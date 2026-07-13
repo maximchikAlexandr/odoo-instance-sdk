@@ -3,9 +3,8 @@
 import json
 from urllib.parse import parse_qs
 
-from _helpers import SilentHandler, make_client, start_stub_server
-
 from odoo_instance_sdk.exceptions import RemoteInstanceError
+from tests._helpers import SilentHandler, make_client, start_stub_server
 
 
 class DBHandler(SilentHandler):

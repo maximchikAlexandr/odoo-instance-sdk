@@ -152,18 +152,18 @@ odoo-instance-sdk/
 │   ├── models.py          (all msgspec.Struct public types)
 │   └── exceptions.py      (typed exception hierarchy)
 └── tests/
-    └── (минимальные __main__-style self-checks; без фреймворков в v0.1)
+    └── (pytest-based tests, test_*.py naming)
 ```
 
 - `_`-префикс на внутренних модулях — контракт, что они не public API.
 - Все модели и исключения в отдельных модулях для re-export через `__init__.py`.
-- `tests/` — без фреймворка в v0.1 (assert-based `__main__` самопроверки); фреймворк добавим когда появится réal need (YAGNI).
+- v0.1 uses pytest for test discovery and assertions; tests live in `tests/` with `test_*.py` naming.
 
 ### D13. Зависимости и dev-зависимости
 
 Runtime: `httpx`, `msgspec`.
 Dev: `mypy`, `ruff`.
-Никаких `platformdirs`, `psutil`, `pytest` в v0.1.
+Никаких `platformdirs`, `psutil` в v0.1. `pytest` и `pytest-cov` — dev-зависимости.
 
 ### D14. Ruff-конфиг
 

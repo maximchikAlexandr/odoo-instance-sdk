@@ -1,11 +1,25 @@
 # odoo-instance-sdk
 
+[![CI Status](https://github.com/maximchikAlexandr/odoo-instance-sdk/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/maximchikAlexandr/odoo-instance-sdk/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+
 A typed Python SDK for managing local Odoo 19.0 instances: process lifecycle, CLI commands, readiness checks, and database operations via standard HTTP API.
 
 ## Installation
 
+> **Note:** not yet published to PyPI.
+
+From Git (recommended until first PyPI release):
+
 ```bash
-uv add odoo-instance-sdk
+uv add "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk"
+```
+
+Pin to a tag or commit for reproducible installs:
+
+```bash
+uv add "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk@v0.1.0"
 ```
 
 ## Quick start
@@ -46,12 +60,6 @@ print(result.stdout)
 print(f"Exit code: {result.returncode}, took {result.duration:.2f}s")
 ```
 
-### Stop the server
-
-```python
-client.server.stop(proc, timeout=10.0)
-```
-
 ### Backup and restore databases
 
 ```python
@@ -62,17 +70,6 @@ print(f"Saved to: {artifact.path}")
 # Restore — local-only, guarded by SDK
 restored = client.database.restore(artifact, "mydb_copy")
 print(f"Restored as: {restored.new_db}")
-```
-
-### List, check, and drop databases
-
-```python
-databases = client.database.list()
-print(f"Databases: {databases}")
-
-if client.database.exists("mydb"):
-    result = client.database.drop("mydb")
-    print(f"Dropped: {result.db}")
 ```
 
 ## API overview
@@ -93,23 +90,21 @@ OdooClient
     └── exists()     — check database exists
 ```
 
-### Local-only guard
+See the docstrings on each model and method for full type and parameter details. The `StartConfig` fields map directly to Odoo 19.0 CLI options.
 
-`restore()` and `drop()` refuse non-local `base_url` (`localhost`, `127.0.0.0/8`, `::1` only). The check runs before any HTTP request and cannot be disabled.
+## Security
 
-### Security
+See [SECURITY.md](SECURITY.md) for the security model and how to report vulnerabilities.
 
-- `master_pwd` never appears in `repr`, exception messages, or logs.
-- `db_password` is masked in `StartConfig` and `OdooProcess` repr.
-- `StartConfig.http_interface` defaults to `127.0.0.1` (loopback only).
-- Warning on Basic Auth over unencrypted HTTP for non-local URLs.
+Key points:
+- `master_pwd` is never in `repr`, exception messages, or logs
+- Destructive operations (`restore`, `drop`) are local-only and cannot be bypassed
+- HTTP interface defaults to loopback only
 
 ## Examples
 
-See the [`examples/`](examples/) directory for complete scripts:
-
 - [`examples/backup_and_restore.py`](examples/backup_and_restore.py) — back up production DB, restore onto local staging
-- [`examples/fastapi_integration.py`](examples/fastapi_integration.py) — FastAPI service: one `/refresh` endpoint that backs up prod → restores staging → starts the instance
+- [`examples/fastapi_integration.py`](examples/fastapi_integration.py) — FastAPI service: one `/refresh` endpoint
 
 ## License
 

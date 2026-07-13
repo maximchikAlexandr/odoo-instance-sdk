@@ -1,8 +1,7 @@
 """Verify master_pwd never leaks through repr."""
 
-from _helpers import make_client
-
 from odoo_instance_sdk import StartConfig
+from tests._helpers import make_client
 
 
 def test_odoo_client_config_repr_masks_master_pwd() -> None:

@@ -2,9 +2,8 @@
 
 import sys
 
-from _helpers import make_client
-
 from odoo_instance_sdk.exceptions import CommandTimeoutError
+from tests._helpers import make_client
 
 
 def test_run_version_command() -> None:

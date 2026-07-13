@@ -6,14 +6,13 @@ import sys
 import time
 import uuid
 
-from _helpers import make_client
-
 from odoo_instance_sdk import StartConfig
 from odoo_instance_sdk.exceptions import (
     ProcessExitedBeforeReady,
     ProcessNotFoundError,
 )
 from odoo_instance_sdk.models import OdooProcess
+from tests._helpers import make_client
 
 
 def test_start_structure() -> None:

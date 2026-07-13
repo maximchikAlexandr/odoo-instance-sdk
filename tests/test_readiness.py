@@ -1,10 +1,9 @@
 """Minimal self-check for readiness polling."""
 
-from _helpers import SilentHandler, start_stub_server
-
 from odoo_instance_sdk._health import poll_health
 from odoo_instance_sdk.exceptions import ReadinessTimeoutError
 from odoo_instance_sdk.models import OdooClientConfig
+from tests._helpers import SilentHandler, start_stub_server
 
 
 class HealthPassHandler(SilentHandler):

@@ -3,9 +3,8 @@
 import tempfile
 from urllib.parse import parse_qs
 
-from _helpers import SilentHandler, make_client, start_stub_server
-
 from odoo_instance_sdk import OdooClient, OdooClientConfig
+from tests._helpers import SilentHandler, make_client, start_stub_server
 
 
 class BackupHandler(SilentHandler):

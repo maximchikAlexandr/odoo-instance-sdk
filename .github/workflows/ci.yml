@@ -26,3 +26,6 @@ jobs:
 
       - name: Mypy strict
         run: uv run mypy --strict src/odoo_instance_sdk
+
+      - name: Run tests
+        run: uv run pytest tests/ -v

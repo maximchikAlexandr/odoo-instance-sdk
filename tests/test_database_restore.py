@@ -5,10 +5,9 @@ import os
 import tempfile
 from pathlib import Path
 
-from _helpers import SilentHandler, make_client, start_stub_server
-
 from odoo_instance_sdk.exceptions import RemoteInstanceError
 from odoo_instance_sdk.models import BackupArtifact
+from tests._helpers import SilentHandler, make_client, start_stub_server
 
 
 class RestoreHandler(SilentHandler):

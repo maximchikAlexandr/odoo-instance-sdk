@@ -17,3 +17,8 @@ dist/
 # mypy / ruff caches
 .mypy_cache/
 .ruff_cache/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+coverage.xml
