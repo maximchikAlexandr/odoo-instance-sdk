@@ -1,0 +1,29 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = [
+    "BLE", "C", "E", "F", "FA", "FLY", "G", "I", "ICN", "ISC",
+    "LOG", "PGH", "PIE", "PLC", "PLE", "PLW", "PYI", "RET", "RUF",
+    "SIM", "SLOT", "T", "TC", "TID", "TRY", "UP", "W", "YTT",
+]
+ignore = [
+    "COM812",
+    "E501",
+    "EM101",
+    "EM102",
+    "TC001",
+    "TC003",
+    "BLE001",
+    "TRY003",
+    "T201",
+    "PYI034",
+    "UP046",
+    "UP047",
+]
+
+[lint.isort]
+known-first-party = ["odoo_instance_sdk"]
+
+[format]
+docstring-code-format = true

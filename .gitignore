@@ -1,0 +1,19 @@
+.devlocal/*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# uv
+.venv/
+
+# mypy / ruff caches
+.mypy_cache/
+.ruff_cache/
