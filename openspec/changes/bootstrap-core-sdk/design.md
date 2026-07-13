@@ -178,7 +178,7 @@ Odoo-модульных правил в исходном ruff.toml нет — н
 
 ### D15. Версионирование и публикация
 
-Первая версия `0.1.0` (pre-1.0 — API может меняться). PyPI: `wheel` + `sdist`. `uv tool install odoo-instance-sdk` — основная установка. `uv add odoo-instance-sdk` — как библиотечная зависимость. Метаданные: license MIT (как в репо), README, версия в `pyproject.toml` (`version = "0.1.0"`; static, не dynamic).
+Первая версия `0.1.0` (pre-1.0 — API может меняться). PyPI: `wheel` + `sdist`. `uv add odoo-instance-sdk` — установка как библиотечной зависимости. Метаданные: license MIT (как в репо), README, версия в `pyproject.toml` (`version = "0.1.0"`; static, не dynamic).
 
 ## Risks / Trade-offs
 

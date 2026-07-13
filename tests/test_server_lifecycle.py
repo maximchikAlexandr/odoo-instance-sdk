@@ -212,6 +212,15 @@ def test_two_concurrent_starts() -> None:
     print("test_two_concurrent_starts PASSED")
 
 
+def test_odoo_process_repr_masks_db_password() -> None:
+    """OdooProcess.__repr__ must redact --db-password value."""
+    proc = OdooProcess(id="x", pid=1, args=["odoo", "--db-password", "s3cret"], started_at=0.0)
+    r = repr(proc)
+    assert "s3cret" not in r, f"db_password value leaked: {r!r}"
+    assert "<redacted>" in r, f"no redaction marker in {r!r}"
+    print("test_odoo_process_repr_masks_db_password PASSED")
+
+
 if __name__ == "__main__":
     test_start_structure()
     test_lifecycle()
@@ -222,3 +231,4 @@ if __name__ == "__main__":
     test_wait_ready_raises_when_process_exited()
     test_cross_client_isolation()
     test_two_concurrent_starts()
+    test_odoo_process_repr_masks_db_password()

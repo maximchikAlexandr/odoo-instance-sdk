@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import httpx
 
+from odoo_instance_sdk._local_guard import warn_if_cleartext_auth
 from odoo_instance_sdk.exceptions import (
     ProcessExitedBeforeReady,
     ReadinessTimeoutError,
@@ -24,6 +25,8 @@ def poll_health(
     attempts = 0
     last_status: str | None = None
     health_url = f"{config.base_url.rstrip('/')}/web/health?db_server_status=true"
+
+    warn_if_cleartext_auth(config.base_url, stacklevel=2)
 
     with httpx.Client(
         auth=("admin", config.master_pwd),

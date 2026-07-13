@@ -42,9 +42,7 @@ def start_stub_server(
     tests when the handler mutates per-request state.
     """
     if databases is not None:
-        handler_cls = type(
-            handler_cls.__name__, (handler_cls,), {"databases": list(databases)}
-        )
+        handler_cls = type(handler_cls.__name__, (handler_cls,), {"databases": list(databases)})
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)

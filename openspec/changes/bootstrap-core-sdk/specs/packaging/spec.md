@@ -2,11 +2,7 @@
 
 ### Requirement: Project uses `uv` for environment, dependencies, build, and publish
 
-The project SHALL be managed by `uv`. `pyproject.toml` SHALL declare build backend (`hatchling` or equivalent uv-native backend) and shall be installable via `uv tool install odoo-instance-sdk` and `uv add odoo-instance-sdk`.
-
-#### Scenario: Tool install
-- **WHEN** `uv tool install odoo-instance-sdk` is run after publication
-- **THEN** the `odoo-instance-sdk` CLI entry-point is available (if any) and the package is importable
+The project SHALL be managed by `uv`. `pyproject.toml` SHALL declare build backend (`hatchling` or equivalent uv-native backend) and shall be installable via `uv add odoo-instance-sdk` as a library dependency.
 
 #### Scenario: Library add
 - **WHEN** `uv add odoo-instance-sdk` is run in another project

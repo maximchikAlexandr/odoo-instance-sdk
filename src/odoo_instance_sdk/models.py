@@ -64,20 +64,21 @@ class OdooClientConfig(msgspec.Struct, metaclass=_StructMeta, forbid_unknown_fie
     http_timeout: float = 30.0
 
     def __repr__(self) -> str:
-        return (
-            f"OdooClientConfig(executable={self.executable!r}, "
-            f"base_url={self.base_url!r}, "
-            f"master_pwd=<redacted>, "
-            f"backup_dir={self.backup_dir!r}, "
-            f"http_timeout={self.http_timeout!r})"
-        )
+        parts: list[str] = []
+        for f in msgspec.structs.fields(self):
+            val = getattr(self, f.name)
+            if f.name == "master_pwd":
+                parts.append(f"{f.name}=<redacted>")
+            else:
+                parts.append(f"{f.name}={val!r}")
+        return f"OdooClientConfig({', '.join(parts)})"
 
 
 class StartConfig(msgspec.Struct, metaclass=_StructMeta, forbid_unknown_fields=True):
     """Typed configuration for launching an Odoo HTTP server process."""
 
     http_port: int = 8069
-    http_interface: str = "0.0.0.0"
+    http_interface: str = "127.0.0.1"
     config_path: str | None = None
     addons_path: list[str] | None = None
     data_dir: str | None = None
@@ -93,6 +94,16 @@ class StartConfig(msgspec.Struct, metaclass=_StructMeta, forbid_unknown_fields=T
     db_password: str | None = None
     db_name: str | None = None
     load_language: str | None = None
+
+    def __repr__(self) -> str:
+        parts: list[str] = []
+        for f in msgspec.structs.fields(self):
+            val = getattr(self, f.name)
+            if f.name == "db_password" and val is not None:
+                parts.append(f"{f.name}=<redacted>")
+            else:
+                parts.append(f"{f.name}={val!r}")
+        return f"StartConfig({', '.join(parts)})"
 
 
 class CommandResult(msgspec.Struct):
@@ -112,6 +123,15 @@ class OdooProcess(msgspec.Struct):
     pid: int
     args: list[str]
     started_at: float
+
+    def __repr__(self) -> str:
+        masked: list[str] = []
+        for i, a in enumerate(self.args):
+            if i > 0 and self.args[i - 1] == "--db-password":
+                masked.append("<redacted>")
+            else:
+                masked.append(a)
+        return f"OdooProcess(id={self.id!r}, pid={self.pid!r}, args={masked!r}, started_at={self.started_at!r})"
 
 
 class ProcessStatus(msgspec.Struct):

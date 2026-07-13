@@ -5,6 +5,8 @@ from urllib.parse import parse_qs
 
 from _helpers import SilentHandler, make_client, start_stub_server
 
+from odoo_instance_sdk import OdooClient, OdooClientConfig
+
 
 class BackupHandler(SilentHandler):
     """Stub that serves a fake backup zip."""
@@ -78,6 +80,36 @@ def test_backup_dump_no_filestore() -> None:
     print("test_backup_dump_no_filestore PASSED")
 
 
+def test_backup_rejects_path_traversal() -> None:
+    """backup() must reject db names containing path separators."""
+    config = OdooClientConfig(
+        executable="/bin/true", base_url="http://127.0.0.1:0", master_pwd="test"
+    )
+    client = OdooClient(config)
+    try:
+        client.database.backup("../../etc/passwd", dest="/tmp")
+        assert False, "Should have raised"
+    except ValueError:
+        pass
+    print("test_backup_rejects_path_traversal PASSED")
+
+
+def test_backup_rejects_bad_format() -> None:
+    """backup() must reject unknown format values."""
+    config = OdooClientConfig(
+        executable="/bin/true", base_url="http://127.0.0.1:0", master_pwd="test"
+    )
+    client = OdooClient(config)
+    try:
+        client.database.backup("testdb", format="tar")  # type: ignore[arg-type]
+        assert False, "Should have raised"
+    except ValueError:
+        pass
+    print("test_backup_rejects_bad_format PASSED")
+
+
 if __name__ == "__main__":
     test_backup_default_format()
     test_backup_dump_no_filestore()
+    test_backup_rejects_path_traversal()
+    test_backup_rejects_bad_format()

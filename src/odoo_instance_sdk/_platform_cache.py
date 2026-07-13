@@ -15,7 +15,11 @@ def default_backup_dir() -> Path:
     """
     if sys.platform == "win32":
         local_app_data = os.environ.get("LOCALAPPDATA")
-        base = Path(local_app_data) if local_app_data is not None else Path.home() / "AppData" / "Local"
+        base = (
+            Path(local_app_data)
+            if local_app_data is not None
+            else Path.home() / "AppData" / "Local"
+        )
     else:
         xdg_cache = os.environ.get("XDG_CACHE_HOME")
         base = Path(xdg_cache) if xdg_cache is not None else Path.home() / ".cache"
