@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from http import HTTPStatus
 
 import httpx
 
@@ -45,7 +46,7 @@ def poll_health(
 
             try:
                 response = http.get(health_url)
-                if response.status_code == 200:
+                if response.status_code == HTTPStatus.OK:
                     data = response.json()
                     status = data.get("status")
                     if status == "pass":

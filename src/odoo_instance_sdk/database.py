@@ -4,6 +4,7 @@ import contextlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -94,11 +95,11 @@ class DatabaseResource:
         url = self._url("backup")
 
         with self._http(timeout=timeout) as http, http.stream("POST", url, data=data) as response:
-            if response.status_code != 200:
+            if response.status_code != HTTPStatus.OK:
                 body = response.read()
                 raise DatabaseError(
                     status_code=response.status_code,
-                    message=f"Backup failed: HTTP {response.status_code}",
+                    message=f"Backup failed: {HTTPStatus(response.status_code).phrase}",
                     body=_redact(body, config.master_pwd),
                 )
 
@@ -130,10 +131,10 @@ class DatabaseResource:
                     "id": 1,
                 },
             )
-            if response.status_code != 200:
+            if response.status_code != HTTPStatus.OK:
                 raise DatabaseError(
                     status_code=response.status_code,
-                    message=f"Failed to list databases: HTTP {response.status_code}",
+                    message=f"Failed to list databases: {HTTPStatus(response.status_code).phrase}",
                     body=_redact(response.content, config.master_pwd),
                 )
 
@@ -175,11 +176,11 @@ class DatabaseResource:
             data: dict[str, str] = {"master_pwd": config.master_pwd, "name": db}
             response = http.post(self._url("drop"), data=data)
 
-            if response.status_code == 302:
+            if response.status_code == HTTPStatus.FOUND:
                 return DropResult(db=db)
             raise DatabaseError(
                 status_code=response.status_code,
-                message=f"Failed to drop database '{db}'",
+                message=f"Failed to drop database '{db}': {HTTPStatus(response.status_code).phrase}",
                 body=_redact(response.content, config.master_pwd),
             )
 
@@ -209,7 +210,7 @@ class DatabaseResource:
             }
             response = http.post(self._url("restore"), data=fields, files=files)
 
-        if response.status_code != 200:
+        if response.status_code != HTTPStatus.OK:
             body = response.content
             try:
                 server_msg = response.json().get("error", response.text)
@@ -218,7 +219,7 @@ class DatabaseResource:
             raise DatabaseError(
                 status_code=response.status_code,
                 message=_redact(
-                    f"Restore failed: HTTP {response.status_code}: {server_msg}".encode(),
+                    f"Restore failed: {HTTPStatus(response.status_code).phrase}: {server_msg}".encode(),
                     config.master_pwd,
                 ).decode("utf-8", errors="replace"),
                 body=_redact(body, config.master_pwd),
