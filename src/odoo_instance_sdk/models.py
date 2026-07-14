@@ -1,82 +1,79 @@
 from __future__ import annotations
 
-import types
-import typing
-from pathlib import Path
-from typing import Any, Literal
+import enum
+import uuid
+from datetime import datetime
+from typing import Literal
 
 import msgspec
 
-from odoo_instance_sdk.exceptions import ConfigError
+
+class BackupFormat(enum.StrEnum):
+    ZIP = "zip"
+    DUMP = "dump"
 
 
-def _matches(value: object, annotation: object) -> bool:
-    """Check if value matches a type annotation. Handles Union, Literal, and generics.
-
-    msgspec.Struct's constructor does not validate types, and msgspec.convert()
-    refuses to validate unions with custom classes (e.g. ``str | Path``), so
-    the metaclass uses this isinstance-based check for those fields.
-    """
-    if annotation is type(None):
-        return value is None
-    origin = typing.get_origin(annotation)
-    if origin is typing.Union or origin is types.UnionType:
-        return any(_matches(value, arg) for arg in typing.get_args(annotation))
-    if origin is typing.Literal:
-        return value in typing.get_args(annotation)
-    if origin is not None:
-        return isinstance(value, origin)
-    if isinstance(annotation, type):
-        return isinstance(value, annotation)
-    return True
+class BackupState(enum.StrEnum):
+    DOWNLOADING = "downloading"
+    AVAILABLE = "available"
+    FAILED = "failed"
+    DELETED = "deleted"
 
 
-class _StructMeta(type(msgspec.Struct)):  # type: ignore[misc]
-    """Metaclass that validates union types containing custom classes and wraps errors.
-
-    For fields with custom types in unions (e.g. ``str | Path``) msgspec's
-    constructor is permissive and msgspec.convert() refuses to validate, so
-    the metaclass does an isinstance-based check. ``forbid_unknown_fields=True``
-    on the Struct class makes the constructor raise TypeError for unknown
-    kwargs, which is re-raised as ConfigError.
-    """
-
-    def __call__(cls: type[Any], *args: Any, **kwargs: Any) -> Any:
-        for f in msgspec.structs.fields(cls):
-            if f.name in kwargs and not _matches(kwargs[f.name], f.type):
-                raise ConfigError(
-                    f"Invalid type for {f.name}: expected {f.type}, "
-                    f"got {type(kwargs[f.name]).__name__}"
-                )
-        try:
-            return super().__call__(*args, **kwargs)
-        except TypeError as e:
-            raise ConfigError(str(e)) from e
+class BackupEventType(enum.StrEnum):
+    DOWNLOAD_STARTED = "download_started"
+    DOWNLOAD_SUCCEEDED = "download_succeeded"
+    DOWNLOAD_FAILED = "download_failed"
+    VALIDATION_SUCCEEDED = "validation_succeeded"
+    VALIDATION_FAILED = "validation_failed"
+    VALIDATION_UNAVAILABLE = "validation_unavailable"
+    DELETED = "deleted"
 
 
-class OdooClientConfig(msgspec.Struct, metaclass=_StructMeta, forbid_unknown_fields=True):
-    """Client configuration for OdooInstanceSDK."""
-
-    executable: str | Path
-    base_url: str
-    master_pwd: str
-    backup_dir: str | Path | None = None
-    http_timeout: float = 30.0
-
-    def __repr__(self) -> str:
-        parts: list[str] = []
-        for f in msgspec.structs.fields(self):
-            val = getattr(self, f.name)
-            if f.name == "master_pwd":
-                parts.append(f"{f.name}=<redacted>")
-            else:
-                parts.append(f"{f.name}={val!r}")
-        return f"OdooClientConfig({', '.join(parts)})"
+class BackupValidationStatus(enum.StrEnum):
+    VALID = "valid"
+    INVALID = "invalid"
+    UNAVAILABLE = "unavailable"
 
 
-class StartConfig(msgspec.Struct, metaclass=_StructMeta, forbid_unknown_fields=True):
-    """Typed configuration for launching an Odoo HTTP server process."""
+class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    id: uuid.UUID
+    source_base_url: str
+    database_name: str
+    format: BackupFormat
+    filestore_requested: bool
+    path: str
+    filename: str
+    size_bytes: int
+    sha256: str
+    downloaded_at: datetime
 
+
+class BackupEvent(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    backup_id: uuid.UUID
+    sequence: int
+    event_type: BackupEventType
+    occurred_at: datetime
+    path: str | None = None
+    validator: str | None = None
+    exit_code: int | None = None
+    message: str | None = None
+
+
+class BackupValidationResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    valid: bool
+    errors: tuple[str, ...] = ()
+    db_name: str | None = None
+    db_version: str | None = None
+
+
+class BackupDeletionResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    file_existed: bool
+    already_deleted: bool
+    deleted_at: datetime
+
+
+class StartConfig(msgspec.Struct, forbid_unknown_fields=True):
     http_port: int = 8069
     http_interface: str = "127.0.0.1"
     config_path: str | None = None
@@ -107,8 +104,6 @@ class StartConfig(msgspec.Struct, metaclass=_StructMeta, forbid_unknown_fields=T
 
 
 class CommandResult(msgspec.Struct):
-    """Result of a one-shot CLI command."""
-
     args: list[str]
     returncode: int
     stdout: str
@@ -117,8 +112,6 @@ class CommandResult(msgspec.Struct):
 
 
 class OdooProcess(msgspec.Struct):
-    """Represents a running/exited Odoo server process."""
-
     id: str
     pid: int
     args: list[str]
@@ -127,7 +120,7 @@ class OdooProcess(msgspec.Struct):
     def __repr__(self) -> str:
         masked: list[str] = []
         for i, a in enumerate(self.args):
-            if i > 0 and self.args[i - 1] == "--db-password":
+            if i > 0 and self.args[i - 1] == "--config":
                 masked.append("<redacted>")
             else:
                 masked.append(a)
@@ -135,39 +128,21 @@ class OdooProcess(msgspec.Struct):
 
 
 class ProcessStatus(msgspec.Struct):
-    """Status of a registered process."""
-
     state: Literal["running", "exited"]
     returncode: int | None = None
 
 
 class ReadinessResult(msgspec.Struct):
-    """Result of a wait_ready() call."""
-
     ok: bool
     elapsed: float
     attempts: int
     final_status: str | None = None
 
 
-class BackupArtifact(msgspec.Struct):
-    """A downloaded backup file."""
-
-    path: Path
-    source_db: str
-    format: Literal["zip", "dump"]
-    has_filestore: bool
-    source_base_url: str
-
-
 class RestoreResult(msgspec.Struct):
-    """Result of a database restore."""
-
     new_db: str
-    source: BackupArtifact
+    source: Backup
 
 
 class DropResult(msgspec.Struct):
-    """Result of a database drop."""
-
     db: str

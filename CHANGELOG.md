@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [19.0.0b1] - 2026-07-14
+
+### Added
+- `instance.databases` — database operations bound to a specific Odoo instance
+- `client.instance(base_url, master_password)` — create an instance by URL
+- `client.instance.from_config(path)` — create an instance from `odoo.conf`
+- `client.backups` — catalog resource (list, latest, history, validate, delete)
+- Persistent backup catalog via SQLite (WAL mode) under `~/.cache/odoo-instance-sdk/`
+- ZIP validation (`is_zipfile`, manifest, CRC) and optional `pg_restore` validation
+- Audited download with UUID tracking and `.part` files for atomic completion
+- `BackupEvent`, `BackupState`, `BackupFormat`, `BackupValidationStatus` enums
+
+### Removed (breaking)
+- `client.database` — use `instance.databases`
+- `client.server` — use `instance.start()` and lifecycle methods on `OdooInstance`
+- `BackupArtifact` — replaced by `Backup`
+- `RemoteInstanceError` — renamed to `NonLocalInstanceError`
+- HTTP Basic Auth — `master_pwd` sent only as form field
+
+### Changed
+- `OdooClientConfig` carries only `executable`, `backups_directory` (optional) and `http_timeout_seconds`; each `OdooInstance` provides its own `base_url` and master password
+- Process registry shared across instances on `OdooClient`
+- `warn_if_cleartext_auth` → `warn_if_cleartext_secret`
+
+### Security
+- Destructive operations (`restore`, `drop`) guarded by `NonLocalInstanceError`
+- `MasterPasswordRequiredError` raised early when password is missing
+- Backup filenames start with the backup UUID; paths contained within the destination directory
+
 ## [0.1.0] - 2026-07-13
 
 ### Added

@@ -6,11 +6,11 @@ class OdooInstanceSdkError(Exception):
 
 
 class ConfigError(OdooInstanceSdkError):
-    """Invalid configuration."""
+    """Invalid configuration."""  # ponytail: spec-mandated, not yet raised in this slice
 
 
 class CommandTimeoutError(OdooInstanceSdkError):
-    """CLI command exceeded timeout."""
+    """CLI command exceeded timeout."""  # ponytail: spec-mandated, not yet raised in this slice
 
 
 class ProcessNotFoundError(OdooInstanceSdkError):
@@ -33,7 +33,19 @@ class ReadinessTimeoutError(OdooInstanceSdkError):
         )
 
 
-class RemoteInstanceError(OdooInstanceSdkError):
+class InvalidBaseUrlError(OdooInstanceSdkError):
+    """Invalid base URL format."""
+
+
+class InstanceConfigurationError(OdooInstanceSdkError):
+    """Invalid or incomplete instance configuration."""
+
+
+class MasterPasswordRequiredError(OdooInstanceSdkError):
+    """Master password is required for this operation."""
+
+
+class NonLocalInstanceError(OdooInstanceSdkError):
     """Operation not allowed on non-local instance."""
 
 
@@ -45,3 +57,39 @@ class DatabaseError(OdooInstanceSdkError):
         self.message = message
         self.body = body
         super().__init__(message)
+
+
+class BackupCatalogError(OdooInstanceSdkError):
+    """Backup catalog operation failed."""
+
+
+class BackupNotFoundError(OdooInstanceSdkError):
+    """Backup not found in catalog."""
+
+
+class BackupNotAvailableError(OdooInstanceSdkError):
+    """Backup file is not available on disk."""
+
+
+class BackupValidationUnavailableError(OdooInstanceSdkError):
+    """Backup validation is not available for this backup."""
+
+
+class DatabaseAlreadyExistsError(OdooInstanceSdkError):
+    """Target database already exists."""
+
+
+class RestoreFailedError(OdooInstanceSdkError):
+    """Database restore failed."""
+
+
+class DropFailedError(OdooInstanceSdkError):
+    """Database drop failed."""
+
+
+class BackupDownloadError(OdooInstanceSdkError):
+    """Backup download failed."""
+
+
+class DatabaseManagerUnavailableError(OdooInstanceSdkError):
+    """Database manager endpoint unavailable or listing disabled."""

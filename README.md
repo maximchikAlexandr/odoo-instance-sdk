@@ -4,11 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
-A typed Python SDK for managing local Odoo 19.0 instances: process lifecycle, CLI commands, readiness checks, and database operations via standard HTTP API.
+A typed Python SDK for managing local Odoo 19.0 instances: process lifecycle, CLI commands, readiness checks, database operations, and an audited local backup catalog.
 
 ## Installation
-
-> **Note:** not yet published to PyPI.
 
 From Git (recommended until first PyPI release):
 
@@ -16,23 +14,16 @@ From Git (recommended until first PyPI release):
 uv add "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk"
 ```
 
-Pin to a tag or commit for reproducible installs:
-
-```bash
-uv add "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk@v0.1.0"
-```
-
 ## Quick start
 
 ```python
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 
-config = OdooClientConfig(
-    executable="odoo",
-    base_url="http://localhost:8069",
-    master_pwd="admin",
-)
+config = OdooClientConfig(executable="odoo")
 client = OdooClient(config)
+
+# From odoo.conf
+instance = client.instance.from_config("./odoo.conf", base_url="http://localhost:8069")
 ```
 
 ### Start a local Odoo server
@@ -40,66 +31,131 @@ client = OdooClient(config)
 ```python
 from odoo_instance_sdk import StartConfig
 
-proc = client.server.start(StartConfig(
-    http_port=8069,
-    db_host="localhost",
-    db_user="odoo",
-    db_password="odoo",
-))
+instance = client.instance(base_url="http://localhost:8069", master_password="admin")
+proc = instance.start(StartConfig(http_port=8069))
 
-# Wait until the server is ready
-result = client.server.wait_ready(proc, timeout=60.0)
+result = instance.wait_ready(proc, timeout=60.0)
 print(f"Ready: {result.ok} in {result.elapsed:.1f}s")
 ```
 
-### Run a one-shot CLI command
+### Database operations
 
 ```python
-result = client.server.run(["--version"], timeout=10.0)
-print(result.stdout)
-print(f"Exit code: {result.returncode}, took {result.duration:.2f}s")
-```
+# List databases
+dbs = instance.databases.list()
 
-### Backup and restore databases
-
-```python
-# Back up — works on local and remote instances
-artifact = client.database.backup("mydb", format="zip", include_filestore=True)
-print(f"Saved to: {artifact.path}")
+# Backup — works on local and remote instances
+backup = instance.databases.backup("mydb")
+print(f"Saved to: {backup.filename}")
 
 # Restore — local-only, guarded by SDK
-restored = client.database.restore(artifact, "mydb_copy")
-print(f"Restored as: {restored.new_db}")
+restored = instance.databases.restore(backup, copy=True)
+print(f"Restored as: {restored.source.database_name}")
+
+# Drop — local-only
+result = instance.databases.drop("mydb_copy")
+```
+
+### Browse the backup catalog
+
+```python
+# List all available backups
+for b in client.backups.list():
+    print(f"{b.database_name} — {b.filename} ({b.size_bytes} bytes)")
+
+# Latest backup for a specific database
+latest = client.backups.latest(base_url="http://localhost:8069", database_name="mydb")
+
+# Full history for a database
+for event in client.backups.history(base_url="http://localhost:8069", database_name="mydb"):
+    print(f"{event.event_type.value}: {event.message}")
+```
+
+### Validate a backup
+
+```python
+result = client.backups.validate(backup)
+print(f"Valid: {result.valid}, errors: {result.errors}")
 ```
 
 ## API overview
 
 ```
 OdooClient
-├── server
-│   ├── run()        — one-shot CLI command
-│   ├── start()      — long-lived Odoo process
-│   ├── stop()       — graceful then forced termination
-│   ├── status()     — running / exited
-│   └── wait_ready() — poll /web/health until pass
-└── database
-    ├── backup()     — download backup (local or remote)
-    ├── restore()    — upload backup (local-only)
-    ├── drop()       — delete database (local-only)
-    ├── list()       — list databases
-    └── exists()     — check database exists
+├── instance
+│   ├── __call__(base_url, master_password=None) -> OdooInstance
+│   └── from_config(path, base_url=None, master_password=None) -> OdooInstance
+└── backups
+    ├── list(...)
+    ├── latest(...)
+    ├── history(...)
+    ├── validate(...)
+    └── delete(...)
+
+OdooInstance
+├── base_url
+├── configured_database_names
+├── databases
+│   ├── backup(...)
+│   ├── restore(...)
+│   ├── drop(...)
+│   ├── list()
+│   └── exists()
+├── run(args, *, cwd=None, env=None, timeout=None) -> CommandResult
+├── start(config: StartConfig, ...) -> OdooProcess
+├── stop(proc, *, timeout=10.0)
+├── status(proc) -> ProcessStatus
+└── wait_ready(proc, *, timeout=60.0) -> ReadinessResult
 ```
 
-See the docstrings on each model and method for full type and parameter details. The `StartConfig` fields map directly to Odoo 19.0 CLI options.
+## Cache layout
+
+Backup files and audit metadata are stored under `~/.cache/odoo-instance-sdk/`:
+
+```
+~/.cache/odoo-instance-sdk/
+├── backups/
+│   └── <backup-uuid>_<safe-content-disposition-filename>
+└── backups.sqlite3   (SQLite, WAL mode)
+```
+
+- Backup filenames begin with the backup UUID and stay within the destination directory.
+- Catalog is a persistent SQLite database with full audit history.
+- Schema version 1: `backups` table + `backup_events` table with foreign keys.
+- Concurrent access uses WAL mode and 5-second busy timeout.
+
+## Validation semantics
+
+- **ZIP validation** (always available): checks `is_zipfile()`, required root members (`manifest.json`, `dump.sql`), `testzip()` CRC verification, and `manifest.json` JSON parse.
+- **Dump validation** (requires `pg_restore` in PATH): runs `pg_restore --list` against the file with a 60s timeout.
+- `raise_if_unavailable=True` raises `BackupValidationUnavailableError` when pg_restore is not found.
+
+## Readiness checks
+
+- GET `/web/health?db_server_status=true` with `httpx.Client(timeout=...)`.
+- No Basic Auth — endpoint has `auth="none"` in Odoo 19.0.
+- `wait_ready()` polls until the endpoint returns 200 or the linked process exits.
+- Configurable timeout (default 60s) and poll interval (default 1.0s).
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for the security model and how to report vulnerabilities.
+- `master_pwd` is never in `repr`, exception messages, or logs.
+- Destructive operations (`restore`, `drop`) are local-only and cannot be bypassed.
+- HTTP interface defaults to loopback only.
+- Basic Auth removed: `master_pwd` is sent only as a form field in POST bodies.
+- Cleartext warning fires once per process when master password is sent over HTTP to non-local hosts.
 
-Key points:
-- `master_pwd` is never in `repr`, exception messages, or logs
-- Destructive operations (`restore`, `drop`) are local-only and cannot be bypassed
-- HTTP interface defaults to loopback only
+## Breaking changes from 0.x
+
+This release (19.0.0b1) makes several breaking API changes:
+
+| Removed | Replacement |
+|---------|-------------|
+| `client.database` | `instance.databases` (bound to an `OdooInstance`) |
+| `client.server` | methods on `OdooInstance` directly |
+| `BackupArtifact` | `Backup` |
+| `RemoteInstanceError` | `NonLocalInstanceError` |
+| HTTP Basic Auth | `master_pwd` as form field only |
 
 ## Examples
 

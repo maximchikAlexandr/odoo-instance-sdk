@@ -7,32 +7,28 @@ from http import HTTPStatus
 
 import httpx
 
-from odoo_instance_sdk._local_guard import warn_if_cleartext_auth
 from odoo_instance_sdk.exceptions import (
     ProcessExitedBeforeReady,
     ReadinessTimeoutError,
 )
-from odoo_instance_sdk.models import OdooClientConfig, ReadinessResult
+from odoo_instance_sdk.internal.urls import assert_local
+from odoo_instance_sdk.models import ReadinessResult
 
 
 def poll_health(
-    config: OdooClientConfig,
+    base_url: str,
     *,
     timeout: float = 60.0,
     poll_interval: float = 1.0,
     alive_check: Callable[[], bool] | None = None,
 ) -> ReadinessResult:
+    assert_local(base_url)
     start = time.perf_counter()
     attempts = 0
     last_status: str | None = None
-    health_url = f"{config.base_url.rstrip('/')}/web/health?db_server_status=true"
+    health_url = f"{base_url.rstrip('/')}/web/health?db_server_status=true"
 
-    warn_if_cleartext_auth(config.base_url, stacklevel=2)
-
-    with httpx.Client(
-        auth=("admin", config.master_pwd),
-        timeout=httpx.Timeout(config.http_timeout),
-    ) as http:
+    with httpx.Client(timeout=httpx.Timeout(timeout)) as http:
         while True:
             elapsed = time.perf_counter() - start
 
