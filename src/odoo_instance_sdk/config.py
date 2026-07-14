@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from odoo_instance_sdk.models import StartConfig
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class OdooClientConfig:
@@ -19,6 +21,7 @@ class InstanceConfig:
     base_url: str
     master_password: str | None = field(default=None, repr=False)
     configured_database_names: tuple[str, ...] = ()
+    start_config: StartConfig | None = field(default=None, repr=False)
 
     def __repr__(self) -> str:
         return (

@@ -78,6 +78,7 @@ class InstanceFactory:
                 base_url=normalized,
                 master_password=master_password,
                 configured_database_names=db_names,
+                start_config=StartConfig.from_odoo_config(path),
             ),
             _client=self._client,
         )
@@ -117,11 +118,17 @@ class OdooInstance:
 
     def start(
         self,
-        config: StartConfig,
+        config: StartConfig | None = None,
         *,
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
     ) -> OdooProcess:
+        if config is None:
+            config = self.config.start_config
+            if config is None:
+                raise InstanceConfigurationError(
+                    "No StartConfig — pass one explicitly or create instance via from_config()"
+                )
         proc, handle, secret_config = start_process(
             self._client.config.executable, config, cwd=cwd, env=env
         )

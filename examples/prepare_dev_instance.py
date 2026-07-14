@@ -11,7 +11,7 @@ import logging
 import os
 from datetime import UTC, datetime, timedelta
 
-from odoo_instance_sdk import Backup, OdooClient, OdooClientConfig, StartConfig
+from odoo_instance_sdk import Backup, OdooClient, OdooClientConfig
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("prepare-dev")
@@ -26,7 +26,8 @@ test_instance = client.instance(
 )
 
 # Local instance — all params from odoo.conf
-local_instance = client.instance.from_config(os.environ["ODOO_CONF_PATH"])
+conf_path = os.environ["ODOO_CONF_PATH"]
+local_instance = client.instance.from_config(conf_path)
 FRESH_THRESHOLD = timedelta(hours=2)
 
 
@@ -61,8 +62,8 @@ def main() -> None:
     local_db = f"{source_db}_{datetime.now(UTC):%Y%m%d_%H%M%S}"
     backup = get_or_download_backup(source_db)
 
-    log.info("Starting local Odoo from %s", os.environ["ODOO_CONF_PATH"])
-    proc = local_instance.start(StartConfig.from_odoo_config(os.environ["ODOO_CONF_PATH"]))
+    log.info("Starting local Odoo from %s", conf_path)
+    proc = local_instance.start()
 
     try:
         local_instance.wait_ready(proc, timeout=120.0)
