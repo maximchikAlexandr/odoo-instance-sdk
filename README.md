@@ -103,8 +103,7 @@ Key points:
 
 ## Examples
 
-- [`examples/backup_and_restore.py`](examples/backup_and_restore.py) — back up production DB, restore onto local staging
-- [`examples/fastapi_integration.py`](examples/fastapi_integration.py) — FastAPI service: one `/refresh` endpoint
+- [`examples/prepare_dev_instance.py`](examples/prepare_dev_instance.py) — back up from test, start local Odoo, restore, stop
 
 ## License
 
