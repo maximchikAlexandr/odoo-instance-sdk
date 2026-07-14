@@ -12,6 +12,7 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_db_names,
     parse_odoo_config,
 )
+from odoo_instance_sdk.models import StartConfig
 from tests.fixtures.odoo_config import write_fixtures
 
 
@@ -119,6 +120,72 @@ class TestGetAdminPasswd:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             assert get_admin_passwd({"admin_passwd": "mypass"}) == "mypass"
+
+
+class TestStartConfigFromOdooConfig:
+    def test_reads_db_fields(self, tmp_path: Path) -> None:
+        path = _write_config(
+            "[options]\ndb_host = localhost\ndb_user = odoo\ndb_password = secret\n"
+            "http_port = 8070\nhttp_interface = 127.0.0.1\nlog_level = debug\n",
+            tmp_path,
+        )
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.db_host == "localhost"
+        assert sc.db_user == "odoo"
+        assert sc.db_password == "secret"
+        assert sc.http_port == 8070
+        assert sc.http_interface == "127.0.0.1"
+        assert sc.log_level == "debug"
+
+    def test_empty_config_uses_defaults(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\n", tmp_path)
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.http_port == 8069
+        assert sc.http_interface == "127.0.0.1"
+        assert sc.db_host is None
+        assert sc.db_password is None
+
+    def test_invalid_port_skipped(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\nhttp_port = notanumber\n", tmp_path)
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.http_port == 8069
+
+    def test_addons_path_split(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\naddons_path = /a,/b,/c\n", tmp_path)
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.addons_path == ["/a", "/b", "/c"]
+
+    def test_empty_values_skipped(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\ndb_host = \n", tmp_path)
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.db_host is None
+
+    def test_log_level_debug(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\nlog_level = debug\n", tmp_path)
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.log_level == "debug"
+
+    def test_log_level_info(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\nlog_level = info\n", tmp_path)
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.log_level == "info"
+
+    def test_dev_mode_all_stays_string(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\ndev_mode = all\n", tmp_path)
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.dev_mode == "all"
+        assert isinstance(sc.dev_mode, str)
+
+    def test_dev_mode_comma_list(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\ndev_mode = all,queue\n", tmp_path)
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.dev_mode == ["all", "queue"]
+
+    def test_invalid_int_warns(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\nworkers = notanumber\n", tmp_path)
+        with pytest.warns(UserWarning, match="Invalid int for workers"):
+            sc = StartConfig.from_odoo_config(path)
+        assert sc.workers is None
 
 
 if __name__ == "__main__":

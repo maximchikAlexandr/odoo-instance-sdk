@@ -1,120 +1,84 @@
 """Prepare a local development Odoo instance from a test environment backup.
 
-Flow: check last backup → download if stale (>2h) or reuse → start local Odoo → restore → stop.
+Flow: read odoo.conf → check last backup → download if stale (>2h) or reuse
+→ start local Odoo → restore → stop.
 
-Usage: uv run python examples/prepare_dev_instance.py
+Configure via environment variables (see .env.example). Export them or use a .env loader:
+    set -a && source .env && set +a && uv run python examples/prepare_dev_instance.py
 """
 
 import logging
-import sys
+import os
 from datetime import UTC, datetime, timedelta
 
 from odoo_instance_sdk import Backup, OdooClient, OdooClientConfig, StartConfig
-from odoo_instance_sdk.exceptions import (
-    NonLocalInstanceError,
-    ProcessExitedBeforeReady,
-    ReadinessTimeoutError,
-    RestoreFailedError,
-)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("prepare-dev")
 
-config = OdooClientConfig(executable="odoo")
+config = OdooClientConfig(executable=os.environ.get("ODOO_EXECUTABLE", "odoo"))
 client = OdooClient(config)
 
 # Test environment — backup allowed on remote
 test_instance = client.instance(
-    base_url="http://odoo-test.internal:8069", master_password="test_master_pwd"
+    base_url=os.environ["TEST_ODOO_BASE_URL"],
+    master_password=os.environ["TEST_ODOO_MASTER_PASSWORD"],
 )
 
-# Local instance — restore and drop require localhost
-local_instance = client.instance(
-    base_url="http://localhost:8069", master_password="local_master_pwd"
-)
-
-SOURCE_DB = "test_db"
-LOCAL_DB = "dev_db"
-PORT = 8069
+# Local instance — all params from odoo.conf
+local_instance = client.instance.from_config(os.environ["ODOO_CONF_PATH"])
 FRESH_THRESHOLD = timedelta(hours=2)
 
 
-def get_or_download_backup() -> Backup:
+def get_or_download_backup(source_db: str) -> Backup:
     """Return the latest backup if it's fresh (<2h), otherwise download a new one."""
     latest = client.backups.latest(
         source_base_url=test_instance.config.base_url,
-        database_name=SOURCE_DB,
+        database_name=source_db,
     )
     if latest is not None:
         age = datetime.now(UTC) - latest.downloaded_at
         if age < FRESH_THRESHOLD:
-            log.info("Reusing fresh backup %s (age: %.0f min)", latest.filename, age.total_seconds() / 60)
+            log.info(
+                "Reusing fresh backup %s (age: %.0f min)", latest.filename, age.total_seconds() / 60
+            )
             return latest
-        log.info("Latest backup is stale (%.0f min old), downloading new", age.total_seconds() / 60)
 
-    if not test_instance.databases.exists(SOURCE_DB):
-        log.error("Source database '%s' not found on test instance", SOURCE_DB)
-        sys.exit(1)
-
-    log.info("Backing up '%s' from test environment", SOURCE_DB)
-    backup = test_instance.databases.backup(SOURCE_DB)
+    log.info("Backing up '%s' from test environment", source_db)
+    backup = test_instance.databases.backup(source_db)
     log.info("Backup saved: %s", backup.filename)
     return backup
 
 
 def main() -> None:
-    # 1. Get a backup (reuse if fresh, download otherwise)
-    backup = get_or_download_backup()
+    dbs = test_instance.databases.list()
+    if not dbs:
+        raise RuntimeError("No databases found on test instance")
 
-    # 2. Start a local Odoo instance (needed for restore via HTTP)
-    log.info("Starting local Odoo on port %s", PORT)
-    proc = local_instance.start(
-        StartConfig(
-            http_port=PORT,
-            http_interface="127.0.0.1",
-            db_host="localhost",
-            db_user="odoo",
-            db_password="odoo",
-            log_level="info",
-        )
-    )
+    source_db = dbs[0]
+    log.info("Resolved source database: %s (available: %s)", source_db, ", ".join(dbs))
+
+    local_db = f"{source_db}_{datetime.now(UTC):%Y%m%d_%H%M%S}"
+    backup = get_or_download_backup(source_db)
+
+    log.info("Starting local Odoo from %s", os.environ["ODOO_CONF_PATH"])
+    proc = local_instance.start(StartConfig.from_odoo_config(os.environ["ODOO_CONF_PATH"]))
 
     try:
-        # 3. Wait for the instance to become ready
-        try:
-            result = local_instance.wait_ready(proc, timeout=120.0)
-            log.info("Odoo ready in %.1fs (%d polls)", result.elapsed, result.attempts)
-        except ReadinessTimeoutError:
-            log.exception("Odoo did not become ready")
-            sys.exit(1)
-        except ProcessExitedBeforeReady:
-            log.exception("Odoo process exited before becoming ready")
-            sys.exit(1)
+        local_instance.wait_ready(proc, timeout=120.0)
 
-        # 4. Drop stale dev database if it exists
-        if local_instance.databases.exists(LOCAL_DB):
-            log.info("Dropping existing dev database '%s'", LOCAL_DB)
-            local_instance.databases.drop(LOCAL_DB)
+        if local_instance.databases.exists(local_db):
+            log.info("Dropping existing dev database '%s'", local_db)
+            local_instance.databases.drop(local_db)
 
-        # 5. Restore the backup onto the local instance
-        try:
-            local_instance.databases.restore(backup, LOCAL_DB, copy=False)
-        except NonLocalInstanceError:
-            log.exception("Restore blocked by local-only guard")
-            sys.exit(1)
-        except RestoreFailedError:
-            log.exception("Restore failed")
-            sys.exit(1)
-
-        log.info("Restored '%s' on local instance", LOCAL_DB)
+        local_instance.databases.restore(backup, local_db, copy=False)
+        log.info("Restored '%s' on local instance", local_db)
 
     finally:
-        # 6. Stop the local Odoo instance
         log.info("Stopping local Odoo (PID %s)", proc.pid)
         local_instance.stop(proc, timeout=10.0)
-        log.info("Stopped")
 
-    log.info("Dev instance prepared. Start Odoo manually to use database '%s'", LOCAL_DB)
+    log.info("Dev instance prepared. Start Odoo manually to use database '%s'", local_db)
 
 
 if __name__ == "__main__":
