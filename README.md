@@ -49,8 +49,8 @@ backup = instance.databases.backup("mydb")
 print(f"Saved to: {backup.filename}")
 
 # Restore — local-only, guarded by SDK
-restored = instance.databases.restore(backup, copy=True)
-print(f"Restored as: {restored.source.database_name}")
+restored = instance.databases.restore(backup, "mydb_copy", copy=True)
+print(f"Restored as: {restored.new_db}")
 
 # Drop — local-only
 result = instance.databases.drop("mydb_copy")
@@ -64,10 +64,10 @@ for b in client.backups.list():
     print(f"{b.database_name} — {b.filename} ({b.size_bytes} bytes)")
 
 # Latest backup for a specific database
-latest = client.backups.latest(base_url="http://localhost:8069", database_name="mydb")
+latest = client.backups.latest(source_base_url="http://localhost:8069", database_name="mydb")
 
 # Full history for a database
-for event in client.backups.history(base_url="http://localhost:8069", database_name="mydb"):
+for event in client.backups.history(source_base_url="http://localhost:8069", database_name="mydb"):
     print(f"{event.event_type.value}: {event.message}")
 ```
 

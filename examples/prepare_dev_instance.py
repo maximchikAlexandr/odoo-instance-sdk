@@ -1,14 +1,15 @@
 """Prepare a local development Odoo instance from a test environment backup.
 
-Flow: backup from test → start local Odoo → restore backup → stop instance.
+Flow: check last backup → download if stale (>2h) or reuse → start local Odoo → restore → stop.
 
 Usage: uv run python examples/prepare_dev_instance.py
 """
 
 import logging
 import sys
+from datetime import UTC, datetime, timedelta
 
-from odoo_instance_sdk import OdooClient, OdooClientConfig, StartConfig
+from odoo_instance_sdk import Backup, OdooClient, OdooClientConfig, StartConfig
 from odoo_instance_sdk.exceptions import (
     NonLocalInstanceError,
     ProcessExitedBeforeReady,
@@ -35,10 +36,22 @@ local_instance = client.instance(
 SOURCE_DB = "test_db"
 LOCAL_DB = "dev_db"
 PORT = 8069
+FRESH_THRESHOLD = timedelta(hours=2)
 
 
-def main() -> None:
-    # 1. Back up from test environment
+def get_or_download_backup() -> Backup:
+    """Return the latest backup if it's fresh (<2h), otherwise download a new one."""
+    latest = client.backups.latest(
+        source_base_url=test_instance.config.base_url,
+        database_name=SOURCE_DB,
+    )
+    if latest is not None:
+        age = datetime.now(UTC) - latest.downloaded_at
+        if age < FRESH_THRESHOLD:
+            log.info("Reusing fresh backup %s (age: %.0f min)", latest.filename, age.total_seconds() / 60)
+            return latest
+        log.info("Latest backup is stale (%.0f min old), downloading new", age.total_seconds() / 60)
+
     if not test_instance.databases.exists(SOURCE_DB):
         log.error("Source database '%s' not found on test instance", SOURCE_DB)
         sys.exit(1)
@@ -46,6 +59,12 @@ def main() -> None:
     log.info("Backing up '%s' from test environment", SOURCE_DB)
     backup = test_instance.databases.backup(SOURCE_DB)
     log.info("Backup saved: %s", backup.filename)
+    return backup
+
+
+def main() -> None:
+    # 1. Get a backup (reuse if fresh, download otherwise)
+    backup = get_or_download_backup()
 
     # 2. Start a local Odoo instance (needed for restore via HTTP)
     log.info("Starting local Odoo on port %s", PORT)
@@ -79,7 +98,7 @@ def main() -> None:
 
         # 5. Restore the backup onto the local instance
         try:
-            local_instance.databases.restore(backup, copy=False)
+            local_instance.databases.restore(backup, LOCAL_DB, copy=False)
         except NonLocalInstanceError:
             log.exception("Restore blocked by local-only guard")
             sys.exit(1)

@@ -28,7 +28,7 @@ Base URL and master password MUST NOT be stored in `OdooClientConfig`.
 - `master_password: str | None` (with `repr=False`)
 - `configured_database_names: tuple[str, ...] = ()`
 
-The `InstanceConfig.__repr__` SHALL display `master_pwd=<redacted>` rather than the actual password value.
+The `InstanceConfig.__repr__` SHALL display `master_pwd=<redacted>` rather than the actual password value. The `master_password` field SHALL use `repr=False`.
 
 #### Scenario: One client and several instances
 - **WHEN** one `OdooClient` creates two instances with different URLs
@@ -61,7 +61,7 @@ The SDK SHALL expose typed exceptions, each a subclass of `OdooInstanceSdkError`
 - `MasterPasswordRequiredError`, `InstanceConfigurationError`, `InvalidBaseUrlError`
 - `BackupValidationUnavailableError`
 
-`RemoteInstanceError` SHALL be renamed to `NonLocalInstanceError`. Compatibility alias MUST NOT be added.
+`RemoteInstanceError` SHALL be renamed to `NonLocalInstanceError`. The name `RemoteInstanceError` MUST NOT exist in the codebase. Compatibility alias MUST NOT be added.
 
 No exception message SHALL include `master_pwd`.
 

@@ -10,12 +10,12 @@ The project SHALL be managed by `uv`. `pyproject.toml` SHALL declare build backe
 
 ### Requirement: Runtime dependencies are minimal
 
-The `pyproject.toml` SHALL declare runtime dependencies as exactly: `httpx` (pinned `>=0.27,<1.0`) and `msgspec`. No other runtime dependencies SHALL be introduced in v0.1.
+The `pyproject.toml` SHALL declare runtime dependencies as exactly: `httpx` (pinned `>=0.27,<1.0`), `msgspec`, and `platformdirs` (pinned `>=4.3,<5`). No other runtime dependencies SHALL be introduced.
 
 #### Scenario: Runtime dependencies enumerated
 - **WHEN** the published metadata is inspected
-- **THEN** runtime dependencies are `httpx>=0.27,<1.0` and `msgspec`
-- **AND** no `platformdirs`, `psutil`, or `pytest` appear as runtime dependencies
+- **THEN** runtime dependencies are `httpx>=0.27,<1.0`, `msgspec`, and `platformdirs>=4.3,<5`
+- **AND** no `psutil` or `pytest` appear as runtime dependencies
 
 ### Requirement: Strict mypy and ruff
 
@@ -53,10 +53,10 @@ The project SHALL build both a wheel and an sdist via `uv build`. Both artefacts
 
 ### Requirement: Package metadata is complete
 
-The `pyproject.toml` SHALL populate at minimum: `name`, `version` (static `0.1.0` for v0.1), `description`, `readme` (path to README), `license` (matching repository LICENSE), `requires-python` (`>=3.12`), `authors`, and a classifiers list appropriate for PyPI.
+The `pyproject.toml` SHALL populate at minimum: `name`, `version` (static `19.0.0b1`), `description`, `readme` (path to README), `license` (matching repository LICENSE), `requires-python` (`>=3.12`), `authors`, and a classifiers list appropriate for PyPI.
 
 #### Scenario: Metadata present
 - **WHEN** `pyproject.toml` is inspected
 - **THEN** `name`, `version`, `description`, `readme`, `license`, `requires-python`, `authors` are all set
-- **AND** `version == "0.1.0"`
+- **AND** `version == "19.0.0b1"`
 - **AND** `requires-python >= "3.12"`
