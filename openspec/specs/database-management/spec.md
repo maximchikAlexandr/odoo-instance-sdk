@@ -1,66 +1,93 @@
 ## ADDED Requirements
 
-### Requirement: `instance.databases.list()` uses standard Odoo 19.0 HTTP method
+### Requirement: REST-контракт database manager
 
-`instance.databases.list()` SHALL return a tuple of database names by invoking the standard Odoo 19.0 list endpoint at `<base_url>/web/database/list` via JSON-RPC POST. SDK MUST NOT use HTTP Basic Auth: Odoo 19.0 database endpoints have `auth="none"` and do not validate the Basic header.
+Instance-bound `DatabaseResource` MUST использовать только стандартные endpoints Odoo 19.0:
 
-#### Scenario: List returns database names
-- **WHEN** the Odoo instance has databases `["db1", "db2"]` and `instance.databases.list()` is called
-- **THEN** the return is `("db1", "db2")` (a `tuple[str, ...]`, not a dict)
+- `POST /web/database/backup`;
+- `POST /web/database/restore`;
+- `POST /web/database/drop`;
+- JSON-RPC `/web/database/list`.
 
-### Requirement: `instance.databases.exists()` is derived from `list()`
+Каждый request MUST строиться от normalized `OdooInstance.base_url`.
 
-`instance.databases.exists(db: str) -> bool` SHALL return `<db> in instance.databases.list()`. No separate HTTP method SHALL be added for existence checks.
+`backup()`, `restore()` и `drop()` MUST использовать master password instance как обычное form field `master_pwd` в POST body. SDK MUST NOT использовать HTTP Basic Auth: Odoo 19.0 database endpoints имеют `auth="none"` и не проверяют Basic header.
 
-#### Scenario: Existing database
-- **WHEN** `db1` is in `instance.databases.list()` and `instance.databases.exists("db1")` is called
-- **THEN** the result is `True`
+SDK MUST NOT выдавать прямой публичный доступ к произвольным Odoo HTTP endpoints.
 
-#### Scenario: Missing database
-- **WHEN** `dbX` is not in `instance.databases.list()` and `instance.databases.exists("dbX")` is called
-- **THEN** the result is `False`
+#### Scenario: Изоляция instance
 
-### Requirement: `instance.databases.drop()` uses standard Odoo 19.0 HTTP method
+- **WHEN** database method вызван у `instance_a.databases`
+- **THEN** request отправляется только на normalized base URL `instance_a`
 
-`instance.databases.drop(database_name: str, *, timeout: float | None = None)` SHALL delete the database by invoking the standard Odoo 19.0 drop endpoint at `<base_url>/web/database/drop` via POST with form field `master_pwd` (the instance master password) and `name`. SDK MUST NOT use HTTP Basic Auth: Odoo 19.0 database endpoints have `auth="none"` and do not validate the Basic header.
+### Requirement: Получение списка и проверка существования базы
 
-#### Scenario: Drop call shape
-- **WHEN** `instance.databases.drop("mydb")` is called
-- **THEN** a request is sent to `<base_url>/web/database/drop`
-- **AND** the request body includes `master_pwd` as a form field and `name="mydb"`
-- **AND** no HTTP Basic Auth header is sent
+`instance.databases.list()` MUST вызывать Odoo 19.0 JSON-RPC endpoint `/web/database/list` и возвращать tuple имён баз в порядке ответа Odoo.
 
-### Requirement: Drop returns typed `DropResult`
+SDK MUST NOT угадывать default database и MUST NOT предоставлять `resolve_default()`.
 
-A successful drop SHALL return a `DropResult` (frozen `msgspec.Struct`) containing:
-- `db: str` — the name of the dropped database
+`instance.databases.exists(name)` MUST вызвать `list()` и вернуть точный membership result.
 
-#### Scenario: Successful drop
-- **WHEN** `instance.databases.drop("mydb")` succeeds and `exists("mydb")` is `False`
-- **THEN** `result.db == "mydb"`
+Если listing отключён или endpoint недоступен, методы MUST выбрасывать `DatabaseManagerUnavailableError`, а не возвращать пустой tuple.
 
-### Requirement: Local-only guard applies to `drop()` before HTTP
+#### Scenario: Несколько удалённых баз
 
-`instance.databases.drop()` SHALL refuse to issue any HTTP request when `instance.base_url` does not resolve to a local instance. The check SHALL be identical to the one used by `instance.databases.restore()` (hostname `localhost`, IPv4 in `127.0.0.0/8`, IPv6 `::1`, via `urllib.parse` and `ipaddress` stdlib). The check SHALL NOT be disabled by any parameter.
+- **WHEN** remote Odoo возвращает несколько database names
+- **THEN** `list()` возвращает все names без выбора одного default
 
-#### Scenario: Localhost allowed
-- **WHEN** `base_url == "http://localhost:8069"` and `drop("mydb")` is called
-- **THEN** the HTTP request is issued
+#### Scenario: Listing недоступен
 
-#### Scenario: Remote refused
-- **WHEN** `base_url == "http://odoo.example.com:8069"` and `drop("mydb")` is called
-- **THEN** `NonLocalInstanceError` is raised
-- **AND** no HTTP request is sent
+- **WHEN** Odoo не предоставляет database list
+- **THEN** SDK сообщает явную typed error
 
-### Requirement: Odoo-level failures raise typed `DatabaseError`
+### Requirement: Удаление базы
 
-If `list()` or `drop()` returns an HTTP error, the SDK SHALL raise `DatabaseError` populated from the response (same shape used by `instance.databases.restore()`). Existence checks on a nonexistent database SHALL NOT raise — they SHALL return `False` (because `list()` simply will not contain the name; an HTTP error from `list()` SHOULD still propagate as `DatabaseError`).
+`instance.databases.drop()` MUST отправлять `POST /web/database/drop` только после local guard и master password guard.
 
-#### Scenario: Drop nonexistent database
-- **WHEN** `drop("nonexistent")` is called and Odoo returns an HTTP error
-- **THEN** `DatabaseError` is raised
+После ответа метод MUST подтвердить `exists(name) == False`. Redirect или HTTP 200 без postcondition MUST NOT считаться успехом.
 
-#### Scenario: Exists on nonexistent database does not raise
-- **WHEN** `exists("nonexistent")` is called and `list()` returns `("other_db",)` without HTTP error
-- **THEN** the result is `False`
-- **AND** no exception is raised
+#### Scenario: Успешное удаление локальной базы
+
+- **WHEN** local database существует и Odoo успешно удаляет её
+- **THEN** `drop()` возвращает `DropResult` после отрицательной проверки `exists()`
+
+### Requirement: Запрет destructive операций на нелокальных инстансах
+
+`instance.databases.restore()` и `instance.databases.drop()` MUST быть запрещены для нелокального normalized base URL.
+
+Local URL MUST определяться без DNS resolution:
+
+- hostname ровно `localhost`; или
+- literal IPv4/IPv6 address, для которого `ipaddress.ip_address(host).is_loopback` равно `True`.
+
+Private network address, public address, любой иной DNS hostname и malformed URL MUST считаться нелокальными. Guard MUST выполняться до открытия HTTP connection. Override, force или unsafe flag MUST NOT существовать.
+
+`backup()`, `list()` и `exists()` MUST поддерживать удалённые instances.
+
+#### Scenario: Loopback разрешён
+
+- **WHEN** instance URL использует `localhost`, `127.0.0.0/8` или `::1`
+- **THEN** restore и drop проходят local guard
+
+#### Scenario: Private network запрещена
+
+- **WHEN** instance URL использует `10.0.0.0/8`, `172.16.0.0/12` или `192.168.0.0/16`
+- **THEN** restore и drop завершаются `NonLocalInstanceError` до network request
+
+### Requirement: HTTP transport без Basic Auth
+
+SDK MUST NOT использовать HTTP Basic Auth для запросов к Odoo 19.0. Database endpoints имеют `auth="none"` и не проверяют Basic header. `master_pwd` передаётся как обычное form field в POST body.
+
+HTTP client для database operations MUST создаваться без `auth=`. Health endpoint опрашивается без auth.
+
+SDK MUST предупреждать о передаче секрета по cleartext HTTP через `warn_if_cleartext_secret`: warning срабатывает при HTTP-запросе к нелокальному host, потому что `master_pwd` в form POST передаётся в cleartext.
+
+#### Scenario: Database request без Basic Auth
+
+- **WHEN** `backup()`, `restore()` или `drop()` отправляет POST
+- **THEN** HTTP client не имеет `auth=` и `master_pwd` находится только в form body
+
+#### Scenario: Cleartext warning для нелокального HTTP
+
+- **WHEN** database operation выполняется к нелокальному host по HTTP (не HTTPS)
+- **THEN** SDK warns о передаче секрета в cleartext один раз за процесс

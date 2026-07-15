@@ -1,65 +1,56 @@
 ## ADDED Requirements
 
-### Requirement: `database.backup()` uses standard Odoo 19.0 HTTP method
+### Requirement: Создание backup
 
-`instance.databases.backup(database_name: str, *, format: BackupFormat = BackupFormat.ZIP, filestore: bool = True, destination: str | Path | None = None, timeout: float | None = None)` SHALL invoke the standard Odoo 19.0 HTTP backup endpoint at `<base_url>/web/database/backup` with multipart form data containing the field `master_pwd` (the instance master password) and the parameters `name`, `backup_format`, `filestore`. SDK MUST NOT use HTTP Basic Auth: Odoo 19.0 database endpoints have `auth="none"` and do not validate the Basic header.
+`instance.databases.backup()` MUST поддерживать:
 
-#### Scenario: Default backup call shape
-- **WHEN** `instance.databases.backup("mydb")` is called
-- **THEN** the HTTP request targets `<base_url>/web/database/backup`
-- **AND** the request body includes `master_pwd`, `name="mydb"` and `backup_format="zip"`
-- **AND** no HTTP Basic Auth header is sent
+- имя базы;
+- `BackupFormat.ZIP` или `BackupFormat.DUMP`;
+- параметр `filestore`, default `True`;
+- необязательный destination directory;
+- необязательный timeout.
 
-### Requirement: Response is streamed to disk
+Метод MUST:
 
-The response body SHALL be streamed to a file on disk, not buffered entirely in memory.
+1. создать audit entry до HTTP request;
+2. отправить `POST /web/database/backup` с полями Odoo 19.0 `master_pwd`, `name`, `backup_format`, `filestore`;
+3. потоково записать response в `.part` file;
+4. атомарно переименовать успешно скачанный file;
+5. записать успех или ошибку в catalog;
+6. вернуть `Backup`.
 
-#### Scenario: Large backup does not fully load memory
-- **WHEN** a backup response body is many megabytes
-- **THEN** the file is written incrementally
-- **AND** the SDK does not hold the entire body in a single bytes object
+`Backup` MUST напрямую приниматься `instance.databases.restore()` другого локального instance без ручного открытия или переупаковки file.
 
-### Requirement: Default destination is a platform cache directory
+#### Scenario: Backup remote instance
 
-If `destination` is `None`, the file SHALL be saved under `OdooClientConfig.backups_directory` if set, otherwise under `platformdirs.user_cache_path("odoo-instance-sdk") / "backups"`.
+- **WHEN** remote instance имеет master password и база существует
+- **THEN** backup скачивается локально, audit содержит success и метод возвращает `Backup`
 
-The directory SHALL be created with `mkdir(parents=True, exist_ok=True)` if missing.
+#### Scenario: Ошибка скачивания
+
+- **WHEN** HTTP request или запись file завершается ошибкой
+- **THEN** partial file удаляется, audit сохраняет failure и вызывающий получает типизированное исключение
+
+### Requirement: Каталог хранения backups
+
+`instance.databases.backup()` MUST сохранять file:
+
+1. в явно переданный destination directory;
+2. иначе в `OdooClientConfig.backups_directory`;
+3. иначе в `platformdirs.user_cache_path("odoo-instance-sdk") / "backups"`.
+
+Catalog database MUST всегда храниться в `platformdirs.user_cache_path("odoo-instance-sdk") / "backups.sqlite3"`.
+
+SDK MUST использовать безопасный basename из `Content-Disposition`. Final filename MUST начинаться с backup UUID. Имя HTTP response MUST NOT позволять выйти за destination directory.
+
+Успешный backup MUST NOT удаляться автоматически.
 
 #### Scenario: Custom destination
-- **WHEN** caller passes a destination directory
-- **THEN** the file is saved there, and the absolute path is registered in the shared SQLite catalog
+
+- **WHEN** caller передал destination directory
+- **THEN** file сохраняется там, а absolute path регистрируется в общем SQLite catalog
 
 #### Scenario: Default cache
-- **WHEN** destination and client default are absent
-- **THEN** the file and catalog are created in the standard user cache layout
 
-### Requirement: UUID-prefixed filename for collision avoidance
-
-The backup file SHALL be named with a UUID prefix for collision avoidance, format `{backup_id}_{server_filename}` where `backup_id` is a generated UUID and `server_filename` is derived safely from the `Content-Disposition` header. The HTTP response filename SHALL NOT allow escaping the destination directory.
-
-#### Scenario: Filename shape
-- **WHEN** `instance.databases.backup("mydb", format=BackupFormat.ZIP, destination="/tmp")` is called and the server returns `Content-Disposition: attachment; filename=mydb.zip`
-- **THEN** the saved file path starts with the backup UUID prefix followed by the server filename
-
-### Requirement: `Backup` is a typed object
-
-`instance.databases.backup()` SHALL return a `Backup` (frozen `msgspec.Struct`) with:
-- `id: uuid.UUID` — unique backup identifier
-- `source_base_url: str` — the normalized base URL of the instance that produced the backup
-- `database_name: str` — original database name
-- `format: BackupFormat`
-- `filestore_requested: bool`
-- `path: str` — absolute local path
-- `filename: str`
-- `size_bytes: int`
-- `sha256: str`
-- `downloaded_at: datetime`
-
-The returned `Backup` SHALL be directly passable to `instance.databases.restore()` of another local instance without manual file opening or repacking.
-
-#### Scenario: Backup content
-- **WHEN** `backup("mydb", format=BackupFormat.DUMP, filestore=False, destination="/tmp")` returns successfully
-- **THEN** `backup.database_name == "mydb"`
-- **AND** `backup.format == BackupFormat.DUMP`
-- **AND** `backup.filestore_requested is False`
-- **AND** `backup.source_base_url == <instance base_url>`
+- **WHEN** destination и client default отсутствуют
+- **THEN** file и catalog создаются в стандартном user cache layout

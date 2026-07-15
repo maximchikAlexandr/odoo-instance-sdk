@@ -1,74 +1,76 @@
 ## ADDED Requirements
 
-### Requirement: Public model-contracts are `msgspec.Struct`; internal containers may be `dataclass`
+### Requirement: Точные типы, dataclass и msgspec
 
-Every public model-contract (listed below) SHALL be a subclass of `msgspec.Struct`. Internal runtime containers of logic (clients, resources, registry records, exceptions) MAY use `dataclasses` to avoid hand-written `__init__` and improve readability. The SDK SHALL NOT use `typing.Any` in any public signature; opaque payloads SHALL use `bytes` or `str` with a typed shape.
+Классы с поведением, зависимостями или runtime-состоянием MUST быть реализованы как `@dataclass(slots=True, kw_only=True)`:
 
-Public model-contracts (must be `msgspec.Struct`):
-- `StartConfig`, `CommandResult`, `OdooProcess`, `ProcessStatus`, `ReadinessResult`, `Backup`, `BackupEvent`, `BackupValidationResult`, `BackupDeletionResult`, `RestoreResult`, `DropResult`
+- `OdooClient`;
+- `InstanceFactory`;
+- `OdooInstance`;
+- `ServerResource` (внутренний, не публичный ресурс; `OdooInstance` делегирует в него lifecycle и readiness);
+- `DatabaseResource`;
+- `BackupResource`;
+- `BackupCatalog`;
+- HTTP transport/client.
 
-Configuration objects `OdooClientConfig` and `InstanceConfig` SHALL be `@dataclass(frozen=True, slots=True, kw_only=True)`. Secret fields MUST use `repr=False`.
+Неизменяемые конфигурации `OdooClientConfig` и `InstanceConfig` MUST дополнительно использовать `frozen=True`. Секретные поля MUST использовать `repr=False`.
 
-#### Scenario: Model instantiation is typed
-- **WHEN** the public API is imported
-- **THEN** `StartConfig`, `CommandResult`, `OdooProcess`, `ProcessStatus`, `ReadinessResult`, `Backup`, `RestoreResult`, `DropResult` are all `msgspec.Struct` subclasses
-- **AND** `OdooClientConfig` and `InstanceConfig` are frozen dataclasses
+`msgspec.Struct` MUST использоваться только для неизменяемых моделей данных без поведения:
 
-### Requirement: Two-config design
+- `Backup` — frozen;
+- `BackupEvent` — frozen;
+- `BackupValidationResult` — frozen;
+- `BackupDeletionResult` — frozen;
+- `StartConfig` — с `forbid_unknown_fields=True`, без изменений к полям; метакласс `_StructMeta` и helper `_matches` удаляются как последний источник `Any` и `type: ignore` в production code;
+- существующие модели `CommandResult`, `OdooProcess`, `ProcessStatus`, `ReadinessResult`, `DropResult` — без изменений;
+- `RestoreResult` — поле `source` меняет тип с удалённого `BackupArtifact` на `Backup`;
+- внутренних DTO ответов Odoo HTTP API.
 
-`OdooClientConfig` SHALL contain only shared client parameters:
-- `executable: str` — path or name of the Odoo executable
-- `http_timeout_seconds: float = 30.0` — default HTTP timeout
-- `backups_directory: Path | None = None` — optional default backup directory
+Перечисления `BackupFormat`, `BackupState`, `BackupEventType` и `BackupValidationStatus` MUST быть стандартными `StrEnum`.
 
-Base URL and master password MUST NOT be stored in `OdooClientConfig`.
+`BackupArtifact` MUST быть удалён из public exports.
 
-`InstanceConfig` SHALL contain:
-- `base_url: str` — normalized base URL
-- `master_password: str | None` (with `repr=False`)
-- `configured_database_names: tuple[str, ...] = ()`
+Production code и public annotations MUST NOT использовать `Any`. Ресурсы, SQLite repository и классы с зависимостями MUST NOT быть реализованы как `msgspec.Struct`.
 
-The `InstanceConfig.__repr__` SHALL display `master_pwd=<redacted>` rather than the actual password value. The `master_password` field SHALL use `repr=False`.
+#### Scenario: Dataclass показывает зависимости ресурса
 
-#### Scenario: One client and several instances
-- **WHEN** one `OdooClient` creates two instances with different URLs
-- **THEN** each `DatabaseResource` uses only its own instance configuration
+- **WHEN** реализуется новый resource или container с логикой
+- **THEN** его зависимости объявлены dataclass-полями, а ручной boilerplate `__init__` отсутствует
 
-### Requirement: Minimum model set is exposed
+#### Scenario: msgspec ограничен моделями данных
 
-The package's public namespace (`odoo_instance_sdk`) SHALL expose at minimum:
-- `OdooClient`, `OdooClientConfig`, `InstanceConfig`, `StartConfig`
-- `CommandResult`, `OdooProcess`, `ProcessStatus`, `ReadinessResult`
-- `Backup`, `RestoreResult`, `DropResult`
+- **WHEN** реализуются `Backup`, `BackupEvent` и результаты операций
+- **THEN** они являются frozen `msgspec.Struct` и не содержат methods с side effects
 
-#### Scenario: Public re-exports
-- **WHEN** user does `from odoo_instance_sdk import OdooClient, Backup`
-- **THEN** both names are defined in the `odoo_instance_sdk` namespace
+#### Scenario: Static typing
 
-### Requirement: Typed exception hierarchy
+- **WHEN** mypy проверяет production package и tests
+- **THEN** проверка проходит без `Any`, необоснованных ignores и отсутствующих annotations
 
-The SDK SHALL expose typed exceptions, each a subclass of `OdooInstanceSdkError` (root type). At minimum:
-- `OdooInstanceSdkError` (root)
-- `ConfigError` — invalid client or start configuration
-- `CommandTimeoutError` — `server.run()` timeout
-- `ProcessNotFoundError` — unregistered or unknown process handle
-- `ProcessExitedBeforeReady` — linked process died during `wait_ready()`
-- `ReadinessTimeoutError` — `wait_ready()` timeout
-- `NonLocalInstanceError` — local-only guard refused a remote `restore()`/`drop()`
-- `DatabaseError` — Odoo database HTTP endpoint returned an error
-- `BackupCatalogError`, `BackupNotFoundError`, `BackupNotAvailableError`, `BackupDownloadError`
-- `DatabaseManagerUnavailableError`, `DatabaseAlreadyExistsError`, `RestoreFailedError`, `DropFailedError`
-- `MasterPasswordRequiredError`, `InstanceConfigurationError`, `InvalidBaseUrlError`
-- `BackupValidationUnavailableError`
+### Requirement: Ошибки SDK
 
-`RemoteInstanceError` SHALL be renamed to `NonLocalInstanceError`. The name `RemoteInstanceError` MUST NOT exist in the codebase. Compatibility alias MUST NOT be added.
+Typed exception hierarchy MUST включать существующие ошибки и новые:
 
-No exception message SHALL include `master_pwd`.
+- `InvalidBaseUrlError`;
+- `InstanceConfigurationError`;
+- `MasterPasswordRequiredError`;
+- `NonLocalInstanceError` (переименование существующего `RemoteInstanceError`);
+- `BackupCatalogError`;
+- `BackupNotFoundError`;
+- `BackupNotAvailableError`;
+- `BackupValidationUnavailableError`;
+- `DatabaseManagerUnavailableError`;
+- `BackupDownloadError`.
 
-#### Scenario: Exception hierarchy root
-- **WHEN** any typed SDK exception is raised
-- **THEN** it is an instance of `OdooInstanceSdkError`
+Существующие ошибки `CommandTimeoutError`, `ProcessNotFoundError`, `ProcessExitedBeforeReady`, `ReadinessTimeoutError`, `DatabaseError`, `ConfigError` и `OdooInstanceSdkError` (base) MUST остаться.
 
-#### Scenario: Exception messages do not leak password
-- **WHEN** `DatabaseError(message="...")` is constructed while processing a request that included `master_pwd`
-- **THEN** the `message` does not contain the value of `master_pwd`
+`RemoteInstanceError` MUST быть переименован в `NonLocalInstanceError`. Compatibility alias MUST NOT добавляться.
+
+Exceptions MUST содержать operation name и безопасный context, но MUST NOT содержать master password, multipart body или полный config file.
+
+Повреждённый backup MUST возвращать `BackupValidationStatus.INVALID`, а не выбрасывать отдельное validation exception. `BackupValidationUnavailableError` MUST использоваться только при недоступном `pg_restore` и `raise_if_unavailable=True`.
+
+#### Scenario: Ошибка без утечки секрета
+
+- **WHEN** instance operation завершается ошибкой
+- **THEN** exception string и repr не содержат master password
