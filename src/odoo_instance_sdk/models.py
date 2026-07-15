@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 import uuid
 import warnings
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 
@@ -39,6 +39,14 @@ class BackupValidationStatus(enum.StrEnum):
 
 
 class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """A successfully downloaded backup.
+
+    Convention: ``downloaded_at`` is timezone-aware (UTC). ``NoBackup`` also
+    uses a tz-aware default. Downstream code that reads
+    ``db.backup.downloaded_at`` on a ``Backup | NoBackup`` union can rely on
+    the value being tz-aware.
+    """
+
     id: uuid.UUID
     source_base_url: str
     database_name: str
@@ -49,6 +57,24 @@ class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     size_bytes: int
     sha256: str
     downloaded_at: datetime
+
+
+class NoBackup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    id: uuid.UUID = uuid.UUID(int=0)
+    source_base_url: str = ""
+    database_name: str = ""
+    format: BackupFormat | None = None
+    filestore_requested: bool = False
+    path: str = ""
+    filename: str = ""
+    size_bytes: int = 0
+    sha256: str = ""
+    downloaded_at: datetime = datetime.fromtimestamp(0, UTC)
+
+
+class Database(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    name: str
+    backup: Backup | NoBackup
 
 
 class BackupEvent(msgspec.Struct, frozen=True, forbid_unknown_fields=True):

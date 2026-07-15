@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from odoo_instance_sdk.models import StartConfig
@@ -22,10 +22,17 @@ class InstanceConfig:
     master_password: str | None = field(default=None, repr=False)
     configured_database_names: tuple[str, ...] = ()
     start_config: StartConfig | None = field(default=None, repr=False)
+    db_host: str | None = field(default=None)
+    db_port: int | None = field(default=None)
+    db_user: str | None = field(default=None)
+    db_password: str | None = field(default=None, repr=False)
 
     def __repr__(self) -> str:
-        return (
-            f"InstanceConfig(base_url={self.base_url!r}, "
-            f"master_pwd=<redacted>, "
-            f"configured_database_names={self.configured_database_names!r})"
-        )
+        parts: list[str] = []
+        for f in fields(self):
+            val = getattr(self, f.name)
+            if f.name in ("master_password", "db_password") and val is not None:
+                parts.append(f"{f.name}=<redacted>")
+            else:
+                parts.append(f"{f.name}={val!r}")
+        return f"InstanceConfig({', '.join(parts)})"

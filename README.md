@@ -41,18 +41,30 @@ print(f"Ready: {result.ok} in {result.elapsed:.1f}s")
 ### Database operations
 
 ```python
-# List databases
+# List databases — returns Database objects with backup info
 dbs = instance.databases.list()
+for db in dbs:
+    if db.backup.format is not None:
+        print(f"{db.name} → restored from {db.backup.downloaded_at}")
+    else:
+        print(f"{db.name} → no restore mapping")
+
+# Positional indexing
+db = instance.databases[0]
+print(db.name, db.backup.downloaded_at)
+
+# Current database (from configured_database_names[0])
+current = instance.databases.current()
 
 # Backup — works on local and remote instances
 backup = instance.databases.backup("mydb")
 print(f"Saved to: {backup.filename}")
 
-# Restore — local-only, guarded by SDK
+# Restore — local-only, guarded by SDK; writes restore-mapping for from_config() instances
 restored = instance.databases.restore(backup, "mydb_copy", copy=True)
 print(f"Restored as: {restored.new_db}")
 
-# Drop — local-only
+# Drop — local-only; records dropped event for from_config() instances
 result = instance.databases.drop("mydb_copy")
 ```
 
@@ -100,7 +112,9 @@ OdooInstance
 │   ├── restore(...)
 │   ├── drop(...)
 │   ├── list()
-│   └── exists()
+│   ├── exists()
+│   ├── current()
+│   └── [n]
 ├── run(args, *, cwd=None, env=None, timeout=None) -> CommandResult
 ├── start(config: StartConfig, ...) -> OdooProcess
 ├── stop(proc, *, timeout=10.0)
@@ -121,8 +135,9 @@ Backup files and audit metadata are stored under `~/.cache/odoo-instance-sdk/`:
 
 - Backup filenames begin with the backup UUID and stay within the destination directory.
 - Catalog is a persistent SQLite database with full audit history.
-- Schema version 1: `backups` table + `backup_events` table with foreign keys.
+- Schema version 2: `backups` + `backup_events` tables (audit), `restores` + `database_events` tables (restore-tracking), with foreign keys.
 - Concurrent access uses WAL mode and 5-second busy timeout.
+- Catalog file and WAL/SHM sidecars are `chmod 0600`.
 
 ## Validation semantics
 
@@ -139,23 +154,11 @@ Backup files and audit metadata are stored under `~/.cache/odoo-instance-sdk/`:
 
 ## Security
 
-- `master_pwd` is never in `repr`, exception messages, or logs.
+- `master_pwd` and `db_password` are never in `repr`, exception messages, or logs.
 - Destructive operations (`restore`, `drop`) are local-only and cannot be bypassed.
 - HTTP interface defaults to loopback only.
 - Basic Auth removed: `master_pwd` is sent only as a form field in POST bodies.
 - Cleartext warning fires once per process when master password is sent over HTTP to non-local hosts.
-
-## Breaking changes from 0.x
-
-This release (19.0.0b1) makes several breaking API changes:
-
-| Removed | Replacement |
-|---------|-------------|
-| `client.database` | `instance.databases` (bound to an `OdooInstance`) |
-| `client.server` | methods on `OdooInstance` directly |
-| `BackupArtifact` | `Backup` |
-| `RemoteInstanceError` | `NonLocalInstanceError` |
-| HTTP Basic Auth | `master_pwd` as form field only |
 
 ## Examples
 

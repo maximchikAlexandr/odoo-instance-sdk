@@ -1,7 +1,13 @@
 """Prepare a local development Odoo instance from a test environment backup.
 
-Flow: read odoo.conf → check last backup → download if stale (>2h) or reuse
-→ start local Odoo → restore → stop.
+Flow: read odoo.conf → check backup freshness on both source (catalog age)
+and target (restore-mapping age) → download if source backup stale (>2h) →
+start local Odoo → restore only if target's current backup is stale (>2h) → stop.
+
+A backup is considered fresh if its `downloaded_at` (source) or the restore-
+mapping's `backup.downloaded_at` (target) is within the last 2 hours. The
+target check uses `databases.current().backup.downloaded_at` via the
+restore-tracking catalog — no extra HTTP needed when the mapping exists.
 
 Configure via environment variables (see .env.example). Export them or use a .env loader:
     set -a && source .env && set +a && uv run python examples/prepare_dev_instance.py
@@ -51,15 +57,38 @@ def get_or_download_backup(source_db: str) -> Backup:
     return backup
 
 
+def _is_backup_fresh(downloaded_at: datetime) -> bool:
+    return datetime.now(UTC) - downloaded_at < FRESH_THRESHOLD
+
+
 def main() -> None:
     dbs = test_instance.databases.list()
     if not dbs:
         raise RuntimeError("No databases found on test instance")
 
-    source_db = dbs[0]
-    log.info("Resolved source database: %s (available: %s)", source_db, ", ".join(dbs))
+    source_db = dbs[0].name
+    log.info("Resolved source database: %s (available: %s)", source_db, ", ".join(db.name for db in dbs))
 
     local_db = f"{source_db}_{datetime.now(UTC):%Y%m%d_%H%M%S}"
+
+    # Check restore-mapping freshness on the deployed (target) instance.
+    # databases.current() returns the Database for configured_database_names[0],
+    # with .backup populated from the restores catalog (or NoBackup if no mapping).
+    current = local_instance.databases.current()
+    if current.backup.format is not None and _is_backup_fresh(current.backup.downloaded_at):
+        log.info(
+            "Local database '%s' already has a fresh restore (backup age: %.0f min), skipping",
+            current.name,
+            (datetime.now(UTC) - current.backup.downloaded_at).total_seconds() / 60,
+        )
+        return
+
+    if current.name:
+        log.info(
+            "Local database '%s' backup is stale or missing — proceeding with restore",
+            current.name,
+        )
+
     backup = get_or_download_backup(source_db)
 
     log.info("Starting local Odoo from %s", conf_path)

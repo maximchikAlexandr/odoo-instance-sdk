@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -283,4 +284,367 @@ def test_verify_identity_rejects_path_mismatch(tmp_path):
     wrong_path.write_bytes(b"x")
     with pytest.raises(BackupNotAvailableError, match="path"):
         catalog.verify_identity(_make_backup(bid, path=wrong_path))
+    catalog.close()
+
+
+def test_v0_empty_catalog_migration(tmp_path):
+    db = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA user_version = 0")
+    conn.close()
+
+    catalog = BackupCatalog(db_path=db)
+    tables = {
+        r[0]
+        for r in catalog._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "restores" in tables
+    assert "database_events" in tables
+
+    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version == 2
+
+    # Existing backups table still works
+    path = _create_backup_file(tmp_path, "migrated.zip")
+    bid = _u("migration")
+    catalog.start_download(bid, "http://localhost:8069", "db", "zip", True, path)
+    row = catalog._conn.execute("SELECT * FROM backups WHERE id=?", (bid,)).fetchone()
+    assert row["state"] == "downloading"
+    catalog.close()
+
+
+def test_schema_creation_v0_migration_with_existing_data(tmp_path):
+    """v0 → v2 migration MUST preserve existing backups and events."""
+    db = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA user_version = 0")
+    conn.executescript("""
+        CREATE TABLE backups (
+            id TEXT PRIMARY KEY,
+            source_base_url TEXT NOT NULL,
+            database_name TEXT NOT NULL,
+            format TEXT NOT NULL,
+            filestore_requested INTEGER NOT NULL,
+            path TEXT,
+            filename TEXT,
+            size_bytes INTEGER,
+            sha256 TEXT,
+            state TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            downloaded_at TEXT,
+            failed_at TEXT,
+            deleted_at TEXT,
+            error_type TEXT,
+            error_message TEXT
+        );
+        CREATE TABLE backup_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            backup_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            path TEXT,
+            validator TEXT,
+            exit_code INTEGER,
+            message TEXT
+        );
+    """)
+    pre_backup_id = _u("pre-existing")
+    conn.execute(
+        "INSERT INTO backups (id, source_base_url, database_name, format, "
+        "filestore_requested, state, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (pre_backup_id, "http://old:8069", "olddb", "zip", 1, "available", "2020-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO backup_events (backup_id, event_type, occurred_at) VALUES (?, ?, ?)",
+        (pre_backup_id, "download_started", "2020-01-01"),
+    )
+    conn.commit()
+    conn.close()
+
+    catalog = BackupCatalog(db_path=db)
+
+    backup_row = catalog._conn.execute(
+        "SELECT * FROM backups WHERE id=?", (pre_backup_id,)
+    ).fetchone()
+    assert backup_row is not None
+    assert backup_row["database_name"] == "olddb"
+    assert backup_row["state"] == "available"
+
+    event_row = catalog._conn.execute(
+        "SELECT * FROM backup_events WHERE backup_id=? ORDER BY sequence",
+        (pre_backup_id,),
+    ).fetchone()
+    assert event_row is not None
+    assert event_row["event_type"] == "download_started"
+
+    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version == 2
+
+    catalog.close()
+
+
+def test_schema_creation_v2_reopen(tmp_path):
+    db = tmp_path / "test.db"
+    catalog = BackupCatalog(db_path=db)
+    version1 = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version1 == 2
+    catalog.close()
+
+    catalog2 = BackupCatalog(db_path=db)
+    version2 = catalog2._conn.execute("PRAGMA user_version").fetchone()[0]
+    assert version2 == 2
+    tables = {
+        r[0]
+        for r in catalog2._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert "restores" in tables
+    assert "database_events" in tables
+    catalog2.close()
+
+
+def test_normalize_db_host():
+    from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
+
+    assert normalize_db_host(None) == "socket"
+    assert normalize_db_host("localhost") == "localhost"
+    assert normalize_db_host("192.168.1.1") == "192.168.1.1"
+
+
+def test_record_restore_inserts_rows(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "b.zip")
+    bid = _u("record-restore")
+    catalog.start_download(bid, "http://localhost:8069", "mydb", "zip", True, path)
+    catalog.success_download(bid, "b.zip", 100, "")
+
+    catalog.record_restore("localhost", 5432, "mydb", bid)
+
+    restores = catalog._conn.execute(
+        "SELECT * FROM restores WHERE db_host=? AND db_port=? AND database_name=?",
+        ("localhost", 5432, "mydb"),
+    ).fetchall()
+    assert len(restores) == 1
+    assert restores[0]["backup_id"] == bid
+
+    events = catalog._conn.execute(
+        "SELECT event_type, backup_id FROM database_events WHERE db_host=? AND db_port=? AND database_name=? ORDER BY sequence",
+        ("localhost", 5432, "mydb"),
+    ).fetchall()
+    assert len(events) == 1
+    assert events[0]["event_type"] == "restored"
+    assert events[0]["backup_id"] == bid
+
+    latest = catalog.latest_restore("localhost", 5432, "mydb")
+    assert latest is not None
+    assert latest.id == uuid.UUID(bid)
+    catalog.close()
+
+
+def test_record_restore_normalizes_socket(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "b.zip")
+    bid = _u("socket-restore")
+    catalog.start_download(bid, "http://localhost:8069", "mydb", "zip", True, path)
+    catalog.success_download(bid, "b.zip", 100, "")
+
+    catalog.record_restore(None, 5432, "mydb", bid)
+
+    rows = catalog._conn.execute(
+        "SELECT db_host FROM restores WHERE database_name=?", ("mydb",)
+    ).fetchall()
+    assert rows[0]["db_host"] == "socket"
+
+    latest = catalog.latest_restore(None, 5432, "mydb")
+    assert latest is not None
+    assert latest.id == uuid.UUID(bid)
+    catalog.close()
+
+
+def test_duplicate_restore_inserts_two_rows(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "b.zip")
+    bid = _u("dup-restore")
+    catalog.start_download(bid, "http://localhost:8069", "mydb", "zip", True, path)
+    catalog.success_download(bid, "b.zip", 100, "")
+
+    catalog.record_restore("localhost", 5432, "mydb", bid)
+    catalog.record_restore("localhost", 5432, "mydb", bid)
+
+    rows = catalog._conn.execute(
+        "SELECT COUNT(*) FROM restores WHERE db_host=? AND db_port=? AND database_name=?",
+        ("localhost", 5432, "mydb"),
+    ).fetchone()
+    assert rows[0] == 2
+
+    latest = catalog.latest_restore("localhost", 5432, "mydb")
+    assert latest is not None
+    assert latest.id == uuid.UUID(bid)
+    catalog.close()
+
+
+def test_latest_restore_backup_deleted_returns_none(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "b.zip")
+    bid = _u("deleted-restore")
+    catalog.start_download(bid, "http://localhost:8069", "mydb", "zip", True, path)
+    catalog.success_download(bid, "b.zip", 100, "")
+    catalog.record_restore("localhost", 5432, "mydb", bid)
+    catalog.record_deletion(bid)
+
+    latest = catalog.latest_restore("localhost", 5432, "mydb")
+    assert latest is None
+    catalog.close()
+
+
+def test_latest_restore_file_missing_returns_none(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "vanish.zip")
+    bid = _u("missing-file")
+    catalog.start_download(bid, "http://localhost:8069", "mydb", "zip", True, path)
+    catalog.success_download(bid, "vanish.zip", 100, "")
+    catalog.record_restore("localhost", 5432, "mydb", bid)
+    path.unlink()
+
+    latest = catalog.latest_restore("localhost", 5432, "mydb")
+    assert latest is None
+    catalog.close()
+
+
+def test_latest_restore_no_fallback_to_earlier(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    p1 = _create_backup_file(tmp_path, "b1.zip")
+    p2 = _create_backup_file(tmp_path, "b2.zip")
+    bid1 = _u("no-fallback-1")
+    bid2 = _u("no-fallback-2")
+    catalog.start_download(bid1, "http://localhost:8069", "mydb", "zip", True, p1)
+    catalog.start_download(bid2, "http://localhost:8069", "mydb", "zip", True, p2)
+    catalog.success_download(bid1, "b1.zip", 100, "")
+    catalog.success_download(bid2, "b2.zip", 200, "")
+
+    catalog.record_restore("localhost", 5432, "mydb", bid1)
+    catalog._conn.execute(
+        "UPDATE restores SET restored_at = datetime('now', '-1 day') WHERE backup_id = ?",
+        (bid1,),
+    )
+    catalog.record_restore("localhost", 5432, "mydb", bid2)
+    catalog.record_deletion(bid2)
+
+    latest = catalog.latest_restore("localhost", 5432, "mydb")
+    assert latest is None
+    catalog.close()
+
+
+def test_record_database_dropped_idempotent(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    catalog.record_database_dropped("localhost", 5432, "mydb")
+    catalog.record_database_dropped("localhost", 5432, "mydb")
+
+    events = catalog._conn.execute(
+        "SELECT event_type FROM database_events WHERE db_host=? AND db_port=? AND database_name=? ORDER BY sequence",
+        ("localhost", 5432, "mydb"),
+    ).fetchall()
+    assert len(events) == 1
+    assert events[0]["event_type"] == "dropped"
+    catalog.close()
+
+
+def test_record_database_dropped_normalizes_socket(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    catalog.record_database_dropped(None, 5432, "mydb")
+
+    events = catalog._conn.execute(
+        "SELECT db_host, event_type FROM database_events WHERE database_name=? ORDER BY sequence",
+        ("mydb",),
+    ).fetchall()
+    assert events[0]["db_host"] == "socket"
+    assert events[0]["event_type"] == "dropped"
+    catalog.close()
+
+
+def test_restore_after_dropped_resets(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "b.zip")
+    bid = _u("reset-test")
+    catalog.start_download(bid, "http://localhost:8069", "mydb", "zip", True, path)
+    catalog.success_download(bid, "b.zip", 100, "")
+
+    catalog.record_database_dropped("localhost", 5432, "mydb")
+    catalog.record_restore("localhost", 5432, "mydb", bid)
+
+    latest = catalog.latest_restore("localhost", 5432, "mydb")
+    assert latest is not None
+    assert latest.id == uuid.UUID(bid)
+    catalog.close()
+
+
+def test_distinct_restored_database_names(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    p1 = _create_backup_file(tmp_path, "db1.zip")
+    p2 = _create_backup_file(tmp_path, "db2.zip")
+    bid1 = _u("distinct-1")
+    bid2 = _u("distinct-2")
+    catalog.start_download(bid1, "http://localhost:8069", "db1", "zip", True, p1)
+    catalog.start_download(bid2, "http://localhost:8069", "db2", "zip", True, p2)
+    catalog.success_download(bid1, "db1.zip", 100, "")
+    catalog.success_download(bid2, "db2.zip", 200, "")
+
+    catalog.record_restore("localhost", 5432, "db1", bid1)
+    catalog.record_restore("localhost", 5432, "db1", bid1)
+    catalog.record_restore("localhost", 5432, "db2", bid2)
+
+    names = catalog.distinct_restored_database_names("localhost", 5432)
+    assert sorted(names) == ["db1", "db2"]
+    catalog.close()
+
+
+def test_distinct_restored_database_names_normalizes_socket(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    bid = _u("distinct-socket")
+    p = _create_backup_file(tmp_path, "s.zip")
+    catalog.start_download(bid, "http://localhost:8069", "mydb", "zip", True, p)
+    catalog.success_download(bid, "s.zip", 100, "")
+
+    catalog.record_restore(None, 5432, "mydb", bid)
+
+    names = catalog.distinct_restored_database_names(None, 5432)
+    assert names == ("mydb",)
+    catalog.close()
+
+
+def test_latest_restore_empty_returns_none(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    latest = catalog.latest_restore("localhost", 5432, "nonexistent")
+    assert latest is None
+    catalog.close()
+
+
+def test_has_tracked_database_true(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    p = _create_backup_file(tmp_path, "b.zip")
+    bid = _u("has-tracked")
+    catalog.start_download(bid, "http://localhost:8069", "mydb", "zip", True, p)
+    catalog.success_download(bid, "b.zip", 100, "")
+    catalog.record_restore("localhost", 5432, "mydb", bid)
+    assert catalog.has_tracked_database("localhost", 5432, "mydb") is True
+    catalog.close()
+
+
+def test_has_tracked_database_false(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    assert catalog.has_tracked_database("localhost", 5432, "ghost") is False
+    catalog.close()
+
+
+def test_has_tracked_database_normalizes_socket(tmp_path):
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    p = _create_backup_file(tmp_path, "s.zip")
+    bid = _u("socket-has")
+    catalog.start_download(bid, "http://localhost:8069", "mydb", "zip", True, p)
+    catalog.success_download(bid, "s.zip", 100, "")
+    catalog.record_restore(None, 5432, "mydb", bid)
+    assert catalog.has_tracked_database(None, 5432, "mydb") is True
     catalog.close()

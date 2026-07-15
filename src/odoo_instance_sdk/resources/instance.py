@@ -73,12 +73,20 @@ class InstanceFactory:
             raise InstanceConfigurationError(
                 f"from_config requires a local instance; {normalized} is remote"
             ) from e
+        start_cfg = StartConfig.from_odoo_config(path)
+        db_port = start_cfg.db_port
+        if start_cfg.db_host and db_port is None:
+            db_port = 5432
         return OdooInstance(
             config=InstanceConfig(
                 base_url=normalized,
                 master_password=master_password,
                 configured_database_names=db_names,
-                start_config=StartConfig.from_odoo_config(path),
+                start_config=start_cfg,
+                db_host=start_cfg.db_host,
+                db_port=db_port,
+                db_user=start_cfg.db_user,
+                db_password=start_cfg.db_password,
             ),
             _client=self._client,
         )

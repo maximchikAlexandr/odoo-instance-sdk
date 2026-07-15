@@ -67,4 +67,5 @@ class OdooClient:
 
         if self._catalog is None:
             self._catalog = BackupCatalog(db_path=get_cache_root() / "backups.sqlite3")
+            atexit.register(self._catalog.close)
         return self._catalog

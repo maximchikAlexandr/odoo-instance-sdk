@@ -53,10 +53,12 @@ The project SHALL build both a wheel and an sdist via `uv build`. Both artefacts
 
 ### Requirement: Package metadata is complete
 
-The `pyproject.toml` SHALL populate at minimum: `name`, `version` (static `19.0.0b1`), `description`, `readme` (path to README), `license` (matching repository LICENSE), `requires-python` (`>=3.12`), `authors`, and a classifiers list appropriate for PyPI.
+The `pyproject.toml` SHALL populate at minimum: `name`, `version` (static, SemVer, independent of Odoo version), `description`, `readme` (path to README), `license` (matching repository LICENSE), `requires-python` (`>=3.12`), `authors`, and a classifiers list appropriate for PyPI.
+
+The package version MUST NOT embed the Odoo version. The Odoo compatibility target is stated in `description` and classifiers, not in `version`. See ADR-0001.
 
 #### Scenario: Metadata present
 - **WHEN** `pyproject.toml` is inspected
 - **THEN** `name`, `version`, `description`, `readme`, `license`, `requires-python`, `authors` are all set
-- **AND** `version == "19.0.0b1"`
+- **AND** `version` follows SemVer and does not contain the Odoo major version
 - **AND** `requires-python >= "3.12"`

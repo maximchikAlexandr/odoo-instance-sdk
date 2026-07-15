@@ -34,7 +34,9 @@ from odoo_instance_sdk.models import (
     BackupValidationResult,
     BackupValidationStatus,
     CommandResult,
+    Database,
     DropResult,
+    NoBackup,
     OdooProcess,
     ProcessStatus,
     ReadinessResult,
@@ -45,7 +47,7 @@ from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 
-__version__ = "19.0.0b1"
+__version__ = "0.1.0"
 __all__ = [
     "Backup",
     "BackupCatalogError",
@@ -64,6 +66,7 @@ __all__ = [
     "CommandResult",
     "CommandTimeoutError",
     "ConfigError",
+    "Database",
     "DatabaseAlreadyExistsError",
     "DatabaseError",
     "DatabaseManagerUnavailableError",
@@ -75,6 +78,7 @@ __all__ = [
     "InstanceFactory",
     "InvalidBaseUrlError",
     "MasterPasswordRequiredError",
+    "NoBackup",
     "NonLocalInstanceError",
     "OdooClient",
     "OdooClientConfig",

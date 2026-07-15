@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import shutil
+import subprocess
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -31,7 +33,14 @@ from odoo_instance_sdk.internal.files import (
 from odoo_instance_sdk.internal.paths import get_backups_dir
 from odoo_instance_sdk.internal.redact import format_error
 from odoo_instance_sdk.internal.urls import assert_local, warn_if_cleartext_secret
-from odoo_instance_sdk.models import Backup, BackupFormat, DropResult, RestoreResult
+from odoo_instance_sdk.models import (
+    Backup,
+    BackupFormat,
+    Database,
+    DropResult,
+    NoBackup,
+    RestoreResult,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -57,6 +66,52 @@ def _stream_response_to_file(
     return written, sha.hexdigest()
 
 
+def _verify_database_via_psql(
+    db_host: str | None,
+    db_port: int,
+    db_user: str | None,
+    db_password: str | None,
+    database_name: str,
+) -> bool | None:
+    """Probe whether a PostgreSQL database exists via the ``psql`` CLI.
+
+    Return values:
+      * ``True``  — psql ran successfully and stdout indicates the database
+                    exists (e.g. a row from ``pg_database``).
+      * ``False`` — psql ran successfully and stdout is empty: the database
+                    is confirmed absent. Callers SHOULD record the drop.
+      * ``None``  — inconclusive: psql not in PATH, returned non-zero, or
+                    timed out. Callers MUST NOT treat this as a drop.
+    """
+    if db_user is None:
+        return None
+    if "\\" in database_name:
+        return None
+    if shutil.which("psql") is None:
+        return None
+    env = os.environ.copy()
+    if db_password is not None:
+        env["PGPASSWORD"] = db_password
+    escaped = database_name.replace("'", "''")
+    cmd = ["psql"]
+    if db_host is not None:
+        cmd.extend(["-h", db_host])
+    cmd.extend([
+        "-p", str(db_port),
+        "-U", db_user,
+        "-d", "postgres",
+        "-t", "-A",
+        "-c", f"SELECT 1 FROM pg_database WHERE datname='{escaped}'",
+    ])
+    try:
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30, shell=False, check=False)
+        if proc.returncode != 0:
+            return None
+        return bool(proc.stdout.strip())
+    except subprocess.TimeoutExpired:
+        return None
+
+
 @dataclass(slots=True, kw_only=True)
 class DatabaseResource:
     base_url: str
@@ -76,6 +131,17 @@ class DatabaseResource:
     def _assert_local(self) -> None:
         assert_local(self.base_url)
 
+    @property
+    def _cluster(self) -> tuple[str | None, int] | None:
+        db_port = self._instance.config.db_port
+        if db_port is None:
+            return None
+        return (self._instance.config.db_host, db_port)
+
+    def _latest_backup_for(self, db_host: str | None, db_port: int, name: str) -> Backup | NoBackup:
+        b = self._instance._client.get_catalog().latest_restore(db_host, db_port, name)
+        return b if b is not None else NoBackup()
+
     @contextlib.contextmanager
     def _http(self, timeout: float | None = None) -> Iterator[httpx.Client]:
         warn_if_cleartext_secret(self.base_url)
@@ -87,7 +153,7 @@ class DatabaseResource:
         ) as http:
             yield http
 
-    def list(self) -> tuple[str, ...]:
+    def list(self) -> tuple[Database, ...]:
         try:
             with self._http() as http:
                 resp = http.post(
@@ -115,10 +181,114 @@ class DatabaseResource:
             raise DatabaseManagerUnavailableError(
                 f"Database listing disabled or unavailable on {self.base_url}"
             )
-        return tuple(str(name) for name in result)
+        db_names = tuple(str(name) for name in result)
+
+        ck = self._cluster
+        catalog = self._instance._client.get_catalog()
+
+        databases = []
+        for name in db_names:
+            if ck is not None:
+                db_host, db_port = ck
+                backup = self._latest_backup_for(db_host, db_port, name)
+            else:
+                backup = NoBackup()
+            databases.append(Database(name=name, backup=backup))
+
+        if ck is not None:
+            db_host, db_port = ck
+            restored_names = catalog.distinct_restored_database_names(db_host, db_port)
+            current_set = set(db_names)
+            for rname in restored_names:
+                if rname not in current_set:
+                    catalog.record_database_dropped(db_host, db_port, rname)
+
+        return tuple(databases)
 
     def exists(self, name: str) -> bool:
-        return name in self.list()
+        try:
+            databases = self.list()
+        except DatabaseManagerUnavailableError:
+            ck = self._cluster
+            if ck is not None and self._instance.config.db_user is not None:
+                db_host, db_port = ck
+                result = _verify_database_via_psql(
+                    db_host,
+                    db_port,
+                    self._instance.config.db_user,
+                    self._instance.config.db_password,
+                    name,
+                )
+                if result is True:
+                    return True
+                if result is False:
+                    catalog = self._instance._client.get_catalog()
+                    catalog.record_database_dropped(db_host, db_port, name)
+                    return False
+            raise
+
+        ck = self._cluster
+        found = any(db.name == name for db in databases)
+        if not found and ck is not None:
+            db_host, db_port = ck
+            catalog = self._instance._client.get_catalog()
+            if catalog.has_tracked_database(db_host, db_port, name):
+                catalog.record_database_dropped(db_host, db_port, name)
+        return found
+
+    def __getitem__(self, index: int) -> Database:
+        if not isinstance(index, int):
+            raise TypeError(f"DatabaseResource indices must be integers, not {type(index).__name__}")
+        return self.list()[index]
+
+    def current(self) -> Database:
+        configured = self._instance.config.configured_database_names
+        if not configured:
+            return Database(name="", backup=NoBackup())
+
+        name = configured[0]
+
+        try:
+            databases = self.list()
+        except DatabaseManagerUnavailableError:
+            ck = self._cluster
+            if ck is not None and self._instance.config.db_user is not None:
+                db_host, db_port = ck
+                exists_result = _verify_database_via_psql(
+                    db_host,
+                    db_port,
+                    self._instance.config.db_user,
+                    self._instance.config.db_password,
+                    name,
+                )
+                catalog = self._instance._client.get_catalog()
+                if exists_result is True:
+                    backup = self._latest_backup_for(db_host, db_port, name)
+                    return Database(name=name, backup=backup)
+                if exists_result is False:
+                    catalog.record_database_dropped(db_host, db_port, name)
+                    return Database(name=name, backup=NoBackup())
+                return Database(name=name, backup=NoBackup())
+            raise
+
+        ck = self._cluster
+        catalog = self._instance._client.get_catalog()
+
+        found = any(db.name == name for db in databases)
+
+        if not found:
+            if ck is not None:
+                db_host, db_port = ck
+                catalog.record_database_dropped(db_host, db_port, name)
+            return Database(name=name, backup=NoBackup())
+
+        if ck is not None:
+            db_host, db_port = ck
+            backup = self._latest_backup_for(db_host, db_port, name)
+        else:
+            backup = NoBackup()
+
+        return Database(name=name, backup=backup)
 
     def backup(
         self,
@@ -253,6 +423,16 @@ class DatabaseResource:
                 f"Database {target_database_name!r} was not created after restore"
             )
 
+        ck = self._cluster
+        if ck is not None:
+            db_host, db_port = ck
+            catalog.record_restore(
+                db_host,
+                db_port,
+                target_database_name,
+                str(backup.id),
+            )
+
         return RestoreResult(new_db=target_database_name, source=backup)
 
     def drop(
@@ -283,5 +463,15 @@ class DatabaseResource:
 
         if self.exists(database_name):
             raise DropFailedError(f"Database {database_name!r} still exists after drop")
+
+        ck = self._cluster
+        if ck is not None:
+            db_host, db_port = ck
+            catalog = self._instance._client.get_catalog()
+            catalog.record_database_dropped(
+                db_host,
+                db_port,
+                database_name,
+            )
 
         return DropResult(db=database_name)

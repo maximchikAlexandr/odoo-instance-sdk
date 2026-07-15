@@ -1,6 +1,6 @@
 [project]
 name = "odoo-instance-sdk"
-version = "19.0.0b1"
+version = "0.1.0"
 description = "A typed Python SDK for managing local Odoo 19.0 instances: process lifecycle, CLI commands, readiness checks, and database operations via standard HTTP API."
 readme = "README.md"
 license = "MIT"

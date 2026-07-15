@@ -141,5 +141,37 @@ def test_instance_run_executes_subprocess() -> None:
     assert result.args[0] == client.config.executable
 
 
+def test_from_config_empty_db_host_does_not_default_port(tmp_path) -> None:
+    """MT-2: empty db_host in configparser must not set db_port to 5432."""
+    path = tmp_path / "odoo.conf"
+    path.write_text(
+        "[options]\n"
+        "http_port = 8069\n"
+        "http_interface = 127.0.0.1\n"
+        "admin_passwd = mypass\n"
+        "db_host = \n"
+    )
+    client = _make_client()
+    inst = client.instance.from_config(path)
+    assert inst.config.db_host is None
+    assert inst.config.db_port is None
+
+
+def test_from_config_db_host_sets_default_port(tmp_path) -> None:
+    """MT-2 (control): non-empty db_host should default port to 5432."""
+    path = tmp_path / "odoo.conf"
+    path.write_text(
+        "[options]\n"
+        "http_port = 8069\n"
+        "http_interface = 127.0.0.1\n"
+        "admin_passwd = mypass\n"
+        "db_host = localhost\n"
+    )
+    client = _make_client()
+    inst = client.instance.from_config(path)
+    assert inst.config.db_host == "localhost"
+    assert inst.config.db_port == 5432
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

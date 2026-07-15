@@ -52,9 +52,15 @@ class BackupCatalog:
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._create_schema(self._conn)
+            self.db_path.chmod(0o600)
+            for sidecar in (self.db_path.with_suffix(self.db_path.suffix + "-wal"),
+                            self.db_path.with_suffix(self.db_path.suffix + "-shm")):
+                if sidecar.exists():
+                    sidecar.chmod(0o600)
         except sqlite3.Error as e:
             raise BackupCatalogError(str(e)) from e
-        self.db_path.chmod(0o600)
+        except OSError as e:
+            raise BackupCatalogError(f"Failed to set permissions on catalog file: {e}") from e
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript("""
@@ -92,6 +98,35 @@ class BackupCatalog:
             CREATE INDEX IF NOT EXISTS backup_events_backup_idx ON backup_events (backup_id, sequence DESC);
         """)
         conn.commit()
+
+        user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if user_version < 2:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS restores (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    db_host TEXT NOT NULL,
+                    db_port INTEGER NOT NULL,
+                    database_name TEXT NOT NULL,
+                    backup_id TEXT NOT NULL REFERENCES backups(id),
+                    restored_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS restores_cluster_idx ON restores (db_host, db_port, database_name, restored_at DESC);
+
+                CREATE TABLE IF NOT EXISTS database_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    db_host TEXT NOT NULL,
+                    db_port INTEGER NOT NULL,
+                    database_name TEXT NOT NULL,
+                    event_type TEXT NOT NULL CHECK (event_type IN ('restored', 'dropped')),
+                    occurred_at TEXT NOT NULL,
+                    backup_id TEXT,
+                    CHECK (event_type = 'dropped' OR backup_id IS NOT NULL),
+                    FOREIGN KEY (backup_id) REFERENCES backups(id)
+                );
+                CREATE INDEX IF NOT EXISTS database_events_cluster_idx ON database_events (db_host, db_port, database_name, sequence DESC);
+            """)
+            conn.execute("PRAGMA user_version = 2")
+            conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -317,6 +352,92 @@ class BackupCatalog:
                     f"Backup {backup.id} content hash mismatch (tampered or modified)"
                 )
 
+    @_translate_sqlite_error
+    def record_restore(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+        backup_id: str,
+    ) -> None:
+        host = normalize_db_host(db_host)
+        self._conn.execute(
+            "INSERT INTO restores (db_host, db_port, database_name, backup_id, restored_at) VALUES (?, ?, ?, ?, datetime('now'))",
+            (host, db_port, database_name, backup_id),
+        )
+        self._conn.execute(
+            "INSERT INTO database_events (db_host, db_port, database_name, event_type, occurred_at, backup_id) VALUES (?, ?, ?, 'restored', datetime('now'), ?)",
+            (host, db_port, database_name, backup_id),
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def record_database_dropped(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+    ) -> None:
+        host = normalize_db_host(db_host)
+        row = self._conn.execute(
+            "SELECT event_type FROM database_events WHERE db_host=? AND db_port=? AND database_name=? ORDER BY sequence DESC LIMIT 1",
+            (host, db_port, database_name),
+        ).fetchone()
+        if row is not None and row["event_type"] == "dropped":
+            return
+        self._conn.execute(
+            "INSERT INTO database_events (db_host, db_port, database_name, event_type, occurred_at, backup_id) VALUES (?, ?, ?, 'dropped', datetime('now'), NULL)",
+            (host, db_port, database_name),
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def latest_restore(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+    ) -> Backup | None:
+        host = normalize_db_host(db_host)
+        row = self._conn.execute(
+            "SELECT b.*, r.restored_at FROM restores r INNER JOIN backups b ON b.id = r.backup_id WHERE r.db_host=? AND r.db_port=? AND r.database_name=? ORDER BY r.restored_at DESC LIMIT 1",
+            (host, db_port, database_name),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["state"] == BackupState.DELETED.value:
+            return None
+        if not row["path"]:
+            return None
+        return _row_to_backup(row)
+
+    @_translate_sqlite_error
+    def distinct_restored_database_names(
+        self,
+        db_host: str | None,
+        db_port: int,
+    ) -> tuple[str, ...]:
+        host = normalize_db_host(db_host)
+        rows = self._conn.execute(
+            "SELECT DISTINCT database_name FROM restores WHERE db_host=? AND db_port=?",
+            (host, db_port),
+        ).fetchall()
+        return tuple(row["database_name"] for row in rows)
+
+    @_translate_sqlite_error
+    def has_tracked_database(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+    ) -> bool:
+        host = normalize_db_host(db_host)
+        row = self._conn.execute(
+            "SELECT 1 FROM restores WHERE db_host=? AND db_port=? AND database_name=? LIMIT 1",
+            (host, db_port, database_name),
+        ).fetchone()
+        return row is not None
+
     def _add_event(
         self,
         backup_id: str,
@@ -367,3 +488,7 @@ def _row_to_event(row: sqlite3.Row) -> BackupEvent:
         exit_code=row["exit_code"],
         message=row["message"],
     )
+
+
+def normalize_db_host(value: str | None) -> str:
+    return "socket" if value is None else value
