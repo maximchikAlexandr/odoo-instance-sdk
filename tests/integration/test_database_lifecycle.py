@@ -48,7 +48,8 @@ class TestRestore:
         httpx_mock.add_response(
             url="http://localhost:8069/web/database/restore",
             method="POST",
-            json={"result": True},
+            status_code=303,
+            headers={"location": "/web/database/manager"},
         )
 
         httpx_mock.add_response(
@@ -137,7 +138,8 @@ class TestDrop:
         httpx_mock.add_response(
             url="http://localhost:8069/web/database/drop",
             method="POST",
-            json={"result": True},
+            status_code=303,
+            headers={"location": "/web/database/manager"},
         )
 
         httpx_mock.add_response(
@@ -153,7 +155,8 @@ class TestDrop:
         httpx_mock.add_response(
             url="http://localhost:8069/web/database/drop",
             method="POST",
-            json={"result": True},
+            status_code=303,
+            headers={"location": "/web/database/manager"},
         )
         httpx_mock.add_response(
             url="http://localhost:8069/web/database/list",
