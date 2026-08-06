@@ -58,6 +58,16 @@ def _make_instance_with_cluster_key(client, db_host: str = "localhost", db_port:
 
 
 class TestList:
+    def test_uses_jsonrpc_request(self, instance):
+        mock_cm = _mock_http({"result": []})
+        with patch("httpx.Client", return_value=mock_cm):
+            instance.databases.list()
+
+        mock_cm.__enter__.return_value.post.assert_called_once_with(
+            "http://localhost:8069/web/database/list",
+            json={"jsonrpc": "2.0", "method": "call", "params": {}},
+        )
+
     def test_returns_database_tuple(self, instance):
         mock_cm = _mock_http({"result": ["db1", "db2", "db3"]})
         with patch("httpx.Client", return_value=mock_cm):
@@ -552,6 +562,7 @@ class TestRestore:
 
         assert result.new_db == "newdb"
         assert result.source == backup
+        assert mock_cm.__enter__.return_value.post.call_args.kwargs["data"]["name"] == "newdb"
         mock_catalog.record_restore.assert_called_once_with("localhost", 5432, "newdb", str(backup.id))
 
     def test_without_cluster_key_does_not_record_restore(self, instance, tmp_path):
