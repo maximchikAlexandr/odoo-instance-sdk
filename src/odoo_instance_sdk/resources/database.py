@@ -158,7 +158,7 @@ class DatabaseResource:
             with self._http() as http:
                 resp = http.post(
                     self._url("list"),
-                    data={},
+                    json={"jsonrpc": "2.0", "method": "call", "params": {}},
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -402,6 +402,7 @@ class DatabaseResource:
                 self._url("restore"),
                 data={
                     "master_pwd": pwd,
+                    "name": target_database_name,
                     "copy": "true" if copy else "false",
                     "neutralize_database": "true" if neutralize_database else "false",
                 },
@@ -410,7 +411,8 @@ class DatabaseResource:
                 },
             )
             try:
-                resp.raise_for_status()
+                if resp.is_error:
+                    resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 raise DatabaseError(
                     status_code=exc.response.status_code,
@@ -453,7 +455,8 @@ class DatabaseResource:
                 },
             )
             try:
-                resp.raise_for_status()
+                if resp.is_error:
+                    resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 raise DatabaseError(
                     status_code=exc.response.status_code,
