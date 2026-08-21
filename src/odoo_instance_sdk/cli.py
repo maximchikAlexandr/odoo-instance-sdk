@@ -228,7 +228,7 @@ def _handle_existing_manifest(
     except Exception as e:
         _fail(no_input, json_output, f"Existing manifest unreadable: {e}")
         return True
-    if existing_cfg == config:
+    if _manifest_dict(existing_cfg) == _manifest_dict(config):
         if json_output:
             _emit_json(
                 ok=True, command="init", data=_manifest_dict(config), provenance={}, dry_run=True

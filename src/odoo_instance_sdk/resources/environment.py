@@ -443,6 +443,10 @@ class EnvironmentResource:
     ) -> None:
 
         catalog = cast("BackupCatalog", cat)
+        if backup_id is None:
+            row = catalog.get_environment(str(env_id))
+            if row is not None and row["backup_id"] is not None:
+                backup_id = uuid.UUID(str(row["backup_id"]))
         cleanup_failed = self._cleanup_created_paths(repo_root, created_paths)
         if backup_id is not None:
             cleanup_failed = self._cleanup_backup(catalog, backup_id) or cleanup_failed
