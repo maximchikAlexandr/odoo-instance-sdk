@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+Restoring a catalog Backup onto a local Odoo instance with postcondition checks and restore tracking.
+
+## Requirements
 
 ### Requirement: Восстановление базы
 
@@ -7,7 +11,7 @@
 Перед HTTP request метод MUST проверить:
 
 - local instance guard;
-- наличие master password;
+- наличие master password (raised `MasterPasswordRequiredError` if `None` — см. ADDED requirement "Mutating DB methods require password at call time" ниже);
 - наличие соответствующей catalog row;
 - state `available`;
 - совпадение metadata объекта с catalog;
@@ -15,6 +19,12 @@
 - отсутствие target database.
 
 Метод MUST отправлять multipart request в `POST /web/database/restore` и MUST NOT автоматически удалять существующую target database.
+
+POST body MUST содержать `"name": target_database_name`.
+
+Для copy checkout (`copy=True`) restore MUST использовать `neutralize_database=True`.
+
+Target DB NEVER перезаписывается и не удаляется для повторной попытки автоматически.
 
 После ответа Odoo метод MUST подтвердить `exists(target_name) == True`. HTTP 200 или redirect сам по себе MUST NOT считаться успехом.
 
@@ -32,6 +42,16 @@ Mapping write (шаги 1-2 ниже) MUST выполняться ТОЛЬКО �
 
 - **WHEN** target instance локальный, target database отсутствует и передан доступный `Backup`
 - **THEN** SDK восстанавливает database и возвращает result только после подтверждения через list endpoint
+
+#### Scenario: Restore sends target name in POST body
+
+- **WHEN** `restore(backup, target_database_name="comerta_x")`
+- **THEN** POST body содержит `"name": "comerta_x"`
+
+#### Scenario: Copy checkout restore neutralizes
+
+- **WHEN** copy checkout вызывает `restore(..., copy=True, neutralize_database=True)`
+- **THEN** target DB restored and neutralized
 
 #### Scenario: Forged или stale Backup
 
@@ -65,3 +85,26 @@ SDK MUST NOT предоставлять создание пустой базы, 
 
 - **WHEN** `client.backups.latest()` вернул существующий file
 - **THEN** вызывающий код может сравнить `downloaded_at` со своим threshold и передать тот же `Backup` в restore
+
+### Requirement: Mutating DB methods require password at call time
+
+`backup()`, `restore()`, `drop()` MUST требовать master password в момент mutating DB call и поднимать `MasterPasswordRequiredError`, если `master_password is None`.
+
+`MasterPasswordRequiredError` MUST NOT подниматься при construction instance (`from_config()`, `from_environment()`, `__call__()`).
+
+`list()` и `exists()` MUST NOT требовать master password.
+
+#### Scenario: Backup without password
+
+- **WHEN** `instance.databases.backup()` и `master_password is None`
+- **THEN** `MasterPasswordRequiredError` raised before HTTP request
+
+#### Scenario: Restore without password
+
+- **WHEN** `instance.databases.restore(backup, "target")` и `master_password is None`
+- **THEN** `MasterPasswordRequiredError` raised before HTTP request
+
+#### Scenario: List without password
+
+- **WHEN** `instance.databases.list()` и `master_password is None`
+- **THEN** list succeeds (no password needed for read)

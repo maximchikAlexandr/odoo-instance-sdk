@@ -1,14 +1,32 @@
-## ADDED Requirements
+## Purpose
+
+Odoo process lifecycle and foreground, shell, and captured script execution on OdooInstance.
+
+## Requirements
 
 ### Requirement: Server lifecycle в instance
 
-`OdooInstance` MUST предоставлять методы `run()`, `start()`, `stop()`, `status()` и `wait_ready()` напрямую, без вложенного подресурса `instance.server`.
+`OdooInstance` MUST предоставлять методы `run()`, `start()`, `stop()`, `status()`, `wait_ready()`, `run_foreground()`, `shell()` и `run_shell_script()` напрямую, без вложенного подресурса `instance.server`.
 
 Process registry (зарегистрированные `OdooProcess` и subprocess handles) MUST храниться приватно на `OdooClient` и разделяться всеми instances. Публичный `client.server` MUST NOT существовать.
 
-`instance.run()`, `start()`, `stop()` и `status()` MUST сохранять поведение существующего `ServerResource`: запуск Odoo executable, регистрация процесса, опрос статуса, остановка process group.
+`instance.run()`, `start()`, `stop()`, `status()`, `run_foreground()`, `shell()`, `run_shell_script()` MUST использовать instance `command_prefix` (если set), затем client fallback на `OdooClientConfig.executable`.
 
 `instance.start(config: StartConfig)` MUST принимать `StartConfig` и возвращать `OdooProcess`. `StartConfig` остаётся `msgspec.Struct` с `forbid_unknown_fields=True`; поля не меняются. Метакласс `_StructMeta` удаляется.
+
+Существующий `OdooInstance.run(args) -> CommandResult` остаётся captured one-shot API без изменения семантики. Не перегружать его неявным выбором между capture и foreground server mode.
+
+`shell()` и `run_foreground()` используют один internal foreground subprocess primitive, но остаются двумя ясными public operations. `EnvironmentResource` не получает runtime methods `run()`, `shell()`, `start()` или `stop()`.
+
+#### Scenario: Instance prefix used over client fallback
+
+- **WHEN** `instance` создан через `from_environment()` с `command_prefix=["/venv/bin/python", "/worktree/odoo-bin"]`
+- **THEN** `run()`/`start()`/`run_foreground()`/`shell()`/`run_shell_script()` используют prefix, не `OdooClientConfig.executable`
+
+#### Scenario: Client fallback for manual instance
+
+- **WHEN** `instance` создан через `instance(base_url=...)` без `command_prefix`
+- **THEN** `run()`/`start()` используют `OdooClientConfig.executable` как fallback
 
 #### Scenario: Запуск сервера через instance
 
@@ -19,3 +37,102 @@ Process registry (зарегистрированные `OdooProcess` и subproce
 
 - **WHEN** два instance запускают по одному процессу через `instance_a.start(...)` и `instance_b.start(...)`
 - **THEN** оба процесса зарегистрированы в одном registry на `OdooClient` и доступны через `instance_a.status(proc_a)` и `instance_b.status(proc_b)`
+
+### Requirement: `OdooInstance.run_foreground()`
+
+`OdooInstance.run_foreground(config: StartConfig | None = None, *, cwd=None, env=None) -> int` MUST:
+
+- если `config is None`, использовать `self.config.start_config` (from `from_config()`/`from_environment()`); если `start_config` is None → `InstanceConfigurationError`;
+- использовать тот же resolved command-prefix/config/process-group lifecycle, что и `start()`/`stop()`;
+- наследовать stdout/stderr, поэтому Odoo logs идут прямо в terminal без буферизации, SQLite-хранения, tail API или собственного форматирования;
+- блокироваться до завершения Odoo и возвращать exit code;
+- на Ctrl+C корректно остановить owned process group.
+
+#### Scenario: Foreground run with explicit config
+
+- **WHEN** `instance.run_foreground(config=cfg)` and Odoo exits with code 0
+- **THEN** returns `0`
+
+#### Scenario: Foreground run uses start_config
+
+- **WHEN** `instance.run_foreground()` (config=None) и instance создан через `from_environment()` со `start_config` from generated `odoo.conf`
+- **THEN** uses `self.config.start_config`
+
+#### Scenario: Foreground run no start_config — error
+
+- **WHEN** `instance.run_foreground()` (config=None) и `self.config.start_config is None`
+- **THEN** `InstanceConfigurationError`
+
+#### Scenario: Ctrl+C stops process group
+
+- **WHEN** `instance.run_foreground()` получает Ctrl+C
+- **THEN** owned process group stopped, CLI exits 130
+
+### Requirement: `OdooInstance.shell()`
+
+`OdooInstance.shell(*, args: Sequence[str] = ()) -> int` MUST:
+
+- использовать тот же internal foreground subprocess primitive, что и `run_foreground()`;
+- использовать `self.config.start_config` (from `from_config()`/`from_environment()`) для bound config/DB; если `start_config is None` → `InstanceConfigurationError`;
+- `args` — passthrough Odoo args (e.g. `--log-level=debug`); передаются после `odoo-bin shell` subcommand; passthrough config/database overrides MUST быть запрещены и вызывать error — как attached form (`-cPATH`/`-dDB`), так и spaced form (`-c PATH`/`-d DB`/`--config PATH`/`--database NAME`);
+- наследовать stdin/stdout/stderr, signals и exit code штатного `odoo-bin shell`;
+- not add собственный REPL и not интерпретировать ввод.
+
+`shell()` и `run_foreground()` — две ясные public operations, один internal primitive. Существующий `run()` не перегружается третьим режимом.
+
+#### Scenario: Shell uses start_config
+
+- **WHEN** `instance.shell()` и instance создан через `from_environment()` со `start_config` from generated `odoo.conf`
+- **THEN** uses `self.config.start_config` for bound config/DB
+
+#### Scenario: Shell no start_config — error
+
+- **WHEN** `instance.shell()` и `self.config.start_config is None`
+- **THEN** `InstanceConfigurationError`
+
+#### Scenario: Shell inherits stdio
+
+- **WHEN** `instance.shell()` executes
+- **THEN** stdin/stdout/stderr inherited from parent, `odoo-bin shell` runs interactively
+
+#### Scenario: Passthrough config override forbidden (attached and spaced)
+
+- **WHEN** `shell(args=["-cPATH"])` or `shell(args=["-c", "PATH"])` or `shell(args=["--config", "PATH"])` or `shell(args=["-dDB"])` or `shell(args=["-d", "DB"])` or `shell(args=["--database", "DB"])`
+- **THEN** error, binding cannot be overridden
+
+### Requirement: `OdooInstance.run_shell_script()`
+
+`OdooInstance.run_shell_script(source: str, *, argv: Sequence[str] = (), timeout: float | None = None, commit: bool = False) -> CommandResult` MUST:
+
+- возвращать existing captured `CommandResult`;
+- использовать `self.config.start_config` для bound config/DB; если `start_config is None` → `InstanceConfigurationError`;
+- добавлять non-TTY stdin (script source);
+- inject script `argv` after Odoo parsing; `argv` не может менять binding;
+- bundled wrapper отделяет payload nonce-framed record, private CLI coordinator разбирает его из stdout.
+
+`commit` semantics:
+
+- `commit=False` (default) — best-effort shell rollback в конце; warning: script/Odoo method MAY commit самостоятельно, `commit=False` не является security boundary;
+- `commit=True` — explicit commit в конце; visible в plan/event message; не security boundary.
+
+`eval`/`exec`/`module`/`translations` используют этот primitive. Interactive shell остаётся raw.
+
+#### Scenario: Captured script result
+
+- **WHEN** `run_shell_script("print(1+1)")` executes
+- **THEN** returns `CommandResult` with captured stdout/stderr/returncode
+
+#### Scenario: argv injected after Odoo parsing
+
+- **WHEN** `run_shell_script(source, argv=["--flag"])` executes
+- **THEN** `--flag` injected after Odoo parsing, cannot change bound config/DB
+
+#### Scenario: commit=False best-effort rollback
+
+- **WHEN** `run_shell_script(source, commit=False)` and script does not self-commit
+- **THEN** best-effort rollback at end; transient records cleaned
+
+#### Scenario: commit=True explicit commit
+
+- **WHEN** `run_shell_script(source, commit=True)`
+- **THEN** explicit commit at end; visible in event message
