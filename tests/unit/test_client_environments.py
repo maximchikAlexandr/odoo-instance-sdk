@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
@@ -42,15 +40,7 @@ def test_checkout_options_defaults() -> None:
     assert opts.create_venv is False
 
 
-def test_environment_resource_methods_raise_not_implemented() -> None:
+def test_environment_resource_sync_python_raises_not_implemented() -> None:
     client = _make_client()
-    with pytest.raises(NotImplementedError):
-        client.environments.checkout(project=Path("/repo"), branch="main")
-    with pytest.raises(NotImplementedError):
-        client.environments.get("test")
-    with pytest.raises(NotImplementedError):
-        client.environments.list()
-    with pytest.raises(NotImplementedError):
-        client.environments.remove("test")
     with pytest.raises(NotImplementedError):
         client.environments.sync_python("test")

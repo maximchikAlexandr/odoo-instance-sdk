@@ -1,20 +1,62 @@
 from __future__ import annotations
 
+import contextlib
 import enum
+import hashlib
+import re
+import shutil
+import socket
+import subprocess
 import uuid
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Union, cast
+
+if TYPE_CHECKING:
+    import sqlite3
 
 import msgspec
 
+from odoo_instance_sdk.exceptions import (
+    ConfigError,
+    DatabaseAlreadyExistsError,
+    EnvironmentConflictError,
+    EnvironmentNotFoundError,
+    EnvironmentResolutionError,
+    InstanceConfigurationError,
+    MasterPasswordRequiredError,
+    NonLocalInstanceError,
+)
+from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
+from odoo_instance_sdk.internal.generated_config import generate_config
+from odoo_instance_sdk.internal.git_worktree import (
+    worktree_add,
+)
+from odoo_instance_sdk.internal.locks import (
+    environment_lock_path,
+    exclusive_lock,
+    provisioning_lock_path,
+)
+from odoo_instance_sdk.internal.odoo_config import (
+    get_admin_passwd,
+    infer_base_url,
+    parse_db_names,
+    parse_odoo_config,
+)
+from odoo_instance_sdk.internal.paths import get_environments_root
+from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.sanitize import sanitize_last_error
+from odoo_instance_sdk.internal.urls import assert_local, is_loopback_host
+from odoo_instance_sdk.models import Backup, BackupFormat
 from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
 
 EnvironmentSelector = Union[str, "DevelopmentEnvironment"]
+
+_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class EnvironmentState(enum.StrEnum):
@@ -49,7 +91,7 @@ class DevelopmentEnvironment(msgspec.Struct, frozen=True, forbid_unknown_fields=
     source_db_name: str | None = None
     target_db_name: str | None = None
     backup_id: uuid.UUID | None = None
-    state: EnvironmentState
+    state: str
     created_at: datetime
     last_used_at: datetime | None = None
     removed_at: datetime | None = None
@@ -69,9 +111,16 @@ class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
     http_port: int | None = None
 
 
+_PORT_RANGE_START = 8069
+_PORT_RANGE_END = 8099
+
+_StrList = list[str]
+
+
 @dataclass(slots=True, kw_only=True)
 class EnvironmentResource:
     _client: OdooClient
+    _python_locks_dir: Path = field(default=Path("/tmp/odoo-instance-sdk-python-locks"))
 
     def checkout(
         self,
@@ -79,8 +128,354 @@ class EnvironmentResource:
         branch: str,
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
+        dry_run: bool = False,
     ) -> DevelopmentEnvironment:
-        raise NotImplementedError("implemented in Slice 2")
+        if isinstance(project, ProjectConfig):
+            project_cfg = project
+            project_path = _project_root_from_config(project_cfg)
+        else:
+            project_path = Path(project)
+            project_cfg = ProjectConfig.load(project_path)
+
+        catalog = self._client.get_catalog()
+
+        from odoo_instance_sdk.internal.git_worktree import (
+            rev_parse_git_common_dir,
+            rev_parse_toplevel,
+        )
+
+        repo_root = rev_parse_toplevel(project_path)
+        git_common = rev_parse_git_common_dir(repo_root)
+        git_common_str = str(git_common)
+
+        self._verify_tools()
+
+        base_ref = options.base_ref or "HEAD"
+        from odoo_instance_sdk.internal.git_worktree import rev_parse_verify
+
+        rev_parse_verify(repo_root, base_ref)
+
+        source_config = self._resolve_source_config(options, project_cfg, repo_root)
+        if source_config is not None and not source_config.is_file():
+            raise ConfigError(f"Source config not found: {source_config}")
+
+        python_mode = self._resolve_python_mode(options, project_cfg, repo_root)
+
+        existing = catalog.active_environment_for(git_common_str, branch)
+        if existing is not None and existing["state"] != EnvironmentState.REMOVED:
+            raise EnvironmentConflictError(
+                "active_environment_exists",
+                f"Active environment already exists for branch {branch!r}",
+                details={"branch": branch, "existing_id": existing["id"]},
+            )
+
+        cfg_dict = parse_odoo_config(source_config) if source_config is not None else {}
+
+        db_mode = options.db_mode
+        source_db, target_db = self._resolve_dbs(
+            options, project_cfg, cfg_dict, db_mode, branch, repo_root
+        )
+
+        http_interface = cfg_dict.get("http_interface", "127.0.0.1") or "127.0.0.1"
+        http_port = self._allocate_port(options.http_port, project_cfg, catalog, http_interface)
+
+        env_id = uuid.uuid4()
+        key = repo_key(repo_root, git_common)
+        env_root = get_environments_root() / key / str(env_id)
+        worktree = env_root / "worktree"
+        venv = env_root / "venv"
+        generated_cfg = env_root / "odoo.conf"
+        lock_file = env_root / "requirements.lock"
+
+        if options.create_venv:
+            python_path = str(venv)
+            python_owned = True
+        else:
+            python_path = str(python_mode["interpreter"])
+            python_owned = False
+
+        name = options.name or f"{repo_root.name}:{branch}"
+
+        now = datetime.now(UTC).isoformat()
+
+        if dry_run:
+            return DevelopmentEnvironment(
+                id=env_id,
+                name=name,
+                repository_root=str(repo_root),
+                git_common_dir=git_common_str,
+                branch=branch,
+                base_ref=base_ref,
+                worktree_path=str(worktree),
+                generated_config_path=str(generated_cfg),
+                python_environment_path=python_path,
+                python_environment_owned=python_owned,
+                dependency_lock_path=str(lock_file),
+                http_interface=http_interface,
+                http_port=http_port,
+                db_mode=db_mode,
+                source_db_name=source_db,
+                target_db_name=target_db,
+                backup_id=None,
+                state=EnvironmentState.CREATING,
+                created_at=datetime.now(UTC),
+            )
+
+        lock_path = provisioning_lock_path(key, branch)
+        with exclusive_lock(lock_path):
+            return self._do_checkout(
+                catalog=catalog,
+                env_id=env_id,
+                name=name,
+                repo_root=repo_root,
+                git_common_str=git_common_str,
+                branch=branch,
+                base_ref=base_ref,
+                worktree=worktree,
+                venv=venv,
+                generated_cfg=generated_cfg,
+                lock_file=lock_file,
+                env_root=env_root,
+                python_path=python_path,
+                python_owned=python_owned,
+                http_interface=http_interface,
+                http_port=http_port,
+                db_mode=db_mode,
+                source_db=source_db,
+                target_db=target_db,
+                source_config=source_config,
+                cfg_dict=cfg_dict,
+                now=now,
+                options=options,
+            )
+
+    def _do_checkout(
+        self,
+        *,
+        catalog: object,
+        env_id: uuid.UUID,
+        name: str,
+        repo_root: Path,
+        git_common_str: str,
+        branch: str,
+        base_ref: str,
+        worktree: Path,
+        venv: Path,
+        generated_cfg: Path,
+        lock_file: Path,
+        env_root: Path,
+        python_path: str,
+        python_owned: bool,
+        http_interface: str,
+        http_port: int,
+        db_mode: str,
+        source_db: str | None,
+        target_db: str | None,
+        source_config: Path | None,
+        cfg_dict: dict[str, str],
+        now: str,
+        options: EnvironmentCheckoutOptions,
+    ) -> DevelopmentEnvironment:
+        env_row = {
+            "id": str(env_id),
+            "name": name,
+            "repository_root": str(repo_root),
+            "git_common_dir": git_common_str,
+            "branch": branch,
+            "base_ref": base_ref,
+            "worktree_path": str(worktree),
+            "generated_config_path": str(generated_cfg),
+            "python_environment_path": python_path,
+            "python_environment_owned": python_owned,
+            "dependency_lock_path": str(lock_file),
+            "http_interface": http_interface,
+            "http_port": http_port,
+            "db_mode": db_mode,
+            "source_db_name": source_db,
+            "target_db_name": target_db,
+            "backup_id": None,
+            "runtime_json": "{}",
+            "state": EnvironmentState.CREATING,
+            "created_at": now,
+            "last_used_at": None,
+            "removed_at": None,
+            "last_error": None,
+        }
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        cat = cast("BackupCatalog", catalog)
+        cat.create_environment(env_row)
+        cat.add_environment_event(str(env_id), "checkout", "started")
+
+        created_paths: list[Path] = []
+        backup_id: uuid.UUID | None = None
+        try:
+            worktree_add(repo_root, worktree, branch, base_ref=base_ref)
+            created_paths.append(worktree)
+
+            if source_config is not None:
+                db_name_for_config = (
+                    target_db if db_mode == EnvironmentDatabaseMode.COPY else source_db
+                )
+                if db_name_for_config is None:
+                    db_name_for_config = source_db or ""
+                generate_config(
+                    source_config,
+                    generated_cfg,
+                    repo_root=repo_root,
+                    worktree=worktree,
+                    http_interface=http_interface,
+                    http_port=http_port,
+                    db_name=db_name_for_config,
+                )
+                created_paths.append(generated_cfg)
+
+            if (
+                db_mode == EnvironmentDatabaseMode.COPY
+                and source_db is not None
+                and target_db is not None
+            ):
+                backup_id = self._do_copy_restore(
+                    cat=cat,
+                    env_id=env_id,
+                    source_config=source_config,
+                    cfg_dict=cfg_dict,
+                    source_db=source_db,
+                    target_db=target_db,
+                )
+
+            cat.update_environment_state(str(env_id), EnvironmentState.READY)
+            cat.add_environment_event(str(env_id), "checkout", "succeeded")
+            return self._get_env_row(cat, env_id)
+
+        except BaseException as exc:
+            self._cleanup_on_failure(
+                cat=cat,
+                env_id=env_id,
+                repo_root=repo_root,
+                created_paths=created_paths,
+                env_root=env_root,
+                backup_id=backup_id,
+                error=exc,
+            )
+            raise
+
+    def _get_env_row(self, cat: object, env_id: uuid.UUID) -> DevelopmentEnvironment:
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        catalog = cast("BackupCatalog", cat)
+        row = catalog.get_environment(str(env_id))
+        if row is None:
+            raise RuntimeError("environment row disappeared after checkout")
+        return _row_to_env(row)
+
+    def _do_copy_restore(
+        self,
+        *,
+        cat: object,
+        env_id: uuid.UUID,
+        source_config: Path | None,
+        cfg_dict: dict[str, str],
+        source_db: str,
+        target_db: str,
+    ) -> uuid.UUID:
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        catalog = cast("BackupCatalog", cat)
+        if source_config is None:
+            raise ConfigError("copy mode requires a source config")
+        base_url = infer_base_url(cfg_dict)
+        assert_local(base_url)
+        master_pwd = get_admin_passwd(cfg_dict)
+        if master_pwd is None:
+            raise MasterPasswordRequiredError("copy mode requires admin_passwd in source config")
+
+        instance = self._client.instance.from_config(source_config, master_password=master_pwd)
+
+        try:
+            existing_dbs = instance.databases.list()
+        except Exception as e:
+            raise InstanceConfigurationError(
+                f"Source Odoo HTTP endpoint unavailable for copy mode: {e}"
+            ) from e
+
+        if target_db in {db.name for db in existing_dbs}:
+            raise DatabaseAlreadyExistsError(
+                f"Target database {target_db!r} already exists on {base_url}"
+            )
+
+        backup = instance.databases.backup(source_db, format=BackupFormat.ZIP, filestore=True)
+        catalog.update_environment(str(env_id), {"backup_id": str(backup.id)})
+
+        instance.databases.restore(backup, target_db, copy=True, neutralize_database=True)
+
+        if not instance.databases.exists(target_db):
+            raise InstanceConfigurationError(
+                f"Copy restore postcondition failed: {target_db!r} not found"
+            )
+
+        return backup.id
+
+    def _cleanup_on_failure(
+        self,
+        *,
+        cat: object,
+        env_id: uuid.UUID,
+        repo_root: Path,
+        created_paths: list[Path],
+        env_root: Path,
+        backup_id: uuid.UUID | None,
+        error: BaseException,
+    ) -> None:
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        catalog = cast("BackupCatalog", cat)
+        cleanup_failed = self._cleanup_created_paths(repo_root, created_paths)
+        if backup_id is not None:
+            cleanup_failed = self._cleanup_backup(catalog, backup_id) or cleanup_failed
+
+        msg = sanitize_last_error(str(error)) or type(error).__name__
+        if cleanup_failed:
+            catalog.update_environment_state(
+                str(env_id), EnvironmentState.CLEANUP_FAILED, last_error=msg
+            )
+        else:
+            catalog.update_environment_state(str(env_id), EnvironmentState.FAILED, last_error=msg)
+        catalog.add_environment_event(str(env_id), "checkout", "failed", message=msg)
+
+    def _cleanup_created_paths(self, repo_root: Path, created_paths: list[Path]) -> bool:
+        cleanup_failed = False
+        for p in created_paths:
+            if p.name == "worktree":
+                from odoo_instance_sdk.internal.git_worktree import worktree_remove
+
+                try:
+                    worktree_remove(repo_root, p)
+                except Exception:
+                    cleanup_failed = True
+            else:
+                try:
+                    if p.is_dir():
+                        shutil.rmtree(p, ignore_errors=False)
+                    else:
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    cleanup_failed = True
+        return cleanup_failed
+
+    def _cleanup_backup(self, catalog: object, backup_id: uuid.UUID) -> bool:
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        cat = cast("BackupCatalog", catalog)
+        try:
+            row = cat.get_by_id(str(backup_id))
+            if row is not None:
+                backup = _row_to_backup(row)
+                if backup is not None:
+                    self._client.backups.delete(backup)
+        except Exception:
+            return True
+        return False
 
     def sync_python(
         self,
@@ -88,10 +483,12 @@ class EnvironmentResource:
         *,
         upgrade: bool = False,
     ) -> DevelopmentEnvironment:
-        raise NotImplementedError("implemented in Slice 2")
+        raise NotImplementedError("sync_python full implementation is Slice 3")
 
     def get(self, selector: EnvironmentSelector) -> DevelopmentEnvironment:
-        raise NotImplementedError("implemented in Slice 2")
+        if isinstance(selector, DevelopmentEnvironment):
+            return selector
+        return self._resolve_selector(selector, include_removed=True)
 
     def list(
         self,
@@ -99,7 +496,455 @@ class EnvironmentResource:
         project: ProjectConfig | Path | None = None,
         include_removed: bool = False,
     ) -> list[DevelopmentEnvironment]:
-        raise NotImplementedError("implemented in Slice 2")
+        catalog = self._client.get_catalog()
+        if project is not None:
+            if isinstance(project, ProjectConfig):
+                project_path = _project_root_from_config(project)
+            else:
+                project_path = Path(project)
+            from odoo_instance_sdk.internal.git_worktree import (
+                rev_parse_git_common_dir,
+                rev_parse_toplevel,
+            )
+
+            repo_root = rev_parse_toplevel(project_path)
+            git_common = rev_parse_git_common_dir(repo_root)
+            rows = catalog.list_environments(
+                git_common_dir=str(git_common), include_removed=include_removed
+            )
+        else:
+            rows = catalog.list_environments(include_removed=include_removed)
+        return [_row_to_env(r) for r in rows]
 
     def remove(self, selector: EnvironmentSelector) -> None:
-        raise NotImplementedError("implemented in Slice 2")
+        env = (
+            self._resolve_selector(selector, include_removed=True)
+            if isinstance(selector, str)
+            else selector
+        )
+        catalog = self._client.get_catalog()
+        with exclusive_lock(environment_lock_path(str(env.id))):
+            self._do_remove(catalog, env)
+
+    def _do_remove(self, catalog: object, env: DevelopmentEnvironment) -> None:
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        cat = cast("BackupCatalog", catalog)
+        cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
+        cat.add_environment_event(str(env.id), "remove", "started")
+
+        env_root = Path(env.worktree_path).parent
+        repo_root = Path(env.repository_root)
+        worktree = Path(env.worktree_path)
+        generated_cfg = Path(env.generated_config_path)
+        lock_file = Path(env.dependency_lock_path)
+        venv = Path(env.python_environment_path) if env.python_environment_owned else None
+
+        cleanup_failed = False
+        failures: list[str] = []
+
+        cleanup_failed = (
+            self._remove_worktree(cat, env, repo_root, worktree, failures) or cleanup_failed
+        )
+        cleanup_failed = self._remove_files(generated_cfg, lock_file, failures) or cleanup_failed
+        cleanup_failed = self._remove_venv(env_root, venv, failures) or cleanup_failed
+
+        if env.db_mode == EnvironmentDatabaseMode.COPY and env.target_db_name:
+            cleanup_failed = self._drop_target_db(cat, env, cleanup_failed, failures)
+        else:
+            cat.add_environment_event(
+                str(env.id), "remove", "succeeded", message="shared mode: source DB not dropped"
+            )
+
+        if env.backup_id is not None:
+            cleanup_failed = self._remove_backup(cat, env, failures) or cleanup_failed
+
+        if cleanup_failed:
+            msg = "; ".join(failures)[:2000]
+            cat.update_environment_state(
+                str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
+            )
+            cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
+            raise EnvironmentConflictError("cleanup_failed", msg)
+        now = datetime.now(UTC).isoformat()
+        cat.update_environment_state(str(env.id), EnvironmentState.REMOVED, removed_at=now)
+        cat.add_environment_event(str(env.id), "remove", "succeeded")
+        with contextlib.suppress(OSError):
+            if env_root.is_dir() and not any(env_root.iterdir()):
+                env_root.rmdir()
+
+    def _remove_worktree(
+        self,
+        cat: object,
+        env: DevelopmentEnvironment,
+        repo_root: Path,
+        worktree: Path,
+        failures: _StrList,
+    ) -> bool:
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        catalog = cast("BackupCatalog", cat)
+        if not worktree.is_dir():
+            catalog.add_environment_event(
+                str(env.id), "remove", "succeeded", message="worktree already absent"
+            )
+            return False
+        from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty, worktree_remove
+
+        if worktree_is_dirty(worktree):
+            msg = f"worktree {worktree} is dirty; refusing to remove"
+            catalog.update_environment_state(
+                str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
+            )
+            catalog.add_environment_event(str(env.id), "remove", "failed", message=msg)
+            raise EnvironmentConflictError("dirty_worktree", msg)
+        try:
+            worktree_remove(repo_root, worktree)
+        except Exception as e:
+            failures.append(f"worktree remove: {e}")
+            return True
+        return False
+
+    def _remove_files(self, generated_cfg: Path, lock_file: Path, failures: _StrList) -> bool:
+        failed = False
+        for p in (generated_cfg, lock_file):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as e:
+                failed = True
+                failures.append(f"{p}: {e}")
+        return failed
+
+    def _remove_venv(self, env_root: Path, venv: Path | None, failures: _StrList) -> bool:
+        if venv is None:
+            return False
+        try:
+            venv_resolved = venv.resolve()
+            env_root_resolved = env_root.resolve()
+            try:
+                venv_resolved.relative_to(env_root_resolved)
+            except ValueError:
+                failures.append(f"venv {venv} outside env root; skipped")
+                return True
+            if venv.is_dir():
+                shutil.rmtree(venv, ignore_errors=False)
+        except OSError as e:
+            failures.append(f"venv: {e}")
+            return True
+        return False
+
+    def _remove_backup(
+        self,
+        cat: object,
+        env: DevelopmentEnvironment,
+        failures: _StrList,
+    ) -> bool:
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        catalog = cast("BackupCatalog", cat)
+        try:
+            row = catalog.get_by_id(str(env.backup_id))
+            if row is not None:
+                backup = _row_to_backup(row)
+                if backup is not None:
+                    self._client.backups.delete(backup)
+        except Exception as e:
+            failures.append(f"backup delete: {e}")
+            return True
+        return False
+
+    def _drop_target_db(
+        self,
+        cat: object,
+        env: DevelopmentEnvironment,
+        cleanup_failed: bool,
+        failures: _StrList,
+    ) -> bool:
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        catalog = cast("BackupCatalog", cat)
+        target = env.target_db_name
+        if target is None:
+            return cleanup_failed
+        source_config = Path(env.generated_config_path)
+        if not source_config.is_file():
+            failures.append(f"generated config missing: {source_config}")
+            return True
+        cfg = parse_odoo_config(source_config)
+        master_pwd = get_admin_passwd(cfg)
+        if master_pwd is None:
+            failures.append("master password missing; cannot drop target DB")
+            return True
+        base_url = infer_base_url(cfg)
+        try:
+            assert_local(base_url)
+        except NonLocalInstanceError as e:
+            failures.append(str(e))
+            return True
+        try:
+            instance = self._client.instance.from_config(source_config, master_password=master_pwd)
+            instance.databases.drop(target)
+            if instance.databases.exists(target):
+                failures.append(f"drop postcondition failed: {target} still exists")
+                return True
+            catalog.add_environment_event(
+                str(env.id), "remove", "succeeded", message=f"dropped {target}"
+            )
+        except Exception as e:
+            failures.append(f"drop: {e}")
+            return True
+        return cleanup_failed
+
+    def _verify_tools(self) -> None:
+        if shutil.which("git") is None:
+            raise ConfigError("git not found in PATH")
+        if shutil.which("uv") is None:
+            raise ConfigError("uv not found in PATH")
+
+    def _resolve_source_config(
+        self, options: EnvironmentCheckoutOptions, project: ProjectConfig, repo_root: Path
+    ) -> Path | None:
+        cfg = options.config_path or project.source_config
+        if cfg is None:
+            default = repo_root / "odoo.conf"
+            return default if default.is_file() else None
+        p = Path(cfg)
+        if not p.is_absolute():
+            p = (repo_root / p).resolve()
+        return p
+
+    def _resolve_python_mode(
+        self, options: EnvironmentCheckoutOptions, project: ProjectConfig, repo_root: Path
+    ) -> dict[str, object]:
+        if options.create_venv:
+            return {"mode": "create", "interpreter": None}
+        py = options.python or project.python
+        if py is None:
+            raise ConfigError(
+                "No Python interpreter configured; pass --python or use --create-venv"
+            )
+        pybin = _resolve_python_bin(py, repo_root)
+        if not Path(pybin).exists():
+            raise InstanceConfigurationError(
+                f"Python interpreter not found: {pybin}; use --create-venv to create one"
+            )
+        if not _is_venv(pybin):
+            raise InstanceConfigurationError(
+                f"Python interpreter {pybin} is not a virtual-env; use --create-venv"
+            )
+        return {"mode": "reuse", "interpreter": pybin}
+
+    def _resolve_dbs(
+        self,
+        options: EnvironmentCheckoutOptions,
+        project: ProjectConfig,
+        cfg: dict[str, str],
+        db_mode: str,
+        branch: str,
+        repo_root: Path,
+    ) -> tuple[str | None, str | None]:
+        if db_mode == EnvironmentDatabaseMode.SHARED:
+            source = (
+                options.source_database or project.default_source_database or _infer_single_db(cfg)
+            )
+            if source is None:
+                raise ConfigError(
+                    "Could not infer source DB from odoo.conf (multiple or empty db_name); pass --source-db"
+                )
+            return source, None
+        source = options.source_database or project.default_source_database or _infer_single_db(cfg)
+        if source is None:
+            raise ConfigError("copy mode requires --source-db or exactly one db_name in odoo.conf")
+        target = options.target_database
+        if target is None:
+            target = self._default_target_db(source, branch)
+        validate_db_name(target)
+        data_dir = cfg.get("data_dir")
+        if data_dir:
+            validate_filestore_containment(Path(data_dir), target)
+        return source, target
+
+    def _default_target_db(self, source: str, branch: str) -> str:
+        slug = _SLUG_RE.sub("_", branch).strip("._-") or "branch"
+        h = hashlib.sha256(branch.encode("utf-8")).hexdigest()[:8]
+        name = f"{source}_{slug}_{h}"
+        if len(name.encode("utf-8")) > 63:
+            name = f"{source}_{h}"
+        return name
+
+    def _allocate_port(
+        self,
+        requested: int | None,
+        project: ProjectConfig,
+        catalog: object,
+        http_interface: str,
+    ) -> int:
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        cat = cast("BackupCatalog", catalog)
+        start = requested or project.preferred_http_port or _PORT_RANGE_START
+        if requested is not None:
+            if cat.active_environment_for_port(requested) is not None:
+                raise EnvironmentConflictError(
+                    "port_in_use",
+                    f"Port {requested} already allocated to an active environment",
+                    details={"port": requested},
+                )
+            return requested
+        port = start
+        while port <= _PORT_RANGE_END:
+            if cat.active_environment_for_port(port) is None and _port_free(http_interface, port):
+                return port
+            port += 1
+        raise EnvironmentConflictError(
+            "no_free_port",
+            f"No free port in range {_PORT_RANGE_START}-{_PORT_RANGE_END}; pass --http-port",
+            details={"range": [str(_PORT_RANGE_START), str(_PORT_RANGE_END)]},
+        )
+
+    def _resolve_selector(
+        self, selector: str, *, include_removed: bool = False
+    ) -> DevelopmentEnvironment:
+        catalog = self._client.get_catalog()
+        row = catalog.get_environment(selector)
+        if row is not None:
+            return _row_to_env(row)
+        rows = catalog.list_environments(include_removed=True)
+        by_name = [r for r in rows if r["name"] == selector]
+        if len(by_name) > 1:
+            raise EnvironmentResolutionError(
+                f"Ambiguous environment selector {selector!r}",
+                candidates=[str(r["id"]) for r in by_name],
+            )
+        if len(by_name) == 1:
+            return _row_to_env(by_name[0])
+        raise EnvironmentNotFoundError(selector)
+
+
+def _row_to_env(row: object) -> DevelopmentEnvironment:
+    def _get(key: str) -> object:
+        r = cast("sqlite3.Row", row)
+        return r[key]
+
+    def _opt(key: str) -> str | None:
+        r = cast("sqlite3.Row", row)
+        try:
+            v: object = r[key]
+        except (KeyError, IndexError):
+            return None
+        if v is None:
+            return None
+        return str(v)
+
+    backup_raw: object = None
+    with contextlib.suppress(KeyError, IndexError):
+        backup_raw = cast("sqlite3.Row", row)["backup_id"]
+    return DevelopmentEnvironment(
+        id=uuid.UUID(str(_get("id"))),
+        name=str(_get("name")),
+        repository_root=str(_get("repository_root")),
+        git_common_dir=str(_get("git_common_dir")),
+        branch=str(_get("branch")),
+        base_ref=str(_get("base_ref")),
+        worktree_path=str(_get("worktree_path")),
+        generated_config_path=str(_get("generated_config_path")),
+        python_environment_path=str(_get("python_environment_path")),
+        python_environment_owned=bool(_get("python_environment_owned")),
+        dependency_lock_path=str(_get("dependency_lock_path")),
+        http_interface=str(_get("http_interface")),
+        http_port=int(str(_get("http_port"))),
+        db_mode=EnvironmentDatabaseMode(str(_get("db_mode"))),
+        source_db_name=_opt("source_db_name"),
+        target_db_name=_opt("target_db_name"),
+        backup_id=uuid.UUID(str(backup_raw)) if backup_raw is not None else None,
+        state=EnvironmentState(str(_get("state"))),
+        created_at=datetime.fromisoformat(str(_get("created_at"))),
+        last_used_at=datetime.fromisoformat(str(_get("last_used_at")))
+        if _opt("last_used_at")
+        else None,
+        removed_at=datetime.fromisoformat(str(_get("removed_at"))) if _opt("removed_at") else None,
+        last_error=_opt("last_error"),
+    )
+
+
+def _row_to_backup(row: object) -> Backup | None:
+    r = cast("sqlite3.Row", row)
+    try:
+        path: object = r["path"]
+    except (KeyError, IndexError):
+        return None
+    if path is None or not Path(str(path)).is_file():
+        return None
+    size_raw: object = None
+    with contextlib.suppress(KeyError, IndexError):
+        size_raw = r["size_bytes"]
+    return Backup(
+        id=uuid.UUID(str(r["id"])),
+        source_base_url=str(r["source_base_url"]),
+        database_name=str(r["database_name"]),
+        format=BackupFormat(str(r["format"])),
+        filestore_requested=bool(r["filestore_requested"]),
+        path=str(path),
+        filename=str(r["filename"]) if r["filename"] else "",
+        size_bytes=int(str(size_raw)) if size_raw is not None else 0,
+        sha256=str(r["sha256"]) if r["sha256"] else "",
+        downloaded_at=datetime.fromisoformat(str(r["downloaded_at"])),
+    )
+
+
+def _infer_single_db(cfg: dict[str, str]) -> str | None:
+    names = parse_db_names(cfg.get("db_name"))
+    if len(names) == 1:
+        return names[0]
+    return None
+
+
+def _resolve_python_bin(py: str | Path, repo_root: Path) -> str:
+    s = str(py)
+    p = Path(s)
+    if not p.is_absolute():
+        candidate = shutil.which(s)
+        if candidate:
+            return candidate
+        p = (repo_root / p).resolve()
+    return str(p)
+
+
+def _is_venv(pybin: str) -> bool:
+    try:
+        proc = subprocess.run(
+            [pybin, "-c", "import sys; print(sys.prefix != sys.base_prefix)"],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return False
+        return proc.stdout.strip().lower() == "true"
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _port_free(host: str, port: int) -> bool:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.2)
+    try:
+        s.bind((_resolve_bind_host(host), port))
+    except OSError:
+        return False
+    else:
+        return True
+    finally:
+        s.close()
+
+
+def _resolve_bind_host(host: str) -> str:
+    if is_loopback_host(host):
+        return host
+    return "127.0.0.1"
+
+
+def _project_root_from_config(project: ProjectConfig) -> Path:
+    raise ConfigError("ProjectConfig does not carry repo root; pass an explicit Path")

@@ -4,7 +4,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import click
 
@@ -12,6 +12,9 @@ from odoo_instance_sdk.exceptions import VscodeImportError
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
 from odoo_instance_sdk.project import ProjectConfig
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
 
 
 @click.group()
@@ -289,6 +292,238 @@ def _fail(no_input: bool, json_output: bool, message: str) -> None:
     else:
         click.echo(message, err=True)
     sys.exit(1)
+
+
+def _make_client() -> OdooClient:
+    from odoo_instance_sdk import OdooClient, OdooClientConfig
+
+    return OdooClient(config=OdooClientConfig(executable="odoo"))
+
+
+def _resolve_project_path(ctx: click.Context) -> Path:
+    raw = ctx.obj.get("project")
+    if raw is not None:
+        return Path(raw)
+    return Path.cwd()
+
+
+@cli.group()
+def env() -> None:
+    pass
+
+
+@env.command("checkout")
+@click.argument("branch")
+@click.option("--base", "base_ref", default=None, help="Base ref (default HEAD).")
+@click.option(
+    "--config", "config_path", type=click.Path(), default=None, help="Source odoo.conf path."
+)
+@click.option("--name", "name", default=None, help="Environment name.")
+@click.option(
+    "--db-mode",
+    "db_mode",
+    type=click.Choice(["shared", "copy"]),
+    default="shared",
+    help="Database mode.",
+)
+@click.option("--source-db", "source_database", default=None, help="Source database name.")
+@click.option("--target-db", "target_database", default=None, help="Target database name.")
+@click.option("--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin.")
+@click.option("--python", "python", default=None, help="Python interpreter or uv selector.")
+@click.option(
+    "--create-venv", "create_venv", is_flag=True, default=False, help="Create owned venv."
+)
+@click.option("--http-port", "http_port", type=int, default=None, help="HTTP port.")
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
+@click.pass_context
+def env_checkout(
+    ctx: click.Context,
+    branch: str,
+    base_ref: str | None,
+    config_path: str | None,
+    name: str | None,
+    db_mode: str,
+    source_database: str | None,
+    target_database: str | None,
+    odoo_bin: str | None,
+    python: str | None,
+    create_venv: bool,
+    http_port: int | None,
+    dry_run: bool,
+    json_output: bool,
+) -> None:
+    from odoo_instance_sdk.resources.environment import (
+        EnvironmentCheckoutOptions,
+        EnvironmentDatabaseMode,
+    )
+
+    project_path = _resolve_project_path(ctx)
+    client = _make_client()
+    options = EnvironmentCheckoutOptions(
+        base_ref=base_ref,
+        name=name,
+        config_path=Path(config_path) if config_path else None,
+        db_mode=EnvironmentDatabaseMode(db_mode),
+        source_database=source_database,
+        target_database=target_database,
+        odoo_bin=Path(odoo_bin) if odoo_bin else None,
+        python=python,
+        create_venv=create_venv,
+        http_port=http_port,
+    )
+    try:
+        result = client.environments.checkout(
+            project_path, branch, options=options, dry_run=dry_run
+        )
+    except Exception as e:
+        _env_fail(json_output, "env.checkout", str(e))
+        return
+    if json_output:
+        _env_json("env.checkout", _env_dict(result), dry_run=dry_run)
+    else:
+        click.echo(f"Environment {result.name} ({result.id}) state={result.state}")
+        if dry_run:
+            click.echo("Dry run — no files written.")
+        if result.db_mode == EnvironmentDatabaseMode.SHARED:
+            click.echo("Warning: code/process isolated, DB and filestore are NOT.")
+
+
+@env.command("list")
+@click.option("--all", "all_envs", is_flag=True, default=False, help="Include removed.")
+@click.option(
+    "--all-projects", "all_projects", is_flag=True, default=False, help="List all projects."
+)
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
+@click.pass_context
+def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output: bool) -> None:
+    client = _make_client()
+    project = None if all_projects else _resolve_project_path(ctx)
+    try:
+        envs = client.environments.list(project=project, include_removed=all_envs)
+    except Exception as e:
+        _env_fail(json_output, "env.list", str(e))
+        return
+    if json_output:
+        _env_json("env.list", {"environments": [_env_dict(e) for e in envs]}, dry_run=False)
+    else:
+        _print_env_table(envs, client)
+
+
+@env.command("remove")
+@click.argument("environment", required=False)
+@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
+@click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation.")
+@click.pass_context
+def env_remove(ctx: click.Context, environment: str | None, dry_run: bool, yes: bool) -> None:
+    client = _make_client()
+    if environment is None:
+        click.echo("ENVIRONMENT selector required", err=True)
+        sys.exit(2)
+    try:
+        env_obj = client.environments.get(environment)
+    except Exception as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+        return
+    if dry_run:
+        click.echo(f"Would remove environment {env_obj.name} ({env_obj.id}) state={env_obj.state}")
+        return
+    if not yes and not click.confirm(
+        f"Remove environment {env_obj.name} ({env_obj.id})?", default=False
+    ):
+        click.echo("Aborted.")
+        return
+    try:
+        client.environments.remove(env_obj)
+    except Exception as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+    click.echo(f"Removed environment {env_obj.name} ({env_obj.id})")
+
+
+@env.command("sync")
+@click.argument("environment", required=False)
+@click.option("--upgrade", "upgrade", is_flag=True, default=False)
+@click.pass_context
+def env_sync(ctx: click.Context, environment: str | None, upgrade: bool) -> None:
+    click.echo("env sync is implemented in Slice 3", err=True)
+    sys.exit(1)
+
+
+def _env_dict(e: object) -> dict[str, Any]:
+    from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
+
+    env = cast("DevelopmentEnvironment", e)
+    return {
+        "id": str(env.id),
+        "name": env.name,
+        "state": str(env.state),
+        "branch": env.branch,
+        "db_mode": str(env.db_mode),
+        "http_port": env.http_port,
+        "worktree_path": env.worktree_path,
+    }
+
+
+def _env_json(command: str, data: dict[str, Any], *, dry_run: bool) -> None:
+    envelope = {
+        "schema_version": 1,
+        "ok": True,
+        "command": command,
+        "data": data,
+        "warnings": [],
+        "dry_run": dry_run,
+    }
+    click.echo(json.dumps(envelope, indent=2, default=str))
+
+
+def _env_fail(json_output: bool, command: str, message: str) -> None:
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "ok": False,
+                    "command": command,
+                    "error": {"message": message},
+                },
+                indent=2,
+            ),
+            err=True,
+        )
+    else:
+        click.echo(message, err=True)
+    sys.exit(1)
+
+
+def _print_env_table(envs: list[Any], client: OdooClient) -> None:
+    import socket as _socket
+
+    from odoo_instance_sdk.resources.environment import EnvironmentState
+
+    rows = []
+    for e in envs:
+        observed = "unknown"
+        if e.state in (EnvironmentState.READY, EnvironmentState.CREATING, EnvironmentState.FAILED):
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            try:
+                s.bind((e.http_interface, e.http_port))
+                observed = "port-free"
+            except OSError:
+                observed = "port-occupied"
+            finally:
+                s.close()
+        db = e.source_db_name if e.db_mode == "shared" else e.target_db_name
+        rows.append(
+            f"{e.id}  {e.name}  {e.state}  {observed}  {e.branch}  "
+            f"{'create' if e.python_environment_owned else 'reuse'}  {e.db_mode}  "
+            f"{db or ''}  {e.http_port}  {e.worktree_path}"
+        )
+    click.echo("ID  NAME  STATE  OBSERVED  BRANCH  PYTHON_MODE  DB_MODE  DATABASE  PORT  WORKTREE")
+    for r in rows:
+        click.echo(r)
 
 
 if __name__ == "__main__":
