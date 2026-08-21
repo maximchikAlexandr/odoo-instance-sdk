@@ -167,7 +167,7 @@ class StartConfig(msgspec.Struct, forbid_unknown_fields=True):
         return cls(
             http_port=_int("http_port") or 8069,
             http_interface=_get("http_interface") or "127.0.0.1",
-            config_path=_get("config_path"),
+            config_path=str(Path(path)),
             addons_path=_list("addons_path"),
             data_dir=_get("data_dir"),
             dbfilter=_get("dbfilter"),

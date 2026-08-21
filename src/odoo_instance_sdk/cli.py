@@ -541,5 +541,110 @@ def _print_env_table(envs: list[Any], client: OdooClient) -> None:
         click.echo(r)
 
 
+@cli.command()
+@click.pass_context
+def run(ctx: click.Context) -> None:
+    client = _make_client()
+    try:
+        env_obj = _resolve_ready_env(ctx, client)
+        _verify_env_runtime(env_obj)
+        if not _check_port_free(env_obj):
+            click.echo(
+                f"port-conflict: {env_obj.http_interface}:{env_obj.http_port} is occupied "
+                "(ownership unknown)",
+                err=True,
+            )
+            sys.exit(1)
+            return
+        _record_use_event(client, env_obj)
+        instance = client.instance.from_environment(env_obj)
+    except SystemExit:
+        raise
+    except Exception as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+        return
+    try:
+        exit_code = instance.run_foreground()
+    except KeyboardInterrupt:
+        exit_code = 130
+    sys.exit(exit_code)
+
+
+@cli.command()
+@click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
+@click.pass_context
+def shell(ctx: click.Context, odoo_args: tuple[str, ...]) -> None:
+    client = _make_client()
+    try:
+        env_obj = _resolve_ready_env(ctx, client)
+        _verify_env_runtime(env_obj)
+        instance = client.instance.from_environment(env_obj)
+    except SystemExit:
+        raise
+    except Exception as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+        return
+    try:
+        exit_code = instance.shell(args=list(odoo_args))
+    except KeyboardInterrupt:
+        exit_code = 130
+    sys.exit(exit_code)
+
+
+def _resolve_ready_env(ctx: click.Context, client: OdooClient) -> Any:
+    from odoo_instance_sdk.internal.context import resolve_environment
+    from odoo_instance_sdk.resources.environment import EnvironmentState
+
+    env_selector = ctx.obj.get("env")
+    env_obj = resolve_environment(client, env_selector)
+    if env_obj.state != EnvironmentState.READY:
+        raise RuntimeError(
+            f"Environment {env_obj.name} ({env_obj.id}) is not ready (state={env_obj.state})"
+        )
+    return env_obj
+
+
+def _verify_env_runtime(env_obj: Any) -> None:
+    from pathlib import Path
+
+    worktree = Path(env_obj.worktree_path)
+    if not worktree.is_dir():
+        raise RuntimeError(f"worktree missing: {worktree}")
+    config_path = Path(env_obj.generated_config_path)
+    if not config_path.is_file():
+        raise RuntimeError(f"generated config missing: {config_path}")
+    py_path = Path(env_obj.python_environment_path)
+    if env_obj.python_environment_owned:
+        if not (py_path / "bin" / "python").exists():
+            raise RuntimeError(f"recorded Python missing: {py_path / 'bin' / 'python'}")
+    elif not py_path.exists():
+        raise RuntimeError(f"recorded Python missing: {py_path}")
+
+
+def _check_port_free(env_obj: Any) -> bool:
+    import socket as _socket
+
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    s.settimeout(0.2)
+    try:
+        s.bind((env_obj.http_interface, env_obj.http_port))
+    except OSError:
+        return False
+    finally:
+        s.close()
+    return True
+
+
+def _record_use_event(client: OdooClient, env_obj: Any) -> None:
+    from datetime import UTC, datetime
+
+    catalog = client.get_catalog()
+    now = datetime.now(UTC).isoformat()
+    catalog.update_environment(str(env_obj.id), {"last_used_at": now})
+    catalog.add_environment_event(str(env_obj.id), "use", "succeeded")
+
+
 if __name__ == "__main__":
     cli()

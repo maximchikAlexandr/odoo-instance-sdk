@@ -281,6 +281,9 @@ class EnvironmentResource:
         now: str,
         options: EnvironmentCheckoutOptions,
     ) -> DevelopmentEnvironment:
+        odoo_bin = self._resolve_odoo_bin(options, project_cfg, repo_root)
+        runtime_cwd = self._resolve_runtime_cwd(project_cfg, repo_root, worktree)
+        runtime_json = _encode_runtime_json(odoo_bin, runtime_cwd)
         env_row = {
             "id": str(env_id),
             "name": name,
@@ -299,7 +302,7 @@ class EnvironmentResource:
             "source_db_name": source_db,
             "target_db_name": target_db,
             "backup_id": None,
-            "runtime_json": "{}",
+            "runtime_json": runtime_json,
             "state": EnvironmentState.CREATING,
             "created_at": now,
             "last_used_at": None,
@@ -822,6 +825,29 @@ class EnvironmentResource:
         if shutil.which("uv") is None:
             raise ConfigError("uv not found in PATH")
 
+    def _resolve_odoo_bin(
+        self, options: EnvironmentCheckoutOptions, project: ProjectConfig, repo_root: Path
+    ) -> str:
+        odoo_bin = options.odoo_bin or project.odoo_bin
+        if odoo_bin is None:
+            raise ConfigError("No odoo_bin configured; pass --odoo-bin or set project.odoo_bin")
+        p = Path(odoo_bin)
+        if not p.is_absolute():
+            candidate = (repo_root / p).resolve()
+            return str(candidate)
+        return str(p)
+
+    def _resolve_runtime_cwd(self, project: ProjectConfig, repo_root: Path, worktree: Path) -> str:
+        if project.runtime_cwd is not None:
+            p = Path(project.runtime_cwd)
+            if not p.is_absolute():
+                resolved_repo = (repo_root / p).resolve()
+                if resolved_repo.is_relative_to(repo_root.resolve()):
+                    return str((worktree / p).resolve())
+                return str(resolved_repo)
+            return str(p)
+        return str(worktree)
+
     def _resolve_source_config(
         self, options: EnvironmentCheckoutOptions, project: ProjectConfig, repo_root: Path
     ) -> Path | None:
@@ -939,6 +965,26 @@ class EnvironmentResource:
         if len(by_name) == 1:
             return _row_to_env(by_name[0])
         raise EnvironmentNotFoundError(selector)
+
+
+def _encode_runtime_json(odoo_bin: str, runtime_cwd: str) -> str:
+    import json
+
+    return json.dumps({"odoo_bin": odoo_bin, "runtime_cwd": runtime_cwd})
+
+
+def _decode_runtime_json(raw: str | None) -> dict[str, str]:
+    import json
+
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: str(v) for k, v in data.items() if isinstance(v, str)}
 
 
 def _row_to_env(row: object) -> DevelopmentEnvironment:

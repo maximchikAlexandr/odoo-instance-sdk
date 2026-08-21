@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 from msgspec import structs
@@ -19,7 +20,7 @@ from odoo_instance_sdk.models import (
     StartConfig,
 )
 
-_SENSITIVE_FIELDS = frozenset({"db_password", "admin_passwd"})
+_SENSITIVE_FIELDS = frozenset({"db_password", "admin_passwd", "config_path"})
 
 
 def _cli_flag(field_name: str) -> str:
@@ -41,7 +42,9 @@ def _build_cli_args(config: StartConfig, *, secret_config_path: str | None = Non
             args.extend([flag, ",".join(value)])
         else:
             args.extend([flag, str(value)])
-    if secret_config_path is not None:
+    if config.config_path is not None:
+        args.extend(["--config", config.config_path])
+    elif secret_config_path is not None:
         args.extend(["--config", secret_config_path])
     return args
 
@@ -77,15 +80,18 @@ def _kill_pg(proc: subprocess.Popen[bytes], *, force: bool) -> None:
 
 
 def start_process(
-    executable: str,
+    executable: str | Sequence[str],
     config: StartConfig,
     *,
     cwd: str | Path | None = None,
     env: dict[str, str] | None = None,
 ) -> tuple[OdooProcess, subprocess.Popen[bytes], str | None]:
-    secret_config_path = _write_secret_config(config)
+    secret_config_path: str | None = None
+    if config.config_path is None:
+        secret_config_path = _write_secret_config(config)
     cli_args = _build_cli_args(config, secret_config_path=secret_config_path)
-    full_args = [executable, *cli_args]
+    prefix = [executable] if isinstance(executable, str) else list(executable)
+    full_args = [*prefix, *cli_args]
 
     proc = subprocess.Popen(
         full_args,
@@ -138,16 +144,18 @@ def get_process_status(
 
 
 def run_command(
-    executable: str,
+    executable: str | Sequence[str],
     args: list[str],
     *,
     cwd: str | Path | None = None,
     env: dict[str, str] | None = None,
     timeout: float | None = None,
 ) -> CommandResult:
+    prefix = [executable] if isinstance(executable, str) else list(executable)
+    full_args = [*prefix, *args]
     start = time.perf_counter()
     proc = subprocess.run(
-        [executable, *args],
+        full_args,
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -156,7 +164,116 @@ def run_command(
         check=False,
     )
     return CommandResult(
-        args=[executable, *args],
+        args=full_args,
+        returncode=proc.returncode,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        duration=time.perf_counter() - start,
+    )
+
+
+def run_foreground_process(
+    executable: str | Sequence[str],
+    args: list[str],
+    *,
+    cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
+    inherit_stdio: bool = True,
+) -> int:
+    prefix = [executable] if isinstance(executable, str) else list(executable)
+    full_args = [*prefix, *args]
+    proc = subprocess.Popen(
+        full_args,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+        stdin=None if inherit_stdio else subprocess.PIPE,
+        stdout=None if inherit_stdio else subprocess.PIPE,
+        stderr=None if inherit_stdio else subprocess.PIPE,
+    )
+    interrupted = False
+    prev_handler = signal.getsignal(signal.SIGINT)
+
+    def _on_sigint(signum: int, frame: object) -> None:
+        nonlocal interrupted
+        interrupted = True
+        with contextlib.suppress(OSError, ProcessLookupError):
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGINT)
+
+    if sys.platform != "win32":
+        signal.signal(signal.SIGINT, _on_sigint)
+    try:
+        exit_code = proc.wait()
+    except KeyboardInterrupt:
+        interrupted = True
+        with contextlib.suppress(OSError, ProcessLookupError):
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        proc.wait()
+        exit_code = 130
+    finally:
+        if sys.platform != "win32":
+            signal.signal(signal.SIGINT, prev_handler)
+    if interrupted and exit_code == 0:
+        exit_code = 130
+    return exit_code
+
+
+def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: str) -> str:
+    marker_open = f"__ODCLI_PAYLOAD__{nonce}__"
+    marker_close = f"__END_PAYLOAD__{nonce}__"
+    import json
+
+    source_repr = json.dumps(source)
+    argv_repr = json.dumps(argv)
+    return (
+        "import json as _json, sys as _sys\n"
+        f"_sys.argv = [_sys.argv[0], *_json.loads({argv_repr!r})]\n"
+        f"_source = _json.loads({source_repr!r})\n"
+        "try:\n"
+        "    exec(compile(_source, '<odcli-shell-script>', 'exec'), globals())\n"
+        "finally:\n"
+        "    try:\n"
+        "        if env is not None and hasattr(env, 'cr') and env.cr is not None:\n"
+        f"            env.cr.commit() if {commit!r} else env.cr.rollback()\n"
+        "    except Exception:\n"
+        "        pass\n"
+        f"print({marker_open!r}, _json.dumps({{'ok': True, 'commit': {commit!r}}}), "
+        f"{marker_close!r})\n"
+    )
+
+
+def _run_captured_shell(
+    executable: str | Sequence[str],
+    cli_args: list[str],
+    *,
+    source: str,
+    argv: list[str],
+    timeout: float | None,
+    commit: bool,
+    cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
+) -> CommandResult:
+    import secrets as _secrets
+
+    nonce = _secrets.token_hex(8)
+    wrapper = _build_shell_wrapper(source, argv, commit=commit, nonce=nonce)
+    prefix = [executable] if isinstance(executable, str) else list(executable)
+    full_args = [*prefix, *cli_args]
+    start = time.perf_counter()
+    proc = subprocess.run(
+        full_args,
+        cwd=cwd,
+        env=env,
+        input=wrapper,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    return CommandResult(
+        args=full_args,
         returncode=proc.returncode,
         stdout=proc.stdout,
         stderr=proc.stderr,

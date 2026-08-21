@@ -22,6 +22,8 @@ class InstanceConfig:
     master_password: str | None = field(default=None, repr=False)
     configured_database_names: tuple[str, ...] = ()
     start_config: StartConfig | None = field(default=None, repr=False)
+    command_prefix: tuple[str, ...] | None = None
+    default_cwd: Path | None = None
     db_host: str | None = field(default=None)
     db_port: int | None = field(default=None)
     db_user: str | None = field(default=None)
