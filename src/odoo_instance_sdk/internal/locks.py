@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -58,3 +59,10 @@ def environment_lock_path(environment_id: str) -> Path:
     from odoo_instance_sdk.internal.paths import get_locks_dir
 
     return get_locks_dir() / f"env-{environment_id}.lock"
+
+
+def python_env_lock_path(python_env_path: str) -> Path:
+    from odoo_instance_sdk.internal.paths import get_locks_dir
+
+    digest = hashlib.sha256(python_env_path.encode("utf-8")).hexdigest()[:16]
+    return get_locks_dir() / f"pyenv-{digest}.lock"

@@ -8,7 +8,7 @@ import shutil
 import socket
 import subprocess
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Union, cast
@@ -37,6 +37,7 @@ from odoo_instance_sdk.internal.locks import (
     environment_lock_path,
     exclusive_lock,
     provisioning_lock_path,
+    python_env_lock_path,
 )
 from odoo_instance_sdk.internal.odoo_config import (
     get_admin_passwd,
@@ -53,6 +54,7 @@ from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 EnvironmentSelector = Union[str, "DevelopmentEnvironment"]
 
@@ -120,7 +122,6 @@ _StrList = list[str]
 @dataclass(slots=True, kw_only=True)
 class EnvironmentResource:
     _client: OdooClient
-    _python_locks_dir: Path = field(default=Path("/tmp/odoo-instance-sdk-python-locks"))
 
     def checkout(
         self,
@@ -225,6 +226,7 @@ class EnvironmentResource:
         with exclusive_lock(lock_path):
             return self._do_checkout(
                 catalog=catalog,
+                project_cfg=project_cfg,
                 env_id=env_id,
                 name=name,
                 repo_root=repo_root,
@@ -238,6 +240,7 @@ class EnvironmentResource:
                 env_root=env_root,
                 python_path=python_path,
                 python_owned=python_owned,
+                python_selector=(options.python or project_cfg.python),
                 http_interface=http_interface,
                 http_port=http_port,
                 db_mode=db_mode,
@@ -253,6 +256,7 @@ class EnvironmentResource:
         self,
         *,
         catalog: object,
+        project_cfg: ProjectConfig,
         env_id: uuid.UUID,
         name: str,
         repo_root: Path,
@@ -266,6 +270,7 @@ class EnvironmentResource:
         env_root: Path,
         python_path: str,
         python_owned: bool,
+        python_selector: str | Path | None,
         http_interface: str,
         http_port: int,
         db_mode: str,
@@ -301,7 +306,6 @@ class EnvironmentResource:
             "removed_at": None,
             "last_error": None,
         }
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         cat = cast("BackupCatalog", catalog)
         cat.create_environment(env_row)
@@ -329,6 +333,15 @@ class EnvironmentResource:
                     db_name=db_name_for_config,
                 )
                 created_paths.append(generated_cfg)
+
+            if options.create_venv and python_selector is not None:
+                self._run_uv_venv(venv, str(python_selector))
+                created_paths.append(venv)
+
+            env_obj = self._get_env_row(cat, env_id)
+            with exclusive_lock(python_env_lock_path(env_obj.python_environment_path)):
+                self._compile_and_install(env_obj, project_cfg, upgrade=False)
+                created_paths.append(lock_file)
 
             if (
                 db_mode == EnvironmentDatabaseMode.COPY
@@ -361,7 +374,6 @@ class EnvironmentResource:
             raise
 
     def _get_env_row(self, cat: object, env_id: uuid.UUID) -> DevelopmentEnvironment:
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         catalog = cast("BackupCatalog", cat)
         row = catalog.get_environment(str(env_id))
@@ -379,7 +391,6 @@ class EnvironmentResource:
         source_db: str,
         target_db: str,
     ) -> uuid.UUID:
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         catalog = cast("BackupCatalog", cat)
         if source_config is None:
@@ -427,7 +438,6 @@ class EnvironmentResource:
         backup_id: uuid.UUID | None,
         error: BaseException,
     ) -> None:
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         catalog = cast("BackupCatalog", cat)
         cleanup_failed = self._cleanup_created_paths(repo_root, created_paths)
@@ -464,7 +474,6 @@ class EnvironmentResource:
         return cleanup_failed
 
     def _cleanup_backup(self, catalog: object, backup_id: uuid.UUID) -> bool:
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         cat = cast("BackupCatalog", catalog)
         try:
@@ -483,7 +492,123 @@ class EnvironmentResource:
         *,
         upgrade: bool = False,
     ) -> DevelopmentEnvironment:
-        raise NotImplementedError("sync_python full implementation is Slice 3")
+        env = (
+            self._resolve_selector(selector, include_removed=False)
+            if isinstance(selector, str)
+            else selector
+        )
+        catalog = self._client.get_catalog()
+        catalog.add_environment_event(str(env.id), "sync", "started")
+        with (
+            exclusive_lock(environment_lock_path(str(env.id))),
+            exclusive_lock(python_env_lock_path(env.python_environment_path)),
+        ):
+            return self._do_sync_python(catalog, env, upgrade=upgrade)
+
+    def _do_sync_python(
+        self, catalog: BackupCatalog, env: DevelopmentEnvironment, *, upgrade: bool
+    ) -> DevelopmentEnvironment:
+        project = _load_project(env)
+        worktree = Path(env.worktree_path)
+        repo_root = Path(env.repository_root)
+        inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
+        odoo_req = _find_odoo_requirements(worktree)
+        if inputs or odoo_req is not None:
+            try:
+                self._compile_requirements(env, project, upgrade=upgrade)
+                self._install_requirements(env)
+                catalog.add_environment_event(str(env.id), "sync", "succeeded")
+            except _CompileFailed:
+                catalog.add_environment_event(
+                    str(env.id),
+                    "sync",
+                    "failed",
+                    message="uv pip compile failed; kept existing lock",
+                )
+        else:
+            catalog.add_environment_event(
+                str(env.id),
+                "sync",
+                "succeeded",
+                message="no requirements to compile",
+            )
+        return self._get_env_row(catalog, env.id)
+
+    def _compile_and_install(
+        self, env: DevelopmentEnvironment, project: ProjectConfig, *, upgrade: bool
+    ) -> None:
+        worktree = Path(env.worktree_path)
+        repo_root = Path(env.repository_root)
+        inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
+        odoo_req = _find_odoo_requirements(worktree)
+        if not inputs and odoo_req is None:
+            return
+        try:
+            self._compile_requirements(env, project, upgrade=upgrade)
+        except _CompileFailed:
+            if not Path(env.dependency_lock_path).is_file():
+                raise
+        self._install_requirements(env)
+
+    def _run_uv_venv(self, venv: Path, selector: str) -> None:
+        venv.parent.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(
+            ["uv", "venv", str(venv), "--python", selector],
+            shell=False,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise ConfigError(f"uv venv failed: {proc.stderr.strip()}")
+
+    def _compile_requirements(
+        self, env: DevelopmentEnvironment, project: ProjectConfig, *, upgrade: bool
+    ) -> Path:
+        worktree = Path(env.worktree_path)
+        repo_root = Path(env.repository_root)
+        inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
+        odoo_req = _find_odoo_requirements(worktree)
+        if odoo_req is not None:
+            inputs.append(str(odoo_req))
+        if not inputs:
+            raise ConfigError("no requirements to compile; set project.requirements")
+        lock_file = Path(env.dependency_lock_path)
+        cmd: list[str] = ["uv", "pip", "compile", *inputs]
+        if upgrade:
+            cmd.append("--upgrade")
+        cmd.extend(["-o", str(lock_file)])
+        proc = subprocess.run(cmd, shell=False, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            if lock_file.is_file():
+                raise _CompileFailed(proc.stderr.strip() or "uv pip compile failed")
+            raise ConfigError(f"uv pip compile failed and no prior lock: {proc.stderr.strip()}")
+        return lock_file
+
+    def _install_requirements(self, env: DevelopmentEnvironment) -> None:
+        lock_file = Path(env.dependency_lock_path)
+        if not lock_file.is_file():
+            raise ConfigError(f"requirements lock missing: {lock_file}")
+        if env.python_environment_owned:
+            venv = Path(env.python_environment_path)
+            python_bin = str(venv / "bin" / "python")
+            cmd: list[str] = ["uv", "pip", "sync", "--python", python_bin, str(lock_file)]
+        else:
+            cmd = [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                env.python_environment_path,
+                "-r",
+                str(lock_file),
+            ]
+        proc = subprocess.run(cmd, shell=False, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            raise ConfigError(
+                f"uv pip {'sync' if env.python_environment_owned else 'install'} failed: "
+                f"{proc.stderr.strip()}"
+            )
 
     def get(self, selector: EnvironmentSelector) -> DevelopmentEnvironment:
         if isinstance(selector, DevelopmentEnvironment):
@@ -527,7 +652,6 @@ class EnvironmentResource:
             self._do_remove(catalog, env)
 
     def _do_remove(self, catalog: object, env: DevelopmentEnvironment) -> None:
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         cat = cast("BackupCatalog", catalog)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
@@ -581,7 +705,6 @@ class EnvironmentResource:
         worktree: Path,
         failures: _StrList,
     ) -> bool:
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         catalog = cast("BackupCatalog", cat)
         if not worktree.is_dir():
@@ -639,7 +762,6 @@ class EnvironmentResource:
         env: DevelopmentEnvironment,
         failures: _StrList,
     ) -> bool:
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         catalog = cast("BackupCatalog", cat)
         try:
@@ -660,7 +782,6 @@ class EnvironmentResource:
         cleanup_failed: bool,
         failures: _StrList,
     ) -> bool:
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         catalog = cast("BackupCatalog", cat)
         target = env.target_db_name
@@ -779,7 +900,6 @@ class EnvironmentResource:
         catalog: object,
         http_interface: str,
     ) -> int:
-        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
         cat = cast("BackupCatalog", catalog)
         start = requested or project.preferred_http_port or _PORT_RANGE_START
@@ -948,3 +1068,34 @@ def _resolve_bind_host(host: str) -> str:
 
 def _project_root_from_config(project: ProjectConfig) -> Path:
     raise ConfigError("ProjectConfig does not carry repo root; pass an explicit Path")
+
+
+class _CompileFailed(Exception):
+    pass
+
+
+def _load_project(env: DevelopmentEnvironment) -> ProjectConfig:
+    return ProjectConfig.load(Path(env.repository_root))
+
+
+def _rebase_requirement_paths(paths: list[str], repo_root: Path, worktree: Path) -> list[str]:
+    rebased: list[str] = []
+    for p in paths:
+        candidate = Path(p)
+        if candidate.is_absolute():
+            rebased.append(str(candidate))
+            continue
+        resolved_repo = (repo_root / candidate).resolve()
+        resolved_work = (worktree / candidate).resolve()
+        if resolved_repo.is_relative_to(repo_root.resolve()):
+            rebased.append(str(resolved_work))
+        else:
+            rebased.append(str(candidate))
+    return rebased
+
+
+def _find_odoo_requirements(worktree: Path) -> Path | None:
+    for candidate in (worktree / "requirements.txt", worktree / "odoo" / "requirements.txt"):
+        if candidate.is_file():
+            return candidate
+    return None

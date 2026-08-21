@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
@@ -40,7 +38,9 @@ def test_checkout_options_defaults() -> None:
     assert opts.create_venv is False
 
 
-def test_environment_resource_sync_python_raises_not_implemented() -> None:
+def test_environment_resource_has_no_run_shell_methods() -> None:
     client = _make_client()
-    with pytest.raises(NotImplementedError):
-        client.environments.sync_python("test")
+    assert not hasattr(client.environments, "run")
+    assert not hasattr(client.environments, "shell")
+    assert not hasattr(client.environments, "start")
+    assert not hasattr(client.environments, "stop")

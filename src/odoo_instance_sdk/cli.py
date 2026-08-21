@@ -445,10 +445,25 @@ def env_remove(ctx: click.Context, environment: str | None, dry_run: bool, yes: 
 @env.command("sync")
 @click.argument("environment", required=False)
 @click.option("--upgrade", "upgrade", is_flag=True, default=False)
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
-def env_sync(ctx: click.Context, environment: str | None, upgrade: bool) -> None:
-    click.echo("env sync is implemented in Slice 3", err=True)
-    sys.exit(1)
+def env_sync(ctx: click.Context, environment: str | None, upgrade: bool, json_output: bool) -> None:
+    client = _make_client()
+    if environment is None:
+        env_sel = ctx.obj.get("env")
+        if env_sel is None:
+            click.echo("ENVIRONMENT selector required", err=True)
+            sys.exit(2)
+        environment = env_sel
+    try:
+        result = client.environments.sync_python(environment, upgrade=upgrade)
+    except Exception as e:
+        _env_fail(json_output, "env.sync", str(e))
+        return
+    if json_output:
+        _env_json("env.sync", _env_dict(result), dry_run=False)
+    else:
+        click.echo(f"Synced environment {result.name} ({result.id}) state={result.state}")
 
 
 def _env_dict(e: object) -> dict[str, Any]:
