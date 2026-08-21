@@ -542,6 +542,66 @@ def _print_env_table(envs: list[Any], client: OdooClient) -> None:
 
 
 @cli.command()
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
+@click.pass_context
+def doctor(ctx: click.Context, json_output: bool) -> None:
+    from odoo_instance_sdk.internal.doctor import run_doctor
+
+    project_path = _resolve_project_path(ctx)
+    client = _make_client()
+    try:
+        report = run_doctor(client, project_path if project_path != Path.cwd() else None)
+    except Exception as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
+        return
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "ok": report.ok,
+                    "command": "doctor",
+                    "context": report.context,
+                    "data": {
+                        "checks": [
+                            {
+                                "name": c.name,
+                                "status": c.status,
+                                "detail": c.detail,
+                                "environment_id": c.environment_id,
+                                "environment_name": c.environment_name,
+                            }
+                            for c in report.checks
+                        ]
+                    },
+                    "warnings": report.warnings,
+                },
+                indent=2,
+                default=str,
+            )
+        )
+    else:
+        _print_doctor(report)
+    sys.exit(0 if report.ok else 1)
+
+
+def _print_doctor(report: object) -> None:
+    from odoo_instance_sdk.internal.doctor import DoctorReport
+
+    rep = cast("DoctorReport", report)
+    current_env: str | None = None
+    for c in rep.checks:
+        if c.environment_id and c.environment_id != current_env:
+            current_env = c.environment_id
+            click.echo(f"\n[{current_env}] {c.environment_name or ''}")
+        marker = {"ok": "OK", "warn": "WARN", "error": "ERROR", "info": "INFO"}.get(
+            c.status, c.status
+        )
+        click.echo(f"  {marker:<5} {c.name}: {c.detail}")
+
+
+@cli.command()
 @click.pass_context
 def run(ctx: click.Context) -> None:
     client = _make_client()
