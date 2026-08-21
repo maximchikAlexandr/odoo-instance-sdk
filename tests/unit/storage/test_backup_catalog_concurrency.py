@@ -14,7 +14,7 @@ def _create_backup_file(tmp_path: Path, name: str) -> Path:
     return f
 
 
-def test_two_writers_sequential(tmp_path):
+def test_two_writers_sequential(tmp_path: Path) -> None:
     db_path = tmp_path / "shared.db"
     p1 = _create_backup_file(tmp_path, "b1.zip")
     p2 = _create_backup_file(tmp_path, "b2.zip")
@@ -32,7 +32,7 @@ def test_two_writers_sequential(tmp_path):
     catalog2.close()
 
 
-def test_concurrent_writes(tmp_path):
+def test_concurrent_writes(tmp_path: Path) -> None:
     db_path = tmp_path / "concurrent.db"
     # Warm up — open and close to set up the DB file before threading.
     warm = BackupCatalog(db_path=db_path)

@@ -72,9 +72,9 @@ class TestClientAPI:
     def test_client_old_api_absent(self) -> None:
         client = _make_client()
         with pytest.raises(AttributeError):
-            _ = client.server
+            _ = client.server  # type: ignore[attr-defined]
         with pytest.raises(AttributeError):
-            _ = client.database
+            _ = client.database  # type: ignore[attr-defined]
 
     def test_shared_process_registry(self) -> None:
         client = _make_client()

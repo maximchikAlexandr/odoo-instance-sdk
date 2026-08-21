@@ -96,15 +96,24 @@ def _verify_database_via_psql(
     cmd = ["psql"]
     if db_host is not None:
         cmd.extend(["-h", db_host])
-    cmd.extend([
-        "-p", str(db_port),
-        "-U", db_user,
-        "-d", "postgres",
-        "-t", "-A",
-        "-c", f"SELECT 1 FROM pg_database WHERE datname='{escaped}'",
-    ])
+    cmd.extend(
+        [
+            "-p",
+            str(db_port),
+            "-U",
+            db_user,
+            "-d",
+            "postgres",
+            "-t",
+            "-A",
+            "-c",
+            f"SELECT 1 FROM pg_database WHERE datname='{escaped}'",
+        ]
+    )
     try:
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30, shell=False, check=False)
+        proc = subprocess.run(
+            cmd, env=env, capture_output=True, text=True, timeout=30, shell=False, check=False
+        )
         if proc.returncode != 0:
             return None
         return bool(proc.stdout.strip())
@@ -238,7 +247,9 @@ class DatabaseResource:
 
     def __getitem__(self, index: int) -> Database:
         if not isinstance(index, int):
-            raise TypeError(f"DatabaseResource indices must be integers, not {type(index).__name__}")
+            raise TypeError(
+                f"DatabaseResource indices must be integers, not {type(index).__name__}"
+            )
         return self.list()[index]
 
     def current(self) -> Database:

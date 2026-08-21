@@ -93,3 +93,57 @@ class BackupDownloadError(OdooInstanceSdkError):
 
 class DatabaseManagerUnavailableError(OdooInstanceSdkError):
     """Database manager endpoint unavailable or listing disabled."""
+
+
+class ProjectManifestNotFoundError(ConfigError):
+    """Project manifest `.odcli/project.toml` not found."""
+
+    def __init__(self, project_path: str, *, hint: str = "odcli init") -> None:
+        self.project_path = project_path
+        super().__init__(
+            f"Project manifest not found at {project_path}/.odcli/project.toml — run {hint}"
+        )
+
+
+class VscodeImportError(ConfigError):
+    """VS Code launch profile import failed."""
+
+
+class ProjectContextError(OdooInstanceSdkError):
+    """Project context could not be resolved."""
+
+
+class EnvironmentNotFoundError(OdooInstanceSdkError):
+    """Environment not found."""
+
+    def __init__(self, selector: str) -> None:
+        self.selector = selector
+        super().__init__(f"Environment not found for selector {selector!r}")
+
+
+class EnvironmentConflictError(OdooInstanceSdkError):
+    """Environment conflict (duplicate active env, port, ambiguous selector)."""
+
+    def __init__(
+        self, code: str, message: str, *, details: dict[str, object] | None = None
+    ) -> None:
+        self.code = code
+        self.details = details or {}
+        super().__init__(message)
+
+
+class EnvironmentResolutionError(EnvironmentConflictError):
+    """Environment selector could not be resolved unambiguously."""
+
+    def __init__(self, message: str, *, candidates: list[str] | None = None) -> None:
+        self.candidates = candidates or []
+        super().__init__("environment_resolution", message, details={"candidates": self.candidates})
+
+
+class LockConflictError(OdooInstanceSdkError):
+    """An flock could not be acquired (held by another process)."""
+
+    def __init__(self, lock_path: str, *, mode: str) -> None:
+        self.lock_path = lock_path
+        self.mode = mode
+        super().__init__(f"Lock conflict on {lock_path} ({mode}): held by another process")

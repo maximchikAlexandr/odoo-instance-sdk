@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from odoo_instance_sdk.internal.files import (
@@ -50,11 +52,11 @@ class TestMakeDownloadFilename:
 
 
 class TestEnsureDestination:
-    def test_resolves_within_base(self, tmp_path) -> None:
+    def test_resolves_within_base(self, tmp_path: Path) -> None:
         dest = ensure_destination(tmp_path, "backup.zip")
         assert dest == (tmp_path / "backup.zip").resolve()
 
-    def test_escape_rejected(self, tmp_path) -> None:
+    def test_escape_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="escape"):
             ensure_destination(tmp_path, "../escape.zip")
 

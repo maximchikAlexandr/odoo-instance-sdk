@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from odoo_instance_sdk.models import BackupFormat
 from tests.fixtures import make_backup
 
+if TYPE_CHECKING:
+    from pytest_httpx import HTTPXMock
+
+    from odoo_instance_sdk.resources.instance import OdooInstance
+
 
 class TestRestore:
-    def test_remote_backup_to_local_restore(self, instance, tmp_path, monkeypatch, httpx_mock):
-
+    def test_remote_backup_to_local_restore(
+        self,
+        instance: OdooInstance,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        httpx_mock: HTTPXMock,
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
 
         from tests.fixtures.odoo_database_server import BACKUP_ZIP_CONTENT
@@ -35,7 +47,7 @@ class TestRestore:
             backup.database_name,
             backup.format.value,
             backup.filestore_requested,
-            backup.path,
+            Path(backup.path),
         )
         catalog.success_download(str(backup.id), backup.filename, backup.size_bytes, backup.sha256)
 
@@ -61,8 +73,9 @@ class TestRestore:
         result = instance.databases.restore(backup, "testdb")
         assert result.new_db == "testdb"
 
-    def test_forged_backup_rejected(self, instance, tmp_path, monkeypatch):
-
+    def test_forged_backup_rejected(
+        self, instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
 
         backup_file = tmp_path / "forged.zip"
@@ -79,8 +92,13 @@ class TestRestore:
         with pytest.raises(BackupNotFoundError):
             instance.databases.restore(backup, "testdb")
 
-    def test_existing_target_rejected(self, instance, tmp_path, monkeypatch, httpx_mock):
-
+    def test_existing_target_rejected(
+        self,
+        instance: OdooInstance,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        httpx_mock: HTTPXMock,
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
 
         backup_dir = tmp_path / "backups"
@@ -103,7 +121,7 @@ class TestRestore:
             backup.database_name,
             backup.format.value,
             backup.filestore_requested,
-            backup.path,
+            Path(backup.path),
         )
         catalog.success_download(str(backup.id), backup.filename, backup.size_bytes, backup.sha256)
 
@@ -118,7 +136,7 @@ class TestRestore:
         with pytest.raises(DatabaseAlreadyExistsError):
             instance.databases.restore(backup, "existing_db")
 
-    def test_remote_restore_rejected(self, instance_remote, tmp_path):
+    def test_remote_restore_rejected(self, instance_remote: OdooInstance, tmp_path: Path) -> None:
         backup_file = tmp_path / "test.zip"
         backup = make_backup(
             source_base_url="http://example.com:8069",
@@ -134,7 +152,7 @@ class TestRestore:
 
 
 class TestDrop:
-    def test_drop_success(self, instance, httpx_mock):
+    def test_drop_success(self, instance: OdooInstance, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
             url="http://localhost:8069/web/database/drop",
             method="POST",
@@ -151,7 +169,7 @@ class TestDrop:
         result = instance.databases.drop("testdb")
         assert result.db == "testdb"
 
-    def test_drop_nonexistent(self, instance, httpx_mock):
+    def test_drop_nonexistent(self, instance: OdooInstance, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
             url="http://localhost:8069/web/database/drop",
             method="POST",
@@ -167,7 +185,7 @@ class TestDrop:
         result = instance.databases.drop("nonexistent")
         assert result.db == "nonexistent"
 
-    def test_remote_drop_rejected(self, instance_remote):
+    def test_remote_drop_rejected(self, instance_remote: OdooInstance) -> None:
         from odoo_instance_sdk.exceptions import NonLocalInstanceError
 
         with pytest.raises(NonLocalInstanceError):
@@ -176,8 +194,12 @@ class TestDrop:
 
 class TestValidationUnavailable:
     def test_validation_unavailable_records_event(
-        self, instance, tmp_path, monkeypatch, httpx_mock
-    ):
+        self,
+        instance: OdooInstance,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        httpx_mock: HTTPXMock,
+    ) -> None:
         from odoo_instance_sdk.models import BackupState
 
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
@@ -207,7 +229,7 @@ class TestValidationUnavailable:
             backup.database_name,
             backup.format.value,
             backup.filestore_requested,
-            backup.path,
+            Path(backup.path),
         )
         catalog.success_download(str(backup.id), backup.filename, backup.size_bytes, backup.sha256)
 

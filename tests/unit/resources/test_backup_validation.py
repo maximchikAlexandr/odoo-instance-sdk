@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -10,8 +11,12 @@ from odoo_instance_sdk.models import BackupFormat
 from odoo_instance_sdk.resources.backup import BackupResource
 from tests.fixtures import make_backup
 
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.models import Backup
 
-def _make(file_path: Path, **overrides: object):
+
+def _make(file_path: Path, **overrides: object) -> Backup:
     return make_backup(
         source_base_url="http://localhost:8069",
         database_name="testdb",
@@ -22,7 +27,7 @@ def _make(file_path: Path, **overrides: object):
     )
 
 
-def _register(client, backup) -> None:
+def _register(client: OdooClient, backup: Backup) -> None:
     catalog = client.get_catalog()
     catalog.start_download(
         str(backup.id),
@@ -36,7 +41,9 @@ def _register(client, backup) -> None:
 
 
 class TestBackupResourceValidate:
-    def test_validate_missing_file(self, client, tmp_path, monkeypatch):
+    def test_validate_missing_file(
+        self, client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
         backup_file = tmp_path / "vanished.zip"
         backup_file.write_bytes(b"x")
@@ -47,7 +54,13 @@ class TestBackupResourceValidate:
         with pytest.raises(BackupNotAvailableError):
             res.validate(backup)
 
-    def test_validate_valid_backup_zip(self, client, tmp_path, monkeypatch, backup_fixtures):
+    def test_validate_valid_backup_zip(
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        backup_fixtures: dict[str, Path],
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
 
         backup_root = tmp_path / "backup_storage"
@@ -62,7 +75,13 @@ class TestBackupResourceValidate:
         result = res.validate(backup)
         assert result.valid is True
 
-    def test_validate_invalid_manifest(self, client, tmp_path, monkeypatch, backup_fixtures):
+    def test_validate_invalid_manifest(
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        backup_fixtures: dict[str, Path],
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
         backup_root = tmp_path / "backup_storage"
         backup_root.mkdir(parents=True, exist_ok=True)
@@ -77,7 +96,13 @@ class TestBackupResourceValidate:
         assert result.valid is False
         assert any("manifest" in e.lower() for e in result.errors)
 
-    def test_validate_corrupted_zip(self, client, tmp_path, monkeypatch, backup_fixtures):
+    def test_validate_corrupted_zip(
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        backup_fixtures: dict[str, Path],
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
         backup_root = tmp_path / "backup_storage"
         backup_root.mkdir(parents=True, exist_ok=True)
@@ -91,7 +116,13 @@ class TestBackupResourceValidate:
         result = res.validate(backup)
         assert result.valid is False
 
-    def test_validate_missing_member(self, client, tmp_path, monkeypatch, backup_fixtures):
+    def test_validate_missing_member(
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        backup_fixtures: dict[str, Path],
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
         backup_root = tmp_path / "backup_storage"
         backup_root.mkdir(parents=True, exist_ok=True)
@@ -107,8 +138,12 @@ class TestBackupResourceValidate:
         assert any("Missing" in e for e in result.errors)
 
     def test_validate_dump_with_pg_restore_exit_zero(
-        self, client, tmp_path, monkeypatch, pg_restore_fixtures
-    ):
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pg_restore_fixtures: dict[str, Path],
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.backup_validation.shutil.which",
@@ -126,8 +161,12 @@ class TestBackupResourceValidate:
         assert result.valid is True
 
     def test_validate_dump_with_pg_restore_exit_one(
-        self, client, tmp_path, monkeypatch, pg_restore_fixtures
-    ):
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pg_restore_fixtures: dict[str, Path],
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.backup_validation.shutil.which",
@@ -144,7 +183,13 @@ class TestBackupResourceValidate:
         result = res.validate(backup)
         assert result.valid is False
 
-    def test_validate_dump_timeout(self, client, tmp_path, monkeypatch, pg_restore_fixtures):
+    def test_validate_dump_timeout(
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        pg_restore_fixtures: dict[str, Path],
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.backup_validation.shutil.which",
@@ -161,7 +206,9 @@ class TestBackupResourceValidate:
         result = res.validate(backup, timeout=1.0)
         assert result.valid is False
 
-    def test_validate_dump_unavailable(self, client, tmp_path, monkeypatch):
+    def test_validate_dump_unavailable(
+        self, client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.backup_validation.shutil.which",
@@ -178,7 +225,9 @@ class TestBackupResourceValidate:
         result = res.validate(backup)
         assert result.valid is False
 
-    def test_validate_dump_unavailable_raises(self, client, tmp_path, monkeypatch):
+    def test_validate_dump_unavailable_raises(
+        self, client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
 
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
@@ -197,7 +246,13 @@ class TestBackupResourceValidate:
         with pytest.raises(BackupValidationUnavailableError):
             res.validate(backup, raise_if_unavailable=True)
 
-    def test_validate_records_audit_event(self, client, tmp_path, monkeypatch, backup_fixtures):
+    def test_validate_records_audit_event(
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        backup_fixtures: dict[str, Path],
+    ) -> None:
         from odoo_instance_sdk.models import BackupEventType
 
         monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)

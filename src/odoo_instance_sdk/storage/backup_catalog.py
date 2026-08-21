@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import os
 import sqlite3
+import tempfile
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -15,6 +17,11 @@ from odoo_instance_sdk.exceptions import (
     BackupNotAvailableError,
     BackupNotFoundError,
 )
+from odoo_instance_sdk.internal.locks import catalog_migration_lock_path, exclusive_lock
+from odoo_instance_sdk.internal.paths import (
+    get_legacy_catalog_path,
+)
+from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
 from odoo_instance_sdk.models import (
     Backup,
     BackupEvent,
@@ -43,9 +50,11 @@ def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
 class BackupCatalog:
     db_path: Path
     _conn: sqlite3.Connection = field(init=False, repr=False)
+    _migrated_legacy: bool = field(init=False, repr=False, default=False)
 
     def __post_init__(self) -> None:
         try:
+            self._maybe_migrate_legacy()
             self._conn = sqlite3.connect(str(self.db_path), timeout=5.0)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -53,14 +62,60 @@ class BackupCatalog:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._create_schema(self._conn)
             self.db_path.chmod(0o600)
-            for sidecar in (self.db_path.with_suffix(self.db_path.suffix + "-wal"),
-                            self.db_path.with_suffix(self.db_path.suffix + "-shm")):
+            for sidecar in (
+                self.db_path.with_suffix(self.db_path.suffix + "-wal"),
+                self.db_path.with_suffix(self.db_path.suffix + "-shm"),
+            ):
                 if sidecar.exists():
                     sidecar.chmod(0o600)
         except sqlite3.Error as e:
             raise BackupCatalogError(str(e)) from e
         except OSError as e:
             raise BackupCatalogError(f"Failed to set permissions on catalog file: {e}") from e
+
+    def _maybe_migrate_legacy(self) -> None:
+        if self.db_path.exists():
+            return
+        from odoo_instance_sdk.internal.paths import get_catalog_path
+
+        if self.db_path != get_catalog_path():
+            return
+        legacy = get_legacy_catalog_path()
+        if not legacy.exists():
+            return
+        with exclusive_lock(catalog_migration_lock_path()):
+            if self.db_path.exists():
+                return
+            if not legacy.exists():
+                return
+            self._copy_legacy_to_durable(legacy)
+
+    def _copy_legacy_to_durable(self, legacy: Path) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        src = sqlite3.connect(str(legacy), timeout=5.0)
+        try:
+            src.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                dir=str(self.db_path.parent), suffix=".tmp", prefix=self.db_path.name
+            )
+            os.close(tmp_fd)
+            tmp_path = Path(tmp_name)
+            dst = sqlite3.connect(str(tmp_path), timeout=5.0)
+            try:
+                src.backup(dst)
+                dst.close()
+            finally:
+                src.close()
+            os.chmod(tmp_path, 0o600)
+            fd = os.open(str(tmp_path), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp_path, self.db_path)
+            self._migrated_legacy = True
+        except sqlite3.Error as e:
+            raise BackupCatalogError(f"Legacy catalog migration failed: {e}") from e
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript("""
@@ -126,6 +181,50 @@ class BackupCatalog:
                 CREATE INDEX IF NOT EXISTS database_events_cluster_idx ON database_events (db_host, db_port, database_name, sequence DESC);
             """)
             conn.execute("PRAGMA user_version = 2")
+            conn.commit()
+        if user_version < 3:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS environments (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    repository_root TEXT NOT NULL,
+                    git_common_dir TEXT NOT NULL,
+                    branch TEXT NOT NULL,
+                    base_ref TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    generated_config_path TEXT NOT NULL,
+                    python_environment_path TEXT NOT NULL,
+                    python_environment_owned INTEGER NOT NULL,
+                    dependency_lock_path TEXT NOT NULL,
+                    http_interface TEXT NOT NULL,
+                    http_port INTEGER NOT NULL,
+                    db_mode TEXT NOT NULL,
+                    source_db_name TEXT,
+                    target_db_name TEXT,
+                    backup_id TEXT,
+                    runtime_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT,
+                    removed_at TEXT,
+                    last_error TEXT,
+                    FOREIGN KEY (backup_id) REFERENCES backups(id)
+                );
+                CREATE INDEX IF NOT EXISTS environments_active_idx ON environments (git_common_dir, branch, state);
+                CREATE INDEX IF NOT EXISTS environments_port_idx ON environments (http_port, state);
+
+                CREATE TABLE IF NOT EXISTS environment_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    environment_id TEXT NOT NULL,
+                    operation TEXT NOT NULL CHECK (operation IN ('checkout', 'sync', 'use', 'shell', 'remove')),
+                    outcome TEXT NOT NULL CHECK (outcome IN ('started', 'succeeded', 'failed')),
+                    occurred_at TEXT NOT NULL,
+                    message TEXT,
+                    FOREIGN KEY (environment_id) REFERENCES environments(id)
+                );
+                CREATE INDEX IF NOT EXISTS environment_events_env_idx ON environment_events (environment_id, sequence DESC);
+            """)
+            conn.execute("PRAGMA user_version = 3")
             conn.commit()
 
     def close(self) -> None:
@@ -437,6 +536,155 @@ class BackupCatalog:
             (host, db_port, database_name),
         ).fetchone()
         return row is not None
+
+    def legacy_catalog_path(self) -> Path | None:
+        legacy = get_legacy_catalog_path()
+        return legacy if legacy.exists() else None
+
+    @_translate_sqlite_error
+    def create_environment(self, env: dict[str, object]) -> None:
+        self._conn.execute(
+            """INSERT INTO environments (
+                id, name, repository_root, git_common_dir, branch, base_ref,
+                worktree_path, generated_config_path, python_environment_path,
+                python_environment_owned, dependency_lock_path, http_interface,
+                http_port, db_mode, source_db_name, target_db_name, backup_id,
+                runtime_json, state, created_at, last_used_at, removed_at, last_error
+            ) VALUES (
+                :id, :name, :repository_root, :git_common_dir, :branch, :base_ref,
+                :worktree_path, :generated_config_path, :python_environment_path,
+                :python_environment_owned, :dependency_lock_path, :http_interface,
+                :http_port, :db_mode, :source_db_name, :target_db_name, :backup_id,
+                :runtime_json, :state, :created_at, :last_used_at, :removed_at, :last_error
+            )""",
+            {
+                "id": env["id"],
+                "name": env["name"],
+                "repository_root": env["repository_root"],
+                "git_common_dir": env["git_common_dir"],
+                "branch": env["branch"],
+                "base_ref": env["base_ref"],
+                "worktree_path": env["worktree_path"],
+                "generated_config_path": env["generated_config_path"],
+                "python_environment_path": env["python_environment_path"],
+                "python_environment_owned": int(bool(env["python_environment_owned"])),
+                "dependency_lock_path": env["dependency_lock_path"],
+                "http_interface": env["http_interface"],
+                "http_port": env["http_port"],
+                "db_mode": env["db_mode"],
+                "source_db_name": env.get("source_db_name"),
+                "target_db_name": env.get("target_db_name"),
+                "backup_id": env.get("backup_id"),
+                "runtime_json": env["runtime_json"],
+                "state": env["state"],
+                "created_at": env["created_at"],
+                "last_used_at": env.get("last_used_at"),
+                "removed_at": env.get("removed_at"),
+                "last_error": sanitize_last_error(str(env.get("last_error")))
+                if env.get("last_error")
+                else None,
+            },
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def update_environment_state(
+        self,
+        environment_id: str,
+        state: str,
+        *,
+        last_error: str | None = None,
+        removed_at: str | None = None,
+    ) -> None:
+        sets: list[str] = ["state = ?"]
+        params: list[str | None] = [state]
+        if last_error is not None:
+            sets.append("last_error = ?")
+            params.append(sanitize_last_error(last_error))
+        if removed_at is not None:
+            sets.append("removed_at = ?")
+            params.append(removed_at)
+        params.append(environment_id)
+        self._conn.execute(
+            f"UPDATE environments SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def update_environment(self, environment_id: str, fields_map: dict[str, object]) -> None:
+        if not fields_map:
+            return
+        if "last_error" in fields_map and fields_map["last_error"] is not None:
+            fields_map["last_error"] = sanitize_last_error(str(fields_map["last_error"]))
+        cols = ", ".join(f"{c} = :{c}" for c in fields_map)
+        params = dict(fields_map, id=environment_id)
+        self._conn.execute(
+            f"UPDATE environments SET {cols} WHERE id = :id",
+            params,
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def get_environment(self, environment_id: str) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM environments WHERE id = ?",
+            (environment_id,),
+        ).fetchone()
+        return row
+
+    @_translate_sqlite_error
+    def list_environments(
+        self,
+        *,
+        git_common_dir: str | None = None,
+        include_removed: bool = False,
+    ) -> list[sqlite3.Row]:
+        query = "SELECT * FROM environments"
+        params: list[str] = []
+        clauses: list[str] = []
+        if git_common_dir is not None:
+            clauses.append("git_common_dir = ?")
+            params.append(git_common_dir)
+        if not include_removed:
+            clauses.append("state != 'removed'")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, id DESC"
+        return self._conn.execute(query, params).fetchall()
+
+    @_translate_sqlite_error
+    def add_environment_event(
+        self,
+        environment_id: str,
+        operation: str,
+        outcome: str,
+        *,
+        message: str | None = None,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO environment_events (environment_id, operation, outcome, occurred_at, message) "
+            "VALUES (?, ?, ?, datetime('now'), ?)",
+            (environment_id, operation, outcome, sanitize_event_message(message)),
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def active_environment_for(self, git_common_dir: str, branch: str) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM environments WHERE git_common_dir = ? AND branch = ? "
+            "AND state NOT IN ('removed') ORDER BY created_at DESC LIMIT 1",
+            (git_common_dir, branch),
+        ).fetchone()
+        return row
+
+    @_translate_sqlite_error
+    def active_environment_for_port(self, port: int) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM environments WHERE http_port = ? AND state NOT IN ('removed') LIMIT 1",
+            (port,),
+        ).fetchone()
+        return row
 
     def _add_event(
         self,
