@@ -1052,6 +1052,59 @@ def deps_verify(ctx: click.Context, json_output: bool) -> None:
     sys.exit(exit_code)
 
 
+@cli.group("vscode")
+def vscode_group() -> None:
+    pass
+
+
+@vscode_group.command("generate")
+@click.option(
+    "--write", "write_file", is_flag=True, default=False, help="Write .vscode/launch.json."
+)
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
+@click.pass_context
+def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> None:
+    from odoo_instance_sdk.internal.vscode_generate import (
+        build_launch_profile,
+        launch_json,
+        write_launch_json,
+    )
+
+    project_path = _resolve_project_path(ctx)
+    client = _make_client()
+    try:
+        env_obj = _resolve_ready_env(ctx, client)
+        profile = build_launch_profile(client, env_obj)
+    except SystemExit:
+        raise
+    except Exception as e:
+        _emit_command_error(json_output, "vscode.generate", str(e))
+        sys.exit(1)
+        return
+    if write_file:
+        try:
+            content = launch_json(profile)
+            written = write_launch_json(project_path, content)
+        except Exception as e:
+            _emit_command_error(json_output, "vscode.generate", str(e))
+            sys.exit(1)
+            return
+        if json_output:
+            _emit_command_json(
+                "vscode.generate",
+                {"profile": profile, "written": str(written), "dry_run": False},
+            )
+        else:
+            click.echo(f"Wrote {written}")
+        sys.exit(0)
+        return
+    if json_output:
+        _emit_command_json("vscode.generate", {"profile": profile, "dry_run": True})
+    else:
+        click.echo(launch_json(profile), nl=False)
+    sys.exit(0)
+
+
 def _emit_command_json(command: str, data: dict[str, Any]) -> None:
     envelope = {
         "schema_version": 1,
