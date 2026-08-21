@@ -3,15 +3,18 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import os
 import re
 import socket
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.locks import environment_lock_path, exclusive_lock
+from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
 
 if TYPE_CHECKING:
@@ -28,6 +31,10 @@ class ShellOutcome:
     payload: dict[str, Any] | None
 
 
+def _safe_stderr(value: str) -> str:
+    return sanitize_last_error(value) or "<no diagnostic>"
+
+
 def _run_with_payload(
     instance: OdooInstance,
     source: str,
@@ -35,8 +42,14 @@ def _run_with_payload(
     argv: tuple[str, ...] = (),
     commit: bool = False,
     timeout: float | None = None,
+    artifact_lock_held: bool = False,
 ) -> ShellOutcome:
-    result = instance.run_shell_script(source, argv=argv, timeout=timeout, commit=commit)
+    if artifact_lock_held:
+        result = instance._run_shell_script_unlocked(
+            source, argv=argv, timeout=timeout, commit=commit
+        )
+    else:
+        result = instance.run_shell_script(source, argv=argv, timeout=timeout, commit=commit)
     payload = parse_payload(result.stdout)
     return ShellOutcome(
         returncode=result.returncode,
@@ -112,7 +125,7 @@ def list_modules(
     outcome = _run_with_payload(instance, source)
     if outcome.returncode != 0:
         raise RuntimeError(
-            f"module list failed (rc={outcome.returncode}): {outcome.stderr.strip()}"
+            f"module list failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
         )
     if outcome.payload is None or "result" not in outcome.payload:
         return []
@@ -172,7 +185,7 @@ def update_modules(
     )
     lock_path = environment_lock_path(env_id)
     with exclusive_lock(lock_path):
-        return _run_with_payload(instance, source, commit=True)
+        return _run_with_payload(instance, source, commit=True, artifact_lock_held=True)
 
 
 @dataclass(slots=True)
@@ -229,10 +242,10 @@ def run_module_tests(
     )
     lock_path = environment_lock_path(env_id)
     with exclusive_lock(lock_path):
-        outcome = _run_with_payload(instance, source)
+        outcome = _run_with_payload(instance, source, artifact_lock_held=True)
     if outcome.returncode != 0:
         raise RuntimeError(
-            f"module test shell failed (rc={outcome.returncode}): {outcome.stderr.strip()}"
+            f"module test shell failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
         )
     payload = outcome.payload or {}
     raw = payload.get("result", {})
@@ -268,6 +281,59 @@ def _is_path_within(child: Path, root: Path) -> bool:
     return True
 
 
+def _resolve_worktree_module(
+    worktree_root: Path, module: str, addons_paths: list[str] | None
+) -> Path:
+    """Resolve exactly one local addon directory without trusting Odoo output."""
+    if not module or Path(module).name != module:
+        raise ConfigError(f"invalid module name: {module!r}")
+    root = worktree_root.resolve()
+    candidates: list[Path] = []
+    for addons_root in _addons_paths(worktree_root, addons_paths):
+        try:
+            addons_root.resolve().relative_to(root)
+        except ValueError:
+            continue
+        candidate = addons_root / module
+        if candidate.is_dir() and not candidate.is_symlink() and (candidate / "__manifest__.py").is_file():
+            candidates.append(candidate)
+    unique = {path.resolve() for path in candidates}
+    if len(unique) != 1:
+        detail = "absent" if not unique else "ambiguous"
+        raise ConfigError(f"module {module!r} is {detail} in worktree-local addons paths")
+    return next(iter(unique))
+
+
+def _addons_paths(worktree_root: Path, configured: list[str] | None) -> tuple[Path, ...]:
+    """Keep only configured addon roots that resolve inside this worktree."""
+    roots: list[Path] = []
+    for raw_path in configured or []:
+        path = Path(raw_path)
+        roots.append(path if path.is_absolute() else worktree_root / path)
+    return tuple(roots)
+
+
+def _expected_translation_filename(module: str, lang: str, raw: dict[str, Any]) -> str:
+    if lang in ("pot", "__new__", ""):
+        return f"{module}.pot"
+    iso = raw.get("iso")
+    if not isinstance(iso, str) or not iso or Path(iso).name != iso:
+        raise ConfigError("translations export produced an invalid language code")
+    return f"{iso}.po"
+
+
+def _decode_translation_payload(data_b64: object, module: str, lang: str) -> bytes:
+    if not isinstance(data_b64, str) or not data_b64:
+        raise ConfigError(f"translations export produced empty payload for {module}/{lang}")
+    try:
+        content = base64.b64decode(data_b64, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(f"translations export produced invalid base64 for {module}/{lang}") from exc
+    if not content:
+        raise ConfigError(f"translations export produced empty payload for {module}/{lang}")
+    return content
+
+
 def export_translations(
     instance: OdooInstance,
     modules: tuple[str, ...],
@@ -299,7 +365,7 @@ def _export_one(
     outcome = _run_with_payload(instance, source)
     if outcome.returncode != 0:
         raise RuntimeError(
-            f"translations export failed (rc={outcome.returncode}): {outcome.stderr.strip()}"
+            f"translations export failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
         )
     if outcome.payload is None or "result" not in outcome.payload:
         raise RuntimeError("translations export produced no payload")
@@ -308,7 +374,14 @@ def _export_one(
         raise TypeError("translations export produced malformed payload")
     if raw.get("error"):
         raise ConfigError(f"translations export error: {raw.get('error')}")
-    return _finalize_export(module, lang, raw, worktree_root=worktree_root)
+    addons_paths = (
+        instance.config.start_config.addons_path
+        if instance.config.start_config is not None
+        else None
+    )
+    return _finalize_export(
+        module, lang, raw, worktree_root=worktree_root, addons_paths=addons_paths
+    )
 
 
 def _build_export_source(module: str, lang: str) -> str:
@@ -355,30 +428,48 @@ def _finalize_export(
     raw: dict[str, Any],
     *,
     worktree_root: Path,
+    addons_paths: list[str] | None,
 ) -> TranslationExportResult:
     installed = raw.get("installed")
     if not installed:
         raise ConfigError(f"module {module!r} is not installed")
-    data_b64 = raw.get("data") or ""
-    if not data_b64:
-        raise ConfigError(f"translations export produced empty payload for {module}/{lang}")
-    filename = raw.get("filename") or f"{lang}.po"
-    target_dir = worktree_root / module
-    if not target_dir.exists():
-        target_dir = worktree_root
-    if not _is_path_within(target_dir, worktree_root):
-        raise ConfigError(f"module path {target_dir} escapes worktree root {worktree_root}")
-    target = target_dir / "i18n" / filename
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if not _is_path_within(target, worktree_root):
+    filename = raw.get("filename")
+    expected_filename = _expected_translation_filename(module, lang, raw)
+    if (
+        not isinstance(filename, str)
+        or Path(filename).name != filename
+        or filename != expected_filename
+    ):
+        raise ConfigError(f"translations export produced unexpected filename for {module}/{lang}")
+    module_dir = _resolve_worktree_module(worktree_root, module, addons_paths)
+    target_dir = module_dir / "i18n"
+    target = target_dir / filename
+    if not _is_path_within(target, worktree_root) or target_dir.is_symlink():
         raise ConfigError(f"target path {target} escapes worktree root {worktree_root}")
-    content = base64.b64decode(data_b64)
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_bytes(content)
-    if target.exists():
+    content = _decode_translation_payload(raw.get("data"), module, lang)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if target_dir.is_symlink() or not _is_path_within(target, worktree_root):
+        raise ConfigError(f"target path {target} escapes worktree root {worktree_root}")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{filename}.", suffix=".tmp", dir=target_dir)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
         with contextlib.suppress(OSError):
-            tmp.chmod(target.stat().st_mode & 0o7777)
-    tmp.replace(target)
+            tmp.unlink()
+        raise
+    try:
+        if target.exists():
+            with contextlib.suppress(OSError):
+                tmp.chmod(target.stat().st_mode & 0o7777)
+        tmp.replace(target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     return TranslationExportResult(
         module=module,
         requested_lang=lang,

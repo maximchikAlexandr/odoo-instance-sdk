@@ -5,8 +5,13 @@ import re
 _MAX_LAST_ERROR = 2000
 
 _SECRET_PATTERNS = [
-    re.compile(r"(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S+", re.IGNORECASE),
-    re.compile(r"(admin_passwd|db_password|master_pwd)\s*=\s*\S+", re.IGNORECASE),
+    re.compile(
+        r"\b(password|passwd|secret|token|api[_-]?key|admin_passwd|db_password|master_pwd)"
+        r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|\S+)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:postgres(?:ql)?|mysql)://[^\s]+", re.IGNORECASE),
+    re.compile(r"://[^\s/:@]+:[^\s/@]+@", re.IGNORECASE),
 ]
 
 _ENV_VAR_RE = re.compile(r"\$\{[^}]*\}")

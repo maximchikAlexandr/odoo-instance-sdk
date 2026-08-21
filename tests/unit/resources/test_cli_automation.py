@@ -21,6 +21,7 @@ from odoo_instance_sdk.internal.automation import (
     update_modules,
     verify_deps,
 )
+from odoo_instance_sdk.internal.locks import environment_lock_path
 from odoo_instance_sdk.internal.server import _build_shell_wrapper, parse_payload
 from odoo_instance_sdk.models import CommandResult
 from odoo_instance_sdk.resources.environment import (
@@ -44,7 +45,10 @@ def _make_instance(tmp_path: Path) -> OdooInstance:
 
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     cfg = tmp_path / "odoo.conf"
-    cfg.write_text("[options]\nhttp_port = 8069\nhttp_interface = 127.0.0.1\nadmin_passwd = x\n")
+    cfg.write_text(
+        "[options]\nhttp_port = 8069\nhttp_interface = 127.0.0.1\n"
+        f"addons_path = {tmp_path / 'wt'}\nadmin_passwd = x\n"
+    )
     return client.instance.from_config(cfg)
 
 
@@ -167,6 +171,20 @@ class TestModuleList:
 
 
 class TestModuleUpdate:
+    def test_update_does_not_reacquire_its_own_environment_lock(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        inst._artifact_lock_path = environment_lock_path("update-no-self-conflict")
+        list_payload = {"result": [{"name": "comerta_base", "state": "installed"}]}
+        upgrade_payload = {"result": {"updated": ["comerta_base"]}}
+        captured = CommandResult(
+            args=[], returncode=0, stdout=_payload_stdout(upgrade_payload), stderr="", duration=0.0
+        )
+        with (
+            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(list_payload)),
+            patch("odoo_instance_sdk.internal.server._run_captured_shell", return_value=captured),
+        ):
+            assert update_modules(inst, ("comerta_base",), env_id="update-no-self-conflict").payload
+
     def test_dry_run_plan(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
         payload = {
@@ -213,6 +231,7 @@ class TestModuleUpdate:
 
         with (
             patch.object(type(inst), "run_shell_script", _impl),
+            patch.object(type(inst), "_run_shell_script_unlocked", _impl),
             patch("odoo_instance_sdk.internal.automation.exclusive_lock") as mock_lock,
         ):
             outcome = update_modules(inst, ("comerta_base",), env_id="env-1")
@@ -248,6 +267,7 @@ class TestModuleTest:
         }
         with (
             patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch.object(type(inst), "_run_shell_script_unlocked", _stub_run_shell_script(payload)),
             patch("odoo_instance_sdk.internal.automation.exclusive_lock"),
             patch("odoo_instance_sdk.internal.automation.socket.socket"),
         ):
@@ -279,6 +299,7 @@ class TestModuleTest:
         }
         with (
             patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch.object(type(inst), "_run_shell_script_unlocked", _stub_run_shell_script(payload)),
             patch("odoo_instance_sdk.internal.automation.exclusive_lock"),
             patch("odoo_instance_sdk.internal.automation.socket.socket"),
         ):
@@ -335,6 +356,7 @@ class TestTranslationsExport:
         }
         worktree = tmp_path / "wt"
         (worktree / "comerta_base" / "i18n").mkdir(parents=True)
+        (worktree / "comerta_base" / "__manifest__.py").write_text("{}")
         with patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)):
             results = export_translations(
                 inst, ("comerta_base",), ("ru_RU",), worktree_root=worktree
@@ -362,9 +384,10 @@ class TestTranslationsExport:
         }
         worktree = tmp_path / "wt"
         (worktree / "comerta_base" / "i18n").mkdir(parents=True)
+        (worktree / "comerta_base" / "__manifest__.py").write_text("{}")
         with (
             patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
-            pytest.raises(ConfigError, match="escapes worktree root"),
+            pytest.raises(ConfigError, match="unexpected filename"),
         ):
             export_translations(inst, ("comerta_base",), ("ru_RU",), worktree_root=worktree)
 
@@ -386,6 +409,7 @@ class TestTranslationsExport:
         worktree = tmp_path / "wt"
         i18n_dir = worktree / "comerta_base" / "i18n"
         i18n_dir.mkdir(parents=True)
+        (worktree / "comerta_base" / "__manifest__.py").write_text("{}")
         existing = i18n_dir / "ru.po"
         existing.write_bytes(b"OLD")
         existing.chmod(0o640)
@@ -395,6 +419,64 @@ class TestTranslationsExport:
             )
         assert results[0].path.read_bytes() == po_content
         assert not results[0].path.with_suffix(".po.tmp").exists()
+
+    def test_absent_module_is_rejected_before_creating_i18n(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "result": {
+                "iso": "ru",
+                "filename": "ru.po",
+                "data": base64.b64encode(b"x").decode(),
+                "installed": True,
+            }
+        }
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        with (
+            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            pytest.raises(ConfigError, match="absent"),
+        ):
+            export_translations(inst, ("not_local",), ("ru_RU",), worktree_root=worktree)
+        assert not (worktree / "not_local" / "i18n").exists()
+
+    def test_invalid_base64_is_rejected_before_writing(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "result": {"iso": "ru", "filename": "ru.po", "data": "%%%", "installed": True}
+        }
+        target = tmp_path / "wt" / "comerta_base" / "i18n" / "ru.po"
+        target.parent.mkdir(parents=True)
+        (target.parent.parent / "__manifest__.py").write_text("{}")
+        target.write_bytes(b"old")
+        with (
+            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            pytest.raises(ConfigError, match="invalid base64"),
+        ):
+            export_translations(inst, ("comerta_base",), ("ru_RU",), worktree_root=tmp_path / "wt")
+        assert target.read_bytes() == b"old"
+
+    def test_replace_failure_preserves_old_target_and_removes_temp(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "result": {
+                "iso": "ru",
+                "filename": "ru.po",
+                "data": base64.b64encode(b"new").decode(),
+                "installed": True,
+            }
+        }
+        target = tmp_path / "wt" / "comerta_base" / "i18n" / "ru.po"
+        target.parent.mkdir(parents=True)
+        (target.parent.parent / "__manifest__.py").write_text("{}")
+        target.write_bytes(b"old")
+        with (
+            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch("pathlib.Path.replace", side_effect=OSError("replace denied")),
+            pytest.raises(OSError, match="replace denied"),
+        ):
+            export_translations(inst, ("comerta_base",), ("ru_RU",), worktree_root=tmp_path / "wt")
+        assert target.read_bytes() == b"old"
+        assert not list(target.parent.glob(".ru.po.*.tmp"))
 
 
 class TestDepsVerify:

@@ -93,7 +93,7 @@ class DevelopmentEnvironment(msgspec.Struct, frozen=True, forbid_unknown_fields=
     source_db_name: str | None = None
     target_db_name: str | None = None
     backup_id: uuid.UUID | None = None
-    state: str
+    state: EnvironmentState
     created_at: datetime
     last_used_at: datetime | None = None
     removed_at: datetime | None = None
@@ -655,8 +655,8 @@ class EnvironmentResource:
             self._do_remove(catalog, env)
 
     def _do_remove(self, catalog: object, env: DevelopmentEnvironment) -> None:
-
         cat = cast("BackupCatalog", catalog)
+        self._preflight_remove(cat, env)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
         cat.add_environment_event(str(env.id), "remove", "started")
 
@@ -699,6 +699,63 @@ class EnvironmentResource:
         with contextlib.suppress(OSError):
             if env_root.is_dir() and not any(env_root.iterdir()):
                 env_root.rmdir()
+
+    def _preflight_remove(self, catalog: BackupCatalog, env: DevelopmentEnvironment) -> None:
+        """Reject unsafe or stale catalog rows before changing any external state."""
+        if not _port_free(env.http_interface, env.http_port):
+            raise EnvironmentConflictError(
+                "port_in_use",
+                f"reserved port {env.http_interface}:{env.http_port} is occupied",
+            )
+        repo_root = Path(env.repository_root)
+        expected_root = get_environments_root() / repo_key(repo_root, Path(env.git_common_dir)) / str(env.id)
+        env_root = Path(env.worktree_path).parent
+        if env_root.absolute() != expected_root.absolute() or _has_symlink_component(env_root):
+            raise EnvironmentConflictError("unsafe_environment_path", "environment root is not owned")
+        expected = (
+            (Path(env.worktree_path), env_root / "worktree", "dir"),
+            (Path(env.generated_config_path), env_root / "odoo.conf", "file"),
+            (Path(env.dependency_lock_path), env_root / "requirements.lock", "file"),
+        )
+        for path, owned, kind in expected:
+            _validate_owned_artifact(path, owned, kind)
+        if env.python_environment_owned:
+            _validate_owned_artifact(Path(env.python_environment_path), env_root / "venv", "dir")
+        worktree = Path(env.worktree_path)
+        if worktree.is_dir():
+            from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty
+
+            if worktree_is_dirty(worktree):
+                raise EnvironmentConflictError(
+                    "dirty_worktree", f"worktree {worktree} is dirty; refusing to remove"
+                )
+
+        if env.db_mode == EnvironmentDatabaseMode.COPY:
+            self._preflight_copy_remove(catalog, env)
+
+    def _preflight_copy_remove(self, catalog: BackupCatalog, env: DevelopmentEnvironment) -> None:
+        if env.target_db_name is None or env.backup_id is None:
+            raise EnvironmentConflictError("copy_ownership_missing", "copy environment ownership is incomplete")
+        config_path = Path(env.generated_config_path)
+        if not config_path.is_file():
+            raise EnvironmentConflictError("copy_config_missing", "copy environment config is missing")
+        cfg = parse_odoo_config(config_path)  # Read before any deletion.
+        master_pwd = get_admin_passwd(cfg)
+        if master_pwd is None:
+            raise EnvironmentConflictError("copy_config_invalid", "copy environment master password is missing")
+        instance = self._client.instance.from_config(config_path, master_password=master_pwd)
+        db_port = instance.config.db_port or 5432
+        restored = catalog.latest_restore(instance.config.db_host, db_port, env.target_db_name)
+        if restored is None or restored.id != env.backup_id:
+            raise EnvironmentConflictError(
+                "copy_restore_mismatch", "target database has no matching recorded restore"
+            )
+        backup_row = catalog.get_by_id(str(env.backup_id))
+        if backup_row is None:
+            raise EnvironmentConflictError("copy_backup_missing", "owned backup is absent from catalog")
+        backup = _row_to_backup(backup_row)
+        if backup is None or backup.id != env.backup_id:
+            raise EnvironmentConflictError("copy_backup_mismatch", "owned backup metadata is invalid")
 
     def _remove_worktree(
         self,
@@ -1106,6 +1163,27 @@ def _port_free(host: str, port: int) -> bool:
         s.close()
 
 
+def _has_symlink_component(path: Path) -> bool:
+    current = Path(path.anchor) if path.is_absolute() else Path()
+    for part in path.parts[1:] if path.is_absolute() else path.parts:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _validate_owned_artifact(path: Path, expected: Path, kind: str) -> None:
+    if path.absolute() != expected.absolute():
+        raise EnvironmentConflictError("unsafe_environment_path", f"unexpected {kind} path: {path}")
+    if _has_symlink_component(path):
+        raise EnvironmentConflictError("unsafe_environment_path", f"symlinked {kind} path: {path}")
+    if not path.exists():
+        return
+    valid = path.is_file() if kind == "file" else path.is_dir()
+    if not valid:
+        raise EnvironmentConflictError("unsafe_environment_path", f"unexpected {kind} type: {path}")
+
+
 def _resolve_bind_host(host: str) -> str:
     if is_loopback_host(host):
         return host
@@ -1113,7 +1191,9 @@ def _resolve_bind_host(host: str) -> str:
 
 
 def _project_root_from_config(project: ProjectConfig) -> Path:
-    raise ConfigError("ProjectConfig does not carry repo root; pass an explicit Path")
+    if project.repository_root is None:
+        raise ConfigError("ProjectConfig has no repository provenance; load it from a project path")
+    return project.repository_root
 
 
 class _CompileFailed(Exception):

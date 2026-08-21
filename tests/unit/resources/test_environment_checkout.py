@@ -168,6 +168,16 @@ class TestWorktreeBranchRules:
 
 
 class TestGetAndList:
+    def test_loaded_project_config_is_accepted_for_list(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        env_client.environments.checkout(
+            project_manifest, "feat/config-project", options=EnvironmentCheckoutOptions(python=str(fake_python))
+        )
+        from odoo_instance_sdk.project import ProjectConfig
+
+        assert len(env_client.environments.list(project=ProjectConfig.load(project_manifest))) == 1
+
     def test_get_by_id(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:

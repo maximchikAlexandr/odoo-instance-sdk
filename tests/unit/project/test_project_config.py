@@ -32,6 +32,7 @@ def test_load_existing_manifest(tmp_path: Path) -> None:
     assert cfg.requirements == ("reqs.txt",)
     assert cfg.default_run_args == ("--dev=qweb",)
     assert cfg.runtime_cwd == Path(".")
+    assert cfg.repository_root == tmp_path.resolve()
 
 
 def test_load_missing_manifest_raises_typed_error(tmp_path: Path) -> None:
@@ -53,7 +54,8 @@ def test_roundtrip_write_read_secrets_free(tmp_path: Path) -> None:
     )
     write_manifest(tmp_path, cfg)
     loaded = ProjectConfig.load(tmp_path)
-    assert loaded == cfg
+    assert loaded.to_manifest() == cfg.to_manifest()
+    assert loaded.repository_root == tmp_path.resolve()
 
 
 def test_manifest_refuses_secrets() -> None:
@@ -76,3 +78,9 @@ def test_project_config_is_frozen() -> None:
     cfg = ProjectConfig(odoo_bin=Path("/opt/odoo/odoo-bin"))
     with pytest.raises(AttributeError):
         cfg.odoo_bin = Path("/other")  # type: ignore[misc]
+
+
+def test_manual_config_can_explicitly_bind_repository_root(tmp_path: Path) -> None:
+    cfg = ProjectConfig(repository_root=tmp_path)
+    assert cfg.repository_root == tmp_path
+    assert "repository_root" not in cfg.to_manifest()

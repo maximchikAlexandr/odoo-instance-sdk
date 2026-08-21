@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import contextlib
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -10,6 +11,7 @@ from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     NonLocalInstanceError,
 )
+from odoo_instance_sdk.internal.locks import environment_lock_path, shared_lock
 from odoo_instance_sdk.internal.odoo_config import (
     infer_base_url,
     parse_db_names,
@@ -144,6 +146,7 @@ class InstanceFactory:
                 db_password=start_cfg.db_password,
             ),
             _client=self._client,
+            _artifact_lock_path=environment_lock_path(str(environment.id)),
         )
 
 
@@ -187,6 +190,7 @@ class OdooInstance:
     config: InstanceConfig
     _client: OdooClient
     databases: DatabaseResource = field(init=False)
+    _artifact_lock_path: Path | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.databases = DatabaseResource(
@@ -255,12 +259,13 @@ class OdooInstance:
         from odoo_instance_sdk.internal.server import _build_cli_args
 
         cli_args = _build_cli_args(config)
-        return run_foreground_process(
-            self._executable_prefix(),
-            cli_args,
-            cwd=resolved_cwd,
-            env=env,
-        )
+        with self._artifact_lock():
+            return run_foreground_process(
+                self._executable_prefix(),
+                cli_args,
+                cwd=resolved_cwd,
+                env=env,
+            )
 
     def shell(self, *, args: Sequence[str] = ()) -> int:
         config = self.config.start_config
@@ -274,11 +279,12 @@ class OdooInstance:
         cli_args = _build_cli_args(config)
         full_args = [*cli_args, "shell", *args]
         resolved_cwd = self.config.default_cwd
-        return run_foreground_process(
-            self._executable_prefix(),
-            full_args,
-            cwd=resolved_cwd,
-        )
+        with self._artifact_lock():
+            return run_foreground_process(
+                self._executable_prefix(),
+                full_args,
+                cwd=resolved_cwd,
+            )
 
     def run_shell_script(
         self,
@@ -288,6 +294,20 @@ class OdooInstance:
         timeout: float | None = None,
         commit: bool = False,
     ) -> CommandResult:
+        with self._artifact_lock():
+            return self._run_shell_script_unlocked(
+                source, argv=argv, timeout=timeout, commit=commit
+            )
+
+    def _run_shell_script_unlocked(
+        self,
+        source: str,
+        *,
+        argv: Sequence[str] = (),
+        timeout: float | None = None,
+        commit: bool = False,
+    ) -> CommandResult:
+        """Internal shell primitive for coordinators which already own the artifact lock."""
         config = self.config.start_config
         if config is None:
             raise InstanceConfigurationError(
@@ -307,6 +327,14 @@ class OdooInstance:
             commit=commit,
             cwd=resolved_cwd,
         )
+
+    @contextlib.contextmanager
+    def _artifact_lock(self) -> Iterator[None]:
+        if self._artifact_lock_path is None:
+            yield
+            return
+        with shared_lock(self._artifact_lock_path):
+            yield
 
     def stop(self, proc: OdooProcess, *, timeout: float = 10.0) -> None:
         handle, secret_config = self._client.unregister_process(proc.id)

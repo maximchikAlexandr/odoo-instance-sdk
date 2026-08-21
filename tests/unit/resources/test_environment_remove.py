@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,7 +30,7 @@ class TestEnvRemove:
         with pytest.raises(EnvironmentConflictError):
             env_client.environments.remove(env)
         updated = env_client.environments.get(str(env.id))
-        assert updated.state == EnvironmentState.CLEANUP_FAILED
+        assert updated.state == EnvironmentState.READY
 
     def test_shared_source_db_never_dropped(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
@@ -63,6 +64,24 @@ class TestEnvRemove:
         assert cfg_path.is_file()
         env_client.environments.remove(env)
         assert not cfg_path.exists()
+
+    def test_occupied_reserved_port_causes_zero_mutations(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        env = env_client.environments.checkout(
+            project_manifest, "feat/rm-port", options=EnvironmentCheckoutOptions(python=str(fake_python))
+        )
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind((env.http_interface, env.http_port))
+        listener.listen()
+        try:
+            with pytest.raises(EnvironmentConflictError, match="reserved port"):
+                env_client.environments.remove(env)
+        finally:
+            listener.close()
+        assert env_client.environments.get(str(env.id)).state == EnvironmentState.READY
+        assert Path(env.worktree_path).is_dir()
+        assert Path(env.generated_config_path).is_file()
 
     def test_audit_rows_kept(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
