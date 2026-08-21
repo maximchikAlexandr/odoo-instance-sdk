@@ -31,13 +31,16 @@ class TestOdcliLifecycle:
         fake_python: Path,
         source_config: Path,
     ) -> None:
+        fake_odoo = fake_python.parent / "odoo-bin"
+        fake_odoo.write_text("#!/bin/sh\nexit 0\n")
+        fake_odoo.chmod(0o755)
         init_result = CliRunner().invoke(
             cli,
             [
                 "init",
                 "--no-input",
                 "--odoo-bin",
-                "/usr/bin/odoo",
+                str(fake_odoo),
                 "--python",
                 str(fake_python),
                 "--config",

@@ -11,6 +11,7 @@ import pytest
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.internal.address import AddressState
 from odoo_instance_sdk.internal.automation import (
     eval_expression,
     exec_script,
@@ -21,7 +22,6 @@ from odoo_instance_sdk.internal.automation import (
     update_modules,
     verify_deps,
 )
-from odoo_instance_sdk.internal.locks import environment_lock_path
 from odoo_instance_sdk.internal.server import _build_shell_wrapper, parse_payload
 from odoo_instance_sdk.models import CommandResult
 from odoo_instance_sdk.resources.environment import (
@@ -173,6 +173,8 @@ class TestModuleList:
 class TestModuleUpdate:
     def test_update_does_not_reacquire_its_own_environment_lock(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
+        from odoo_instance_sdk.internal.locks import environment_lock_path
+
         inst._artifact_lock_path = environment_lock_path("update-no-self-conflict")
         list_payload = {"result": [{"name": "comerta_base", "state": "installed"}]}
         upgrade_payload = {"result": {"updated": ["comerta_base"]}}
@@ -231,13 +233,11 @@ class TestModuleUpdate:
 
         with (
             patch.object(type(inst), "run_shell_script", _impl),
-            patch.object(type(inst), "_run_shell_script_unlocked", _impl),
-            patch("odoo_instance_sdk.internal.automation.exclusive_lock") as mock_lock,
+            patch.object(type(inst), "_run_shell_script_exclusive", _impl),
         ):
             outcome = update_modules(inst, ("comerta_base",), env_id="env-1")
         assert outcome.payload is not None
         assert outcome.payload["result"]["updated"] == ["comerta_base"]
-        mock_lock.assert_called_once()
 
     def test_not_installed_errors(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
@@ -267,9 +267,13 @@ class TestModuleTest:
         }
         with (
             patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
-            patch.object(type(inst), "_run_shell_script_unlocked", _stub_run_shell_script(payload)),
-            patch("odoo_instance_sdk.internal.automation.exclusive_lock"),
-            patch("odoo_instance_sdk.internal.automation.socket.socket"),
+            patch.object(
+                type(inst), "_run_shell_script_exclusive", _stub_run_shell_script(payload)
+            ),
+            patch(
+                "odoo_instance_sdk.internal.automation.probe_address",
+                return_value=AddressState.FREE,
+            ),
         ):
             res, code = run_module_tests(
                 inst,
@@ -299,9 +303,13 @@ class TestModuleTest:
         }
         with (
             patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
-            patch.object(type(inst), "_run_shell_script_unlocked", _stub_run_shell_script(payload)),
-            patch("odoo_instance_sdk.internal.automation.exclusive_lock"),
-            patch("odoo_instance_sdk.internal.automation.socket.socket"),
+            patch.object(
+                type(inst), "_run_shell_script_exclusive", _stub_run_shell_script(payload)
+            ),
+            patch(
+                "odoo_instance_sdk.internal.automation.probe_address",
+                return_value=AddressState.FREE,
+            ),
         ):
             res, code = run_module_tests(
                 inst,
@@ -317,25 +325,22 @@ class TestModuleTest:
     def test_port_conflict_precondition_error(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
 
-        def _boom(*_a: Any, **_kw: Any) -> Any:
-            raise AssertionError("socket should not bind via real socket")
-
         with (
             patch.object(type(inst), "run_shell_script", _stub_run_shell_script()),
-            patch("odoo_instance_sdk.internal.automation.exclusive_lock"),
-            patch("odoo_instance_sdk.internal.automation.socket.socket") as mock_sock_cls,
+            patch(
+                "odoo_instance_sdk.internal.automation.probe_address",
+                return_value=AddressState.OCCUPIED,
+            ),
+            pytest.raises(ConfigError, match="port occupied"),
         ):
-            mock_sock = mock_sock_cls.return_value
-            mock_sock.bind.side_effect = OSError("addr in use")
-            with pytest.raises(ConfigError, match="port conflict"):
-                run_module_tests(
-                    inst,
-                    ("comerta_base",),
-                    "/tag",
-                    env_id="e1",
-                    http_interface="127.0.0.1",
-                    http_port=18071,
-                )
+            run_module_tests(
+                inst,
+                ("comerta_base",),
+                "/tag",
+                env_id="e1",
+                http_interface="127.0.0.1",
+                http_port=18071,
+            )
 
 
 class TestTranslationsExport:
@@ -441,9 +446,7 @@ class TestTranslationsExport:
 
     def test_invalid_base64_is_rejected_before_writing(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
-        payload = {
-            "result": {"iso": "ru", "filename": "ru.po", "data": "%%%", "installed": True}
-        }
+        payload = {"result": {"iso": "ru", "filename": "ru.po", "data": "%%%", "installed": True}}
         target = tmp_path / "wt" / "comerta_base" / "i18n" / "ru.po"
         target.parent.mkdir(parents=True)
         (target.parent.parent / "__manifest__.py").write_text("{}")
@@ -563,7 +566,7 @@ class TestCliEval:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
         env = env_client.environments.checkout(project_manifest, "feat/eval-cli", options=opts)
         runner = CliRunner()
@@ -597,7 +600,7 @@ class TestCliModuleUpdate:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
         env = env_client.environments.checkout(project_manifest, "feat/modupd-cli", options=opts)
         runner = CliRunner()
@@ -633,7 +636,7 @@ class TestCliModuleUpdate:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
         env = env_client.environments.checkout(project_manifest, "feat/modupd-dry", options=opts)
         runner = CliRunner()
@@ -675,7 +678,7 @@ class TestCliExecStdin:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
         env = env_client.environments.checkout(project_manifest, "feat/exec-cli", options=opts)
         runner = CliRunner()
@@ -713,7 +716,7 @@ class TestCliModuleList:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
         env = env_client.environments.checkout(project_manifest, "feat/modlist-cli", options=opts)
         runner = CliRunner()

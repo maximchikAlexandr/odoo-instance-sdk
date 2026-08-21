@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ import click
 
 from odoo_instance_sdk.exceptions import VscodeImportError
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
+from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
 from odoo_instance_sdk.project import ProjectConfig
 
@@ -111,6 +113,7 @@ def init(
         return
 
     config = ProjectConfig(
+        repository_root=resolved_project.resolve(),
         odoo_bin=option_state.odoo_bin,
         python=option_state.python,
         source_config=option_state.source_config,
@@ -260,37 +263,61 @@ def _manifest_dict(config: ProjectConfig) -> dict[str, Any]:
     }
 
 
-def _emit_json(
-    *, ok: bool, command: str, data: dict[str, Any], provenance: dict[str, Any], dry_run: bool
+def _sanitize_diagnostic(value: object) -> str:
+    """Make every non-interactive diagnostic safe and bounded before emission."""
+    return sanitize_last_error(str(value)) or "operation failed"
+
+
+def _emit_json_envelope(
+    *,
+    ok: bool,
+    command: str,
+    result: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
+    provenance: dict[str, Any] | None = None,
+    dry_run: bool = False,
+    error_code: str | None = None,
+    error_message: object | None = None,
 ) -> None:
-    envelope = {
+    envelope: dict[str, Any] = {
         "schema_version": 1,
         "ok": ok,
         "command": command,
-        "data": data,
-        "provenance": provenance,
+        "context": context or {},
+        "provenance": provenance or {},
         "dry_run": dry_run,
         "warnings": [],
     }
+    if ok:
+        safe_result = result or {}
+        # `data` remains for the v1 consumers; `result` is the single stable
+        # machine-output contract for new callers.
+        envelope["result"] = safe_result
+        envelope["data"] = safe_result
+    else:
+        envelope["error"] = {
+            "code": error_code or command.replace(".", "_") + "_failed",
+            "message": _sanitize_diagnostic(error_message),
+        }
     click.echo(json.dumps(envelope, indent=2, default=str))
+
+
+def _emit_json(
+    *, ok: bool, command: str, data: dict[str, Any], provenance: dict[str, Any], dry_run: bool
+) -> None:
+    _emit_json_envelope(ok=ok, command=command, result=data, provenance=provenance, dry_run=dry_run)
 
 
 def _fail(no_input: bool, json_output: bool, message: str) -> None:
     if json_output:
-        _emit_json(ok=False, command="init", data={}, provenance={}, dry_run=False)
-        click.echo(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "ok": False,
-                    "error": {"code": "init_failed", "message": message},
-                },
-                indent=2,
-            ),
-            err=True,
+        _emit_json_envelope(
+            ok=False,
+            command="init",
+            error_code="init_failed",
+            error_message=message,
         )
     else:
-        click.echo(message, err=True)
+        click.echo(_sanitize_diagnostic(message), err=True)
     sys.exit(1)
 
 
@@ -301,10 +328,15 @@ def _make_client() -> OdooClient:
 
 
 def _resolve_project_path(ctx: click.Context) -> Path:
+    from odoo_instance_sdk.internal.context import resolve_project
+
     raw = ctx.obj.get("project")
-    if raw is not None:
-        return Path(raw)
-    return Path.cwd()
+    project = resolve_project(Path(raw) if raw is not None else None)
+    ctx.obj["project_source"] = "explicit" if raw is not None else "cwd_or_worktree"
+    if isinstance(project, ProjectConfig):
+        assert project.repository_root is not None
+        return project.repository_root
+    return Path(project)
 
 
 @cli.group()
@@ -358,33 +390,43 @@ def env_checkout(
         EnvironmentDatabaseMode,
     )
 
-    project_path = _resolve_project_path(ctx)
-    client = _make_client()
-    options = EnvironmentCheckoutOptions(
-        base_ref=base_ref,
-        name=name,
-        config_path=Path(config_path) if config_path else None,
-        db_mode=EnvironmentDatabaseMode(db_mode),
-        source_database=source_database,
-        target_database=target_database,
-        odoo_bin=Path(odoo_bin) if odoo_bin else None,
-        python=python,
-        create_venv=create_venv,
-        http_port=http_port,
-    )
     try:
-        result = client.environments.checkout(
-            project_path, branch, options=options, dry_run=dry_run
+        project_path = _resolve_project_path(ctx)
+        client = _make_client()
+        options = EnvironmentCheckoutOptions(
+            base_ref=base_ref,
+            name=name,
+            config_path=Path(config_path) if config_path else None,
+            db_mode=EnvironmentDatabaseMode(db_mode),
+            source_database=source_database,
+            target_database=target_database,
+            odoo_bin=Path(odoo_bin) if odoo_bin else None,
+            python=python,
+            create_venv=create_venv,
+            http_port=http_port,
+        )
+        result = (
+            client.environments.plan_checkout(project_path, branch, options=options)
+            if dry_run
+            else client.environments.checkout(project_path, branch, options=options)
         )
     except Exception as e:
         _env_fail(json_output, "env.checkout", str(e))
         return
     if json_output:
-        _env_json("env.checkout", _env_dict(result), dry_run=dry_run)
+        _env_json(
+            "env.checkout",
+            _checkout_plan_dict(result) if dry_run else _env_dict(result),
+            dry_run=dry_run,
+        )
     else:
-        click.echo(f"Environment {result.name} ({result.id}) state={result.state}")
         if dry_run:
-            click.echo("Dry run — no files written.")
+            _print_plan("Checkout plan", _checkout_plan_dict(result))
+        else:
+            rendered = _env_dict(result)
+            click.echo(
+                f"Environment {rendered['name']} ({rendered['id']}) state={rendered['state']}"
+            )
         if result.db_mode == EnvironmentDatabaseMode.SHARED:
             click.echo("Warning: code/process isolated, DB and filestore are NOT.")
 
@@ -398,14 +440,18 @@ def env_checkout(
 @click.pass_context
 def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output: bool) -> None:
     client = _make_client()
-    project = None if all_projects else _resolve_project_path(ctx)
     try:
+        project = None if all_projects else _resolve_project_path(ctx)
         envs = client.environments.list(project=project, include_removed=all_envs)
     except Exception as e:
         _env_fail(json_output, "env.list", str(e))
         return
     if json_output:
-        _env_json("env.list", {"environments": [_env_dict(e) for e in envs]}, dry_run=False)
+        _env_json(
+            "env.list",
+            {"environments": [_reconcile_environment(e, client) for e in envs]},
+            dry_run=False,
+        )
     else:
         _print_env_table(envs, client)
 
@@ -414,20 +460,38 @@ def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output
 @click.argument("environment", required=False)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation.")
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
-def env_remove(ctx: click.Context, environment: str | None, dry_run: bool, yes: bool) -> None:
+def env_remove(
+    ctx: click.Context, environment: str | None, dry_run: bool, yes: bool, json_output: bool
+) -> None:
     client = _make_client()
     if environment is None:
-        click.echo("ENVIRONMENT selector required", err=True)
-        sys.exit(2)
-    try:
-        env_obj = client.environments.get(environment)
-    except Exception as e:
-        click.echo(str(e), err=True)
-        sys.exit(1)
-        return
+        if ctx.obj.get("env") is not None:
+            _usage_fail(
+                json_output,
+                "env.remove",
+                "root --env is not accepted by env remove; pass ENVIRONMENT or cd into its worktree",
+            )
+        try:
+            from odoo_instance_sdk.internal.context import resolve_environment
+
+            env_obj = resolve_environment(client, None)
+        except Exception as e:
+            _env_fail(json_output, "env.remove", str(e))
+            return
+    else:
+        try:
+            _resolve_project_path(ctx)
+            env_obj = client.environments.get(environment)
+        except Exception as e:
+            _env_fail(json_output, "env.remove", str(e))
+            return
     if dry_run:
-        click.echo(f"Would remove environment {env_obj.name} ({env_obj.id}) state={env_obj.state}")
+        if json_output:
+            _env_json("env.remove", _remove_plan_dict(env_obj), dry_run=True)
+        else:
+            _print_plan("Remove plan", _remove_plan_dict(env_obj))
         return
     if not yes and not click.confirm(
         f"Remove environment {env_obj.name} ({env_obj.id})?", default=False
@@ -436,10 +500,14 @@ def env_remove(ctx: click.Context, environment: str | None, dry_run: bool, yes: 
         return
     try:
         client.environments.remove(env_obj)
+        env_obj = client.environments.get(str(env_obj.id))
     except Exception as e:
-        click.echo(str(e), err=True)
+        _env_fail(json_output, "env.remove", str(e))
         sys.exit(1)
-    click.echo(f"Removed environment {env_obj.name} ({env_obj.id})")
+    if json_output:
+        _env_json("env.remove", _env_dict(env_obj), dry_run=False)
+    else:
+        click.echo(f"Removed environment {env_obj.name} ({env_obj.id})")
 
 
 @env.command("sync")
@@ -450,12 +518,21 @@ def env_remove(ctx: click.Context, environment: str | None, dry_run: bool, yes: 
 def env_sync(ctx: click.Context, environment: str | None, upgrade: bool, json_output: bool) -> None:
     client = _make_client()
     if environment is None:
-        env_sel = ctx.obj.get("env")
-        if env_sel is None:
-            click.echo("ENVIRONMENT selector required", err=True)
-            sys.exit(2)
-        environment = env_sel
+        if ctx.obj.get("env") is not None:
+            _usage_fail(
+                json_output,
+                "env.sync",
+                "root --env is not accepted by env sync; pass ENVIRONMENT or cd into its worktree",
+            )
+        try:
+            from odoo_instance_sdk.internal.context import resolve_environment
+
+            environment = str(resolve_environment(client, None).id)
+        except Exception as e:
+            _env_fail(json_output, "env.sync", str(e))
+            return
     try:
+        _resolve_project_path(ctx)
         result = client.environments.sync_python(environment, upgrade=upgrade)
     except Exception as e:
         _env_fail(json_output, "env.sync", str(e))
@@ -481,62 +558,201 @@ def _env_dict(e: object) -> dict[str, Any]:
     }
 
 
-def _env_json(command: str, data: dict[str, Any], *, dry_run: bool) -> None:
-    envelope = {
-        "schema_version": 1,
-        "ok": True,
-        "command": command,
-        "data": data,
-        "warnings": [],
-        "dry_run": dry_run,
+def _checkout_plan_dict(plan: object) -> dict[str, Any]:
+    from odoo_instance_sdk.resources.environment import CheckoutPlan
+
+    if not isinstance(plan, CheckoutPlan):
+        raise TypeError("checkout dry-run must return CheckoutPlan")
+    return {
+        "id": str(plan.env_id),
+        "name": plan.name,
+        "state": str(plan.state),
+        "branch": plan.branch,
+        "db_mode": str(plan.db_mode),
+        "http_port": plan.http_port,
+        "worktree_path": str(plan.worktree),
+        "generated_config_path": str(plan.generated_config),
+        "dependency_lock_path": str(plan.dependency_lock),
+        "python_mode": "create" if plan.python_owned else "reuse",
+        "python_path": plan.python_path,
+        "database": {
+            "mode": str(plan.db_mode),
+            "source": plan.source_database,
+            "target": plan.target_database,
+            "owned": plan.db_mode.value == "copy",
+        },
+        "ownership": {
+            "worktree": True,
+            "generated_config": True,
+            "dependency_lock": True,
+            "python_environment": plan.python_owned,
+            "backup": False,
+        },
+        "commands": ["git worktree add", "generate odoo.conf", "uv pip compile"],
+        "dependency_inputs": {
+            "requirements": list(plan.dependency_inputs),
+            "lock_path": str(plan.dependency_lock),
+        },
+        "helper_argv": {
+            "git_worktree_add": list(plan.worktree_argv),
+            "uv_compile": [
+                "uv",
+                "pip",
+                "compile",
+                *plan.dependency_inputs,
+                "-o",
+                str(plan.dependency_lock),
+            ],
+        },
     }
-    click.echo(json.dumps(envelope, indent=2, default=str))
+
+
+def _remove_plan_dict(e: object) -> dict[str, Any]:
+    plan = _env_dict(e)
+    plan["ownership"] = {"worktree": True, "generated_config": True, "backup": False}
+    plan["commands"] = (
+        ["drop target database", "delete owned backup", "git worktree remove"]
+        if str(cast("Any", e).db_mode) == "copy"
+        else ["git worktree remove"]
+    )
+    plan["ownership"]["backup"] = cast("Any", e).backup_id is not None
+    return plan
+
+
+def _print_plan(title: str, plan: dict[str, Any]) -> None:
+    click.echo(title)
+    for key, value in plan.items():
+        click.echo(f"{key}: {json.dumps(value, default=str, sort_keys=True)}")
+
+
+def _reconcile_environment(e: object, client: OdooClient) -> dict[str, Any]:
+    env = cast("Any", e)
+    worktree = Path(env.worktree_path)
+    try:
+        from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
+
+        registered = any(
+            Path(entry.worktree).resolve() == worktree.resolve()
+            for entry in worktree_list_porcelain(Path(env.repository_root))
+        )
+    except OSError:
+        registered = False
+    observed = "unknown"
+    if env.state == "ready":
+        observed = "port-free" if _check_port_free(env) else "port-occupied"
+    python_path = Path(env.python_environment_path)
+    python_exists = (
+        (python_path / "bin" / "python").is_file()
+        if env.python_environment_owned
+        else python_path.is_file()
+    )
+    backup_exists: bool | None = None
+    if env.backup_id is not None:
+        backup_row = client.get_catalog().get_by_id(str(env.backup_id))
+        backup_exists = (
+            backup_row is not None
+            and bool(backup_row["path"])
+            and Path(str(backup_row["path"])).is_file()
+        )
+    lock_path = Path(env.dependency_lock_path)
+    fingerprint = (
+        hashlib.sha256(lock_path.read_bytes()).hexdigest() if lock_path.is_file() else None
+    )
+    root = Path(env.worktree_path).parent.resolve()
+    python_contained = not env.python_environment_owned or python_path.resolve().is_relative_to(
+        root
+    )
+    return {
+        **_env_dict(env),
+        "source_database": env.source_db_name,
+        "target_database": env.target_db_name,
+        "last_used": env.last_used_at,
+        "observed": observed,
+        "python_mode": "create" if env.python_environment_owned else "reuse",
+        "reconciliation": {
+            "worktree_exists": worktree.is_dir(),
+            "worktree_registered": registered,
+            "config_exists": Path(env.generated_config_path).is_file(),
+            "python_exists": python_exists,
+            "dependency_lock_exists": lock_path.is_file(),
+            "dependency_fingerprint": fingerprint,
+            "backup_exists": backup_exists,
+            "python_contained": python_contained,
+        },
+    }
+
+
+def _env_json(command: str, data: dict[str, Any], *, dry_run: bool) -> None:
+    environment = data.get("id")
+    _emit_json_envelope(
+        ok=True,
+        command=command,
+        result=data,
+        context={
+            "environment_id": environment,
+            "worktree_path": data.get("worktree_path"),
+        },
+        provenance={
+            "project_source": "explicit_or_context",
+            "environment_source": "selector_or_worktree" if environment is not None else None,
+        },
+        dry_run=dry_run,
+    )
 
 
 def _env_fail(json_output: bool, command: str, message: str) -> None:
     if json_output:
-        click.echo(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "ok": False,
-                    "command": command,
-                    "error": {"message": message},
-                },
-                indent=2,
-            ),
-            err=True,
+        _emit_json_envelope(
+            ok=False,
+            command=command,
+            error_code=command.replace(".", "_") + "_failed",
+            error_message=message,
         )
     else:
-        click.echo(message, err=True)
+        click.echo(_sanitize_diagnostic(message), err=True)
     sys.exit(1)
 
 
-def _print_env_table(envs: list[Any], client: OdooClient) -> None:
-    import socket as _socket
-
-    from odoo_instance_sdk.resources.environment import EnvironmentState
-
-    rows = []
-    for e in envs:
-        observed = "unknown"
-        if e.state in (EnvironmentState.READY, EnvironmentState.CREATING, EnvironmentState.FAILED):
-            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-            s.settimeout(0.2)
-            try:
-                s.bind((e.http_interface, e.http_port))
-                observed = "port-free"
-            except OSError:
-                observed = "port-occupied"
-            finally:
-                s.close()
-        db = e.source_db_name if e.db_mode == "shared" else e.target_db_name
-        rows.append(
-            f"{e.id}  {e.name}  {e.state}  {observed}  {e.branch}  "
-            f"{'create' if e.python_environment_owned else 'reuse'}  {e.db_mode}  "
-            f"{db or ''}  {e.http_port}  {e.worktree_path}"
+def _usage_fail(json_output: bool, command: str, message: str) -> None:
+    if json_output:
+        _emit_json_envelope(
+            ok=False, command=command, error_code="usage_error", error_message=message
         )
-    click.echo("ID  NAME  STATE  OBSERVED  BRANCH  PYTHON_MODE  DB_MODE  DATABASE  PORT  WORKTREE")
+    else:
+        click.echo(_sanitize_diagnostic(message), err=True)
+    raise click.exceptions.Exit(2)
+
+
+def _print_env_table(envs: list[Any], client: OdooClient) -> None:
+    rows: list[str] = []
+    for e in envs:
+        data = _reconcile_environment(e, client)
+        db = data["source_database"] if e.db_mode == "shared" else data["target_database"]
+        reconciliation = data["reconciliation"]
+        artifacts = (
+            ",".join(
+                name
+                for name, value in (
+                    ("worktree", reconciliation["worktree_exists"]),
+                    ("registered", reconciliation["worktree_registered"]),
+                    ("config", reconciliation["config_exists"]),
+                    ("python", reconciliation["python_exists"]),
+                    ("python-contained", reconciliation["python_contained"]),
+                    ("lock", reconciliation["dependency_lock_exists"]),
+                    ("backup", reconciliation["backup_exists"]),
+                )
+                if value is False
+            )
+            or "ok"
+        )
+        rows.append(
+            f"{e.id}  {e.name}  {e.state}  {data['observed']}  {e.branch}  "
+            f"{data['python_mode']}  {e.db_mode}  {db or ''}  {e.http_port}  "
+            f"{artifacts}  {data['last_used'] or ''}  {e.worktree_path}"
+        )
+    click.echo(
+        "ID  NAME  STATE  OBSERVED  BRANCH  PYTHON_MODE  DB_MODE  DATABASE  PORT  ARTIFACTS  LAST_USED  WORKTREE"
+    )
     for r in rows:
         click.echo(r)
 
@@ -552,34 +768,28 @@ def doctor(ctx: click.Context, json_output: bool) -> None:
     try:
         report = run_doctor(client, project_path if project_path != Path.cwd() else None)
     except Exception as e:
-        click.echo(str(e), err=True)
+        _emit_command_error(json_output, "doctor", str(e))
         sys.exit(1)
         return
     if json_output:
-        click.echo(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "ok": report.ok,
-                    "command": "doctor",
-                    "context": report.context,
-                    "data": {
-                        "checks": [
-                            {
-                                "name": c.name,
-                                "status": c.status,
-                                "detail": c.detail,
-                                "environment_id": c.environment_id,
-                                "environment_name": c.environment_name,
-                            }
-                            for c in report.checks
-                        ]
-                    },
-                    "warnings": report.warnings,
-                },
-                indent=2,
-                default=str,
-            )
+        _emit_json_envelope(
+            ok=report.ok,
+            command="doctor",
+            context=report.context,
+            result={
+                "checks": [
+                    {
+                        "name": c.name,
+                        "status": c.status,
+                        "detail": _sanitize_diagnostic(c.detail),
+                        "environment_id": c.environment_id,
+                        "environment_name": c.environment_name,
+                    }
+                    for c in report.checks
+                ]
+            },
+            error_code="doctor_failed" if not report.ok else None,
+            error_message="doctor reported failed checks" if not report.ok else None,
         )
     else:
         _print_doctor(report)
@@ -598,7 +808,7 @@ def _print_doctor(report: object) -> None:
         marker = {"ok": "OK", "warn": "WARN", "error": "ERROR", "info": "INFO"}.get(
             c.status, c.status
         )
-        click.echo(f"  {marker:<5} {c.name}: {c.detail}")
+        click.echo(f"  {marker:<5} {c.name}: {_sanitize_diagnostic(c.detail)}")
 
 
 @cli.command()
@@ -621,13 +831,16 @@ def run(ctx: click.Context) -> None:
     except SystemExit:
         raise
     except Exception as e:
-        click.echo(str(e), err=True)
+        _emit_command_error(False, "run", str(e))
         sys.exit(1)
         return
     try:
         exit_code = instance.run_foreground()
     except KeyboardInterrupt:
         exit_code = 130
+    except Exception as e:
+        _emit_command_error(False, "run", str(e))
+        exit_code = 1
     sys.exit(exit_code)
 
 
@@ -643,13 +856,16 @@ def shell(ctx: click.Context, odoo_args: tuple[str, ...]) -> None:
     except SystemExit:
         raise
     except Exception as e:
-        click.echo(str(e), err=True)
+        _emit_command_error(False, "shell", str(e))
         sys.exit(1)
         return
     try:
         exit_code = instance.shell(args=list(odoo_args))
     except KeyboardInterrupt:
         exit_code = 130
+    except Exception as e:
+        _emit_command_error(False, "shell", str(e))
+        exit_code = 1
     sys.exit(exit_code)
 
 
@@ -738,14 +954,14 @@ def exec_cmd(
             {
                 "returncode": outcome.returncode,
                 "stdout": outcome.stdout,
-                "stderr": outcome.stderr,
+                "stderr": _sanitize_diagnostic(outcome.stderr) if outcome.stderr else "",
                 "commit": commit,
             },
         )
     else:
         click.echo(outcome.stdout, nl=False)
         if outcome.stderr:
-            click.echo(outcome.stderr, err=True, nl=False)
+            click.echo(_sanitize_diagnostic(outcome.stderr), err=True, nl=False)
     sys.exit(outcome.returncode)
 
 
@@ -1070,7 +1286,6 @@ def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> 
         write_launch_json,
     )
 
-    project_path = _resolve_project_path(ctx)
     client = _make_client()
     try:
         env_obj = _resolve_ready_env(ctx, client)
@@ -1083,6 +1298,7 @@ def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> 
         return
     if write_file:
         try:
+            project_path = _resolve_project_path(ctx)
             content = launch_json(profile)
             written = write_launch_json(project_path, content)
         except Exception as e:
@@ -1106,32 +1322,19 @@ def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> 
 
 
 def _emit_command_json(command: str, data: dict[str, Any]) -> None:
-    envelope = {
-        "schema_version": 1,
-        "ok": True,
-        "command": command,
-        "data": data,
-        "warnings": [],
-    }
-    click.echo(json.dumps(envelope, indent=2, default=str))
+    _emit_json_envelope(ok=True, command=command, result=data)
 
 
 def _emit_command_error(json_output: bool, command: str, message: str) -> None:
     if json_output:
-        click.echo(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "ok": False,
-                    "command": command,
-                    "error": {"code": command.replace(".", "_") + "_failed", "message": message},
-                },
-                indent=2,
-            ),
-            err=True,
+        _emit_json_envelope(
+            ok=False,
+            command=command,
+            error_code=command.replace(".", "_") + "_failed",
+            error_message=message,
         )
     else:
-        click.echo(message, err=True)
+        click.echo(_sanitize_diagnostic(message), err=True)
 
 
 def _resolve_ready_env(ctx: click.Context, client: OdooClient) -> Any:
@@ -1165,17 +1368,9 @@ def _verify_env_runtime(env_obj: Any) -> None:
 
 
 def _check_port_free(env_obj: Any) -> bool:
-    import socket as _socket
+    from odoo_instance_sdk.internal.address import AddressState, probe_address
 
-    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    s.settimeout(0.2)
-    try:
-        s.bind((env_obj.http_interface, env_obj.http_port))
-    except OSError:
-        return False
-    finally:
-        s.close()
-    return True
+    return probe_address(env_obj.http_interface, env_obj.http_port) is AddressState.FREE
 
 
 def _record_use_event(client: OdooClient, env_obj: Any) -> None:

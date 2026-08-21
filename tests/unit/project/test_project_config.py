@@ -43,6 +43,7 @@ def test_load_missing_manifest_raises_typed_error(tmp_path: Path) -> None:
 
 def test_roundtrip_write_read_secrets_free(tmp_path: Path) -> None:
     cfg = ProjectConfig(
+        repository_root=tmp_path,
         odoo_bin=Path("/opt/odoo/odoo-bin"),
         python="python3",
         source_config=Path("./odoo.conf"),
@@ -74,13 +75,26 @@ def test_load_empty_manifest_defaults(tmp_path: Path) -> None:
     assert cfg.default_run_args == ()
 
 
-def test_project_config_is_frozen() -> None:
-    cfg = ProjectConfig(odoo_bin=Path("/opt/odoo/odoo-bin"))
+def test_project_config_is_frozen(tmp_path: Path) -> None:
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
     with pytest.raises(AttributeError):
         cfg.odoo_bin = Path("/other")  # type: ignore[misc]
 
 
+def test_bare_project_config_requires_explicit_repository_root() -> None:
+    with pytest.raises(TypeError, match="repository_root"):
+        ProjectConfig()  # type: ignore[call-arg]
+
+
 def test_manual_config_can_explicitly_bind_repository_root(tmp_path: Path) -> None:
     cfg = ProjectConfig(repository_root=tmp_path)
-    assert cfg.repository_root == tmp_path
+    assert cfg.repository_root == tmp_path.resolve()
     assert "repository_root" not in cfg.to_manifest()
+
+
+def test_binding_does_not_change_manifest_equality(tmp_path: Path) -> None:
+    left = ProjectConfig(repository_root=tmp_path / "one", odoo_bin=Path("/opt/odoo"))
+    right = ProjectConfig(repository_root=tmp_path / "two", odoo_bin=Path("/opt/odoo"))
+    assert left != right
+    assert left.to_manifest() == right.to_manifest()
+    assert left.to_manifest() == right.to_manifest()

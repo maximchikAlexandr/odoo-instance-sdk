@@ -52,6 +52,17 @@ def test_resolve_project_explicit(tmp_path: Path) -> None:
     assert cfg.odoo_bin == Path("/opt/odoo")
 
 
+def test_resolve_project_explicit_nested_path(tmp_path: Path) -> None:
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text("[project]\nodoo_bin = '/opt/odoo'\n")
+    nested = tmp_path / "nested" / "path"
+    nested.mkdir(parents=True)
+    cfg = resolve_project(nested, cwd=tmp_path)
+    assert isinstance(cfg, ProjectConfig)
+    assert cfg.repository_root == tmp_path
+
+
 def test_resolve_project_nearest_manifest(tmp_path: Path) -> None:
     manifest_dir = tmp_path / ".odcli"
     manifest_dir.mkdir()

@@ -42,6 +42,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["real_odoo: opt-in disposable lifecycle test requiring explicit local Odoo prerequisites"]
 
 [tool.mypy]
 strict = true

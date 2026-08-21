@@ -31,7 +31,7 @@ def _checkout_ready_env(
     opts = EnvironmentCheckoutOptions(
         python=str(fake_python),
         db_mode=EnvironmentDatabaseMode.SHARED,
-        odoo_bin=Path("/usr/bin/odoo"),
+        odoo_bin=fake_python.parent / "odoo-bin",
     )
     return env_client.environments.checkout(project_manifest, branch, options=opts)
 
@@ -58,7 +58,7 @@ class TestVscodeGenerateProfile:
         assert cfg["type"] == "python"
         assert cfg["request"] == "launch"
         assert cfg["python"] == str(fake_python)
-        assert cfg["program"] == "/usr/bin/odoo"
+        assert cfg["program"] == str(fake_python.parent / "odoo-bin")
         assert cfg["cwd"] == env.worktree_path
         assert cfg["justMyCode"] is False
         assert cfg["console"] == "integratedTerminal"

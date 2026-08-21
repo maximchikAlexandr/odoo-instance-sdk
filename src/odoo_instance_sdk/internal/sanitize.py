@@ -15,7 +15,7 @@ _SECRET_PATTERNS = [
 ]
 
 _ENV_VAR_RE = re.compile(r"\$\{[^}]*\}")
-_PATH_LIKE_RE = re.compile(r"(/[^,\s]{4,}|[A-Za-z]:[/\\][^,\s]{4,})")
+_PATH_LIKE_RE = re.compile(r"(?<![A-Za-z0-9_-])(/[^,\s]{4,}|[A-Za-z]:[/\\][^,\s]{4,})")
 
 
 def sanitize_last_error(value: str | None) -> str | None:

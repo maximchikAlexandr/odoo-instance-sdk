@@ -11,7 +11,7 @@ from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     NonLocalInstanceError,
 )
-from odoo_instance_sdk.internal.locks import environment_lock_path, shared_lock
+from odoo_instance_sdk.internal.locks import environment_lock_path, exclusive_lock, shared_lock
 from odoo_instance_sdk.internal.odoo_config import (
     infer_base_url,
     parse_db_names,
@@ -299,6 +299,20 @@ class OdooInstance:
                 source, argv=argv, timeout=timeout, commit=commit
             )
 
+    def _run_shell_script_exclusive(
+        self,
+        source: str,
+        *,
+        argv: Sequence[str] = (),
+        timeout: float | None = None,
+        commit: bool = False,
+    ) -> CommandResult:
+        """Internal mutator entrypoint; lock choice belongs to this instance only."""
+        with self._artifact_operation(exclusive=True):
+            return self._run_shell_script_unlocked(
+                source, argv=argv, timeout=timeout, commit=commit
+            )
+
     def _run_shell_script_unlocked(
         self,
         source: str,
@@ -330,10 +344,16 @@ class OdooInstance:
 
     @contextlib.contextmanager
     def _artifact_lock(self) -> Iterator[None]:
+        with self._artifact_operation(exclusive=False):
+            yield
+
+    @contextlib.contextmanager
+    def _artifact_operation(self, *, exclusive: bool) -> Iterator[None]:
         if self._artifact_lock_path is None:
             yield
             return
-        with shared_lock(self._artifact_lock_path):
+        lock = exclusive_lock if exclusive else shared_lock
+        with lock(self._artifact_lock_path):
             yield
 
     def stop(self, proc: OdooProcess, *, timeout: float = 10.0) -> None:

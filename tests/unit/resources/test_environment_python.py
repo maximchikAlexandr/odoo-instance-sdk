@@ -51,7 +51,7 @@ def _add_requirements(project_manifest: Path, fake_python: Path) -> None:
     manifest.write_text(
         textwrap.dedent(f"""\
             [project]
-            odoo_bin = "/usr/bin/odoo"
+            odoo_bin = "{fake_python.parent / "odoo-bin"}"
             python = "{fake_python}"
             source_config = "odoo.conf"
             default_source_database = "comerta"

@@ -9,8 +9,9 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -33,6 +34,16 @@ from odoo_instance_sdk.models import (
 
 P = ParamSpec("P")
 T = TypeVar("T")
+CURRENT_SCHEMA_VERSION = 7
+
+
+class CopyJournalStage(StrEnum):
+    PREPARED = "prepared"
+    BACKED_UP = "backed_up"
+    RESTORE_PENDING = "restore_pending"
+    RESTORED = "restored"
+    DROPPED = "dropped"
+    BACKUP_DELETED = "backup_deleted"
 
 
 def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
@@ -225,6 +236,88 @@ class BackupCatalog:
                 CREATE INDEX IF NOT EXISTS environment_events_env_idx ON environment_events (environment_id, sequence DESC);
             """)
             conn.execute("PRAGMA user_version = 3")
+            conn.commit()
+            user_version = 3
+        if user_version < 4:
+            # More than one non-removed environment for a checkout would make
+            # ownership and cleanup ambiguous.  Older catalogs may contain
+            # such rows; retain the newest one and mark older rows removed
+            # before installing the invariant.
+            conn.execute(
+                """UPDATE environments SET state='removed', removed_at=datetime('now'), last_error='superseded during active-environment migration'
+                   WHERE id IN (
+                     SELECT id FROM (
+                       SELECT id, ROW_NUMBER() OVER (
+                         PARTITION BY git_common_dir, branch
+                         ORDER BY created_at DESC, id DESC
+                       ) AS position
+                       FROM environments WHERE state <> 'removed'
+                     ) WHERE position > 1
+                   )"""
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS environments_one_active_branch "
+                "ON environments(git_common_dir, branch) WHERE state <> 'removed'"
+            )
+            conn.execute("PRAGMA user_version = 4")
+            conn.commit()
+            user_version = 4
+        if user_version < 5:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS environment_copy_journal (
+                    environment_id TEXT PRIMARY KEY REFERENCES environments(id),
+                    target_database TEXT NOT NULL,
+                    db_host TEXT NOT NULL,
+                    db_port INTEGER NOT NULL,
+                    db_user TEXT,
+                    backup_id TEXT REFERENCES backups(id),
+                    stage TEXT NOT NULL CHECK (stage IN ('prepared', 'backed_up', 'restored', 'dropped', 'backup_deleted')),
+                    updated_at TEXT NOT NULL
+                );
+            """)
+            conn.execute("PRAGMA user_version = 5")
+            conn.commit()
+            user_version = 5
+        if user_version < 6:
+            conn.executescript("""
+                ALTER TABLE environment_copy_journal RENAME TO environment_copy_journal_v5;
+                CREATE TABLE environment_copy_journal (
+                    environment_id TEXT PRIMARY KEY REFERENCES environments(id),
+                    target_database TEXT NOT NULL,
+                    db_host TEXT NOT NULL,
+                    db_port INTEGER NOT NULL,
+                    db_user TEXT,
+                    backup_id TEXT REFERENCES backups(id),
+                    stage TEXT NOT NULL CHECK (stage IN ('prepared', 'backed_up', 'restore_pending', 'restored', 'dropped', 'backup_deleted')),
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO environment_copy_journal
+                    SELECT environment_id, target_database, db_host, db_port, db_user, backup_id, stage, updated_at
+                    FROM environment_copy_journal_v5;
+                DROP TABLE environment_copy_journal_v5;
+            """)
+            conn.execute("PRAGMA user_version = 6")
+            conn.commit()
+            user_version = 6
+        if user_version < 7:
+            # A port is a global host resource.  Never silently mark a live
+            # environment removed merely to make an index creation succeed.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(environments)")}
+            if {"state", "http_port", "created_at"} <= columns:
+                duplicate = conn.execute(
+                    "SELECT http_port FROM environments WHERE state <> 'removed' "
+                    "GROUP BY http_port HAVING COUNT(*) > 1 LIMIT 1"
+                ).fetchone()
+                if duplicate is not None:
+                    raise BackupCatalogError(
+                        f"catalog has multiple active environments reserving port {duplicate[0]}; "
+                        "resolve the conflict before upgrading"
+                    )
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS environments_one_active_port "
+                    "ON environments(http_port) WHERE state <> 'removed'"
+                )
+            conn.execute("PRAGMA user_version = 7")
             conn.commit()
 
     def close(self) -> None:
@@ -652,6 +745,49 @@ class BackupCatalog:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at DESC, id DESC"
         return self._conn.execute(query, params).fetchall()
+
+    @_translate_sqlite_error
+    def upsert_copy_journal(
+        self,
+        environment_id: str,
+        *,
+        target_database: str,
+        db_host: str | None,
+        db_port: int,
+        db_user: str | None,
+        backup_id: str | None,
+        stage: CopyJournalStage,
+    ) -> None:
+        if not isinstance(stage, CopyJournalStage):
+            raise TypeError("copy journal stage must be a CopyJournalStage")
+        self._conn.execute(
+            """INSERT INTO environment_copy_journal
+               (environment_id,target_database,db_host,db_port,db_user,backup_id,stage,updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(environment_id) DO UPDATE SET
+                 target_database=excluded.target_database, db_host=excluded.db_host,
+                 db_port=excluded.db_port, db_user=excluded.db_user,
+                 backup_id=excluded.backup_id, stage=excluded.stage, updated_at=excluded.updated_at""",
+            (
+                environment_id,
+                target_database,
+                normalize_db_host(db_host),
+                db_port,
+                db_user,
+                backup_id,
+                stage.value,
+            ),
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def get_copy_journal(self, environment_id: str) -> sqlite3.Row | None:
+        return cast(
+            "sqlite3.Row | None",
+            self._conn.execute(
+                "SELECT * FROM environment_copy_journal WHERE environment_id=?", (environment_id,)
+            ).fetchone(),
+        )
 
     @_translate_sqlite_error
     def add_environment_event(

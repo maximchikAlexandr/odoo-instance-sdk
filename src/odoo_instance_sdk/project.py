@@ -8,9 +8,13 @@ import msgspec
 from odoo_instance_sdk.exceptions import ProjectManifestNotFoundError
 
 
-class ProjectConfig(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    # Runtime-only provenance: never emitted into project.toml.
-    repository_root: Path | None = None
+class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
+    """Declarative project manifest plus required repository identity.
+
+    Manifest serialization intentionally writes only declarative fields.
+    """
+
+    repository_root: Path
     odoo_bin: Path | None = None
     python: str | Path | None = None
     source_config: Path | None = None
@@ -34,9 +38,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_
         return cls._from_mapping(section, repository_root=root.resolve())
 
     @classmethod
-    def _from_mapping(
-        cls, data: dict[str, object], *, repository_root: Path | None = None
-    ) -> ProjectConfig:
+    def _from_mapping(cls, data: dict[str, object], *, repository_root: Path) -> ProjectConfig:
         return cls(
             repository_root=repository_root,
             odoo_bin=_path_or_none(data.get("odoo_bin")),

@@ -158,6 +158,7 @@ def _map_profile(
     report.ignored_config_overlays = tuple(parsed.overlays)
 
     return ProjectConfig(
+        repository_root=workspace_dir.resolve(),
         odoo_bin=odoo_bin,
         python=python,
         source_config=parsed.source_config,

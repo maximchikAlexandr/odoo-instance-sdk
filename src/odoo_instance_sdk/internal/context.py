@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from odoo_instance_sdk.exceptions import (
@@ -12,7 +13,7 @@ from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
 
-def _find_nearest_manifest(start: Path) -> Path | None:
+def _find_nearest_manifest(start: Path, boundary: Path | None) -> Path | None:
     current = start.resolve()
     if not current.is_dir():
         current = current.parent
@@ -22,34 +23,78 @@ def _find_nearest_manifest(start: Path) -> Path | None:
         candidate = current / ".odcli" / "project.toml"
         if candidate.is_file():
             return candidate
-        parent = current.parent
-        if parent == current:
+        if current == boundary or current.parent == current:
             return None
-        current = parent
+        current = current.parent
     return None
 
 
 def resolve_project(explicit: Path | None, cwd: Path | None = None) -> ProjectConfig | Path:
     base = (cwd or Path.cwd()).resolve()
+    from odoo_instance_sdk.internal.git_worktree import rev_parse_toplevel
+
     if explicit is not None:
-        project_root = Path(explicit).resolve()
-        if (project_root / ".odcli" / "project.toml").is_file():
+        selected = Path(explicit).resolve()
+        try:
+            boundary: Path | None = rev_parse_toplevel(selected)
+        except Exception:
+            boundary = None
+        manifest = _find_nearest_manifest(selected, boundary)
+        if manifest is not None:
             try:
-                return ProjectConfig.load(project_root)
+                return ProjectConfig.load(manifest.parent.parent)
             except ProjectManifestNotFoundError as e:
                 raise ProjectContextError(str(e)) from e
         raise ProjectContextError(
-            f"Explicit --project {explicit} has no .odcli/project.toml; run odcli init"
+            f"Explicit --project {explicit} is not inside a project with .odcli/project.toml; run odcli init"
         )
-    manifest = _find_nearest_manifest(base)
+    try:
+        boundary = rev_parse_toplevel(base)
+    except Exception:
+        boundary = None
+    manifest = _find_nearest_manifest(base, boundary)
     if manifest is not None:
         try:
             return ProjectConfig.load(manifest.parent.parent)
         except ProjectManifestNotFoundError as e:
             raise ProjectContextError(str(e)) from e
+    registered = _project_from_registered_worktree(base)
+    if registered is not None:
+        return ProjectConfig.load(registered)
     raise ProjectContextError(
         "No .odcli/project.toml found upward from cwd; run odcli init or pass --project PATH"
     )
+
+
+def _project_from_registered_worktree(cwd: Path) -> Path | None:
+    """Resolve nested registered worktrees without creating/opening a catalog."""
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+
+    catalog = get_catalog_path()
+    if not catalog.is_file():
+        return None
+    try:
+        with sqlite3.connect(f"file:{catalog}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                "SELECT repository_root, worktree_path, git_common_dir "
+                "FROM environments WHERE state <> 'removed'"
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    from odoo_instance_sdk.internal.git_worktree import rev_parse_git_common_dir, rev_parse_toplevel
+
+    for root, worktree, common_dir in rows:
+        try:
+            cwd.relative_to(Path(str(worktree)).resolve())
+        except ValueError:
+            continue
+        try:
+            if rev_parse_git_common_dir(rev_parse_toplevel(cwd)) != Path(str(common_dir)):
+                continue
+        except Exception:
+            continue
+        return Path(str(root))
+    return None
 
 
 def resolve_environment(

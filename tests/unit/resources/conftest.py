@@ -116,9 +116,12 @@ def env_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_uv: Path) -
     state_root.mkdir()
     cache_root.mkdir()
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_data_root", lambda: data_root)
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.paths.get_environments_root", lambda: data_root / "environments"
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_environments_root",
+        lambda **_kwargs: data_root / "environments",
     )
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_state_root", lambda: state_root)
     monkeypatch.setattr(
@@ -157,6 +160,9 @@ def project_manifest(git_repo: Path, fake_python: Path, source_config: Path) -> 
     manifest_dir = git_repo / ".odcli"
     manifest_dir.mkdir(exist_ok=True)
     manifest = manifest_dir / "project.toml"
+    fake_odoo = fake_python.parent / "odoo-bin"
+    fake_odoo.write_text("#!/bin/sh\nexit 0\n")
+    os.chmod(fake_odoo, 0o755)
     rel_config = (
         source_config.relative_to(git_repo)
         if source_config.is_relative_to(git_repo)
@@ -165,7 +171,7 @@ def project_manifest(git_repo: Path, fake_python: Path, source_config: Path) -> 
     manifest.write_text(
         textwrap.dedent(f"""\
         [project]
-        odoo_bin = "/usr/bin/odoo"
+        odoo_bin = "{fake_odoo}"
         python = "{fake_python}"
         source_config = "{rel_config}"
         default_source_database = "comerta"

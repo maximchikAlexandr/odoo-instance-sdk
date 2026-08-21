@@ -54,7 +54,7 @@ def _make_legacy_v2(db_path: Path) -> str:
     return bid
 
 
-def test_fresh_install_creates_v3_directly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fresh_install_creates_v6_directly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     durable = tmp_path / "catalog.sqlite3"
     monkeypatch.setattr(
         "odoo_instance_sdk.storage.backup_catalog.get_legacy_catalog_path",
@@ -62,7 +62,7 @@ def test_fresh_install_creates_v3_directly(tmp_path: Path, monkeypatch: pytest.M
     )
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 3
+    assert version == 7
     tables = {
         r[0]
         for r in catalog._conn.execute(
@@ -92,7 +92,7 @@ def test_cache_to_data_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 3
+    assert version == 7
     row = catalog._conn.execute("SELECT * FROM backups WHERE id = ?", (bid,)).fetchone()
     assert row is not None
     assert row["database_name"] == "mydb"
@@ -157,7 +157,7 @@ def test_both_exist_durable_authoritative(tmp_path: Path, monkeypatch: pytest.Mo
 
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 3
+    assert version == 7
     row = catalog._conn.execute("SELECT * FROM backups WHERE id = ?", (durable_bid,)).fetchone()
     assert row is not None
     assert row["database_name"] == "durable_db"
@@ -211,4 +211,40 @@ def test_environment_methods_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert catalog.active_environment_for_port(8069) is not None
     envs = catalog.list_environments()
     assert len(envs) == 1
+    catalog.close()
+
+
+def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA user_version = 5")
+    conn.executescript("""
+        CREATE TABLE backups (
+            id TEXT PRIMARY KEY,
+            source_base_url TEXT NOT NULL,
+            database_name TEXT NOT NULL,
+            state TEXT NOT NULL,
+            downloaded_at TEXT
+        );
+        CREATE TABLE environments (id TEXT PRIMARY KEY);
+        CREATE TABLE environment_copy_journal (
+            environment_id TEXT PRIMARY KEY REFERENCES environments(id),
+            target_database TEXT NOT NULL,
+            db_host TEXT NOT NULL,
+            db_port INTEGER NOT NULL,
+            db_user TEXT,
+            backup_id TEXT REFERENCES backups(id),
+            stage TEXT NOT NULL CHECK (stage IN ('prepared', 'backed_up', 'restored', 'dropped', 'backup_deleted')),
+            updated_at TEXT NOT NULL
+        );
+    """)
+    conn.close()
+
+    catalog = BackupCatalog(db_path=db)
+    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
+    schema = catalog._conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='environment_copy_journal'"
+    ).fetchone()[0]
+    assert version == 7
+    assert "restore_pending" in schema
     catalog.close()

@@ -216,7 +216,7 @@ def run_foreground_process(
     finally:
         if sys.platform != "win32":
             signal.signal(signal.SIGINT, prev_handler)
-    if interrupted and exit_code == 0:
+    if interrupted:
         exit_code = 130
     return exit_code
 

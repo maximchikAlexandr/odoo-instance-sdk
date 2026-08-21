@@ -81,7 +81,7 @@ class TestInstancePrefix:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
         env = env_client.environments.checkout(project_manifest, "feat/prefix", options=opts)
         assert env.state == EnvironmentState.READY
@@ -89,7 +89,7 @@ class TestInstancePrefix:
         assert inst.config.command_prefix is not None
         assert len(inst.config.command_prefix) == 2
         assert inst.config.command_prefix[0] == str(fake_python)
-        assert inst.config.command_prefix[1] == "/usr/bin/odoo"
+        assert inst.config.command_prefix[1] == str(fake_python.parent / "odoo-bin")
         assert inst.config.master_password is None
 
     def test_from_environment_non_ready_raises(
@@ -103,13 +103,11 @@ class TestInstancePrefix:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
-        env = env_client.environments.checkout(
-            project_manifest, "feat/notready", options=opts, dry_run=True
-        )
+        env = env_client.environments.plan_checkout(project_manifest, "feat/notready", options=opts)
         with pytest.raises(InstanceConfigurationError):
-            env_client.instance.from_environment(env)
+            env_client.instance.from_environment(env)  # type: ignore[arg-type]
 
     def test_run_uses_instance_prefix(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
@@ -122,7 +120,7 @@ class TestInstancePrefix:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
         env = env_client.environments.checkout(project_manifest, "feat/runprefix", options=opts)
         inst = env_client.instance.from_environment(env)
@@ -222,7 +220,7 @@ class TestRunForeground:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
         env = env_client.environments.checkout(project_manifest, "feat/fgprefix", options=opts)
         inst = env_client.instance.from_environment(env)
@@ -399,7 +397,7 @@ class TestPortConflictCli:
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
-            odoo_bin=Path("/usr/bin/odoo"),
+            odoo_bin=fake_python.parent / "odoo-bin",
         )
         env = env_client.environments.checkout(project_manifest, "feat/portconf", options=opts)
 

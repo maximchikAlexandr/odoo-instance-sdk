@@ -48,11 +48,12 @@ def catalog_migration_lock_path() -> Path:
     return get_locks_dir() / "catalog-migration.lock"
 
 
-def provisioning_lock_path(repo_key: str, branch: str) -> Path:
+def provisioning_lock_path() -> Path:
     from odoo_instance_sdk.internal.paths import get_locks_dir
 
-    safe_branch = branch.replace(os.sep, "_").replace("/", "_")
-    return get_locks_dir() / f"provision-{repo_key}-{safe_branch}.lock"
+    # Port allocation is catalog-global; a branch-scoped lock permits two
+    # simultaneous checkouts to select the same port.
+    return get_locks_dir() / "environment-port-allocation.lock"
 
 
 def environment_lock_path(environment_id: str) -> Path:

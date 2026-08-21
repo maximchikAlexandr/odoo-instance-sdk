@@ -5,13 +5,14 @@ import enum
 import hashlib
 import re
 import shutil
-import socket
 import subprocess
 import uuid
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Union, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Literal, Union, cast
 
 if TYPE_CHECKING:
     import sqlite3
@@ -28,6 +29,7 @@ from odoo_instance_sdk.exceptions import (
     MasterPasswordRequiredError,
     NonLocalInstanceError,
 )
+from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
 from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.git_worktree import (
@@ -48,12 +50,14 @@ from odoo_instance_sdk.internal.odoo_config import (
 from odoo_instance_sdk.internal.paths import get_environments_root
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
-from odoo_instance_sdk.internal.urls import assert_local, is_loopback_host
+from odoo_instance_sdk.internal.urls import assert_local
 from odoo_instance_sdk.models import Backup, BackupFormat
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize_db_host
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 EnvironmentSelector = Union[str, "DevelopmentEnvironment"]
@@ -113,6 +117,79 @@ class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
     http_port: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CopyCleanupPlan:
+    """Validated COPY ownership retained for one destructive cleanup operation."""
+
+    target_database: str
+    backup_id: uuid.UUID | None
+    instance: object | None
+    backup: Backup | None
+    stage: CopyJournalStage
+
+
+@dataclass(frozen=True, slots=True)
+class CheckoutPlan:
+    """Fully resolved immutable checkout inputs; no mutation is allowed while building it."""
+
+    project: ProjectConfig
+    env_id: uuid.UUID
+    name: str
+    repo_root: Path
+    git_common_dir: str
+    branch: str
+    base_ref: str
+    worktree: Path
+    venv: Path
+    generated_config: Path
+    dependency_lock: Path
+    env_root: Path
+    python_path: str
+    python_owned: bool
+    python_selector: str | Path | None
+    http_interface: str
+    http_port: int
+    db_mode: EnvironmentDatabaseMode
+    source_database: str | None
+    target_database: str | None
+    source_config: Path | None
+    config_values: Mapping[str, str]
+    odoo_bin: str
+    runtime_cwd: str
+    dependency_inputs: tuple[str, ...]
+    worktree_argv: tuple[str, ...]
+    created_at: str
+    options: EnvironmentCheckoutOptions
+
+    @property
+    def id(self) -> uuid.UUID:
+        return self.env_id
+
+    @property
+    def state(self) -> EnvironmentState:
+        return EnvironmentState.CREATING
+
+    @property
+    def worktree_path(self) -> str:
+        return str(self.worktree)
+
+    @property
+    def generated_config_path(self) -> str:
+        return str(self.generated_config)
+
+    @property
+    def python_environment_path(self) -> str:
+        return self.python_path
+
+    @property
+    def python_environment_owned(self) -> bool:
+        return self.python_owned
+
+    @property
+    def dependency_lock_path(self) -> str:
+        return str(self.dependency_lock)
+
+
 _PORT_RANGE_START = 8069
 _PORT_RANGE_END = 8099
 
@@ -123,14 +200,14 @@ _StrList = list[str]
 class EnvironmentResource:
     _client: OdooClient
 
-    def checkout(
+    def _prepare_checkout(
         self,
         project: ProjectConfig | Path,
         branch: str,
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-        dry_run: bool = False,
-    ) -> DevelopmentEnvironment:
+        dry_run_paths: bool,
+    ) -> CheckoutPlan:
         if isinstance(project, ProjectConfig):
             project_cfg = project
             project_path = _project_root_from_config(project_cfg)
@@ -138,7 +215,12 @@ class EnvironmentResource:
             project_path = Path(project)
             project_cfg = ProjectConfig.load(project_path)
 
-        catalog = self._client.get_catalog()
+        # A plan must be inspectable without creating the durable catalog or
+        # running migrations in user data.
+        # Do not open the durable catalog until all COPY preconditions have
+        # passed.  Opening it can create/migrate user state, which must not be
+        # the observable result of a rejected checkout.
+        catalog = None
 
         from odoo_instance_sdk.internal.git_worktree import (
             rev_parse_git_common_dir,
@@ -162,14 +244,6 @@ class EnvironmentResource:
 
         python_mode = self._resolve_python_mode(options, project_cfg, repo_root)
 
-        existing = catalog.active_environment_for(git_common_str, branch)
-        if existing is not None and existing["state"] != EnvironmentState.REMOVED:
-            raise EnvironmentConflictError(
-                "active_environment_exists",
-                f"Active environment already exists for branch {branch!r}",
-                details={"branch": branch, "existing_id": existing["id"]},
-            )
-
         cfg_dict = parse_odoo_config(source_config) if source_config is not None else {}
 
         db_mode = options.db_mode
@@ -182,7 +256,7 @@ class EnvironmentResource:
 
         env_id = uuid.uuid4()
         key = repo_key(repo_root, git_common)
-        env_root = get_environments_root() / key / str(env_id)
+        env_root = get_environments_root(ensure_exists=not dry_run_paths) / key / str(env_id)
         worktree = env_root / "worktree"
         venv = env_root / "venv"
         generated_cfg = env_root / "odoo.conf"
@@ -198,91 +272,115 @@ class EnvironmentResource:
         name = options.name or f"{repo_root.name}:{branch}"
 
         now = datetime.now(UTC).isoformat()
-
-        if dry_run:
-            return DevelopmentEnvironment(
-                id=env_id,
-                name=name,
-                repository_root=str(repo_root),
-                git_common_dir=git_common_str,
-                branch=branch,
-                base_ref=base_ref,
-                worktree_path=str(worktree),
-                generated_config_path=str(generated_cfg),
-                python_environment_path=python_path,
-                python_environment_owned=python_owned,
-                dependency_lock_path=str(lock_file),
-                http_interface=http_interface,
-                http_port=http_port,
-                db_mode=db_mode,
-                source_db_name=source_db,
-                target_db_name=target_db,
-                backup_id=None,
-                state=EnvironmentState.CREATING,
-                created_at=datetime.now(UTC),
-            )
-
-        lock_path = provisioning_lock_path(key, branch)
-        with exclusive_lock(lock_path):
-            return self._do_checkout(
-                catalog=catalog,
-                project_cfg=project_cfg,
-                env_id=env_id,
-                name=name,
-                repo_root=repo_root,
-                git_common_str=git_common_str,
-                branch=branch,
-                base_ref=base_ref,
-                worktree=worktree,
-                venv=venv,
-                generated_cfg=generated_cfg,
-                lock_file=lock_file,
-                env_root=env_root,
-                python_path=python_path,
-                python_owned=python_owned,
-                python_selector=(options.python or project_cfg.python),
-                http_interface=http_interface,
-                http_port=http_port,
-                db_mode=db_mode,
-                source_db=source_db,
-                target_db=target_db,
-                source_config=source_config,
-                cfg_dict=cfg_dict,
-                now=now,
-                options=options,
-            )
-
-    def _do_checkout(
-        self,
-        *,
-        catalog: object,
-        project_cfg: ProjectConfig,
-        env_id: uuid.UUID,
-        name: str,
-        repo_root: Path,
-        git_common_str: str,
-        branch: str,
-        base_ref: str,
-        worktree: Path,
-        venv: Path,
-        generated_cfg: Path,
-        lock_file: Path,
-        env_root: Path,
-        python_path: str,
-        python_owned: bool,
-        python_selector: str | Path | None,
-        http_interface: str,
-        http_port: int,
-        db_mode: str,
-        source_db: str | None,
-        target_db: str | None,
-        source_config: Path | None,
-        cfg_dict: dict[str, str],
-        now: str,
-        options: EnvironmentCheckoutOptions,
-    ) -> DevelopmentEnvironment:
         odoo_bin = self._resolve_odoo_bin(options, project_cfg, repo_root)
         runtime_cwd = self._resolve_runtime_cwd(project_cfg, repo_root, worktree)
+        dependency_inputs = tuple(
+            _rebase_requirement_paths(list(project_cfg.requirements), repo_root, worktree)
+        )
+
+        return CheckoutPlan(
+            project=project_cfg,
+            env_id=env_id,
+            name=name,
+            repo_root=repo_root,
+            git_common_dir=git_common_str,
+            branch=branch,
+            base_ref=base_ref,
+            worktree=worktree,
+            venv=venv,
+            generated_config=generated_cfg,
+            dependency_lock=lock_file,
+            env_root=env_root,
+            python_path=python_path,
+            python_owned=python_owned,
+            python_selector=(options.python or project_cfg.python),
+            http_interface=http_interface,
+            http_port=http_port,
+            db_mode=db_mode,
+            source_database=source_db,
+            target_database=target_db,
+            source_config=source_config,
+            config_values=MappingProxyType(cfg_dict),
+            odoo_bin=odoo_bin,
+            runtime_cwd=runtime_cwd,
+            dependency_inputs=dependency_inputs,
+            worktree_argv=("git", "worktree", "add", str(worktree), branch, base_ref),
+            created_at=now,
+            options=options,
+        )
+
+    def plan_checkout(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
+    ) -> CheckoutPlan:
+        return self._prepare_checkout(project, branch, options=options, dry_run_paths=True)
+
+    def checkout(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
+    ) -> DevelopmentEnvironment:
+        plan = self._prepare_checkout(project, branch, options=options, dry_run_paths=False)
+        if plan.db_mode is EnvironmentDatabaseMode.COPY:
+            self._preflight_copy_checkout(plan)
+        catalog = self._client.get_catalog()
+        lock_path = provisioning_lock_path()
+        with exclusive_lock(lock_path):
+            if plan.options.http_port is None:
+                plan = replace(
+                    plan,
+                    http_port=self._allocate_port(None, plan.project, catalog, plan.http_interface),
+                )
+            self._revalidate_checkout_locked(catalog, plan)
+            return self._do_checkout(catalog, plan)
+
+    def _revalidate_checkout_locked(self, catalog: object, plan: CheckoutPlan) -> None:
+        cat = cast("BackupCatalog", catalog)
+        existing = cat.active_environment_for(plan.git_common_dir, plan.branch)
+        if existing is not None:
+            raise EnvironmentConflictError(
+                "active_environment_exists",
+                f"Active environment already exists for branch {plan.branch!r}",
+                details={"branch": plan.branch, "existing_id": existing["id"]},
+            )
+        allocated = cat.active_environment_for_port(plan.http_port)
+        if allocated is not None or not _port_free(plan.http_interface, plan.http_port):
+            raise EnvironmentConflictError(
+                "port_in_use", f"Port {plan.http_port} is no longer available"
+            )
+
+    def _do_checkout(self, catalog: object, plan: CheckoutPlan) -> DevelopmentEnvironment:
+        project_cfg = plan.project
+        env_id = plan.env_id
+        name = plan.name
+        repo_root = plan.repo_root
+        git_common_str = plan.git_common_dir
+        branch = plan.branch
+        base_ref = plan.base_ref
+        worktree = plan.worktree
+        venv = plan.venv
+        generated_cfg = plan.generated_config
+        lock_file = plan.dependency_lock
+        env_root = plan.env_root
+        python_path = plan.python_path
+        python_owned = plan.python_owned
+        python_selector = plan.python_selector
+        http_interface = plan.http_interface
+        http_port = plan.http_port
+        db_mode = plan.db_mode
+        source_db = plan.source_database
+        target_db = plan.target_database
+        source_config = plan.source_config
+        cfg_dict = plan.config_values
+        now = plan.created_at
+        options = plan.options
+        odoo_bin = plan.odoo_bin
+        runtime_cwd = plan.runtime_cwd
         runtime_json = _encode_runtime_json(odoo_bin, runtime_cwd)
         env_row = {
             "id": str(env_id),
@@ -390,7 +488,7 @@ class EnvironmentResource:
         cat: object,
         env_id: uuid.UUID,
         source_config: Path | None,
-        cfg_dict: dict[str, str],
+        cfg_dict: Mapping[str, str],
         source_db: str,
         target_db: str,
     ) -> uuid.UUID:
@@ -405,6 +503,16 @@ class EnvironmentResource:
             raise MasterPasswordRequiredError("copy mode requires admin_passwd in source config")
 
         instance = self._client.instance.from_config(source_config, master_password=master_pwd)
+        db_port = instance.config.db_port or 5432
+        catalog.upsert_copy_journal(
+            str(env_id),
+            target_database=target_db,
+            db_host=instance.config.db_host,
+            db_port=db_port,
+            db_user=instance.config.db_user,
+            backup_id=None,
+            stage=CopyJournalStage.PREPARED,
+        )
 
         try:
             existing_dbs = instance.databases.list()
@@ -420,15 +528,62 @@ class EnvironmentResource:
 
         backup = instance.databases.backup(source_db, format=BackupFormat.ZIP, filestore=True)
         catalog.update_environment(str(env_id), {"backup_id": str(backup.id)})
+        catalog.upsert_copy_journal(
+            str(env_id),
+            target_database=target_db,
+            db_host=instance.config.db_host,
+            db_port=db_port,
+            db_user=instance.config.db_user,
+            backup_id=str(backup.id),
+            stage=CopyJournalStage.BACKED_UP,
+        )
 
+        # The restore endpoint can create a database and then fail.  Persist
+        # uncertainty first so compensation never assumes it did not happen.
+        catalog.upsert_copy_journal(
+            str(env_id),
+            target_database=target_db,
+            db_host=instance.config.db_host,
+            db_port=db_port,
+            db_user=instance.config.db_user,
+            backup_id=str(backup.id),
+            stage=CopyJournalStage.RESTORE_PENDING,
+        )
         instance.databases.restore(backup, target_db, copy=True, neutralize_database=True)
-
-        if not instance.databases.exists(target_db):
-            raise InstanceConfigurationError(
-                f"Copy restore postcondition failed: {target_db!r} not found"
-            )
+        catalog.upsert_copy_journal(
+            str(env_id),
+            target_database=target_db,
+            db_host=instance.config.db_host,
+            db_port=db_port,
+            db_user=instance.config.db_user,
+            backup_id=str(backup.id),
+            stage=CopyJournalStage.RESTORED,
+        )
 
         return backup.id
+
+    def _preflight_copy_checkout(self, plan: CheckoutPlan) -> None:
+        """Perform every COPY rejection check before creating owned artifacts."""
+        if plan.source_config is None:
+            raise ConfigError("copy mode requires a source config")
+        if plan.source_database is None or plan.target_database is None:
+            raise ConfigError("copy mode requires source and target databases")
+        base_url = infer_base_url(plan.config_values)
+        assert_local(base_url)
+        master_pwd = get_admin_passwd(plan.config_values)
+        if master_pwd is None:
+            raise MasterPasswordRequiredError("copy mode requires admin_passwd in source config")
+        instance = self._client.instance.from_config(plan.source_config, master_password=master_pwd)
+        try:
+            existing = instance.databases.names()
+        except Exception as exc:
+            raise InstanceConfigurationError(
+                f"Source Odoo HTTP endpoint unavailable for copy mode: {exc}"
+            ) from exc
+        if plan.target_database in set(existing):
+            raise DatabaseAlreadyExistsError(
+                f"Target database {plan.target_database!r} already exists on {base_url}"
+            )
 
     def _cleanup_on_failure(
         self,
@@ -447,9 +602,12 @@ class EnvironmentResource:
             row = catalog.get_environment(str(env_id))
             if row is not None and row["backup_id"] is not None:
                 backup_id = uuid.UUID(str(row["backup_id"]))
-        cleanup_failed = self._cleanup_created_paths(repo_root, created_paths)
-        if backup_id is not None:
-            cleanup_failed = self._cleanup_backup(catalog, backup_id) or cleanup_failed
+        cleanup_failed = self._rollback_copy_checkout(catalog, env_id, backup_id)
+        # A restored copy must remain diagnosable when compensation cannot prove
+        # that the target database is gone.  In particular, do not delete the
+        # generated config (the cluster identity) or its owned backup first.
+        if not cleanup_failed:
+            cleanup_failed = self._cleanup_created_paths(repo_root, created_paths)
 
         msg = sanitize_last_error(str(error)) or type(error).__name__
         if cleanup_failed:
@@ -459,6 +617,72 @@ class EnvironmentResource:
         else:
             catalog.update_environment_state(str(env_id), EnvironmentState.FAILED, last_error=msg)
         catalog.add_environment_event(str(env_id), "checkout", "failed", message=msg)
+
+    def _rollback_copy_checkout(  # noqa: C901
+        self, catalog: BackupCatalog, env_id: uuid.UUID, backup_id: uuid.UUID | None
+    ) -> bool:
+        """Compensate a failed COPY checkout without losing the deletion capability."""
+        journal = catalog.get_copy_journal(str(env_id))
+        if journal is None:
+            return self._cleanup_backup(catalog, backup_id) if backup_id is not None else False
+
+        stage = CopyJournalStage(str(journal["stage"]))
+        if stage in (CopyJournalStage.RESTORE_PENDING, CopyJournalStage.RESTORED):
+            row = catalog.get_environment(str(env_id))
+            if row is None:
+                return True
+            config_path = Path(str(row["generated_config_path"]))
+            if not config_path.is_file():
+                return True
+            try:
+                cfg = parse_odoo_config(config_path)
+                master_pwd = get_admin_passwd(cfg)
+                if master_pwd is None:
+                    return True
+                instance = self._client.instance.from_config(
+                    config_path, master_password=master_pwd
+                )
+                target = str(journal["target_database"])
+                exists = instance.databases.exists(target)
+                if exists:
+                    instance.databases.drop(target)
+                    if instance.databases.exists(target):
+                        return True
+            except Exception:
+                return True
+            catalog.upsert_copy_journal(
+                str(env_id),
+                target_database=str(journal["target_database"]),
+                db_host=str(journal["db_host"]),
+                db_port=int(journal["db_port"]),
+                db_user=str(journal["db_user"]) if journal["db_user"] is not None else None,
+                backup_id=str(journal["backup_id"]) if journal["backup_id"] is not None else None,
+                stage=CopyJournalStage.DROPPED,
+            )
+            stage = CopyJournalStage.DROPPED
+
+        if stage in (
+            CopyJournalStage.PREPARED,
+            CopyJournalStage.BACKED_UP,
+            CopyJournalStage.DROPPED,
+        ):
+            journal_backup_id = journal["backup_id"]
+            resolved_backup_id = (
+                uuid.UUID(str(journal_backup_id)) if journal_backup_id is not None else backup_id
+            )
+            if resolved_backup_id is not None and self._cleanup_backup(catalog, resolved_backup_id):
+                return True
+            if stage is CopyJournalStage.DROPPED:
+                catalog.upsert_copy_journal(
+                    str(env_id),
+                    target_database=str(journal["target_database"]),
+                    db_host=str(journal["db_host"]),
+                    db_port=int(journal["db_port"]),
+                    db_user=str(journal["db_user"]) if journal["db_user"] is not None else None,
+                    backup_id=str(journal_backup_id) if journal_backup_id is not None else None,
+                    stage=CopyJournalStage.BACKUP_DELETED,
+                )
+        return False
 
     def _cleanup_created_paths(self, repo_root: Path, created_paths: list[Path]) -> bool:
         cleanup_failed = False
@@ -660,7 +884,7 @@ class EnvironmentResource:
 
     def _do_remove(self, catalog: object, env: DevelopmentEnvironment) -> None:
         cat = cast("BackupCatalog", catalog)
-        self._preflight_remove(cat, env)
+        copy_plan = self._preflight_remove(cat, env)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
         cat.add_environment_event(str(env.id), "remove", "started")
 
@@ -674,21 +898,81 @@ class EnvironmentResource:
         cleanup_failed = False
         failures: list[str] = []
 
-        cleanup_failed = (
-            self._remove_worktree(cat, env, repo_root, worktree, failures) or cleanup_failed
-        )
-        cleanup_failed = self._remove_files(generated_cfg, lock_file, failures) or cleanup_failed
-        cleanup_failed = self._remove_venv(env_root, venv, failures) or cleanup_failed
-
-        if env.db_mode == EnvironmentDatabaseMode.COPY and env.target_db_name:
-            cleanup_failed = self._drop_target_db(cat, env, cleanup_failed, failures)
+        if copy_plan is not None and copy_plan.stage in (
+            CopyJournalStage.RESTORE_PENDING,
+            CopyJournalStage.RESTORED,
+        ):
+            cleanup_failed = self._drop_copy_target(copy_plan, failures) or cleanup_failed
+            if cleanup_failed:
+                # Keep the config and owned backup: they are the only durable
+                # evidence and capability required for a safe retry.
+                msg = "; ".join(failures)[:2000]
+                cat.update_environment_state(
+                    str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
+                )
+                cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
+                raise EnvironmentConflictError("cleanup_failed", msg)
+            instance = cast("OdooInstance", copy_plan.instance)
+            cat.upsert_copy_journal(
+                str(env.id),
+                target_database=copy_plan.target_database,
+                db_host=instance.config.db_host,
+                db_port=instance.config.db_port or 5432,
+                db_user=instance.config.db_user,
+                backup_id=str(copy_plan.backup_id) if copy_plan.backup_id is not None else None,
+                stage=CopyJournalStage.DROPPED,
+            )
         else:
             cat.add_environment_event(
                 str(env.id), "remove", "succeeded", message="shared mode: source DB not dropped"
             )
 
-        if env.backup_id is not None:
+        if copy_plan is not None and copy_plan.stage is not CopyJournalStage.BACKUP_DELETED:
+            cleanup_failed = self._delete_copy_backup(copy_plan, failures) or cleanup_failed
+            if cleanup_failed:
+                # Keep every remaining artifact for a safe retry: deleting
+                # config/worktree first would lose the cluster evidence.
+                msg = "; ".join(failures)[:2000]
+                cat.update_environment_state(
+                    str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
+                )
+                cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
+                raise EnvironmentConflictError("cleanup_failed", msg)
+            if not cleanup_failed:
+                journal = cat.get_copy_journal(str(env.id))
+                assert journal is not None
+                cleanup_instance = cast("OdooInstance | None", copy_plan.instance)
+                cat.upsert_copy_journal(
+                    str(env.id),
+                    target_database=copy_plan.target_database,
+                    db_host=(
+                        cleanup_instance.config.db_host
+                        if cleanup_instance is not None
+                        else str(journal["db_host"])
+                    ),
+                    db_port=(
+                        cleanup_instance.config.db_port or 5432
+                        if cleanup_instance is not None
+                        else int(journal["db_port"])
+                    ),
+                    db_user=(
+                        cleanup_instance.config.db_user
+                        if cleanup_instance is not None
+                        else (str(journal["db_user"]) if journal["db_user"] is not None else None)
+                    ),
+                    backup_id=str(copy_plan.backup_id) if copy_plan.backup_id is not None else None,
+                    stage=CopyJournalStage.BACKUP_DELETED,
+                )
+        elif copy_plan is None and env.backup_id is not None:
             cleanup_failed = self._remove_backup(cat, env, failures) or cleanup_failed
+
+        # DB and its owned backup are removed first: configuration/worktree
+        # deletion must never make the cluster identity unverifiable.
+        cleanup_failed = self._remove_files(generated_cfg, lock_file, failures) or cleanup_failed
+        cleanup_failed = self._remove_venv(env_root, venv, failures) or cleanup_failed
+        cleanup_failed = (
+            self._remove_worktree(cat, env, repo_root, worktree, failures) or cleanup_failed
+        )
 
         if cleanup_failed:
             msg = "; ".join(failures)[:2000]
@@ -704,7 +988,9 @@ class EnvironmentResource:
             if env_root.is_dir() and not any(env_root.iterdir()):
                 env_root.rmdir()
 
-    def _preflight_remove(self, catalog: BackupCatalog, env: DevelopmentEnvironment) -> None:
+    def _preflight_remove(
+        self, catalog: BackupCatalog, env: DevelopmentEnvironment
+    ) -> CopyCleanupPlan | None:
         """Reject unsafe or stale catalog rows before changing any external state."""
         if not _port_free(env.http_interface, env.http_port):
             raise EnvironmentConflictError(
@@ -712,11 +998,15 @@ class EnvironmentResource:
                 f"reserved port {env.http_interface}:{env.http_port} is occupied",
             )
         repo_root = Path(env.repository_root)
-        expected_root = get_environments_root() / repo_key(repo_root, Path(env.git_common_dir)) / str(env.id)
+        expected_root = (
+            get_environments_root() / repo_key(repo_root, Path(env.git_common_dir)) / str(env.id)
+        )
         env_root = Path(env.worktree_path).parent
         if env_root.absolute() != expected_root.absolute() or _has_symlink_component(env_root):
-            raise EnvironmentConflictError("unsafe_environment_path", "environment root is not owned")
-        expected = (
+            raise EnvironmentConflictError(
+                "unsafe_environment_path", "environment root is not owned"
+            )
+        expected: tuple[tuple[Path, Path, Literal["file", "dir"]], ...] = (
             (Path(env.worktree_path), env_root / "worktree", "dir"),
             (Path(env.generated_config_path), env_root / "odoo.conf", "file"),
             (Path(env.dependency_lock_path), env_root / "requirements.lock", "file"),
@@ -735,31 +1025,222 @@ class EnvironmentResource:
                 )
 
         if env.db_mode == EnvironmentDatabaseMode.COPY:
-            self._preflight_copy_remove(catalog, env)
+            return self._preflight_copy_remove(catalog, env)
+        return None
 
-    def _preflight_copy_remove(self, catalog: BackupCatalog, env: DevelopmentEnvironment) -> None:
-        if env.target_db_name is None or env.backup_id is None:
-            raise EnvironmentConflictError("copy_ownership_missing", "copy environment ownership is incomplete")
+    def _preflight_copy_remove(  # noqa: C901
+        self, catalog: BackupCatalog, env: DevelopmentEnvironment
+    ) -> CopyCleanupPlan:
+        if env.target_db_name is None:
+            raise EnvironmentConflictError(
+                "copy_ownership_missing", "copy environment ownership is incomplete"
+            )
         config_path = Path(env.generated_config_path)
+        journal = catalog.get_copy_journal(str(env.id))
+        # The durable journal is authoritative after a crash; never let the
+        # mere presence of a generated config downgrade a terminal stage.
+        if (
+            not config_path.is_file()
+            and journal is not None
+            and CopyJournalStage(str(journal["stage"]))
+            in (
+                CopyJournalStage.PREPARED,
+                CopyJournalStage.BACKED_UP,
+                CopyJournalStage.DROPPED,
+                CopyJournalStage.BACKUP_DELETED,
+            )
+        ):
+            stage = CopyJournalStage(str(journal["stage"]))
+            backup_id = uuid.UUID(str(journal["backup_id"])) if journal["backup_id"] else None
+            backup_row = catalog.get_by_id(str(backup_id)) if backup_id is not None else None
+            recovery_backup = _row_to_backup(backup_row) if backup_row is not None else None
+            return CopyCleanupPlan(
+                target_database=str(journal["target_database"]),
+                backup_id=backup_id,
+                instance=None,
+                backup=recovery_backup,
+                stage=stage,
+            )
         if not config_path.is_file():
-            raise EnvironmentConflictError("copy_config_missing", "copy environment config is missing")
+            if journal is not None:
+                stage = CopyJournalStage(str(journal["stage"]))
+                backup: Backup | None = None
+                backup_id = (
+                    uuid.UUID(str(journal["backup_id"])) if journal["backup_id"] else env.backup_id
+                )
+                if stage in (CopyJournalStage.DROPPED, CopyJournalStage.BACKUP_DELETED):
+                    if stage is CopyJournalStage.DROPPED:
+                        if backup_id is None:
+                            raise EnvironmentConflictError(
+                                "copy_backup_missing", "owned backup is absent"
+                            )
+                        row = catalog.get_by_id(str(backup_id))
+                        backup = _row_to_backup(row) if row is not None else None
+                        if backup is None:
+                            raise EnvironmentConflictError(
+                                "copy_backup_missing", "owned backup is absent"
+                            )
+                    return CopyCleanupPlan(
+                        target_database=str(journal["target_database"]),
+                        backup_id=backup_id,
+                        instance=None,
+                        backup=backup,
+                        stage=stage,
+                    )
+                # Failed before restore: the durable stage proves no target
+                # database exists.  A prepared journal may legitimately have
+                # no backup at all; backed_up is retryable only when its backup
+                # artifact still exists.
+                if stage is CopyJournalStage.PREPARED and backup_id is None:
+                    return CopyCleanupPlan(
+                        target_database=str(journal["target_database"]),
+                        backup_id=None,
+                        instance=None,
+                        backup=None,
+                        stage=stage,
+                    )
+                if stage is CopyJournalStage.BACKED_UP and backup_id is not None:
+                    if backup_id is None:
+                        raise EnvironmentConflictError(
+                            "copy_backup_missing", "owned backup is absent"
+                        )
+                    row = catalog.get_by_id(str(backup_id))
+                    backup = _row_to_backup(row) if row is not None else None
+                    if backup is None:
+                        raise EnvironmentConflictError(
+                            "copy_backup_missing", "owned backup is absent"
+                        )
+                    return CopyCleanupPlan(
+                        target_database=str(journal["target_database"]),
+                        backup_id=backup_id,
+                        instance=None,
+                        backup=backup,
+                        stage=stage,
+                    )
+            raise EnvironmentConflictError(
+                "copy_config_missing", "copy environment config is missing"
+            )
         cfg = parse_odoo_config(config_path)  # Read before any deletion.
         master_pwd = get_admin_passwd(cfg)
         if master_pwd is None:
-            raise EnvironmentConflictError("copy_config_invalid", "copy environment master password is missing")
+            raise EnvironmentConflictError(
+                "copy_config_invalid", "copy environment master password is missing"
+            )
         instance = self._client.instance.from_config(config_path, master_password=master_pwd)
         db_port = instance.config.db_port or 5432
+        if journal is not None:
+            self._validate_copy_journal_ownership(env, journal, instance)
+            stage = CopyJournalStage(str(journal["stage"]))
+            if stage in (
+                CopyJournalStage.PREPARED,
+                CopyJournalStage.BACKED_UP,
+                CopyJournalStage.DROPPED,
+                CopyJournalStage.BACKUP_DELETED,
+            ):
+                journal_backup_id = journal["backup_id"]
+                backup_id = uuid.UUID(str(journal_backup_id)) if journal_backup_id else None
+                backup_row = catalog.get_by_id(str(backup_id)) if backup_id is not None else None
+                return CopyCleanupPlan(
+                    target_database=str(journal["target_database"]),
+                    backup_id=backup_id,
+                    instance=None,
+                    backup=_row_to_backup(backup_row) if backup_row is not None else None,
+                    stage=stage,
+                )
+            if stage in (CopyJournalStage.RESTORE_PENDING, CopyJournalStage.RESTORED):
+                journal_backup_id = journal["backup_id"]
+                if journal_backup_id is None:
+                    raise EnvironmentConflictError(
+                        "copy_backup_missing", "journal backup is absent"
+                    )
+                backup_row = catalog.get_by_id(str(journal_backup_id))
+                backup = _row_to_backup(backup_row) if backup_row is not None else None
+                if stage is CopyJournalStage.RESTORED and instance.config.db_host is not None:
+                    restored = catalog.latest_restore(
+                        instance.config.db_host, db_port, str(journal["target_database"])
+                    )
+                    if restored is None or restored.id != uuid.UUID(str(journal_backup_id)):
+                        raise EnvironmentConflictError(
+                            "copy_restore_mismatch",
+                            "target database has no matching recorded restore",
+                        )
+                return CopyCleanupPlan(
+                    target_database=str(journal["target_database"]),
+                    backup_id=uuid.UUID(str(journal_backup_id)),
+                    instance=instance,
+                    backup=backup,
+                    stage=stage,
+                )
         restored = catalog.latest_restore(instance.config.db_host, db_port, env.target_db_name)
-        if restored is None or restored.id != env.backup_id:
+        if env.backup_id is None or restored is None or restored.id != env.backup_id:
             raise EnvironmentConflictError(
                 "copy_restore_mismatch", "target database has no matching recorded restore"
             )
         backup_row = catalog.get_by_id(str(env.backup_id))
         if backup_row is None:
-            raise EnvironmentConflictError("copy_backup_missing", "owned backup is absent from catalog")
+            raise EnvironmentConflictError(
+                "copy_backup_missing", "owned backup is absent from catalog"
+            )
         backup = _row_to_backup(backup_row)
-        if backup is None or backup.id != env.backup_id:
-            raise EnvironmentConflictError("copy_backup_mismatch", "owned backup metadata is invalid")
+        if backup is not None and backup.id != env.backup_id:
+            raise EnvironmentConflictError(
+                "copy_backup_mismatch", "owned backup metadata is invalid"
+            )
+        return CopyCleanupPlan(
+            target_database=env.target_db_name,
+            backup_id=env.backup_id,
+            instance=instance,
+            backup=backup,
+            stage=CopyJournalStage.RESTORED,
+        )
+
+    def _validate_copy_journal_ownership(
+        self, env: DevelopmentEnvironment, journal: sqlite3.Row, instance: OdooInstance
+    ) -> None:
+        """Fail closed unless config, environment row and durable journal agree."""
+        expected_backup = str(env.backup_id) if env.backup_id is not None else None
+        values_match = (
+            str(journal["environment_id"]) == str(env.id)
+            and str(journal["target_database"]) == str(env.target_db_name)
+            and (str(journal["backup_id"]) if journal["backup_id"] is not None else None)
+            == expected_backup
+            and str(journal["db_host"]) == normalize_db_host(instance.config.db_host)
+            and int(journal["db_port"]) == (instance.config.db_port or 5432)
+            and (str(journal["db_user"]) if journal["db_user"] is not None else None)
+            == instance.config.db_user
+        )
+        if not values_match:
+            raise EnvironmentConflictError(
+                "copy_cluster_mismatch",
+                "copy journal, environment ownership, and generated config disagree",
+            )
+
+    def _drop_copy_target(self, plan: CopyCleanupPlan, failures: _StrList) -> bool:
+        instance = cast("OdooInstance", plan.instance)
+        try:
+            if not instance.databases.exists(plan.target_database):
+                return False
+            instance.databases.drop(plan.target_database)
+            if instance.databases.exists(plan.target_database):
+                failures.append(f"drop postcondition failed: {plan.target_database} still exists")
+                return True
+        except Exception as exc:
+            failures.append(f"drop: {exc}")
+            return True
+        return False
+
+    def _delete_copy_backup(self, plan: CopyCleanupPlan, failures: _StrList) -> bool:
+        if plan.backup is None:
+            # The catalog still proves ownership, but the payload has already
+            # disappeared.  Deletion is idempotent: advance the durable stage
+            # rather than blocking filesystem cleanup forever.
+            return False
+        try:
+            self._client.backups.delete(plan.backup)
+        except Exception as exc:
+            failures.append(f"backup delete: {exc}")
+            return True
+        return False
 
     def _remove_worktree(
         self,
@@ -893,10 +1374,12 @@ class EnvironmentResource:
         if odoo_bin is None:
             raise ConfigError("No odoo_bin configured; pass --odoo-bin or set project.odoo_bin")
         p = Path(odoo_bin)
-        if not p.is_absolute():
-            candidate = (repo_root / p).resolve()
-            return str(candidate)
-        return str(p)
+        candidate = (repo_root / p).resolve() if not p.is_absolute() else p
+        if not candidate.is_file() or not candidate.stat().st_mode & 0o111:
+            raise InstanceConfigurationError(
+                f"Odoo executable not found or not executable: {candidate}"
+            )
+        return str(candidate)
 
     def _resolve_runtime_cwd(self, project: ProjectConfig, repo_root: Path, worktree: Path) -> str:
         if project.runtime_cwd is not None:
@@ -984,14 +1467,14 @@ class EnvironmentResource:
         self,
         requested: int | None,
         project: ProjectConfig,
-        catalog: object,
+        catalog: object | None,
         http_interface: str,
     ) -> int:
 
-        cat = cast("BackupCatalog", catalog)
+        cat = cast("BackupCatalog | None", catalog)
         start = requested or project.preferred_http_port or _PORT_RANGE_START
         if requested is not None:
-            if cat.active_environment_for_port(requested) is not None:
+            if cat is not None and cat.active_environment_for_port(requested) is not None:
                 raise EnvironmentConflictError(
                     "port_in_use",
                     f"Port {requested} already allocated to an active environment",
@@ -1000,7 +1483,9 @@ class EnvironmentResource:
             return requested
         port = start
         while port <= _PORT_RANGE_END:
-            if cat.active_environment_for_port(port) is None and _port_free(http_interface, port):
+            if (cat is None or cat.active_environment_for_port(port) is None) and _port_free(
+                http_interface, port
+            ):
                 return port
             port += 1
         raise EnvironmentConflictError(
@@ -1155,16 +1640,7 @@ def _is_venv(pybin: str) -> bool:
 
 
 def _port_free(host: str, port: int) -> bool:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.2)
-    try:
-        s.bind((_resolve_bind_host(host), port))
-    except OSError:
-        return False
-    else:
-        return True
-    finally:
-        s.close()
+    return probe_address(host, port) is AddressState.FREE
 
 
 def _has_symlink_component(path: Path) -> bool:
@@ -1176,7 +1652,7 @@ def _has_symlink_component(path: Path) -> bool:
     return False
 
 
-def _validate_owned_artifact(path: Path, expected: Path, kind: str) -> None:
+def _validate_owned_artifact(path: Path, expected: Path, kind: Literal["file", "dir"]) -> None:
     if path.absolute() != expected.absolute():
         raise EnvironmentConflictError("unsafe_environment_path", f"unexpected {kind} path: {path}")
     if _has_symlink_component(path):
@@ -1188,15 +1664,7 @@ def _validate_owned_artifact(path: Path, expected: Path, kind: str) -> None:
         raise EnvironmentConflictError("unsafe_environment_path", f"unexpected {kind} type: {path}")
 
 
-def _resolve_bind_host(host: str) -> str:
-    if is_loopback_host(host):
-        return host
-    return "127.0.0.1"
-
-
 def _project_root_from_config(project: ProjectConfig) -> Path:
-    if project.repository_root is None:
-        raise ConfigError("ProjectConfig has no repository provenance; load it from a project path")
     return project.repository_root
 
 

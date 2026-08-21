@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import configparser
 import shutil
-import socket
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
 from odoo_instance_sdk.internal.paths import (
     get_environments_root,
@@ -138,7 +138,7 @@ def _check_catalog(report: DoctorReport, client: OdooClient) -> None:
         return
     finally:
         conn.close()
-    if user_version == 3:
+    if user_version >= 5:
         report.checks.append(
             CheckResult("catalog", STATUS_OK, f"{catalog_path} (user_version={user_version})")
         )
@@ -147,7 +147,7 @@ def _check_catalog(report: DoctorReport, client: OdooClient) -> None:
             CheckResult(
                 "catalog",
                 STATUS_ERROR,
-                f"catalog user_version={user_version}, expected 3",
+                f"catalog user_version={user_version}, expected at least 5",
             )
         )
 
@@ -398,19 +398,8 @@ def _check_generated_config(
 
 
 def _check_port(report: DoctorReport, env: DevelopmentEnvironment, eid: str, ename: str) -> None:
-    interface = env.http_interface or "127.0.0.1"
-    host = "127.0.0.1" if interface in ("0.0.0.0", "") else interface
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.2)
-    free = False
-    try:
-        s.bind((host, env.http_port))
-        free = True
-    except OSError:
-        free = False
-    finally:
-        s.close()
-    if free:
+    state = probe_address(env.http_interface or "127.0.0.1", env.http_port)
+    if state is AddressState.FREE:
         report.checks.append(
             CheckResult(
                 "port",
@@ -420,12 +409,22 @@ def _check_port(report: DoctorReport, env: DevelopmentEnvironment, eid: str, ena
                 environment_name=ename,
             )
         )
-    else:
+    elif state is AddressState.OCCUPIED:
         report.checks.append(
             CheckResult(
                 "port",
                 STATUS_INFO,
                 f"port-occupied ({env.http_port})",
+                environment_id=eid,
+                environment_name=ename,
+            )
+        )
+    else:
+        report.checks.append(
+            CheckResult(
+                "port",
+                STATUS_WARN,
+                f"port-unknown ({env.http_port})",
                 environment_id=eid,
                 environment_name=ename,
             )

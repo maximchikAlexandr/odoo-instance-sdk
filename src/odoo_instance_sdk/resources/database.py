@@ -142,10 +142,9 @@ class DatabaseResource:
 
     @property
     def _cluster(self) -> tuple[str | None, int] | None:
-        db_port = self._instance.config.db_port
-        if db_port is None:
+        if self._instance.config.db_host is None:
             return None
-        return (self._instance.config.db_host, db_port)
+        return (self._instance.config.db_host, self._instance.config.db_port or 5432)
 
     def _latest_backup_for(self, db_host: str | None, db_port: int, name: str) -> Backup | NoBackup:
         b = self._instance._client.get_catalog().latest_restore(db_host, db_port, name)
@@ -162,7 +161,8 @@ class DatabaseResource:
         ) as http:
             yield http
 
-    def list(self) -> tuple[Database, ...]:
+    def names(self) -> tuple[str, ...]:
+        """Return database names without touching the local audit catalog."""
         try:
             with self._http() as http:
                 resp = http.post(
@@ -190,7 +190,10 @@ class DatabaseResource:
             raise DatabaseManagerUnavailableError(
                 f"Database listing disabled or unavailable on {self.base_url}"
             )
-        db_names = tuple(str(name) for name in result)
+        return tuple(str(name) for name in result)
+
+    def list(self) -> tuple[Database, ...]:
+        db_names = self.names()
 
         ck = self._cluster
         catalog = self._instance._client.get_catalog()

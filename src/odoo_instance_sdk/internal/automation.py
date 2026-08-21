@@ -5,7 +5,6 @@ import contextlib
 import json
 import os
 import re
-import socket
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.internal.locks import environment_lock_path, exclusive_lock
+from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
 
@@ -42,14 +41,8 @@ def _run_with_payload(
     argv: tuple[str, ...] = (),
     commit: bool = False,
     timeout: float | None = None,
-    artifact_lock_held: bool = False,
 ) -> ShellOutcome:
-    if artifact_lock_held:
-        result = instance._run_shell_script_unlocked(
-            source, argv=argv, timeout=timeout, commit=commit
-        )
-    else:
-        result = instance.run_shell_script(source, argv=argv, timeout=timeout, commit=commit)
+    result = instance.run_shell_script(source, argv=argv, timeout=timeout, commit=commit)
     payload = parse_payload(result.stdout)
     return ShellOutcome(
         returncode=result.returncode,
@@ -183,9 +176,14 @@ def update_modules(
         "_mods.button_immediate_upgrade()\n"
         "result = {'updated': list(_mods.mapped('name'))}\n"
     )
-    lock_path = environment_lock_path(env_id)
-    with exclusive_lock(lock_path):
-        return _run_with_payload(instance, source, commit=True, artifact_lock_held=True)
+    _ = env_id
+    result = instance._run_shell_script_exclusive(source, commit=True)
+    return ShellOutcome(
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        payload=parse_payload(result.stdout),
+    )
 
 
 @dataclass(slots=True)
@@ -214,14 +212,11 @@ def run_module_tests(
         raise ConfigError("module test requires at least one module")
     if not test_tags:
         raise ConfigError("module test requires --test-tags")
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.2)
-    try:
-        s.bind((http_interface, http_port))
-    except OSError as e:
-        raise ConfigError(f"port conflict: {http_interface}:{http_port} occupied: {e}") from e
-    finally:
-        s.close()
+    address_state = probe_address(http_interface, http_port)
+    if address_state is not AddressState.FREE:
+        raise ConfigError(
+            f"port {address_state}: {http_interface}:{http_port} cannot be reserved for module tests"
+        )
 
     modules_repr = json.dumps(list(modules))
     tags_repr = json.dumps(test_tags)
@@ -240,9 +235,14 @@ def run_module_tests(
         "    'had_zero_tests': not bool(getattr(_r, 'tests_count', 0)),\n"
         "}\n"
     )
-    lock_path = environment_lock_path(env_id)
-    with exclusive_lock(lock_path):
-        outcome = _run_with_payload(instance, source, artifact_lock_held=True)
+    _ = env_id
+    result = instance._run_shell_script_exclusive(source)
+    outcome = ShellOutcome(
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        payload=parse_payload(result.stdout),
+    )
     if outcome.returncode != 0:
         raise RuntimeError(
             f"module test shell failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
@@ -295,7 +295,11 @@ def _resolve_worktree_module(
         except ValueError:
             continue
         candidate = addons_root / module
-        if candidate.is_dir() and not candidate.is_symlink() and (candidate / "__manifest__.py").is_file():
+        if (
+            candidate.is_dir()
+            and not candidate.is_symlink()
+            and (candidate / "__manifest__.py").is_file()
+        ):
             candidates.append(candidate)
     unique = {path.resolve() for path in candidates}
     if len(unique) != 1:
@@ -328,7 +332,9 @@ def _decode_translation_payload(data_b64: object, module: str, lang: str) -> byt
     try:
         content = base64.b64decode(data_b64, validate=True)
     except (ValueError, TypeError) as exc:
-        raise ConfigError(f"translations export produced invalid base64 for {module}/{lang}") from exc
+        raise ConfigError(
+            f"translations export produced invalid base64 for {module}/{lang}"
+        ) from exc
     if not content:
         raise ConfigError(f"translations export produced empty payload for {module}/{lang}")
     return content
