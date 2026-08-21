@@ -131,12 +131,21 @@ def test_resolve_environment_single_ready_not_silently_selected() -> None:
         resolve_environment(client, None, cwd=Path("/not-in-worktree"))
 
 
-def test_resolve_environment_infers_from_worktree(tmp_path: Path) -> None:
+def test_resolve_environment_infers_from_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     worktree = tmp_path / "wt"
     worktree.mkdir()
     env = _make_env(name="inferred", worktree=str(worktree))
     client = MagicMock()
     client.environments.list.return_value = [env]
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_toplevel", lambda _path: worktree
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_git_common_dir",
+        lambda _path: Path(env.git_common_dir),
+    )
     from odoo_instance_sdk.internal.context import resolve_environment
 
     result = resolve_environment(client, None, cwd=worktree)

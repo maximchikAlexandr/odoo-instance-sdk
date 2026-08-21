@@ -129,7 +129,7 @@ class CopyCleanupPlan:
 
 
 @dataclass(frozen=True, slots=True)
-class CheckoutPlan:
+class _CheckoutPlan:
     """Fully resolved immutable checkout inputs; no mutation is allowed while building it."""
 
     project: ProjectConfig
@@ -161,34 +161,6 @@ class CheckoutPlan:
     created_at: str
     options: EnvironmentCheckoutOptions
 
-    @property
-    def id(self) -> uuid.UUID:
-        return self.env_id
-
-    @property
-    def state(self) -> EnvironmentState:
-        return EnvironmentState.CREATING
-
-    @property
-    def worktree_path(self) -> str:
-        return str(self.worktree)
-
-    @property
-    def generated_config_path(self) -> str:
-        return str(self.generated_config)
-
-    @property
-    def python_environment_path(self) -> str:
-        return self.python_path
-
-    @property
-    def python_environment_owned(self) -> bool:
-        return self.python_owned
-
-    @property
-    def dependency_lock_path(self) -> str:
-        return str(self.dependency_lock)
-
 
 _PORT_RANGE_START = 8069
 _PORT_RANGE_END = 8099
@@ -207,10 +179,10 @@ class EnvironmentResource:
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
         dry_run_paths: bool,
-    ) -> CheckoutPlan:
+    ) -> _CheckoutPlan:
         if isinstance(project, ProjectConfig):
             project_cfg = project
-            project_path = _project_root_from_config(project_cfg)
+            project_path = project_cfg.repository_root
         else:
             project_path = Path(project)
             project_cfg = ProjectConfig.load(project_path)
@@ -278,7 +250,7 @@ class EnvironmentResource:
             _rebase_requirement_paths(list(project_cfg.requirements), repo_root, worktree)
         )
 
-        return CheckoutPlan(
+        return _CheckoutPlan(
             project=project_cfg,
             env_id=env_id,
             name=name,
@@ -309,13 +281,13 @@ class EnvironmentResource:
             options=options,
         )
 
-    def plan_checkout(
+    def _plan_checkout(
         self,
         project: ProjectConfig | Path,
         branch: str,
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-    ) -> CheckoutPlan:
+    ) -> _CheckoutPlan:
         return self._prepare_checkout(project, branch, options=options, dry_run_paths=True)
 
     def checkout(
@@ -339,7 +311,7 @@ class EnvironmentResource:
             self._revalidate_checkout_locked(catalog, plan)
             return self._do_checkout(catalog, plan)
 
-    def _revalidate_checkout_locked(self, catalog: object, plan: CheckoutPlan) -> None:
+    def _revalidate_checkout_locked(self, catalog: object, plan: _CheckoutPlan) -> None:
         cat = cast("BackupCatalog", catalog)
         existing = cat.active_environment_for(plan.git_common_dir, plan.branch)
         if existing is not None:
@@ -354,55 +326,29 @@ class EnvironmentResource:
                 "port_in_use", f"Port {plan.http_port} is no longer available"
             )
 
-    def _do_checkout(self, catalog: object, plan: CheckoutPlan) -> DevelopmentEnvironment:
-        project_cfg = plan.project
-        env_id = plan.env_id
-        name = plan.name
-        repo_root = plan.repo_root
-        git_common_str = plan.git_common_dir
-        branch = plan.branch
-        base_ref = plan.base_ref
-        worktree = plan.worktree
-        venv = plan.venv
-        generated_cfg = plan.generated_config
-        lock_file = plan.dependency_lock
-        env_root = plan.env_root
-        python_path = plan.python_path
-        python_owned = plan.python_owned
-        python_selector = plan.python_selector
-        http_interface = plan.http_interface
-        http_port = plan.http_port
-        db_mode = plan.db_mode
-        source_db = plan.source_database
-        target_db = plan.target_database
-        source_config = plan.source_config
-        cfg_dict = plan.config_values
-        now = plan.created_at
-        options = plan.options
-        odoo_bin = plan.odoo_bin
-        runtime_cwd = plan.runtime_cwd
-        runtime_json = _encode_runtime_json(odoo_bin, runtime_cwd)
+    def _do_checkout(self, catalog: object, plan: _CheckoutPlan) -> DevelopmentEnvironment:
+        runtime_json = _encode_runtime_json(plan.odoo_bin, plan.runtime_cwd)
         env_row = {
-            "id": str(env_id),
-            "name": name,
-            "repository_root": str(repo_root),
-            "git_common_dir": git_common_str,
-            "branch": branch,
-            "base_ref": base_ref,
-            "worktree_path": str(worktree),
-            "generated_config_path": str(generated_cfg),
-            "python_environment_path": python_path,
-            "python_environment_owned": python_owned,
-            "dependency_lock_path": str(lock_file),
-            "http_interface": http_interface,
-            "http_port": http_port,
-            "db_mode": db_mode,
-            "source_db_name": source_db,
-            "target_db_name": target_db,
+            "id": str(plan.env_id),
+            "name": plan.name,
+            "repository_root": str(plan.repo_root),
+            "git_common_dir": plan.git_common_dir,
+            "branch": plan.branch,
+            "base_ref": plan.base_ref,
+            "worktree_path": str(plan.worktree),
+            "generated_config_path": str(plan.generated_config),
+            "python_environment_path": plan.python_path,
+            "python_environment_owned": plan.python_owned,
+            "dependency_lock_path": str(plan.dependency_lock),
+            "http_interface": plan.http_interface,
+            "http_port": plan.http_port,
+            "db_mode": plan.db_mode,
+            "source_db_name": plan.source_database,
+            "target_db_name": plan.target_database,
             "backup_id": None,
             "runtime_json": runtime_json,
             "state": EnvironmentState.CREATING,
-            "created_at": now,
+            "created_at": plan.created_at,
             "last_used_at": None,
             "removed_at": None,
             "last_error": None,
@@ -410,65 +356,67 @@ class EnvironmentResource:
 
         cat = cast("BackupCatalog", catalog)
         cat.create_environment(env_row)
-        cat.add_environment_event(str(env_id), "checkout", "started")
+        cat.add_environment_event(str(plan.env_id), "checkout", "started")
 
         created_paths: list[Path] = []
         backup_id: uuid.UUID | None = None
         try:
-            worktree_add(repo_root, worktree, branch, base_ref=base_ref)
-            created_paths.append(worktree)
+            worktree_add(plan.repo_root, plan.worktree, plan.branch, base_ref=plan.base_ref)
+            created_paths.append(plan.worktree)
 
-            if source_config is not None:
+            if plan.source_config is not None:
                 db_name_for_config = (
-                    target_db if db_mode == EnvironmentDatabaseMode.COPY else source_db
+                    plan.target_database
+                    if plan.db_mode == EnvironmentDatabaseMode.COPY
+                    else plan.source_database
                 )
                 if db_name_for_config is None:
-                    db_name_for_config = source_db or ""
+                    db_name_for_config = plan.source_database or ""
                 generate_config(
-                    source_config,
-                    generated_cfg,
-                    repo_root=repo_root,
-                    worktree=worktree,
-                    http_interface=http_interface,
-                    http_port=http_port,
+                    plan.source_config,
+                    plan.generated_config,
+                    repo_root=plan.repo_root,
+                    worktree=plan.worktree,
+                    http_interface=plan.http_interface,
+                    http_port=plan.http_port,
                     db_name=db_name_for_config,
                 )
-                created_paths.append(generated_cfg)
+                created_paths.append(plan.generated_config)
 
-            if options.create_venv and python_selector is not None:
-                self._run_uv_venv(venv, str(python_selector))
-                created_paths.append(venv)
+            if plan.options.create_venv and plan.python_selector is not None:
+                self._run_uv_venv(plan.venv, str(plan.python_selector))
+                created_paths.append(plan.venv)
 
-            env_obj = self._get_env_row(cat, env_id)
+            env_obj = self._get_env_row(cat, plan.env_id)
             with exclusive_lock(python_env_lock_path(env_obj.python_environment_path)):
-                self._compile_and_install(env_obj, project_cfg, upgrade=False)
-                created_paths.append(lock_file)
+                self._compile_and_install(env_obj, plan.project, upgrade=False)
+                created_paths.append(plan.dependency_lock)
 
             if (
-                db_mode == EnvironmentDatabaseMode.COPY
-                and source_db is not None
-                and target_db is not None
+                plan.db_mode == EnvironmentDatabaseMode.COPY
+                and plan.source_database is not None
+                and plan.target_database is not None
             ):
                 backup_id = self._do_copy_restore(
                     cat=cat,
-                    env_id=env_id,
-                    source_config=source_config,
-                    cfg_dict=cfg_dict,
-                    source_db=source_db,
-                    target_db=target_db,
+                    env_id=plan.env_id,
+                    source_config=plan.source_config,
+                    cfg_dict=plan.config_values,
+                    source_db=plan.source_database,
+                    target_db=plan.target_database,
                 )
 
-            cat.update_environment_state(str(env_id), EnvironmentState.READY)
-            cat.add_environment_event(str(env_id), "checkout", "succeeded")
-            return self._get_env_row(cat, env_id)
+            cat.update_environment_state(str(plan.env_id), EnvironmentState.READY)
+            cat.add_environment_event(str(plan.env_id), "checkout", "succeeded")
+            return self._get_env_row(cat, plan.env_id)
 
         except BaseException as exc:
             self._cleanup_on_failure(
                 cat=cat,
-                env_id=env_id,
-                repo_root=repo_root,
+                env_id=plan.env_id,
+                repo_root=plan.repo_root,
                 created_paths=created_paths,
-                env_root=env_root,
+                env_root=plan.env_root,
                 backup_id=backup_id,
                 error=exc,
             )
@@ -562,7 +510,7 @@ class EnvironmentResource:
 
         return backup.id
 
-    def _preflight_copy_checkout(self, plan: CheckoutPlan) -> None:
+    def _preflight_copy_checkout(self, plan: _CheckoutPlan) -> None:
         """Perform every COPY rejection check before creating owned artifacts."""
         if plan.source_config is None:
             raise ConfigError("copy mode requires a source config")
@@ -855,7 +803,7 @@ class EnvironmentResource:
         catalog = self._client.get_catalog()
         if project is not None:
             if isinstance(project, ProjectConfig):
-                project_path = _project_root_from_config(project)
+                project_path = project.repository_root
             else:
                 project_path = Path(project)
             from odoo_instance_sdk.internal.git_worktree import (
@@ -1662,10 +1610,6 @@ def _validate_owned_artifact(path: Path, expected: Path, kind: Literal["file", "
     valid = path.is_file() if kind == "file" else path.is_dir()
     if not valid:
         raise EnvironmentConflictError("unsafe_environment_path", f"unexpected {kind} type: {path}")
-
-
-def _project_root_from_config(project: ProjectConfig) -> Path:
-    return project.repository_root
 
 
 class _CompileFailed(Exception):

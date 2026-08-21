@@ -162,5 +162,18 @@ def _infer_from_worktree(
             cwd.relative_to(worktree)
         except ValueError:
             continue
+        try:
+            from odoo_instance_sdk.internal.git_worktree import (
+                rev_parse_git_common_dir,
+                rev_parse_toplevel,
+            )
+
+            if (
+                rev_parse_git_common_dir(rev_parse_toplevel(cwd)).resolve()
+                != Path(env.git_common_dir).resolve()
+            ):
+                continue
+        except Exception:
+            continue
         return env
     return None

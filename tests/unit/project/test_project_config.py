@@ -97,4 +97,3 @@ def test_binding_does_not_change_manifest_equality(tmp_path: Path) -> None:
     right = ProjectConfig(repository_root=tmp_path / "two", odoo_bin=Path("/opt/odoo"))
     assert left != right
     assert left.to_manifest() == right.to_manifest()
-    assert left.to_manifest() == right.to_manifest()

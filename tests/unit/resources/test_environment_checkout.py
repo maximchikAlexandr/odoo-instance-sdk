@@ -420,10 +420,9 @@ class TestCheckoutDryRun:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
         )
-        env = env_client.environments.plan_checkout(project_manifest, "feat/dry", options=opts)
-        assert env.state == EnvironmentState.CREATING
-        assert not Path(env.worktree_path).exists()
-        assert not Path(env.generated_config_path).exists()
+        env = env_client.environments._plan_checkout(project_manifest, "feat/dry", options=opts)
+        assert not env.worktree.exists()
+        assert not env.generated_config.exists()
 
 
 class TestWorktreeBranchRules:

@@ -36,6 +36,14 @@ def test_nested_worktree_infers_remove_selector(
     )
     nested = Path(env.worktree_path) / "nested" / "child"
     nested.mkdir(parents=True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_toplevel",
+        lambda _path: Path(env.worktree_path),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_git_common_dir",
+        lambda _path: Path(env.git_common_dir),
+    )
     monkeypatch.chdir(nested)
 
     result = _invoke(CliRunner(), env_client, ["env", "remove", "--dry-run", "--json"])

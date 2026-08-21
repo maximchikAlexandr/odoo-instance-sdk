@@ -328,11 +328,25 @@ def _make_client() -> OdooClient:
 
 
 def _resolve_project_path(ctx: click.Context) -> Path:
-    from odoo_instance_sdk.internal.context import resolve_project
+    from odoo_instance_sdk.internal.context import (
+        _find_nearest_manifest,
+        _project_from_registered_worktree,
+        resolve_project,
+    )
 
     raw = ctx.obj.get("project")
     project = resolve_project(Path(raw) if raw is not None else None)
-    ctx.obj["project_source"] = "explicit" if raw is not None else "cwd_or_worktree"
+    if raw is not None:
+        ctx.obj["project_source"] = "explicit"
+    else:
+        cwd = Path.cwd()
+        ctx.obj["project_source"] = (
+            "cwd"
+            if _find_nearest_manifest(cwd, None) is not None
+            else "worktree"
+            if _project_from_registered_worktree(cwd) is not None
+            else "null"
+        )
     if isinstance(project, ProjectConfig):
         assert project.repository_root is not None
         return project.repository_root
@@ -406,7 +420,7 @@ def env_checkout(
             http_port=http_port,
         )
         result = (
-            client.environments.plan_checkout(project_path, branch, options=options)
+            client.environments._plan_checkout(project_path, branch, options=options)
             if dry_run
             else client.environments.checkout(project_path, branch, options=options)
         )
@@ -418,6 +432,8 @@ def env_checkout(
             "env.checkout",
             _checkout_plan_dict(result) if dry_run else _env_dict(result),
             dry_run=dry_run,
+            project_source=ctx.obj.get("project_source", "null"),
+            environment_source="null",
         )
     else:
         if dry_run:
@@ -451,6 +467,8 @@ def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output
             "env.list",
             {"environments": [_reconcile_environment(e, client) for e in envs]},
             dry_run=False,
+            project_source="null" if all_projects else ctx.obj.get("project_source", "null"),
+            environment_source="null",
         )
     else:
         _print_env_table(envs, client)
@@ -489,7 +507,13 @@ def env_remove(
             return
     if dry_run:
         if json_output:
-            _env_json("env.remove", _remove_plan_dict(env_obj), dry_run=True)
+            _env_json(
+                "env.remove",
+                _remove_plan_dict(env_obj),
+                dry_run=True,
+                project_source=ctx.obj.get("project_source", "null"),
+                environment_source="explicit" if environment else "worktree",
+            )
         else:
             _print_plan("Remove plan", _remove_plan_dict(env_obj))
         return
@@ -505,7 +529,13 @@ def env_remove(
         _env_fail(json_output, "env.remove", str(e))
         sys.exit(1)
     if json_output:
-        _env_json("env.remove", _env_dict(env_obj), dry_run=False)
+        _env_json(
+            "env.remove",
+            _env_dict(env_obj),
+            dry_run=False,
+            project_source=ctx.obj.get("project_source", "null"),
+            environment_source="explicit" if environment else "worktree",
+        )
     else:
         click.echo(f"Removed environment {env_obj.name} ({env_obj.id})")
 
@@ -559,14 +589,14 @@ def _env_dict(e: object) -> dict[str, Any]:
 
 
 def _checkout_plan_dict(plan: object) -> dict[str, Any]:
-    from odoo_instance_sdk.resources.environment import CheckoutPlan
+    from odoo_instance_sdk.resources.environment import _CheckoutPlan
 
-    if not isinstance(plan, CheckoutPlan):
-        raise TypeError("checkout dry-run must return CheckoutPlan")
+    if not isinstance(plan, _CheckoutPlan):
+        raise TypeError("checkout dry-run must return an internal checkout plan")
     return {
         "id": str(plan.env_id),
         "name": plan.name,
-        "state": str(plan.state),
+        "state": "creating",
         "branch": plan.branch,
         "db_mode": str(plan.db_mode),
         "http_port": plan.http_port,
@@ -682,7 +712,14 @@ def _reconcile_environment(e: object, client: OdooClient) -> dict[str, Any]:
     }
 
 
-def _env_json(command: str, data: dict[str, Any], *, dry_run: bool) -> None:
+def _env_json(
+    command: str,
+    data: dict[str, Any],
+    *,
+    dry_run: bool,
+    project_source: str = "null",
+    environment_source: str = "null",
+) -> None:
     environment = data.get("id")
     _emit_json_envelope(
         ok=True,
@@ -693,8 +730,8 @@ def _env_json(command: str, data: dict[str, Any], *, dry_run: bool) -> None:
             "worktree_path": data.get("worktree_path"),
         },
         provenance={
-            "project_source": "explicit_or_context",
-            "environment_source": "selector_or_worktree" if environment is not None else None,
+            "project_source": project_source,
+            "environment_source": environment_source,
         },
         dry_run=dry_run,
     )

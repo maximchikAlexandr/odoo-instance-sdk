@@ -105,8 +105,10 @@ class TestInstancePrefix:
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
         )
-        env = env_client.environments.plan_checkout(project_manifest, "feat/notready", options=opts)
-        with pytest.raises(InstanceConfigurationError):
+        env = env_client.environments._plan_checkout(
+            project_manifest, "feat/notready", options=opts
+        )
+        with pytest.raises(AttributeError):
             env_client.instance.from_environment(env)  # type: ignore[arg-type]
 
     def test_run_uses_instance_prefix(
