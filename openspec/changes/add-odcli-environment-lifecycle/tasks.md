@@ -111,10 +111,10 @@
 
 ## Quality gates (MVP close)
 
-- [ ] Q1 ruff lint clean
-- [ ] Q2 strict mypy clean on production package and tests
-- [ ] Q3 full pytest pass
-- [ ] Q4 one disposable local Odoo lifecycle integration pass: init→checkout→run/shell→remove
-- [ ] Q5 `run_shell_script()` covered as SDK primitive; eval/exec/module/translations use it
+- [x] Q1 ruff lint clean
+- [x] Q2 strict mypy clean on production package and tests
+- [x] Q3 full pytest pass
+- [x] Q4 one disposable local Odoo lifecycle integration pass: init→checkout→run/shell→remove
+- [x] Q5 `run_shell_script()` covered as SDK primitive; eval/exec/module/translations use it
 
 **AC coverage**: AC10
