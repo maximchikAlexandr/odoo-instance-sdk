@@ -20,14 +20,13 @@ OdooClient
     ├── checkout(project, branch, *, options)
     ├── sync_python(selector, *, upgrade)
     ├── get(selector)
-    ├── list(*, project, include_removed, verify)
-    ├── history(selector)
+    ├── list(*, project, include_removed)
     └── remove(selector)
 ```
 
 `client.instance(...)`, `client.instance.from_config(...)` и `client.instance.from_environment(...)` MUST возвращать отдельный `OdooInstance`. `OdooInstance.databases` MUST быть единственным публичным входом к database manager конкретного instance. Server lifecycle и readiness методы (`run`, `start`, `stop`, `status`, `wait_ready`, `run_foreground`, `shell`, `run_shell_script`) MUST быть доступны напрямую на `OdooInstance`.
 
-`client.environments` MUST быть `EnvironmentResource` для provisioning lifecycle (checkout/sync/get/list/history/remove) development environments. `client.backups` MUST управлять локальной коллекцией скачанных backup files и MUST NOT выполнять HTTP operations Odoo.
+`client.environments` MUST быть `EnvironmentResource` для provisioning lifecycle (checkout/sync/get/list/remove) development environments. `client.backups` MUST управлять локальной коллекцией скачанных backup files и MUST NOT выполнять HTTP operations Odoo.
 
 `client.database`, `client.server`, `client.catalog` и `client.doctor` MUST быть удалены/отсутствовать. Compatibility alias или deprecation proxy MUST NOT добавляться.
 
@@ -109,7 +108,7 @@ Base URL MUST автоматически строиться с scheme HTTP то�
 
 Resulting URL MUST быть local; remote URL в `from_config()` MUST завершаться `InstanceConfigurationError`.
 
-`from_config()` MUST записывать `command_prefix` (см. `instance-runtime-binding` spec — `command_prefix` rules).
+`from_config()` MUST оставлять `command_prefix=None` (см. `instance-runtime-binding` spec).
 
 #### Scenario: Loopback config без admin_passwd
 

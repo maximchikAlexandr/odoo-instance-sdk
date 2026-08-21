@@ -11,7 +11,7 @@ odcli = "odoo_instance_sdk.cli:cli"
 
 CLI — тонкий adapter над SDK, не оркестратор процессов.
 
-MVP command surface. Help и synopsis MUST показывать только эти команды, пока post-MVP срезы не начаты:
+Help и synopsis MUST показывать полный command surface:
 
 ```text
 odcli [--project PATH] COMMAND
@@ -25,18 +25,26 @@ odcli env remove [ENVIRONMENT] [OPTIONS]
 odcli run
 odcli shell [-- ODOO_ARGS...]
 odcli doctor [OPTIONS]
+odcli eval EXPRESSION [OPTIONS]
+odcli exec SCRIPT [-- SCRIPT_ARGS...]
+odcli module list [MODULE...] [OPTIONS]
+odcli module update MODULE... [OPTIONS]
+odcli module test MODULE... [OPTIONS]
+odcli translations export --module MODULE... [OPTIONS]
+odcli deps verify [OPTIONS]
+odcli vscode generate [OPTIONS]
 ```
 
-#### Scenario: MVP help shows only MVP commands
+#### Scenario: Help shows full command surface
 
 - **WHEN** `odcli --help` runs
-- **THEN** shows `init`, `env checkout|sync|list|remove`, `run`, `shell`, `doctor`; no post-MVP commands
+- **THEN** shows init, env, run, shell, doctor, eval, exec, module, translations, deps, vscode
 
 ### Requirement: CLI not a third runtime
 
 `odcli` MUST NOT: стартовать/останавливать/регистрировать процессы сам, держать process table, писать generated config в обход `EnvironmentResource`, реализовывать Git/`uv`/lock API, угадывать environment по recency или по «единственному ready».
 
-`odcli` MAY: резолвить project/environment по двум правилам, печатать human text или один JSON envelope, брать exclusive/shared lock через internal SDK path, вызывать `EnvironmentResource` и `OdooInstance`.
+`odcli` MAY: резолвить project/environment по двум правилам, печатать human text или один JSON envelope, вызывать `EnvironmentResource` и `OdooInstance`. CLI MUST NOT acquire flock.
 
 #### Scenario: No process table in CLI
 
@@ -86,7 +94,7 @@ odcli doctor [OPTIONS]
 
 ### Requirement: Environment resolution for instance commands
 
-Для instance commands (`run`, `shell`; post-MVP также `eval`, `exec`, `module`, `translations`, `deps verify`):
+Для instance commands (`run`, `shell`, `eval`, `exec`, `module`, `translations`, `deps verify`):
 
 1. Explicit root `--env SELECTOR` — UUID либо однозначное имя; option допустим только для instance commands.
 2. Exact registered worktree containing current directory.
@@ -190,26 +198,15 @@ odcli --env <environment-id> run
 
 Алгоритм:
 
-1. Разрешить ready environment и проверить worktree/config, recorded Python и Odoo entry point.
-2. Сравнить dependency fingerprint и при необходимости выполнить тот же environment sync. Если sync fails (compile error and no valid lock) — deterministic error, не запускать Odoo.
-3. Проверить порт через stdlib `socket.bind((http_interface, http_port))`, а при занятом port выполнить только observational HTTP health check для диагностики.
-4. Если port занят — независимо от HTTP ответа вернуть deterministic `port-conflict`/ownership-unknown и не менять generated config, не обновлять `used`, не запускать второй process.
-5. Обновить `last_used_at` и generic `use/succeeded` event после free-port preflight.
-6. Построить instance через `client.instance.from_environment(environment)`.
-7. Передать управление `instance.run_foreground()` и вернуть его exit code.
-8. На Ctrl+C `run_foreground()` останавливает только process group, созданную этим foreground call, и CLI завершается кодом 130.
+1. Разрешить ready environment и проверить worktree/config, recorded Python и Odoo entry point. MUST NOT вызывать `sync_python`.
+2. Проверить порт через stdlib `socket.bind((http_interface, http_port))`, а при занятом port выполнить только observational HTTP health check для диагностики.
+3. Если port занят — независимо от HTTP ответа вернуть deterministic `port-conflict`/ownership-unknown и не менять generated config, не обновлять `used`, не запускать второй process.
+4. Обновить `last_used_at` и generic `use/succeeded` event после free-port preflight.
+5. Построить instance через `client.instance.from_environment(environment)`.
+6. Передать управление `instance.run_foreground()` и вернуть его exit code.
+7. На Ctrl+C `run_foreground()` останавливает только process group, созданную этим foreground call, и CLI завершается кодом 130.
 
 Environment resource не запускает, не останавливает и не регистрирует процессы.
-
-#### Scenario: Dependency sync failure blocks run
-
-- **WHEN** `odcli run` and dependency fingerprint changed, sync fails (compile error, no valid lock)
-- **THEN** deterministic error, Odoo not started
-
-#### Scenario: Sync failure with valid lock — run continues
-
-- **WHEN** `odcli run` and dependency fingerprint changed, sync fails (compile error), BUT valid `requirements.lock` already exists
-- **THEN** run continues with existing valid lock (failed compile не заменяет valid lock)
 
 #### Scenario: Port conflict deterministic error
 
@@ -230,7 +227,7 @@ odcli --env <environment-id> shell -- --log-level=debug
 
 Алгоритм:
 
-1. Выполнить тот же selector/config/Python/dependency preflight, что и `run`, без HTTP port check.
+1. Выполнить тот же selector/config/Python preflight, что и `run`, без HTTP port check и без `sync_python`.
 2. Использовать БД, привязанную к environment: source DB для `shared`, target DB для `copy`.
 3. Построить обычный `OdooInstance` через `from_environment()`.
 4. Вызвать `OdooInstance.shell()` с `[recorded-python, odoo-bin]`, одним config/DB. Passthrough config/database overrides запрещены.
@@ -240,11 +237,6 @@ odcli --env <environment-id> shell -- --log-level=debug
 
 - **WHEN** `odcli shell` inside registered worktree
 - **THEN** environment + DB inferred, `instance.shell()` executes with bound config/DB
-
-#### Scenario: Shell sync failure with valid lock — continues
-
-- **WHEN** `odcli shell` and dependency fingerprint changed, sync fails (compile error), BUT valid `requirements.lock` exists
-- **THEN** shell continues with existing valid lock (same behavior as `run`)
 
 ### Requirement: `odcli doctor`
 
@@ -256,7 +248,7 @@ odcli --project /path/to/repo doctor
 
 Read-only checks покрывают manifest, worktrees, `uv`, recorded Python/ownership, dependencies, Odoo/config, catalog, DB/backups, ports и orphaned artifacts.
 
-`doctor` — CLI coordinator над `list`/`get`/`history` и filesystem checks. Это не `client.doctor` и не public resource.
+`doctor` — CLI coordinator над `list`/`get` и filesystem checks, plus internal catalog events. Это не `client.doctor` и не public resource.
 
 Errors дают non-zero; warnings остаются в output. `doctor --fix` не добавляется.
 
@@ -305,24 +297,88 @@ Errors дают non-zero; warnings остаются в output. `doctor --fix` н
 - **WHEN** `odcli doctor` после cache→data migration
 - **THEN** legacy DB shown как migrated legacy artifact
 
-### Requirement: Post-MVP command surface
+### Requirement: Automation commands
 
-Post-MVP, те же Click group, без новых public resources:
+`eval`, `exec`, `module`, `translations export`, `deps verify` и `vscode generate` MUST входить в CLI. Новых public resources MUST NOT добавляться. RPC fallback MUST NOT использоваться. `eval`/`exec`/`module`/`translations` MUST использовать `run_shell_script()`.
 
-```text
-odcli eval EXPRESSION [OPTIONS]
-odcli exec SCRIPT [-- SCRIPT_ARGS...]
-odcli module list [MODULE...] [OPTIONS]
-odcli module update MODULE... [OPTIONS]
-odcli module test MODULE... [OPTIONS]
-odcli translations export --module MODULE... [OPTIONS]
-odcli deps verify [OPTIONS]
-odcli vscode generate [OPTIONS]
+#### Scenario: Help lists automation commands
+
+- **WHEN** `odcli --help` runs
+- **THEN** shows `eval`, `exec`, `module`, `translations`, `deps`, `vscode`
+
+### Requirement: `eval` and `exec`
+
+```bash
+odcli eval "env['res.users'].search_count([])"
+odcli exec ./script.py -- arg1 arg2
 ```
 
-Эти команды не входят в первый CLI и не становятся public resources. Они используют captured local Odoo/uv primitives, no RPC fallback.
+- `eval` MUST вычислять одно Python expression в Odoo shell context (`env`, `odoo`, `self`) и возвращать scalar/collection JSON либо typed recordset summary `{model, ids, count}`; unknown objects MUST получать bounded sanitized `repr`.
+- `exec` MUST читать explicit file (`-` означает caller stdin), передавать script через shell stdin и устанавливать predictable `sys.argv` из tokens после `--`.
+- default MUST быть best-effort shell rollback. Explicit `--commit` MUST быть виден в plan.
+- project config MUST NOT автоматически подставлять eval/exec source.
 
-#### Scenario: Post-MVP not in MVP help
+#### Scenario: Eval expression
 
-- **WHEN** `odcli --help` in MVP
-- **THEN** `eval`/`exec`/`module`/`translations`/`deps`/`vscode` не показаны
+- **WHEN** `odcli eval "1+1"` executes in a ready environment
+- **THEN** JSON result is returned, no RPC used
+
+### Requirement: `module` commands
+
+```bash
+odcli module list --state installed
+odcli module update comerta_base --dry-run
+odcli module update comerta_base --yes
+odcli module test comerta_base --test-tags /comerta_base --reload-tests
+```
+
+- `list [MODULE...]` MUST читать `ir.module.module`.
+- `update` MUST требовать `--yes`; внутри shell `button_immediate_upgrade()`.
+- `test` MUST вызывать Odoo 19 `odoo.tests.shell.run_tests(...)`; workers=0; свободный bound HTTP port; exit non-zero при failed tests и при zero tests unless `--allow-empty`.
+- install/uninstall MUST NOT добавляться. Public `ModuleResource` MUST NOT существовать.
+
+#### Scenario: Module list
+
+- **WHEN** `odcli module list --state installed` executes
+- **THEN** installed modules are listed via local Odoo shell
+
+### Requirement: `translations export`
+
+```bash
+odcli translations export --module comerta_base --language ru_RU
+```
+
+Команда MUST подавать exporter через non-TTY stdin в `run_shell_script()`. MUST NOT использовать `--shell-file`. PO имя MUST браться из wizard `name`/`tools.get_iso_codes()` (`ru_RU` → `ru.po`). Public `TranslationResource` MUST NOT существовать.
+
+#### Scenario: ru_RU writes ru.po
+
+- **WHEN** `odcli translations export --module comerta_base --language ru_RU` succeeds
+- **THEN** file `ru.po` is written, not `ru_RU.po`
+
+### Requirement: `deps verify`
+
+```bash
+odcli deps verify
+odcli deps verify --json
+```
+
+Команда MUST запускать `uv pip check` плюс imports из addon `external_dependencies['python']` в recorded interpreter.
+
+#### Scenario: Missing import reported
+
+- **WHEN** an addon declares `external_dependencies['python']` import that is missing
+- **THEN** `deps verify` reports module/import name and exits non-zero
+
+### Requirement: `vscode generate`
+
+```bash
+odcli vscode generate
+odcli vscode generate --write
+```
+
+Команда MUST выполнять обратное преобразование current project/environment в debugpy launch profile. Default MUST печатать; `--write` MUST создавать отсутствующий `.vscode/launch.json` и MUST NOT rewrite существующего JSONC. MUST требовать ready environment.
+
+#### Scenario: Print profile
+
+- **WHEN** `odcli vscode generate` runs for a ready environment
+- **THEN** one debugpy profile is printed and no file is written

@@ -35,7 +35,7 @@
 - [ ] 2.8 `copy` mode: ZIP backup source DB with filestore via existing `backup()`; save `backup_id` as env-owned; restore target DB via `restore(..., copy=True, neutralize_database=True)`; postcondition `exists(target_db) is True`; only then `ready`; source Odoo HTTP must be local+available, else `failed` env with error; target DB never overwritten/auto-deleted
 - [ ] 2.9 `DatabaseResource.restore()` MUST send `"name": target_database_name` in POST body
 - [ ] 2.10 `env checkout --dry-run`: shows worktree/config/port/DB plan, Python mode (`reuse|create`), ownership, dependency inputs, helper argv; nothing created; candidates re-checked at execution
-- [ ] 2.11 `env list`: default table `ID NAME STATE OBSERVED BRANCH PYTHON_MODE DB_MODE DATABASE PORT LAST_USED WORKTREE`; hide only `removed`; `failed`/`cleanup_failed` visible; quick reconciliation (worktree/config/python/lock/port/backup); `OBSERVED` = `port-free|port-occupied|unknown`; `--all` = include removed; `--older-than` filters by `last_used_at` (no auto-delete); `--json` envelope
+- [ ] 2.11 `env list`: default table `ID NAME STATE OBSERVED BRANCH PYTHON_MODE DB_MODE DATABASE PORT LAST_USED WORKTREE`; hide only `removed`; `failed`/`cleanup_failed` visible; quick reconciliation (worktree/config/python/lock/port/backup); `OBSERVED` = `port-free|port-occupied|unknown`; `--all` = include removed; `--json` envelope
 - [ ] 2.12 `env remove`: plan + preflight; `--yes` или Click confirmation; `--dry-run`; cleanup matrix (shared vs copy); safety rules (dirty worktree blocks, occupied port blocks, `git worktree remove` not recursive delete, owned venv only if `python_environment_owned=true` + containment, reused venv never touched, no Git force, no branch delete, drop only for copy with matched cluster identity, shared source DB never deleted, `BackupResource.delete()` for env-owned backup only, idempotent missing = success, partial error → `cleanup_failed`, `removed` only after all owned artifacts gone, final empty dir deleted, SQLite rows kept)
 - [ ] 2.13 Тесты: path/DB-name containment, config rewrite and single `--config`, temporary-Git E2E (default reused venv + explicit owned venv), local-Odoo copy E2E (checkout→run/shell→remove), fake Git/uv/Odoo executables (failure exit codes, atomic rollback, no-RPC)
 
@@ -50,9 +50,9 @@
 - [ ] 3.5 uv writes serialized by `flock` по canonical Python-environment path
 - [ ] 3.6 Repo-local dependency files rebase to worktree; lock/fingerprint relate to worktree
 - [ ] 3.7 `env sync --upgrade` updates pins; regular sync preserves them; failed compile does not replace valid lock
-- [ ] 3.8 run/shell auto-sync only on changed inputs; external drift → `doctor` (MVP) / `deps verify` (post-MVP)
+- [ ] 3.8 run/shell MUST NOT auto-sync; drift → `doctor` / `deps verify`
 - [ ] 3.9 Runtime prefix always `[recorded-python, odoo-bin]`; no separate Python resource; `uv venv`/`pip compile`/`pip sync`/fingerprint — internal `sync_python()`, not public venv module
-- [ ] 3.10 Тесты: reuse venv (owned=false, not deleted), create venv (owned=true, isolated), sync upgrade vs preserve, failed compile keeps valid lock, auto-sync on changed inputs
+- [ ] 3.10 Тесты: reuse venv (owned=false, not deleted), create venv (owned=true, isolated), sync upgrade vs preserve, failed compile keeps valid lock; run/shell do not call sync_python
 
 **AC coverage**: AC2 (Python env part)
 
@@ -70,7 +70,7 @@
 - [ ] 4.10 `OdooInstance.shell(...) -> int`: same internal foreground subprocess primitive as `run_foreground`; inherit stdin/stdout/stderr/signals/exit code of `odoo-bin shell`; no own REPL; bound config/DB; passthrough config/database overrides (incl. `-cPATH`/`-dDB`) forbidden
 - [ ] 4.11 `OdooInstance.run_shell_script(source, *, argv=(), timeout=None, commit=False) -> CommandResult`: captured; one bound config/DB; non-TTY stdin; script `argv` injected after Odoo parsing; nonce-framed payload record in stdout; returns existing `CommandResult`
 - [ ] 4.12 Existing `OdooInstance.run(args) -> CommandResult` — unchanged captured one-shot API, not overloaded
-- [ ] 4.13 `odcli run`: resolve ready env + verify worktree/config/python; compare dep fingerprint → sync if changed; `socket.bind((http_interface, http_port))` port check; if busy → `port-conflict`/ownership-unknown, no 2nd process, no config change, no `used` update; update `last_used_at` + `use/succeeded` event after free-port preflight; build instance via `from_environment()`; `run_foreground()` → return exit code; Ctrl+C → exit 130
+- [ ] 4.13 `odcli run`: resolve ready env + verify worktree/config/python; MUST NOT sync_python; `socket.bind((http_interface, http_port))` port check; if busy → `port-conflict`/ownership-unknown, no 2nd process, no config change, no `used` update; update `last_used_at` + `use/succeeded` event after free-port preflight; build instance via `from_environment()`; `run_foreground()` → return exit code; Ctrl+C → exit 130
 - [ ] 4.14 `odcli shell`: same preflight as `run` without HTTP port check; bound DB (source for shared, target for copy); `from_environment()` → `instance.shell()`; passthrough args after `--`
 - [ ] 4.15 `EnvironmentResource` не получает runtime methods `run()`/`shell()`/`start()`/`stop()`
 - [ ] 4.16 Тесты: `from_config` without password, instance prefix vs client fallback, `run_shell_script` framing, `run_foreground`/`shell` raw streams + signals + exit code, port-conflict deterministic error
@@ -80,14 +80,14 @@
 ## Slice 5 — MVP: `doctor`
 
 - [ ] 5.1 `odcli doctor` / `odcli doctor --json` / `odcli --project /path doctor`: read-only checks over manifest, worktrees, `uv`, recorded Python/ownership, dependencies, Odoo/config, catalog, DB/backups, ports, orphaned artifacts
-- [ ] 5.2 `doctor` — CLI coordinator над `list`/`get`/`history` и filesystem checks; не `client.doctor`, не public resource
+- [ ] 5.2 `doctor` — CLI coordinator над `list`/`get` и filesystem checks plus internal catalog events; не `client.doctor`, не public resource
 - [ ] 5.3 Errors → non-zero; warnings → in output; `doctor --fix` не добавляется
 - [ ] 5.4 `doctor` показывает migrated legacy DB artifact (cache→data migration)
 - [ ] 5.5 Тесты: doctor detects missing worktree/config/python/lock, port state, owned backup missing, orphaned artifacts, migrated legacy DB
 
 **AC coverage**: AC4 (doctor sees one picture), AC5 (stable output)
 
-## Slice 6 — Post-MVP: captured automation: `eval`, `exec`, `module`, `translations export`, `deps verify`
+## Slice 6 — MVP: `eval`, `exec`, `module`, `translations export`, `deps verify`
 
 - [ ] 6.1 `odcli eval EXPRESSION`: single Python expression in Odoo shell context (`env`/`odoo`/`self`); scalar/collection JSON or typed recordset summary `{model, ids, count}`; unknown objects → bounded sanitized `repr`; default best-effort rollback; `--commit` visible in plan/event but not security boundary
 - [ ] 6.2 `odcli exec SCRIPT [-- SCRIPT_ARGS...]`: reads explicit file (`-` = caller stdin); script via shell stdin; predictable `sys.argv` from tokens after `--`; default best-effort rollback; `--commit` warning in help
@@ -96,12 +96,12 @@
 - [ ] 6.5 `odcli module test MODULE... --test-tags TAGS [--reload-tests] [--allow-empty]`: Odoo 19 `odoo.tests.shell.run_tests(env, test_tags, modules, reload_tests=...)`; workers=0; exclusive artifact lock + free bound HTTP port required; port conflict → deterministic precondition error; exit non-zero on failed tests AND on zero tests unless `--allow-empty`
 - [ ] 6.6 `odcli translations export --module MODULE... --language LANG... [--json]`: `run_shell_script()` with exporter on non-TTY stdin; `base.language.export` (`__new__` for .pot, active language, `format=po`, `export_type=module`); actual PO name from wizard `name`/`tools.get_iso_codes()` (e.g. `ru_RU`→`ru.po`); validate installed module + active language + non-empty base64; atomic write preserving file mode; containment proof for module root/target paths; no commit from bundled exporter; summary with requested code/actual filename/missing counts; partial failure → non-zero
 - [ ] 6.7 `odcli deps verify [--json]`: `uv pip check` for installed distributions + imports from addon `external_dependencies['python']` in managed interpreter; Manifest Python не исполняется; missing import → module/import name
-- [ ] 6.8 No RPC fallback for any post-MVP command; no new public resources (`ModuleResource`/`TranslationResource`/`PythonResource`); coordinators private application layer over `run_shell_script()`
+- [ ] 6.8 No RPC fallback; no new public resources (`ModuleResource`/`TranslationResource`/`PythonResource`); coordinators private application layer over `run_shell_script()`
 - [ ] 6.9 Тесты: eval scalar/recordset/unknown, exec stdin/`-`/argv, module list/update/test, translations export `ru_RU→ru.po` + containment + atomic write, deps verify missing import
 
 **AC coverage**: AC11
 
-## Slice 7 — Post-MVP: `vscode generate`
+## Slice 7 — MVP: `vscode generate`
 
 - [ ] 7.1 `odcli vscode generate` / `odcli vscode generate --write`: reverse transform current project/environment → debugpy launch profile; recorded Python/program, config, DB/port, portable `cwd`, integrated terminal, `justMyCode=false`; secrets/tasks/mutating args excluded
 - [ ] 7.2 Requires ready environment; default prints only; `--write` atomically creates absent `.vscode/launch.json`, refuses merge/rewrite existing JSONC
@@ -115,6 +115,6 @@
 - [ ] Q2 strict mypy clean on production package and tests
 - [ ] Q3 full pytest pass
 - [ ] Q4 one disposable local Odoo lifecycle integration pass: init→checkout→run/shell→remove
-- [ ] Q5 `run_shell_script()` covered as SDK primitive без CLI `eval`/`module`
+- [ ] Q5 `run_shell_script()` covered as SDK primitive; eval/exec/module/translations use it
 
 **AC coverage**: AC10
