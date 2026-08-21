@@ -1,0 +1,682 @@
+from __future__ import annotations
+
+import base64
+import json
+import textwrap
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
+
+import pytest
+
+from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.internal.automation import (
+    eval_expression,
+    exec_script,
+    export_translations,
+    list_modules,
+    plan_module_update,
+    run_module_tests,
+    update_modules,
+    verify_deps,
+)
+from odoo_instance_sdk.internal.server import _build_shell_wrapper, parse_payload
+from odoo_instance_sdk.models import CommandResult
+from odoo_instance_sdk.resources.environment import (
+    EnvironmentCheckoutOptions,
+    EnvironmentDatabaseMode,
+)
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk import OdooClient
+    from odoo_instance_sdk.resources.instance import OdooInstance
+
+
+def _payload_stdout(payload: dict[str, Any], nonce: str = "deadbeefdeadbeef") -> str:
+    marker_open = f"__ODCLI_PAYLOAD__{nonce}__"
+    marker_close = f"__END_PAYLOAD__{nonce}__"
+    return f"noise\n{marker_open} {json.dumps(payload)} {marker_close}\nmore\n"
+
+
+def _make_instance(tmp_path: Path) -> OdooInstance:
+    from odoo_instance_sdk import OdooClient, OdooClientConfig
+
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
+    cfg = tmp_path / "odoo.conf"
+    cfg.write_text("[options]\nhttp_port = 8069\nhttp_interface = 127.0.0.1\nadmin_passwd = x\n")
+    return client.instance.from_config(cfg)
+
+
+def _stub_run_shell_script(
+    payload: dict[str, Any] | None = None,
+    *,
+    returncode: int = 0,
+    stdout_override: str | None = None,
+    captured_source: list[str] | None = None,
+    captured_argv: list[list[str]] | None = None,
+    captured_commit: list[bool] | None = None,
+) -> CommandResult:
+    def _impl(
+        self: Any,
+        source: str,
+        *,
+        argv: tuple[str, ...] = (),
+        timeout: float | None = None,
+        commit: bool = False,
+    ) -> CommandResult:
+        if captured_source is not None:
+            captured_source.append(source)
+        if captured_argv is not None:
+            captured_argv.append(list(argv))
+        if captured_commit is not None:
+            captured_commit.append(commit)
+        if stdout_override is not None:
+            return CommandResult(
+                args=[], returncode=returncode, stdout=stdout_override, stderr="", duration=0.0
+            )
+        out = _payload_stdout(payload or {})
+        return CommandResult(args=[], returncode=returncode, stdout=out, stderr="", duration=0.0)
+
+    return _impl  # type: ignore[return-value]
+
+
+class TestEvalScalar:
+    def test_eval_returns_scalar(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        with patch.object(
+            type(inst),
+            "run_shell_script",
+            _stub_run_shell_script({"ok": True, "commit": False, "result": 2}),
+        ):
+            outcome = eval_expression(inst, "1+1")
+        assert outcome.payload is not None
+        assert outcome.payload["result"] == 2
+
+
+class TestEvalRecordset:
+    def test_eval_recordset_summary(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        summary = {"model": "res.users", "ids": [1, 7], "count": 2}
+        with patch.object(
+            type(inst),
+            "run_shell_script",
+            _stub_run_shell_script({"ok": True, "commit": False, "result": summary}),
+        ):
+            outcome = eval_expression(inst, "env['res.users'].search([])")
+        assert outcome.payload is not None
+        assert outcome.payload["result"] == summary
+
+
+class TestEvalUnknownObject:
+    def test_eval_unknown_bounded_repr(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        sanitized = "<SomeObject object at 0x1>"
+        with patch.object(
+            type(inst),
+            "run_shell_script",
+            _stub_run_shell_script({"ok": True, "commit": False, "result": sanitized}),
+        ):
+            outcome = eval_expression(inst, "object()")
+        assert outcome.payload is not None
+        assert outcome.payload["result"] == sanitized
+
+
+class TestExec:
+    def test_exec_file_argv(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        captured: list[list[str]] = []
+        script = tmp_path / "script.py"
+        script.write_text("print('hi')\n")
+        with patch.object(
+            type(inst),
+            "run_shell_script",
+            _stub_run_shell_script({"ok": True, "commit": False}, captured_argv=captured),
+        ):
+            outcome = exec_script(inst, script.read_text(), argv=("arg1", "arg2"))
+        assert outcome.returncode == 0
+        assert captured[0] == ["arg1", "arg2"]
+
+    def test_exec_stdin_dash(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        captured: list[str] = []
+        with patch.object(
+            type(inst),
+            "run_shell_script",
+            _stub_run_shell_script({"ok": True, "commit": False}, captured_source=captured),
+        ):
+            exec_script(inst, "x = 1\n")
+        assert captured[0] == "x = 1\n"
+
+
+class TestModuleList:
+    def test_module_list(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "ok": True,
+            "commit": False,
+            "result": [
+                {"name": "base", "state": "installed", "installed_version": "19.0"},
+                {"name": "sale", "state": "installed", "installed_version": "19.0"},
+            ],
+        }
+        with patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)):
+            records = list_modules(inst, state="installed")
+        assert [r.name for r in records] == ["base", "sale"]
+        assert all(r.state == "installed" for r in records)
+
+
+class TestModuleUpdate:
+    def test_dry_run_plan(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "ok": True,
+            "commit": False,
+            "result": [
+                {"name": "comerta_base", "state": "installed"},
+            ],
+        }
+        with patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)):
+            plan = plan_module_update(inst, ("comerta_base",))
+        assert plan.modules == ["comerta_base"]
+        assert plan.not_installed == []
+
+    def test_yes_executes_upgrade(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        list_payload = {
+            "ok": True,
+            "commit": False,
+            "result": [{"name": "comerta_base", "state": "installed"}],
+        }
+        upgrade_payload = {
+            "ok": True,
+            "commit": True,
+            "result": {"updated": ["comerta_base"]},
+        }
+        payloads = iter([list_payload, upgrade_payload])
+
+        def _impl(
+            self: Any,
+            source: str,
+            *,
+            argv: tuple[str, ...] = (),
+            timeout: float | None = None,
+            commit: bool = False,
+        ) -> CommandResult:
+            return CommandResult(
+                args=[],
+                returncode=0,
+                stdout=_payload_stdout(next(payloads)),
+                stderr="",
+                duration=0.0,
+            )
+
+        with (
+            patch.object(type(inst), "run_shell_script", _impl),
+            patch("odoo_instance_sdk.internal.automation.exclusive_lock") as mock_lock,
+        ):
+            outcome = update_modules(inst, ("comerta_base",), env_id="env-1")
+        assert outcome.payload is not None
+        assert outcome.payload["result"]["updated"] == ["comerta_base"]
+        mock_lock.assert_called_once()
+
+    def test_not_installed_errors(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {"ok": True, "commit": False, "result": []}
+        with (
+            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            pytest.raises(ConfigError, match="not installed"),
+        ):
+            update_modules(inst, ("missing_mod",), env_id="env-1")
+
+
+class TestModuleTest:
+    def test_pass(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "ok": True,
+            "commit": False,
+            "result": {
+                "tests_count": 5,
+                "tests_success": 5,
+                "tests_errors": 0,
+                "tests_failed": 0,
+                "skipped": 0,
+                "had_failures": False,
+                "had_zero_tests": False,
+            },
+        }
+        with (
+            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch("odoo_instance_sdk.internal.automation.exclusive_lock"),
+            patch("odoo_instance_sdk.internal.automation.socket.socket"),
+        ):
+            res, code = run_module_tests(
+                inst,
+                ("comerta_base",),
+                "/comerta_base",
+                env_id="e1",
+                http_interface="127.0.0.1",
+                http_port=18069,
+            )
+        assert code == 0
+        assert res.tests_count == 5
+
+    def test_zero_tests_without_allow_empty_nonzero(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "ok": True,
+            "commit": False,
+            "result": {
+                "tests_count": 0,
+                "tests_success": 0,
+                "tests_errors": 0,
+                "tests_failed": 0,
+                "skipped": 0,
+                "had_failures": False,
+                "had_zero_tests": True,
+            },
+        }
+        with (
+            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch("odoo_instance_sdk.internal.automation.exclusive_lock"),
+            patch("odoo_instance_sdk.internal.automation.socket.socket"),
+        ):
+            res, code = run_module_tests(
+                inst,
+                ("comerta_base",),
+                "/tag",
+                env_id="e1",
+                http_interface="127.0.0.1",
+                http_port=18070,
+            )
+        assert code == 1
+        assert res.had_zero_tests
+
+    def test_port_conflict_precondition_error(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+
+        def _boom(*_a: Any, **_kw: Any) -> Any:
+            raise AssertionError("socket should not bind via real socket")
+
+        with (
+            patch.object(type(inst), "run_shell_script", _stub_run_shell_script()),
+            patch("odoo_instance_sdk.internal.automation.exclusive_lock"),
+            patch("odoo_instance_sdk.internal.automation.socket.socket") as mock_sock_cls,
+        ):
+            mock_sock = mock_sock_cls.return_value
+            mock_sock.bind.side_effect = OSError("addr in use")
+            with pytest.raises(ConfigError, match="port conflict"):
+                run_module_tests(
+                    inst,
+                    ("comerta_base",),
+                    "/tag",
+                    env_id="e1",
+                    http_interface="127.0.0.1",
+                    http_port=18071,
+                )
+
+
+class TestTranslationsExport:
+    def test_ru_ru_writes_ru_po(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        po_content = b'msgid ""\nmsgstr ""\n'
+        payload = {
+            "ok": True,
+            "commit": False,
+            "result": {
+                "iso": "ru",
+                "filename": "ru.po",
+                "data": base64.b64encode(po_content).decode(),
+                "module": "comerta_base",
+                "installed": True,
+                "lang": "ru_RU",
+            },
+        }
+        worktree = tmp_path / "wt"
+        (worktree / "comerta_base" / "i18n").mkdir(parents=True)
+        with patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)):
+            results = export_translations(
+                inst, ("comerta_base",), ("ru_RU",), worktree_root=worktree
+            )
+        assert len(results) == 1
+        r = results[0]
+        assert r.actual_filename == "ru.po"
+        assert r.requested_lang == "ru_RU"
+        assert r.path.name == "ru.po"
+        assert r.path.read_bytes() == po_content
+
+    def test_containment_escape_rejected(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {
+            "ok": True,
+            "commit": False,
+            "result": {
+                "iso": "ru",
+                "filename": "../../../../../../../etc/passwd",
+                "data": base64.b64encode(b"x").decode(),
+                "module": "comerta_base",
+                "installed": True,
+                "lang": "ru_RU",
+            },
+        }
+        worktree = tmp_path / "wt"
+        (worktree / "comerta_base" / "i18n").mkdir(parents=True)
+        with (
+            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            pytest.raises(ConfigError, match="escapes worktree root"),
+        ):
+            export_translations(inst, ("comerta_base",), ("ru_RU",), worktree_root=worktree)
+
+    def test_atomic_write_preserves_mode(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        po_content = b"msgid x\n"
+        payload = {
+            "ok": True,
+            "commit": False,
+            "result": {
+                "iso": "ru",
+                "filename": "ru.po",
+                "data": base64.b64encode(po_content).decode(),
+                "module": "comerta_base",
+                "installed": True,
+                "lang": "ru_RU",
+            },
+        }
+        worktree = tmp_path / "wt"
+        i18n_dir = worktree / "comerta_base" / "i18n"
+        i18n_dir.mkdir(parents=True)
+        existing = i18n_dir / "ru.po"
+        existing.write_bytes(b"OLD")
+        existing.chmod(0o640)
+        with patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)):
+            results = export_translations(
+                inst, ("comerta_base",), ("ru_RU",), worktree_root=worktree
+            )
+        assert results[0].path.read_bytes() == po_content
+        assert not results[0].path.with_suffix(".po.tmp").exists()
+
+
+class TestDepsVerify:
+    def test_missing_import_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        worktree = tmp_path / "wt"
+        mod_dir = worktree / "myaddon"
+        mod_dir.mkdir(parents=True)
+        (mod_dir / "__manifest__.py").write_text(
+            textwrap.dedent("""\
+            {
+                'name': 'myaddon',
+                'external_dependencies': {
+                    'python': ['requests'],
+                },
+            }
+            """)
+        )
+        fake_py = tmp_path / "fakepython"
+        fake_py.write_text("#!/bin/sh\nexit 1\n")
+        fake_py.chmod(0o755)
+
+        def fake_run(args: list[str], **_kw: Any) -> Any:
+            class R:
+                def __init__(self, rc: int) -> None:
+                    self.returncode = rc
+                    self.stdout = ""
+                    self.stderr = ""
+
+            if "pip" in args and "check" in args:
+                return R(0)
+            if "-c" in args and "import requests" in " ".join(args):
+                return R(1)
+            return R(0)
+
+        monkeypatch.setattr("odoo_instance_sdk.internal.automation.subprocess.run", fake_run)
+        result = verify_deps(recorded_python=fake_py, worktree_root=worktree, uv_executable="uv")
+        assert {"module": "myaddon", "import": "requests"} in result.missing_imports
+
+
+class TestParsePayload:
+    def test_auto_detect_nonce(self) -> None:
+        stdout = _payload_stdout({"ok": True, "result": 42}, nonce="abcdef1234567890")
+        payload = parse_payload(stdout)
+        assert payload is not None
+        assert payload["result"] == 42
+
+    def test_explicit_nonce(self) -> None:
+        stdout = _payload_stdout({"ok": True}, nonce="1234567890abcdef")
+        payload = parse_payload(stdout, nonce="1234567890abcdef")
+        assert payload is not None
+        assert payload["ok"] is True
+
+    def test_no_payload_returns_none(self) -> None:
+        assert parse_payload("no markers here") is None
+
+    def test_returns_payload_dict(self) -> None:
+        stdout = _payload_stdout({"ok": True, "result": "x"})
+        assert parse_payload(stdout) is not None
+
+
+class TestShellWrapper:
+    def test_wrapper_emits_result_when_defined(self) -> None:
+        wrapper = _build_shell_wrapper("result = 5\n", [], commit=False, nonce="abc123")
+        assert "_odcli_serialize_result" in wrapper
+        assert "'result'" in wrapper
+        assert "__ODCLI_PAYLOAD__abc123__" in wrapper
+
+    def test_wrapper_injects_source(self) -> None:
+        wrapper = _build_shell_wrapper("x = 1\n", ["--y"], commit=True, nonce="z9")
+        assert "x = 1" in wrapper
+        assert '"--y"' in wrapper
+        assert "True" in wrapper
+
+
+class TestCliEval:
+    def test_cli_eval_json(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        from click.testing import CliRunner
+
+        opts = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=Path("/usr/bin/odoo"),
+        )
+        env = env_client.environments.checkout(project_manifest, "feat/eval-cli", options=opts)
+        runner = CliRunner()
+        with (
+            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+        ):
+            mock_run.return_value = CommandResult(
+                args=[],
+                returncode=0,
+                stdout=_payload_stdout({"ok": True, "commit": False, "result": 2}),
+                stderr="",
+                duration=0.0,
+            )
+            result = runner.invoke(cli, ["--env", str(env.id), "eval", "1+1", "--json"])
+        assert result.exit_code == 0
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is True
+        assert envelope["data"]["result"] == 2
+
+
+class TestCliModuleUpdate:
+    def test_without_yes_errors(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        from click.testing import CliRunner
+
+        opts = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=Path("/usr/bin/odoo"),
+        )
+        env = env_client.environments.checkout(project_manifest, "feat/modupd-cli", options=opts)
+        runner = CliRunner()
+        with (
+            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+        ):
+            mock_run.return_value = CommandResult(
+                args=[],
+                returncode=0,
+                stdout=_payload_stdout(
+                    {
+                        "ok": True,
+                        "commit": False,
+                        "result": [{"name": "base", "state": "installed"}],
+                    }
+                ),
+                stderr="",
+                duration=0.0,
+            )
+            result = runner.invoke(cli, ["--env", str(env.id), "module", "update", "base"])
+        assert result.exit_code == 1
+        assert "--yes" in result.output
+
+    def test_dry_run_plan(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        from click.testing import CliRunner
+
+        opts = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=Path("/usr/bin/odoo"),
+        )
+        env = env_client.environments.checkout(project_manifest, "feat/modupd-dry", options=opts)
+        runner = CliRunner()
+        with (
+            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+        ):
+            mock_run.return_value = CommandResult(
+                args=[],
+                returncode=0,
+                stdout=_payload_stdout(
+                    {
+                        "ok": True,
+                        "commit": False,
+                        "result": [{"name": "base", "state": "installed"}],
+                    }
+                ),
+                stderr="",
+                duration=0.0,
+            )
+            result = runner.invoke(
+                cli, ["--env", str(env.id), "module", "update", "base", "--dry-run", "--json"]
+            )
+        assert result.exit_code == 0
+        env_json = json.loads(result.output)
+        assert env_json["data"]["modules"] == ["base"]
+        assert env_json["data"]["dry_run"] is True
+
+
+class TestCliExecStdin:
+    def test_exec_dash_reads_stdin(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        from click.testing import CliRunner
+
+        opts = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=Path("/usr/bin/odoo"),
+        )
+        env = env_client.environments.checkout(project_manifest, "feat/exec-cli", options=opts)
+        runner = CliRunner()
+        with (
+            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+        ):
+            mock_run.return_value = CommandResult(
+                args=[],
+                returncode=0,
+                stdout=_payload_stdout({"ok": True, "commit": False}),
+                stderr="",
+                duration=0.0,
+            )
+            result = runner.invoke(
+                cli,
+                ["--env", str(env.id), "exec", "-", "--", "arg1"],
+                input="print('hi')\n",
+            )
+        assert result.exit_code == 0
+        _src, kwargs = mock_run.call_args
+        assert _src[0] == "print('hi')\n"
+        assert list(kwargs["argv"]) == ["arg1"]
+
+
+class TestCliModuleList:
+    def test_module_list_json(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        from click.testing import CliRunner
+
+        opts = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=Path("/usr/bin/odoo"),
+        )
+        env = env_client.environments.checkout(project_manifest, "feat/modlist-cli", options=opts)
+        runner = CliRunner()
+        with (
+            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+        ):
+            mock_run.return_value = CommandResult(
+                args=[],
+                returncode=0,
+                stdout=_payload_stdout(
+                    {
+                        "ok": True,
+                        "commit": False,
+                        "result": [{"name": "base", "state": "installed"}],
+                    }
+                ),
+                stderr="",
+                duration=0.0,
+            )
+            result = runner.invoke(
+                cli,
+                ["--env", str(env.id), "module", "list", "--state", "installed", "--json"],
+            )
+        assert result.exit_code == 0
+        env_json = json.loads(result.output)
+        assert env_json["data"]["modules"][0]["name"] == "base"
+
+
+class TestNoNewPublicResources:
+    def test_no_module_resource(self) -> None:
+        from odoo_instance_sdk import resources as r
+
+        assert not hasattr(r, "ModuleResource")
+
+    def test_no_translation_resource(self) -> None:
+        from odoo_instance_sdk import resources as r
+
+        assert not hasattr(r, "TranslationResource")
+
+    def test_no_python_resource(self) -> None:
+        from odoo_instance_sdk import resources as r
+
+        assert not hasattr(r, "PythonResource")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__])

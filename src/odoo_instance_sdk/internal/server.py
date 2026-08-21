@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any, cast
 
 from msgspec import structs
 
@@ -220,6 +221,46 @@ def run_foreground_process(
     return exit_code
 
 
+_RESULT_SNIPPET = (
+    "import json as _odcli_rj\n"
+    "def _odcli_serialize_result(_r):\n"
+    "    if _r is None or isinstance(_r, (bool, int, float, str)):\n"
+    "        return _r\n"
+    "    if isinstance(_r, (list, tuple)):\n"
+    "        try:\n"
+    "            return [_odcli_serialize_result(_x) for _x in _r]\n"
+    "        except Exception:\n"
+    "            return _odcli_sanitize(_r)\n"
+    "    if isinstance(_r, dict):\n"
+    "        try:\n"
+    "            return {str(_k): _odcli_serialize_result(_v) for _k, _v in _r.items()}\n"
+    "        except Exception:\n"
+    "            return _odcli_sanitize(_r)\n"
+    "    if hasattr(_r, 'ids') and (hasattr(_r, '_name') or hasattr(_r, '_model')):\n"
+    "        _name = getattr(_r, '_name', None)\n"
+    "        if _name is None and hasattr(_r, '_model'):\n"
+    "            _name = getattr(_r._model, '_name', None)\n"
+    "        try:\n"
+    "            return {'model': _name, 'ids': list(_r.ids), 'count': len(_r)}\n"
+    "        except Exception:\n"
+    "            return _odcli_sanitize(_r)\n"
+    "    return _odcli_sanitize(_r)\n"
+    "def _odcli_sanitize(_o, _max=500):\n"
+    "    try:\n"
+    "        _t = repr(_o)\n"
+    "    except Exception:\n"
+    "        _t = '<unrepresentable>'\n"
+    "    _t = ' '.join(str(_t).split())\n"
+    "    if len(_t) > _max:\n"
+    "        _t = _t[:_max] + '...<truncated>'\n"
+    "    for _kw in ('password', 'passwd', 'token', 'secret', 'api_key', 'apikey'):\n"
+    "        if _kw in _t.lower():\n"
+    "            _t = '<redacted>'\n"
+    "            break\n"
+    "    return _t\n"
+)
+
+
 def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: str) -> str:
     marker_open = f"__ODCLI_PAYLOAD__{nonce}__"
     marker_close = f"__END_PAYLOAD__{nonce}__"
@@ -227,10 +268,16 @@ def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: s
 
     source_repr = json.dumps(source)
     argv_repr = json.dumps(argv)
+    payload_dict = "{'ok': True, 'commit': " + repr(commit) + "}"
+    result_emit = (
+        "    if 'result' in globals() and result is not None:\n"
+        "        _payload.update({'result': _odcli_serialize_result(result)})\n"
+    )
     return (
         "import json as _json, sys as _sys\n"
         f"_sys.argv = [_sys.argv[0], *_json.loads({argv_repr!r})]\n"
         f"_source = _json.loads({source_repr!r})\n"
+        f"{_RESULT_SNIPPET}"
         "try:\n"
         "    exec(compile(_source, '<odcli-shell-script>', 'exec'), globals())\n"
         "finally:\n"
@@ -239,9 +286,44 @@ def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: s
         f"            env.cr.commit() if {commit!r} else env.cr.rollback()\n"
         "    except Exception:\n"
         "        pass\n"
-        f"print({marker_open!r}, _json.dumps({{'ok': True, 'commit': {commit!r}}}), "
-        f"{marker_close!r})\n"
+        f"    _payload = {payload_dict}\n"
+        f"{result_emit}"
+        f"    print({marker_open!r}, _json.dumps(_payload), {marker_close!r})\n"
     )
+
+
+def parse_payload(stdout: str, nonce: str | None = None) -> dict[str, Any] | None:
+    import json as _json
+    import re as _re
+
+    if nonce is not None:
+        marker_open = f"__ODCLI_PAYLOAD__{nonce}__"
+        marker_close = f"__END_PAYLOAD__{nonce}__"
+        start = stdout.rfind(marker_open)
+        if start == -1:
+            return None
+        start += len(marker_open)
+        end = stdout.rfind(marker_close, start)
+        if end == -1:
+            return None
+        body = stdout[start:end].strip()
+    else:
+        match = None
+        for m in _re.finditer(
+            r"__ODCLI_PAYLOAD__([0-9a-fA-F]+)__\s*(.*?)\s*__END_PAYLOAD__\1__",
+            stdout,
+            _re.DOTALL,
+        ):
+            match = m
+        if match is None:
+            return None
+        body = match.group(2).strip()
+    if not body:
+        return None
+    try:
+        return cast("dict[str, Any]", _json.loads(body))
+    except ValueError:
+        return None
 
 
 def _run_captured_shell(
