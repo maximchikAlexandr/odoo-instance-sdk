@@ -16,10 +16,6 @@ from odoo_instance_sdk.internal.paths import get_backups_dir
 def _patch_catalog(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db_path = tmp_path / "catalog.sqlite3"
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.storage.backup_catalog.get_legacy_catalog_path",
-        lambda: tmp_path / "nonexistent-legacy.sqlite3",
-    )
 
 
 def test_successful_download(

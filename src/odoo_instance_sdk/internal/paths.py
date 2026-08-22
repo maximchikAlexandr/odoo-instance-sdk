@@ -33,7 +33,3 @@ def get_environments_root(*, ensure_exists: bool = True) -> Path:
 
 def get_locks_dir() -> Path:
     return get_state_root() / "locks"
-
-
-def get_legacy_catalog_path() -> Path:
-    return get_cache_root() / "backups.sqlite3"

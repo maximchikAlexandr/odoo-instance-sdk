@@ -42,12 +42,6 @@ def shared_lock(path: Path) -> Iterator[int]:
         yield fd
 
 
-def catalog_migration_lock_path() -> Path:
-    from odoo_instance_sdk.internal.paths import get_locks_dir
-
-    return get_locks_dir() / "catalog-migration.lock"
-
-
 def provisioning_lock_path() -> Path:
     from odoo_instance_sdk.internal.paths import get_locks_dir
 

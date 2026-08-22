@@ -10,10 +10,7 @@ from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
-from odoo_instance_sdk.internal.paths import (
-    get_environments_root,
-    get_legacy_catalog_path,
-)
+from odoo_instance_sdk.internal.paths import get_environments_root
 from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
@@ -72,7 +69,6 @@ def run_doctor(client: OdooClient, project_path: Path | None) -> DoctorReport:
 
     _check_uv(report)
     _check_catalog(report, client)
-    _check_legacy(report, client)
     _check_orphaned(report, client)
 
     for env in envs:
@@ -149,35 +145,6 @@ def _check_catalog(report: DoctorReport, client: OdooClient) -> None:
                 STATUS_ERROR,
                 f"catalog user_version={user_version}, expected at least 5",
             )
-        )
-
-
-def _check_legacy(report: DoctorReport, client: OdooClient) -> None:
-    legacy = get_legacy_catalog_path()
-    if not legacy.exists():
-        return
-    from odoo_instance_sdk.internal.paths import get_catalog_path
-
-    durable = get_catalog_path()
-    if durable.exists():
-        report.checks.append(
-            CheckResult(
-                "legacy",
-                STATUS_INFO,
-                "both durable and legacy catalogs exist; durable is authoritative, "
-                "automatic merge forbidden",
-            )
-        )
-        report.checks.append(
-            CheckResult(
-                "legacy",
-                STATUS_INFO,
-                f"migrated legacy artifact: {legacy}",
-            )
-        )
-    else:
-        report.checks.append(
-            CheckResult("legacy", STATUS_INFO, f"migrated legacy artifact: {legacy}")
         )
 
 

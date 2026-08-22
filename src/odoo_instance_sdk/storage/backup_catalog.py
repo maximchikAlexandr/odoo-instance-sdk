@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import os
 import sqlite3
-import tempfile
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,10 +15,6 @@ from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
     BackupNotAvailableError,
     BackupNotFoundError,
-)
-from odoo_instance_sdk.internal.locks import catalog_migration_lock_path, exclusive_lock
-from odoo_instance_sdk.internal.paths import (
-    get_legacy_catalog_path,
 )
 from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
 from odoo_instance_sdk.models import (
@@ -61,11 +55,9 @@ def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
 class BackupCatalog:
     db_path: Path
     _conn: sqlite3.Connection = field(init=False, repr=False)
-    _migrated_legacy: bool = field(init=False, repr=False, default=False)
 
     def __post_init__(self) -> None:
         try:
-            self._maybe_migrate_legacy()
             self._conn = sqlite3.connect(str(self.db_path), timeout=5.0)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -83,50 +75,6 @@ class BackupCatalog:
             raise BackupCatalogError(str(e)) from e
         except OSError as e:
             raise BackupCatalogError(f"Failed to set permissions on catalog file: {e}") from e
-
-    def _maybe_migrate_legacy(self) -> None:
-        if self.db_path.exists():
-            return
-        from odoo_instance_sdk.internal.paths import get_catalog_path
-
-        if self.db_path != get_catalog_path():
-            return
-        legacy = get_legacy_catalog_path()
-        if not legacy.exists():
-            return
-        with exclusive_lock(catalog_migration_lock_path()):
-            if self.db_path.exists():
-                return
-            if not legacy.exists():
-                return
-            self._copy_legacy_to_durable(legacy)
-
-    def _copy_legacy_to_durable(self, legacy: Path) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        src = sqlite3.connect(str(legacy), timeout=5.0)
-        try:
-            src.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            tmp_fd, tmp_name = tempfile.mkstemp(
-                dir=str(self.db_path.parent), suffix=".tmp", prefix=self.db_path.name
-            )
-            os.close(tmp_fd)
-            tmp_path = Path(tmp_name)
-            dst = sqlite3.connect(str(tmp_path), timeout=5.0)
-            try:
-                src.backup(dst)
-                dst.close()
-            finally:
-                src.close()
-            os.chmod(tmp_path, 0o600)
-            fd = os.open(str(tmp_path), os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.replace(tmp_path, self.db_path)
-            self._migrated_legacy = True
-        except sqlite3.Error as e:
-            raise BackupCatalogError(f"Legacy catalog migration failed: {e}") from e
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript("""
@@ -629,10 +577,6 @@ class BackupCatalog:
             (host, db_port, database_name),
         ).fetchone()
         return row is not None
-
-    def legacy_catalog_path(self) -> Path | None:
-        legacy = get_legacy_catalog_path()
-        return legacy if legacy.exists() else None
 
     @_translate_sqlite_error
     def create_environment(self, env: dict[str, object]) -> None:

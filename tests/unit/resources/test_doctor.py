@@ -170,26 +170,6 @@ class TestDoctorOccupiedPort:
         assert report.ok is True
 
 
-class TestDoctorMigratedLegacyDb:
-    def test_legacy_db_shown_as_migrated(
-        self,
-        env_client: OdooClient,
-        project_manifest: Path,
-        fake_python: Path,
-    ) -> None:
-        _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-legacy")
-        from odoo_instance_sdk.internal.paths import get_legacy_catalog_path
-
-        legacy = get_legacy_catalog_path()
-        legacy.parent.mkdir(parents=True, exist_ok=True)
-        legacy.write_text("dummy")
-        report = _doctor(env_client, project_manifest)
-        legacy_checks = [c for c in report.checks if c.name == "legacy"]
-        assert any("migrated legacy artifact" in c.detail for c in legacy_checks)
-        assert all(c.status == "info" for c in legacy_checks)
-        assert report.ok is True
-
-
 class TestDoctorMissingOwnedBackup:
     def test_missing_owned_backup_file_warns(
         self,

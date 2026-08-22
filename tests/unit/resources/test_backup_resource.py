@@ -23,10 +23,6 @@ def sample_backup_entry(
 ) -> Generator[dict[str, object], None, None]:
     db_path = tmp_path / "catalog.sqlite3"
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.storage.backup_catalog.get_legacy_catalog_path",
-        lambda: tmp_path / "nonexistent-legacy.sqlite3",
-    )
     backup_file = tmp_path / "real_backup.zip"
     backup_file.write_bytes(b"x")
     bid = str(uuid.uuid4())
@@ -48,10 +44,6 @@ def sample_backup_entry(
 def test_list_empty(client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "catalog.sqlite3"
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.storage.backup_catalog.get_legacy_catalog_path",
-        lambda: tmp_path / "nonexistent-legacy.sqlite3",
-    )
     client._catalog = None
     res = BackupResource(_client=client)
     backups = res.list()
@@ -79,10 +71,6 @@ def test_latest_backup_none(
 ) -> None:
     db_path = tmp_path / "catalog.sqlite3"
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.storage.backup_catalog.get_legacy_catalog_path",
-        lambda: tmp_path / "nonexistent-legacy.sqlite3",
-    )
     client._catalog = None
     res = BackupResource(_client=client)
     assert res.latest("http://localhost:8069", "nonexistent") is None
@@ -161,10 +149,6 @@ def test_cross_process_rehydration(
 ) -> None:
     db_path = tmp_path / "catalog.sqlite3"
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.storage.backup_catalog.get_legacy_catalog_path",
-        lambda: tmp_path / "nonexistent-legacy.sqlite3",
-    )
     client._catalog = None
     backup_file = tmp_path / "across.zip"
     backup_file.write_bytes(b"x")
@@ -194,10 +178,6 @@ def test_backup_resource_repr(
 ) -> None:
     db_path = tmp_path / "catalog.sqlite3"
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.storage.backup_catalog.get_legacy_catalog_path",
-        lambda: tmp_path / "nonexistent-legacy.sqlite3",
-    )
     client._catalog = None
     res = BackupResource(_client=client)
     r = repr(res)
