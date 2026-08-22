@@ -684,6 +684,11 @@ class EnvironmentResource:
         ):
             return self._do_sync_python(catalog, env, upgrade=upgrade)
 
+    def record_use(self, env: DevelopmentEnvironment) -> None:
+        catalog = self._client.get_catalog()
+        now = datetime.now(UTC).isoformat()
+        catalog.record_environment_use(str(env.id), now)
+
     def _do_sync_python(
         self, catalog: BackupCatalog, env: DevelopmentEnvironment, *, upgrade: bool
     ) -> DevelopmentEnvironment:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,9 @@ def _make_env(
     env_id: uuid.UUID | None = None,
     name: str = "env-1",
     worktree: str = "/tmp/wt-1",
+    generated_config_path: str = "/wt/odoo.conf",
+    python_environment_path: str = "/venv",
+    python_environment_owned: bool = False,
 ) -> DevelopmentEnvironment:
     return DevelopmentEnvironment(
         id=env_id or uuid.uuid4(),
@@ -31,9 +35,9 @@ def _make_env(
         branch="main",
         base_ref="HEAD",
         worktree_path=worktree,
-        generated_config_path="/wt/odoo.conf",
-        python_environment_path="/venv",
-        python_environment_owned=False,
+        generated_config_path=generated_config_path,
+        python_environment_path=python_environment_path,
+        python_environment_owned=python_environment_owned,
         dependency_lock_path="/lock",
         http_interface="127.0.0.1",
         http_port=8069,
@@ -150,3 +154,109 @@ def test_resolve_environment_infers_from_worktree(
 
     result = resolve_environment(client, None, cwd=worktree)
     assert result.name == "inferred"
+
+
+def test_ready_instance_reads_selector_from_click_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    config = worktree / "odoo.conf"
+    config.write_text("[options]\n")
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n")
+    env = _make_env(
+        name="ready",
+        worktree=str(worktree),
+        generated_config_path=str(config),
+        python_environment_path=str(python),
+    )
+    client = MagicMock()
+    instance = MagicMock()
+    client.instance.from_environment.return_value = instance
+    ctx = MagicMock()
+    ctx.obj = {"env": env.name}
+    monkeypatch.setattr("odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_environment",
+        lambda _client, selector: env if selector == env.name else None,
+    )
+    from odoo_instance_sdk.internal.context import ready_instance
+
+    result_client, result_env, result_instance = ready_instance(ctx)
+
+    assert result_client is client
+    assert result_env is env
+    assert result_instance is instance
+    client.instance.from_environment.assert_called_once_with(env)
+
+
+@pytest.mark.parametrize(
+    (
+        "worktree_exists",
+        "config_exists",
+        "python_owned",
+        "python_exists",
+        "expected_error",
+    ),
+    [
+        (False, False, False, False, "worktree missing: {worktree}"),
+        (True, False, False, False, "generated config missing: {config}"),
+        (True, True, True, True, None),
+        (True, True, True, False, "recorded Python missing: {python}/bin/python"),
+        (True, True, False, False, "recorded Python missing: {python}"),
+    ],
+    ids=[
+        "missing-worktree",
+        "missing-config",
+        "owned-python-present",
+        "owned-python-missing",
+        "reused-python-missing",
+    ],
+)
+def test_ready_instance_validates_recorded_runtime_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worktree_exists: bool,
+    config_exists: bool,
+    python_owned: bool,
+    python_exists: bool,
+    expected_error: str | None,
+) -> None:
+    worktree = tmp_path / "worktree"
+    config = worktree / "odoo.conf"
+    python = tmp_path / "python"
+    if worktree_exists:
+        worktree.mkdir()
+    if config_exists:
+        config.write_text("[options]\n")
+    python_executable = python / "bin" / "python" if python_owned else python
+    if python_exists:
+        python_executable.parent.mkdir(parents=True, exist_ok=True)
+        python_executable.write_text("#!/bin/sh\n")
+    env = _make_env(
+        worktree=str(worktree),
+        generated_config_path=str(config),
+        python_environment_path=str(python),
+        python_environment_owned=python_owned,
+    )
+    client = MagicMock()
+    ctx = MagicMock()
+    ctx.obj = {"env": env.name}
+    monkeypatch.setattr("odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_environment",
+        lambda _client, selector: env if selector == env.name else None,
+    )
+    from odoo_instance_sdk.internal.context import ready_instance
+
+    if expected_error is None:
+        ready_instance(ctx)
+        client.instance.from_environment.assert_called_once_with(env)
+    else:
+        with pytest.raises(
+            RuntimeError,
+            match=re.escape(expected_error.format(worktree=worktree, config=config, python=python)),
+        ):
+            ready_instance(ctx)
+        client.instance.from_environment.assert_not_called()

@@ -663,6 +663,20 @@ class BackupCatalog:
         self._conn.commit()
 
     @_translate_sqlite_error
+    def record_environment_use(self, environment_id: str, last_used_at: str) -> None:
+        """Persist the use timestamp and success event as one transaction."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE environments SET last_used_at = ? WHERE id = ?",
+                (last_used_at, environment_id),
+            )
+            self._conn.execute(
+                "INSERT INTO environment_events (environment_id, operation, outcome, occurred_at, message) "
+                "VALUES (?, ?, ?, datetime('now'), ?)",
+                (environment_id, "use", "succeeded", None),
+            )
+
+    @_translate_sqlite_error
     def get_environment(self, environment_id: str) -> sqlite3.Row | None:
         row: sqlite3.Row | None = self._conn.execute(
             "SELECT * FROM environments WHERE id = ?",

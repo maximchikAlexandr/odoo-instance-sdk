@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.resources.environment import EnvironmentState
 
 
 @pytest.mark.parametrize(
@@ -96,14 +97,87 @@ def test_run_and_shell_sanitize_runtime_exception(command: str, method: str) -> 
     getattr(instance, method).side_effect = RuntimeError("password=top-secret /private/path")
     client = MagicMock()
     client.instance.from_environment.return_value = instance
-    env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
+    env = SimpleNamespace(
+        state=EnvironmentState.READY,
+        http_interface="127.0.0.1",
+        http_port=8069,
+    )
     with (
-        patch("odoo_instance_sdk.cli._make_client", return_value=client),
-        patch("odoo_instance_sdk.cli._resolve_ready_env", return_value=env),
-        patch("odoo_instance_sdk.cli._check_port_free", return_value=True),
+        patch("odoo_instance_sdk.internal.context.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.internal.context.resolve_environment", return_value=env),
+        patch("odoo_instance_sdk.internal.context._verify_env_runtime", return_value=None),
+        patch("odoo_instance_sdk.internal.context._check_port_free", return_value=True),
     ):
         result = runner.invoke(cli, [command])
 
     assert result.exit_code == 1
     assert "top-secret" not in result.output
     assert "/private/path" not in result.output
+
+
+def test_env_list_is_read_only_through_public_resources() -> None:
+    runner = CliRunner()
+    client = MagicMock()
+    client.environments.list.return_value = []
+    client.backups.list.return_value = []
+    with patch("odoo_instance_sdk.internal.cli_env.OdooClient", return_value=client):
+        result = runner.invoke(cli, ["env", "list", "--all-projects", "--json"])
+
+    assert result.exit_code == 0, result.output
+    client.environments.list.assert_called_once_with(project=None, include_removed=False)
+    client.backups.list.assert_called_once_with()
+    client.get_catalog.assert_not_called()
+
+
+def test_run_records_use_once_before_foreground_start() -> None:
+    client = MagicMock()
+    instance = MagicMock()
+    instance.run_foreground.return_value = 0
+    env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
+    calls = MagicMock()
+    calls.attach_mock(client.environments.record_use, "record_use")
+    calls.attach_mock(instance.run_foreground, "run_foreground")
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance", return_value=(client, env, instance)
+        ),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, ["run"])
+
+    assert result.exit_code == 0, result.output
+    assert calls.mock_calls == [
+        call.record_use(env),
+        call.run_foreground(),
+    ]
+
+
+def test_port_conflict_does_not_record_use_or_start_foreground() -> None:
+    client = MagicMock()
+    instance = MagicMock()
+    env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance", return_value=(client, env, instance)
+        ),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=False),
+    ):
+        result = CliRunner().invoke(cli, ["run"])
+
+    assert result.exit_code == 1
+    client.environments.record_use.assert_not_called()
+    instance.run_foreground.assert_not_called()
+
+
+def test_shell_does_not_record_use() -> None:
+    client = MagicMock()
+    instance = MagicMock()
+    instance.shell.return_value = 0
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        return_value=(client, SimpleNamespace(), instance),
+    ):
+        result = CliRunner().invoke(cli, ["shell"])
+
+    assert result.exit_code == 0, result.output
+    client.environments.record_use.assert_not_called()

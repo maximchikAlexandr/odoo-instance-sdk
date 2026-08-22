@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 def _invoke(runner: CliRunner, client: OdooClient, args: list[str]) -> Result:
-    with patch("odoo_instance_sdk.cli._make_client", return_value=client):
+    with patch("odoo_instance_sdk.internal.cli_env.OdooClient", return_value=client):
         return runner.invoke(cli, args)
 
 
