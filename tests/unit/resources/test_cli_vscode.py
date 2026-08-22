@@ -37,7 +37,7 @@ def _checkout_ready_env(
 
 
 def _invoke(runner: CliRunner, env_client: OdooClient, args: list[str]) -> Result:
-    with patch("odoo_instance_sdk.cli._make_client", return_value=env_client):
+    with patch("odoo_instance_sdk.internal.context._make_client", return_value=env_client):
         return runner.invoke(cli, args, catch_exceptions=False)
 
 

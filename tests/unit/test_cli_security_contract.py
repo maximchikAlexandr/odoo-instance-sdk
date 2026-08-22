@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.resources.environment import EnvironmentState
 
 
 @pytest.mark.parametrize(
@@ -96,11 +97,16 @@ def test_run_and_shell_sanitize_runtime_exception(command: str, method: str) -> 
     getattr(instance, method).side_effect = RuntimeError("password=top-secret /private/path")
     client = MagicMock()
     client.instance.from_environment.return_value = instance
-    env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
+    env = SimpleNamespace(
+        state=EnvironmentState.READY,
+        http_interface="127.0.0.1",
+        http_port=8069,
+    )
     with (
-        patch("odoo_instance_sdk.cli._make_client", return_value=client),
-        patch("odoo_instance_sdk.cli._resolve_ready_env", return_value=env),
-        patch("odoo_instance_sdk.cli._check_port_free", return_value=True),
+        patch("odoo_instance_sdk.internal.context._make_client", return_value=client),
+        patch("odoo_instance_sdk.internal.context.resolve_environment", return_value=env),
+        patch("odoo_instance_sdk.internal.context._verify_env_runtime", return_value=None),
+        patch("odoo_instance_sdk.internal.context._check_port_free", return_value=True),
     ):
         result = runner.invoke(cli, [command])
 

@@ -405,8 +405,8 @@ class TestPortConflictCli:
 
         runner = CliRunner()
         with (
-            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
-            patch("odoo_instance_sdk.cli._check_port_free", return_value=False),
+            patch("odoo_instance_sdk.internal.context._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.internal.context._check_port_free", return_value=False),
         ):
             result = runner.invoke(cli, ["--env", str(env.id), "run"])
         assert result.exit_code == 1

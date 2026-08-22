@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 
 def _invoke(env_client: OdooClient, args: list[str]) -> Result:
-    with patch("odoo_instance_sdk.cli._make_client", return_value=env_client):
+    with patch("odoo_instance_sdk.internal.context._make_client", return_value=env_client):
         return CliRunner().invoke(cli, args, catch_exceptions=False)
 
 
@@ -71,7 +71,7 @@ class TestOdcliLifecycle:
 
         env_id = str(env.id)
         with (
-            patch("odoo_instance_sdk.cli._check_port_free", return_value=True),
+            patch("odoo_instance_sdk.internal.context._check_port_free", return_value=True),
             patch(
                 "odoo_instance_sdk.resources.instance.OdooInstance.run_foreground",
                 return_value=0,

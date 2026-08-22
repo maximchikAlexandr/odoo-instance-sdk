@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.exceptions import (
     EnvironmentNotFoundError,
@@ -10,7 +11,11 @@ from odoo_instance_sdk.exceptions import (
     ProjectManifestNotFoundError,
 )
 from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
+from odoo_instance_sdk.resources.environment import DevelopmentEnvironment, EnvironmentState
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 def _find_nearest_manifest(start: Path, boundary: Path | None) -> Path | None:
@@ -177,3 +182,46 @@ def _infer_from_worktree(
             continue
         return env
     return None
+
+
+def _make_client() -> OdooClient:
+    from odoo_instance_sdk import OdooClient, OdooClientConfig
+
+    return OdooClient(config=OdooClientConfig(executable="odoo"))
+
+
+def _check_port_free(env_obj: DevelopmentEnvironment) -> bool:
+    from odoo_instance_sdk.internal.address import AddressState, probe_address
+
+    return probe_address(env_obj.http_interface, env_obj.http_port) is AddressState.FREE
+
+
+def _verify_env_runtime(env_obj: DevelopmentEnvironment) -> None:
+    worktree = Path(env_obj.worktree_path)
+    if not worktree.is_dir():
+        raise RuntimeError(f"worktree missing: {worktree}")
+    config_path = Path(env_obj.generated_config_path)
+    if not config_path.is_file():
+        raise RuntimeError(f"generated config missing: {config_path}")
+    py_path = Path(env_obj.python_environment_path)
+    if env_obj.python_environment_owned:
+        if not (py_path / "bin" / "python").exists():
+            raise RuntimeError(f"recorded Python missing: {py_path / 'bin' / 'python'}")
+    elif not py_path.exists():
+        raise RuntimeError(f"recorded Python missing: {py_path}")
+
+
+def ready_instance(
+    *,
+    project: str | None,
+    env_selector: str | None,
+) -> tuple[OdooClient, DevelopmentEnvironment, OdooInstance]:
+    client = _make_client()
+    env_obj = resolve_environment(client, env_selector)
+    if env_obj.state != EnvironmentState.READY:
+        raise RuntimeError(
+            f"Environment {env_obj.name} ({env_obj.id}) is not ready (state={env_obj.state})"
+        )
+    _verify_env_runtime(env_obj)
+    instance = client.instance.from_environment(env_obj)
+    return client, env_obj, instance

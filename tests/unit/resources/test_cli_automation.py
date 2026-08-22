@@ -571,7 +571,7 @@ class TestCliEval:
         env = env_client.environments.checkout(project_manifest, "feat/eval-cli", options=opts)
         runner = CliRunner()
         with (
-            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.internal.context._make_client", return_value=env_client),
             patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
         ):
             mock_run.return_value = CommandResult(
@@ -605,7 +605,7 @@ class TestCliModuleUpdate:
         env = env_client.environments.checkout(project_manifest, "feat/modupd-cli", options=opts)
         runner = CliRunner()
         with (
-            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.internal.context._make_client", return_value=env_client),
             patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
         ):
             mock_run.return_value = CommandResult(
@@ -641,7 +641,7 @@ class TestCliModuleUpdate:
         env = env_client.environments.checkout(project_manifest, "feat/modupd-dry", options=opts)
         runner = CliRunner()
         with (
-            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.internal.context._make_client", return_value=env_client),
             patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
         ):
             mock_run.return_value = CommandResult(
@@ -683,7 +683,7 @@ class TestCliExecStdin:
         env = env_client.environments.checkout(project_manifest, "feat/exec-cli", options=opts)
         runner = CliRunner()
         with (
-            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.internal.context._make_client", return_value=env_client),
             patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
         ):
             mock_run.return_value = CommandResult(
@@ -721,7 +721,7 @@ class TestCliModuleList:
         env = env_client.environments.checkout(project_manifest, "feat/modlist-cli", options=opts)
         runner = CliRunner()
         with (
-            patch("odoo_instance_sdk.cli._make_client", return_value=env_client),
+            patch("odoo_instance_sdk.internal.context._make_client", return_value=env_client),
             patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
         ):
             mock_run.return_value = CommandResult(
