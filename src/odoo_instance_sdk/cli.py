@@ -8,6 +8,8 @@ from typing import Any, cast
 
 import click
 
+from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import VscodeImportError
 from odoo_instance_sdk.internal import context as cli_context
 from odoo_instance_sdk.internal.automation import (
@@ -121,13 +123,11 @@ def init(
     if option_state.odoo_bin is None:
         if no_input or json_output or dry_run:
             fail(json_output, "init", "Missing required option --odoo-bin")
-            return
         option_state.odoo_bin = Path(click.prompt("Path to odoo-bin"))
         provenance["discovery"].append("odoo_bin")
 
     if not option_state.odoo_bin:
         fail(json_output, "init", "odoo_bin is required")
-        return
 
     config = ProjectConfig(
         repository_root=resolved_project.resolve(),
@@ -212,7 +212,6 @@ def _import_vscode(
         result = import_vscode_launch(from_vscode, launch_name=launch_name, no_input=no_input)
     except VscodeImportError as e:
         fail(json_output, "init", str(e))
-        return None
     return result.config
 
 
@@ -247,7 +246,6 @@ def _handle_existing_manifest(
         existing_cfg = ProjectConfig.load(resolved_project)
     except Exception as e:
         fail(json_output, "init", f"Existing manifest unreadable: {e}")
-        return True
     if _manifest_dict(existing_cfg) == _manifest_dict(config):
         if json_output:
             emit_json_envelope(
@@ -258,7 +256,6 @@ def _handle_existing_manifest(
         return True
     if no_input or json_output:
         fail(json_output, "init", "manifest exists and differs; remove it first or adjust options")
-        return True
     if not click.confirm("Manifest exists and differs; overwrite?", default=False):
         click.echo("Aborted.")
         return True
@@ -283,13 +280,11 @@ def _manifest_dict(config: ProjectConfig) -> dict[str, Any]:
 @click.pass_context
 def doctor(ctx: click.Context, json_output: bool) -> None:
     project_path = cli_context.resolve_project_path(ctx)
-    client = cli_context._make_client()
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
     try:
         report = run_doctor(client, project_path if project_path != Path.cwd() else None)
     except Exception as e:
         fail(json_output, "doctor", str(e))
-        sys.exit(1)
-        return
     if json_output:
         emit_json_envelope(
             ok=report.ok,
@@ -340,20 +335,17 @@ def run(ctx: click.Context) -> None:
                 err=True,
             )
             sys.exit(1)
-            return
         client.environments.record_use(env_obj)
     except SystemExit:
         raise
     except Exception as e:
         fail(False, "run", str(e))
-        return
     try:
         exit_code = instance.run_foreground()
     except KeyboardInterrupt:
         exit_code = 130
     except Exception as e:
         fail(False, "run", str(e))
-        exit_code = 1
     sys.exit(exit_code)
 
 
@@ -367,14 +359,12 @@ def shell(ctx: click.Context, odoo_args: tuple[str, ...]) -> None:
         raise
     except Exception as e:
         fail(False, "shell", str(e))
-        return
     try:
         exit_code = instance.shell(args=list(odoo_args))
     except KeyboardInterrupt:
         exit_code = 130
     except Exception as e:
         fail(False, "shell", str(e))
-        exit_code = 1
     sys.exit(exit_code)
 
 
@@ -393,10 +383,8 @@ def eval_cmd(ctx: click.Context, expression: str, commit: bool, json_output: boo
         raise
     except Exception as e:
         fail(json_output, "eval", str(e))
-        return
     if outcome.returncode != 0:
         fail(json_output, "eval", f"shell exited {outcome.returncode}: {outcome.stderr.strip()}")
-        return
     result = outcome.payload.get("result") if outcome.payload else None
     if json_output:
         emit_json_envelope(ok=True, command="eval", result={"result": result, "commit": commit})
@@ -426,12 +414,10 @@ def exec_cmd(
         p = Path(script)
         if not p.is_file():
             fail(json_output, "exec", f"script not found: {script}")
-            return
         try:
             source = p.read_text(encoding="utf-8")
         except OSError as e:
             fail(json_output, "exec", f"cannot read script: {e}")
-            return
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
         outcome = exec_script(instance, source, argv=tuple(script_args), commit=commit)
@@ -439,7 +425,6 @@ def exec_cmd(
         raise
     except Exception as e:
         fail(json_output, "exec", str(e))
-        return
     if json_output:
         emit_json_envelope(
             ok=True,
@@ -478,7 +463,6 @@ def module_list(
         raise
     except Exception as e:
         fail(json_output, "module.list", str(e))
-        return
     if json_output:
         emit_json_envelope(
             ok=True, command="module.list", result={"modules": [r.to_dict() for r in records]}
@@ -512,14 +496,12 @@ def module_update(
         raise
     except Exception as e:
         fail(json_output, "module.update", str(e))
-        return
     if plan.not_installed:
         fail(
             json_output,
             "module.update",
             f"modules not installed: {', '.join(plan.not_installed)}",
         )
-        return
     if dry_run:
         if json_output:
             emit_json_envelope(
@@ -533,7 +515,6 @@ def module_update(
         return
     if not yes:
         fail(json_output, "module.update", "module update requires --yes")
-        return
     _module_update_execute(instance, plan.modules, env_obj, json_output=json_output)
 
 
@@ -550,14 +531,12 @@ def _module_update_execute(
         raise
     except Exception as e:
         fail(json_output, "module.update", str(e))
-        return
     if outcome.returncode != 0:
         fail(
             json_output,
             "module.update",
             f"shell exited {outcome.returncode}: {outcome.stderr.strip()}",
         )
-        return
     updated = outcome.payload.get("result", {}).get("updated", []) if outcome.payload else []
     if json_output:
         emit_json_envelope(
@@ -601,7 +580,6 @@ def module_test(
         raise
     except Exception as e:
         fail(json_output, "module.test", str(e))
-        return
     if json_output:
         emit_json_envelope(
             ok=True,
@@ -653,7 +631,6 @@ def translations_export(
         raise
     except Exception as e:
         fail(json_output, "translations.export", str(e))
-        return
     if json_output:
         emit_json_envelope(
             ok=True,
@@ -702,7 +679,6 @@ def deps_verify(ctx: click.Context, json_output: bool) -> None:
         raise
     except Exception as e:
         fail(json_output, "deps.verify", str(e))
-        return
     exit_code = 1 if result.missing_imports else 0
     if json_output:
         emit_json_envelope(
@@ -750,7 +726,6 @@ def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> 
         raise
     except Exception as e:
         fail(json_output, "vscode.generate", str(e))
-        return
     if write_file:
         try:
             project_path = cli_context.resolve_project_path(ctx)
@@ -758,7 +733,6 @@ def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> 
             written = write_launch_json(project_path, content)
         except Exception as e:
             fail(json_output, "vscode.generate", str(e))
-            return
         if json_output:
             emit_json_envelope(
                 ok=True,

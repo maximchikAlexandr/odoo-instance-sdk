@@ -687,8 +687,7 @@ class EnvironmentResource:
     def record_use(self, env: DevelopmentEnvironment) -> None:
         catalog = self._client.get_catalog()
         now = datetime.now(UTC).isoformat()
-        catalog.update_environment(str(env.id), {"last_used_at": now})
-        catalog.add_environment_event(str(env.id), "use", "succeeded")
+        catalog.record_environment_use(str(env.id), now)
 
     def _do_sync_python(
         self, catalog: BackupCatalog, env: DevelopmentEnvironment, *, upgrade: bool

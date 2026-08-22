@@ -19,7 +19,10 @@ if TYPE_CHECKING:
 
 
 def _invoke(env_client: OdooClient, args: list[str]) -> Result:
-    with patch("odoo_instance_sdk.internal.context._make_client", return_value=env_client):
+    with (
+        patch("odoo_instance_sdk.internal.context.OdooClient", return_value=env_client),
+        patch("odoo_instance_sdk.internal.cli_env.OdooClient", return_value=env_client),
+    ):
         return CliRunner().invoke(cli, args, catch_exceptions=False)
 
 
@@ -81,10 +84,29 @@ class TestOdcliLifecycle:
             run_result = _invoke(env_client, ["--project", str(git_repo), "--env", env_id, "run"])
             assert run_result.exit_code == 0, run_result.output
 
+            catalog = env_client.get_catalog()
+            used = catalog.get_environment(env_id)
+            assert used is not None
+            assert used["last_used_at"] is not None
+            use_events = catalog._conn.execute(
+                "SELECT operation, outcome FROM environment_events WHERE environment_id = ?",
+                (env_id,),
+            ).fetchall()
+            assert [(event["operation"], event["outcome"]) for event in use_events].count(
+                ("use", "succeeded")
+            ) == 1
+
             shell_result = _invoke(
                 env_client, ["--project", str(git_repo), "--env", env_id, "shell"]
             )
             assert shell_result.exit_code == 0, shell_result.output
+            assert (
+                catalog._conn.execute(
+                    "SELECT COUNT(*) FROM environment_events WHERE environment_id = ? AND operation = 'use'",
+                    (env_id,),
+                ).fetchone()[0]
+                == 1
+            )
 
         remove_result = _invoke(
             env_client,

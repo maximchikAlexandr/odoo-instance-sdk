@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
 import click
 
 from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.internal import context as cli_context
 from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail
 from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
-from odoo_instance_sdk.internal.observe import backup_exists
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
     EnvironmentCheckoutOptions,
@@ -69,7 +69,7 @@ def env_checkout(
 ) -> None:
     try:
         project_path = cli_context.resolve_project_path(ctx)
-        client = cli_context._make_client()
+        client = OdooClient(config=OdooClientConfig(executable="odoo"))
         options = EnvironmentCheckoutOptions(
             base_ref=base_ref,
             name=name,
@@ -89,7 +89,6 @@ def env_checkout(
         )
     except Exception as e:
         fail(json_output, "env.checkout", str(e))
-        return
     if json_output:
         data = _checkout_plan_dict(result) if dry_run else _env_dict(result)
         emit_json_envelope(
@@ -123,15 +122,15 @@ def env_checkout(
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output: bool) -> None:
-    client = cli_context._make_client()
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
     try:
         project = None if all_projects else cli_context.resolve_project_path(ctx)
         envs = client.environments.list(project=project, include_removed=all_envs)
     except Exception as e:
         fail(json_output, "env.list", str(e))
-        return
     if json_output:
-        data = {"environments": [_reconcile_environment(e, client) for e in envs]}
+        backup_ids = {backup.id for backup in client.backups.list()}
+        data = {"environments": [_reconcile_environment(e, backup_ids=backup_ids) for e in envs]}
         emit_json_envelope(
             ok=True,
             command="env.list",
@@ -142,7 +141,8 @@ def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output
             },
         )
     else:
-        _print_env_table(envs, client)
+        backup_ids = {backup.id for backup in client.backups.list()}
+        _print_env_table(envs, backup_ids=backup_ids)
 
 
 @env_group.command("remove")
@@ -154,7 +154,7 @@ def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output
 def env_remove(
     ctx: click.Context, environment: str | None, dry_run: bool, yes: bool, json_output: bool
 ) -> None:
-    client = cli_context._make_client()
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
     if environment is None:
         if ctx.obj.get("env") is not None:
             fail(
@@ -167,14 +167,12 @@ def env_remove(
             env_obj = cli_context.resolve_environment(client, None)
         except Exception as e:
             fail(json_output, "env.remove", str(e))
-            return
     else:
         try:
             cli_context.resolve_project_path(ctx)
             env_obj = client.environments.get(environment)
         except Exception as e:
             fail(json_output, "env.remove", str(e))
-            return
     if dry_run:
         if json_output:
             data = _remove_plan_dict(env_obj)
@@ -205,7 +203,6 @@ def env_remove(
         env_obj = client.environments.get(str(env_obj.id))
     except Exception as e:
         fail(json_output, "env.remove", str(e))
-        sys.exit(1)
     if json_output:
         data = _env_dict(env_obj)
         emit_json_envelope(
@@ -228,7 +225,7 @@ def env_remove(
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def env_sync(ctx: click.Context, environment: str | None, upgrade: bool, json_output: bool) -> None:
-    client = cli_context._make_client()
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
     if environment is None:
         if ctx.obj.get("env") is not None:
             fail(
@@ -241,13 +238,11 @@ def env_sync(ctx: click.Context, environment: str | None, upgrade: bool, json_ou
             environment = str(cli_context.resolve_environment(client, None).id)
         except Exception as e:
             fail(json_output, "env.sync", str(e))
-            return
     try:
         cli_context.resolve_project_path(ctx)
         result = client.environments.sync_python(environment, upgrade=upgrade)
     except Exception as e:
         fail(json_output, "env.sync", str(e))
-        return
     if json_output:
         data = _env_dict(result)
         emit_json_envelope(
@@ -339,7 +334,7 @@ def _print_plan(title: str, plan: dict[str, Any]) -> None:
         click.echo(f"{key}: {json.dumps(value, default=str, sort_keys=True)}")
 
 
-def _reconcile_environment(e: object, client: OdooClient) -> dict[str, Any]:
+def _reconcile_environment(e: object, *, backup_ids: set[uuid.UUID]) -> dict[str, Any]:
     env = cast("Any", e)
     worktree = Path(env.worktree_path)
     try:
@@ -358,7 +353,7 @@ def _reconcile_environment(e: object, client: OdooClient) -> dict[str, Any]:
         if env.python_environment_owned
         else python_path.is_file()
     )
-    backup_exists_val = backup_exists(client, env)
+    backup_exists_val = None if env.backup_id is None else env.backup_id in backup_ids
     lock_path = Path(env.dependency_lock_path)
     fingerprint = (
         hashlib.sha256(lock_path.read_bytes()).hexdigest() if lock_path.is_file() else None
@@ -387,10 +382,10 @@ def _reconcile_environment(e: object, client: OdooClient) -> dict[str, Any]:
     }
 
 
-def _print_env_table(envs: list[Any], client: OdooClient) -> None:
+def _print_env_table(envs: list[Any], *, backup_ids: set[uuid.UUID]) -> None:
     rows: list[str] = []
     for e in envs:
-        data = _reconcile_environment(e, client)
+        data = _reconcile_environment(e, backup_ids=backup_ids)
         db = data["source_database"] if e.db_mode == "shared" else data["target_database"]
         reconciliation = data["reconciliation"]
         artifacts = (

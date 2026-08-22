@@ -202,10 +202,6 @@ def resolve_project_path(ctx: click.Context) -> Path:
     return Path(project)
 
 
-def _make_client() -> OdooClient:
-    return OdooClient(config=OdooClientConfig(executable="odoo"))
-
-
 def _check_port_free(env_obj: DevelopmentEnvironment) -> bool:
     return probe_address(env_obj.http_interface, env_obj.http_port) is AddressState.FREE
 
@@ -227,7 +223,7 @@ def _verify_env_runtime(env_obj: DevelopmentEnvironment) -> None:
 
 def ready_instance(ctx: click.Context) -> tuple[OdooClient, DevelopmentEnvironment, OdooInstance]:
     """Resolve a ready environment from Click context and return a live instance."""
-    client = _make_client()
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
     env_obj = resolve_environment(client, ctx.obj.get("env"))
     if env_obj.state != EnvironmentState.READY:
         raise RuntimeError(

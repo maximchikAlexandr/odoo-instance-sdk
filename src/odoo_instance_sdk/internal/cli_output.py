@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+from typing import Any, Never
 
 import click
 
@@ -47,7 +47,7 @@ def emit_json_envelope(
     click.echo(json.dumps(envelope, indent=2, default=str))
 
 
-def fail(json_output: bool, command: str, message: str, *, usage: bool = False) -> None:
+def fail(json_output: bool, command: str, message: str, *, usage: bool = False) -> Never:
     if json_output:
         emit_json_envelope(
             ok=False,
