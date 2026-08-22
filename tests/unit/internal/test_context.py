@@ -22,6 +22,8 @@ def _make_env(
     env_id: uuid.UUID | None = None,
     name: str = "env-1",
     worktree: str = "/tmp/wt-1",
+    generated_config_path: str = "/wt/odoo.conf",
+    python_environment_path: str = "/venv",
 ) -> DevelopmentEnvironment:
     return DevelopmentEnvironment(
         id=env_id or uuid.uuid4(),
@@ -31,8 +33,8 @@ def _make_env(
         branch="main",
         base_ref="HEAD",
         worktree_path=worktree,
-        generated_config_path="/wt/odoo.conf",
-        python_environment_path="/venv",
+        generated_config_path=generated_config_path,
+        python_environment_path=python_environment_path,
         python_environment_owned=False,
         dependency_lock_path="/lock",
         http_interface="127.0.0.1",
@@ -150,3 +152,38 @@ def test_resolve_environment_infers_from_worktree(
 
     result = resolve_environment(client, None, cwd=worktree)
     assert result.name == "inferred"
+
+
+def test_ready_instance_reads_selector_from_click_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    config = worktree / "odoo.conf"
+    config.write_text("[options]\n")
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n")
+    env = _make_env(
+        name="ready",
+        worktree=str(worktree),
+        generated_config_path=str(config),
+        python_environment_path=str(python),
+    )
+    client = MagicMock()
+    instance = MagicMock()
+    client.instance.from_environment.return_value = instance
+    ctx = MagicMock()
+    ctx.obj = {"env": env.name}
+    monkeypatch.setattr("odoo_instance_sdk.internal.context._make_client", lambda: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_environment",
+        lambda _client, selector: env if selector == env.name else None,
+    )
+    from odoo_instance_sdk.internal.context import ready_instance
+
+    result_client, result_env, result_instance = ready_instance(ctx)
+
+    assert result_client is client
+    assert result_env is env
+    assert result_instance is instance
+    client.instance.from_environment.assert_called_once_with(env)

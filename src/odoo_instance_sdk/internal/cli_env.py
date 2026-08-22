@@ -4,14 +4,21 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import click
 
-from odoo_instance_sdk.cli import _emit_json_envelope, _fail, _resolve_project_path
-
-if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.internal import context as cli_context
+from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail
+from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
+from odoo_instance_sdk.internal.observe import backup_exists
+from odoo_instance_sdk.resources.environment import (
+    DevelopmentEnvironment,
+    EnvironmentCheckoutOptions,
+    EnvironmentDatabaseMode,
+    _CheckoutPlan,
+)
 
 
 @click.group()
@@ -60,16 +67,9 @@ def env_checkout(
     dry_run: bool,
     json_output: bool,
 ) -> None:
-    from odoo_instance_sdk.resources.environment import (
-        EnvironmentCheckoutOptions,
-        EnvironmentDatabaseMode,
-    )
-
     try:
-        project_path = _resolve_project_path(ctx)
-        from odoo_instance_sdk.internal.context import _make_client
-
-        client = _make_client()
+        project_path = cli_context.resolve_project_path(ctx)
+        client = cli_context._make_client()
         options = EnvironmentCheckoutOptions(
             base_ref=base_ref,
             name=name,
@@ -88,11 +88,11 @@ def env_checkout(
             else client.environments.checkout(project_path, branch, options=options)
         )
     except Exception as e:
-        _fail(json_output, "env.checkout", str(e))
+        fail(json_output, "env.checkout", str(e))
         return
     if json_output:
         data = _checkout_plan_dict(result) if dry_run else _env_dict(result)
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=True,
             command="env.checkout",
             result=data,
@@ -123,18 +123,16 @@ def env_checkout(
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output: bool) -> None:
-    from odoo_instance_sdk.internal.context import _make_client
-
-    client = _make_client()
+    client = cli_context._make_client()
     try:
-        project = None if all_projects else _resolve_project_path(ctx)
+        project = None if all_projects else cli_context.resolve_project_path(ctx)
         envs = client.environments.list(project=project, include_removed=all_envs)
     except Exception as e:
-        _fail(json_output, "env.list", str(e))
+        fail(json_output, "env.list", str(e))
         return
     if json_output:
         data = {"environments": [_reconcile_environment(e, client) for e in envs]}
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=True,
             command="env.list",
             result=data,
@@ -156,35 +154,31 @@ def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output
 def env_remove(
     ctx: click.Context, environment: str | None, dry_run: bool, yes: bool, json_output: bool
 ) -> None:
-    from odoo_instance_sdk.internal.context import _make_client
-
-    client = _make_client()
+    client = cli_context._make_client()
     if environment is None:
         if ctx.obj.get("env") is not None:
-            _fail(
+            fail(
                 json_output,
                 "env.remove",
                 "root --env is not accepted by env remove; pass ENVIRONMENT or cd into its worktree",
                 usage=True,
             )
         try:
-            from odoo_instance_sdk.internal.context import resolve_environment
-
-            env_obj = resolve_environment(client, None)
+            env_obj = cli_context.resolve_environment(client, None)
         except Exception as e:
-            _fail(json_output, "env.remove", str(e))
+            fail(json_output, "env.remove", str(e))
             return
     else:
         try:
-            _resolve_project_path(ctx)
+            cli_context.resolve_project_path(ctx)
             env_obj = client.environments.get(environment)
         except Exception as e:
-            _fail(json_output, "env.remove", str(e))
+            fail(json_output, "env.remove", str(e))
             return
     if dry_run:
         if json_output:
             data = _remove_plan_dict(env_obj)
-            _emit_json_envelope(
+            emit_json_envelope(
                 ok=True,
                 command="env.remove",
                 result=data,
@@ -210,11 +204,11 @@ def env_remove(
         client.environments.remove(env_obj)
         env_obj = client.environments.get(str(env_obj.id))
     except Exception as e:
-        _fail(json_output, "env.remove", str(e))
+        fail(json_output, "env.remove", str(e))
         sys.exit(1)
     if json_output:
         data = _env_dict(env_obj)
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=True,
             command="env.remove",
             result=data,
@@ -234,33 +228,29 @@ def env_remove(
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def env_sync(ctx: click.Context, environment: str | None, upgrade: bool, json_output: bool) -> None:
-    from odoo_instance_sdk.internal.context import _make_client
-
-    client = _make_client()
+    client = cli_context._make_client()
     if environment is None:
         if ctx.obj.get("env") is not None:
-            _fail(
+            fail(
                 json_output,
                 "env.sync",
                 "root --env is not accepted by env sync; pass ENVIRONMENT or cd into its worktree",
                 usage=True,
             )
         try:
-            from odoo_instance_sdk.internal.context import resolve_environment
-
-            environment = str(resolve_environment(client, None).id)
+            environment = str(cli_context.resolve_environment(client, None).id)
         except Exception as e:
-            _fail(json_output, "env.sync", str(e))
+            fail(json_output, "env.sync", str(e))
             return
     try:
-        _resolve_project_path(ctx)
+        cli_context.resolve_project_path(ctx)
         result = client.environments.sync_python(environment, upgrade=upgrade)
     except Exception as e:
-        _fail(json_output, "env.sync", str(e))
+        fail(json_output, "env.sync", str(e))
         return
     if json_output:
         data = _env_dict(result)
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=True,
             command="env.sync",
             result=data,
@@ -272,8 +262,6 @@ def env_sync(ctx: click.Context, environment: str | None, upgrade: bool, json_ou
 
 
 def _env_dict(e: object) -> dict[str, Any]:
-    from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
-
     env = cast("DevelopmentEnvironment", e)
     return {
         "id": str(env.id),
@@ -287,8 +275,6 @@ def _env_dict(e: object) -> dict[str, Any]:
 
 
 def _checkout_plan_dict(plan: object) -> dict[str, Any]:
-    from odoo_instance_sdk.resources.environment import _CheckoutPlan
-
     if not isinstance(plan, _CheckoutPlan):
         raise TypeError("checkout dry-run must return an internal checkout plan")
     return {
@@ -354,14 +340,9 @@ def _print_plan(title: str, plan: dict[str, Any]) -> None:
 
 
 def _reconcile_environment(e: object, client: OdooClient) -> dict[str, Any]:
-    from odoo_instance_sdk.internal.context import _check_port_free
-    from odoo_instance_sdk.internal.observe import backup_exists
-
     env = cast("Any", e)
     worktree = Path(env.worktree_path)
     try:
-        from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
-
         registered = any(
             Path(entry.worktree).resolve() == worktree.resolve()
             for entry in worktree_list_porcelain(Path(env.repository_root))
@@ -370,7 +351,7 @@ def _reconcile_environment(e: object, client: OdooClient) -> dict[str, Any]:
         registered = False
     observed = "unknown"
     if env.state == "ready":
-        observed = "port-free" if _check_port_free(env) else "port-occupied"
+        observed = "port-free" if cli_context._check_port_free(env) else "port-occupied"
     python_path = Path(env.python_environment_path)
     python_exists = (
         (python_path / "bin" / "python").is_file()

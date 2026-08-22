@@ -113,3 +113,11 @@ def test_run_and_shell_sanitize_runtime_exception(command: str, method: str) -> 
     assert result.exit_code == 1
     assert "top-secret" not in result.output
     assert "/private/path" not in result.output
+
+
+def test_cli_modules_do_not_call_get_catalog() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "src" / "odoo_instance_sdk"
+    for relative in ("cli.py", "internal/cli_env.py", "internal/observe.py"):
+        assert "get_catalog(" not in (root / relative).read_text(encoding="utf-8")

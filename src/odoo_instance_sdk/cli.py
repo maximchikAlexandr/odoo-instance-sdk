@@ -9,8 +9,26 @@ from typing import Any, cast
 import click
 
 from odoo_instance_sdk.exceptions import VscodeImportError
+from odoo_instance_sdk.internal import context as cli_context
+from odoo_instance_sdk.internal.automation import (
+    eval_expression,
+    exec_script,
+    export_translations,
+    list_modules,
+    plan_module_update,
+    run_module_tests,
+    update_modules,
+    verify_deps,
+)
+from odoo_instance_sdk.internal.cli_env import env_group
+from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail, sanitize_diagnostic
+from odoo_instance_sdk.internal.doctor import DoctorReport, run_doctor
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
-from odoo_instance_sdk.internal.sanitize import sanitize_last_error
+from odoo_instance_sdk.internal.vscode_generate import (
+    build_launch_profile,
+    launch_json,
+    write_launch_json,
+)
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
 from odoo_instance_sdk.project import ProjectConfig
 
@@ -29,6 +47,9 @@ def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> No
     ctx.ensure_object(dict)
     ctx.obj["project"] = project
     ctx.obj["env"] = env_selector
+
+
+cli.add_command(env_group, name="env")
 
 
 @cli.command()
@@ -99,13 +120,13 @@ def init(
 
     if option_state.odoo_bin is None:
         if no_input or json_output or dry_run:
-            _fail(json_output, "init", "Missing required option --odoo-bin")
+            fail(json_output, "init", "Missing required option --odoo-bin")
             return
         option_state.odoo_bin = Path(click.prompt("Path to odoo-bin"))
         provenance["discovery"].append("odoo_bin")
 
     if not option_state.odoo_bin:
-        _fail(json_output, "init", "odoo_bin is required")
+        fail(json_output, "init", "odoo_bin is required")
         return
 
     config = ProjectConfig(
@@ -128,7 +149,7 @@ def init(
 
     if dry_run:
         if json_output:
-            _emit_json_envelope(
+            emit_json_envelope(
                 ok=True,
                 command="init",
                 result=_manifest_dict(config),
@@ -142,7 +163,7 @@ def init(
 
     write_manifest(resolved_project, config)
     if json_output:
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=True,
             command="init",
             result=_manifest_dict(config),
@@ -190,7 +211,7 @@ def _import_vscode(
     try:
         result = import_vscode_launch(from_vscode, launch_name=launch_name, no_input=no_input)
     except VscodeImportError as e:
-        _fail(json_output, "init", str(e))
+        fail(json_output, "init", str(e))
         return None
     return result.config
 
@@ -225,20 +246,18 @@ def _handle_existing_manifest(
     try:
         existing_cfg = ProjectConfig.load(resolved_project)
     except Exception as e:
-        _fail(json_output, "init", f"Existing manifest unreadable: {e}")
+        fail(json_output, "init", f"Existing manifest unreadable: {e}")
         return True
     if _manifest_dict(existing_cfg) == _manifest_dict(config):
         if json_output:
-            _emit_json_envelope(
+            emit_json_envelope(
                 ok=True, command="init", result=_manifest_dict(config), provenance={}, dry_run=True
             )
         else:
             click.echo("Manifest already up to date; no-op.")
         return True
     if no_input or json_output:
-        _fail(
-            json_output, "init", "manifest exists and differs; remove it first or adjust options"
-        )
+        fail(json_output, "init", "manifest exists and differs; remove it first or adjust options")
         return True
     if not click.confirm("Manifest exists and differs; overwrite?", default=False):
         click.echo("Aborted.")
@@ -259,103 +278,20 @@ def _manifest_dict(config: ProjectConfig) -> dict[str, Any]:
     }
 
 
-def _sanitize_diagnostic(value: object) -> str:
-    """Make every non-interactive diagnostic safe and bounded before emission."""
-    return sanitize_last_error(str(value)) or "operation failed"
-
-
-def _emit_json_envelope(
-    *,
-    ok: bool,
-    command: str,
-    result: dict[str, Any] | None = None,
-    context: dict[str, Any] | None = None,
-    provenance: dict[str, Any] | None = None,
-    dry_run: bool = False,
-    error_code: str | None = None,
-    error_message: object | None = None,
-) -> None:
-    envelope: dict[str, Any] = {
-        "schema_version": 1,
-        "ok": ok,
-        "command": command,
-        "context": context or {},
-        "provenance": provenance or {},
-        "dry_run": dry_run,
-        "warnings": [],
-    }
-    if ok:
-        safe_result = result or {}
-        # `data` remains for the v1 consumers; `result` is the single stable
-        # machine-output contract for new callers.
-        envelope["result"] = safe_result
-        envelope["data"] = safe_result
-    else:
-        envelope["error"] = {
-            "code": error_code or command.replace(".", "_") + "_failed",
-            "message": _sanitize_diagnostic(error_message),
-        }
-    click.echo(json.dumps(envelope, indent=2, default=str))
-
-
-def _fail(json_output: bool, command: str, message: str, *, usage: bool = False) -> None:
-    if json_output:
-        _emit_json_envelope(
-            ok=False,
-            command=command,
-            error_code="usage_error" if usage else command.replace(".", "_") + "_failed",
-            error_message=message,
-        )
-    else:
-        click.echo(_sanitize_diagnostic(message), err=True)
-    if usage:
-        raise click.exceptions.Exit(2)
-    sys.exit(1)
-
-
-def _resolve_project_path(ctx: click.Context) -> Path:
-    from odoo_instance_sdk.internal.context import (
-        _find_nearest_manifest,
-        _project_from_registered_worktree,
-        resolve_project,
-    )
-
-    raw = ctx.obj.get("project")
-    project = resolve_project(Path(raw) if raw is not None else None)
-    if raw is not None:
-        ctx.obj["project_source"] = "explicit"
-    else:
-        cwd = Path.cwd()
-        ctx.obj["project_source"] = (
-            "cwd"
-            if _find_nearest_manifest(cwd, None) is not None
-            else "worktree"
-            if _project_from_registered_worktree(cwd) is not None
-            else "null"
-        )
-    if isinstance(project, ProjectConfig):
-        assert project.repository_root is not None
-        return project.repository_root
-    return Path(project)
-
-
 @cli.command()
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def doctor(ctx: click.Context, json_output: bool) -> None:
-    from odoo_instance_sdk.internal.context import _make_client
-    from odoo_instance_sdk.internal.doctor import run_doctor
-
-    project_path = _resolve_project_path(ctx)
-    client = _make_client()
+    project_path = cli_context.resolve_project_path(ctx)
+    client = cli_context._make_client()
     try:
         report = run_doctor(client, project_path if project_path != Path.cwd() else None)
     except Exception as e:
-        _fail(json_output, "doctor", str(e))
+        fail(json_output, "doctor", str(e))
         sys.exit(1)
         return
     if json_output:
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=report.ok,
             command="doctor",
             context=report.context,
@@ -364,7 +300,7 @@ def doctor(ctx: click.Context, json_output: bool) -> None:
                     {
                         "name": c.name,
                         "status": c.status,
-                        "detail": _sanitize_diagnostic(c.detail),
+                        "detail": sanitize_diagnostic(c.detail),
                         "environment_id": c.environment_id,
                         "environment_name": c.environment_name,
                     }
@@ -380,8 +316,6 @@ def doctor(ctx: click.Context, json_output: bool) -> None:
 
 
 def _print_doctor(report: object) -> None:
-    from odoo_instance_sdk.internal.doctor import DoctorReport
-
     rep = cast("DoctorReport", report)
     current_env: str | None = None
     for c in rep.checks:
@@ -391,19 +325,15 @@ def _print_doctor(report: object) -> None:
         marker = {"ok": "OK", "warn": "WARN", "error": "ERROR", "info": "INFO"}.get(
             c.status, c.status
         )
-        click.echo(f"  {marker:<5} {c.name}: {_sanitize_diagnostic(c.detail)}")
+        click.echo(f"  {marker:<5} {c.name}: {sanitize_diagnostic(c.detail)}")
 
 
 @cli.command()
 @click.pass_context
 def run(ctx: click.Context) -> None:
-    from odoo_instance_sdk.internal.context import _check_port_free, ready_instance
-
     try:
-        client, env_obj, instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
-        if not _check_port_free(env_obj):
+        client, env_obj, instance = cli_context.ready_instance(ctx)
+        if not cli_context._check_port_free(env_obj):
             click.echo(
                 f"port-conflict: {env_obj.http_interface}:{env_obj.http_port} is occupied "
                 "(ownership unknown)",
@@ -415,14 +345,14 @@ def run(ctx: click.Context) -> None:
     except SystemExit:
         raise
     except Exception as e:
-        _fail(False, "run", str(e))
+        fail(False, "run", str(e))
         return
     try:
         exit_code = instance.run_foreground()
     except KeyboardInterrupt:
         exit_code = 130
     except Exception as e:
-        _fail(False, "run", str(e))
+        fail(False, "run", str(e))
         exit_code = 1
     sys.exit(exit_code)
 
@@ -431,23 +361,19 @@ def run(ctx: click.Context) -> None:
 @click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
 def shell(ctx: click.Context, odoo_args: tuple[str, ...]) -> None:
-    from odoo_instance_sdk.internal.context import ready_instance
-
     try:
-        _client, _env, instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
+        _client, _env, instance = cli_context.ready_instance(ctx)
     except SystemExit:
         raise
     except Exception as e:
-        _fail(False, "shell", str(e))
+        fail(False, "shell", str(e))
         return
     try:
         exit_code = instance.shell(args=list(odoo_args))
     except KeyboardInterrupt:
         exit_code = 130
     except Exception as e:
-        _fail(False, "shell", str(e))
+        fail(False, "shell", str(e))
         exit_code = 1
     sys.exit(exit_code)
 
@@ -460,25 +386,20 @@ def shell(ctx: click.Context, odoo_args: tuple[str, ...]) -> None:
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def eval_cmd(ctx: click.Context, expression: str, commit: bool, json_output: bool) -> None:
-    from odoo_instance_sdk.internal.automation import eval_expression
-    from odoo_instance_sdk.internal.context import ready_instance
-
     try:
-        _client, _env, instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
+        _client, _env, instance = cli_context.ready_instance(ctx)
         outcome = eval_expression(instance, expression, commit=commit)
     except SystemExit:
         raise
     except Exception as e:
-        _fail(json_output, "eval", str(e))
+        fail(json_output, "eval", str(e))
         return
     if outcome.returncode != 0:
-        _fail(json_output, "eval", f"shell exited {outcome.returncode}: {outcome.stderr.strip()}")
+        fail(json_output, "eval", f"shell exited {outcome.returncode}: {outcome.stderr.strip()}")
         return
     result = outcome.payload.get("result") if outcome.payload else None
     if json_output:
-        _emit_json_envelope(ok=True, command="eval", result={"result": result, "commit": commit})
+        emit_json_envelope(ok=True, command="eval", result={"result": result, "commit": commit})
     else:
         click.echo(json.dumps(result, default=str, indent=2))
     sys.exit(0)
@@ -504,41 +425,36 @@ def exec_cmd(
     else:
         p = Path(script)
         if not p.is_file():
-            _fail(json_output, "exec", f"script not found: {script}")
+            fail(json_output, "exec", f"script not found: {script}")
             return
         try:
             source = p.read_text(encoding="utf-8")
         except OSError as e:
-            _fail(json_output, "exec", f"cannot read script: {e}")
+            fail(json_output, "exec", f"cannot read script: {e}")
             return
     try:
-        from odoo_instance_sdk.internal.automation import exec_script
-        from odoo_instance_sdk.internal.context import ready_instance
-
-        _client, _env, instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
+        _client, _env, instance = cli_context.ready_instance(ctx)
         outcome = exec_script(instance, source, argv=tuple(script_args), commit=commit)
     except SystemExit:
         raise
     except Exception as e:
-        _fail(json_output, "exec", str(e))
+        fail(json_output, "exec", str(e))
         return
     if json_output:
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=True,
             command="exec",
             result={
                 "returncode": outcome.returncode,
                 "stdout": outcome.stdout,
-                "stderr": _sanitize_diagnostic(outcome.stderr) if outcome.stderr else "",
+                "stderr": sanitize_diagnostic(outcome.stderr) if outcome.stderr else "",
                 "commit": commit,
             },
         )
     else:
         click.echo(outcome.stdout, nl=False)
         if outcome.stderr:
-            click.echo(_sanitize_diagnostic(outcome.stderr), err=True, nl=False)
+            click.echo(sanitize_diagnostic(outcome.stderr), err=True, nl=False)
     sys.exit(outcome.returncode)
 
 
@@ -555,21 +471,18 @@ def module_group() -> None:
 def module_list(
     ctx: click.Context, modules: tuple[str, ...], state: str | None, json_output: bool
 ) -> None:
-    from odoo_instance_sdk.internal.automation import list_modules
-    from odoo_instance_sdk.internal.context import ready_instance
-
     try:
-        _client, _env, instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
+        _client, _env, instance = cli_context.ready_instance(ctx)
         records = list_modules(instance, names=tuple(modules), state=state)
     except SystemExit:
         raise
     except Exception as e:
-        _fail(json_output, "module.list", str(e))
+        fail(json_output, "module.list", str(e))
         return
     if json_output:
-        _emit_json_envelope(ok=True, command="module.list", result={"modules": [r.to_dict() for r in records]})
+        emit_json_envelope(
+            ok=True, command="module.list", result={"modules": [r.to_dict() for r in records]}
+        )
     else:
         click.echo(f"{'NAME':<30} {'STATE':<15} {'VERSION'}")
         for r in records:
@@ -592,21 +505,16 @@ def module_update(
     yes: bool,
     json_output: bool,
 ) -> None:
-    from odoo_instance_sdk.internal.automation import plan_module_update
-    from odoo_instance_sdk.internal.context import ready_instance
-
     try:
-        _client, env_obj, instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
+        _client, env_obj, instance = cli_context.ready_instance(ctx)
         plan = plan_module_update(instance, tuple(modules))
     except SystemExit:
         raise
     except Exception as e:
-        _fail(json_output, "module.update", str(e))
+        fail(json_output, "module.update", str(e))
         return
     if plan.not_installed:
-        _fail(
+        fail(
             json_output,
             "module.update",
             f"modules not installed: {', '.join(plan.not_installed)}",
@@ -614,7 +522,9 @@ def module_update(
         return
     if dry_run:
         if json_output:
-            _emit_json_envelope(ok=True, command="module.update", result={"modules": plan.modules, "dry_run": True})
+            emit_json_envelope(
+                ok=True, command="module.update", result={"modules": plan.modules, "dry_run": True}
+            )
         else:
             click.echo("Dry run — modules to update:")
             for m in plan.modules:
@@ -622,7 +532,7 @@ def module_update(
         sys.exit(0)
         return
     if not yes:
-        _fail(json_output, "module.update", "module update requires --yes")
+        fail(json_output, "module.update", "module update requires --yes")
         return
     _module_update_execute(instance, plan.modules, env_obj, json_output=json_output)
 
@@ -634,17 +544,15 @@ def _module_update_execute(
     *,
     json_output: bool,
 ) -> None:
-    from odoo_instance_sdk.internal.automation import update_modules
-
     try:
         outcome = update_modules(instance, tuple(modules), env_id=str(env_obj.id))
     except SystemExit:
         raise
     except Exception as e:
-        _fail(json_output, "module.update", str(e))
+        fail(json_output, "module.update", str(e))
         return
     if outcome.returncode != 0:
-        _fail(
+        fail(
             json_output,
             "module.update",
             f"shell exited {outcome.returncode}: {outcome.stderr.strip()}",
@@ -652,7 +560,9 @@ def _module_update_execute(
         return
     updated = outcome.payload.get("result", {}).get("updated", []) if outcome.payload else []
     if json_output:
-        _emit_json_envelope(ok=True, command="module.update", result={"updated": updated, "dry_run": False})
+        emit_json_envelope(
+            ok=True, command="module.update", result={"updated": updated, "dry_run": False}
+        )
     else:
         click.echo("Updated modules:")
         for m in updated:
@@ -675,13 +585,8 @@ def module_test(
     allow_empty: bool,
     json_output: bool,
 ) -> None:
-    from odoo_instance_sdk.internal.automation import run_module_tests
-    from odoo_instance_sdk.internal.context import ready_instance
-
     try:
-        _client, env_obj, instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
+        _client, env_obj, instance = cli_context.ready_instance(ctx)
         res, exit_code = run_module_tests(
             instance,
             tuple(modules),
@@ -695,10 +600,10 @@ def module_test(
     except SystemExit:
         raise
     except Exception as e:
-        _fail(json_output, "module.test", str(e))
+        fail(json_output, "module.test", str(e))
         return
     if json_output:
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=True,
             command="module.test",
             result={
@@ -736,28 +641,21 @@ def translations_export(
     languages: tuple[str, ...],
     json_output: bool,
 ) -> None:
-    from pathlib import Path as _Path
-
-    from odoo_instance_sdk.internal.automation import export_translations
-    from odoo_instance_sdk.internal.context import ready_instance
-
     try:
-        _client, env_obj, instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
+        _client, env_obj, instance = cli_context.ready_instance(ctx)
         results = export_translations(
             instance,
             tuple(modules),
             tuple(languages),
-            worktree_root=_Path(env_obj.worktree_path),
+            worktree_root=Path(env_obj.worktree_path),
         )
     except SystemExit:
         raise
     except Exception as e:
-        _fail(json_output, "translations.export", str(e))
+        fail(json_output, "translations.export", str(e))
         return
     if json_output:
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=True,
             command="translations.export",
             result={
@@ -791,30 +689,23 @@ def deps_group() -> None:
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def deps_verify(ctx: click.Context, json_output: bool) -> None:
-    from pathlib import Path as _Path
-
-    from odoo_instance_sdk.internal.automation import verify_deps
-    from odoo_instance_sdk.internal.context import ready_instance
-
     try:
-        _client, env_obj, _instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
-        recorded_python = _Path(env_obj.python_environment_path)
+        _client, env_obj, _instance = cli_context.ready_instance(ctx)
+        recorded_python = Path(env_obj.python_environment_path)
         if recorded_python.is_dir():
             recorded_python = recorded_python / "bin" / "python"
         result = verify_deps(
             recorded_python=recorded_python,
-            worktree_root=_Path(env_obj.worktree_path),
+            worktree_root=Path(env_obj.worktree_path),
         )
     except SystemExit:
         raise
     except Exception as e:
-        _fail(json_output, "deps.verify", str(e))
+        fail(json_output, "deps.verify", str(e))
         return
     exit_code = 1 if result.missing_imports else 0
     if json_output:
-        _emit_json_envelope(
+        emit_json_envelope(
             ok=True,
             command="deps.verify",
             result={
@@ -852,33 +743,24 @@ def vscode_group() -> None:
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> None:
-    from odoo_instance_sdk.internal.context import ready_instance
-    from odoo_instance_sdk.internal.vscode_generate import (
-        build_launch_profile,
-        launch_json,
-        write_launch_json,
-    )
-
     try:
-        client, env_obj, _instance = ready_instance(
-            project=ctx.obj.get("project"), env_selector=ctx.obj.get("env")
-        )
+        client, env_obj, _instance = cli_context.ready_instance(ctx)
         profile = build_launch_profile(client, env_obj)
     except SystemExit:
         raise
     except Exception as e:
-        _fail(json_output, "vscode.generate", str(e))
+        fail(json_output, "vscode.generate", str(e))
         return
     if write_file:
         try:
-            project_path = _resolve_project_path(ctx)
+            project_path = cli_context.resolve_project_path(ctx)
             content = launch_json(profile)
             written = write_launch_json(project_path, content)
         except Exception as e:
-            _fail(json_output, "vscode.generate", str(e))
+            fail(json_output, "vscode.generate", str(e))
             return
         if json_output:
-            _emit_json_envelope(
+            emit_json_envelope(
                 ok=True,
                 command="vscode.generate",
                 result={"profile": profile, "written": str(written), "dry_run": False},
@@ -888,15 +770,12 @@ def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> 
         sys.exit(0)
         return
     if json_output:
-        _emit_json_envelope(ok=True, command="vscode.generate", result={"profile": profile, "dry_run": True})
+        emit_json_envelope(
+            ok=True, command="vscode.generate", result={"profile": profile, "dry_run": True}
+        )
     else:
         click.echo(launch_json(profile), nl=False)
     sys.exit(0)
-
-
-from odoo_instance_sdk.internal.cli_env import env_group  # noqa: E402
-
-cli.add_command(env_group, name="env")  # type: ignore[has-type]
 
 
 if __name__ == "__main__":

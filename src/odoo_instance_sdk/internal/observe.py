@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
 
-def backup_exists(client: OdooClient, env: Any) -> bool | None:
+def backup_exists(client: OdooClient, env: DevelopmentEnvironment) -> bool | None:
+    """Return whether the environment backup is available, or None if unset."""
     if env.backup_id is None:
         return None
-    row = client.get_catalog().get_by_id(str(env.backup_id))
-    return row is not None and bool(row["path"]) and Path(str(row["path"])).is_file()
+    return any(backup.id == env.backup_id for backup in client.backups.list())

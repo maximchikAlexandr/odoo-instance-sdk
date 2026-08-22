@@ -4,18 +4,23 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import (
     EnvironmentNotFoundError,
     EnvironmentResolutionError,
     ProjectContextError,
     ProjectManifestNotFoundError,
 )
+from odoo_instance_sdk.internal import git_worktree
+from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import DevelopmentEnvironment, EnvironmentState
+from odoo_instance_sdk.resources.instance import OdooInstance
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.resources.instance import OdooInstance
+    import click
 
 
 def _find_nearest_manifest(start: Path, boundary: Path | None) -> Path | None:
@@ -36,12 +41,10 @@ def _find_nearest_manifest(start: Path, boundary: Path | None) -> Path | None:
 
 def resolve_project(explicit: Path | None, cwd: Path | None = None) -> ProjectConfig | Path:
     base = (cwd or Path.cwd()).resolve()
-    from odoo_instance_sdk.internal.git_worktree import rev_parse_toplevel
-
     if explicit is not None:
         selected = Path(explicit).resolve()
         try:
-            boundary: Path | None = rev_parse_toplevel(selected)
+            boundary: Path | None = git_worktree.rev_parse_toplevel(selected)
         except Exception:
             boundary = None
         manifest = _find_nearest_manifest(selected, boundary)
@@ -54,7 +57,7 @@ def resolve_project(explicit: Path | None, cwd: Path | None = None) -> ProjectCo
             f"Explicit --project {explicit} is not inside a project with .odcli/project.toml; run odcli init"
         )
     try:
-        boundary = rev_parse_toplevel(base)
+        boundary = git_worktree.rev_parse_toplevel(base)
     except Exception:
         boundary = None
     manifest = _find_nearest_manifest(base, boundary)
@@ -73,8 +76,6 @@ def resolve_project(explicit: Path | None, cwd: Path | None = None) -> ProjectCo
 
 def _project_from_registered_worktree(cwd: Path) -> Path | None:
     """Resolve nested registered worktrees without creating/opening a catalog."""
-    from odoo_instance_sdk.internal.paths import get_catalog_path
-
     catalog = get_catalog_path()
     if not catalog.is_file():
         return None
@@ -86,15 +87,15 @@ def _project_from_registered_worktree(cwd: Path) -> Path | None:
             ).fetchall()
     except sqlite3.Error:
         return None
-    from odoo_instance_sdk.internal.git_worktree import rev_parse_git_common_dir, rev_parse_toplevel
-
     for root, worktree, common_dir in rows:
         try:
             cwd.relative_to(Path(str(worktree)).resolve())
         except ValueError:
             continue
         try:
-            if rev_parse_git_common_dir(rev_parse_toplevel(cwd)) != Path(str(common_dir)):
+            if git_worktree.rev_parse_git_common_dir(git_worktree.rev_parse_toplevel(cwd)) != Path(
+                str(common_dir)
+            ):
                 continue
         except Exception:
             continue
@@ -168,13 +169,10 @@ def _infer_from_worktree(
         except ValueError:
             continue
         try:
-            from odoo_instance_sdk.internal.git_worktree import (
-                rev_parse_git_common_dir,
-                rev_parse_toplevel,
-            )
-
             if (
-                rev_parse_git_common_dir(rev_parse_toplevel(cwd)).resolve()
+                git_worktree.rev_parse_git_common_dir(
+                    git_worktree.rev_parse_toplevel(cwd)
+                ).resolve()
                 != Path(env.git_common_dir).resolve()
             ):
                 continue
@@ -184,15 +182,31 @@ def _infer_from_worktree(
     return None
 
 
-def _make_client() -> OdooClient:
-    from odoo_instance_sdk import OdooClient, OdooClientConfig
+def resolve_project_path(ctx: click.Context) -> Path:
+    raw = ctx.obj.get("project")
+    project = resolve_project(Path(raw) if raw is not None else None)
+    if raw is not None:
+        ctx.obj["project_source"] = "explicit"
+    else:
+        cwd = Path.cwd()
+        ctx.obj["project_source"] = (
+            "cwd"
+            if _find_nearest_manifest(cwd, None) is not None
+            else "worktree"
+            if _project_from_registered_worktree(cwd) is not None
+            else "null"
+        )
+    if isinstance(project, ProjectConfig):
+        assert project.repository_root is not None
+        return project.repository_root
+    return Path(project)
 
+
+def _make_client() -> OdooClient:
     return OdooClient(config=OdooClientConfig(executable="odoo"))
 
 
 def _check_port_free(env_obj: DevelopmentEnvironment) -> bool:
-    from odoo_instance_sdk.internal.address import AddressState, probe_address
-
     return probe_address(env_obj.http_interface, env_obj.http_port) is AddressState.FREE
 
 
@@ -211,13 +225,10 @@ def _verify_env_runtime(env_obj: DevelopmentEnvironment) -> None:
         raise RuntimeError(f"recorded Python missing: {py_path}")
 
 
-def ready_instance(
-    *,
-    project: str | None,
-    env_selector: str | None,
-) -> tuple[OdooClient, DevelopmentEnvironment, OdooInstance]:
+def ready_instance(ctx: click.Context) -> tuple[OdooClient, DevelopmentEnvironment, OdooInstance]:
+    """Resolve a ready environment from Click context and return a live instance."""
     client = _make_client()
-    env_obj = resolve_environment(client, env_selector)
+    env_obj = resolve_environment(client, ctx.obj.get("env"))
     if env_obj.state != EnvironmentState.READY:
         raise RuntimeError(
             f"Environment {env_obj.name} ({env_obj.id}) is not ready (state={env_obj.state})"
