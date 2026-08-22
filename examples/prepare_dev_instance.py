@@ -67,7 +67,9 @@ def main() -> None:
         raise RuntimeError("No databases found on test instance")
 
     source_db = dbs[0].name
-    log.info("Resolved source database: %s (available: %s)", source_db, ", ".join(db.name for db in dbs))
+    log.info(
+        "Resolved source database: %s (available: %s)", source_db, ", ".join(db.name for db in dbs)
+    )
 
     local_db = f"{source_db}_{datetime.now(UTC):%Y%m%d_%H%M%S}"
 

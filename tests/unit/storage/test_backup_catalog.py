@@ -48,7 +48,7 @@ def _make_backup(
     )
 
 
-def test_schema_creation(tmp_path):
+def test_schema_creation(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     catalog = BackupCatalog(db_path=db)
     tables = catalog._conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -58,7 +58,7 @@ def test_schema_creation(tmp_path):
     catalog.close()
 
 
-def test_start_download_records_event(tmp_path):
+def test_start_download_records_event(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "backup.zip")
     bid = _u("start")
@@ -83,7 +83,7 @@ def test_start_download_records_event(tmp_path):
     catalog.close()
 
 
-def test_success_download(tmp_path):
+def test_success_download(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "backup.zip")
     bid = _u("success")
@@ -102,7 +102,7 @@ def test_success_download(tmp_path):
     catalog.close()
 
 
-def test_fail_download(tmp_path):
+def test_fail_download(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "backup.zip")
     bid = _u("fail")
@@ -120,7 +120,7 @@ def test_fail_download(tmp_path):
     catalog.close()
 
 
-def test_state_transitions(tmp_path):
+def test_state_transitions(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "backup.zip")
     bid = _u("state")
@@ -132,13 +132,13 @@ def test_state_transitions(tmp_path):
     catalog.close()
 
 
-def test_list_backups_empty(tmp_path):
+def test_list_backups_empty(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     assert catalog.list_backups() == []
     catalog.close()
 
 
-def test_list_backups_with_filters(tmp_path):
+def test_list_backups_with_filters(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     for i, (url, db) in enumerate(
         [("http://a:8069", "db1"), ("http://a:8069", "db2"), ("http://b:8069", "db1")],
@@ -152,7 +152,7 @@ def test_list_backups_with_filters(tmp_path):
     catalog.close()
 
 
-def test_list_backups_filters_state_available(tmp_path):
+def test_list_backups_filters_state_available(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path1 = _create_backup_file(tmp_path, "ok.zip")
     bid_ok = _u("filter-ok")
@@ -167,7 +167,7 @@ def test_list_backups_filters_state_available(tmp_path):
     catalog.close()
 
 
-def test_list_backups_skips_missing_files(tmp_path):
+def test_list_backups_skips_missing_files(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "vanish.zip")
     bid = _u("vanish")
@@ -178,7 +178,7 @@ def test_list_backups_skips_missing_files(tmp_path):
     catalog.close()
 
 
-def test_latest_backup(tmp_path):
+def test_latest_backup(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     p1 = _create_backup_file(tmp_path, "old.zip")
     bid1 = _u("latest-old")
@@ -200,7 +200,7 @@ def test_latest_backup(tmp_path):
     catalog.close()
 
 
-def test_full_audit_retention(tmp_path):
+def test_full_audit_retention(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("audit")
@@ -214,7 +214,7 @@ def test_full_audit_retention(tmp_path):
     catalog.close()
 
 
-def test_validation_succeeded_and_failed_events(tmp_path):
+def test_validation_succeeded_and_failed_events(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("validate")
@@ -229,7 +229,7 @@ def test_validation_succeeded_and_failed_events(tmp_path):
     catalog.close()
 
 
-def test_ordering(tmp_path):
+def test_ordering(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     bids: list[str] = []
     for i, name in enumerate(["a.zip", "b.zip"]):
@@ -250,7 +250,7 @@ def test_ordering(tmp_path):
     catalog.close()
 
 
-def test_verify_identity_raises(tmp_path):
+def test_verify_identity_raises(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("verify")
@@ -262,7 +262,7 @@ def test_verify_identity_raises(tmp_path):
     catalog.close()
 
 
-def test_verify_identity_rejects_wrong_state(tmp_path):
+def test_verify_identity_rejects_wrong_state(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("verify-state")
@@ -274,7 +274,7 @@ def test_verify_identity_rejects_wrong_state(tmp_path):
     catalog.close()
 
 
-def test_verify_identity_rejects_path_mismatch(tmp_path):
+def test_verify_identity_rejects_path_mismatch(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("verify-path")
@@ -287,7 +287,7 @@ def test_verify_identity_rejects_path_mismatch(tmp_path):
     catalog.close()
 
 
-def test_v0_empty_catalog_migration(tmp_path):
+def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 0")
@@ -304,7 +304,7 @@ def test_v0_empty_catalog_migration(tmp_path):
     assert "database_events" in tables
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 2
+    assert version == 7
 
     # Existing backups table still works
     path = _create_backup_file(tmp_path, "migrated.zip")
@@ -315,8 +315,8 @@ def test_v0_empty_catalog_migration(tmp_path):
     catalog.close()
 
 
-def test_schema_creation_v0_migration_with_existing_data(tmp_path):
-    """v0 → v2 migration MUST preserve existing backups and events."""
+def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None:
+    """v0 → v7 migration MUST preserve existing backups and events."""
     db = tmp_path / "test.db"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 0")
@@ -380,21 +380,21 @@ def test_schema_creation_v0_migration_with_existing_data(tmp_path):
     assert event_row["event_type"] == "download_started"
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 2
+    assert version == 7
 
     catalog.close()
 
 
-def test_schema_creation_v2_reopen(tmp_path):
+def test_schema_creation_v2_reopen(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     catalog = BackupCatalog(db_path=db)
     version1 = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version1 == 2
+    assert version1 == 7
     catalog.close()
 
     catalog2 = BackupCatalog(db_path=db)
     version2 = catalog2._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version2 == 2
+    assert version2 == 7
     tables = {
         r[0]
         for r in catalog2._conn.execute(
@@ -403,10 +403,12 @@ def test_schema_creation_v2_reopen(tmp_path):
     }
     assert "restores" in tables
     assert "database_events" in tables
+    assert "environments" in tables
+    assert "environment_events" in tables
     catalog2.close()
 
 
-def test_normalize_db_host():
+def test_normalize_db_host() -> None:
     from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
 
     assert normalize_db_host(None) == "socket"
@@ -414,7 +416,7 @@ def test_normalize_db_host():
     assert normalize_db_host("192.168.1.1") == "192.168.1.1"
 
 
-def test_record_restore_inserts_rows(tmp_path):
+def test_record_restore_inserts_rows(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("record-restore")
@@ -444,7 +446,7 @@ def test_record_restore_inserts_rows(tmp_path):
     catalog.close()
 
 
-def test_record_restore_normalizes_socket(tmp_path):
+def test_record_restore_normalizes_socket(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("socket-restore")
@@ -464,7 +466,7 @@ def test_record_restore_normalizes_socket(tmp_path):
     catalog.close()
 
 
-def test_duplicate_restore_inserts_two_rows(tmp_path):
+def test_duplicate_restore_inserts_two_rows(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("dup-restore")
@@ -486,7 +488,7 @@ def test_duplicate_restore_inserts_two_rows(tmp_path):
     catalog.close()
 
 
-def test_latest_restore_backup_deleted_returns_none(tmp_path):
+def test_latest_restore_backup_deleted_returns_none(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("deleted-restore")
@@ -500,7 +502,7 @@ def test_latest_restore_backup_deleted_returns_none(tmp_path):
     catalog.close()
 
 
-def test_latest_restore_file_missing_returns_none(tmp_path):
+def test_latest_restore_file_missing_returns_none(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "vanish.zip")
     bid = _u("missing-file")
@@ -514,7 +516,7 @@ def test_latest_restore_file_missing_returns_none(tmp_path):
     catalog.close()
 
 
-def test_latest_restore_no_fallback_to_earlier(tmp_path):
+def test_latest_restore_no_fallback_to_earlier(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     p1 = _create_backup_file(tmp_path, "b1.zip")
     p2 = _create_backup_file(tmp_path, "b2.zip")
@@ -538,7 +540,7 @@ def test_latest_restore_no_fallback_to_earlier(tmp_path):
     catalog.close()
 
 
-def test_record_database_dropped_idempotent(tmp_path):
+def test_record_database_dropped_idempotent(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     catalog.record_database_dropped("localhost", 5432, "mydb")
     catalog.record_database_dropped("localhost", 5432, "mydb")
@@ -552,7 +554,7 @@ def test_record_database_dropped_idempotent(tmp_path):
     catalog.close()
 
 
-def test_record_database_dropped_normalizes_socket(tmp_path):
+def test_record_database_dropped_normalizes_socket(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     catalog.record_database_dropped(None, 5432, "mydb")
 
@@ -565,7 +567,7 @@ def test_record_database_dropped_normalizes_socket(tmp_path):
     catalog.close()
 
 
-def test_restore_after_dropped_resets(tmp_path):
+def test_restore_after_dropped_resets(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
     bid = _u("reset-test")
@@ -581,7 +583,7 @@ def test_restore_after_dropped_resets(tmp_path):
     catalog.close()
 
 
-def test_distinct_restored_database_names(tmp_path):
+def test_distinct_restored_database_names(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     p1 = _create_backup_file(tmp_path, "db1.zip")
     p2 = _create_backup_file(tmp_path, "db2.zip")
@@ -601,7 +603,7 @@ def test_distinct_restored_database_names(tmp_path):
     catalog.close()
 
 
-def test_distinct_restored_database_names_normalizes_socket(tmp_path):
+def test_distinct_restored_database_names_normalizes_socket(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     bid = _u("distinct-socket")
     p = _create_backup_file(tmp_path, "s.zip")
@@ -615,14 +617,14 @@ def test_distinct_restored_database_names_normalizes_socket(tmp_path):
     catalog.close()
 
 
-def test_latest_restore_empty_returns_none(tmp_path):
+def test_latest_restore_empty_returns_none(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     latest = catalog.latest_restore("localhost", 5432, "nonexistent")
     assert latest is None
     catalog.close()
 
 
-def test_has_tracked_database_true(tmp_path):
+def test_has_tracked_database_true(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     p = _create_backup_file(tmp_path, "b.zip")
     bid = _u("has-tracked")
@@ -633,13 +635,13 @@ def test_has_tracked_database_true(tmp_path):
     catalog.close()
 
 
-def test_has_tracked_database_false(tmp_path):
+def test_has_tracked_database_false(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     assert catalog.has_tracked_database("localhost", 5432, "ghost") is False
     catalog.close()
 
 
-def test_has_tracked_database_normalizes_socket(tmp_path):
+def test_has_tracked_database_normalizes_socket(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     p = _create_backup_file(tmp_path, "s.zip")
     bid = _u("socket-has")

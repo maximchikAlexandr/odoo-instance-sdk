@@ -96,15 +96,24 @@ def _verify_database_via_psql(
     cmd = ["psql"]
     if db_host is not None:
         cmd.extend(["-h", db_host])
-    cmd.extend([
-        "-p", str(db_port),
-        "-U", db_user,
-        "-d", "postgres",
-        "-t", "-A",
-        "-c", f"SELECT 1 FROM pg_database WHERE datname='{escaped}'",
-    ])
+    cmd.extend(
+        [
+            "-p",
+            str(db_port),
+            "-U",
+            db_user,
+            "-d",
+            "postgres",
+            "-t",
+            "-A",
+            "-c",
+            f"SELECT 1 FROM pg_database WHERE datname='{escaped}'",
+        ]
+    )
     try:
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30, shell=False, check=False)
+        proc = subprocess.run(
+            cmd, env=env, capture_output=True, text=True, timeout=30, shell=False, check=False
+        )
         if proc.returncode != 0:
             return None
         return bool(proc.stdout.strip())
@@ -133,10 +142,9 @@ class DatabaseResource:
 
     @property
     def _cluster(self) -> tuple[str | None, int] | None:
-        db_port = self._instance.config.db_port
-        if db_port is None:
+        if self._instance.config.db_host is None:
             return None
-        return (self._instance.config.db_host, db_port)
+        return (self._instance.config.db_host, self._instance.config.db_port or 5432)
 
     def _latest_backup_for(self, db_host: str | None, db_port: int, name: str) -> Backup | NoBackup:
         b = self._instance._client.get_catalog().latest_restore(db_host, db_port, name)
@@ -153,7 +161,8 @@ class DatabaseResource:
         ) as http:
             yield http
 
-    def list(self) -> tuple[Database, ...]:
+    def names(self) -> tuple[str, ...]:
+        """Return database names without touching the local audit catalog."""
         try:
             with self._http() as http:
                 resp = http.post(
@@ -181,7 +190,10 @@ class DatabaseResource:
             raise DatabaseManagerUnavailableError(
                 f"Database listing disabled or unavailable on {self.base_url}"
             )
-        db_names = tuple(str(name) for name in result)
+        return tuple(str(name) for name in result)
+
+    def list(self) -> tuple[Database, ...]:
+        db_names = self.names()
 
         ck = self._cluster
         catalog = self._instance._client.get_catalog()
@@ -238,7 +250,9 @@ class DatabaseResource:
 
     def __getitem__(self, index: int) -> Database:
         if not isinstance(index, int):
-            raise TypeError(f"DatabaseResource indices must be integers, not {type(index).__name__}")
+            raise TypeError(
+                f"DatabaseResource indices must be integers, not {type(index).__name__}"
+            )
         return self.list()[index]
 
     def current(self) -> Database:

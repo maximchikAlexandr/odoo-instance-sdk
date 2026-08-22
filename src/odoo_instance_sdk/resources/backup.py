@@ -103,8 +103,9 @@ class BackupResource:
 
         file_path = Path(backup.path)
         file_existed = file_path.is_file()
-        with contextlib.suppress(OSError):
-            file_path.unlink(missing_ok=True)
+        file_path.unlink(missing_ok=True)
+        if file_path.exists():
+            raise OSError(f"Backup file still exists after deletion: {file_path}")
 
         catalog.record_deletion(str(backup.id))
 

@@ -10,6 +10,7 @@ from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import ProcessNotFoundError
 from odoo_instance_sdk.models import OdooProcess
 from odoo_instance_sdk.resources.backup import BackupResource
+from odoo_instance_sdk.resources.environment import EnvironmentResource
 from odoo_instance_sdk.resources.instance import InstanceFactory
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -25,10 +26,12 @@ class OdooClient:
     _catalog: BackupCatalog | None = field(default=None, repr=False)
     instance: InstanceFactory = field(init=False)
     backups: BackupResource = field(init=False)
+    environments: EnvironmentResource = field(init=False)
 
     def __post_init__(self) -> None:
         self.instance = InstanceFactory(_client=self)
         self.backups = BackupResource(_client=self)
+        self.environments = EnvironmentResource(_client=self)
         atexit.register(self._cleanup_secret_configs)
 
     def __repr__(self) -> str:
@@ -63,9 +66,9 @@ class OdooClient:
         return self._handles.get(proc_id)
 
     def get_catalog(self) -> BackupCatalog:
-        from odoo_instance_sdk.internal.paths import get_cache_root
+        from odoo_instance_sdk.internal.paths import get_catalog_path
 
         if self._catalog is None:
-            self._catalog = BackupCatalog(db_path=get_cache_root() / "backups.sqlite3")
+            self._catalog = BackupCatalog(db_path=get_catalog_path())
             atexit.register(self._catalog.close)
         return self._catalog

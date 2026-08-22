@@ -7,14 +7,16 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
     BackupNotAvailableError,
     BackupNotFoundError,
 )
+from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
 from odoo_instance_sdk.models import (
     Backup,
     BackupEvent,
@@ -26,6 +28,16 @@ from odoo_instance_sdk.models import (
 
 P = ParamSpec("P")
 T = TypeVar("T")
+CURRENT_SCHEMA_VERSION = 7
+
+
+class CopyJournalStage(StrEnum):
+    PREPARED = "prepared"
+    BACKED_UP = "backed_up"
+    RESTORE_PENDING = "restore_pending"
+    RESTORED = "restored"
+    DROPPED = "dropped"
+    BACKUP_DELETED = "backup_deleted"
 
 
 def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
@@ -53,8 +65,10 @@ class BackupCatalog:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._create_schema(self._conn)
             self.db_path.chmod(0o600)
-            for sidecar in (self.db_path.with_suffix(self.db_path.suffix + "-wal"),
-                            self.db_path.with_suffix(self.db_path.suffix + "-shm")):
+            for sidecar in (
+                self.db_path.with_suffix(self.db_path.suffix + "-wal"),
+                self.db_path.with_suffix(self.db_path.suffix + "-shm"),
+            ):
                 if sidecar.exists():
                     sidecar.chmod(0o600)
         except sqlite3.Error as e:
@@ -126,6 +140,132 @@ class BackupCatalog:
                 CREATE INDEX IF NOT EXISTS database_events_cluster_idx ON database_events (db_host, db_port, database_name, sequence DESC);
             """)
             conn.execute("PRAGMA user_version = 2")
+            conn.commit()
+        if user_version < 3:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS environments (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    repository_root TEXT NOT NULL,
+                    git_common_dir TEXT NOT NULL,
+                    branch TEXT NOT NULL,
+                    base_ref TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    generated_config_path TEXT NOT NULL,
+                    python_environment_path TEXT NOT NULL,
+                    python_environment_owned INTEGER NOT NULL,
+                    dependency_lock_path TEXT NOT NULL,
+                    http_interface TEXT NOT NULL,
+                    http_port INTEGER NOT NULL,
+                    db_mode TEXT NOT NULL,
+                    source_db_name TEXT,
+                    target_db_name TEXT,
+                    backup_id TEXT,
+                    runtime_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT,
+                    removed_at TEXT,
+                    last_error TEXT,
+                    FOREIGN KEY (backup_id) REFERENCES backups(id)
+                );
+                CREATE INDEX IF NOT EXISTS environments_active_idx ON environments (git_common_dir, branch, state);
+                CREATE INDEX IF NOT EXISTS environments_port_idx ON environments (http_port, state);
+
+                CREATE TABLE IF NOT EXISTS environment_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    environment_id TEXT NOT NULL,
+                    operation TEXT NOT NULL CHECK (operation IN ('checkout', 'sync', 'use', 'shell', 'remove')),
+                    outcome TEXT NOT NULL CHECK (outcome IN ('started', 'succeeded', 'failed')),
+                    occurred_at TEXT NOT NULL,
+                    message TEXT,
+                    FOREIGN KEY (environment_id) REFERENCES environments(id)
+                );
+                CREATE INDEX IF NOT EXISTS environment_events_env_idx ON environment_events (environment_id, sequence DESC);
+            """)
+            conn.execute("PRAGMA user_version = 3")
+            conn.commit()
+            user_version = 3
+        if user_version < 4:
+            # More than one non-removed environment for a checkout would make
+            # ownership and cleanup ambiguous.  Older catalogs may contain
+            # such rows; retain the newest one and mark older rows removed
+            # before installing the invariant.
+            conn.execute(
+                """UPDATE environments SET state='removed', removed_at=datetime('now'), last_error='superseded during active-environment migration'
+                   WHERE id IN (
+                     SELECT id FROM (
+                       SELECT id, ROW_NUMBER() OVER (
+                         PARTITION BY git_common_dir, branch
+                         ORDER BY created_at DESC, id DESC
+                       ) AS position
+                       FROM environments WHERE state <> 'removed'
+                     ) WHERE position > 1
+                   )"""
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS environments_one_active_branch "
+                "ON environments(git_common_dir, branch) WHERE state <> 'removed'"
+            )
+            conn.execute("PRAGMA user_version = 4")
+            conn.commit()
+            user_version = 4
+        if user_version < 5:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS environment_copy_journal (
+                    environment_id TEXT PRIMARY KEY REFERENCES environments(id),
+                    target_database TEXT NOT NULL,
+                    db_host TEXT NOT NULL,
+                    db_port INTEGER NOT NULL,
+                    db_user TEXT,
+                    backup_id TEXT REFERENCES backups(id),
+                    stage TEXT NOT NULL CHECK (stage IN ('prepared', 'backed_up', 'restored', 'dropped', 'backup_deleted')),
+                    updated_at TEXT NOT NULL
+                );
+            """)
+            conn.execute("PRAGMA user_version = 5")
+            conn.commit()
+            user_version = 5
+        if user_version < 6:
+            conn.executescript("""
+                ALTER TABLE environment_copy_journal RENAME TO environment_copy_journal_v5;
+                CREATE TABLE environment_copy_journal (
+                    environment_id TEXT PRIMARY KEY REFERENCES environments(id),
+                    target_database TEXT NOT NULL,
+                    db_host TEXT NOT NULL,
+                    db_port INTEGER NOT NULL,
+                    db_user TEXT,
+                    backup_id TEXT REFERENCES backups(id),
+                    stage TEXT NOT NULL CHECK (stage IN ('prepared', 'backed_up', 'restore_pending', 'restored', 'dropped', 'backup_deleted')),
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO environment_copy_journal
+                    SELECT environment_id, target_database, db_host, db_port, db_user, backup_id, stage, updated_at
+                    FROM environment_copy_journal_v5;
+                DROP TABLE environment_copy_journal_v5;
+            """)
+            conn.execute("PRAGMA user_version = 6")
+            conn.commit()
+            user_version = 6
+        if user_version < 7:
+            # A port is a global host resource.  Never silently mark a live
+            # environment removed merely to make an index creation succeed.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(environments)")}
+            if {"state", "http_port", "created_at"} <= columns:
+                duplicate = conn.execute(
+                    "SELECT http_port FROM environments WHERE state <> 'removed' "
+                    "GROUP BY http_port HAVING COUNT(*) > 1 LIMIT 1"
+                ).fetchone()
+                if duplicate is not None:
+                    raise BackupCatalogError(
+                        f"catalog has multiple active environments reserving port {duplicate[0]}; "
+                        "resolve the conflict before upgrading"
+                    )
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS environments_one_active_port "
+                    "ON environments(http_port) WHERE state <> 'removed'"
+                )
+            conn.execute("PRAGMA user_version = 7")
             conn.commit()
 
     def close(self) -> None:
@@ -437,6 +577,194 @@ class BackupCatalog:
             (host, db_port, database_name),
         ).fetchone()
         return row is not None
+
+    @_translate_sqlite_error
+    def create_environment(self, env: dict[str, object]) -> None:
+        self._conn.execute(
+            """INSERT INTO environments (
+                id, name, repository_root, git_common_dir, branch, base_ref,
+                worktree_path, generated_config_path, python_environment_path,
+                python_environment_owned, dependency_lock_path, http_interface,
+                http_port, db_mode, source_db_name, target_db_name, backup_id,
+                runtime_json, state, created_at, last_used_at, removed_at, last_error
+            ) VALUES (
+                :id, :name, :repository_root, :git_common_dir, :branch, :base_ref,
+                :worktree_path, :generated_config_path, :python_environment_path,
+                :python_environment_owned, :dependency_lock_path, :http_interface,
+                :http_port, :db_mode, :source_db_name, :target_db_name, :backup_id,
+                :runtime_json, :state, :created_at, :last_used_at, :removed_at, :last_error
+            )""",
+            {
+                "id": env["id"],
+                "name": env["name"],
+                "repository_root": env["repository_root"],
+                "git_common_dir": env["git_common_dir"],
+                "branch": env["branch"],
+                "base_ref": env["base_ref"],
+                "worktree_path": env["worktree_path"],
+                "generated_config_path": env["generated_config_path"],
+                "python_environment_path": env["python_environment_path"],
+                "python_environment_owned": int(bool(env["python_environment_owned"])),
+                "dependency_lock_path": env["dependency_lock_path"],
+                "http_interface": env["http_interface"],
+                "http_port": env["http_port"],
+                "db_mode": env["db_mode"],
+                "source_db_name": env.get("source_db_name"),
+                "target_db_name": env.get("target_db_name"),
+                "backup_id": env.get("backup_id"),
+                "runtime_json": env["runtime_json"],
+                "state": env["state"],
+                "created_at": env["created_at"],
+                "last_used_at": env.get("last_used_at"),
+                "removed_at": env.get("removed_at"),
+                "last_error": sanitize_last_error(str(env.get("last_error")))
+                if env.get("last_error")
+                else None,
+            },
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def update_environment_state(
+        self,
+        environment_id: str,
+        state: str,
+        *,
+        last_error: str | None = None,
+        removed_at: str | None = None,
+    ) -> None:
+        sets: list[str] = ["state = ?"]
+        params: list[str | None] = [state]
+        if last_error is not None:
+            sets.append("last_error = ?")
+            params.append(sanitize_last_error(last_error))
+        if removed_at is not None:
+            sets.append("removed_at = ?")
+            params.append(removed_at)
+        params.append(environment_id)
+        self._conn.execute(
+            f"UPDATE environments SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def update_environment(self, environment_id: str, fields_map: dict[str, object]) -> None:
+        if not fields_map:
+            return
+        if "last_error" in fields_map and fields_map["last_error"] is not None:
+            fields_map["last_error"] = sanitize_last_error(str(fields_map["last_error"]))
+        cols = ", ".join(f"{c} = :{c}" for c in fields_map)
+        params = dict(fields_map, id=environment_id)
+        self._conn.execute(
+            f"UPDATE environments SET {cols} WHERE id = :id",
+            params,
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def get_environment(self, environment_id: str) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM environments WHERE id = ?",
+            (environment_id,),
+        ).fetchone()
+        return row
+
+    @_translate_sqlite_error
+    def list_environments(
+        self,
+        *,
+        git_common_dir: str | None = None,
+        include_removed: bool = False,
+    ) -> list[sqlite3.Row]:
+        query = "SELECT * FROM environments"
+        params: list[str] = []
+        clauses: list[str] = []
+        if git_common_dir is not None:
+            clauses.append("git_common_dir = ?")
+            params.append(git_common_dir)
+        if not include_removed:
+            clauses.append("state != 'removed'")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, id DESC"
+        return self._conn.execute(query, params).fetchall()
+
+    @_translate_sqlite_error
+    def upsert_copy_journal(
+        self,
+        environment_id: str,
+        *,
+        target_database: str,
+        db_host: str | None,
+        db_port: int,
+        db_user: str | None,
+        backup_id: str | None,
+        stage: CopyJournalStage,
+    ) -> None:
+        if not isinstance(stage, CopyJournalStage):
+            raise TypeError("copy journal stage must be a CopyJournalStage")
+        self._conn.execute(
+            """INSERT INTO environment_copy_journal
+               (environment_id,target_database,db_host,db_port,db_user,backup_id,stage,updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(environment_id) DO UPDATE SET
+                 target_database=excluded.target_database, db_host=excluded.db_host,
+                 db_port=excluded.db_port, db_user=excluded.db_user,
+                 backup_id=excluded.backup_id, stage=excluded.stage, updated_at=excluded.updated_at""",
+            (
+                environment_id,
+                target_database,
+                normalize_db_host(db_host),
+                db_port,
+                db_user,
+                backup_id,
+                stage.value,
+            ),
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def get_copy_journal(self, environment_id: str) -> sqlite3.Row | None:
+        return cast(
+            "sqlite3.Row | None",
+            self._conn.execute(
+                "SELECT * FROM environment_copy_journal WHERE environment_id=?", (environment_id,)
+            ).fetchone(),
+        )
+
+    @_translate_sqlite_error
+    def add_environment_event(
+        self,
+        environment_id: str,
+        operation: str,
+        outcome: str,
+        *,
+        message: str | None = None,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO environment_events (environment_id, operation, outcome, occurred_at, message) "
+            "VALUES (?, ?, ?, datetime('now'), ?)",
+            (environment_id, operation, outcome, sanitize_event_message(message)),
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def active_environment_for(self, git_common_dir: str, branch: str) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM environments WHERE git_common_dir = ? AND branch = ? "
+            "AND state NOT IN ('removed') ORDER BY created_at DESC LIMIT 1",
+            (git_common_dir, branch),
+        ).fetchone()
+        return row
+
+    @_translate_sqlite_error
+    def active_environment_for_port(self, port: int) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM environments WHERE http_port = ? AND state NOT IN ('removed') LIMIT 1",
+            (port,),
+        ).fetchone()
+        return row
 
     def _add_event(
         self,

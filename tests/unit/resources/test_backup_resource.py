@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Generator
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -10,11 +13,16 @@ from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.fixtures import make_backup
 
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
+
 
 @pytest.fixture
-def sample_backup_entry(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
-    db_path = tmp_path / "backups.sqlite3"
+def sample_backup_entry(
+    client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[dict[str, object], None, None]:
+    db_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
     backup_file = tmp_path / "real_backup.zip"
     backup_file.write_bytes(b"x")
     bid = str(uuid.uuid4())
@@ -29,46 +37,55 @@ def sample_backup_entry(client, tmp_path, monkeypatch):
     )
     catalog.success_download(bid, "real_backup.zip", 1024, "abc123")
     catalog.close()
+    client._catalog = None
     yield {"path": backup_file, "db_path": db_path, "client": client, "tmp": tmp_path, "id": bid}
 
 
-def test_list_empty(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+def test_list_empty(client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
+    client._catalog = None
     res = BackupResource(_client=client)
     backups = res.list()
     assert backups == ()
 
 
-def test_list_with_entries(client, sample_backup_entry):
+def test_list_with_entries(client: OdooClient, sample_backup_entry: dict[str, object]) -> None:
     res = BackupResource(_client=client)
     backups = res.list(source_base_url="http://localhost:8069")
     assert len(backups) == 1
     assert backups[0].database_name == "mydb"
-    assert backups[0].id == uuid.UUID(sample_backup_entry["id"])
+    assert backups[0].id == uuid.UUID(cast("str", sample_backup_entry["id"]))
 
 
-def test_latest_backup(client, sample_backup_entry):
+def test_latest_backup(client: OdooClient, sample_backup_entry: dict[str, object]) -> None:
     res = BackupResource(_client=client)
     latest = res.latest("http://localhost:8069", "mydb")
     assert latest is not None
     assert latest.database_name == "mydb"
-    assert latest.id == uuid.UUID(sample_backup_entry["id"])
+    assert latest.id == uuid.UUID(cast("str", sample_backup_entry["id"]))
 
 
-def test_latest_backup_none(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+def test_latest_backup_none(
+    client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
+    client._catalog = None
     res = BackupResource(_client=client)
     assert res.latest("http://localhost:8069", "nonexistent") is None
 
 
-def test_history_with_started_event(client, sample_backup_entry):
+def test_history_with_started_event(
+    client: OdooClient, sample_backup_entry: dict[str, object]
+) -> None:
     res = BackupResource(_client=client)
-    events = res.history(backup_id=sample_backup_entry["id"])
+    events = res.history(backup_id=cast("str", sample_backup_entry["id"]))
     assert len(events) >= 1
     assert any(e.event_type.value == "download_started" for e in events)
 
 
-def test_history_empty(client, sample_backup_entry):
+def test_history_empty(client: OdooClient, sample_backup_entry: dict[str, object]) -> None:
     res = BackupResource(_client=client)
     events = res.history()
     sample_events = [
@@ -77,14 +94,14 @@ def test_history_empty(client, sample_backup_entry):
     assert len(sample_events) == 0
 
 
-def test_delete_idempotent(client, sample_backup_entry):
+def test_delete_idempotent(client: OdooClient, sample_backup_entry: dict[str, object]) -> None:
     res = BackupResource(_client=client)
     backup = make_backup(
-        id=uuid.UUID(sample_backup_entry["id"]),
+        id=uuid.UUID(cast("str", sample_backup_entry["id"])),
         source_base_url="http://localhost:8069",
         database_name="mydb",
-        path=str(sample_backup_entry["path"]),
-        filename=sample_backup_entry["path"].name,
+        path=str(cast("Path", sample_backup_entry["path"])),
+        filename=cast("Path", sample_backup_entry["path"]).name,
         size_bytes=1024,
         sha256="abc123",
     )
@@ -99,39 +116,44 @@ def test_delete_idempotent(client, sample_backup_entry):
     assert second.deleted_at is not None
 
 
-def test_list_skips_missing_file(client, sample_backup_entry):
-    sample_backup_entry["path"].unlink()
+def test_list_skips_missing_file(
+    client: OdooClient, sample_backup_entry: dict[str, object]
+) -> None:
+    cast("Path", sample_backup_entry["path"]).unlink()
     res = BackupResource(_client=client)
     backups = res.list(source_base_url="http://localhost:8069")
     assert backups == ()
 
 
-def test_full_audit_visibility(client, sample_backup_entry):
+def test_full_audit_visibility(client: OdooClient, sample_backup_entry: dict[str, object]) -> None:
     res = BackupResource(_client=client)
     backup = make_backup(
-        id=uuid.UUID(sample_backup_entry["id"]),
+        id=uuid.UUID(cast("str", sample_backup_entry["id"])),
         source_base_url="http://localhost:8069",
         database_name="mydb",
-        path=str(sample_backup_entry["path"]),
-        filename=sample_backup_entry["path"].name,
+        path=str(cast("Path", sample_backup_entry["path"])),
+        filename=cast("Path", sample_backup_entry["path"]).name,
         size_bytes=1024,
         sha256="abc123",
     )
     res.delete(backup)
-    events = res.history(backup_id=sample_backup_entry["id"])
+    events = res.history(backup_id=cast("str", sample_backup_entry["id"]))
     kinds = [e.event_type.value for e in events]
     assert "download_started" in kinds
     assert "download_succeeded" in kinds
     assert "deleted" in kinds
 
 
-def test_cross_process_rehydration(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+def test_cross_process_rehydration(
+    client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
+    client._catalog = None
     backup_file = tmp_path / "across.zip"
     backup_file.write_bytes(b"x")
     bid = str(uuid.uuid4())
 
-    db_path = tmp_path / "backups.sqlite3"
     catalog1 = BackupCatalog(db_path=db_path)
     catalog1.start_download(
         bid,
@@ -151,20 +173,26 @@ def test_cross_process_rehydration(client, tmp_path, monkeypatch):
     assert backups[0].size_bytes == 2048
 
 
-def test_backup_resource_repr(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+def test_backup_resource_repr(
+    client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
+    client._catalog = None
     res = BackupResource(_client=client)
     r = repr(res)
     assert "BackupResource" in r
 
 
-def test_delete_unknown_id_raises(client, sample_backup_entry):
+def test_delete_unknown_id_raises(
+    client: OdooClient, sample_backup_entry: dict[str, object]
+) -> None:
     res = BackupResource(_client=client)
     backup = make_backup(
         source_base_url="http://localhost:8069",
         database_name="mydb",
-        path=str(sample_backup_entry["path"]),
-        filename=sample_backup_entry["path"].name,
+        path=str(cast("Path", sample_backup_entry["path"])),
+        filename=cast("Path", sample_backup_entry["path"]).name,
     )
     with pytest.raises(BackupNotFoundError):
         res.delete(backup)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -47,7 +50,7 @@ def test_instance_status() -> None:
 
     fake_proc = OdooProcess(id="test-status", pid=12345, args=[], started_at=0.0)
     client._processes[fake_proc.id] = fake_proc
-    client._handles[fake_proc.id] = mock_handle
+    client._handles[fake_proc.id] = cast("subprocess.Popen[bytes]", mock_handle)
 
     with patch("odoo_instance_sdk.resources.instance.get_process_status") as mock_status:
         mock_status.return_value = object()
@@ -69,7 +72,7 @@ def test_readiness_success() -> None:
     inst = client.instance(base_url="http://localhost:8069")
     fake_proc = OdooProcess(id="test-ready", pid=12345, args=[], started_at=0.0)
     client._processes[fake_proc.id] = fake_proc
-    client._handles[fake_proc.id] = object()
+    client._handles[fake_proc.id] = cast("subprocess.Popen[bytes]", object())
 
     with patch("odoo_instance_sdk.internal.health.poll_health") as mock_poll:
         mock_poll.return_value = ReadinessResult(
@@ -98,7 +101,7 @@ def test_readiness_timeout() -> None:
     inst = client.instance(base_url="http://localhost:8069")
     fake_proc = OdooProcess(id="test-timeout", pid=12345, args=[], started_at=0.0)
     client._processes[fake_proc.id] = fake_proc
-    client._handles[fake_proc.id] = object()
+    client._handles[fake_proc.id] = cast("subprocess.Popen[bytes]", object())
 
     with patch("odoo_instance_sdk.internal.health.poll_health") as mock_poll:
         mock_poll.side_effect = ReadinessTimeoutError(timeout=1.0)
@@ -141,7 +144,7 @@ def test_instance_run_executes_subprocess() -> None:
     assert result.args[0] == client.config.executable
 
 
-def test_from_config_empty_db_host_does_not_default_port(tmp_path) -> None:
+def test_from_config_empty_db_host_does_not_default_port(tmp_path: Path) -> None:
     """MT-2: empty db_host in configparser must not set db_port to 5432."""
     path = tmp_path / "odoo.conf"
     path.write_text(
@@ -157,7 +160,7 @@ def test_from_config_empty_db_host_does_not_default_port(tmp_path) -> None:
     assert inst.config.db_port is None
 
 
-def test_from_config_db_host_sets_default_port(tmp_path) -> None:
+def test_from_config_db_host_sets_default_port(tmp_path: Path) -> None:
     """MT-2 (control): non-empty db_host should default port to 5432."""
     path = tmp_path / "odoo.conf"
     path.write_text(

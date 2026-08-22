@@ -17,7 +17,7 @@ def parse_odoo_config(path: str | Path) -> dict[str, str]:
     return dict(cfg.items("options"))
 
 
-def infer_base_url(config: dict[str, str], *, base_url: str | None = None) -> str:
+def infer_base_url(config: Mapping[str, str], *, base_url: str | None = None) -> str:
     if base_url is not None:
         return base_url
     http_interface = config.get("http_interface", "")

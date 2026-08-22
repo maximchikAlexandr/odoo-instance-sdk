@@ -1,0 +1,34 @@
+{
+    // VS Code launch configuration for the comerta project.
+    // Contains a Node.js profile (must be ignored by the importer) and the
+    // Odoo profile used for local development.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Node: server",
+            "type": "node",
+            "request": "launch",
+            "program": "${workspaceFolder}/server.js",
+            "skipFiles": ["<node_internals>/**"]
+        },
+        {
+            "name": "Odoo comerta",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/odoo-bin",
+            "python": "/opt/comerta/venv/bin/python",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "-c", "./odoo.conf",
+                "-d", "CMRT-361_1",
+                "--http-port", "8068",
+                "--dev=qweb,xml",
+                "-u", "comerta_base"
+            ],
+            "preLaunchTask": "build-assets",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}

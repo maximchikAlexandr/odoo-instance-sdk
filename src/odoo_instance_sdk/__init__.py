@@ -14,15 +14,22 @@ from odoo_instance_sdk.exceptions import (
     DatabaseError,
     DatabaseManagerUnavailableError,
     DropFailedError,
+    EnvironmentConflictError,
+    EnvironmentNotFoundError,
+    EnvironmentResolutionError,
     InstanceConfigurationError,
     InvalidBaseUrlError,
+    LockConflictError,
     MasterPasswordRequiredError,
     NonLocalInstanceError,
     OdooInstanceSdkError,
     ProcessExitedBeforeReady,
     ProcessNotFoundError,
+    ProjectContextError,
+    ProjectManifestNotFoundError,
     ReadinessTimeoutError,
     RestoreFailedError,
+    VscodeImportError,
 )
 from odoo_instance_sdk.models import (
     Backup,
@@ -43,8 +50,16 @@ from odoo_instance_sdk.models import (
     RestoreResult,
     StartConfig,
 )
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.resources.database import DatabaseResource
+from odoo_instance_sdk.resources.environment import (
+    DevelopmentEnvironment,
+    EnvironmentCheckoutOptions,
+    EnvironmentDatabaseMode,
+    EnvironmentResource,
+    EnvironmentState,
+)
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 
 __version__ = "0.1.0"
@@ -71,12 +86,21 @@ __all__ = [
     "DatabaseError",
     "DatabaseManagerUnavailableError",
     "DatabaseResource",
+    "DevelopmentEnvironment",
     "DropFailedError",
     "DropResult",
+    "EnvironmentCheckoutOptions",
+    "EnvironmentConflictError",
+    "EnvironmentDatabaseMode",
+    "EnvironmentNotFoundError",
+    "EnvironmentResolutionError",
+    "EnvironmentResource",
+    "EnvironmentState",
     "InstanceConfig",
     "InstanceConfigurationError",
     "InstanceFactory",
     "InvalidBaseUrlError",
+    "LockConflictError",
     "MasterPasswordRequiredError",
     "NoBackup",
     "NonLocalInstanceError",
@@ -88,9 +112,13 @@ __all__ = [
     "ProcessExitedBeforeReady",
     "ProcessNotFoundError",
     "ProcessStatus",
+    "ProjectConfig",
+    "ProjectContextError",
+    "ProjectManifestNotFoundError",
     "ReadinessResult",
     "ReadinessTimeoutError",
     "RestoreFailedError",
     "RestoreResult",
     "StartConfig",
+    "VscodeImportError",
 ]
