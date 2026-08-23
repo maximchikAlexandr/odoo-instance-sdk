@@ -1,4 +1,9 @@
-## ADDED Requirements
+# postgres-cluster Specification
+
+## Purpose
+TBD - created by archiving change add-postgres-cluster-lifecycle. Update Purpose after archive.
+
+## Requirements
 
 ### Requirement: `PostgresCluster` public abstraction
 
@@ -120,10 +125,6 @@ cluster.approve_image(digest, timeout=60.0)
 
 ### Requirement: `ensure_running()` is idempotent
 
-### Requirement: Compose image trust and serialized lifecycle
-
-For compose mode, a manifest image is only a mutable selector. `approve_image(image_digest)` MUST pull and inspect it, accept only an exactly matching OCI `repository@sha256:<64-hex>` RepoDigest, and save a `reference -> digest` approval in user data outside the repository with mode `0600`. Each `ensure_running()` MUST resolve again, fail closed if it differs or approval is corrupt, and render Compose with the immutable approved digest. Standalone public `status()` remains read-only and does not acquire the lifecycle lock. The canonical exclusive project lock MUST cover lifecycle-internal status/rechecks, reconciliation, `up`, polling to terminal health, and `stop`; a concurrent caller rechecks status after acquiring the lock.
-
 `PostgresCluster.ensure_running(timeout: float = 60.0) -> None` MUST:
 
 - для `external` — вызывать `status()`; если `HEALTHY` — return; иначе raise `PostgresClusterUnreachableError` (typed, redacted);
@@ -156,6 +157,20 @@ For compose mode, a manifest image is only a mutable selector. `approve_image(im
 
 - **WHEN** `cluster.ensure_running()` on a compose cluster that is `UNHEALTHY`
 - **THEN** raises `PostgresClusterUnhealthyError`
+
+### Requirement: Compose image trust and serialized lifecycle
+
+For compose mode, a manifest image is only a mutable selector. `approve_image(image_digest)` MUST pull and inspect it, accept only an exactly matching OCI `repository@sha256:<64-hex>` RepoDigest, and save a `reference -> digest` approval in user data outside the repository with mode `0600`. Each `ensure_running()` MUST resolve again, fail closed if it differs or approval is corrupt, and render Compose with the immutable approved digest. Standalone public `status()` remains read-only and does not acquire the lifecycle lock. The canonical exclusive project lock MUST cover lifecycle-internal status/rechecks, reconciliation, `up`, polling to terminal health, and `stop`; a concurrent caller rechecks status after acquiring the lock.
+
+#### Scenario: Compose startup uses an approved immutable digest
+
+- **WHEN** a compose cluster image has been explicitly approved and `ensure_running()` starts the cluster
+- **THEN** the image is resolved again and Compose uses the matching immutable RepoDigest
+
+#### Scenario: Concurrent lifecycle calls are serialized
+
+- **WHEN** concurrent callers attempt compose lifecycle transitions for the same project
+- **THEN** each transition holds the canonical project lifecycle lock and rechecks status after acquiring it
 
 ### Requirement: `stop()` rejects externally owned clusters
 

@@ -386,3 +386,128 @@ odcli vscode generate --write
 
 - **WHEN** `odcli vscode generate` runs for a ready environment
 - **THEN** one debugpy profile is printed and no file is written
+
+### Requirement: Instance commands share one ready path
+
+`run`, `shell`, `eval`, `exec`, `module`, `translations`, `deps verify` и `vscode generate` MUST получать `OdooClient`, ready environment и `OdooInstance` через один internal `ready_instance` path. Command bodies MUST NOT копировать resolve/verify/`from_environment()` и MUST NOT конструировать `OdooClient` сами.
+
+`ready_instance` MUST использовать already-specified two-rule context. Port preflight остаётся только у `run`.
+
+#### Scenario: Eval and run share resolve
+
+- **WHEN** `odcli eval 1` and `odcli run` execute inside a registered worktree
+- **THEN** both resolve the same environment through `ready_instance`, not through per-command helpers
+
+### Requirement: CLI does not open the catalog
+
+CLI command bodies, printers и env-list rendering MUST NOT вызывать `get_catalog()` и MUST NOT писать `last_used_at` или environment events напрямую.
+
+`odcli run` MUST вызвать `EnvironmentResource.record_use()` после free-port preflight и MUST NOT вызывать его при `port-conflict`. Other instance commands MUST NOT record `use`.
+
+JSON envelope v1 MUST остаться: `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, `warnings`; success — одинаковые `result` и `data`; error — `error.code` + sanitized `error.message`. Один shared emit path.
+
+Entry point MUST остаться `odoo_instance_sdk.cli:cli`. Имена команд и `from odoo_instance_sdk.cli import cli` MUST сохраниться.
+
+#### Scenario: List JSON does not open catalog
+
+- **WHEN** `odcli env list --json` prints the envelope
+- **THEN** the command does not call `get_catalog()` and does not write environment events
+
+#### Scenario: Port conflict skips use
+
+- **WHEN** `odcli run` hits an occupied port
+- **THEN** output is `port-conflict` / ownership-unknown and `record_use` is not called
+
+#### Scenario: Successful run records use on the environment resource
+
+- **WHEN** `odcli run` finds a free port
+- **THEN** `EnvironmentResource.record_use()` writes `last_used_at` and `use/succeeded` before `run_foreground()`
+
+#### Scenario: Help still lists full command surface
+
+- **WHEN** `odcli --help` runs
+- **THEN** shows init, env, run, shell, doctor, eval, exec, module, translations, deps, vscode
+
+### Requirement: `odcli postgres` command group
+
+`odcli` MUST предоставлять command group `postgres` с подкомандами:
+
+```text
+odcli postgres status [--json]
+odcli postgres up [--wait-timeout SECONDS]
+odcli postgres stop [--timeout SECONDS]
+odcli postgres approve-image --image-digest REPOSITORY@sha256:DIGEST [--timeout SECONDS] [--json]
+```
+
+Все три MUST использовать existing project resolution rules (`resolve_project_path`) — без project argument внутри initialized project или registered worktree.
+
+`status` MUST быть read-only (не меняет cluster state). `status` MUST NOT вызывать Docker в external mode (только TCP probe). `--json` output: JSON envelope v1 с `state`, `mode`, `owned`, `endpoint` (redacted).
+
+`up` MUST быть idempotent. Для managed (compose) cluster — вызывает `PostgresCluster.ensure_running(timeout)` (Compose `up --detach --wait`). Для external cluster — только reachability check (вызывает `status()`), не вызывает Docker. `--wait-timeout SECONDS` переходит в `ensure_running(timeout=...)`.
+
+`stop` MUST быть allowed только для SDK-owned (compose) cluster. Для external — typed error, exit 1. `--timeout SECONDS` переходит в `stop(timeout=...)`. `stop` MUST preserves container data/volume (никогда `down -v`).
+
+JSON envelope v1 MUST остаться (`emit_json_envelope`/`fail`). Entry point `odoo_instance_sdk.cli:cli` MUST сохраниться.
+
+`postgres` group MUST NOT дублировать preflight, который уже делает `OdooInstance` перед spawn Odoo. Команды `run`/`shell`/`eval`/`exec`/`module`/`translations` не вызывают `postgres up` явно — preflight в `OdooInstance` обрабатывает readiness.
+
+`approve-image` MUST resolve the manifest reference through Docker within its bounded `--timeout`, require `--image-digest` to exactly equal the OCI RepoDigest, and persist the approval outside the repository. Human and JSON responses MUST show the exact reference and digest. `up` and Odoo preflight MUST fail closed until approval exists and MUST re-resolve the image at every start.
+
+#### Scenario: Status inside initialized project
+
+- **WHEN** `odcli postgres status` runs inside a project with `[postgres] mode="compose"`
+- **THEN** output reports `state`, `mode`, `owned`, `endpoint` without starting/stopping cluster
+
+#### Scenario: Status JSON envelope
+
+- **WHEN** `odcli postgres status --json` runs
+- **THEN** JSON envelope v1 with `result` containing `state`, `mode`, `owned`, `endpoint` (no password)
+
+#### Scenario: Status external does not invoke Docker
+
+- **WHEN** `odcli postgres status` on external mode
+- **THEN** only TCP probe is performed, no `docker compose` invocation
+
+#### Scenario: Up compose starts cluster
+
+- **WHEN** `odcli postgres up --wait-timeout 60` on compose mode with `STOPPED` cluster
+- **THEN** runs `docker compose up --detach --wait`, polls until healthy, exits 0
+
+#### Scenario: Up external checks reachability only
+
+- **WHEN** `odcli postgres up` on external mode with reachable endpoint
+- **THEN** no Docker invocation, exits 0
+
+#### Scenario: Up external unreachable fails
+
+- **WHEN** `odcli postgres up` on external mode with unreachable endpoint
+- **THEN** exits 1 with typed `PostgresClusterUnreachableError` message
+
+#### Scenario: Stop compose preserves volume
+
+- **WHEN** `odcli postgres stop --timeout 30` on a running compose cluster
+- **THEN** runs `docker compose stop`, named volume persists, exits 0
+
+#### Scenario: Stop external fails
+
+- **WHEN** `odcli postgres stop` on external mode
+- **THEN** exits 1 with `PostgresClusterNotOwnedError` message
+
+#### Scenario: Commands resolve project without --project
+
+- **WHEN** `odcli postgres status` runs inside an initialized project
+- **THEN** project is resolved via existing two-rule context, no `--project` required
+
+### Requirement: `init` wires `--postgres*` options
+
+`odcli init` MUST принимать `--postgres`, `--postgres-image`, `--postgres-port`, `--postgres-user` (см. `project-init` spec). `init` MUST NOT создавать compose artifacts directory. `init` MUST NOT запускать Docker. Existing init flow (interactive prompts, `--no-input`, `--dry-run --json`, idempotency, VS Code import) MUST оставаться без breaking changes — новые опции интегрируются в existing provenance tracking и `ProjectConfig` construction.
+
+#### Scenario: Init with postgres and vscode import
+
+- **WHEN** `odcli init --from-vscode launch.json --postgres compose --postgres-image ...` runs
+- **THEN** both VS Code import and postgres section are persisted; provenance records both sources
+
+#### Scenario: Init provenance records postgres option
+
+- **WHEN** `odcli init --postgres compose --postgres-image ... --dry-run --json` runs
+- **THEN** provenance includes `option` entry for `postgres`

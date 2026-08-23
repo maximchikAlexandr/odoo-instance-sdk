@@ -47,6 +47,8 @@ Manifest MUST NOT содержать пароль или любые secret-like 
 - **WHEN** `ProjectConfig.load("/path/to/repo")` вызывается без `.odcli/project.toml`
 - **THEN** поднимается typed error с подсказкой `odcli init`
 
+## ADDED Requirements
+
 ### Requirement: `odcli init` postgres options
 
 `odcli init` MUST принимать опции:

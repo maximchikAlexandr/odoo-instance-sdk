@@ -1,10 +1,15 @@
 ## MODIFIED Requirements
 
-### Requirement: `InstanceFactory.from_environment()` binds project cluster
+### Requirement: `InstanceFactory.from_environment()`
 
 `InstanceFactory.from_environment(environment: DevelopmentEnvironment) -> OdooInstance` MUST:
 
-- выполнять existing behavior (ready env, generated config read, command prefix, runtime cwd, `StartConfig.from_odoo_config`);
+- принимать только `ready` environment;
+- читать generated `odoo.conf` через существующий config flow;
+- применять recorded Python interpreter (shared or owned), Odoo entry point и worktree как defaults для запуска;
+- использовать recorded resolved runtime paths, не перечитывая project manifest;
+- не требовать master password — `master_password=None`;
+- не переносить Git, cleanup или audit methods в `OdooInstance`;
 - additionally bind the project cluster to resulting `OdooInstance` через internal field `_postgres_cluster: PostgresCluster | None`;
 - cluster bind происходит через `PostgresCluster.from_project(Path(environment.repository_root))`;
 - bind не запускает cluster и не проверяет readiness (это preflight перед spawn);
@@ -20,6 +25,18 @@
 
 - **WHEN** `InstanceFactory.from_environment(env)` on a project without `[postgres]`
 - **THEN** `_postgres_cluster` is set to an external-mode cluster (bind still happens, preflight probes reachability)
+
+#### Scenario: from_environment without master password
+
+- **WHEN** `from_environment(env)` для ready environment
+- **THEN** `OdooInstance.config.master_password is None`
+
+#### Scenario: from_environment on non-ready environment
+
+- **WHEN** `from_environment(env)` для `state != ready` environment
+- **THEN** error (only ready environments accepted)
+
+## ADDED Requirements
 
 ### Requirement: `OdooInstance` dependency preflight before spawn
 

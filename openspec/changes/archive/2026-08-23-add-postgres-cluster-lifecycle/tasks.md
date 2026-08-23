@@ -63,6 +63,14 @@
 - [x] 8.6 `tests/unit/test_doctor_postgres.py`: read-only checks, missing Docker warn, external reachability
 - [x] 8.7 `tests/integration/test_postgres_lifecycle.py` (opt-in `integration` marker, skip без `docker`): init → up/healthy → instance preflight → stop preserving volume
 
+## 9. Quality gates
+
+- [x] 9.1 `ruff check` clean
+- [x] 9.2 `mypy --strict` clean
+- [x] 9.3 `pytest -m "not real_odoo and not packaging"` green; coverage thresholds pass (новый `postgres` regex + thresholds)
+- [x] 9.4 `pytest -m integration` green locally (with Docker) или skips gracefully
+- [x] 9.5 `pyproject.toml::[tool.coverage.regexs]` добавлен `postgres` regex; thresholds заданы
+
 ## 10. Centralized port allocation (cross-project)
 
 - [x] 10.1 Создать `internal/port_allocation.py` с `find_free_port(kind, catalog, exclude_project)` — итерирует catalog.environments + project manifests + generated odoo.conf для HTTP ports; `probe_address` live check
@@ -73,15 +81,7 @@
 - [x] 10.6 Обновить catalog migration tests (version 8, убрать `active_environment_for_port`)
 - [x] 10.7 Unit + integration tests green
 
-## 9. Quality gates
-
 ## 11. Immutable image trust follow-up
 
 - [x] 11.1 Resolve/pull OCI RepoDigest, explicit out-of-repository approval, and immutable compose rendering
 - [x] 11.2 Serialize start/poll/stop under a project lifecycle lock and extend deterministic lifecycle/trust coverage
-
-- [x] 9.1 `ruff check` clean
-- [x] 9.2 `mypy --strict` clean
-- [x] 9.3 `pytest -m "not real_odoo and not packaging"` green; coverage thresholds pass (новый `postgres` regex + thresholds)
-- [x] 9.4 `pytest -m integration` green locally (with Docker) или skips gracefully
-- [x] 9.5 `pyproject.toml::[tool.coverage.regexs]` добавлен `postgres` regex; thresholds заданы
