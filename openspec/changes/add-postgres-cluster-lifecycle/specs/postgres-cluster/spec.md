@@ -292,7 +292,7 @@ SDK MUST предоставлять следующие typed errors (все на
 
 ### Requirement: No new Python dependency
 
-Implementation MUST NOT добавлять новые Python dependencies. Используется stdlib + установленный `docker compose` CLI. Никаких `docker-py`, `PyYAML`, `psycopg`, второй SQLite registry, daemon или generic service manager.
+Implementation MUST NOT добавлять новые Python зависимости. Используется stdlib + установленный `docker compose` CLI. Никаких `docker-py`, `PyYAML`, `psycopg`, второй SQLite registry, daemon или generic service manager.
 
 Compose file генерируется как text (без PyYAML). Compose CLI вызывается через `subprocess`.
 
@@ -300,6 +300,50 @@ Compose file генерируется как text (без PyYAML). Compose CLI �
 
 - **WHEN** `pyproject.toml` is inspected after implementation
 - **THEN** `[project.dependencies]` does not include `docker`, `pyyaml`, `psycopg`, or any new package
+
+### Requirement: Cross-project centralized port allocation
+
+Port allocation MUST быть централизованной через единый helper `internal.port_allocation.find_free_port(kind, catalog, exclude_project)`, который итерирует по существующим источникам (catalog.environments + project manifests) — **не** отдельный registry портов, который может разъехаться после ручных правок конфигов.
+
+`find_free_port` MUST:
+
+1. Итерировать `catalog.list_environments()` → собирать `http_port` (Odoo HTTP) для всех environments.
+2. Для каждого `repository_root` из catalog environments читать `.odcli/project.toml` через `ProjectConfig.load` → собирать `postgres.port` (compose mode) и `preferred_http_port`.
+3. Live `probe_address` на кандидата.
+4. Возвращать первый свободный порт в kind-специфичном диапазоне, не занятый ни в одном источнике.
+
+`kind` — `"postgres"` (range `[5468, 65535)`) или `"http"` (range `[8069, 8099]`).
+
+`exclude_project` (optional `Path`) — пропускает порты собственного проекта (его manifest), чтобы re-init не видел собственные порты как collision.
+
+Single source of truth — manifest'ы и catalog, не отдельный state file. Ручные правки конфигов отражаются автоматически при следующей аллокации.
+
+`EnvironmentResource._allocate_port` MUST делегировать в `find_free_port("http", ...)`, сохраняя existing behavior. `cli.py` postgres port allocation MUST делегировать в `find_free_port("postgres", ...)`.
+
+#### Scenario: Postgres port allocation checks other projects
+
+- **WHEN** `find_free_port("postgres", catalog)` is called and project A has `[postgres] port = 5468` and project B is being initialized
+- **THEN** 5468 is excluded from candidates even if `probe_address` reports it free (container stopped)
+
+#### Scenario: HTTP port allocation checks other projects
+
+- **WHEN** `find_free_port("http", catalog)` is called and project A's manifest has `preferred_http_port = 8070` and project B is being initialized
+- **THEN** 8070 is excluded from candidates even if no environment is currently running on it
+
+#### Scenario: Manual config edit reflected
+
+- **WHEN** a user manually edits `.odcli/project.toml` to change `postgres.port` to 5500, then runs `init` for a different project
+- **THEN** 5500 is excluded from candidates (manifest is the source of truth, not a stale registry)
+
+#### Scenario: exclude_project skips own ports
+
+- **WHEN** `find_free_port("postgres", catalog, exclude_project="/repo")` is called and `/repo` has `[postgres] port = 5468`
+- **THEN** 5468 is NOT excluded (it's the current project's own port); re-init doesn't collide with itself
+
+#### Scenario: No new state file
+
+- **WHEN** port allocation runs
+- **THEN** no new JSON/SQLite/file is written; only existing catalog + manifests are read
 
 ### Requirement: Unit and integration tests
 

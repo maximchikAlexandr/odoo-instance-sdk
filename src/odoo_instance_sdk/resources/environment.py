@@ -320,8 +320,18 @@ class EnvironmentResource:
                 f"Active environment already exists for branch {plan.branch!r}",
                 details={"branch": plan.branch, "existing_id": existing["id"]},
             )
-        allocated = cat.active_environment_for_port(plan.http_port)
-        if allocated is not None or not _port_free(plan.http_interface, plan.http_port):
+        # Cross-project port check via unified helper (replaces
+        # active_environment_for_port which was removed from catalog).
+        from odoo_instance_sdk.internal.port_allocation import find_free_port
+
+        try:
+            find_free_port(
+                "http",
+                cat,
+                requested=plan.http_port,
+                host=plan.http_interface,
+            )
+        except EnvironmentConflictError:
             raise EnvironmentConflictError(
                 "port_in_use", f"Port {plan.http_port} is no longer available"
             )
@@ -340,8 +350,6 @@ class EnvironmentResource:
             "python_environment_path": plan.python_path,
             "python_environment_owned": plan.python_owned,
             "dependency_lock_path": str(plan.dependency_lock),
-            "http_interface": plan.http_interface,
-            "http_port": plan.http_port,
             "db_mode": plan.db_mode,
             "source_db_name": plan.source_database,
             "target_db_name": plan.target_database,
@@ -1423,28 +1431,15 @@ class EnvironmentResource:
         catalog: object | None,
         http_interface: str,
     ) -> int:
+        from odoo_instance_sdk.internal.port_allocation import find_free_port
 
         cat = cast("BackupCatalog | None", catalog)
-        start = requested or project.preferred_http_port or _PORT_RANGE_START
-        if requested is not None:
-            if cat is not None and cat.active_environment_for_port(requested) is not None:
-                raise EnvironmentConflictError(
-                    "port_in_use",
-                    f"Port {requested} already allocated to an active environment",
-                    details={"port": requested},
-                )
-            return requested
-        port = start
-        while port <= _PORT_RANGE_END:
-            if (cat is None or cat.active_environment_for_port(port) is None) and _port_free(
-                http_interface, port
-            ):
-                return port
-            port += 1
-        raise EnvironmentConflictError(
-            "no_free_port",
-            f"No free port in range {_PORT_RANGE_START}-{_PORT_RANGE_END}; pass --http-port",
-            details={"range": [str(_PORT_RANGE_START), str(_PORT_RANGE_END)]},
+        return find_free_port(
+            "http",
+            cat,
+            requested=requested,
+            project=project,
+            host=http_interface,
         )
 
     def _resolve_selector(
@@ -1486,6 +1481,23 @@ def _decode_runtime_json(raw: str | None) -> dict[str, str]:
     return {k: str(v) for k, v in data.items() if isinstance(v, str)}
 
 
+def _http_fields_from_generated_config(generated_config_path: str) -> tuple[str, int]:
+    """Read http_interface/http_port from the generated odoo.conf (single source of truth)."""
+    from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+
+    try:
+        cfg = parse_odoo_config(generated_config_path)
+    except Exception:
+        return "127.0.0.1", 8069
+    http_interface = cfg.get("http_interface") or "127.0.0.1"
+    http_port_raw = cfg.get("http_port", "8069")
+    try:
+        http_port = int(http_port_raw)
+    except ValueError:
+        http_port = 8069
+    return http_interface, http_port
+
+
 def _row_to_env(row: object) -> DevelopmentEnvironment:
     def _get(key: str) -> object:
         r = cast("sqlite3.Row", row)
@@ -1504,6 +1516,10 @@ def _row_to_env(row: object) -> DevelopmentEnvironment:
     backup_raw: object = None
     with contextlib.suppress(KeyError, IndexError):
         backup_raw = cast("sqlite3.Row", row)["backup_id"]
+    http_interface, http_port = _http_fields_from_generated_config(
+        str(_get("generated_config_path"))
+    )
+
     return DevelopmentEnvironment(
         id=uuid.UUID(str(_get("id"))),
         name=str(_get("name")),
@@ -1516,8 +1532,8 @@ def _row_to_env(row: object) -> DevelopmentEnvironment:
         python_environment_path=str(_get("python_environment_path")),
         python_environment_owned=bool(_get("python_environment_owned")),
         dependency_lock_path=str(_get("dependency_lock_path")),
-        http_interface=str(_get("http_interface")),
-        http_port=int(str(_get("http_port"))),
+        http_interface=http_interface,
+        http_port=http_port,
         db_mode=EnvironmentDatabaseMode(str(_get("db_mode"))),
         source_db_name=_opt("source_db_name"),
         target_db_name=_opt("target_db_name"),

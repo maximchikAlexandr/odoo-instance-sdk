@@ -11,7 +11,7 @@ def test_fresh_install_creates_v7_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 7
+    assert version == 8
     tables = {
         r[0]
         for r in catalog._conn.execute(
@@ -40,8 +40,6 @@ def test_environment_methods_exist(tmp_path: Path) -> None:
             "python_environment_path": "/venv",
             "python_environment_owned": False,
             "dependency_lock_path": "/lock",
-            "http_interface": "127.0.0.1",
-            "http_port": 8069,
             "db_mode": "shared",
             "source_db_name": "mydb",
             "target_db_name": None,
@@ -60,7 +58,6 @@ def test_environment_methods_exist(tmp_path: Path) -> None:
     catalog.add_environment_event(env_id, "checkout", "started", message="begin")
     catalog.update_environment_state(env_id, "ready")
     assert catalog.active_environment_for("/repo/.git", "main") is not None
-    assert catalog.active_environment_for_port(8069) is not None
     envs = catalog.list_environments()
     assert len(envs) == 1
     catalog.close()
@@ -97,6 +94,6 @@ def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None
     schema = catalog._conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='environment_copy_journal'"
     ).fetchone()[0]
-    assert version == 7
+    assert version == 8
     assert "restore_pending" in schema
     catalog.close()

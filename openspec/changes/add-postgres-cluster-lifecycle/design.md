@@ -325,6 +325,37 @@ Thresholds: line/branch средние (80/70 — новый код, не securi
 - Q: `PostgresCluster` как `@dataclass` или `msgspec.Struct`? Решение: `@dataclass(frozen=True, slots=True, kw_only=True)` (как `InstanceFactory`/`OdooInstance` — существующий pattern для ресурсов). Properties для `mode`/`owned`.
 - Q: Хранить ли `postgres-password` в `user_state_dir` или `user_data_dir`? Решение: `user_data_dir` (durable; `user_state_dir` для locks; data важна для preserve-volume constraint). `get_data_root() / "projects" / project_id / "postgres"`.
 
+## Centralized port allocation (cross-project)
+
+Single source of truth for port usage is the existing config files, **not** a separate registry that can drift after manual edits. `internal/port_allocation.py` provides `find_free_port(kind, catalog, exclude_project)` which:
+
+1. Iterates `catalog.list_environments()` → collects `repository_root` for all environments.
+2. For each `repository_root`, reads `.odcli/project.toml` → collects `postgres.port` (compose mode) and `preferred_http_port`.
+3. For each environment's `generated_config_path`, reads the generated `odoo.conf` → collects `http_port` + `http_interface` (per-env, since each env has its own generated config with a potentially different port).
+4. Live `probe_address` check on the candidate.
+5. Returns the first port in the kind-specific range that is free in all checks.
+
+No new state file, no new SQLite table. Port usage is derived from the manifests + generated configs every time — manual edits to configs are reflected automatically.
+
+### Catalog schema change: remove `http_port`/`http_interface` from `environments`
+
+`catalog.environments.http_port` and `http_interface` are removed (schema v7→v8 migration). These were a second copy of data already in the generated `odoo.conf`; they drifted from the source of truth after manual config edits. `DevelopmentEnvironment` keeps `http_interface`/`http_port` fields, but `_row_to_env` now reads them from the generated `odoo.conf` (via `parse_odoo_config(generated_config_path)`) instead of the catalog row. `catalog.active_environment_for_port` is removed — `find_free_port("http", ...)` subsumes it.
+
+```
+find_free_port("postgres", catalog, exclude_project="/repo")
+   │
+   ├─ for repo_root in catalog.environments.repository_root:
+   │     ProjectConfig.load(repo_root) ──→ postgres.port + preferred_http_port
+   ├─ for env in catalog.environments:
+   │     parse_odoo_config(env.generated_config_path) ──→ http_port + http_interface
+   ├─ probe_address("127.0.0.1", candidate)
+   └─ return first free candidate in [5468, 65535) for postgres / [8069, 8099] for HTTP
+```
+
+`EnvironmentResource._allocate_port` delegates to `find_free_port("http", catalog, exclude_project, requested=...)`. `cli.py` postgres port allocation delegates to `find_free_port("postgres", catalog, exclude_project)`.
+
+`exclude_project` skips the current project's own manifest ports so re-init doesn't see its own existing manifest as a collision.
+
 ## Implementer Choices (made explicit)
 
 - **Port allocation range**: `[5468, 65535)`; 5468 chosen to match the issue example and avoid common 5432/5500 collisions. First free loopback port is persisted to the manifest.

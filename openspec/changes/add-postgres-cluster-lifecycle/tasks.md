@@ -63,6 +63,16 @@
 - [x] 8.6 `tests/unit/test_doctor_postgres.py`: read-only checks, missing Docker warn, external reachability
 - [x] 8.7 `tests/integration/test_postgres_lifecycle.py` (opt-in `integration` marker, skip без `docker`): init → up/healthy → instance preflight → stop preserving volume
 
+## 10. Centralized port allocation (cross-project)
+
+- [x] 10.1 Создать `internal/port_allocation.py` с `find_free_port(kind, catalog, exclude_project)` — итерирует catalog.environments + project manifests + generated odoo.conf для HTTP ports; `probe_address` live check
+- [x] 10.2 Catalog schema migration v7→v8: убрать `http_port`/`http_interface` из `environments` (table recreate with `legacy_alter_table`); убрать `active_environment_for_port`
+- [x] 10.3 `EnvironmentResource._allocate_port` делегирует в `find_free_port("http", ...)`
+- [x] 10.4 `_row_to_env` читает `http_interface`/`http_port` из generated odoo.conf (single source of truth)
+- [x] 10.5 `cli.py` postgres port allocation делегирует в `find_free_port("postgres", ...)`
+- [x] 10.6 Обновить catalog migration tests (version 8, убрать `active_environment_for_port`)
+- [x] 10.7 Unit + integration tests green
+
 ## 9. Quality gates
 
 - [x] 9.1 `ruff check` clean

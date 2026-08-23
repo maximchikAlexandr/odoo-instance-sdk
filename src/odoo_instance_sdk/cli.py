@@ -12,7 +12,6 @@ from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import VscodeImportError
 from odoo_instance_sdk.internal import context as cli_context
-from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.automation import (
     eval_expression,
     exec_script,
@@ -26,6 +25,7 @@ from odoo_instance_sdk.internal.automation import (
 from odoo_instance_sdk.internal.cli_env import env_group
 from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail, sanitize_diagnostic
 from odoo_instance_sdk.internal.doctor import DoctorReport, run_doctor
+from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.vscode_generate import (
     build_launch_profile,
@@ -163,6 +163,7 @@ def init(
         source_config=option_state.source_config,
         no_input=no_input,
         json_output=json_output,
+        project_path=resolved_project,
     )
     if postgres_cfg is not None:
         provenance["option"].append("postgres")
@@ -238,6 +239,7 @@ def _resolve_postgres_state(
     source_config: Path | None,
     no_input: bool,
     json_output: bool,
+    project_path: Path,
 ) -> tuple[PostgresProjectConfig | None, bool]:
     mode = "compose" if postgres_mode.lower() == "compose" else "external"
     if mode == "external":
@@ -250,7 +252,7 @@ def _resolve_postgres_state(
 
     allocated = False
     if postgres_port is None:
-        postgres_port = _allocate_free_loopback_port()
+        postgres_port = _allocate_free_loopback_port(project_path)
         allocated = True
 
     if postgres_user is None:
@@ -265,14 +267,24 @@ def _resolve_postgres_state(
     return cfg, allocated
 
 
-def _allocate_free_loopback_port() -> int:
-    """Probe candidate loopback ports starting from a high offset; return first free."""
-    for candidate in range(5468, 65535):
-        if probe_address("127.0.0.1", candidate) is AddressState.FREE:
-            return candidate
-    fail(False, "init", "no free loopback port available for postgres cluster")
-    # ponytail: unreachable — fail() exits; keep mypy happy.
-    return 0
+def _allocate_free_loopback_port(project_path: Path) -> int:
+    """Allocate a free loopback port for postgres via cross-project check."""
+    catalog = _open_catalog_optional()
+    return find_free_port("postgres", catalog, exclude_project=project_path)
+
+
+def _open_catalog_optional() -> Any:
+    """Open the catalog read-only; return None if missing/unreadable."""
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog_path = get_catalog_path()
+    if not catalog_path.is_file():
+        return None
+    try:
+        return BackupCatalog(db_path=catalog_path)
+    except Exception:
+        return None
 
 
 def _default_postgres_user(source_config: Path | None) -> str:
