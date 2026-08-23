@@ -395,13 +395,15 @@ def test_compound_compose_deadline_decreases_between_subcommands(
         "odoo_instance_sdk.internal.postgres_compose.time.monotonic", lambda: next(ticks)
     )
     resolve_image_digest(fake, "postgres:16", timeout=2.0)
-    assert fake.timeouts[1] < fake.timeouts[0]
+    image_timeouts = [timeout for timeout in fake.timeouts if timeout is not None]
+    assert image_timeouts[1] < image_timeouts[0]
     fake.calls.clear()
     fake.timeouts.clear()
     compose = tmp_path / "compose.yaml"
     compose.write_text("services: {}\n")
     derive_state(fake, compose, "project", user="odoo", timeout=2.0)
-    assert fake.timeouts[1] < fake.timeouts[0]
+    state_timeouts = [timeout for timeout in fake.timeouts if timeout is not None]
+    assert state_timeouts[1] < state_timeouts[0]
 
 
 @pytest.mark.unit
@@ -549,8 +551,14 @@ def test_ensure_unhealthy_before_up_is_typed(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_ensure_unhealthy_after_up_is_typed(tmp_path: Path) -> None:
     class UnhealthyAfterUp(FakeComposeRunner):
-        def run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            result = super().run(args, **kwargs)
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().run(args, cwd=cwd, timeout=timeout)
             if " up " in f" {' '.join(args)} ":
                 self._ps_rows = [{"Name": "postgres", "Health": "unhealthy"}]
                 self._health_rc = 2
@@ -613,8 +621,14 @@ def test_changed_resolved_digest_invalidates_prior_approval(tmp_path: Path) -> N
     class DriftRunner(FakeComposeRunner):
         drift = False
 
-        def run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            result = super().run(args, **kwargs)
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            result = super().run(args, cwd=cwd, timeout=timeout)
             if " image inspect " in f" {' '.join(args)} " and self.drift:
                 return subprocess.CompletedProcess(
                     args, 0, "docker.io/library/postgres@sha256:" + "b" * 64, ""

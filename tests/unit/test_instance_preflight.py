@@ -132,14 +132,23 @@ def test_preflight_event_precedes_foreground_shell_and_script_spawn() -> None:
     events: list[str] = []
     instance = _make_instance(cluster=_EventCluster(events))
     result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
+
+    def spawn(*args: object, **kwargs: object) -> int:
+        events.append("spawn")
+        return 0
+
+    def shell_spawn(*args: object, **kwargs: object) -> CommandResult:
+        events.append("shell-spawn")
+        return result
+
     with (
         patch(
             "odoo_instance_sdk.resources.instance.run_foreground_process",
-            side_effect=lambda *args, **kwargs: events.append("spawn") or 0,
+            side_effect=spawn,
         ),
         patch(
             "odoo_instance_sdk.internal.server._run_captured_shell",
-            side_effect=lambda *args, **kwargs: events.append("shell-spawn") or result,
+            side_effect=shell_spawn,
         ),
     ):
         instance.run_foreground()
@@ -159,9 +168,14 @@ def test_preflight_event_precedes_exclusive_script_operation() -> None:
     events: list[str] = []
     instance = _make_instance(cluster=_EventCluster(events))
     result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
+
+    def exclusive_spawn(*args: object, **kwargs: object) -> CommandResult:
+        events.append("exclusive-spawn")
+        return result
+
     with patch(
         "odoo_instance_sdk.internal.server._run_captured_shell",
-        side_effect=lambda *args, **kwargs: events.append("exclusive-spawn") or result,
+        side_effect=exclusive_spawn,
     ):
         instance._run_shell_script_exclusive("print(1)")
     assert events[:2] == ["ensure", "exclusive-spawn"]

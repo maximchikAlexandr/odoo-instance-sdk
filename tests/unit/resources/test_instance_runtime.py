@@ -88,9 +88,14 @@ class TestInstancePrefix:
             staticmethod(lambda path: StoppedCluster()),
         )
         instance = env_client.instance.from_environment(env)
+
+        def spawn(*args: object, **kwargs: object) -> int:
+            events.append("spawn")
+            return 0
+
         with patch(
             "odoo_instance_sdk.resources.instance.run_foreground_process",
-            side_effect=lambda *args, **kwargs: events.append("spawn") or 0,
+            side_effect=spawn,
         ):
             instance.run_foreground()
         assert events == ["healthy", "spawn"]
