@@ -102,9 +102,7 @@ def test_doctor_no_project_skips_postgres(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_doctor_warns_when_docker_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _write_project(tmp_path)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_compose.docker_available", lambda: False
-    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.doctor.docker_available", lambda: False)
     report = run_doctor(_make_client(), root)
     compose_check = [c for c in report.checks if c.name == "postgres.compose"]
     assert len(compose_check) == 1

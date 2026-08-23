@@ -10,7 +10,7 @@ import click
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import OdooClientConfig
-from odoo_instance_sdk.exceptions import VscodeImportError
+from odoo_instance_sdk.exceptions import OdooInstanceSdkError, VscodeImportError
 from odoo_instance_sdk.internal import context as cli_context
 from odoo_instance_sdk.internal.automation import (
     eval_expression,
@@ -33,7 +33,7 @@ from odoo_instance_sdk.internal.vscode_generate import (
     write_launch_json,
 )
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
-from odoo_instance_sdk.models import StartConfig
+from odoo_instance_sdk.models import PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -888,32 +888,21 @@ def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> 
     sys.exit(0)
 
 
-if __name__ == "__main__":
-    cli()
-
-
-# -- postgres cluster group -------------------------------------------------
-
-
 @cli.group("postgres")
 def postgres_group() -> None:
     """Project-level PostgreSQL cluster lifecycle (read-only / idempotent)."""
 
 
-def _resolve_cluster(ctx: click.Context) -> PostgresCluster:
+def _resolve_cluster(ctx: click.Context, json_output: bool) -> PostgresCluster:
     project_path = cli_context.resolve_project_path(ctx)
-    from odoo_instance_sdk.exceptions import OdooInstanceSdkError
-
     try:
         return PostgresCluster.from_project(project_path)
     except OdooInstanceSdkError as e:
-        fail(False, "postgres", str(e))
+        fail(json_output, "postgres", str(e))
 
 
 def _cluster_state_to_exit(state: object) -> int:
-    from odoo_instance_sdk.models import PostgresClusterState as _S
-
-    if state == _S.HEALTHY:
+    if state == PostgresClusterState.HEALTHY:
         return 0
     return 1
 
@@ -923,7 +912,7 @@ def _cluster_state_to_exit(state: object) -> int:
 @click.pass_context
 def postgres_status(ctx: click.Context, json_output: bool) -> None:
     try:
-        cluster = _resolve_cluster(ctx)
+        cluster = _resolve_cluster(ctx, json_output)
         state = cluster.status()
     except SystemExit:
         raise
@@ -956,7 +945,7 @@ def postgres_status(ctx: click.Context, json_output: bool) -> None:
 @click.pass_context
 def postgres_up(ctx: click.Context, wait_timeout: float, json_output: bool) -> None:
     try:
-        cluster = _resolve_cluster(ctx)
+        cluster = _resolve_cluster(ctx, json_output)
         cluster.ensure_running(timeout=wait_timeout)
         state = cluster.status()
     except SystemExit:
@@ -984,7 +973,7 @@ def postgres_up(ctx: click.Context, wait_timeout: float, json_output: bool) -> N
 @click.pass_context
 def postgres_stop(ctx: click.Context, timeout: float, json_output: bool) -> None:
     try:
-        cluster = _resolve_cluster(ctx)
+        cluster = _resolve_cluster(ctx, json_output)
         cluster.stop(timeout=timeout)
         state = cluster.status()
     except SystemExit:
@@ -998,3 +987,7 @@ def postgres_stop(ctx: click.Context, timeout: float, json_output: bool) -> None
     else:
         click.echo(f"postgres stop: state={state.value} endpoint={cluster.endpoint}")
     sys.exit(0)
+
+
+if __name__ == "__main__":
+    cli()

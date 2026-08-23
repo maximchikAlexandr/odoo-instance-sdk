@@ -14,6 +14,7 @@ from pathlib import Path
 from odoo_instance_sdk.exceptions import (
     PostgresClusterStartError,
     PostgresClusterStopError,
+    PostgresClusterTimeoutError,
     PostgresComposeInvalidError,
     PostgresComposeUnavailableError,
     PostgresPortCollisionError,
@@ -166,19 +167,30 @@ def ensure_password_file(path: Path) -> str:
     return password
 
 
-def write_compose_file_atomic(compose_path: Path, content: str) -> None:
+def write_compose_file_atomic(
+    compose_path: Path,
+    content: str,
+    *,
+    runner: ComposeRunner,
+    project_name: str,
+) -> None:
+    """Validate then atomically publish ``compose.yaml`` with mode 0600."""
     compose_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         dir=str(compose_path.parent), prefix=".compose-", suffix=".yaml.tmp"
     )
+    tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
-        os.replace(tmp_name, compose_path)
-    except OSError:
+        os.chmod(tmp_path, 0o600)
+        compose_config(runner, tmp_path, project_name)
+        os.replace(tmp_path, compose_path)
+    except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)
         raise
+    os.chmod(compose_path, 0o600)
 
 
 def _compose_base_args(
@@ -217,7 +229,10 @@ def compose_up(
     timeout: float | None = None,
 ) -> None:
     args = [*_compose_base_args(compose_file, project_name), "up", "--detach", "--wait"]
-    res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+    try:
+        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     if res.returncode != 0:
         if _looks_like_port_collision(res.stderr):
             raise PostgresPortCollisionError(
@@ -241,7 +256,7 @@ def compose_stop(
     *,
     timeout: float | None = None,
 ) -> None:
-    # ``stop`` preserves the named volume (never ``down -v``).
+    """Stop the compose project; preserves the named volume (never ``down -v``)."""
     args = [
         *_compose_base_args(compose_file, project_name),
         "stop",
@@ -250,8 +265,6 @@ def compose_stop(
     ]
     res = runner.run(args, cwd=compose_file.parent, timeout=None)
     if res.returncode != 0:
-        # Idempotent: if already stopped, compose returns 0; a non-zero result
-        # here is reported as a typed stop error.
         raise PostgresClusterStopError(
             f"docker compose stop failed: {res.stderr.strip() or res.stdout.strip()}",
             returncode=res.returncode,
@@ -262,12 +275,12 @@ def compose_ps(
     runner: ComposeRunner,
     compose_file: Path,
     project_name: str,
-) -> list[dict[str, object]]:
-    """Return parsed ``docker compose ps --format json`` rows (one JSON object per line)."""
+) -> list[dict[str, object]] | None:
+    """Return parsed ``docker compose ps --format json`` rows, or None on CLI failure."""
     args = [*_compose_base_args(compose_file, project_name), "ps", "--format", "json"]
     res = runner.run(args, cwd=compose_file.parent)
     if res.returncode != 0:
-        return []
+        return None
     rows: list[dict[str, object]] = []
     for raw in res.stdout.splitlines():
         line = raw.strip()
@@ -313,12 +326,16 @@ def derive_state(
     user: str,
 ) -> PostgresClusterState:
     rows = compose_ps(runner, compose_file, project_name)
+    if rows is None:
+        return PostgresClusterState.UNKNOWN
     if not rows:
         return PostgresClusterState.STOPPED
     rc, _output = compose_health(runner, compose_file, project_name, user=user)
     if rc == 0:
         return PostgresClusterState.HEALTHY
-    return PostgresClusterState.UNHEALTHY
+    if any(str(row.get("Health", "")).lower() == "unhealthy" for row in rows):
+        return PostgresClusterState.UNHEALTHY
+    return PostgresClusterState.STARTING
 
 
 def ensure_docker_or_raise() -> None:

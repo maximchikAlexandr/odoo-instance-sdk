@@ -48,6 +48,7 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_odoo_config,
 )
 from odoo_instance_sdk.internal.paths import get_environments_root
+from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.urls import assert_local
@@ -162,9 +163,6 @@ class _CheckoutPlan:
     options: EnvironmentCheckoutOptions
 
 
-_PORT_RANGE_START = 8069
-_PORT_RANGE_END = 8099
-
 _StrList = list[str]
 
 
@@ -224,7 +222,9 @@ class EnvironmentResource:
         )
 
         http_interface = cfg_dict.get("http_interface", "127.0.0.1") or "127.0.0.1"
-        http_port = self._allocate_port(options.http_port, project_cfg, catalog, http_interface)
+        http_port = self._allocate_port(
+            options.http_port, project_cfg, catalog, http_interface, repo_root
+        )
 
         env_id = uuid.uuid4()
         key = repo_key(repo_root, git_common)
@@ -306,7 +306,9 @@ class EnvironmentResource:
             if plan.options.http_port is None:
                 plan = replace(
                     plan,
-                    http_port=self._allocate_port(None, plan.project, catalog, plan.http_interface),
+                    http_port=self._allocate_port(
+                        None, plan.project, catalog, plan.http_interface, plan.repo_root
+                    ),
                 )
             self._revalidate_checkout_locked(catalog, plan)
             return self._do_checkout(catalog, plan)
@@ -320,16 +322,13 @@ class EnvironmentResource:
                 f"Active environment already exists for branch {plan.branch!r}",
                 details={"branch": plan.branch, "existing_id": existing["id"]},
             )
-        # Cross-project port check via unified helper (replaces
-        # active_environment_for_port which was removed from catalog).
-        from odoo_instance_sdk.internal.port_allocation import find_free_port
-
         try:
             find_free_port(
                 "http",
                 cat,
                 requested=plan.http_port,
                 host=plan.http_interface,
+                exclude_project=plan.repo_root,
             )
         except EnvironmentConflictError:
             raise EnvironmentConflictError(
@@ -1430,9 +1429,8 @@ class EnvironmentResource:
         project: ProjectConfig,
         catalog: object | None,
         http_interface: str,
+        exclude_project: Path | None = None,
     ) -> int:
-        from odoo_instance_sdk.internal.port_allocation import find_free_port
-
         cat = cast("BackupCatalog | None", catalog)
         return find_free_port(
             "http",
@@ -1440,6 +1438,7 @@ class EnvironmentResource:
             requested=requested,
             project=project,
             host=http_interface,
+            exclude_project=exclude_project,
         )
 
     def _resolve_selector(
@@ -1483,8 +1482,6 @@ def _decode_runtime_json(raw: str | None) -> dict[str, str]:
 
 def _http_fields_from_generated_config(generated_config_path: str) -> tuple[str, int]:
     """Read http_interface/http_port from the generated odoo.conf (single source of truth)."""
-    from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
-
     try:
         cfg = parse_odoo_config(generated_config_path)
     except Exception:

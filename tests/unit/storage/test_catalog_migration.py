@@ -4,10 +4,13 @@ import sqlite3
 import uuid
 from pathlib import Path
 
+import pytest
+
+from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
-def test_fresh_install_creates_v7_directly(tmp_path: Path) -> None:
+def test_fresh_install_creates_v8_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
@@ -96,4 +99,168 @@ def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None
     ).fetchone()[0]
     assert version == 8
     assert "restore_pending" in schema
+    catalog.close()
+
+
+def _write_v7_catalog_with_environment(db: Path, env_id: str) -> None:
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA user_version = 7")
+    conn.executescript("""
+        CREATE TABLE backups (
+            id TEXT PRIMARY KEY,
+            source_base_url TEXT NOT NULL,
+            database_name TEXT NOT NULL,
+            format TEXT NOT NULL,
+            filestore_requested INTEGER NOT NULL,
+            path TEXT,
+            filename TEXT,
+            size_bytes INTEGER,
+            sha256 TEXT,
+            state TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            downloaded_at TEXT,
+            failed_at TEXT,
+            deleted_at TEXT,
+            error_type TEXT,
+            error_message TEXT
+        );
+        CREATE TABLE environments (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            repository_root TEXT NOT NULL,
+            git_common_dir TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            base_ref TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            generated_config_path TEXT NOT NULL,
+            python_environment_path TEXT NOT NULL,
+            python_environment_owned INTEGER NOT NULL,
+            dependency_lock_path TEXT NOT NULL,
+            http_interface TEXT NOT NULL,
+            http_port INTEGER NOT NULL,
+            db_mode TEXT NOT NULL,
+            source_db_name TEXT,
+            target_db_name TEXT,
+            backup_id TEXT,
+            runtime_json TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            removed_at TEXT,
+            last_error TEXT,
+            FOREIGN KEY (backup_id) REFERENCES backups(id)
+        );
+        CREATE TABLE environment_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            environment_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            message TEXT,
+            FOREIGN KEY (environment_id) REFERENCES environments(id)
+        );
+        CREATE UNIQUE INDEX environments_one_active_branch
+            ON environments(git_common_dir, branch) WHERE state <> 'removed';
+    """)
+    conn.execute(
+        """INSERT INTO environments (
+            id, name, repository_root, git_common_dir, branch, base_ref,
+            worktree_path, generated_config_path, python_environment_path,
+            python_environment_owned, dependency_lock_path, http_interface,
+            http_port, db_mode, source_db_name, target_db_name, backup_id,
+            runtime_json, state, created_at, last_used_at, removed_at, last_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            env_id,
+            "test",
+            "/repo",
+            "/repo/.git",
+            "main",
+            "HEAD",
+            "/wt",
+            "/wt/odoo.conf",
+            "/venv",
+            0,
+            "/lock",
+            "127.0.0.1",
+            8077,
+            "shared",
+            "mydb",
+            None,
+            None,
+            "{}",
+            "ready",
+            "2026-01-01T00:00:00",
+            None,
+            None,
+            None,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO environment_events
+           (environment_id, operation, outcome, occurred_at, message)
+           VALUES (?, 'checkout', 'succeeded', '2026-01-01T00:00:00', NULL)""",
+        (env_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    env_id = str(uuid.uuid4())
+    _write_v7_catalog_with_environment(db, env_id)
+
+    catalog = BackupCatalog(db_path=db)
+    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
+    columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(environments)")}
+    indexes = {row[1] for row in catalog._conn.execute("PRAGMA index_list(environments)")}
+    row = catalog.get_environment(env_id)
+    event = catalog._conn.execute(
+        "SELECT environment_id FROM environment_events WHERE environment_id=?",
+        (env_id,),
+    ).fetchone()
+
+    assert version == 8
+    assert "http_port" not in columns
+    assert "http_interface" not in columns
+    assert "environments_one_active_branch" in indexes
+    assert row is not None
+    assert row["name"] == "test"
+    assert row["branch"] == "main"
+    assert event is not None
+    catalog.close()
+
+
+def test_v8_catalog_keeps_one_active_environment_per_branch(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    env_id = str(uuid.uuid4())
+    _write_v7_catalog_with_environment(db, env_id)
+    catalog = BackupCatalog(db_path=db)
+    with pytest.raises(BackupCatalogError):
+        catalog.create_environment(
+            {
+                "id": str(uuid.uuid4()),
+                "name": "other",
+                "repository_root": "/repo",
+                "git_common_dir": "/repo/.git",
+                "branch": "main",
+                "base_ref": "HEAD",
+                "worktree_path": "/wt2",
+                "generated_config_path": "/wt2/odoo.conf",
+                "python_environment_path": "/venv",
+                "python_environment_owned": False,
+                "dependency_lock_path": "/lock",
+                "db_mode": "shared",
+                "source_db_name": "mydb",
+                "target_db_name": None,
+                "backup_id": None,
+                "runtime_json": "{}",
+                "state": "ready",
+                "created_at": "2026-01-02T00:00:00",
+                "last_used_at": None,
+                "removed_at": None,
+                "last_error": None,
+            }
+        )
     catalog.close()

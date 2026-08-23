@@ -8,14 +8,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from odoo_instance_sdk.exceptions import OdooInstanceSdkError, ProjectManifestNotFoundError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
 from odoo_instance_sdk.internal.paths import get_environments_root
+from odoo_instance_sdk.internal.postgres_compose import docker_available
+from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.models import PostgresClusterState
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
 STATUS_OK = "ok"
@@ -181,15 +184,12 @@ def _check_postgres(report: DoctorReport, project_root: Path | None) -> None:
     """Read-only cluster checks: mode, ownership, endpoint, health, Docker availability."""
     if project_root is None:
         return
-    from odoo_instance_sdk.exceptions import OdooInstanceSdkError
-    from odoo_instance_sdk.internal.postgres_compose import docker_available
-    from odoo_instance_sdk.resources.postgres import PostgresCluster
-
     try:
         cluster = PostgresCluster.from_project(project_root)
-    except OdooInstanceSdkError:
+    except ProjectManifestNotFoundError:
         return
-    except Exception:
+    except OdooInstanceSdkError as exc:
+        report.checks.append(CheckResult("postgres.cluster", STATUS_WARN, str(exc)))
         return
     if cluster.owned and not docker_available():
         report.checks.append(
@@ -209,11 +209,9 @@ def _check_postgres(report: DoctorReport, project_root: Path | None) -> None:
 
 
 def _postgres_state_to_status(state: PostgresClusterState) -> str:
-    from odoo_instance_sdk.models import PostgresClusterState as _S
-
-    if state == _S.HEALTHY:
+    if state == PostgresClusterState.HEALTHY:
         return STATUS_OK
-    if state in (_S.STARTING, _S.STOPPED):
+    if state in (PostgresClusterState.STARTING, PostgresClusterState.STOPPED):
         return STATUS_INFO
     return STATUS_WARN
 

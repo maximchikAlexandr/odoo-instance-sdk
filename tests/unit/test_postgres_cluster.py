@@ -29,6 +29,7 @@ class FakeComposeRunner(ComposeRunner):
         up_rc: int = 0,
         stop_rc: int = 0,
         config_rc: int = 0,
+        ps_rc: int = 0,
     ) -> None:
         self.calls: list[list[str]] = []
         self._ps_rows = ps_rows or []
@@ -36,6 +37,7 @@ class FakeComposeRunner(ComposeRunner):
         self._up_rc = up_rc
         self._stop_rc = stop_rc
         self._config_rc = config_rc
+        self._ps_rc = ps_rc
 
     def run(
         self,
@@ -45,7 +47,6 @@ class FakeComposeRunner(ComposeRunner):
         timeout: float | None = None,
     ) -> ComposeResult:
         self.calls.append(list(args))
-        # Last positional arg determines the kind.
         joined = " ".join(args)
         if " config " in joined:
             return ComposeResult(self._config_rc, "", "" if self._config_rc == 0 else "bad")
@@ -54,7 +55,7 @@ class FakeComposeRunner(ComposeRunner):
         if " stop " in joined:
             return ComposeResult(self._stop_rc, "", "" if self._stop_rc == 0 else "stop fail")
         if " ps " in joined:
-            return ComposeResult(0, _rows_to_jsonl(self._ps_rows), "")
+            return ComposeResult(self._ps_rc, _rows_to_jsonl(self._ps_rows), "")
         if " exec " in joined:
             return ComposeResult(self._health_rc, "ok" if self._health_rc == 0 else "fail", "")
         return ComposeResult(0, "", "")
@@ -181,14 +182,36 @@ def test_status_compose_healthy_when_health_rc_zero(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_status_compose_unhealthy_when_health_rc_nonzero(tmp_path: Path) -> None:
+def test_status_compose_starting_when_health_rc_nonzero(tmp_path: Path) -> None:
     root = _write_compose_project(tmp_path)
     fake = FakeComposeRunner(ps_rows=[{"Name": "postgres"}], health_rc=2)
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
     cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
     state = cluster.status()
+    assert state is PostgresClusterState.STARTING
+
+
+@pytest.mark.unit
+def test_status_compose_unhealthy_when_health_label_unhealthy(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = FakeComposeRunner(ps_rows=[{"Name": "postgres", "Health": "unhealthy"}], health_rc=2)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
+    cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
+    state = cluster.status()
     assert state is PostgresClusterState.UNHEALTHY
+
+
+@pytest.mark.unit
+def test_status_compose_unknown_when_ps_fails(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = FakeComposeRunner(ps_rc=1)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
+    cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
+    state = cluster.status()
+    assert state is PostgresClusterState.UNKNOWN
 
 
 @pytest.mark.unit
@@ -298,6 +321,7 @@ def test_ensure_running_compose_invalid_config_raises(
     monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
     with pytest.raises(PostgresComposeInvalidError):
         cluster.ensure_running(timeout=1.0)
+    assert not cluster._compose_file().is_file()
 
 
 @pytest.mark.unit
@@ -313,6 +337,8 @@ def test_password_file_mode_0600(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert pw_path.is_file()
     mode = pw_path.stat().st_mode & 0o777
     assert mode == 0o600, f"password file mode {oct(mode)}"
+    compose_mode = cluster._compose_file().stat().st_mode & 0o777
+    assert compose_mode == 0o600, f"compose file mode {oct(compose_mode)}"
 
 
 @pytest.mark.unit

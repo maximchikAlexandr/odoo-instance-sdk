@@ -28,7 +28,7 @@ from odoo_instance_sdk.models import (
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 
 class CopyJournalStage(StrEnum):
@@ -275,17 +275,15 @@ class BackupCatalog:
             user_version = 8
 
     def _migrate_v8_drop_http_port(self, conn: sqlite3.Connection) -> None:
-        # Drop http_port/http_interface from environments — single source
-        # of truth for HTTP ports is now the generated odoo.conf (read
-        # via port_allocation.find_free_port). SQLite < 3.35 lacks
-        # DROP COLUMN, so recreate the table.
+        """Drop catalog HTTP columns; generated odoo.conf is the source of truth.
+
+        SQLite older than 3.35 has no DROP COLUMN, so the table is recreated.
+        ``legacy_alter_table`` plus ``foreign_keys=OFF`` keeps child-table
+        foreign keys pointed at ``environments`` across the rename.
+        """
         columns = {row[1] for row in conn.execute("PRAGMA table_info(environments)")}
         if "http_port" not in columns and "http_interface" not in columns:
             return
-        # legacy_alter_table=ON makes ALTER TABLE RENAME NOT rewrite FK
-        # references in child tables (environment_events, environment_copy_journal).
-        # Combined with foreign_keys=OFF during the swap, this avoids
-        # dangling FK references to the renamed table.
         conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute("PRAGMA legacy_alter_table=ON")
         try:
@@ -326,6 +324,8 @@ class BackupCatalog:
                 DROP TABLE environments_v7;
                 CREATE INDEX IF NOT EXISTS environments_active_idx
                     ON environments (git_common_dir, branch, state);
+                CREATE UNIQUE INDEX IF NOT EXISTS environments_one_active_branch
+                    ON environments(git_common_dir, branch) WHERE state <> 'removed';
                 """
             )
         finally:

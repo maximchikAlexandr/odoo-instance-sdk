@@ -316,7 +316,7 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
 
 
 def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None:
-    """v0 → v7 migration MUST preserve existing backups and events."""
+    """v0 → v8 migration MUST preserve existing backups and events."""
     db = tmp_path / "test.db"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 0")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +23,6 @@ from odoo_instance_sdk.internal.paths import get_project_postgres_dir
 from odoo_instance_sdk.internal.postgres_compose import (
     ComposeRunner,
     SubprocessComposeRunner,
-    compose_config,
     compose_project_name,
     compose_stop,
     compose_up,
@@ -33,7 +34,7 @@ from odoo_instance_sdk.internal.postgres_compose import (
     write_compose_file_atomic,
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
-from odoo_instance_sdk.models import PostgresClusterState
+from odoo_instance_sdk.models import PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 
 _DEFAULT_TIMEOUT = 60.0
@@ -52,9 +53,6 @@ def _resolve_project_id(repository_root: Path) -> str:
         common = rev_parse_git_common_dir(toplevel)
         return repo_key(toplevel, common)
     except Exception:
-        # ponytail: non-git fallback; deterministic per-directory, no sharing.
-        import hashlib
-
         digest = hashlib.sha256(str(repository_root.resolve()).encode("utf-8")).hexdigest()[:8]
         return f"{repository_root.resolve().name or 'repo'}_{digest}"
 
@@ -64,8 +62,6 @@ def _resolve_endpoint_external(source_config: Path | None) -> tuple[str, int]:
         raise PostgresClusterError(
             "external postgres mode requires source_config in manifest; rerun init --config"
         )
-    from odoo_instance_sdk.models import StartConfig
-
     start_cfg = StartConfig.from_odoo_config(source_config)
     host = start_cfg.db_host or "127.0.0.1"
     port = start_cfg.db_port or 5432
@@ -194,9 +190,12 @@ class PostgresCluster:
             project_id=self._project_id,
             password_file=str(password_path),
         )
-        write_compose_file_atomic(self._compose_file(), content)
-        project_name = compose_project_name(self._project_id)
-        compose_config(self._compose_runner, self._compose_file(), project_name)
+        write_compose_file_atomic(
+            self._compose_file(),
+            content,
+            runner=self._compose_runner,
+            project_name=compose_project_name(self._project_id),
+        )
 
     def status(self) -> PostgresClusterState:
         if self._mode == "external":
@@ -245,6 +244,7 @@ class PostgresCluster:
         )
 
     def _ensure_running_compose(self, timeout: float) -> None:
+        """Start a managed cluster when status is STOPPED, STARTING, or UNKNOWN."""
         ensure_docker_or_raise()
         self._ensure_artifacts()
         state = self.status()
@@ -255,19 +255,12 @@ class PostgresCluster:
                 f"compose postgres cluster unhealthy at {self.endpoint} "
                 f"(mode={self._mode}, state={state.value})"
             )
-        # STOPPED / STARTING / UNKNOWN — issue up.
-        # UNKNOWN here can only mean a transient compose ps/exec hiccup
-        # (Docker availability already checked above); re-issuing up is
-        # the recovery path.
         compose_up(
             self._compose_runner,
             self._compose_file(),
             compose_project_name(self._project_id),
             timeout=timeout,
         )
-        # Poll status until HEALTHY or timeout.
-        import time
-
         deadline = time.monotonic() + max(0.1, timeout)
         while True:
             current = self.status()

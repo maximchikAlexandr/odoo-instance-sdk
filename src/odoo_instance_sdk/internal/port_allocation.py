@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from odoo_instance_sdk.exceptions import EnvironmentConflictError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
@@ -14,7 +16,7 @@ PortKind = Literal["http", "postgres"]
 _HTTP_RANGE_START = 8069
 _HTTP_RANGE_END = 8099
 _PG_RANGE_START = 5468
-_PG_RANGE_END = 65535
+_PG_RANGE_END = 65534
 
 
 def find_free_port(
@@ -41,8 +43,6 @@ def find_free_port(
 
     if requested is not None:
         if requested in used or probe_address(host, requested) is not AddressState.FREE:
-            from odoo_instance_sdk.exceptions import EnvironmentConflictError
-
             raise EnvironmentConflictError(
                 "port_in_use",
                 f"Port {requested} already allocated or occupied",
@@ -56,8 +56,6 @@ def find_free_port(
         if candidate not in used and probe_address(host, candidate) is AddressState.FREE:
             return candidate
         candidate += 1
-
-    from odoo_instance_sdk.exceptions import EnvironmentConflictError
 
     raise EnvironmentConflictError(
         "no_free_port",
@@ -119,8 +117,6 @@ def _add_manifest_ports(repo_root: Path, used: set[int]) -> None:
 
 def _http_port_from_generated_config(path: object) -> int | None:
     """Read http_port from a generated odoo.conf (single source for per-env HTTP port)."""
-    from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
-
     try:
         cfg = parse_odoo_config(Path(str(path)))
     except Exception:

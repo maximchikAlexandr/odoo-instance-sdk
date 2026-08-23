@@ -307,16 +307,16 @@ Port allocation MUST быть централизованной через еди
 
 `find_free_port` MUST:
 
-1. Итерировать `catalog.list_environments()` → собирать `http_port` (Odoo HTTP) для всех environments.
+1. Итерировать `catalog.list_environments()` → для каждого environment читать generated `odoo.conf` по `generated_config_path` и собирать `http_port` (Odoo HTTP). Catalog MUST NOT хранить `http_port`/`http_interface`.
 2. Для каждого `repository_root` из catalog environments читать `.odcli/project.toml` через `ProjectConfig.load` → собирать `postgres.port` (compose mode) и `preferred_http_port`.
 3. Live `probe_address` на кандидата.
 4. Возвращать первый свободный порт в kind-специфичном диапазоне, не занятый ни в одном источнике.
 
 `kind` — `"postgres"` (range `[5468, 65535)`) или `"http"` (range `[8069, 8099]`).
 
-`exclude_project` (optional `Path`) — пропускает порты собственного проекта (его manifest), чтобы re-init не видел собственные порты как collision.
+`exclude_project` (optional `Path`) — пропускает порты собственного проекта (его manifest), чтобы re-init / checkout не видел собственные `preferred_http_port` / `postgres.port` как collision.
 
-Single source of truth — manifest'ы и catalog, не отдельный state file. Ручные правки конфигов отражаются автоматически при следующей аллокации.
+Single source of truth — manifest'ы и generated `odoo.conf`, не отдельный state file и не колонки catalog. Ручные правки конфигов отражаются автоматически при следующей аллокации.
 
 `EnvironmentResource._allocate_port` MUST делегировать в `find_free_port("http", ...)`, сохраняя existing behavior. `cli.py` postgres port allocation MUST делегировать в `find_free_port("postgres", ...)`.
 
@@ -334,6 +334,11 @@ Single source of truth — manifest'ы и catalog, не отдельный state
 
 - **WHEN** a user manually edits `.odcli/project.toml` to change `postgres.port` to 5500, then runs `init` for a different project
 - **THEN** 5500 is excluded from candidates (manifest is the source of truth, not a stale registry)
+
+#### Scenario: Manual generated odoo.conf edit reflected
+
+- **WHEN** a user manually edits an environment's generated `odoo.conf` `http_port` to 8077, then another environment is checked out
+- **THEN** 8077 is excluded from candidates (generated config is the source of truth, not a catalog column)
 
 #### Scenario: exclude_project skips own ports
 
