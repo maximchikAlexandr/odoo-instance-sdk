@@ -12,6 +12,7 @@ from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import VscodeImportError
 from odoo_instance_sdk.internal import context as cli_context
+from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.automation import (
     eval_expression,
     exec_script,
@@ -32,7 +33,9 @@ from odoo_instance_sdk.internal.vscode_generate import (
     write_launch_json,
 )
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
-from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.models import StartConfig
+from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
 @click.group()
@@ -77,6 +80,32 @@ cli.add_command(env_group, name="env")
     help="Import from VS Code launch.json.",
 )
 @click.option("--launch-name", "launch_name", default=None, help="VS Code launch profile name.")
+@click.option(
+    "--postgres",
+    "postgres_mode",
+    type=click.Choice(["external", "compose"], case_sensitive=False),
+    default="external",
+    help="PostgreSQL cluster mode (external: reuse source cluster; compose: SDK-owned).",
+)
+@click.option(
+    "--postgres-image",
+    "postgres_image",
+    default=None,
+    help="Compose only; required with --no-input.",
+)
+@click.option(
+    "--postgres-port",
+    "postgres_port",
+    type=int,
+    default=None,
+    help="Compose only; omitted = allocate free loopback port.",
+)
+@click.option(
+    "--postgres-user",
+    "postgres_user",
+    default=None,
+    help="Compose only; default: source db_user or 'odoo'.",
+)
 @click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Do not write.")
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
@@ -94,6 +123,10 @@ def init(
     runtime_cwd: str | None,
     from_vscode: str | None,
     launch_name: str | None,
+    postgres_mode: str,
+    postgres_image: str | None,
+    postgres_port: int | None,
+    postgres_user: str | None,
     no_input: bool,
     dry_run: bool,
     json_output: bool,
@@ -120,14 +153,19 @@ def init(
             return
         _merge_vscode(option_state, vscode_cfg, provenance)
 
-    if option_state.odoo_bin is None:
-        if no_input or json_output or dry_run:
-            fail(json_output, "init", "Missing required option --odoo-bin")
-        option_state.odoo_bin = Path(click.prompt("Path to odoo-bin"))
-        provenance["discovery"].append("odoo_bin")
+    _resolve_odoo_bin(option_state, no_input, json_output, dry_run, provenance)
 
-    if not option_state.odoo_bin:
-        fail(json_output, "init", "odoo_bin is required")
+    postgres_cfg, postgres_allocated = _resolve_postgres_state(
+        postgres_mode=postgres_mode,
+        postgres_image=postgres_image,
+        postgres_port=postgres_port,
+        postgres_user=postgres_user,
+        source_config=option_state.source_config,
+        no_input=no_input,
+        json_output=json_output,
+    )
+    if postgres_cfg is not None:
+        provenance["option"].append("postgres")
 
     config = ProjectConfig(
         repository_root=resolved_project.resolve(),
@@ -139,6 +177,7 @@ def init(
         requirements=option_state.requirements,
         default_run_args=option_state.default_run_args,
         runtime_cwd=option_state.runtime_cwd,
+        postgres=postgres_cfg,
     )
 
     existing = manifest_path(resolved_project)
@@ -152,7 +191,7 @@ def init(
             emit_json_envelope(
                 ok=True,
                 command="init",
-                result=_manifest_dict(config),
+                result=_manifest_dict(config, postgres_allocated=postgres_allocated),
                 provenance=provenance,
                 dry_run=True,
             )
@@ -166,12 +205,85 @@ def init(
         emit_json_envelope(
             ok=True,
             command="init",
-            result=_manifest_dict(config),
+            result=_manifest_dict(config, postgres_allocated=postgres_allocated),
             provenance=provenance,
             dry_run=False,
         )
     else:
         click.echo(f"Wrote {existing}")
+
+
+def _resolve_odoo_bin(
+    option_state: _OptionState,
+    no_input: bool,
+    json_output: bool,
+    dry_run: bool,
+    provenance: dict[str, list[str]],
+) -> None:
+    if option_state.odoo_bin is None:
+        if no_input or json_output or dry_run:
+            fail(json_output, "init", "Missing required option --odoo-bin")
+        option_state.odoo_bin = Path(click.prompt("Path to odoo-bin"))
+        provenance["discovery"].append("odoo_bin")
+    if not option_state.odoo_bin:
+        fail(json_output, "init", "odoo_bin is required")
+
+
+def _resolve_postgres_state(
+    *,
+    postgres_mode: str,
+    postgres_image: str | None,
+    postgres_port: int | None,
+    postgres_user: str | None,
+    source_config: Path | None,
+    no_input: bool,
+    json_output: bool,
+) -> tuple[PostgresProjectConfig | None, bool]:
+    mode = "compose" if postgres_mode.lower() == "compose" else "external"
+    if mode == "external":
+        return None, False
+
+    if postgres_image is None:
+        if no_input or json_output:
+            fail(json_output, "init", "Missing required option --postgres-image for compose mode")
+        postgres_image = click.prompt("PostgreSQL image (e.g. pgvector/pgvector:pg16)")
+
+    allocated = False
+    if postgres_port is None:
+        postgres_port = _allocate_free_loopback_port()
+        allocated = True
+
+    if postgres_user is None:
+        postgres_user = _default_postgres_user(source_config)
+
+    cfg = PostgresProjectConfig(
+        mode="compose",
+        image=postgres_image,
+        port=postgres_port,
+        user=postgres_user,
+    )
+    return cfg, allocated
+
+
+def _allocate_free_loopback_port() -> int:
+    """Probe candidate loopback ports starting from a high offset; return first free."""
+    for candidate in range(5468, 65535):
+        if probe_address("127.0.0.1", candidate) is AddressState.FREE:
+            return candidate
+    fail(False, "init", "no free loopback port available for postgres cluster")
+    # ponytail: unreachable — fail() exits; keep mypy happy.
+    return 0
+
+
+def _default_postgres_user(source_config: Path | None) -> str:
+    if source_config is not None and source_config.is_file():
+        try:
+            start_cfg = StartConfig.from_odoo_config(source_config)
+            if start_cfg.db_user:
+                return start_cfg.db_user
+        except Exception:
+            pass
+    return "odoo"
 
 
 @dataclass(slots=True)
@@ -262,7 +374,16 @@ def _handle_existing_manifest(
     return False
 
 
-def _manifest_dict(config: ProjectConfig) -> dict[str, Any]:
+def _manifest_dict(config: ProjectConfig, *, postgres_allocated: bool = False) -> dict[str, Any]:
+    postgres: dict[str, Any] | None = None
+    if config.postgres is not None:
+        postgres = {
+            "mode": config.postgres.mode,
+            "image": config.postgres.image,
+            "port": config.postgres.port,
+            "user": config.postgres.user,
+            "allocated_port": postgres_allocated,
+        }
     return {
         "odoo_bin": str(config.odoo_bin) if config.odoo_bin else None,
         "python": str(config.python) if config.python else None,
@@ -272,6 +393,7 @@ def _manifest_dict(config: ProjectConfig) -> dict[str, Any]:
         "requirements": list(config.requirements),
         "default_run_args": list(config.default_run_args),
         "runtime_cwd": str(config.runtime_cwd) if config.runtime_cwd else None,
+        "postgres": postgres,
     }
 
 
@@ -754,3 +876,109 @@ def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> 
 
 if __name__ == "__main__":
     cli()
+
+
+# -- postgres cluster group -------------------------------------------------
+
+
+@cli.group("postgres")
+def postgres_group() -> None:
+    """Project-level PostgreSQL cluster lifecycle (read-only / idempotent)."""
+
+
+def _resolve_cluster(ctx: click.Context) -> PostgresCluster:
+    project_path = cli_context.resolve_project_path(ctx)
+    try:
+        return PostgresCluster.from_project(project_path)
+    except Exception as e:
+        fail(False, "postgres", str(e))
+
+
+def _cluster_state_to_exit(state: object) -> int:
+    from odoo_instance_sdk.models import PostgresClusterState as _S
+
+    if state == _S.HEALTHY:
+        return 0
+    return 1
+
+
+@postgres_group.command("status")
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
+@click.pass_context
+def postgres_status(ctx: click.Context, json_output: bool) -> None:
+    try:
+        cluster = _resolve_cluster(ctx)
+        state = cluster.status()
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail(json_output, "postgres.status", str(e))
+    diag = dict(cluster.to_diagnostic_dict())
+    diag["state"] = state.value
+    if json_output:
+        emit_json_envelope(
+            ok=True,
+            command="postgres.status",
+            result=diag,
+        )
+    else:
+        click.echo(
+            f"mode={cluster.mode} owned={cluster.owned} state={state.value} endpoint={cluster.endpoint}"
+        )
+    sys.exit(_cluster_state_to_exit(state))
+
+
+@postgres_group.command("up")
+@click.option(
+    "--wait-timeout",
+    "wait_timeout",
+    type=float,
+    default=60.0,
+    help="Seconds to wait for the cluster to become healthy.",
+)
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
+@click.pass_context
+def postgres_up(ctx: click.Context, wait_timeout: float, json_output: bool) -> None:
+    try:
+        cluster = _resolve_cluster(ctx)
+        cluster.ensure_running(timeout=wait_timeout)
+        state = cluster.status()
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail(json_output, "postgres.up", str(e))
+    diag = dict(cluster.to_diagnostic_dict())
+    diag["state"] = state.value
+    if json_output:
+        emit_json_envelope(ok=True, command="postgres.up", result=diag)
+    else:
+        click.echo(f"postgres up: state={state.value} endpoint={cluster.endpoint}")
+    sys.exit(0)
+
+
+@postgres_group.command("stop")
+@click.option(
+    "--timeout",
+    "timeout",
+    type=float,
+    default=30.0,
+    help="Seconds to wait for graceful stop.",
+)
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
+@click.pass_context
+def postgres_stop(ctx: click.Context, timeout: float, json_output: bool) -> None:
+    try:
+        cluster = _resolve_cluster(ctx)
+        cluster.stop(timeout=timeout)
+        state = cluster.status()
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail(json_output, "postgres.stop", str(e))
+    diag = dict(cluster.to_diagnostic_dict())
+    diag["state"] = state.value
+    if json_output:
+        emit_json_envelope(ok=True, command="postgres.stop", result=diag)
+    else:
+        click.echo(f"postgres stop: state={state.value} endpoint={cluster.endpoint}")
+    sys.exit(0)

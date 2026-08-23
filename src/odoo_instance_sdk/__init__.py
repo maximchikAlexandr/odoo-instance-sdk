@@ -23,6 +23,15 @@ from odoo_instance_sdk.exceptions import (
     MasterPasswordRequiredError,
     NonLocalInstanceError,
     OdooInstanceSdkError,
+    PostgresClusterError,
+    PostgresClusterNotOwnedError,
+    PostgresClusterStartError,
+    PostgresClusterTimeoutError,
+    PostgresClusterUnhealthyError,
+    PostgresClusterUnreachableError,
+    PostgresComposeInvalidError,
+    PostgresComposeUnavailableError,
+    PostgresPortCollisionError,
     ProcessExitedBeforeReady,
     ProcessNotFoundError,
     ProjectContextError,
@@ -45,12 +54,13 @@ from odoo_instance_sdk.models import (
     DropResult,
     NoBackup,
     OdooProcess,
+    PostgresClusterState,
     ProcessStatus,
     ReadinessResult,
     RestoreResult,
     StartConfig,
 )
-from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.environment import (
@@ -61,6 +71,7 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentState,
 )
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 __version__ = "0.1.0"
 __all__ = [
@@ -109,6 +120,18 @@ __all__ = [
     "OdooInstance",
     "OdooInstanceSdkError",
     "OdooProcess",
+    "PostgresCluster",
+    "PostgresClusterError",
+    "PostgresClusterNotOwnedError",
+    "PostgresClusterStartError",
+    "PostgresClusterState",
+    "PostgresClusterTimeoutError",
+    "PostgresClusterUnhealthyError",
+    "PostgresClusterUnreachableError",
+    "PostgresComposeInvalidError",
+    "PostgresComposeUnavailableError",
+    "PostgresPortCollisionError",
+    "PostgresProjectConfig",
     "ProcessExitedBeforeReady",
     "ProcessNotFoundError",
     "ProcessStatus",

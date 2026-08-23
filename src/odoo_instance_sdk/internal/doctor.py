@@ -15,6 +15,7 @@ from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.models import PostgresClusterState
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
 STATUS_OK = "ok"
@@ -70,6 +71,7 @@ def run_doctor(client: OdooClient, project_path: Path | None) -> DoctorReport:
     _check_uv(report)
     _check_catalog(report, client)
     _check_orphaned(report, client)
+    _check_postgres(report, project_root)
 
     for env in envs:
         _check_environment(report, client, env)
@@ -173,6 +175,47 @@ def _check_orphaned(report: DoctorReport, client: OdooClient) -> None:
                         f"orphaned artifact: {env_id_dir} (no matching catalog row)",
                     )
                 )
+
+
+def _check_postgres(report: DoctorReport, project_root: Path | None) -> None:
+    """Read-only cluster checks: mode, ownership, endpoint, health, Docker availability."""
+    if project_root is None:
+        return
+    from odoo_instance_sdk.exceptions import OdooInstanceSdkError
+    from odoo_instance_sdk.internal.postgres_compose import docker_available
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    try:
+        cluster = PostgresCluster.from_project(project_root)
+    except OdooInstanceSdkError:
+        return
+    except Exception:
+        return
+    if cluster.owned and not docker_available():
+        report.checks.append(
+            CheckResult("postgres.compose", STATUS_WARN, "docker not found in PATH")
+        )
+    state = cluster.status()
+    report.checks.append(
+        CheckResult(
+            "postgres.cluster",
+            _postgres_state_to_status(state),
+            (
+                f"mode={cluster.mode} owned={cluster.owned} "
+                f"state={state.value} endpoint={cluster.endpoint}"
+            ),
+        )
+    )
+
+
+def _postgres_state_to_status(state: PostgresClusterState) -> str:
+    from odoo_instance_sdk.models import PostgresClusterState as _S
+
+    if state == _S.HEALTHY:
+        return STATUS_OK
+    if state in (_S.STARTING, _S.STOPPED):
+        return STATUS_INFO
+    return STATUS_WARN
 
 
 def _check_environment(

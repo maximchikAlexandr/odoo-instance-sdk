@@ -33,3 +33,12 @@ def get_environments_root(*, ensure_exists: bool = True) -> Path:
 
 def get_locks_dir() -> Path:
     return get_state_root() / "locks"
+
+
+def get_project_postgres_dir(project_id: str) -> Path:
+    """Runtime artifacts directory for a project's SDK-owned PostgreSQL cluster.
+
+    ``project_id`` is expected to be a deterministic identifier (e.g. ``repo_key``).
+    The directory is created lazily by callers — this function only returns the path.
+    """
+    return get_data_root(ensure_exists=False) / "projects" / project_id / "postgres"
