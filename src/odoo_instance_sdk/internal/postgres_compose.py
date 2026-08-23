@@ -412,6 +412,10 @@ def derive_state(
         return PostgresClusterState.UNKNOWN
     if not rows:
         return PostgresClusterState.STOPPED
+    stopped_states = {"created", "dead", "exited"}
+    reported_states = {str(row.get("State", "")).lower() for row in rows}
+    if reported_states and reported_states <= stopped_states:
+        return PostgresClusterState.STOPPED
     try:
         rc, _output = compose_health(
             runner, compose_file, project_name, user=user, timeout=remaining()

@@ -220,6 +220,18 @@ def test_status_compose_stopped_when_no_containers(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_status_compose_stopped_when_container_is_exited(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = FakeComposeRunner(ps_rows=[{"Name": "postgres", "State": "exited"}], health_rc=1)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
+    cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
+
+    assert cluster.status() is PostgresClusterState.STOPPED
+    assert not any(" exec " in f" {' '.join(call)} " for call in fake.calls)
+
+
+@pytest.mark.unit
 def test_status_compose_healthy_when_health_rc_zero(tmp_path: Path) -> None:
     root = _write_compose_project(tmp_path)
     fake = FakeComposeRunner(ps_rows=[{"Name": "postgres"}], health_rc=0)
