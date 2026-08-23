@@ -6,13 +6,13 @@ Odoo process lifecycle and foreground, shell, and captured script execution on O
 
 ### Requirement: Server lifecycle в instance
 
-`OdooInstance` MUST предоставлять методы `run()`, `start()`, `stop()`, `status()`, `wait_ready()`, `run_foreground()`, `shell()` и `run_shell_script()` напрямую, без вложенного подресурса `instance.server`.
+`OdooInstance` MUST предоставлять методы `run()`, `start()`, `stop()`, `status()`, `wait_ready()`, `run_foreground()`, `iter_logs()`, `shell()` и `run_shell_script()` напрямую, без вложенного подресурса `instance.server`.
 
 Process registry (зарегистрированные `OdooProcess` и subprocess handles) MUST храниться приватно на `OdooClient` и разделяться всеми instances. Публичный `client.server` MUST NOT существовать.
 
 `instance.run()`, `start()`, `stop()`, `status()`, `run_foreground()`, `shell()`, `run_shell_script()` MUST использовать instance `command_prefix` (если set), затем client fallback на `OdooClientConfig.executable`.
 
-`instance.start(config: StartConfig)` MUST принимать `StartConfig` и возвращать `OdooProcess`. `StartConfig` остаётся `msgspec.Struct` с `forbid_unknown_fields=True`; поля не меняются. Метакласс `_StructMeta` удаляется.
+`instance.start(config: StartConfig)` MUST принимать `StartConfig` и возвращать `OdooProcess`. `StartConfig` остаётся `msgspec.Struct` с `forbid_unknown_fields=True` и полем `logfile: str | None`. Метакласс `_StructMeta` удаляется.
 
 Существующий `OdooInstance.run(args) -> CommandResult` остаётся captured one-shot API без изменения семантики. Не перегружать его неявным выбором между capture и foreground server mode.
 
@@ -44,7 +44,7 @@ Process registry (зарегистрированные `OdooProcess` и subproce
 
 - если `config is None`, использовать `self.config.start_config` (from `from_config()`/`from_environment()`); если `start_config` is None → `InstanceConfigurationError`;
 - использовать тот же resolved command-prefix/config/process-group lifecycle, что и `start()`/`stop()`;
-- наследовать stdout/stderr, поэтому Odoo logs идут прямо в terminal без буферизации, SQLite-хранения, tail API или собственного форматирования;
+- наследовать stdout/stderr, поэтому live Odoo output идёт прямо в terminal без буферизации, SQLite-хранения или собственного форматирования; tail native logfile — отдельный `iter_logs()`, не этот метод;
 - блокироваться до завершения Odoo и возвращать exit code;
 - на Ctrl+C корректно остановить owned process group.
 
@@ -67,6 +67,40 @@ Process registry (зарегистрированные `OdooProcess` и subproce
 
 - **WHEN** `instance.run_foreground()` получает Ctrl+C
 - **THEN** owned process group stopped, CLI exits 130
+
+### Requirement: `OdooInstance.iter_logs()`
+
+`OdooInstance.iter_logs(*, tail: int = 100, follow: bool = False) -> Iterator[str]` MUST:
+
+- принадлежать `OdooInstance`, не `DevelopmentEnvironment`;
+- читать только `StartConfig.logfile` (не произвольный второй path);
+- резолвить relative value через тот же runtime cwd, что используется для старта Odoo (`default_cwd` или process cwd);
+- возвращать ровно последние `N` строк из readable logfile;
+- при `follow=True` стримить appended lines и продолжать после truncation/file replacement, reopen того же configured path, не сканировать rotated filenames;
+- при `tail < 1`, absent/empty `logfile`, missing/unreadable file или отсутствии `start_config` поднимать `InstanceConfigurationError` с path/reason;
+- не создавать файл, не менять `run_foreground()` streams и не запускать Postgres preflight.
+
+Stdlib only: `pathlib`, `collections.deque`, file iteration, small sleep while following.
+
+#### Scenario: Tail last N lines
+
+- **WHEN** `instance.iter_logs(tail=3)` and the configured logfile has 5 lines
+- **THEN** yields exactly the last 3 lines
+
+#### Scenario: Follow after append
+
+- **WHEN** `instance.iter_logs(follow=True)` and a line is appended
+- **THEN** the new line is yielded
+
+#### Scenario: Follow after truncation or replacement
+
+- **WHEN** follow is active and the file is truncated or replaced at the same path
+- **THEN** iteration continues from the reopened configured path
+
+#### Scenario: Missing logfile
+
+- **WHEN** `logfile` is unset, empty, missing or unreadable
+- **THEN** `InstanceConfigurationError` with the resolved path; no file is created
 
 ### Requirement: `OdooInstance.shell()`
 

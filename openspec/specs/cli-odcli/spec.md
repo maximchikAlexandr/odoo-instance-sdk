@@ -27,6 +27,7 @@ odcli env sync [ENVIRONMENT] [OPTIONS]
 odcli env list [OPTIONS]
 odcli env remove [ENVIRONMENT] [OPTIONS]
 odcli run
+odcli logs [-n|--tail N] [-f|--follow]
 odcli shell [-- ODOO_ARGS...]
 odcli doctor [OPTIONS]
 odcli eval EXPRESSION [OPTIONS]
@@ -42,7 +43,7 @@ odcli vscode generate [OPTIONS]
 #### Scenario: Help shows full command surface
 
 - **WHEN** `odcli --help` runs
-- **THEN** shows init, env, run, shell, doctor, eval, exec, module, translations, deps, vscode
+- **THEN** shows init, env, run, logs, shell, doctor, eval, exec, module, translations, deps, vscode
 
 ### Requirement: CLI not a third runtime
 
@@ -98,7 +99,7 @@ odcli vscode generate [OPTIONS]
 
 ### Requirement: Environment resolution for instance commands
 
-Для instance commands (`run`, `shell`, `eval`, `exec`, `module`, `translations`, `deps verify`):
+Для instance commands (`run`, `logs`, `shell`, `eval`, `exec`, `module`, `translations`, `deps verify`):
 
 1. Explicit root `--env SELECTOR` — UUID либо однозначное имя; option допустим только для instance commands.
 2. Exact registered worktree containing current directory.
@@ -221,6 +222,49 @@ Environment resource не запускает, не останавливает и
 
 - **WHEN** `odcli run` и port свободен
 - **THEN** `last_used_at` + `use/succeeded` event, `from_environment()` → `run_foreground()` → exit code
+
+### Requirement: `odcli logs`
+
+```bash
+odcli logs
+odcli logs --tail 50
+odcli logs --follow
+odcli --project PATH --env SELECTOR logs --follow
+```
+
+`odcli logs` MUST:
+
+- резолвить ready environment тем же `ready_instance` path, что `run`/`shell`;
+- вызывать `instance.iter_logs(tail=N, follow=F)` и писать raw log text на stdout;
+- принимать `-n, --tail INTEGER` (default 100, MUST быть `>= 1`) и `-f, --follow`;
+- слать diagnostics на stderr; failures MUST быть non-zero;
+- на Ctrl+C во время follow завершаться кодом 130;
+- не спрашивать config/DB/worktree/Python paths заново;
+- не вызывать `record_use`, port preflight или `postgres up`;
+- не создавать и не менять logfile;
+- не добавлять `--grep` / `--errors` / `--since` / JSON snapshot.
+
+Filtering остаётся shell composition: `odcli logs | rg ERROR`.
+
+#### Scenario: Logs inside worktree
+
+- **WHEN** `odcli logs` runs inside a registered worktree with a readable configured logfile
+- **THEN** last 100 lines of that file are printed on stdout
+
+#### Scenario: Logs follow
+
+- **WHEN** `odcli logs --follow` runs
+- **THEN** CLI streams appended lines until interrupted and exits 130 on Ctrl+C
+
+#### Scenario: Logs missing logfile
+
+- **WHEN** bound `logfile` is absent, empty, missing or unreadable
+- **THEN** non-zero error with the resolved path/reason; no file is created
+
+#### Scenario: Invalid tail
+
+- **WHEN** `odcli logs --tail 0` runs
+- **THEN** deterministic non-zero error
 
 ### Requirement: `odcli shell`
 
@@ -389,7 +433,7 @@ odcli vscode generate --write
 
 ### Requirement: Instance commands share one ready path
 
-`run`, `shell`, `eval`, `exec`, `module`, `translations`, `deps verify` и `vscode generate` MUST получать `OdooClient`, ready environment и `OdooInstance` через один internal `ready_instance` path. Command bodies MUST NOT копировать resolve/verify/`from_environment()` и MUST NOT конструировать `OdooClient` сами.
+`run`, `logs`, `shell`, `eval`, `exec`, `module`, `translations`, `deps verify` и `vscode generate` MUST получать `OdooClient`, ready environment и `OdooInstance` через один internal `ready_instance` path. Command bodies MUST NOT копировать resolve/verify/`from_environment()` и MUST NOT конструировать `OdooClient` сами.
 
 `ready_instance` MUST использовать already-specified two-rule context. Port preflight остаётся только у `run`.
 
@@ -426,7 +470,7 @@ Entry point MUST остаться `odoo_instance_sdk.cli:cli`. Имена ком
 #### Scenario: Help still lists full command surface
 
 - **WHEN** `odcli --help` runs
-- **THEN** shows init, env, run, shell, doctor, eval, exec, module, translations, deps, vscode
+- **THEN** shows init, env, run, logs, shell, doctor, eval, exec, module, translations, deps, vscode
 
 ### Requirement: `odcli postgres` command group
 
