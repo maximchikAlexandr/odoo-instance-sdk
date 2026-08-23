@@ -75,6 +75,11 @@
 
 ## 9. Quality gates
 
+## 11. Immutable image trust follow-up
+
+- [x] 11.1 Resolve/pull OCI RepoDigest, explicit out-of-repository approval, and immutable compose rendering
+- [x] 11.2 Serialize start/poll/stop under a project lifecycle lock and extend deterministic lifecycle/trust coverage
+
 - [x] 9.1 `ruff check` clean
 - [x] 9.2 `mypy --strict` clean
 - [x] 9.3 `pytest -m "not real_odoo and not packaging"` green; coverage thresholds pass (новый `postgres` regex + thresholds)

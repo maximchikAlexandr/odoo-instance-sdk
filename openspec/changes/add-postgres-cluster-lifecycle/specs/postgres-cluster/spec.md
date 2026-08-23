@@ -15,7 +15,11 @@ cluster = PostgresCluster.from_project("[PROJECT_ROOT]")
 state = cluster.status()
 cluster.ensure_running(timeout=60.0)
 cluster.stop(timeout=30.0)  # SDK-owned compose mode only
+digest = cluster.resolve_image_digest(timeout=60.0)
+cluster.approve_image(digest, timeout=60.0)
 ```
+
+`resolve_image_digest` and `approve_image` are public compose-only consent operations; external mode raises `PostgresClusterNotOwnedError`. `status()` remains read-only and intentionally does not acquire the lifecycle lock; `ensure_running()` and `stop()` acquire the canonical lock for all state-changing transitions.
 
 `mode` и `owned` MUST быть read-only properties. `mode: Literal["external", "compose"]`. `owned` — `True` iff `mode == "compose"`.
 
@@ -116,6 +120,10 @@ cluster.stop(timeout=30.0)  # SDK-owned compose mode only
 
 ### Requirement: `ensure_running()` is idempotent
 
+### Requirement: Compose image trust and serialized lifecycle
+
+For compose mode, a manifest image is only a mutable selector. `approve_image(image_digest)` MUST pull and inspect it, accept only an exactly matching OCI `repository@sha256:<64-hex>` RepoDigest, and save a `reference -> digest` approval in user data outside the repository with mode `0600`. Each `ensure_running()` MUST resolve again, fail closed if it differs or approval is corrupt, and render Compose with the immutable approved digest. Standalone public `status()` remains read-only and does not acquire the lifecycle lock. The canonical exclusive project lock MUST cover lifecycle-internal status/rechecks, reconciliation, `up`, polling to terminal health, and `stop`; a concurrent caller rechecks status after acquiring the lock.
+
 `PostgresCluster.ensure_running(timeout: float = 60.0) -> None` MUST:
 
 - для `external` — вызывать `status()`; если `HEALTHY` — return; иначе raise `PostgresClusterUnreachableError` (typed, redacted);
@@ -179,7 +187,7 @@ SDK MUST NOT предоставлять `PostgresCluster.start()`. Idempotent op
 #### Scenario: No start method
 
 - **WHEN** introspection on `PostgresCluster`
-- **THEN** no `start` method exists; only `status`, `ensure_running`, `stop`, `from_project`, `mode`, `owned`
+- **THEN** no `start` method exists; lifecycle uses `status`, `ensure_running`, `stop`, `from_project`, `mode`, `owned`, plus the explicit consent operations `resolve_image_digest` and `approve_image`
 
 ### Requirement: Compose runtime artifacts layout
 

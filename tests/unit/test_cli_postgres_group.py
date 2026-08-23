@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -8,12 +9,16 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.internal.postgres_compose import ComposeResult, ComposeRunner
+from odoo_instance_sdk.exceptions import PostgresClusterTimeoutError
+from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
+from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
 class FakeComposeRunner(ComposeRunner):
+    requires_docker = False
+
     def __init__(
         self,
         *,
@@ -30,14 +35,24 @@ class FakeComposeRunner(ComposeRunner):
         *,
         cwd: Path | None = None,
         timeout: float | None = None,
-    ) -> ComposeResult:
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(args))
         joined = " ".join(args)
+        if " image inspect " in joined:
+            return subprocess.CompletedProcess(
+                args, 0, "docker.io/library/postgres@sha256:" + "a" * 64, ""
+            )
+        if " image pull " in joined:
+            return subprocess.CompletedProcess(args, 0, "", "")
         if " ps " in joined:
-            return ComposeResult(0, "\n".join(json.dumps(r) for r in self._ps_rows), "")
+            return subprocess.CompletedProcess(
+                args, 0, "\n".join(json.dumps(r) for r in self._ps_rows), ""
+            )
         if " exec " in joined:
-            return ComposeResult(self._health_rc, "ok" if self._health_rc == 0 else "fail", "")
-        return ComposeResult(0, "", "")
+            return subprocess.CompletedProcess(
+                args, self._health_rc, "ok" if self._health_rc == 0 else "fail", ""
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
 
 
 def _write_project(
@@ -102,6 +117,74 @@ def test_postgres_status_compose_json(tmp_path: Path) -> None:
     assert envelope["data"]["mode"] == "compose"
     assert envelope["data"]["owned"] is True
     assert "password" not in result.output.lower()
+
+
+@pytest.mark.unit
+def test_postgres_approve_image_json_requires_exact_digest(tmp_path: Path) -> None:
+    root = _write_project(tmp_path)
+    runner = CliRunner()
+    digest = "docker.io/library/postgres@sha256:" + "a" * 64
+    result = runner.invoke(
+        cli,
+        ["--project", str(root), "postgres", "approve-image", "--image-digest", digest, "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["data"]["digest"] == digest
+
+
+@pytest.mark.unit
+def test_postgres_approve_image_human_and_missing_digest_error(tmp_path: Path) -> None:
+    root = _write_project(tmp_path)
+    runner = CliRunner()
+    digest = "docker.io/library/postgres@sha256:" + "a" * 64
+    human = runner.invoke(
+        cli, ["--project", str(root), "postgres", "approve-image", "--image-digest", digest]
+    )
+    assert human.exit_code == 0, human.output
+    assert digest in human.output
+    missing = runner.invoke(cli, ["--project", str(root), "postgres", "approve-image"])
+    assert missing.exit_code == 2
+    assert "--image-digest" in missing.output
+
+
+@pytest.mark.unit
+def test_postgres_approve_image_forwards_bounded_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_project(tmp_path)
+    digest = "docker.io/library/postgres@sha256:" + "a" * 64
+
+    class ApprovalCluster:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, float]] = []
+
+        def approve_image(self, image_digest: str, *, timeout: float | None = None) -> None:
+            assert timeout is not None
+            self.calls.append((image_digest, timeout))
+
+        def to_diagnostic_dict(self) -> dict[str, object]:
+            return {"image": "postgres:16"}
+
+    cluster = ApprovalCluster()
+    monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(lambda _path: cluster))
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--project",
+            str(root),
+            "postgres",
+            "approve-image",
+            "--image-digest",
+            digest,
+            "--timeout",
+            "4.5",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert cluster.calls == [(digest, 4.5)]
 
 
 @pytest.mark.unit
@@ -171,9 +254,77 @@ def test_postgres_status_resolves_project_without_arg(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
     runner = CliRunner()
-    # Running from inside the project dir.
     result = runner.invoke(cli, ["postgres", "status", "--json"], catch_exceptions=False)
-    # Without --project it tries cwd resolution; since cwd != project, it fails to resolve.
-    # This test confirms the command exists and attempts resolution.
-    assert result.exit_code in (0, 1, 2)
+    assert result.exit_code == 1
+    assert json.loads(result.output)["command"] == "postgres.status"
+
+
+@pytest.mark.unit
+def test_postgres_up_and_stop_forward_timeouts_and_emit_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_project(tmp_path)
+
+    class RecordingCluster:
+        mode = "compose"
+        owned = True
+        endpoint = "127.0.0.1:5468"
+
+        def __init__(self) -> None:
+            self.ensure_timeouts: list[float] = []
+            self.stop_timeouts: list[float] = []
+
+        def ensure_running(self, *, timeout: float) -> None:
+            self.ensure_timeouts.append(timeout)
+
+        def stop(self, *, timeout: float) -> None:
+            self.stop_timeouts.append(timeout)
+
+        def status(self) -> PostgresClusterState:
+            return PostgresClusterState.HEALTHY
+
+        def to_diagnostic_dict(self) -> dict[str, object]:
+            return {"mode": self.mode, "owned": self.owned, "endpoint": self.endpoint}
+
+    cluster = RecordingCluster()
+    monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(lambda _path: cluster))
+    runner = CliRunner()
+    up = runner.invoke(
+        cli,
+        ["--project", str(root), "postgres", "up", "--wait-timeout", "12.5", "--json"],
+    )
+    assert up.exit_code == 0, up.output
+    assert cluster.ensure_timeouts == [12.5]
+    assert json.loads(up.output)["command"] == "postgres.up"
+    stop = runner.invoke(
+        cli,
+        ["--project", str(root), "postgres", "stop", "--timeout", "7.5", "--json"],
+    )
+    assert stop.exit_code == 0, stop.output
+    assert cluster.stop_timeouts == [7.5]
+    assert json.loads(stop.output)["command"] == "postgres.stop"
+
+
+@pytest.mark.unit
+def test_postgres_up_failure_uses_command_specific_json_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_project(tmp_path)
+
+    class FailingCluster:
+        def ensure_running(self, *, timeout: float) -> None:
+            raise PostgresClusterTimeoutError(timeout)
+
+    monkeypatch.setattr(
+        PostgresCluster, "from_project", staticmethod(lambda _path: FailingCluster())
+    )
+    result = CliRunner().invoke(
+        cli, ["--project", str(root), "postgres", "up", "--wait-timeout", "3", "--json"]
+    )
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["command"] == "postgres.up"
+    assert payload["error"]["code"] == "postgres_up_failed"

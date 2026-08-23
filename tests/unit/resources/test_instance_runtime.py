@@ -57,6 +57,44 @@ class TestFromConfigNoPassword:
 
 
 class TestInstancePrefix:
+    def test_factory_bound_cluster_preflights_before_spawn(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.resources.environment import (
+            EnvironmentCheckoutOptions,
+            EnvironmentDatabaseMode,
+        )
+
+        events: list[str] = []
+
+        class StoppedCluster:
+            def ensure_running(self, timeout: float = 60.0) -> None:
+                events.append("healthy")
+
+        options = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=fake_python.parent / "odoo-bin",
+        )
+        env = env_client.environments.checkout(
+            project_manifest, "feat/postgres-preflight", options=options
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda path: StoppedCluster()),
+        )
+        instance = env_client.instance.from_environment(env)
+        with patch(
+            "odoo_instance_sdk.resources.instance.run_foreground_process",
+            side_effect=lambda *args, **kwargs: events.append("spawn") or 0,
+        ):
+            instance.run_foreground()
+        assert events == ["healthy", "spawn"]
+
     def test_manual_instance_no_prefix(self) -> None:
         client = _make_client()
         inst = client.instance(base_url="http://localhost:8069")

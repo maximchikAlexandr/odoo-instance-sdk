@@ -153,6 +153,10 @@ class PostgresClusterError(OdooInstanceSdkError):
     """Base for PostgresCluster lifecycle errors (messages are redacted)."""
 
 
+class PostgresImageNotTrustedError(PostgresClusterError):
+    """A repository-selected image was not explicitly approved by this user."""
+
+
 class PostgresClusterNotOwnedError(PostgresClusterError):
     """stop() invoked on an externally owned cluster."""
 

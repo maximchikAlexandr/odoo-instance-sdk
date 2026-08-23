@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import click
 
@@ -214,22 +215,6 @@ def init(
         click.echo(f"Wrote {existing}")
 
 
-def _resolve_odoo_bin(
-    option_state: _OptionState,
-    no_input: bool,
-    json_output: bool,
-    dry_run: bool,
-    provenance: dict[str, list[str]],
-) -> None:
-    if option_state.odoo_bin is None:
-        if no_input or json_output or dry_run:
-            fail(json_output, "init", "Missing required option --odoo-bin")
-        option_state.odoo_bin = Path(click.prompt("Path to odoo-bin"))
-        provenance["discovery"].append("odoo_bin")
-    if not option_state.odoo_bin:
-        fail(json_output, "init", "odoo_bin is required")
-
-
 def _resolve_postgres_state(
     *,
     postgres_mode: str,
@@ -252,7 +237,9 @@ def _resolve_postgres_state(
 
     allocated = False
     if postgres_port is None:
-        postgres_port = _allocate_free_loopback_port(project_path)
+        postgres_port = find_free_port(
+            "postgres", _open_catalog_optional(), exclude_project=project_path
+        )
         allocated = True
 
     if postgres_user is None:
@@ -265,12 +252,6 @@ def _resolve_postgres_state(
         user=postgres_user,
     )
     return cfg, allocated
-
-
-def _allocate_free_loopback_port(project_path: Path) -> int:
-    """Allocate a free loopback port for postgres via cross-project check."""
-    catalog = _open_catalog_optional()
-    return find_free_port("postgres", catalog, exclude_project=project_path)
 
 
 def _open_catalog_optional() -> Any:
@@ -901,36 +882,88 @@ def _resolve_cluster(ctx: click.Context, json_output: bool) -> PostgresCluster:
         fail(json_output, "postgres", str(e))
 
 
-def _cluster_state_to_exit(state: object) -> int:
-    if state == PostgresClusterState.HEALTHY:
-        return 0
-    return 1
+_PostgresCommandResult = TypeVar("_PostgresCommandResult")
+
+
+def _run_postgres_command(
+    ctx: click.Context,
+    *,
+    command: str,
+    json_output: bool,
+    operation: Callable[[PostgresCluster], _PostgresCommandResult],
+) -> tuple[PostgresCluster, _PostgresCommandResult]:
+    """Resolve a cluster and give every postgres subcommand one error envelope."""
+    cluster = _resolve_cluster(ctx, json_output)
+    try:
+        return cluster, operation(cluster)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail(json_output, command, str(exc))
+
+
+def _emit_postgres_result(
+    *, cluster: PostgresCluster, state: PostgresClusterState, command: str, json_output: bool
+) -> None:
+    diag = dict(cluster.to_diagnostic_dict())
+    diag["state"] = state.value
+    if json_output:
+        emit_json_envelope(ok=True, command=command, result=diag)
+    else:
+        click.echo(
+            f"mode={cluster.mode} owned={cluster.owned} state={state.value} endpoint={cluster.endpoint}"
+        )
+
+
+@postgres_group.command("approve-image")
+@click.option("--image-digest", required=True, help="Exact OCI RepoDigest shown by Docker.")
+@click.option(
+    "--timeout",
+    type=float,
+    default=60.0,
+    show_default=True,
+    help="Seconds allowed for Docker pull and inspect.",
+)
+@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
+@click.pass_context
+def postgres_approve_image(
+    ctx: click.Context, image_digest: str, timeout: float, json_output: bool
+) -> None:
+    """Approve the current compose image in the local, non-repository trust store."""
+    cluster, _ = _run_postgres_command(
+        ctx,
+        command="postgres.approve-image",
+        json_output=json_output,
+        operation=lambda candidate: candidate.approve_image(image_digest, timeout=timeout),
+    )
+    if json_output:
+        emit_json_envelope(
+            ok=True,
+            command="postgres.approve-image",
+            result={
+                "approved": True,
+                "image": cluster.to_diagnostic_dict()["image"],
+                "digest": image_digest,
+            },
+        )
+    else:
+        click.echo(f"approved image={cluster.to_diagnostic_dict()['image']} digest={image_digest}")
 
 
 @postgres_group.command("status")
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def postgres_status(ctx: click.Context, json_output: bool) -> None:
-    try:
-        cluster = _resolve_cluster(ctx, json_output)
-        state = cluster.status()
-    except SystemExit:
-        raise
-    except Exception as e:
-        fail(json_output, "postgres.status", str(e))
-    diag = dict(cluster.to_diagnostic_dict())
-    diag["state"] = state.value
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="postgres.status",
-            result=diag,
-        )
-    else:
-        click.echo(
-            f"mode={cluster.mode} owned={cluster.owned} state={state.value} endpoint={cluster.endpoint}"
-        )
-    sys.exit(_cluster_state_to_exit(state))
+    cluster, state = _run_postgres_command(
+        ctx,
+        command="postgres.status",
+        json_output=json_output,
+        operation=lambda candidate: candidate.status(),
+    )
+    _emit_postgres_result(
+        cluster=cluster, state=state, command="postgres.status", json_output=json_output
+    )
+    sys.exit(0 if state is PostgresClusterState.HEALTHY else 1)
 
 
 @postgres_group.command("up")
@@ -944,20 +977,16 @@ def postgres_status(ctx: click.Context, json_output: bool) -> None:
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def postgres_up(ctx: click.Context, wait_timeout: float, json_output: bool) -> None:
-    try:
-        cluster = _resolve_cluster(ctx, json_output)
-        cluster.ensure_running(timeout=wait_timeout)
-        state = cluster.status()
-    except SystemExit:
-        raise
-    except Exception as e:
-        fail(json_output, "postgres.up", str(e))
-    diag = dict(cluster.to_diagnostic_dict())
-    diag["state"] = state.value
-    if json_output:
-        emit_json_envelope(ok=True, command="postgres.up", result=diag)
-    else:
-        click.echo(f"postgres up: state={state.value} endpoint={cluster.endpoint}")
+    def ensure(candidate: PostgresCluster) -> PostgresClusterState:
+        candidate.ensure_running(timeout=wait_timeout)
+        return candidate.status()
+
+    cluster, state = _run_postgres_command(
+        ctx, command="postgres.up", json_output=json_output, operation=ensure
+    )
+    _emit_postgres_result(
+        cluster=cluster, state=state, command="postgres.up", json_output=json_output
+    )
     sys.exit(0)
 
 
@@ -972,21 +1001,33 @@ def postgres_up(ctx: click.Context, wait_timeout: float, json_output: bool) -> N
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def postgres_stop(ctx: click.Context, timeout: float, json_output: bool) -> None:
-    try:
-        cluster = _resolve_cluster(ctx, json_output)
-        cluster.stop(timeout=timeout)
-        state = cluster.status()
-    except SystemExit:
-        raise
-    except Exception as e:
-        fail(json_output, "postgres.stop", str(e))
-    diag = dict(cluster.to_diagnostic_dict())
-    diag["state"] = state.value
-    if json_output:
-        emit_json_envelope(ok=True, command="postgres.stop", result=diag)
-    else:
-        click.echo(f"postgres stop: state={state.value} endpoint={cluster.endpoint}")
+    def stop(candidate: PostgresCluster) -> PostgresClusterState:
+        candidate.stop(timeout=timeout)
+        return candidate.status()
+
+    cluster, state = _run_postgres_command(
+        ctx, command="postgres.stop", json_output=json_output, operation=stop
+    )
+    _emit_postgres_result(
+        cluster=cluster, state=state, command="postgres.stop", json_output=json_output
+    )
     sys.exit(0)
+
+
+def _resolve_odoo_bin(
+    option_state: _OptionState,
+    no_input: bool,
+    json_output: bool,
+    dry_run: bool,
+    provenance: dict[str, list[str]],
+) -> None:
+    if option_state.odoo_bin is None:
+        if no_input or json_output or dry_run:
+            fail(json_output, "init", "Missing required option --odoo-bin")
+        option_state.odoo_bin = Path(click.prompt("Path to odoo-bin"))
+        provenance["discovery"].append("odoo_bin")
+    if not option_state.odoo_bin:
+        fail(json_output, "init", "odoo_bin is required")
 
 
 if __name__ == "__main__":

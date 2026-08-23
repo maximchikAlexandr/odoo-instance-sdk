@@ -8,6 +8,7 @@ Run with: ``pytest -m integration tests/integration/test_postgres_lifecycle.py``
 
 from __future__ import annotations
 
+import socket
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,13 @@ def _skip_if_no_docker() -> None:
         pytest.skip("docker not available; skipping postgres lifecycle integration test")
 
 
+def _free_loopback_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.mark.serial
 def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
     _skip_if_no_docker()
     # init a git repo so repo_key is stable.
@@ -51,7 +59,7 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
             "--postgres-image",
             "postgres:16-alpine",
             "--postgres-port",
-            "5478",
+            str(_free_loopback_port()),
             "--postgres-user",
             "odoo",
         ],
@@ -62,16 +70,19 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
 
     cluster = PostgresCluster.from_project(tmp_path)
     assert cluster.owned is True
+    primary_failure: BaseException | None = None
     try:
+        digest = cluster.resolve_image_digest(timeout=120.0)
+        cluster.approve_image(digest, timeout=120.0)
         # up — should start the cluster and become healthy.
         cluster.ensure_running(timeout=120.0)
         state = cluster.status()
         assert state.value == "healthy"
 
         # volume should exist after up.
-        compose_file = cluster._compose_file()
+        compose_file = cluster.compose_file
         assert compose_file.is_file()
-        password_file = cluster._password_file()
+        password_file = cluster.password_file
         assert password_file.is_file()
         mode = password_file.stat().st_mode & 0o777
         assert mode == 0o600
@@ -108,7 +119,7 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         assert stopped_state.value == "stopped"
 
         # Assert the named volume still exists after stop (preserved, not down -v).
-        volume_name = f"pgdata_{cluster._project_id}"
+        volume_name = f"pgdata_{cluster.to_diagnostic_dict()['project_id']}"
         vol_inspect = subprocess.run(
             ["docker", "volume", "inspect", volume_name],
             capture_output=True,
@@ -123,10 +134,31 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         # Restart (idempotent ensure_running).
         cluster.ensure_running(timeout=60.0)
         assert cluster.status().value == "healthy"
+    except BaseException as exc:
+        primary_failure = exc
+        raise
     finally:
-        # Best-effort cleanup: stop the cluster, do NOT delete the volume.
-        import contextlib
-
-        with contextlib.suppress(Exception):
-            cluster.stop(timeout=10.0)
-        # ponytail: volume preserved per spec; manual `docker compose down -v` to remove.
+        # Clean up this exact disposable integration project and assert Docker did it.
+        cleanup = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "--project-name",
+                cluster.compose_project_name,
+                "-f",
+                str(cluster.compose_file),
+                "down",
+                "--volumes",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if primary_failure is None:
+            assert cleanup.returncode == 0, cleanup.stderr
+            assert (
+                subprocess.run(
+                    ["docker", "volume", "inspect", volume_name], capture_output=True, check=False
+                ).returncode
+                != 0
+            )

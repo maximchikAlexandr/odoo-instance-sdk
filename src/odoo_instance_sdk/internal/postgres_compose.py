@@ -6,10 +6,13 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import tempfile
+import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Protocol
 
 from odoo_instance_sdk.exceptions import (
     PostgresClusterStartError,
@@ -26,26 +29,18 @@ _PROJECT_NAME_PREFIX = "odcli_pg_"
 # Limited charset to keep generated YAML text safe without a YAML emitter.
 _IMAGE_RE = re.compile(r"^[A-Za-z0-9._/:@+-]+$")
 _USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_DIGEST_RE = re.compile(r"^(?P<repo>[A-Za-z0-9._/:-]+)@sha256:(?P<digest>[a-f0-9]{64})$")
 
 
-class ComposeResult:
-    """Result of a single compose CLI invocation (no msgspec dependency here)."""
-
-    __slots__ = ("returncode", "stderr", "stdout")
-
-    def __init__(self, returncode: int, stdout: str, stderr: str) -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+def _require_timeout_budget(timeout: float | None) -> None:
+    if timeout is not None and timeout <= 0:
+        raise PostgresClusterTimeoutError(timeout)
 
 
-class ComposeRunner:
-    """Protocol-like seam: tests inject a fake; production uses ``SubprocessComposeRunner``.
+class ComposeRunner(Protocol):
+    """Injectable compose command capability."""
 
-    We keep this a regular class (not ``typing.Protocol``) so tests can subclass
-    and so that ``PostgresCluster`` can accept it without runtime ``isinstance``
-    gymnastics against a Protocol.
-    """
+    requires_docker: bool
 
     def run(
         self,
@@ -53,8 +48,7 @@ class ComposeRunner:
         *,
         cwd: Path | None = None,
         timeout: float | None = None,
-    ) -> ComposeResult:
-        raise NotImplementedError
+    ) -> subprocess.CompletedProcess[str]: ...
 
 
 class SubprocessComposeRunner(ComposeRunner):
@@ -64,14 +58,16 @@ class SubprocessComposeRunner(ComposeRunner):
     pass secrets through the command line — secrets are file-backed.
     """
 
+    requires_docker = True
+
     def run(
         self,
         args: Sequence[str],
         *,
         cwd: Path | None = None,
         timeout: float | None = None,
-    ) -> ComposeResult:
-        proc = subprocess.run(
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             list(args),
             cwd=str(cwd) if cwd is not None else None,
             capture_output=True,
@@ -79,7 +75,6 @@ class SubprocessComposeRunner(ComposeRunner):
             timeout=timeout,
             check=False,
         )
-        return ComposeResult(proc.returncode, proc.stdout, proc.stderr)
 
 
 def docker_available() -> bool:
@@ -97,6 +92,10 @@ def compose_volume_name(project_id: str) -> str:
 def assert_image_safe(image: str) -> None:
     if not image or not _IMAGE_RE.fullmatch(image):
         raise PostgresComposeInvalidError(f"invalid postgres image: {image!r}")
+
+
+def is_oci_digest(reference: object) -> bool:
+    return isinstance(reference, str) and _DIGEST_RE.fullmatch(reference) is not None
 
 
 def assert_user_safe(user: str) -> None:
@@ -148,22 +147,33 @@ def render_compose_yaml(
 
 def ensure_password_file(path: Path) -> str:
     """Create the password file with mode 0600 if missing; never overwrite existing."""
-    if path.exists():
-        return path.read_text(encoding="utf-8").strip()
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if not stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode):
+            raise PostgresComposeInvalidError("postgres password file must be a regular file")
+        if existing.st_uid != os.getuid():
+            raise PostgresComposeInvalidError(
+                "postgres password file must be owned by the current user"
+            )
+        os.chmod(path, 0o600)
+        return path.read_text(encoding="utf-8").strip()
     password = secrets.token_urlsafe(32)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".pgpw-", suffix=".tmp")
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return ensure_password_file(path)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(password)
             f.write("\n")
-        os.chmod(tmp_name, 0o600)
-        os.replace(tmp_name, path)
     except OSError:
         with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
+            os.unlink(path)
         raise
-    os.chmod(path, 0o600)
     return password
 
 
@@ -173,6 +183,7 @@ def write_compose_file_atomic(
     *,
     runner: ComposeRunner,
     project_name: str,
+    timeout: float | None = None,
 ) -> None:
     """Validate then atomically publish ``compose.yaml`` with mode 0600."""
     compose_path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +195,7 @@ def write_compose_file_atomic(
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.chmod(tmp_path, 0o600)
-        compose_config(runner, tmp_path, project_name)
+        compose_config(runner, tmp_path, project_name, timeout=timeout)
         os.replace(tmp_path, compose_path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -211,10 +222,16 @@ def compose_config(
     runner: ComposeRunner,
     compose_file: Path,
     project_name: str,
+    *,
+    timeout: float | None = None,
 ) -> None:
     """Validate the generated compose file via ``docker compose config --quiet``."""
+    _require_timeout_budget(timeout)
     args = [*_compose_base_args(compose_file, project_name), "config", "--quiet"]
-    res = runner.run(args, cwd=compose_file.parent)
+    try:
+        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     if res.returncode != 0:
         raise PostgresComposeInvalidError(
             f"docker compose config failed: {res.stderr.strip() or res.stdout.strip()}"
@@ -228,6 +245,7 @@ def compose_up(
     *,
     timeout: float | None = None,
 ) -> None:
+    _require_timeout_budget(timeout)
     args = [*_compose_base_args(compose_file, project_name), "up", "--detach", "--wait"]
     try:
         res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
@@ -244,6 +262,44 @@ def compose_up(
         )
 
 
+def resolve_image_digest(runner: ComposeRunner, image: str, *, timeout: float | None = None) -> str:
+    """Pull a mutable image reference then return Docker's immutable RepoDigest."""
+    _require_timeout_budget(timeout)
+    assert_image_safe(image)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def remaining() -> float | None:
+        value = None if deadline is None else deadline - time.monotonic()
+        _require_timeout_budget(value)
+        return value
+
+    try:
+        pull = runner.run(["docker", "image", "pull", image], cwd=None, timeout=remaining())
+        if pull.returncode != 0:
+            raise PostgresClusterStartError(
+                f"docker image pull failed: {pull.stderr.strip() or pull.stdout.strip()}",
+                returncode=pull.returncode,
+            )
+        inspected = runner.run(
+            ["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", image],
+            cwd=None,
+            timeout=remaining(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PostgresClusterTimeoutError(timeout or 0.0) from exc
+    if inspected.returncode != 0:
+        raise PostgresClusterStartError(
+            f"docker image inspect failed: {inspected.stderr.strip() or inspected.stdout.strip()}",
+            returncode=inspected.returncode,
+        )
+    reference = inspected.stdout.strip()
+    if not is_oci_digest(reference):
+        raise PostgresComposeInvalidError(
+            "docker image inspect did not return an OCI sha256 RepoDigest"
+        )
+    return reference
+
+
 def _looks_like_port_collision(stderr: str) -> bool:
     lowered = stderr.lower()
     return "bind: address already in use" in lowered or "port is already allocated" in lowered
@@ -257,13 +313,17 @@ def compose_stop(
     timeout: float | None = None,
 ) -> None:
     """Stop the compose project; preserves the named volume (never ``down -v``)."""
+    _require_timeout_budget(timeout)
     args = [
         *_compose_base_args(compose_file, project_name),
         "stop",
         "--timeout",
         str(int(max(1, timeout)) if timeout is not None else 30),
     ]
-    res = runner.run(args, cwd=compose_file.parent, timeout=None)
+    try:
+        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     if res.returncode != 0:
         raise PostgresClusterStopError(
             f"docker compose stop failed: {res.stderr.strip() or res.stdout.strip()}",
@@ -275,10 +335,16 @@ def compose_ps(
     runner: ComposeRunner,
     compose_file: Path,
     project_name: str,
+    *,
+    timeout: float | None = None,
 ) -> list[dict[str, object]] | None:
     """Return parsed ``docker compose ps --format json`` rows, or None on CLI failure."""
+    _require_timeout_budget(timeout)
     args = [*_compose_base_args(compose_file, project_name), "ps", "--format", "json"]
-    res = runner.run(args, cwd=compose_file.parent)
+    try:
+        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     if res.returncode != 0:
         return None
     rows: list[dict[str, object]] = []
@@ -301,8 +367,10 @@ def compose_health(
     project_name: str,
     *,
     user: str,
+    timeout: float | None = None,
 ) -> tuple[int, str]:
     """Run ``pg_isready`` inside the postgres service container."""
+    _require_timeout_budget(timeout)
     args = [
         *_compose_base_args(compose_file, project_name),
         "exec",
@@ -314,7 +382,10 @@ def compose_health(
         "-d",
         "postgres",
     ]
-    res = runner.run(args, cwd=compose_file.parent)
+    try:
+        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     return res.returncode, (res.stdout + res.stderr).strip()
 
 
@@ -324,13 +395,29 @@ def derive_state(
     project_name: str,
     *,
     user: str,
+    timeout: float | None = None,
 ) -> PostgresClusterState:
-    rows = compose_ps(runner, compose_file, project_name)
+    deadline = time.monotonic() + timeout if timeout is not None else None
+
+    def remaining() -> float | None:
+        value = None if deadline is None else deadline - time.monotonic()
+        _require_timeout_budget(value)
+        return value
+
+    try:
+        rows = compose_ps(runner, compose_file, project_name, timeout=remaining())
+    except (OSError, subprocess.SubprocessError):
+        return PostgresClusterState.UNKNOWN
     if rows is None:
         return PostgresClusterState.UNKNOWN
     if not rows:
         return PostgresClusterState.STOPPED
-    rc, _output = compose_health(runner, compose_file, project_name, user=user)
+    try:
+        rc, _output = compose_health(
+            runner, compose_file, project_name, user=user, timeout=remaining()
+        )
+    except (OSError, subprocess.SubprocessError):
+        return PostgresClusterState.UNKNOWN
     if rc == 0:
         return PostgresClusterState.HEALTHY
     if any(str(row.get("Health", "")).lower() == "unhealthy" for row in rows):

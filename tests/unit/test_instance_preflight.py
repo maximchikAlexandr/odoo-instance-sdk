@@ -53,6 +53,16 @@ class _FakeCluster:
         return {"mode": "compose", "owned": True, "endpoint": "127.0.0.1:5468"}
 
 
+class _EventCluster(_FakeCluster):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    def ensure_running(self, timeout: float = 60.0) -> None:
+        self._events.append("ensure")
+        super().ensure_running(timeout)
+
+
 @pytest.mark.unit
 def test_manual_instance_no_preflight() -> None:
     instance = _make_instance(cluster=None)
@@ -113,3 +123,45 @@ def test_preflight_propagates_cluster_error() -> None:
     with pytest.raises(PostgresClusterUnreachableError):
         instance.run_foreground()
     assert cluster.ensure_calls == 1
+
+
+@pytest.mark.unit
+def test_preflight_event_precedes_foreground_shell_and_script_spawn() -> None:
+    from odoo_instance_sdk.models import CommandResult
+
+    events: list[str] = []
+    instance = _make_instance(cluster=_EventCluster(events))
+    result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.run_foreground_process",
+            side_effect=lambda *args, **kwargs: events.append("spawn") or 0,
+        ),
+        patch(
+            "odoo_instance_sdk.internal.server._run_captured_shell",
+            side_effect=lambda *args, **kwargs: events.append("shell-spawn") or result,
+        ),
+    ):
+        instance.run_foreground()
+        assert events[:2] == ["ensure", "spawn"]
+        events.clear()
+        instance.shell(args=())
+        assert events[:2] == ["ensure", "spawn"]
+        events.clear()
+        instance.run_shell_script("print(1)")
+        assert events[:2] == ["ensure", "shell-spawn"]
+
+
+@pytest.mark.unit
+def test_preflight_event_precedes_exclusive_script_operation() -> None:
+    from odoo_instance_sdk.models import CommandResult
+
+    events: list[str] = []
+    instance = _make_instance(cluster=_EventCluster(events))
+    result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
+    with patch(
+        "odoo_instance_sdk.internal.server._run_captured_shell",
+        side_effect=lambda *args, **kwargs: events.append("exclusive-spawn") or result,
+    ):
+        instance._run_shell_script_exclusive("print(1)")
+    assert events[:2] == ["ensure", "exclusive-spawn"]

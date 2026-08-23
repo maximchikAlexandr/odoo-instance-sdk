@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from odoo_instance_sdk.exceptions import (
+    PostgresClusterError,
     PostgresClusterNotOwnedError,
+    PostgresClusterStartError,
+    PostgresClusterStopError,
+    PostgresClusterTimeoutError,
+    PostgresClusterUnhealthyError,
     PostgresClusterUnreachableError,
     PostgresComposeInvalidError,
     PostgresComposeUnavailableError,
+    PostgresImageNotTrustedError,
+    PostgresPortCollisionError,
 )
-from odoo_instance_sdk.internal.postgres_compose import ComposeResult, ComposeRunner
+from odoo_instance_sdk.internal.address import AddressState
+from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -20,6 +31,8 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 class FakeComposeRunner(ComposeRunner):
     """Records invocations; returns scripted results."""
+
+    requires_docker = False
 
     def __init__(
         self,
@@ -32,6 +45,7 @@ class FakeComposeRunner(ComposeRunner):
         ps_rc: int = 0,
     ) -> None:
         self.calls: list[list[str]] = []
+        self.timeouts: list[float | None] = []
         self._ps_rows = ps_rows or []
         self._health_rc = health_rc
         self._up_rc = up_rc
@@ -45,20 +59,52 @@ class FakeComposeRunner(ComposeRunner):
         *,
         cwd: Path | None = None,
         timeout: float | None = None,
-    ) -> ComposeResult:
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(args))
+        self.timeouts.append(timeout)
         joined = " ".join(args)
+        if " image inspect " in joined:
+            return subprocess.CompletedProcess(
+                args, 0, "docker.io/library/postgres@sha256:" + "a" * 64, ""
+            )
+        if " image pull " in joined:
+            return subprocess.CompletedProcess(args, 0, "", "")
         if " config " in joined:
-            return ComposeResult(self._config_rc, "", "" if self._config_rc == 0 else "bad")
+            return subprocess.CompletedProcess(
+                args, self._config_rc, "", "" if self._config_rc == 0 else "bad"
+            )
         if " up " in joined:
-            return ComposeResult(self._up_rc, "", "" if self._up_rc == 0 else "up fail")
+            return subprocess.CompletedProcess(
+                args, self._up_rc, "", "" if self._up_rc == 0 else "up fail"
+            )
         if " stop " in joined:
-            return ComposeResult(self._stop_rc, "", "" if self._stop_rc == 0 else "stop fail")
+            return subprocess.CompletedProcess(
+                args, self._stop_rc, "", "" if self._stop_rc == 0 else "stop fail"
+            )
         if " ps " in joined:
-            return ComposeResult(self._ps_rc, _rows_to_jsonl(self._ps_rows), "")
+            return subprocess.CompletedProcess(args, self._ps_rc, _rows_to_jsonl(self._ps_rows), "")
         if " exec " in joined:
-            return ComposeResult(self._health_rc, "ok" if self._health_rc == 0 else "fail", "")
-        return ComposeResult(0, "", "")
+            return subprocess.CompletedProcess(
+                args, self._health_rc, "ok" if self._health_rc == 0 else "fail", ""
+            )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+class StartingComposeRunner(FakeComposeRunner):
+    """Deterministically transitions STOPPED -> HEALTHY after compose up."""
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        result = super().run(args, cwd=cwd, timeout=timeout)
+        if " up " in f" {' '.join(args)} ":
+            self._ps_rows = [{"Name": "postgres"}]
+            self._health_rc = 0
+        return result
 
 
 def _rows_to_jsonl(rows: list[dict[str, object]]) -> str:
@@ -123,7 +169,7 @@ def test_from_project_external_reads_source_config(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_from_project_external_without_source_config_raises(tmp_path: Path) -> None:
     root = _write_compose_project(tmp_path, mode="external")
-    with pytest.raises(Exception):  # PostgresClusterError
+    with pytest.raises(PostgresClusterError, match="requires source_config"):
         PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
 
 
@@ -141,14 +187,17 @@ def test_legacy_manifest_treated_as_external(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_status_external_reachable_is_healthy(tmp_path: Path) -> None:
+def test_status_external_reachable_is_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg_path = _write_source_config(tmp_path, db_host="127.0.0.1", db_port=5432)
     root = _write_compose_project(tmp_path, mode="external", source_config=cfg_path)
     cluster = PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
-    # 127.0.0.1:5432 is likely free in the test env, so status = UNREACHABLE.
-    # We test the unreachable path; for "occupied" we monkeypatch probe.
-    state = cluster.status()
-    assert state in (PostgresClusterState.UNREACHABLE, PostgresClusterState.HEALTHY)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.probe_address",
+        lambda host, port: AddressState.OCCUPIED,
+    )
+    assert cluster.status() is PostgresClusterState.HEALTHY
 
 
 @pytest.mark.unit
@@ -226,20 +275,17 @@ def test_status_compose_unknown_when_docker_missing(
 
 
 @pytest.mark.unit
-def test_ensure_running_external_unreachable_raises(tmp_path: Path) -> None:
+def test_ensure_running_external_unreachable_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg_path = _write_source_config(tmp_path, db_host="127.0.0.1", db_port=5432)
     root = _write_compose_project(tmp_path, mode="external", source_config=cfg_path)
     cluster = PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
-    # Port 5432 likely free → status UNREACHABLE → ensure raises.
-    try:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.probe_address", lambda host, port: AddressState.FREE
+    )
+    with pytest.raises(PostgresClusterUnreachableError):
         cluster.ensure_running(timeout=1.0)
-    except PostgresClusterUnreachableError:
-        return
-    except Exception:
-        pass
-    # If 5432 happened to be occupied, skip this test in that environment.
-    if cluster.status() is PostgresClusterState.HEALTHY:
-        pytest.skip("port 5432 occupied in this environment")
 
 
 @pytest.mark.unit
@@ -276,7 +322,7 @@ def test_stop_compose_when_no_artifacts_is_noop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _write_compose_project(tmp_path)
-    fake = FakeComposeRunner(stop_rc=0)
+    fake = FakeComposeRunner(ps_rows=[{"Name": "postgres"}], stop_rc=0)
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     # No compose.yaml yet → stop returns without invoking docker.
     cluster.stop(timeout=1.0)
@@ -286,7 +332,7 @@ def test_stop_compose_when_no_artifacts_is_noop(
 @pytest.mark.unit
 def test_stop_compose_invokes_compose_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _write_compose_project(tmp_path)
-    fake = FakeComposeRunner(stop_rc=0)
+    fake = FakeComposeRunner(ps_rows=[{"Name": "postgres"}], stop_rc=0)
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     # Simulate artifacts existing by pre-creating compose.yaml.
     monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
@@ -294,6 +340,68 @@ def test_stop_compose_invokes_compose_stop(tmp_path: Path, monkeypatch: pytest.M
     cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
     cluster.stop(timeout=5.0)
     assert any(" stop " in " ".join(c) for c in fake.calls)
+
+
+@pytest.mark.unit
+def test_stop_maps_failure_and_forwards_bounded_timeout(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = FakeComposeRunner(ps_rows=[{"Name": "postgres"}], stop_rc=2)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
+    cluster._compose_file().write_text("services: {}\n")
+    with pytest.raises(PostgresClusterStopError):
+        cluster.stop(timeout=1.0)
+    stop_index = next(
+        index for index, call in enumerate(fake.calls) if " stop " in f" {' '.join(call)} "
+    )
+    assert fake.timeouts[stop_index] is not None
+
+
+@pytest.mark.unit
+def test_stop_existing_stopped_cluster_is_noop(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = FakeComposeRunner(ps_rows=[])
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster.compose_file.parent.mkdir(parents=True, exist_ok=True)
+    cluster.compose_file.write_text("services: {}\n")
+    cluster.stop(timeout=1.0)
+    assert not any(" stop " in f" {' '.join(call)} " for call in fake.calls)
+
+
+@pytest.mark.unit
+def test_stop_lock_conflict_maps_to_typed_timeout(tmp_path: Path) -> None:
+    from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lock_path
+
+    root = _write_compose_project(tmp_path)
+    cluster = PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
+    cluster.compose_file.parent.mkdir(parents=True, exist_ok=True)
+    cluster.compose_file.write_text("services: {}\n")
+    with (
+        exclusive_lock(postgres_cluster_lock_path(cluster._project_id)),
+        pytest.raises(PostgresClusterTimeoutError),
+    ):
+        cluster.stop(timeout=0.01)
+
+
+@pytest.mark.unit
+def test_compound_compose_deadline_decreases_between_subcommands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.postgres_compose import derive_state, resolve_image_digest
+
+    fake = FakeComposeRunner(ps_rows=[{"Name": "postgres"}], health_rc=0)
+    ticks = iter([0.0, 0.1, 0.4, 1.0, 1.2, 1.6])
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_compose.time.monotonic", lambda: next(ticks)
+    )
+    resolve_image_digest(fake, "postgres:16", timeout=2.0)
+    assert fake.timeouts[1] < fake.timeouts[0]
+    fake.calls.clear()
+    fake.timeouts.clear()
+    compose = tmp_path / "compose.yaml"
+    compose.write_text("services: {}\n")
+    derive_state(fake, compose, "project", user="odoo", timeout=2.0)
+    assert fake.timeouts[1] < fake.timeouts[0]
 
 
 @pytest.mark.unit
@@ -316,10 +424,248 @@ def test_ensure_running_compose_invalid_config_raises(
     root = _write_compose_project(tmp_path)
     fake = FakeComposeRunner(config_rc=1)
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
     with pytest.raises(PostgresComposeInvalidError):
         cluster.ensure_running(timeout=1.0)
     assert not cluster._compose_file().is_file()
+
+
+@pytest.mark.unit
+def test_ensure_running_stopped_transitions_to_healthy_once(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = StartingComposeRunner(ps_rows=[], health_rc=2)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    digest = "docker.io/library/postgres@sha256:" + "a" * 64
+    cluster.approve_image(digest)
+    cluster.ensure_running(timeout=2.0)
+    up_calls = [call for call in fake.calls if " up " in f" {' '.join(call)} "]
+    assert len(up_calls) == 1
+    assert up_calls[0][-3:] == ["up", "--detach", "--wait"]
+    assert cluster.status() is PostgresClusterState.HEALTHY
+
+
+@pytest.mark.unit
+def test_compose_up_maps_timeout_nonzero_and_port_collision(tmp_path: Path) -> None:
+    from odoo_instance_sdk.internal.postgres_compose import compose_up
+
+    compose = tmp_path / "compose.yaml"
+    compose.write_text("services: {}\n")
+
+    class TimeoutRunner(FakeComposeRunner):
+        def run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise subprocess.TimeoutExpired(args, 0.1)
+
+    with pytest.raises(PostgresClusterTimeoutError):
+        compose_up(TimeoutRunner(), compose, "project", timeout=0.1)
+    with pytest.raises(PostgresClusterStartError):
+        compose_up(FakeComposeRunner(up_rc=2), compose, "project", timeout=1.0)
+
+    class CollisionRunner(FakeComposeRunner):
+        def run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 1, "", "Bind: address already in use")
+
+    with pytest.raises(PostgresPortCollisionError):
+        compose_up(CollisionRunner(), compose, "project", timeout=1.0)
+
+
+@pytest.mark.unit
+def test_lifecycle_lock_waits_then_acquires_and_times_out(tmp_path: Path) -> None:
+    from odoo_instance_sdk.exceptions import LockConflictError
+    from odoo_instance_sdk.internal.locks import exclusive_lock, exclusive_lock_until
+
+    lock_path = tmp_path / "postgres.lock"
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with exclusive_lock(lock_path):
+            acquired.set()
+            release.wait(1.0)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert acquired.wait(1.0)
+    with pytest.raises(LockConflictError), exclusive_lock_until(lock_path, time.monotonic() + 0.01):
+        pass
+    release.set()
+    thread.join(timeout=1.0)
+    with exclusive_lock_until(lock_path, time.monotonic() + 1.0):
+        pass
+
+
+@pytest.mark.unit
+def test_concurrent_ensure_rechecks_after_lock_and_starts_once(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = StartingComposeRunner(ps_rows=[], health_rc=2)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    fake.calls.clear()
+    fake.timeouts.clear()
+    barrier = threading.Barrier(2)
+    failures: list[BaseException] = []
+
+    def ensure() -> None:
+        try:
+            barrier.wait(timeout=1.0)
+            cluster.ensure_running(timeout=2.0)
+        except BaseException as exc:  # retained to report a thread failure to the test thread
+            failures.append(exc)
+
+    first = threading.Thread(target=ensure)
+    second = threading.Thread(target=ensure)
+    first.start()
+    second.start()
+    first.join(timeout=3.0)
+    second.join(timeout=3.0)
+    assert failures == []
+    assert sum(" up " in f" {' '.join(call)} " for call in fake.calls) == 1
+    assert all(timeout is not None and timeout > 0 for timeout in fake.timeouts)
+
+
+@pytest.mark.unit
+def test_ensure_poll_timeout_is_typed(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = FakeComposeRunner(ps_rows=[], health_rc=2)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    with pytest.raises(PostgresClusterTimeoutError):
+        cluster.ensure_running(timeout=0.1)
+
+
+@pytest.mark.unit
+def test_ensure_unhealthy_before_up_is_typed(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = FakeComposeRunner(ps_rows=[{"Name": "postgres", "Health": "unhealthy"}], health_rc=2)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
+    cluster._compose_file().write_text("services: {}\n")
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    with pytest.raises(PostgresClusterUnhealthyError):
+        cluster.ensure_running(timeout=1.0)
+    assert not any(" up " in f" {' '.join(call)} " for call in fake.calls)
+
+
+@pytest.mark.unit
+def test_ensure_unhealthy_after_up_is_typed(tmp_path: Path) -> None:
+    class UnhealthyAfterUp(FakeComposeRunner):
+        def run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            result = super().run(args, **kwargs)
+            if " up " in f" {' '.join(args)} ":
+                self._ps_rows = [{"Name": "postgres", "Health": "unhealthy"}]
+                self._health_rc = 2
+            return result
+
+    root = _write_compose_project(tmp_path)
+    fake = UnhealthyAfterUp(ps_rows=[])
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    with pytest.raises(PostgresClusterUnhealthyError):
+        cluster.ensure_running(timeout=1.0)
+
+
+@pytest.mark.unit
+def test_lifecycle_command_budgets_decrease_with_controlled_monotonic_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_compose_project(tmp_path)
+    fake = StartingComposeRunner(ps_rows=[], health_rc=2)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    fake.timeouts.clear()
+    tick = iter(0.01 * number for number in range(1, 200))
+    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: next(tick))
+    cluster.ensure_running(timeout=2.0)
+    budgets = [timeout for timeout in fake.timeouts if timeout is not None]
+    assert budgets == sorted(budgets, reverse=True)
+
+
+@pytest.mark.unit
+def test_image_approval_persists_reloads_and_rejects_corruption(tmp_path: Path) -> None:
+    root = _write_compose_project(tmp_path)
+    digest = "docker.io/library/postgres@sha256:" + "a" * 64
+    cluster = PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
+    cluster.approve_image(digest)
+    trust = cluster._trust_file()
+    assert trust.stat().st_mode & 0o777 == 0o600
+    reloaded = PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
+    assert reloaded._require_trusted_image(1.0) == digest
+    reloaded.approve_image(digest)
+    assert reloaded._require_trusted_image(1.0) == digest
+    trust.write_text("not-json")
+    with pytest.raises(PostgresImageNotTrustedError):
+        reloaded._require_trusted_image(1.0)
+
+
+@pytest.mark.unit
+def test_image_approval_rejects_external_and_mismatched_digest(tmp_path: Path) -> None:
+    cfg_path = _write_source_config(tmp_path)
+    external = PostgresCluster.from_project(
+        _write_compose_project(tmp_path, mode="external", source_config=cfg_path),
+        compose_runner=FakeComposeRunner(),
+    )
+    with pytest.raises(PostgresClusterNotOwnedError):
+        external.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+
+
+@pytest.mark.unit
+def test_changed_resolved_digest_invalidates_prior_approval(tmp_path: Path) -> None:
+    class DriftRunner(FakeComposeRunner):
+        drift = False
+
+        def run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            result = super().run(args, **kwargs)
+            if " image inspect " in f" {' '.join(args)} " and self.drift:
+                return subprocess.CompletedProcess(
+                    args, 0, "docker.io/library/postgres@sha256:" + "b" * 64, ""
+                )
+            return result
+
+    root = _write_compose_project(tmp_path)
+    runner = DriftRunner()
+    cluster = PostgresCluster.from_project(root, compose_runner=runner)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    runner.drift = True
+    with pytest.raises(PostgresImageNotTrustedError, match="changed"):
+        cluster._require_trusted_image(1.0)
+
+
+@pytest.mark.unit
+def test_approve_mismatched_digest_does_not_publish_trust(tmp_path: Path) -> None:
+    cluster = PostgresCluster.from_project(
+        _write_compose_project(tmp_path), compose_runner=FakeComposeRunner()
+    )
+    with pytest.raises(PostgresImageNotTrustedError, match="does not match"):
+        cluster.approve_image("docker.io/library/postgres@sha256:" + "b" * 64)
+    assert not cluster._trust_file().exists()
+
+
+@pytest.mark.unit
+def test_ensure_running_requires_local_image_approval(tmp_path: Path) -> None:
+    fake = FakeComposeRunner()
+    cluster = PostgresCluster.from_project(_write_compose_project(tmp_path), compose_runner=fake)
+    with pytest.raises(PostgresImageNotTrustedError, match="approve-image"):
+        cluster.ensure_running(timeout=1.0)
+    assert fake.calls == []
+
+
+@pytest.mark.unit
+def test_oci_digest_accepts_registry_port() -> None:
+    from odoo_instance_sdk.internal.postgres_compose import is_oci_digest
+
+    assert is_oci_digest("registry.example:5000/team/postgres@sha256:" + "a" * 64)
+
+
+@pytest.mark.unit
+def test_existing_password_symlink_is_rejected(tmp_path: Path) -> None:
+    from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
+
+    target = tmp_path / "target"
+    target.write_text("secret\n")
+    password = tmp_path / "postgres-password"
+    password.symlink_to(target)
+    with pytest.raises(PostgresComposeInvalidError, match="regular file"):
+        ensure_password_file(password)
 
 
 @pytest.mark.unit
@@ -330,7 +676,7 @@ def test_password_file_mode_0600(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.postgres_compose.docker_available", lambda: True
     )
-    cluster._ensure_artifacts()
+    cluster._ensure_artifacts("docker.io/library/postgres@sha256:" + "a" * 64)
     pw_path = cluster._password_file()
     assert pw_path.is_file()
     mode = pw_path.stat().st_mode & 0o777

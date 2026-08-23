@@ -1,11 +1,33 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+
+
+def test_module_init_executes_helpers_defined_after_commands(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "odoo_instance_sdk.cli",
+            "init",
+            "--no-input",
+            "--project",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "Missing required option --odoo-bin" in result.stderr
+    assert "NameError" not in result.stderr
 
 
 def _base_args(tmp_path: Path) -> list[str]:

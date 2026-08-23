@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import tempfile
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -8,17 +11,20 @@ from pathlib import Path
 from typing import Literal
 
 from odoo_instance_sdk.exceptions import (
+    LockConflictError,
     PostgresClusterError,
     PostgresClusterNotOwnedError,
     PostgresClusterTimeoutError,
     PostgresClusterUnhealthyError,
     PostgresClusterUnreachableError,
+    PostgresImageNotTrustedError,
 )
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.git_worktree import (
     rev_parse_git_common_dir,
     rev_parse_toplevel,
 )
+from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.paths import get_project_postgres_dir
 from odoo_instance_sdk.internal.postgres_compose import (
     ComposeRunner,
@@ -30,7 +36,9 @@ from odoo_instance_sdk.internal.postgres_compose import (
     docker_available,
     ensure_docker_or_raise,
     ensure_password_file,
+    is_oci_digest,
     render_compose_yaml,
+    resolve_image_digest,
     write_compose_file_atomic,
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
@@ -39,22 +47,16 @@ from odoo_instance_sdk.project import ProjectConfig
 
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_STOP_TIMEOUT = 30.0
-_PROBE_TIMEOUT = 2.0
 
 
 def _resolve_project_id(repository_root: Path) -> str:
-    """Return the deterministic project id for ``repository_root``.
-
-    Falls back to a name-based key if Git is unavailable (e.g. non-git project);
-    in that case artifacts remain usable but are not shared across worktrees.
-    """
+    """Return Git identity; retain the documented non-Git project fallback."""
     try:
         toplevel = rev_parse_toplevel(repository_root)
-        common = rev_parse_git_common_dir(toplevel)
-        return repo_key(toplevel, common)
+        return repo_key(toplevel, rev_parse_git_common_dir(toplevel))
     except Exception:
-        digest = hashlib.sha256(str(repository_root.resolve()).encode("utf-8")).hexdigest()[:8]
-        return f"{repository_root.resolve().name or 'repo'}_{digest}"
+        resolved = repository_root.resolve()
+        return f"{resolved.name or 'repo'}_{hashlib.sha256(str(resolved).encode()).hexdigest()[:8]}"
 
 
 def _resolve_endpoint_external(source_config: Path | None) -> tuple[str, int]:
@@ -158,6 +160,19 @@ class PostgresCluster:
             host = f"[{host}]"
         return f"{host}:{self._endpoint_port}"
 
+    @property
+    def compose_file(self) -> Path:
+        """Managed compose artifact path, exposed for operational cleanup tooling."""
+        return self._compose_file()
+
+    @property
+    def compose_project_name(self) -> str:
+        return compose_project_name(self._project_id)
+
+    @property
+    def password_file(self) -> Path:
+        return self.compose_file.parent / "postgres-password"
+
     def __repr__(self) -> str:
         return (
             f"PostgresCluster(mode={self._mode!r}, owned={self.owned!r}, "
@@ -173,7 +188,75 @@ class PostgresCluster:
     def _password_file(self) -> Path:
         return self._compose_dir() / "postgres-password"
 
-    def _ensure_artifacts(self) -> None:
+    def _trust_file(self) -> Path:
+        """User-owned approval store; it is intentionally outside the repository."""
+        return self._compose_dir().parent / "approved-images.json"
+
+    def _resolve_image_digest(self, timeout: float | None = None) -> str:
+        assert self._image is not None
+        return resolve_image_digest(self._compose_runner, self._image, timeout=timeout)
+
+    def resolve_image_digest(self, timeout: float | None = None) -> str:
+        """Resolve the manifest image to the OCI RepoDigest to be explicitly approved."""
+        if not self.owned:
+            raise PostgresClusterNotOwnedError("external postgres clusters have no image digest")
+        return self._resolve_image_digest(timeout)
+
+    def approve_image(self, image_digest: str, *, timeout: float | None = None) -> None:
+        """Approve the exact OCI digest currently resolved for the manifest reference."""
+        if not self.owned:
+            raise PostgresClusterNotOwnedError(
+                "external postgres clusters have no image to approve"
+            )
+        resolved = self.resolve_image_digest(timeout)
+        if image_digest != resolved:
+            raise PostgresImageNotTrustedError(
+                "image digest does not match the resolved OCI RepoDigest"
+            )
+        trust_file = self._trust_file()
+        trust_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = json.loads(trust_file.read_text(encoding="utf-8"))
+            images = current.get("images", {})
+        except (OSError, ValueError, AttributeError):
+            images = {}
+        if not isinstance(images, dict):
+            images = {}
+        images[self._image] = resolved
+        payload = {"version": 1, "images": images}
+        fd, tmp_name = tempfile.mkstemp(dir=trust_file.parent, prefix=".trust-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, sort_keys=True)
+                stream.write("\n")
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, trust_file)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+
+    def _require_trusted_image(self, timeout: float) -> str:
+        trust_file = self._trust_file()
+        try:
+            data = json.loads(trust_file.read_text(encoding="utf-8"))
+            approved = data["images"]
+        except (OSError, ValueError, KeyError, TypeError):
+            approved = {}
+        expected = approved.get(self._image) if isinstance(approved, dict) else None
+        # Do not permit a repository-controlled selector to trigger a pull before
+        # an already persisted, syntactically immutable approval is established.
+        if not is_oci_digest(expected):
+            raise PostgresImageNotTrustedError(
+                "postgres image digest is not approved for this user; run 'odcli postgres approve-image --image-digest <resolved-digest>'"
+            )
+        resolved = self._resolve_image_digest(timeout)
+        if expected != resolved:
+            raise PostgresImageNotTrustedError(
+                "postgres image digest changed since explicit approval"
+            )
+        return resolved
+
+    def _ensure_artifacts(self, image: str, *, timeout: float | None = None) -> None:
         """Lazily create compose artifacts (idempotent)."""
         if not self.owned:
             return
@@ -181,10 +264,9 @@ class PostgresCluster:
         compose_dir.mkdir(parents=True, exist_ok=True)
         password_path = self._password_file()
         ensure_password_file(password_path)
-        assert self._image is not None
         assert self._user is not None
         content = render_compose_yaml(
-            image=self._image,
+            image=image,
             port=self._endpoint_port,
             user=self._user,
             project_id=self._project_id,
@@ -195,6 +277,7 @@ class PostgresCluster:
             content,
             runner=self._compose_runner,
             project_name=compose_project_name(self._project_id),
+            timeout=timeout,
         )
 
     def status(self) -> PostgresClusterState:
@@ -208,13 +291,10 @@ class PostgresCluster:
             return PostgresClusterState.UNREACHABLE
         if state is AddressState.OCCUPIED:
             return PostgresClusterState.HEALTHY
-        return PostgresClusterState.UNKNOWN
+        return PostgresClusterState.UNREACHABLE
 
-    def _uses_real_compose_cli(self) -> bool:
-        return type(self._compose_runner) is SubprocessComposeRunner
-
-    def _status_compose(self) -> PostgresClusterState:
-        if self._uses_real_compose_cli() and not docker_available():
+    def _status_compose(self, *, timeout: float | None = None) -> PostgresClusterState:
+        if self._compose_runner.requires_docker and not docker_available():
             return PostgresClusterState.UNKNOWN
         compose_file = self._compose_file()
         if not compose_file.is_file():
@@ -225,6 +305,7 @@ class PostgresCluster:
             compose_file,
             compose_project_name(self._project_id),
             user=self._user,
+            timeout=timeout,
         )
 
     def ensure_running(self, timeout: float = _DEFAULT_TIMEOUT) -> None:
@@ -244,53 +325,72 @@ class PostgresCluster:
 
     def _ensure_running_compose(self, timeout: float) -> None:
         """Start a managed cluster when status is STOPPED, STARTING, or UNKNOWN."""
-        if self._uses_real_compose_cli():
-            ensure_docker_or_raise()
-        self._ensure_artifacts()
-        state = self.status()
-        if state is PostgresClusterState.HEALTHY:
-            return
-        if state is PostgresClusterState.UNHEALTHY:
-            raise PostgresClusterUnhealthyError(
-                f"compose postgres cluster unhealthy at {self.endpoint} "
-                f"(mode={self._mode}, state={state.value})"
-            )
-        compose_up(
-            self._compose_runner,
-            self._compose_file(),
-            compose_project_name(self._project_id),
-            timeout=timeout,
-        )
         deadline = time.monotonic() + max(0.1, timeout)
-        while True:
-            current = self.status()
-            if current is PostgresClusterState.HEALTHY:
-                return
-            if current is PostgresClusterState.UNHEALTHY:
-                raise PostgresClusterUnhealthyError(
-                    f"compose postgres cluster unhealthy at {self.endpoint} "
-                    f"(mode={self._mode}, state={current.value})"
+        try:
+            lock = exclusive_lock_until(postgres_cluster_lock_path(self._project_id), deadline)
+            with lock:
+                if self._compose_runner.requires_docker:
+                    ensure_docker_or_raise()
+                remaining = max(0.0, deadline - time.monotonic())
+                image = self._require_trusted_image(remaining)
+                state = self._status_compose(timeout=max(0.0, deadline - time.monotonic()))
+                # Do not rewrite secret/config artifacts on a healthy fast path.
+                if state is PostgresClusterState.HEALTHY:
+                    return
+                self._ensure_artifacts(image, timeout=max(0.0, deadline - time.monotonic()))
+                if state is PostgresClusterState.UNHEALTHY:
+                    raise PostgresClusterUnhealthyError(
+                        f"compose postgres cluster unhealthy at {self.endpoint} "
+                        f"(mode={self._mode}, state={state.value})"
+                    )
+                compose_up(
+                    self._compose_runner,
+                    self._compose_file(),
+                    compose_project_name(self._project_id),
+                    timeout=max(0.0, deadline - time.monotonic()),
                 )
-            if time.monotonic() >= deadline:
-                raise PostgresClusterTimeoutError(timeout)
-            time.sleep(0.5)
+                while True:
+                    current = self._status_compose(timeout=max(0.0, deadline - time.monotonic()))
+                    if current is PostgresClusterState.HEALTHY:
+                        return
+                    if current is PostgresClusterState.UNHEALTHY:
+                        raise PostgresClusterUnhealthyError(
+                            f"compose postgres cluster unhealthy at {self.endpoint} "
+                            f"(mode={self._mode}, state={current.value})"
+                        )
+                    if time.monotonic() >= deadline:
+                        raise PostgresClusterTimeoutError(timeout)
+                    time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+        except LockConflictError as exc:
+            raise PostgresClusterTimeoutError(timeout) from exc
 
     def stop(self, timeout: float = _DEFAULT_STOP_TIMEOUT) -> None:
         if self._mode == "external":
             raise PostgresClusterNotOwnedError(
                 f"cannot stop externally owned postgres cluster at {self.endpoint}"
             )
-        compose_file = self._compose_file()
-        if not compose_file.is_file():
-            return
-        if self._uses_real_compose_cli():
-            ensure_docker_or_raise()
-        compose_stop(
-            self._compose_runner,
-            compose_file,
-            compose_project_name(self._project_id),
-            timeout=timeout,
-        )
+        deadline = time.monotonic() + max(0.1, timeout)
+        try:
+            lock = exclusive_lock_until(postgres_cluster_lock_path(self._project_id), deadline)
+            with lock:
+                compose_file = self._compose_file()
+                if not compose_file.is_file():
+                    return
+                if self._compose_runner.requires_docker:
+                    ensure_docker_or_raise()
+                if (
+                    self._status_compose(timeout=max(0.0, deadline - time.monotonic()))
+                    is PostgresClusterState.STOPPED
+                ):
+                    return
+                compose_stop(
+                    self._compose_runner,
+                    compose_file,
+                    compose_project_name(self._project_id),
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
+        except LockConflictError as exc:
+            raise PostgresClusterTimeoutError(timeout) from exc
 
     def to_diagnostic_dict(self) -> Mapping[str, object]:
         """Read-only redacted diagnostic payload (no secrets)."""

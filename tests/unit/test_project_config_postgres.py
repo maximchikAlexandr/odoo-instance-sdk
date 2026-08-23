@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 
 
@@ -86,3 +87,13 @@ def test_postgres_config_frozen() -> None:
     cfg = PostgresProjectConfig(mode="compose", image="pg", port=5468, user="odoo")
     with pytest.raises(Exception):  # msgspec frozen
         cfg.image = "other"  # type: ignore[misc]
+
+
+def test_postgres_manifest_rejects_unknown_keys_and_coercions(tmp_path: Path) -> None:
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(
+        '[project]\n[postgres]\nmode = "compose"\nport = "5468"\nextra = true\n'
+    )
+    with pytest.raises(ConfigError, match=r"invalid \[postgres\]"):
+        ProjectConfig.load(tmp_path)

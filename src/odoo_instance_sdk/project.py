@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import msgspec
 
-from odoo_instance_sdk.exceptions import ProjectManifestNotFoundError
+from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError
 
 
 class PostgresProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
@@ -121,14 +121,23 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
 def _postgres_from_mapping(value: object) -> PostgresProjectConfig | None:
     if value is None:
         return None
-    if not isinstance(value, dict):
-        return None
-    mode_raw = value.get("mode", "external")
-    mode = "compose" if mode_raw == "compose" else "external"
-    image = _str_or_none(value.get("image"))
-    port = _int_or_none(value.get("port"))
-    user = _str_or_none(value.get("user"))
-    cfg = PostgresProjectConfig(mode=mode, image=image, port=port, user=user)  # type: ignore[arg-type]
+    if not isinstance(value, dict) or set(value) - {"mode", "image", "port", "user"}:
+        raise ConfigError("invalid [postgres] manifest section")
+    mode = value.get("mode", "external")
+    image = value.get("image")
+    port = value.get("port")
+    user = value.get("user")
+    if mode not in {"external", "compose"} or not isinstance(mode, str):
+        raise ConfigError("postgres.mode must be external or compose")
+    if image is not None and not isinstance(image, str):
+        raise ConfigError("postgres.image must be a string")
+    if user is not None and not isinstance(user, str):
+        raise ConfigError("postgres.user must be a string")
+    if port is not None and (not isinstance(port, int) or isinstance(port, bool)):
+        raise ConfigError("postgres.port must be an integer")
+    cfg = PostgresProjectConfig(
+        mode=cast("Literal['external', 'compose']", mode), image=image, port=port, user=user
+    )
     return None if cfg.is_default() else cfg
 
 
