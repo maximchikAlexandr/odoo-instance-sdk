@@ -87,6 +87,7 @@ process = "odoo_instance_sdk/(internal/server\\.py|internal/health\\.py|resource
 environment = "odoo_instance_sdk/(resources/environment\\.py|internal/git_worktree\\.py|internal/doctor\\.py)$"
 catalog = "odoo_instance_sdk/(resources/database\\.py|storage/backup_catalog\\.py)$"
 security = "odoo_instance_sdk/internal/(redact|sanitize|db_name|urls|address)\\.py$"
+postgres = "odoo_instance_sdk/(resources/postgres\\.py|internal/postgres_compose\\.py)$"
 
 [tool.coverage.thresholds]
 cli = 71
@@ -94,6 +95,7 @@ process = 74
 environment = 76
 catalog = 92
 security = 94
+postgres = 80
 
 [tool.coverage.branch_thresholds]
 cli = 53
@@ -101,6 +103,7 @@ process = 59
 environment = 57
 catalog = 83
 security = 89
+postgres = 70
 
 [tool.mutmut]
 source_paths = [

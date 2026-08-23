@@ -147,3 +147,59 @@ class LockConflictError(OdooInstanceSdkError):
         self.lock_path = lock_path
         self.mode = mode
         super().__init__(f"Lock conflict on {lock_path} ({mode}): held by another process")
+
+
+class PostgresClusterError(OdooInstanceSdkError):
+    """Base for PostgresCluster lifecycle errors (messages are redacted)."""
+
+
+class PostgresImageNotTrustedError(PostgresClusterError):
+    """A repository-selected image was not explicitly approved by this user."""
+
+
+class PostgresClusterNotOwnedError(PostgresClusterError):
+    """stop() invoked on an externally owned cluster."""
+
+
+class PostgresClusterUnreachableError(PostgresClusterError):
+    """External cluster endpoint is not reachable during ensure_running()."""
+
+
+class PostgresClusterUnhealthyError(PostgresClusterError):
+    """Managed compose cluster is running but healthcheck fails."""
+
+
+class PostgresClusterStartError(PostgresClusterError):
+    """`docker compose up` failed (non-timeout)."""
+
+    def __init__(self, message: str, *, returncode: int) -> None:
+        self.returncode = returncode
+        super().__init__(message)
+
+
+class PostgresClusterStopError(PostgresClusterError):
+    """`docker compose stop` failed (non-timeout)."""
+
+    def __init__(self, message: str, *, returncode: int) -> None:
+        self.returncode = returncode
+        super().__init__(message)
+
+
+class PostgresClusterTimeoutError(PostgresClusterError):
+    """ensure_running() timed out before the cluster became healthy."""
+
+    def __init__(self, timeout: float) -> None:
+        self.timeout = timeout
+        super().__init__(f"Postgres cluster did not become healthy within {timeout}s")
+
+
+class PostgresComposeUnavailableError(PostgresClusterError):
+    """Docker / Docker Compose CLI is not available on PATH."""
+
+
+class PostgresComposeInvalidError(PostgresClusterError):
+    """Generated compose.yaml failed `docker compose config` validation."""
+
+
+class PostgresPortCollisionError(PostgresClusterError):
+    """Configured/persisted port is not free at compose up time."""

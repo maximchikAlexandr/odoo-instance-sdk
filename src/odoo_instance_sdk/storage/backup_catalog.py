@@ -28,7 +28,7 @@ from odoo_instance_sdk.models import (
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 8
 
 
 class CopyJournalStage(StrEnum):
@@ -267,6 +267,70 @@ class BackupCatalog:
                 )
             conn.execute("PRAGMA user_version = 7")
             conn.commit()
+            user_version = 7
+        if user_version < 8:
+            self._migrate_v8_drop_http_port(conn)
+            conn.execute("PRAGMA user_version = 8")
+            conn.commit()
+            user_version = 8
+
+    def _migrate_v8_drop_http_port(self, conn: sqlite3.Connection) -> None:
+        """Drop catalog HTTP columns; generated odoo.conf is the source of truth.
+
+        SQLite older than 3.35 has no DROP COLUMN, so the table is recreated.
+        ``legacy_alter_table`` plus ``foreign_keys=OFF`` keeps child-table
+        foreign keys pointed at ``environments`` across the rename.
+        """
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(environments)")}
+        if "http_port" not in columns and "http_interface" not in columns:
+            return
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        try:
+            conn.executescript(
+                """
+                ALTER TABLE environments RENAME TO environments_v7;
+                CREATE TABLE environments (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    repository_root TEXT NOT NULL,
+                    git_common_dir TEXT NOT NULL,
+                    branch TEXT NOT NULL,
+                    base_ref TEXT NOT NULL,
+                    worktree_path TEXT NOT NULL,
+                    generated_config_path TEXT NOT NULL,
+                    python_environment_path TEXT NOT NULL,
+                    python_environment_owned INTEGER NOT NULL,
+                    dependency_lock_path TEXT NOT NULL,
+                    db_mode TEXT NOT NULL,
+                    source_db_name TEXT,
+                    target_db_name TEXT,
+                    backup_id TEXT,
+                    runtime_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT,
+                    removed_at TEXT,
+                    last_error TEXT,
+                    FOREIGN KEY (backup_id) REFERENCES backups(id)
+                );
+                INSERT INTO environments
+                    SELECT id, name, repository_root, git_common_dir, branch, base_ref,
+                           worktree_path, generated_config_path, python_environment_path,
+                           python_environment_owned, dependency_lock_path, db_mode,
+                           source_db_name, target_db_name, backup_id, runtime_json,
+                           state, created_at, last_used_at, removed_at, last_error
+                    FROM environments_v7;
+                DROP TABLE environments_v7;
+                CREATE INDEX IF NOT EXISTS environments_active_idx
+                    ON environments (git_common_dir, branch, state);
+                CREATE UNIQUE INDEX IF NOT EXISTS environments_one_active_branch
+                    ON environments(git_common_dir, branch) WHERE state <> 'removed';
+                """
+            )
+        finally:
+            conn.execute("PRAGMA legacy_alter_table=OFF")
+            conn.execute("PRAGMA foreign_keys=ON")
 
     def close(self) -> None:
         self._conn.close()
@@ -584,14 +648,14 @@ class BackupCatalog:
             """INSERT INTO environments (
                 id, name, repository_root, git_common_dir, branch, base_ref,
                 worktree_path, generated_config_path, python_environment_path,
-                python_environment_owned, dependency_lock_path, http_interface,
-                http_port, db_mode, source_db_name, target_db_name, backup_id,
+                python_environment_owned, dependency_lock_path, db_mode,
+                source_db_name, target_db_name, backup_id,
                 runtime_json, state, created_at, last_used_at, removed_at, last_error
             ) VALUES (
                 :id, :name, :repository_root, :git_common_dir, :branch, :base_ref,
                 :worktree_path, :generated_config_path, :python_environment_path,
-                :python_environment_owned, :dependency_lock_path, :http_interface,
-                :http_port, :db_mode, :source_db_name, :target_db_name, :backup_id,
+                :python_environment_owned, :dependency_lock_path, :db_mode,
+                :source_db_name, :target_db_name, :backup_id,
                 :runtime_json, :state, :created_at, :last_used_at, :removed_at, :last_error
             )""",
             {
@@ -606,8 +670,6 @@ class BackupCatalog:
                 "python_environment_path": env["python_environment_path"],
                 "python_environment_owned": int(bool(env["python_environment_owned"])),
                 "dependency_lock_path": env["dependency_lock_path"],
-                "http_interface": env["http_interface"],
-                "http_port": env["http_port"],
                 "db_mode": env["db_mode"],
                 "source_db_name": env.get("source_db_name"),
                 "target_db_name": env.get("target_db_name"),
@@ -769,14 +831,6 @@ class BackupCatalog:
             "SELECT * FROM environments WHERE git_common_dir = ? AND branch = ? "
             "AND state NOT IN ('removed') ORDER BY created_at DESC LIMIT 1",
             (git_common_dir, branch),
-        ).fetchone()
-        return row
-
-    @_translate_sqlite_error
-    def active_environment_for_port(self, port: int) -> sqlite3.Row | None:
-        row: sqlite3.Row | None = self._conn.execute(
-            "SELECT * FROM environments WHERE http_port = ? AND state NOT IN ('removed') LIMIT 1",
-            (port,),
         ).fetchone()
         return row
 

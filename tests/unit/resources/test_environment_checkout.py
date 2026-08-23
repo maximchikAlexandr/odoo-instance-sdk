@@ -95,6 +95,17 @@ class TestCheckoutPreflight:
             listener.close()
         assert env.http_port == 8070
 
+    @pytest.mark.serial
+    def test_second_branch_skips_generated_http_port(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        first = env_client.environments.checkout(project_manifest, "feat/port-a", options=opts)
+        generated = Path(first.generated_config_path)
+        generated.write_text("[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8077\n")
+        second = env_client.environments.checkout(project_manifest, "feat/port-b", options=opts)
+        assert second.http_port != 8077
+
     def test_missing_venv_interpreter_hints_create_venv(
         self, env_client: OdooClient, project_manifest: Path
     ) -> None:

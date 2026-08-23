@@ -12,6 +12,7 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import CommandResult, StartConfig
+from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 def _make_client() -> OdooClient:
@@ -56,6 +57,49 @@ class TestFromConfigNoPassword:
 
 
 class TestInstancePrefix:
+    def test_factory_bound_cluster_preflights_before_spawn(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.resources.environment import (
+            EnvironmentCheckoutOptions,
+            EnvironmentDatabaseMode,
+        )
+
+        events: list[str] = []
+
+        class StoppedCluster:
+            def ensure_running(self, timeout: float = 60.0) -> None:
+                events.append("healthy")
+
+        options = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=fake_python.parent / "odoo-bin",
+        )
+        env = env_client.environments.checkout(
+            project_manifest, "feat/postgres-preflight", options=options
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda path: StoppedCluster()),
+        )
+        instance = env_client.instance.from_environment(env)
+
+        def spawn(*args: object, **kwargs: object) -> int:
+            events.append("spawn")
+            return 0
+
+        with patch(
+            "odoo_instance_sdk.resources.instance.run_foreground_process",
+            side_effect=spawn,
+        ):
+            instance.run_foreground()
+        assert events == ["healthy", "spawn"]
+
     def test_manual_instance_no_prefix(self) -> None:
         client = _make_client()
         inst = client.instance(base_url="http://localhost:8069")
@@ -226,7 +270,10 @@ class TestRunForeground:
         )
         env = env_client.environments.checkout(project_manifest, "feat/fgprefix", options=opts)
         inst = env_client.instance.from_environment(env)
-        with patch("odoo_instance_sdk.resources.instance.run_foreground_process") as mock_fg:
+        with (
+            patch.object(OdooInstance, "_ensure_dependencies_ready"),
+            patch("odoo_instance_sdk.resources.instance.run_foreground_process") as mock_fg,
+        ):
             mock_fg.return_value = 0
             inst.run_foreground()
             mock_fg.assert_called_once()

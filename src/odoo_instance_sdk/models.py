@@ -15,6 +15,25 @@ class BackupFormat(enum.StrEnum):
     DUMP = "dump"
 
 
+class PostgresClusterState(enum.StrEnum):
+    """Lifecycle state of a project-level PostgreSQL cluster.
+
+    UNKNOWN    — not probed (initial).
+    UNREACHABLE — endpoint not reachable.
+    STARTING   — compose up issued, not yet healthy.
+    HEALTHY    — ready.
+    STOPPED    — compose stopped.
+    UNHEALTHY  — running but healthcheck failing.
+    """
+
+    UNKNOWN = "unknown"
+    UNREACHABLE = "unreachable"
+    STARTING = "starting"
+    HEALTHY = "healthy"
+    STOPPED = "stopped"
+    UNHEALTHY = "unhealthy"
+
+
 class BackupState(enum.StrEnum):
     DOWNLOADING = "downloading"
     AVAILABLE = "available"

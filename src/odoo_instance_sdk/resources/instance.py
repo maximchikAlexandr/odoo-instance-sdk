@@ -37,6 +37,7 @@ from odoo_instance_sdk.resources.database import DatabaseResource
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
 @dataclass(slots=True, kw_only=True)
@@ -96,6 +97,7 @@ class InstanceFactory:
             EnvironmentState,
             _decode_runtime_json,
         )
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
 
         if environment.state != EnvironmentState.READY:
             raise InstanceConfigurationError(
@@ -132,6 +134,23 @@ class InstanceFactory:
         if start_cfg.db_host and db_port is None:
             db_port = 5432
         db_names = parse_db_names(cfg.get("db_name"))
+
+        # Bind the project-level PostgresCluster for dependency preflight.
+        # Bind does not start the cluster; readiness is checked in preflight.
+        # We only swallow SDK-level config/manifest errors: a missing manifest
+        # or unparseable config disables preflight rather than crashing spawn,
+        # matching the "fail-fast" intent only when the cluster is actually
+        # consulted. Unexpected errors propagate.
+        from odoo_instance_sdk.exceptions import (
+            PostgresClusterError,
+            ProjectManifestNotFoundError,
+        )
+
+        try:
+            cluster = PostgresCluster.from_project(Path(environment.repository_root))
+        except (ProjectManifestNotFoundError, PostgresClusterError):
+            cluster = None
+
         return OdooInstance(
             config=InstanceConfig(
                 base_url=normalized,
@@ -147,6 +166,7 @@ class InstanceFactory:
             ),
             _client=self._client,
             _artifact_lock_path=environment_lock_path(str(environment.id)),
+            _postgres_cluster=cluster,
         )
 
 
@@ -191,6 +211,7 @@ class OdooInstance:
     _client: OdooClient
     databases: DatabaseResource = field(init=False)
     _artifact_lock_path: Path | None = field(default=None, repr=False)
+    _postgres_cluster: PostgresCluster | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.databases = DatabaseResource(
@@ -201,6 +222,18 @@ class OdooInstance:
 
     def __repr__(self) -> str:
         return f"OdooInstance(base_url={self.config.base_url!r}, databases=<DatabaseResource>)"
+
+    def _ensure_dependencies_ready(self) -> None:
+        """Dependency preflight: ensure project PostgresCluster is ready before spawn.
+
+        Called exactly once per public spawn entrypoint (run_foreground/shell/
+        run_shell_script) before the artifact lock is acquired. External-mode
+        clusters are probed only; compose-mode clusters are started if stopped.
+        Manual instances (``instance(base_url=...)`` / ``from_config()``) have
+        ``_postgres_cluster is None`` and skip preflight.
+        """
+        if self._postgres_cluster is not None:
+            self._postgres_cluster.ensure_running(timeout=60.0)
 
     def _executable_prefix(self) -> tuple[str, ...]:
         if self.config.command_prefix is not None:
@@ -255,6 +288,7 @@ class OdooInstance:
                 raise InstanceConfigurationError(
                     "No StartConfig — pass one explicitly or create instance via from_config()"
                 )
+        self._ensure_dependencies_ready()
         resolved_cwd = cwd if cwd is not None else self.config.default_cwd
         from odoo_instance_sdk.internal.server import _build_cli_args
 
@@ -274,6 +308,7 @@ class OdooInstance:
                 "No StartConfig — create instance via from_config() or from_environment()"
             )
         _check_shell_overrides(args)
+        self._ensure_dependencies_ready()
         from odoo_instance_sdk.internal.server import _build_cli_args
 
         cli_args = _build_cli_args(config)
@@ -294,6 +329,7 @@ class OdooInstance:
         timeout: float | None = None,
         commit: bool = False,
     ) -> CommandResult:
+        self._ensure_dependencies_ready()
         with self._artifact_lock():
             return self._run_shell_script_unlocked(
                 source, argv=argv, timeout=timeout, commit=commit
@@ -308,6 +344,7 @@ class OdooInstance:
         commit: bool = False,
     ) -> CommandResult:
         """Internal mutator entrypoint; lock choice belongs to this instance only."""
+        self._ensure_dependencies_ready()
         with self._artifact_operation(exclusive=True):
             return self._run_shell_script_unlocked(
                 source, argv=argv, timeout=timeout, commit=commit

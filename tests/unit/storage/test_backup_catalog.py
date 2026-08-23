@@ -304,7 +304,7 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
     assert "database_events" in tables
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 7
+    assert version == 8
 
     # Existing backups table still works
     path = _create_backup_file(tmp_path, "migrated.zip")
@@ -316,7 +316,7 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
 
 
 def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None:
-    """v0 → v7 migration MUST preserve existing backups and events."""
+    """v0 → v8 migration MUST preserve existing backups and events."""
     db = tmp_path / "test.db"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 0")
@@ -380,7 +380,7 @@ def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None
     assert event_row["event_type"] == "download_started"
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 7
+    assert version == 8
 
     catalog.close()
 
@@ -389,12 +389,12 @@ def test_schema_creation_v2_reopen(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     catalog = BackupCatalog(db_path=db)
     version1 = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version1 == 7
+    assert version1 == 8
     catalog.close()
 
     catalog2 = BackupCatalog(db_path=db)
     version2 = catalog2._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version2 == 7
+    assert version2 == 8
     tables = {
         r[0]
         for r in catalog2._conn.execute(

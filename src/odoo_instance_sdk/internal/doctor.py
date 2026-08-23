@@ -8,10 +8,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from odoo_instance_sdk.exceptions import OdooInstanceSdkError, ProjectManifestNotFoundError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
 from odoo_instance_sdk.internal.paths import get_environments_root
+from odoo_instance_sdk.internal.postgres_compose import docker_available
+from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -70,6 +74,7 @@ def run_doctor(client: OdooClient, project_path: Path | None) -> DoctorReport:
     _check_uv(report)
     _check_catalog(report, client)
     _check_orphaned(report, client)
+    _check_postgres(report, project_root)
 
     for env in envs:
         _check_environment(report, client, env)
@@ -173,6 +178,42 @@ def _check_orphaned(report: DoctorReport, client: OdooClient) -> None:
                         f"orphaned artifact: {env_id_dir} (no matching catalog row)",
                     )
                 )
+
+
+def _check_postgres(report: DoctorReport, project_root: Path | None) -> None:
+    """Read-only cluster checks: mode, ownership, endpoint, health, Docker availability."""
+    if project_root is None:
+        return
+    try:
+        cluster = PostgresCluster.from_project(project_root)
+    except ProjectManifestNotFoundError:
+        return
+    except OdooInstanceSdkError as exc:
+        report.checks.append(CheckResult("postgres.cluster", STATUS_WARN, str(exc)))
+        return
+    if cluster.owned and not docker_available():
+        report.checks.append(
+            CheckResult("postgres.compose", STATUS_WARN, "docker not found in PATH")
+        )
+    state = cluster.status()
+    report.checks.append(
+        CheckResult(
+            "postgres.cluster",
+            _postgres_state_to_status(state),
+            (
+                f"mode={cluster.mode} owned={cluster.owned} "
+                f"state={state.value} endpoint={cluster.endpoint}"
+            ),
+        )
+    )
+
+
+def _postgres_state_to_status(state: PostgresClusterState) -> str:
+    if state == PostgresClusterState.HEALTHY:
+        return STATUS_OK
+    if state in (PostgresClusterState.STARTING, PostgresClusterState.STOPPED):
+        return STATUS_INFO
+    return STATUS_WARN
 
 
 def _check_environment(
