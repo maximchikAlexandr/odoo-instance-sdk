@@ -7,6 +7,8 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.internal.doctor import DoctorReport, run_doctor
 from odoo_instance_sdk.resources.environment import (
@@ -15,7 +17,6 @@ from odoo_instance_sdk.resources.environment import (
 )
 
 if TYPE_CHECKING:
-    import pytest
     from click.testing import CliRunner
 
     from odoo_instance_sdk import OdooClient
@@ -150,6 +151,7 @@ class TestDoctorOrphanedArtifacts:
 
 
 class TestDoctorOccupiedPort:
+    @pytest.mark.serial
     def test_occupied_port_is_info_not_error(
         self,
         env_client: OdooClient,

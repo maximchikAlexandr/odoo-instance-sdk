@@ -146,6 +146,7 @@ class TestEnvRemove:
         env_client.environments.remove(env)
         assert not cfg_path.exists()
 
+    @pytest.mark.serial
     def test_occupied_reserved_port_causes_zero_mutations(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:

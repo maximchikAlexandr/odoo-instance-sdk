@@ -131,6 +131,10 @@ def env_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_uv: Path) -
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_catalog_path", lambda: data_root / "catalog.sqlite3"
     )
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
+    port_start = 8069 + (int(worker) if worker.isdigit() else 0) * 31
+    monkeypatch.setattr("odoo_instance_sdk.resources.environment._PORT_RANGE_START", port_start)
+    monkeypatch.setattr("odoo_instance_sdk.resources.environment._PORT_RANGE_END", port_start + 30)
 
     return OdooClient(config=OdooClientConfig(executable="odoo"))
 

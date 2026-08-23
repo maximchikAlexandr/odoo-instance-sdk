@@ -4,7 +4,11 @@ import threading
 import uuid
 from pathlib import Path
 
+import pytest
+
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+pytestmark = pytest.mark.serial
 
 
 def _create_backup_file(tmp_path: Path, name: str) -> Path:

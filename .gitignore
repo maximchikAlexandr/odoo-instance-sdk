@@ -18,7 +18,13 @@ dist/
 .mypy_cache/
 .ruff_cache/
 
-# pytest / coverage
+# pytest / coverage / mutation
 .pytest_cache/
 .coverage
+.coverage.*
 coverage.xml
+coverage.json
+htmlcov/
+.artifacts/
+.mutmut-cache
+mutants/

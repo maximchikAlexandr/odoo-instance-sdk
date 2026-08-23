@@ -160,6 +160,18 @@ Backup files and audit metadata are stored under `~/.cache/odoo-instance-sdk/`:
 - Basic Auth removed: `master_pwd` is sent only as a form field in POST bodies.
 - Cleartext warning fires once per process when master password is sent over HTTP to non-local hosts.
 
+## Development
+
+Requires Python 3.12+ on POSIX (Linux/macOS).
+
+```bash
+uv sync --frozen --dev
+git config core.hooksPath .githooks
+make pr
+```
+
+`make pr` runs lint, types, the offline test suite with zonal coverage, and package checks. Live Odoo is opt-in via `make live`. See [CONTRIBUTING.md](CONTRIBUTING.md) for markers, targeted runs, mutation, and package prerequisites.
+
 ## Examples
 
 - [`examples/prepare_dev_instance.py`](examples/prepare_dev_instance.py) — back up from test, start local Odoo, restore, stop

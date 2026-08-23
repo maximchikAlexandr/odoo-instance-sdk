@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "pre-commit: uv is required but was not found on PATH" >&2
+  exit 1
+fi
+
+echo "pre-commit: ruff check"
+uv run ruff check .
+
+echo "pre-commit: ruff format --check"
+uv run ruff format --check .
+
+echo "pre-commit: mypy"
+uv run mypy --strict src/odoo_instance_sdk
+
+echo "pre-commit: ok"
