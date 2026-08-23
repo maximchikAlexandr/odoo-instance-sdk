@@ -58,6 +58,8 @@ def generate_config(
     options["http_port"] = str(http_port)
     options["db_name"] = db_name
     options["dbfilter"] = db_name
+    if options.get("logfile", "").strip():
+        options["logfile"] = str((dest.parent / "odoo.log").resolve())
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(dest.parent), prefix=dest.name + ".", suffix=".tmp")

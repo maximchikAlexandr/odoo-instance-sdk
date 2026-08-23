@@ -467,6 +467,24 @@ def run(ctx: click.Context) -> None:
 
 
 @cli.command()
+@click.option("-n", "--tail", type=click.IntRange(min=1), default=100, show_default=True)
+@click.option("-f", "--follow", is_flag=True, default=False)
+@click.pass_context
+def logs(ctx: click.Context, tail: int, follow: bool) -> None:
+    try:
+        _client, _env, instance = cli_context.ready_instance(ctx)
+        for line in instance.iter_logs(tail=tail, follow=follow):
+            click.echo(line, nl=False)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail(False, "logs", str(e))
+    sys.exit(0)
+
+
+@cli.command()
 @click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
 def shell(ctx: click.Context, odoo_args: tuple[str, ...]) -> None:

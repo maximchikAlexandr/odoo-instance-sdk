@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import time
+from collections import deque
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -187,6 +189,38 @@ def _resolve_python_binary(env: DevelopmentEnvironment) -> str:
     return str(py_path)
 
 
+def _iter_logfile(path: Path, *, tail: int, follow: bool) -> Iterator[str]:
+    try:
+        handle = path.open(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise InstanceConfigurationError(
+            f"logfile missing or unreadable: {path} ({exc}); "
+            "set logfile in the bound odoo.conf and ensure the file exists"
+        ) from exc
+    try:
+        stat = path.stat()
+        inode, size = stat.st_ino, stat.st_size
+        yield from deque(handle, maxlen=tail)
+        while follow:
+            line = handle.readline()
+            if line:
+                yield line
+                continue
+            time.sleep(0.2)
+            try:
+                stat = path.stat()
+                if stat.st_ino != inode or stat.st_size < size:
+                    new_handle = path.open(encoding="utf-8", errors="replace")
+                    handle.close()
+                    handle, inode, size = new_handle, stat.st_ino, stat.st_size
+                else:
+                    size = stat.st_size
+            except OSError:
+                continue
+    finally:
+        handle.close()
+
+
 _FORBIDDEN_SHELL_FLAGS = ("-c", "--config", "-d", "--database")
 
 
@@ -300,6 +334,23 @@ class OdooInstance:
                 cwd=resolved_cwd,
                 env=env,
             )
+
+    def iter_logs(self, *, tail: int = 100, follow: bool = False) -> Iterator[str]:
+        """Yield the last ``tail`` lines of the bound logfile, optionally following appends."""
+        if tail < 1:
+            raise InstanceConfigurationError("tail must be >= 1")
+        config = self.config.start_config
+        if config is None:
+            raise InstanceConfigurationError(
+                "No StartConfig — create instance via from_config() or from_environment()"
+            )
+        raw = config.logfile
+        if raw is None or not raw.strip():
+            raise InstanceConfigurationError(
+                "logfile is absent or empty; set logfile in the bound odoo.conf"
+            )
+        path = (self.config.default_cwd or Path.cwd()) / raw.strip()
+        yield from _iter_logfile(path, tail=tail, follow=follow)
 
     def shell(self, *, args: Sequence[str] = ()) -> int:
         config = self.config.start_config
