@@ -1,0 +1,28 @@
+name: Mutation Testing
+
+on:
+  schedule:
+    - cron: "0 3 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --group mutation --group test
+      - run: make mutation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-results
+          path: .artifacts/mutation/results.txt
+          retention-days: 14

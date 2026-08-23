@@ -76,6 +76,7 @@ def _record_backup(env_client: OdooClient, backup: Backup) -> None:
 
 
 class TestCheckoutPreflight:
+    @pytest.mark.serial
     def test_auto_port_retries_after_os_reserved_default(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:

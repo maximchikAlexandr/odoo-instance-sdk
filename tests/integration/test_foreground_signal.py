@@ -11,6 +11,8 @@ import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig, StartConfig
 
+pytestmark = pytest.mark.serial
+
 
 @pytest.mark.skipif(os.name != "posix", reason="process-group signals require POSIX")
 def test_foreground_sigint_terminates_child_group_and_restores_handler(
@@ -45,5 +47,11 @@ def test_foreground_sigint_terminates_child_group_and_restores_handler(
     assert result == 130
     assert signal.getsignal(signal.SIGINT) == before
     grandchild_pid = int(pid_file.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(grandchild_pid, 0)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild_pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"grandchild {grandchild_pid} still exists after SIGINT")

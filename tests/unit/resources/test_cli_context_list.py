@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
 
 if TYPE_CHECKING:
-    import pytest
     from click.testing import Result
 
     from odoo_instance_sdk import OdooClient
@@ -136,6 +136,7 @@ def test_list_json_reconciles_and_human_has_required_columns(
     } <= listed.keys()
 
 
+@pytest.mark.serial
 def test_list_reports_occupied_port(
     env_client: OdooClient, project_manifest: Path, fake_python: Path
 ) -> None:

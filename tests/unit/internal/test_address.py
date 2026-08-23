@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import socket
-from typing import TYPE_CHECKING
+
+import pytest
 
 from odoo_instance_sdk.internal.address import AddressState, normalize_bind_host, probe_address
-
-if TYPE_CHECKING:
-    import pytest
+from tests.cases.normalization import BIND_HOST_CASES
 
 
-def test_normalizes_equivalent_local_addresses() -> None:
-    assert normalize_bind_host("localhost") == "127.0.0.1"
-    assert normalize_bind_host("0.0.0.0") == "0.0.0.0"
-    assert normalize_bind_host("::") == "::"
+@pytest.mark.parametrize("raw, expected", BIND_HOST_CASES)
+def test_normalizes_equivalent_local_addresses(raw: str, expected: str) -> None:
+    assert normalize_bind_host(raw) == expected
 
 
 def test_probe_returns_typed_state() -> None:

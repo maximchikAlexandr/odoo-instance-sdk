@@ -147,7 +147,8 @@ class TestStartConfigFromOdooConfig:
 
     def test_invalid_port_skipped(self, tmp_path: Path) -> None:
         path = _write_config("[options]\nhttp_port = notanumber\n", tmp_path)
-        sc = StartConfig.from_odoo_config(path)
+        with pytest.warns(UserWarning, match="Invalid int for http_port"):
+            sc = StartConfig.from_odoo_config(path)
         assert sc.http_port == 8069
 
     def test_addons_path_split(self, tmp_path: Path) -> None:
