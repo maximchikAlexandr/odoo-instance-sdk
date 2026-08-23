@@ -210,15 +210,14 @@ class PostgresCluster:
             return PostgresClusterState.HEALTHY
         return PostgresClusterState.UNKNOWN
 
+    def _uses_real_compose_cli(self) -> bool:
+        return type(self._compose_runner) is SubprocessComposeRunner
+
     def _status_compose(self) -> PostgresClusterState:
-        if not docker_available():
+        if self._uses_real_compose_cli() and not docker_available():
             return PostgresClusterState.UNKNOWN
         compose_file = self._compose_file()
         if not compose_file.is_file():
-            # No artifacts yet == never started; treated as STOPPED so
-            # ensure_running() will issue up. This conflates "never initialized"
-            # with "stopped", which is acceptable since both require the same
-            # recovery action (start the cluster).
             return PostgresClusterState.STOPPED
         assert self._user is not None
         return derive_state(
@@ -245,7 +244,8 @@ class PostgresCluster:
 
     def _ensure_running_compose(self, timeout: float) -> None:
         """Start a managed cluster when status is STOPPED, STARTING, or UNKNOWN."""
-        ensure_docker_or_raise()
+        if self._uses_real_compose_cli():
+            ensure_docker_or_raise()
         self._ensure_artifacts()
         state = self.status()
         if state is PostgresClusterState.HEALTHY:
@@ -280,11 +280,11 @@ class PostgresCluster:
             raise PostgresClusterNotOwnedError(
                 f"cannot stop externally owned postgres cluster at {self.endpoint}"
             )
-        ensure_docker_or_raise()
         compose_file = self._compose_file()
         if not compose_file.is_file():
-            # Idempotent: never started → no-op.
             return
+        if self._uses_real_compose_cli():
+            ensure_docker_or_raise()
         compose_stop(
             self._compose_runner,
             compose_file,

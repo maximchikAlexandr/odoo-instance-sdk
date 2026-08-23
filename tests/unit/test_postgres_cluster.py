@@ -219,8 +219,7 @@ def test_status_compose_unknown_when_docker_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _write_compose_project(tmp_path)
-    fake = FakeComposeRunner()
-    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster = PostgresCluster.from_project(root)
     monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: False)
     state = cluster.status()
     assert state is PostgresClusterState.UNKNOWN
@@ -302,8 +301,7 @@ def test_ensure_running_compose_unavailable_docker_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _write_compose_project(tmp_path)
-    fake = FakeComposeRunner()
-    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster = PostgresCluster.from_project(root)
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.postgres_compose.docker_available", lambda: False
     )

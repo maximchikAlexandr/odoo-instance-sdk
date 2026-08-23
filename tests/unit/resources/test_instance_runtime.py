@@ -12,6 +12,7 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import CommandResult, StartConfig
+from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 def _make_client() -> OdooClient:
@@ -226,7 +227,10 @@ class TestRunForeground:
         )
         env = env_client.environments.checkout(project_manifest, "feat/fgprefix", options=opts)
         inst = env_client.instance.from_environment(env)
-        with patch("odoo_instance_sdk.resources.instance.run_foreground_process") as mock_fg:
+        with (
+            patch.object(OdooInstance, "_ensure_dependencies_ready"),
+            patch("odoo_instance_sdk.resources.instance.run_foreground_process") as mock_fg,
+        ):
             mock_fg.return_value = 0
             inst.run_foreground()
             mock_fg.assert_called_once()
