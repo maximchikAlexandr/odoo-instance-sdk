@@ -173,6 +173,14 @@ class PostgresClusterStartError(PostgresClusterError):
         super().__init__(message)
 
 
+class PostgresClusterStopError(PostgresClusterError):
+    """`docker compose stop` failed (non-timeout)."""
+
+    def __init__(self, message: str, *, returncode: int) -> None:
+        self.returncode = returncode
+        super().__init__(message)
+
+
 class PostgresClusterTimeoutError(PostgresClusterError):
     """ensure_running() timed out before the cluster became healthy."""
 

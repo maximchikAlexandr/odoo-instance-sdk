@@ -216,6 +216,10 @@ class PostgresCluster:
             return PostgresClusterState.UNKNOWN
         compose_file = self._compose_file()
         if not compose_file.is_file():
+            # No artifacts yet == never started; treated as STOPPED so
+            # ensure_running() will issue up. This conflates "never initialized"
+            # with "stopped", which is acceptable since both require the same
+            # recovery action (start the cluster).
             return PostgresClusterState.STOPPED
         assert self._user is not None
         return derive_state(
@@ -252,6 +256,9 @@ class PostgresCluster:
                 f"(mode={self._mode}, state={state.value})"
             )
         # STOPPED / STARTING / UNKNOWN — issue up.
+        # UNKNOWN here can only mean a transient compose ps/exec hiccup
+        # (Docker availability already checked above); re-issuing up is
+        # the recovery path.
         compose_up(
             self._compose_runner,
             self._compose_file(),

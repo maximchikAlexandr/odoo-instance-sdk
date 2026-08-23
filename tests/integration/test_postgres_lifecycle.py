@@ -76,10 +76,49 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         mode = password_file.stat().st_mode & 0o777
         assert mode == 0o600
 
+        # instance preflight: build an OdooInstance bound to the cluster and
+        # call run_foreground with a stubbed binary that exits 0 immediately,
+        # proving the dependency preflight fires against the running cluster.
+        from unittest.mock import patch
+
+        from odoo_instance_sdk.client import OdooClient
+        from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
+        from odoo_instance_sdk.models import StartConfig
+        from odoo_instance_sdk.resources.instance import OdooInstance
+
+        client = OdooClient(config=OdooClientConfig(executable="/bin/true"))
+        instance = OdooInstance(
+            config=InstanceConfig(
+                base_url="http://127.0.0.1:8069",
+                start_config=StartConfig(http_port=8069, config_path="/tmp/odoo.conf"),
+            ),
+            _client=client,
+            _postgres_cluster=cluster,
+        )
+        with patch(
+            "odoo_instance_sdk.resources.instance.run_foreground_process",
+            return_value=0,
+        ):
+            exit_code = instance.run_foreground()
+        assert exit_code == 0  # preflight passed (cluster already healthy)
+
         # stop — preserves the volume.
         cluster.stop(timeout=30.0)
         stopped_state = cluster.status()
         assert stopped_state.value == "stopped"
+
+        # Assert the named volume still exists after stop (preserved, not down -v).
+        volume_name = f"pgdata_{cluster._project_id}"
+        vol_inspect = subprocess.run(
+            ["docker", "volume", "inspect", volume_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert vol_inspect.returncode == 0, (
+            f"volume {volume_name} should persist after stop (got rc={vol_inspect.returncode}, "
+            f"stderr={vol_inspect.stderr.strip()})"
+        )
 
         # Restart (idempotent ensure_running).
         cluster.ensure_running(timeout=60.0)

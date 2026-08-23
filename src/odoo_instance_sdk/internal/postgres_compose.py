@@ -13,6 +13,7 @@ from pathlib import Path
 
 from odoo_instance_sdk.exceptions import (
     PostgresClusterStartError,
+    PostgresClusterStopError,
     PostgresComposeInvalidError,
     PostgresComposeUnavailableError,
     PostgresPortCollisionError,
@@ -250,8 +251,8 @@ def compose_stop(
     res = runner.run(args, cwd=compose_file.parent, timeout=None)
     if res.returncode != 0:
         # Idempotent: if already stopped, compose returns 0; a non-zero result
-        # here is reported but does not raise (caller treats as best-effort).
-        raise PostgresClusterStartError(
+        # here is reported as a typed stop error.
+        raise PostgresClusterStopError(
             f"docker compose stop failed: {res.stderr.strip() or res.stdout.strip()}",
             returncode=res.returncode,
         )

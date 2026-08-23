@@ -324,3 +324,16 @@ Thresholds: line/branch средние (80/70 — новый код, не securi
 - Q: Должен ли `init --postgres compose` сразу аллоцировать порт и писать его в manifest, или только при первом `up`? Решение: писать в manifest при `init` (детерминированность, `--dry-run` показывает allocated), `up` использует persisted. Если collision при `up` → error с инструкцией перезапустить `init --postgres-port`.
 - Q: `PostgresCluster` как `@dataclass` или `msgspec.Struct`? Решение: `@dataclass(frozen=True, slots=True, kw_only=True)` (как `InstanceFactory`/`OdooInstance` — существующий pattern для ресурсов). Properties для `mode`/`owned`.
 - Q: Хранить ли `postgres-password` в `user_state_dir` или `user_data_dir`? Решение: `user_data_dir` (durable; `user_state_dir` для locks; data важна для preserve-volume constraint). `get_data_root() / "projects" / project_id / "postgres"`.
+
+## Implementer Choices (made explicit)
+
+- **Port allocation range**: `[5468, 65535)`; 5468 chosen to match the issue example and avoid common 5432/5500 collisions. First free loopback port is persisted to the manifest.
+- **Probe timeout**: external `status()` uses `internal.address.probe_address` with a 0.2s socket bind timeout (inherited). This is a read-only reachability probe, not a connection test.
+- **`--json` implies non-interactive**: `odcli init --json` (without `--no-input`) still forbids prompts, consistent with the existing `--dry-run --json` contract. `--no-input` is the explicit flag; `--json` suppresses prompts as a side effect of emitting a machine-readable envelope.
+- **Image/user charset restriction**: `image` matches `^[A-Za-z0-9._/:@+-]+$`, `user` matches `^[A-Za-z_][A-Za-z0-9_]*$`. This avoids YAML escaping without PyYAML; invalid values raise `PostgresComposeInvalidError` before the compose file is written.
+- **Password entropy**: `secrets.token_urlsafe(32)` (~43 chars, ~256 bits of entropy), written `0600`, never overwritten if the file exists (idempotent `up`).
+- **Healthcheck params**: `interval: 2s, timeout: 3s, retries: 30, start_period: 5s`. 30 retries × 2s covers slow first-init of `pgvector` images; `start_period: 5s` absorbs container startup. Exact values mandated by spec.
+- **Non-git `project_id` fallback**: when `git rev-parse` fails (non-git project), `project_id` falls back to `hashlib.sha256(resolved_path)[:8]` with the directory name. This is a defensive extension: artifacts remain usable but are **not shared across worktrees** for non-git projects (no common dir to derive a stable key). Marked `ponytail:` in code.
+- **Stop failure error type**: `PostgresClusterStopError` (distinct from `PostgresClusterStartError`); best-effort stop, reported as a typed error on non-zero compose result.
+- **`from_environment` cluster bind error handling**: only `ProjectManifestNotFoundError` and `PostgresClusterError` disable preflight (cluster set to `None`); unexpected errors propagate so a corrupt environment doesn't silently disable fail-fast.
+- **External-mode explicit `--postgres external`**: provenance records `postgres` only when `postgres_cfg is not None` (compose mode). Explicit `--postgres external` produces no `[postgres]` section (backward compat) and no provenance entry; this matches the "external is the default" semantics.

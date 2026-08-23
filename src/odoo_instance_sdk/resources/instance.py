@@ -137,9 +137,18 @@ class InstanceFactory:
 
         # Bind the project-level PostgresCluster for dependency preflight.
         # Bind does not start the cluster; readiness is checked in preflight.
+        # We only swallow SDK-level config/manifest errors: a missing manifest
+        # or unparseable config disables preflight rather than crashing spawn,
+        # matching the "fail-fast" intent only when the cluster is actually
+        # consulted. Unexpected errors propagate.
+        from odoo_instance_sdk.exceptions import (
+            PostgresClusterError,
+            ProjectManifestNotFoundError,
+        )
+
         try:
             cluster = PostgresCluster.from_project(Path(environment.repository_root))
-        except Exception:
+        except (ProjectManifestNotFoundError, PostgresClusterError):
             cluster = None
 
         return OdooInstance(

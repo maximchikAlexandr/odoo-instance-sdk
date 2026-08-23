@@ -358,6 +358,8 @@ def _handle_existing_manifest(
         existing_cfg = ProjectConfig.load(resolved_project)
     except Exception as e:
         fail(json_output, "init", f"Existing manifest unreadable: {e}")
+    # Comparison excludes ``postgres_allocated`` (dry-run-only flag); both
+    # sides default to False here.
     if _manifest_dict(existing_cfg) == _manifest_dict(config):
         if json_output:
             emit_json_envelope(
@@ -888,9 +890,11 @@ def postgres_group() -> None:
 
 def _resolve_cluster(ctx: click.Context) -> PostgresCluster:
     project_path = cli_context.resolve_project_path(ctx)
+    from odoo_instance_sdk.exceptions import OdooInstanceSdkError
+
     try:
         return PostgresCluster.from_project(project_path)
-    except Exception as e:
+    except OdooInstanceSdkError as e:
         fail(False, "postgres", str(e))
 
 

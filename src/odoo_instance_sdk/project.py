@@ -113,6 +113,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             lines.append(f'runtime_cwd = "{_toml_path(self.runtime_cwd)}"')
         postgres_block = _postgres_to_manifest(self.postgres)
         if postgres_block is not None:
+            lines.append("")
             lines.append(postgres_block)
         return "\n".join(lines) + "\n"
 
