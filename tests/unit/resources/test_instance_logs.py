@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,29 +28,23 @@ def _instance_from_config(tmp_path: Path, *, logfile: str | None) -> OdooInstanc
     return OdooClient(config=OdooClientConfig(executable="python3")).instance.from_config(conf)
 
 
-@dataclass(frozen=True)
-class TailCase:
-    id: str
-    text: str
-    tail: int
-    expected: list[str]
-
-
-TAIL_CASES = [
-    TailCase(id="last_three", text="1\n2\n3\n4\n5\n", tail=3, expected=["3\n", "4\n", "5\n"]),
-    TailCase(id="exact_length", text="1\n2\n", tail=2, expected=["1\n", "2\n"]),
-    TailCase(id="longer_than_file", text="1\n2\n", tail=10, expected=["1\n", "2\n"]),
-    TailCase(id="empty_file", text="", tail=5, expected=[]),
-    TailCase(id="no_trailing_newline", text="a\nb", tail=2, expected=["a\n", "b"]),
-]
-
-
-@pytest.mark.parametrize("case", [pytest.param(case, id=case.id) for case in TAIL_CASES])
-def test_iter_logs_returns_trailing_lines(tmp_path: Path, case: TailCase) -> None:
+@pytest.mark.parametrize(
+    ("text", "tail", "expected"),
+    [
+        pytest.param("1\n2\n3\n4\n5\n", 3, ["3\n", "4\n", "5\n"], id="last_three"),
+        pytest.param("1\n2\n", 2, ["1\n", "2\n"], id="exact_length"),
+        pytest.param("1\n2\n", 10, ["1\n", "2\n"], id="longer_than_file"),
+        pytest.param("", 5, [], id="empty_file"),
+        pytest.param("a\nb", 2, ["a\n", "b"], id="no_trailing_newline"),
+    ],
+)
+def test_iter_logs_returns_trailing_lines(
+    tmp_path: Path, text: str, tail: int, expected: list[str]
+) -> None:
     log = tmp_path / "odoo.log"
-    log.write_text(case.text)
+    log.write_text(text)
     inst = _instance_from_config(tmp_path, logfile=str(log))
-    assert list(inst.iter_logs(tail=case.tail)) == case.expected
+    assert list(inst.iter_logs(tail=tail)) == expected
 
 
 def test_iter_logs_follow_append(tmp_path: Path) -> None:
@@ -74,6 +67,52 @@ def test_iter_logs_follow_truncation(tmp_path: Path) -> None:
     assert next(it) == "b\n"
     log.write_text("x\n")
     assert next(it) == "x\n"
+
+
+def test_iter_logs_follow_same_size_rewrite(tmp_path: Path) -> None:
+    log = tmp_path / "odoo.log"
+    log.write_text("old\n")
+    inst = _instance_from_config(tmp_path, logfile=str(log))
+    it = inst.iter_logs(tail=1, follow=True)
+    assert next(it) == "old\n"
+    log.write_text("new\n")
+    assert next(it) == "new\n"
+
+
+def test_iter_logs_follow_rapid_truncate_and_regrowth(tmp_path: Path) -> None:
+    log = tmp_path / "odoo.log"
+    log.write_text("old\n")
+    inst = _instance_from_config(tmp_path, logfile=str(log))
+    it = inst.iter_logs(tail=1, follow=True)
+    assert next(it) == "old\n"
+    log.write_text("new-first\nnew-second\n")
+    assert next(it) == "new-first\n"
+    assert next(it) == "new-second\n"
+
+
+def test_iter_logs_follow_sentinel_read_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "odoo.log"
+    log.write_bytes(b"x" * 100_000)
+    inst = _instance_from_config(tmp_path, logfile=str(log))
+    import odoo_instance_sdk.resources.instance as instance_module
+
+    original_pread = os.pread
+    read_lengths: list[int] = []
+
+    def recording_pread(fd: int, length: int, offset: int) -> bytes:
+        read_lengths.append(length)
+        return original_pread(fd, length, offset)
+
+    monkeypatch.setattr(os, "pread", recording_pread)
+    it = inst.iter_logs(tail=1, follow=True)
+    assert next(it) == "x" * 100_000
+    with log.open("a") as handle:
+        handle.write("\n")
+    assert next(it) == "\n"
+    assert read_lengths
+    assert max(read_lengths) <= instance_module._LOGFILE_SENTINEL_BYTES
 
 
 def test_iter_logs_follow_replacement(tmp_path: Path) -> None:
@@ -160,10 +199,10 @@ def test_iter_logs_requires_start_config() -> None:
         list(inst.iter_logs())
 
 
-def _invoke_logs(*args: str, instance: MagicMock) -> Result:
+def _invoke_logs(*args: str, instance: OdooInstance | MagicMock) -> Result:
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
-        return_value=(MagicMock(), SimpleNamespace(), instance),
+        return_value=(MagicMock(), MagicMock(), instance),
     ):
         return CliRunner().invoke(cli, ["logs", *args])
 
@@ -182,10 +221,11 @@ def test_cli_logs_forwards_options_and_raw_text(
     args: tuple[str, ...], tail: int, follow: bool
 ) -> None:
     instance = MagicMock()
-    instance.iter_logs.return_value = iter(["line\n"])
+    instance.iter_logs.return_value = iter(["\x1b[31mline\x1b[0m\nfragment"])
     result = _invoke_logs(*args, instance=instance)
     assert result.exit_code == 0, result.output
-    assert result.output == "line\n"
+    assert result.stdout == "\x1b[31mline\x1b[0m\nfragment"
+    assert result.stderr == ""
     instance.iter_logs.assert_called_once_with(tail=tail, follow=follow)
 
 
@@ -193,6 +233,21 @@ def test_cli_logs_forwards_options_and_raw_text(
 def test_cli_logs_invalid_tail_is_nonzero(tail: str) -> None:
     result = CliRunner().invoke(cli, ["logs", "--tail", tail])
     assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "Invalid value" in result.stderr
+
+
+@pytest.mark.parametrize("is_directory", [False, True], ids=["absent", "unreadable"])
+def test_cli_logs_file_errors_write_only_stderr(tmp_path: Path, is_directory: bool) -> None:
+    logfile = tmp_path / "odoo.log"
+    if is_directory:
+        logfile.mkdir()
+    instance = _instance_from_config(tmp_path, logfile=str(logfile))
+    result = _invoke_logs(instance=instance)
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert str(logfile) in result.stderr
+    assert "set logfile" in result.stderr
 
 
 def test_cli_logs_keyboard_interrupt_exits_130() -> None:
@@ -208,7 +263,7 @@ def test_cli_logs_does_not_record_use() -> None:
     instance.iter_logs.return_value = iter([])
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
-        return_value=(client, SimpleNamespace(), instance),
+        return_value=(client, MagicMock(), instance),
     ):
         result = CliRunner().invoke(cli, ["logs"])
     assert result.exit_code == 0, result.output
@@ -225,4 +280,77 @@ def test_cli_logs_resolution_error_is_nonzero_and_creates_nothing(
     ):
         result = CliRunner().invoke(cli, ["logs"])
     assert result.exit_code != 0
+    assert result.stdout == ""
+    assert "not ready" in result.stderr
     assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_logs_resolves_registered_worktree_without_ready_instance_mock(
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    source_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_config.write_text(source_config.read_text() + "logfile = /tmp/shared.log\n")
+    env = env_client.environments.checkout(
+        project_manifest,
+        "feat/logs-cwd",
+        options=EnvironmentCheckoutOptions(
+            python=str(fake_python), db_mode=EnvironmentDatabaseMode.SHARED
+        ),
+    )
+    logfile = Path(env.generated_config_path).parent / "odoo.log"
+    logfile.write_text("from-worktree\n")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: env_client
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_toplevel",
+        lambda _path: Path(env.worktree_path),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_git_common_dir",
+        lambda _path: Path(env.git_common_dir),
+    )
+    monkeypatch.chdir(Path(env.worktree_path))
+
+    result = CliRunner().invoke(cli, ["logs"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "from-worktree\n"
+    assert result.stderr == ""
+
+
+def test_cli_logs_resolves_explicit_project_and_environment_outside_worktree(
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    source_config: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_config.write_text(source_config.read_text() + "logfile = /tmp/shared.log\n")
+    env = env_client.environments.checkout(
+        project_manifest,
+        "feat/logs-explicit",
+        options=EnvironmentCheckoutOptions(
+            python=str(fake_python), db_mode=EnvironmentDatabaseMode.SHARED
+        ),
+    )
+    logfile = Path(env.generated_config_path).parent / "odoo.log"
+    logfile.write_text("from-explicit-context\n")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: env_client
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(
+        cli,
+        ["--project", str(project_manifest), "--env", str(env.id), "logs"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "from-explicit-context\n"
+    assert result.stderr == ""

@@ -41,6 +41,18 @@ class InstanceConfigurationError(OdooInstanceSdkError):
     """Invalid or incomplete instance configuration."""
 
 
+class LogfileAccessError(InstanceConfigurationError):
+    """The configured logfile cannot be opened for reading."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(
+            f"logfile missing or unreadable: {path} ({reason}); "
+            "set logfile in the bound odoo.conf and ensure the file exists"
+        )
+
+
 class MasterPasswordRequiredError(OdooInstanceSdkError):
     """Master password is required for this operation."""
 

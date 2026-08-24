@@ -11,7 +11,12 @@ import click
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import OdooClientConfig
-from odoo_instance_sdk.exceptions import OdooInstanceSdkError, VscodeImportError
+from odoo_instance_sdk.exceptions import (
+    InstanceConfigurationError,
+    LogfileAccessError,
+    OdooInstanceSdkError,
+    VscodeImportError,
+)
 from odoo_instance_sdk.internal import context as cli_context
 from odoo_instance_sdk.internal.automation import (
     eval_expression,
@@ -474,14 +479,17 @@ def logs(ctx: click.Context, tail: int, follow: bool) -> None:
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
         for line in instance.iter_logs(tail=tail, follow=follow):
-            click.echo(line, nl=False)
+            sys.stdout.write(line)
+            sys.stdout.flush()
     except KeyboardInterrupt:
         sys.exit(130)
-    except SystemExit:
-        raise
+    except LogfileAccessError as e:
+        click.echo(str(e), err=True)
+        raise click.exceptions.Exit(1)
+    except InstanceConfigurationError as e:
+        fail(False, "logs", str(e))
     except Exception as e:
         fail(False, "logs", str(e))
-    sys.exit(0)
 
 
 @cli.command()

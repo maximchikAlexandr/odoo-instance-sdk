@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 from collections import deque
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TextIO, cast
 
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
+    LogfileAccessError,
     NonLocalInstanceError,
 )
 from odoo_instance_sdk.internal.locks import environment_lock_path, exclusive_lock, shared_lock
@@ -190,35 +192,62 @@ def _resolve_python_binary(env: DevelopmentEnvironment) -> str:
 
 
 def _iter_logfile(path: Path, *, tail: int, follow: bool) -> Iterator[str]:
+    handle = _open_logfile(path)
     try:
-        handle = path.open(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise InstanceConfigurationError(
-            f"logfile missing or unreadable: {path} ({exc}); "
-            "set logfile in the bound odoo.conf and ensure the file exists"
-        ) from exc
-    try:
-        stat = path.stat()
-        inode, size = stat.st_ino, stat.st_size
-        yield from deque(handle, maxlen=tail)
+        lines = deque(handle, maxlen=tail)
+        cursor, sentinel = _logfile_cursor_snapshot(handle)
+        yield from lines
         while follow:
+            try:
+                path_stat = path.stat()
+                descriptor_stat = os.fstat(handle.fileno())
+                replaced = (path_stat.st_dev, path_stat.st_ino) != (
+                    descriptor_stat.st_dev,
+                    descriptor_stat.st_ino,
+                )
+                truncated = descriptor_stat.st_size < cursor
+                rewritten = (
+                    descriptor_stat.st_size >= cursor
+                    and _logfile_sentinel(handle.fileno(), cursor) != sentinel
+                )
+                if replaced or truncated or rewritten:
+                    new_handle = _open_logfile(path)
+                    handle.close()
+                    handle = new_handle
+                    cursor, sentinel = _logfile_cursor_snapshot(handle)
+            except OSError:
+                time.sleep(0.2)
+                continue
             line = handle.readline()
             if line:
+                cursor, sentinel = _logfile_cursor_snapshot(handle)
                 yield line
                 continue
             time.sleep(0.2)
-            try:
-                stat = path.stat()
-                if stat.st_ino != inode or stat.st_size < size:
-                    new_handle = path.open(encoding="utf-8", errors="replace")
-                    handle.close()
-                    handle, inode, size = new_handle, stat.st_ino, stat.st_size
-                else:
-                    size = stat.st_size
-            except OSError:
-                continue
     finally:
         handle.close()
+
+
+_LOGFILE_SENTINEL_BYTES = 4096
+
+
+def _open_logfile(path: Path) -> TextIO:
+    try:
+        return path.open(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise LogfileAccessError(str(path), exc.strerror or type(exc).__name__) from exc
+
+
+def _logfile_sentinel(fd: int, cursor: int) -> bytes:
+    """Read a fixed window immediately before the current follow cursor."""
+    length = min(cursor, _LOGFILE_SENTINEL_BYTES)
+    return os.pread(fd, length, cursor - length)
+
+
+def _logfile_cursor_snapshot(handle: TextIO) -> tuple[int, bytes]:
+    fd = handle.fileno()
+    cursor = handle.tell()
+    return cursor, _logfile_sentinel(fd, cursor)
 
 
 _FORBIDDEN_SHELL_FLAGS = ("-c", "--config", "-d", "--database")

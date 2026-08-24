@@ -8,7 +8,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from odoo_instance_sdk.exceptions import EnvironmentNotFoundError, EnvironmentResolutionError
+from odoo_instance_sdk.exceptions import (
+    EnvironmentNotFoundError,
+    EnvironmentResolutionError,
+    ProjectContextError,
+)
 from odoo_instance_sdk.internal.context import resolve_project
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import (
@@ -175,8 +179,11 @@ def test_ready_instance_reads_selector_from_click_context(
     instance = MagicMock()
     client.instance.from_environment.return_value = instance
     ctx = MagicMock()
-    ctx.obj = {"env": env.name}
+    ctx.obj = {"env": env.name, "project": "/repo"}
     monkeypatch.setattr("odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_project_path", lambda _ctx: Path("/repo")
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.context.resolve_environment",
         lambda _client, selector: env if selector == env.name else None,
@@ -242,8 +249,11 @@ def test_ready_instance_validates_recorded_runtime_artifacts(
     )
     client = MagicMock()
     ctx = MagicMock()
-    ctx.obj = {"env": env.name}
+    ctx.obj = {"env": env.name, "project": "/repo"}
     monkeypatch.setattr("odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_project_path", lambda _ctx: Path("/repo")
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.context.resolve_environment",
         lambda _client, selector: env if selector == env.name else None,
@@ -260,3 +270,60 @@ def test_ready_instance_validates_recorded_runtime_artifacts(
         ):
             ready_instance(ctx)
         client.instance.from_environment.assert_not_called()
+
+
+def test_ready_instance_rejects_environment_from_another_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _make_env()
+    client = MagicMock()
+    ctx = MagicMock()
+    ctx.obj = {"project": "/selected", "env": str(env.id)}
+    monkeypatch.setattr("odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_project_path", lambda _ctx: Path("/selected")
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_environment", lambda *_args: env
+    )
+
+    from odoo_instance_sdk.internal.context import ready_instance
+
+    with pytest.raises(EnvironmentResolutionError, match="does not belong to project"):
+        ready_instance(ctx)
+    client.instance.from_environment.assert_not_called()
+
+
+def test_ready_instance_rejects_missing_explicit_project(tmp_path: Path) -> None:
+    from odoo_instance_sdk.internal.context import ready_instance
+
+    ctx = MagicMock()
+    ctx.obj = {"project": str(tmp_path / "missing"), "env": "demo"}
+    with pytest.raises(ProjectContextError, match="Explicit --project"):
+        ready_instance(ctx)
+
+
+def test_ready_instance_rejects_unknown_environment_for_explicit_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock()
+    ctx = MagicMock()
+    ctx.obj = {"project": "/selected", "env": "unknown"}
+    monkeypatch.setattr("odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_project_path", lambda _ctx: Path("/selected")
+    )
+
+    def raise_unknown(*_args: object) -> DevelopmentEnvironment:
+        raise EnvironmentNotFoundError("unknown")
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_environment",
+        raise_unknown,
+    )
+
+    from odoo_instance_sdk.internal.context import ready_instance
+
+    with pytest.raises(EnvironmentNotFoundError, match="unknown"):
+        ready_instance(ctx)
+    client.instance.from_environment.assert_not_called()
