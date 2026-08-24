@@ -110,6 +110,69 @@ def _resolve_counts(
     return ahead, behind, _sum_numstat(numstat_out)
 
 
+def _compute_git_activity(worktree: Path) -> GitActivity:
+    """Pure compute (no cache): three-dot git activity against the default branch tip.
+
+    Resolves HEAD SHA, branch name, default-tip SHA (upstream then local main),
+    merge-base, and ahead/behind/numstat. Any git failure degrades to an orphan
+    shape (full or partial). The monitor owns instance-level caching; this is the
+    non-caching core shared with ``collect_git_activity``.
+    """
+    head_sha, short_sha, branch, default_tip = _resolve_identity(worktree)
+    if not head_sha:
+        return _orphan_full()
+    if default_tip is None:
+        return _orphan_partial(head_sha, short_sha, branch)
+
+    rc, mb_out, _ = _run_git(["merge-base", default_tip, "HEAD"], worktree)
+    if rc != 0:
+        return _orphan_partial(head_sha, short_sha, branch)
+
+    counts = _resolve_counts(worktree, default_tip, mb_out.strip())
+    if counts is None:
+        return _orphan_partial(head_sha, short_sha, branch)
+    ahead, behind, diff = counts
+
+    if ahead == 0 and behind == 0:
+        state = GitActivityState.CLEAN
+    elif behind == 0:
+        state = GitActivityState.AHEAD
+    elif ahead == 0:
+        state = GitActivityState.BEHIND
+    else:
+        state = GitActivityState.DIVERGED
+
+    return GitActivity(
+        default_branch=_DEFAULT_BRANCH,
+        head_sha=head_sha,
+        short_sha=short_sha,
+        branch=branch,
+        ahead=ahead,
+        behind=behind,
+        diff=diff,
+        state=state,
+    )
+
+
+def _resolve_identity(worktree: Path) -> tuple[str, str, str, str | None]:
+    """Cheap rev-parse pass: (head_sha, short_sha, branch, default_tip_sha).
+
+    default_tip_sha is None when no upstream/local main tip resolves (orphan path).
+    """
+    rc, head_out, _ = _run_git(["rev-parse", "--verify", "HEAD"], worktree)
+    if rc != 0:
+        return "", "", "unknown", None
+    head_sha = head_out.strip()
+    short_sha = head_sha[:7]
+    rc, branch_out, _ = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], worktree)
+    branch = branch_out.strip() if rc == 0 and branch_out.strip() else "unknown"
+    rc, tip_out, _ = _run_git(["rev-parse", "--verify", "main@{upstream}"], worktree)
+    if rc != 0:
+        rc, tip_out, _ = _run_git(["rev-parse", "--verify", "refs/heads/main"], worktree)
+    default_tip = tip_out.strip() if rc == 0 else None
+    return head_sha, short_sha, branch, default_tip
+
+
 def collect_git_activity(worktree: Path) -> GitActivity:
     """Collect three-dot git activity for a worktree against the default branch tip.
 
@@ -117,39 +180,28 @@ def collect_git_activity(worktree: Path) -> GitActivity:
     The expensive part (rev-list / diff) only runs on cache miss; rev-parse for the
     key is cheap and runs every call.
     """
-    # HEAD SHA — required to form the cache key and the result identity.
-    rc, head_out, _ = _run_git(["rev-parse", "--verify", "HEAD"], worktree)
-    if rc != 0:
+    head_sha, short_sha, branch, default_tip = _resolve_identity(worktree)
+    if not head_sha:
         return _orphan_full()
-    head_sha = head_out.strip()
-    short_sha = head_sha[:7]
-
-    # Branch name (detached HEAD yields "HEAD" — acceptable).
-    rc, branch_out, _ = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], worktree)
-    branch = branch_out.strip() if rc == 0 and branch_out.strip() else "unknown"
-
-    # Default-tip SHA: upstream first, then stale local main fallback.
-    rc, tip_out, _ = _run_git(["rev-parse", "--verify", "main@{upstream}"], worktree)
-    if rc != 0:
-        rc, tip_out, _ = _run_git(["rev-parse", "--verify", "refs/heads/main"], worktree)
-    if rc != 0:
+    if default_tip is None:
         return _orphan_partial(head_sha, short_sha, branch)
-    default_tip = tip_out.strip()
 
-    # Cache check — key needs head_sha + tip which we just computed.
     key = (worktree.resolve(), head_sha, default_tip)
     cached = _git_cache.get(key)
     if cached is not None and time.monotonic() - cached[0] < _CACHE_TTL:
         return cached[1]
 
-    # merge-base — no common ancestor => orphan (identity preserved).
     rc, mb_out, _ = _run_git(["merge-base", default_tip, "HEAD"], worktree)
     if rc != 0:
-        return _cache_or_return(key, _orphan_partial(head_sha, short_sha, branch))
+        result = _orphan_partial(head_sha, short_sha, branch)
+        _git_cache[key] = (time.monotonic(), result)
+        return result
 
     counts = _resolve_counts(worktree, default_tip, mb_out.strip())
     if counts is None:
-        return _cache_or_return(key, _orphan_partial(head_sha, short_sha, branch))
+        result = _orphan_partial(head_sha, short_sha, branch)
+        _git_cache[key] = (time.monotonic(), result)
+        return result
     ahead, behind, diff = counts
 
     if ahead == 0 and behind == 0:
@@ -171,10 +223,5 @@ def collect_git_activity(worktree: Path) -> GitActivity:
         diff=diff,
         state=state,
     )
-    _git_cache[key] = (time.monotonic(), result)
-    return result
-
-
-def _cache_or_return(key: tuple[Path, str, str], result: GitActivity) -> GitActivity:
     _git_cache[key] = (time.monotonic(), result)
     return result

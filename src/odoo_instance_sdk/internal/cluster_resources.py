@@ -240,7 +240,7 @@ def _safe_run(
     return result
 
 
-def cluster_resource_snapshot(
+def _compute_cluster_resource(
     *,
     compose_file: Path,
     compose_project_name: str,
@@ -249,11 +249,12 @@ def cluster_resource_snapshot(
     state: PostgresClusterState,
     timeout: float | None = None,
 ) -> ClusterResourceSnapshot:
-    """Build a read-only `ClusterResourceSnapshot` for one compose service.
+    """Pure compute (no module cache): read-only `ClusterResourceSnapshot`.
 
     No lifecycle lock, no start/stop. The caller passes the already-computed
-    cluster state so we can distinguish `stopped` from `missing` without a
-    second status call. Container inspect/stats are cached by container_id.
+    cluster state so we can distinguish `stopped` from `missing` without a second
+    status call. The monitor owns instance-level caching; this is the non-caching
+    core shared with ``cluster_resource_snapshot`` (which keeps the module cache).
     """
     sampled_at = datetime.now(UTC)
 
@@ -313,6 +314,31 @@ def cluster_resource_snapshot(
         metrics=metrics,
         unavailability_reason=None,
         sampled_at=sampled_at,
+    )
+
+
+def cluster_resource_snapshot(
+    *,
+    compose_file: Path,
+    compose_project_name: str,
+    service: str,
+    runner: ComposeRunner,
+    state: PostgresClusterState,
+    timeout: float | None = None,
+) -> ClusterResourceSnapshot:
+    """Build a read-only `ClusterResourceSnapshot` for one compose service.
+
+    No lifecycle lock, no start/stop. The caller passes the already-computed
+    cluster state so we can distinguish `stopped` from `missing` without a
+    second status call. Container inspect/stats are cached by container_id.
+    """
+    return _compute_cluster_resource(
+        compose_file=compose_file,
+        compose_project_name=compose_project_name,
+        service=service,
+        runner=runner,
+        state=state,
+        timeout=timeout,
     )
 
 

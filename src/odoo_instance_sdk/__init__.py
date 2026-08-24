@@ -93,6 +93,7 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentState,
 )
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
+from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 # ponytail: populate models module globals so msgspec can resolve the string
@@ -136,6 +137,7 @@ __all__ = [
     "EnvironmentCheckoutOptions",
     "EnvironmentConflictError",
     "EnvironmentDatabaseMode",
+    "EnvironmentMonitor",
     "EnvironmentNotFoundError",
     "EnvironmentResolutionError",
     "EnvironmentResource",

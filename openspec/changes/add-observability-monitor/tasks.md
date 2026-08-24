@@ -22,11 +22,11 @@
 
 ## 4. `EnvironmentMonitor` collector
 
-- [ ] 4.1 Создать `resources/monitor.py` с `@dataclass(frozen=True, slots=True, kw_only=True) EnvironmentMonitor`; default constructor `EnvironmentMonitor()`; optional injection fields (`catalog_path`, `process_provider`, `git_provider`, `docker_provider`); cache TTLs hardcoded (15s expensive sections, 5s cluster `status()`)
-- [ ] 4.2 `snapshot(project_id=None) -> Snapshot`: discovery from `BackupCatalog.list_environments(include_removed=False)` grouped by `git_common_dir`; monitor id `"project_" + repo_key(...)`; cluster via `PostgresCluster.from_project(repository_root)` (unprefixed `repo_key` compose name); unknown `project_id` → empty tuples; populate `EnvironmentSnapshot` mapping table (`branch` catalog, `short_sha` first 7 of `git.head_sha`, `database` target/source, `lifecycle_state`, `allocated_http_port` from generated `odoo.conf`)
-- [ ] 4.3 `watch(interval=2.0, project_id=None) -> AsyncIterator[Snapshot]` (async generator over `snapshot()` + `asyncio.sleep`); `interval >= 0.1` else `ValueError`; cancellation cleans up, no leaks
-- [ ] 4.4 Component failure isolation: один environment/cluster failure → partial snapshot (`complete=False`/`unavailability_reason`), остальные продолжаются; catalog SQLite error → `MonitorError`; `psutil` missing → `MonitorExtrasMissingError` с actionable hint
-- [ ] 4.5 Redaction: snapshot не содержит credentials/env vars/cmdline/absolute paths/raw Docker payload
+- [x] 4.1 Создать `resources/monitor.py` с `@dataclass(frozen=True, slots=True, kw_only=True) EnvironmentMonitor`; default constructor `EnvironmentMonitor()`; optional injection fields (`catalog_path`, `process_provider`, `git_provider`, `docker_provider`); cache TTLs hardcoded (15s expensive sections, 5s cluster `status()`)
+- [x] 4.2 `snapshot(project_id=None) -> Snapshot`: discovery from `BackupCatalog.list_environments(include_removed=False)` grouped by `git_common_dir`; monitor id `"project_" + repo_key(...)`; cluster via `PostgresCluster.from_project(repository_root)` (unprefixed `repo_key` compose name); unknown `project_id` → empty tuples; populate `EnvironmentSnapshot` mapping table (`branch` catalog, `short_sha` first 7 of `git.head_sha`, `database` target/source, `lifecycle_state`, `allocated_http_port` from generated `odoo.conf`)
+- [x] 4.3 `watch(interval=2.0, project_id=None) -> AsyncIterator[Snapshot]` (async generator over `snapshot()` + `asyncio.sleep`); `interval >= 0.1` else `ValueError`; cancellation cleans up, no leaks
+- [x] 4.4 Component failure isolation: один environment/cluster failure → partial snapshot (`complete=False`/`unavailability_reason`), остальные продолжаются; catalog SQLite error → `MonitorError`; `psutil` missing → `MonitorExtrasMissingError` с actionable hint
+- [x] 4.5 Redaction: snapshot не содержит credentials/env vars/cmdline/absolute paths/raw Docker payload
 
 ## 5. Odoo process tree metrics (psutil)
 
@@ -64,12 +64,12 @@
 
 ## 9. Bounded caching
 
-- [ ] 9.1 CPU/RAM — без кеша (свежая каждая итерация; first sample `null`)
-- [ ] 9.2 Git activity cache по `(worktree, HEAD SHA, default-tip SHA)`, TTL 15s
-- [ ] 9.3 Storage cache по `environment_id`, TTL 15s
-- [ ] 9.4 Docker inspect cache по `container_id`, TTL 15s; Docker stats cache по `container_id`, TTL 15s
-- [ ] 9.5 cluster `status()` (PostgresCluster.status) cache TTL 5s
-- [ ] 9.6 In-memory only, не персистится; новый `EnvironmentMonitor()` — пустой кеш
+- [x] 9.1 CPU/RAM — без кеша (свежая каждая итерация; first sample `null`)
+- [x] 9.2 Git activity cache по `(worktree, HEAD SHA, default-tip SHA)`, TTL 15s
+- [x] 9.3 Storage cache по `environment_id`, TTL 15s
+- [x] 9.4 Docker inspect cache по `container_id`, TTL 15s; Docker stats cache по `container_id`, TTL 15s
+- [x] 9.5 cluster `status()` (PostgresCluster.status) cache TTL 5s
+- [x] 9.6 In-memory only, не персистится; новый `EnvironmentMonitor()` — пустой кеш
 
 ## 10. FastAPI server + SPA mount
 
@@ -103,7 +103,7 @@
 
 ## 14. Tests
 
-- [ ] 14.1 `tests/unit/test_monitor_snapshot.py`: multi-project discovery, stopped/running Odoo, PID reuse, compose/external/stopped cluster, Linux/VM PID scope, Docker stats errors, Git divergence, storage ownership, component failure isolation, redaction
+- [x] 14.1 `tests/unit/test_monitor_snapshot.py`: multi-project discovery, stopped/running Odoo, PID reuse, compose/external/stopped cluster, Linux/VM PID scope, Docker stats errors, Git divergence, storage ownership, component failure isolation, redaction
 - [x] 14.2 `tests/unit/test_process_metrics.py`: fake `psutil.Process`, CPU two-sample, `AccessDenied` isolation
 - [x] 14.3 `tests/unit/test_git_activity.py`: clean/ahead/behind/diverged/orphan, binary files, stale-local-main fallback
 - [x] 14.4 `tests/unit/test_storage_footprint.py`: owned/reused venv, shared/copy DB, `du` vs walk fallback, psql size failure → complete=False, symlinks

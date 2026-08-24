@@ -103,7 +103,7 @@ def _other_files_bytes(generated_config_path: Path, dependency_lock_path: Path) 
     return total
 
 
-def collect_storage_footprint(
+def _compute_storage_footprint(
     *,
     environment_id: str,
     worktree_path: Path,
@@ -119,17 +119,12 @@ def collect_storage_footprint(
     db_password: str | None,
     data_dir: Path | None,
 ) -> StorageFootprint:
-    """Collect a bounded-cached ``StorageFootprint`` for one environment.
+    """Pure compute (no cache): bounded ``StorageFootprint`` for one environment.
 
-    Cache is keyed by ``environment_id`` with a 15s TTL; concurrent callers within
-    that window get the same result. ``complete=False`` flags any owned component
-    (worktree, owned venv, owned DB) that could not be measured.
+    ``complete=False`` flags any owned component (worktree, owned venv, owned DB)
+    that could not be measured. The monitor owns instance-level caching; this is
+    the non-caching core shared with ``collect_storage_footprint``.
     """
-    now = time.monotonic()
-    cached = _CACHE.get(environment_id)
-    if cached is not None and (now - cached[0]) < _CACHE_TTL:
-        return cached[1]
-
     complete_flags: list[bool] = []
 
     worktree_bytes = _directory_size(worktree_path)
@@ -183,13 +178,57 @@ def collect_storage_footprint(
     other = _other_files_bytes(generated_config_path, dependency_lock_path)
 
     total = (worktree_bytes or 0) + (py.bytes or 0) + (db.total_bytes or 0) + other
-    footprint = StorageFootprint(
+    return StorageFootprint(
         total_bytes=total,
         complete=all(complete_flags),
         worktree_bytes=worktree_bytes,
         python_environment=py,
         database=db,
         other_files_bytes=other,
+    )
+
+
+def collect_storage_footprint(
+    *,
+    environment_id: str,
+    worktree_path: Path,
+    python_environment_path: Path,
+    python_environment_owned: bool,
+    db_mode: str,
+    generated_config_path: Path,
+    dependency_lock_path: Path,
+    target_db_name: str | None,
+    db_host: str | None,
+    db_port: int | None,
+    db_user: str | None,
+    db_password: str | None,
+    data_dir: Path | None,
+) -> StorageFootprint:
+    """Collect a bounded-cached ``StorageFootprint`` for one environment.
+
+    Cache is keyed by ``environment_id`` with a 15s TTL; concurrent callers within
+    that window get the same result. ``complete=False`` flags any owned component
+    (worktree, owned venv, owned DB) that could not be measured.
+    """
+    now = time.monotonic()
+    cached = _CACHE.get(environment_id)
+    if cached is not None and (now - cached[0]) < _CACHE_TTL:
+        return cached[1]
+
+    footprint = _compute_storage_footprint(
+        environment_id=environment_id,
+        worktree_path=worktree_path,
+        python_environment_path=python_environment_path,
+        python_environment_owned=python_environment_owned,
+        db_mode=db_mode,
+        generated_config_path=generated_config_path,
+        dependency_lock_path=dependency_lock_path,
+        target_db_name=target_db_name,
+        db_host=db_host,
+        db_port=db_port,
+        db_user=db_user,
+        db_password=db_password,
+        data_dir=data_dir,
     )
     _CACHE[environment_id] = (time.monotonic(), footprint)
     return footprint

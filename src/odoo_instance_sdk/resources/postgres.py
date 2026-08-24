@@ -161,6 +161,14 @@ class PostgresCluster:
         return f"{host}:{self._endpoint_port}"
 
     @property
+    def endpoint_host(self) -> str:
+        return self._endpoint_host
+
+    @property
+    def endpoint_port(self) -> int:
+        return self._endpoint_port
+
+    @property
     def compose_file(self) -> Path:
         """Managed compose artifact path, exposed for operational cleanup tooling."""
         return self._compose_file()
