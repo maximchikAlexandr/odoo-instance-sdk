@@ -4,6 +4,159 @@ Read-only observability surface over the existing lifecycle catalog, `PostgresCl
 
 ## ADDED Requirements
 
+### Requirement: Canonical snapshot types
+
+Public snapshot types MUST live in `models.py` as `msgspec.Struct(frozen=True, forbid_unknown_fields=True, kw_only=True)` except StrEnums. `ProcessTreeResult` MUST NOT be public. Field lists below are complete; do not add extra public fields.
+
+```python
+class RuntimeState(enum.StrEnum):
+    STOPPED = "stopped"
+    READY = "ready"
+    NOT_READY = "not_ready"
+
+class GitActivityState(enum.StrEnum):
+    CLEAN = "clean"
+    AHEAD = "ahead"
+    BEHIND = "behind"
+    DIVERGED = "diverged"
+    ORPHAN = "orphan"
+
+class PidScope(enum.StrEnum):
+    HOST = "host"
+    DOCKER_VM = "docker_vm"
+    UNAVAILABLE = "unavailable"
+
+class GitDiff:
+    added: int
+    deleted: int
+
+class GitActivity:
+    default_branch: str
+    head_sha: str | None
+    short_sha: str | None
+    branch: str
+    ahead: int | None
+    behind: int | None
+    diff: GitDiff | None
+    state: GitActivityState
+
+class PythonEnvFootprint:
+    owned: bool
+    bytes: int | None
+
+class DatabaseFootprint:
+    owned: bool
+    postgres_bytes: int | None
+    filestore_bytes: int | None
+    total_bytes: int | None
+
+class StorageFootprint:
+    total_bytes: int
+    complete: bool
+    worktree_bytes: int | None
+    python_environment: PythonEnvFootprint
+    database: DatabaseFootprint
+    other_files_bytes: int | None
+
+class RuntimeMetrics:
+    state: RuntimeState
+    root_pid: int | None
+    child_pids: tuple[int, ...]
+    process_count: int
+    cpu_percent: float | None
+    rss_bytes: int | None
+    started_at: datetime | None
+    http_url: str | None
+    http_port: int | None
+    database_name: str | None
+    commit_sha: str | None
+    branch: str | None
+
+class ClusterContainer:
+    id: str | None
+    name: str | None
+    image: str | None
+    pid: int | None
+    pid_scope: PidScope
+
+class ClusterMetrics:
+    cpu_percent: float | None
+    memory_usage_bytes: int | None
+    memory_limit_bytes: int | None
+    volume_usage_bytes: int | None
+    sampled_at: datetime | None
+
+class ClusterEndpoint:
+    host: str
+    port: int
+
+class ClusterResourceSnapshot:
+    container: ClusterContainer | None
+    metrics: ClusterMetrics | None
+    unavailability_reason: str | None
+    sampled_at: datetime | None
+
+class ClusterSnapshot:
+    mode: Literal["external", "compose"]
+    owned: bool
+    state: PostgresClusterState
+    endpoint: ClusterEndpoint | None
+    container: ClusterContainer | None
+    metrics: ClusterMetrics | None
+    unavailability_reason: str | None
+    sampled_at: datetime | None
+
+class EnvironmentSnapshot:
+    id: str
+    project_id: str
+    name: str
+    branch: str
+    short_sha: str | None
+    db_mode: Literal["shared", "copy"]
+    database: str | None
+    lifecycle_state: EnvironmentState
+    allocated_http_port: int | None
+    runtime: RuntimeMetrics
+    git: GitActivity
+    storage: StorageFootprint
+
+class ProjectSummary:
+    id: str
+    name: str
+    display_hint: str
+    environment_count: int
+    cluster: ClusterSnapshot | None
+
+class Snapshot:
+    schema_version: int
+    generated_at: datetime
+    projects: tuple[ProjectSummary, ...]
+    environments: tuple[EnvironmentSnapshot, ...]
+```
+
+`unavailability_reason` allowed values: `external_not_owned`, `stopped`, `missing`, `docker_unavailable`, `inspect_failed`, `stats_failed`.
+
+Collector MUST populate `EnvironmentSnapshot` as:
+
+- `id` / `name` / `db_mode` / `lifecycle_state` — catalog row (`lifecycle_state` is existing `EnvironmentState`: `creating|ready|failed|removing|cleanup_failed|removed`);
+- `branch` — catalog `branch` (not `GitActivity.branch`, not runtime record);
+- `short_sha` — first 7 hex chars of `git.head_sha`, or `None` if `head_sha` is None;
+- `database` — `target_db_name` when `db_mode=="copy"`, else `source_db_name`;
+- `allocated_http_port` — `StartConfig.from_odoo_config(generated_config_path).http_port`, or `None` if that file is missing/unreadable. Independent of runtime liveness;
+- `runtime` / `git` / `storage` — as their own requirements.
+
+UI lifecycle badge uses `lifecycle_state`. UI/CLI port uses `runtime.http_port` when `runtime.state` is `ready` or `not_ready`, else `allocated_http_port`.
+
+#### Scenario: EnvironmentSnapshot mapping
+
+- **WHEN** a copy-mode catalog row has `branch="feat/x"`, generated config `http_port=8070`, `target_db_name="db_x"`, and git `head_sha` starting `abc1234def`
+- **THEN** `branch=="feat/x"`, `allocated_http_port==8070`, `database=="db_x"`, `short_sha=="abc1234"`, `lifecycle_state` equals catalog `state`
+
+#### Scenario: EnvironmentSnapshot carries project_id
+
+- **WHEN** `monitor.snapshot()` returns an environment
+- **THEN** `environment.project_id` equals the owning `ProjectSummary.id`
+
 ### Requirement: One `EnvironmentMonitor` collector
 
 SDK MUST предоставлять один public collector primitive в `odoo_instance_sdk.resources.monitor`:
@@ -24,7 +177,7 @@ async for snapshot in monitor.watch(interval=2.0, project_id=None):
 
 `watch(interval: float = 2.0, project_id: str | None = None) -> AsyncIterator[Snapshot]` MUST быть thin async generator поверх `snapshot()` и stdlib `asyncio.sleep(interval)`; без собственного scheduler/queue/threadpool/background task. Consumer cancellation (`asyncio.CancelledError`, `break`, generator `aclose`) MUST корректно завершать `watch()`; collector не оставляет background threads/processes после остановки consumer task. `interval` MUST быть `>= 0.1`; `interval < 0.1` — `ValueError`.
 
-`EnvironmentMonitor` MUST быть единственным владельцем discovery, reconciliation и metric computation. FastAPI endpoint, CLI `env list`/`monitor` и React UI потребляют `EnvironmentMonitor` (или его snapshot models) и MUST NOT дублировать расчёт metrics. Не добавлять interfaces/factories/Protocol для единственной реализации.
+`EnvironmentMonitor` MUST быть единственным владельцем discovery, reconciliation и metric computation. FastAPI endpoint, CLI `env list`/`monitor` и React UI потребляют `EnvironmentMonitor.snapshot()` / `watch()` и MUST NOT дублировать расчёт metrics. Не добавлять public interfaces/factories/ABC. Internal test Protocols (`ProcessProvider`, `GitProvider`, `DockerProvider`) allowed only as optional constructor injection; production path uses the default `None` implementations.
 
 #### Scenario: Default constructor works
 
@@ -48,28 +201,9 @@ async for snapshot in monitor.watch(interval=2.0, project_id=None):
 
 ### Requirement: Snapshot top-level contract
 
-`Snapshot` MUST быть `msgspec.Struct(frozen=True, forbid_unknown_fields=True, kw_only=True)` с полями:
+`Snapshot.schema_version` MUST always be `1`. `generated_at` MUST be tz-aware UTC. `projects` ordered by `project_id` ascending; `environments` ordered by `id` ascending. `GET /api/v1/snapshot` returns this JSON (msgspec encode). `odcli env list --json` wraps the same `Snapshot` object in CLI envelope v1 `result`/`data` (`command="env.list"`).
 
-- `schema_version: int` (always `1`);
-- `generated_at: datetime` (tz-aware UTC);
-- `projects: tuple[ProjectSummary, ...]`;
-- `environments: tuple[EnvironmentSnapshot, ...]`.
-
-`projects` и `environments` — упорядочены стабильно (по `project_id` / `environment id`), не по времени. Backend `GET /api/v1/snapshot?project_id=<opaque>` и CLI `--json` MUST возвращать ровно этот contract (один versioned envelope для monitor; JSON envelope v1 для `env list` остаётся отдельной CLI-specific формой).
-
-```json
-{
-  "schema_version": 1,
-  "generated_at": "2026-08-24T12:00:00Z",
-  "projects": [
-    {"id": "project_7e3d", "name": "comerta", "environment_count": 3,
-     "cluster": {"mode": "compose", "state": "healthy"}}
-  ],
-  "environments": []
-}
-```
-
-`project_id` filter: при `project_id=None` возвращаются все проекты/environments; при `project_id=<opaque>` — только один matching project, его environments и его cluster; unknown `project_id` — пустые tuples (не error), чтобы polling не падал при race между stale project и concurrent removal.
+`project_id` filter: `None` → all catalog projects; opaque id matching a discovered project → that project + its environments; unknown id → `projects == ()` and `environments == ()`, no exception. A project exists only if `list_environments(include_removed=False)` contains at least one of its environments. Do not invent a zero-environment `ProjectSummary`.
 
 #### Scenario: Full snapshot shape
 
@@ -78,7 +212,7 @@ async for snapshot in monitor.watch(interval=2.0, project_id=None):
 
 #### Scenario: Project filter narrows result
 
-- **WHEN** `monitor.snapshot(project_id="project_7e3d")` runs
+- **WHEN** `monitor.snapshot(project_id="project_comerta_7e3d8a01")` runs
 - **THEN** `projects` contains only the matching `ProjectSummary` and `environments` contains only that project's environments
 
 #### Scenario: Unknown project filter returns empty
@@ -91,21 +225,10 @@ async for snapshot in monitor.watch(interval=2.0, project_id=None):
 Project identity MUST строиться из canonical repository provenance существующих catalog environments, **не** из process registry и **не** из filesystem scan.
 
 - Источник списка — `BackupCatalog.list_environments(include_removed=False)`; все environments с `state != "removed"` включаются.
-- Группировка по `git_common_dir` (canonical Git common dir, уже хранится в catalog), не по display name и не по `repository_root`.
-- `project_id` — стабильный opaque identifier, вычисляемый детерминированно из `git_common_dir` как `repo_key(repository_root, git_common_dir)` (существующий helper), с prefix `project_` (например `project_comerta_7e3d`); одинаковый между запусками на одном catalog.
-- `name` — короткое project name из `repository_root` basename (без абсолютного пути); одинаковые имена репозиториев различаются по дополнительному short hash-хинту, выведенному из `project_id`, **без раскрытия абсолютного local path**.
-- Глобальный режим (`project_id=None`) не сканирует filesystem в поисках незарегистрированных repositories.
-- Project, явно переданный через CLI/SDK context (через `project_id`), отображается даже если у него ноль environments в catalog (фильтр по `project_id` возвращает project summary с `environment_count=0` и `environments=()`); это не требует отдельного "registered projects" registry.
-
-```python
-ProjectSummary(
-    id="project_comerta_7e3d",
-    name="comerta",
-    display_hint="comerta_7e3d",  # disambiguator, no absolute path
-    environment_count=3,
-    cluster: ClusterSnapshot | None,
-)
-```
+- Группировка по `git_common_dir`, не по display name и не по `repository_root`.
+- Monitor opaque `project_id` = `"project_" + repo_key(repository_root, git_common_dir)` (example: `project_comerta_7e3d8a01`). PostgresCluster / Compose project name keep unprefixed `repo_key` (`odcli_pg_comerta_7e3d8a01`). Collector MUST call `PostgresCluster.from_project(repository_root)` and MUST NOT pass the `project_` prefix into `compose_project_name`.
+- `name` — `Path(repository_root).name` (no absolute path). `display_hint` — `repo_key` itself (slug + 8 hex), so two repos named `odoo` differ by hash.
+- Global mode (`project_id=None`) does not scan the filesystem for unregistered repositories.
 
 #### Scenario: Projects grouped by canonical provenance
 
@@ -121,11 +244,6 @@ ProjectSummary(
 
 - **WHEN** an environment has `state="removed"` in catalog
 - **THEN** it is excluded from `projects` and `environments` (include_removed is always False for monitor)
-
-#### Scenario: Project filter with zero environments
-
-- **WHEN** `monitor.snapshot(project_id="project_x")` matches a project that has no environments in catalog
-- **THEN** `projects` contains that `ProjectSummary` with `environment_count=0`, `environments == ()`
 
 ### Requirement: One nullable project cluster snapshot
 
@@ -159,9 +277,11 @@ ProjectSummary(
 - `ready` — process жив и bounded Odoo readiness probe успешен;
 - `not_ready` — process жив, probe неуспешен.
 
-`stopped` environment остаётся карточкой: Git/storage metadata доступны, Odoo PID/CPU/RAM отсутствуют (`null`), `Open Odoo` disabled.
+`stopped` environment остаётся карточкой: Git/storage metadata доступны, Odoo PID/CPU/RAM `None`, UI "Open Odoo" disabled.
 
-Reconciliation: collector читает catalog current-runtime record (если есть), берёт `root_pid` и `create_time`, проверяет через `psutil.Process(pid).create_time() == recorded_create_time` и `psutil.pid_exists(pid)`; при несовпадении runtime state = `stopped` (PID reuse) и stale record игнорируется для snapshot (но НЕ удаляется из catalog — очистку делает `run_foreground` при следующем реальном spawn или отдельная reconciliation; cleanup out of scope для MVP).
+Reconciliation: collector читает catalog `environment_runtime` (если есть), берёт `root_pid` и `create_time`, проверяет `psutil.Process(pid).create_time() == recorded_create_time` (exact float) и `psutil.pid_exists(pid)`. Mismatch → `stopped`; collector does not delete the catalog row.
+
+Readiness after a live PID+create_time match: one `httpx.get(f"{http_url}/web/health?db_server_status=true", timeout=2.0)`. `ready` iff HTTP 200 and JSON `status == "pass"`. Any timeout, connect error, non-200, or missing/non-pass status → `not_ready` with process metrics still populated. Do not call `wait_ready` / `poll_health` (those poll up to 60s).
 
 #### Scenario: Stopped environment has null runtime metrics
 
@@ -180,27 +300,20 @@ Reconciliation: collector читает catalog current-runtime record (если 
 
 #### Scenario: Live process but probe fails
 
-- **WHEN** an environment has a live matching process but the readiness HTTP probe fails
+- **WHEN** an environment has a live matching process but `GET {http_url}/web/health?db_server_status=true` does not return HTTP 200 with JSON `status=="pass"` within 2.0s
 - **THEN** `runtime.state == "not_ready"`, process metrics still populated
 
 ### Requirement: Odoo process tree metrics
 
-Для живого Odoo process tree (`root + recursive children/workers`) `RuntimeMetrics` MUST содержать:
+`internal/process_metrics.py::collect_process_tree(...) -> ProcessTreeResult | None` is internal. Collector maps:
 
-- `state: RuntimeState`;
-- `root_pid: int | None` — persisted/verified Odoo PID;
-- `child_pids: tuple[int, ...]` — текущие recursive child/worker PIDs, собираемые live и не сохраняемые в catalog;
-- `process_count: int` — root + доступные children (`1 + len(child_pids)`);
-- `cpu_percent: float | None` — сумма top-like non-blocking CPU; может превышать `100%`; первый CPU sample MAY быть `null` (psutil требует два замера с интервалом; collector хранит предыдущую CPU-точку в памяти по `(pid, create_time)`);
-- `rss_bytes: int | None` — сумма RSS;
-- `started_at: datetime | None` — из runtime record;
-- `http_url: str | None` — полный Odoo HTTP URL вида `http://<http_interface>:<http_port>` (construct from `StartConfig.http_interface`+`http_port` в `run_foreground`; UI "Open Odoo" открывает этот URL напрямую);
-- `http_port: int | None`, `database_name: str | None` — из runtime record;
-- `commit_sha: str | None`, `branch: str | None` — из runtime record.
+- `None` → `RuntimeMetrics(state=STOPPED, root_pid=None, child_pids=(), process_count=0, cpu_percent=None, rss_bytes=None, started_at=None, http_url=None, http_port=None, database_name=None, commit_sha=None, branch=None)`;
+- live result + successful health GET → `state=READY` and copy `child_pids`/`process_count`/`cpu_percent`/`rss_bytes` plus identity fields from the runtime record;
+- live result + failed health GET → `state=NOT_READY` with the same metrics.
 
-`NoSuchProcess`, `AccessDenied`, `ZombieProcess` изолируются на уровне одного environment: affected environment получает `runtime.state="stopped"` (или `not_ready` если процесс был жив на старте snapshot, но исчез mid-aggregation) и `null` resource fields; snapshot продолжает собираться.
+`cpu_percent` MUST be `None` on the first sample for a `(pid, create_time)` pair; later `watch()` iterations MUST be numeric when the process is still live. Values are allowed to exceed 100.
 
-CPU sample interval — bounded (например `psutil` default interval при втором замере); collector не блокируется надолго на одном environment. Историю метрик не сохранять.
+Root `NoSuchProcess` / `AccessDenied` / `ZombieProcess` / PID reuse → `None` from `collect_process_tree` → `stopped`. Child-only `AccessDenied`: skip that child. Do not set `StorageFootprint.complete` from process errors.
 
 #### Scenario: Aggregated CPU over tree
 
@@ -214,30 +327,20 @@ CPU sample interval — bounded (например `psutil` default interval пр
 
 #### Scenario: AccessDenied isolated
 
-- **WHEN** `psutil.Process(43120)` raises `AccessDenied` for one environment
-- **THEN** that environment's `runtime` reflects the error (`state="not_ready"` or `stopped`, metrics null) and other environments in the snapshot are unaffected
+- **WHEN** `psutil.Process(43120)` raises `AccessDenied` for one environment's root PID
+- **THEN** that environment's `runtime.state == "stopped"`, resource fields are null, other environments are unaffected
 
 ### Requirement: Git activity relative to default branch
 
-`GitActivity` MUST содержать (семантика `wt list` из Worktrunk):
+`GitActivity` fields are those in Canonical snapshot types. `default_branch` MUST always be `"main"`. Do not read a manifest field and do not guess from remotes.
 
-- `default_branch: str` — resolved default branch name;
-- `head_sha: str | None` — полный HEAD SHA;
-- `short_sha: str | None` — short SHA (>=7 chars);
-- `branch: str` — текущая checkout branch;
-- `ahead: int | None` — commits ahead относительно default branch tip;
-- `behind: int | None` — commits behind;
-- `diff: GitDiff | None` — `{added: int, deleted: int}` добавленных/удалённых текстовых строк в three-dot diff от merge-base;
-- `state: GitActivityState` — `clean | ahead | behind | diverged | orphan`.
-
-Правила:
-- default branch tip — upstream tip, если доступен (`git rev-parse --verify <default>@{upstream}` или эквивалент); fallback — локальная default branch;
-- line totals относятся к committed three-dot diff (`git diff <merge-base>...HEAD`) и не смешиваются с uncommitted `HEAD±`;
-- binary files не дают фиктивных line counts (пропускаются);
-- no-common-ancestor → `state="orphan"`, `ahead/behind/diff` — `None`, snapshot не ломается;
-- кешировать Git activity по `(worktree_path, HEAD SHA, default-branch SHA)` с bounded TTL (15s), отделённым от CPU/RAM polling.
-
-`default_branch` определяется через project manifest (если есть поле) или fallback `main` (если manifest не указан); fallback выбран явно и стабилен, не гадается из remote refs.
+Rules:
+- default tip: `git rev-parse --verify main@{upstream}` if exit 0, else `git rev-parse --verify refs/heads/main` (timeout 10s per git call);
+- line totals are committed three-dot `git diff --numstat <merge-base>...HEAD`, not uncommitted `HEAD±`;
+- binary files (`-` in numstat) contribute 0;
+- no-common-ancestor → `state="orphan"`, `ahead=behind=diff=None`;
+- any other Git CLI failure → `GitActivity(default_branch="main", head_sha=None, short_sha=None, branch="unknown", ahead=None, behind=None, diff=None, state=ORPHAN)`;
+- cache key `(worktree_path, HEAD SHA, default-branch SHA)`, TTL 15s.
 
 #### Scenario: Clean branch
 
@@ -275,24 +378,13 @@ total = worktree
       + other environment files
 ```
 
-- `total_bytes: int`;
-- `complete: bool` — `true` если все owned components удалось измерить, `false` если хотя бы один недоступен (известная сумма отображается с `>=` в UI);
-- `worktree_bytes: int | None`;
-- `python_environment: PythonEnvFootprint` (`owned: bool`, `bytes: int | None`); reused/external venv — `owned=False` и не включается в total;
-- `database: DatabaseFootprint | None` (`owned: bool`, `postgres_bytes: int | None`, `filestore_bytes: int | None`, `total_bytes: int | None`); только journal-owned `target_db` в `copy` mode; `shared` mode → `owned=False`, `bytes=None`, не включается;
-- `other_files_bytes: int | None` — generated config, dependency lock, local logs/cache/artifacts и остальные файлы environment root, не вошедшие выше.
+`StorageFootprint` / `PythonEnvFootprint` / `DatabaseFootprint` fields are those in Canonical snapshot types. `database` is always a `DatabaseFootprint` object (not `None`): `shared` → `owned=False`, byte fields `None`.
 
-Ownership rules:
-- worktree — filesystem size environment worktree;
-- Python environment — только при `python_environment_owned = true`;
-- database — только journal-owned `target_db` в `copy` mode: PostgreSQL logical size через read-only `pg_database_size(target_db)` (не общий cluster/volume) + соответствующий Odoo filestore после существующих containment checks; будущий dedicated owned DB volume заменяет PostgreSQL logical size, но не суммируется с ним;
-- other files — generated config/lock/local logs/cache/artifacts и остальные файлы environment root, не вошедшие выше.
+Directory size: `du -sb <path>` iff `shutil.which("du")` and subprocess exit 0 with a parseable integer (timeout 10s); else `os.walk(followlinks=False)` + `Path.stat().st_size`, skip symlink dirs, dedup by `Path.resolve()`.
 
-Shared/source database, внешний venv, общий Git object store и общий PostgreSQL cluster **не** учитываются. `pg_database_size(target_db)` — environment-level logical metric; physical managed PostgreSQL volume показывается только на project cluster card и не суммируется в environment disk total (иначе один shared volume посчитан для каждого worktree).
+Owned copy DB size: `internal/postgres_size.py::database_size_bytes` via `psql -c "SELECT pg_database_size('...')"` (same subprocess pattern as `_verify_database_via_psql`; never Odoo HTTP, never `DatabaseResource` public API, never psycopg). Connection params from the environment generated `odoo.conf` via `StartConfig.from_odoo_config`. Filestore: `validate_filestore_containment` then directory size.
 
-Filesystem scan не следует по symlinks за owned roots, исключает nested component roots и не считает inode/path дважды (дедупликация по realpath). При недоступном owned component `complete=False`.
-
-Storage имеет отдельный bounded cache (15s), отделённый от Odoo CPU/RAM polling и от Docker stats.
+Shared/source database, external venv, shared Git object store and shared cluster volume are excluded. Cluster volume lives only on `ClusterSnapshot.metrics.volume_usage_bytes`. Owned-component failure → that field `None` and `complete=False`. Cache key `environment_id`, TTL 15s.
 
 #### Scenario: Owned venv included
 
@@ -331,35 +423,10 @@ Storage имеет отдельный bounded cache (15s), отделённый 
 
 ### Requirement: `ClusterSnapshot` container identity and resources
 
-`ClusterSnapshot` MUST содержать:
+`ClusterSnapshot` / `ClusterContainer` / `ClusterMetrics` / `ClusterEndpoint` / `ClusterResourceSnapshot` fields are those in Canonical snapshot types. `pid_scope` is `PidScope` StrEnum (not a bare Literal).
 
-- `mode: Literal["external", "compose"]`;
-- `owned: bool`;
-- `state: PostgresClusterState` (existing enum: `unknown|unreachable|starting|healthy|stopped|unhealthy`);
-- `endpoint: ClusterEndpoint | None` (`host: str`, `port: int`) — redacted, loopback-only для compose;
-- `container: ClusterContainer | None`;
-- `metrics: ClusterMetrics | None`;
-- `unavailability_reason: str | None` — stable reason code (`external_not_owned`, `stopped`, `missing`, `docker_unavailable`, `inspect_failed`, `stats_failed`);
-- `sampled_at: datetime | None`.
-
-`ClusterContainer`:
-- `id: str | None` — short container ID (12 hex, redacted prefix);
-- `name: str | None`;
-- `image: str | None`;
-- `pid: int | None` — Docker-reported init PID;
-- `pid_scope: Literal["host", "docker_vm", "unavailable"]` — `host` на native Linux (Docker daemon host PID namespace), `docker_vm` на macOS Docker Desktop/Colima (PID в Linux VM, не macOS PID), `unavailable` для stopped/missing/external. Known limitation: Docker Desktop on Linux также запускает Docker в VM, но detection (`sys.platform`) помечает его как `host`; это edge case issue #11 не требует (issue говорит "host на native Linux"), оставляем `host` с documented limitation — future refinement out of scope.
-
-`ClusterMetrics`:
-- `cpu_percent: float | None` — Docker-reported container CPU percent;
-- `memory_usage_bytes: int | None`;
-- `memory_limit_bytes: int | None`;
-- `volume_usage_bytes: int | None` — managed volume usage, только если Docker предоставляет его без privileged host traversal; иначе `null`;
-- `sampled_at: datetime | None`.
-
-Правила:
-- Compose cluster: container resolved через recorded project provenance + deterministic Compose project name (`odcli_pg_<project-id>`, существующий) + service identity; затем read-only `docker inspect`/`docker stats --no-stream` (не `psutil` — одинаково работает на Linux и Docker VM).
-- External cluster: `mode="external"`, `owned=False`, `endpoint` из source config (redacted), `container=None`, `metrics=None`, `unavailability_reason="external_not_owned"`; SDK не пытается находить или инспектировать произвольный PostgreSQL process.
-- Stopped/missing compose cluster: `container=None`, `metrics=None`, `unavailability_reason="stopped"` (или `"missing"` если контейнер отсутствует даже после `compose ps`).
+Compose container is resolved via `PostgresCluster.from_project(repository_root)` → compose project `odcli_pg_{repo_key}` + service `postgres`, then batch `docker inspect` / `docker stats --no-stream`. External: `resource_snapshot()` returns `None`; collector still emits a `ClusterSnapshot` with `mode="external"`, `owned=False`, `container=None`, `metrics=None`, `unavailability_reason="external_not_owned"`.
+- Stopped vs missing compose: `unavailability_reason="stopped"` iff `PostgresCluster.status() == STOPPED`. `unavailability_reason="missing"` iff `status()` is not `STOPPED` and the `postgres` service container ID cannot be resolved after `compose ps`. Never emit both. `sampled_at`: one tz-aware UTC `datetime.now(UTC)` at collection; copy the same value into `ClusterMetrics.sampled_at`, `ClusterResourceSnapshot.sampled_at`, and `ClusterSnapshot.sampled_at`. If `metrics is None`, all three `sampled_at` are `None`.
 - Docker unavailable: `container=None`, `metrics=None`, `unavailability_reason="docker_unavailable"`.
 - Individual PostgreSQL backend PIDs клиентских соединений не отображаются: они короткоживущие и не представляют identity cluster runtime. Container init PID — identity cluster runtime.
 - Ошибка `docker inspect`/`stats` для одного project не роняет весь snapshot: affected cluster получает `unavailability_reason="inspect_failed"`/`"stats_failed"`, остальные продолжаются.
@@ -444,11 +511,11 @@ Collector MUST разделять кеширование:
 
 Сбор snapshot MUST не падать целиком из-за одной компоненты:
 
-- Ошибка одного environment (Git/storage/psutil/DB size) → affected environment получает partial snapshot (`complete=False`, error field), остальные environments продолжаются.
+- Ошибка одного environment (Git/storage/psutil/DB size) → that environment stays in the snapshot with nested partials (`git.state=orphan`, `storage.complete=False`, `runtime.state=stopped`); no environment-level `error` field. Other environments continue.
 - Ошибка одного cluster (Docker inspect/stats) → affected cluster получает `unavailability_reason`, остальные продолжаются.
 - Ошибка project manifest load → `cluster=None` для этого project, environments продолжаются.
 - Catalog SQLite error → snapshot fails целиком с typed `MonitorError` (это единственная unrecoverable ошибка — без catalog нет project discovery); collector не сваливается в generic `Exception`.
-- `psutil` import error (missing extra) → `EnvironmentMonitor()` construction или first `snapshot()` raises typed `MonitorExtrasMissingError` с actionable install hint (`pip install odoo-instance-sdk[metrics]`); не падает в generic `ImportError`.
+- `psutil` import error (missing extra) on first `snapshot()` (default process provider) → `MonitorExtrasMissingError` with `pip install odoo-instance-sdk[metrics]`. Construction of `EnvironmentMonitor()` succeeds without importing psutil.
 - Docker CLI missing → только affected compose clusters; не global crash (covered above).
 
 Типизированные ошибки в `exceptions.py` (наследники `OdooInstanceSdkError`): `MonitorError` (base), `MonitorExtrasMissingError`. Сообщения redacted (без secrets/absolute paths). Component failures изолируются в snapshot (`complete=False`/`unavailability_reason`), не отдельным exception; catalog SQLite error → `MonitorError`.
@@ -456,7 +523,7 @@ Collector MUST разделять кеширование:
 #### Scenario: One environment failure isolated
 
 - **WHEN** Git CLI fails for one environment's worktree
-- **THEN** that environment's `git` reflects error (`state="orphan"` or null fields with `complete=False`), other environments in snapshot unaffected
+- **THEN** that environment's `git.state == "orphan"`, `ahead`/`behind`/`diff`/`head_sha` are None, `branch == "unknown"`; other environments are unaffected
 
 #### Scenario: Catalog error fails snapshot
 
@@ -496,7 +563,7 @@ Endpoint cluster — loopback-only для compose; для external `host` из s
 
 ### Requirement: `msgspec` typed models, no Pydantic DTO duplication
 
-Snapshot models MUST быть frozen `msgspec.Struct(frozen=True, forbid_unknown_fields=True, kw_only=True)` — reusing принятый в SDK `msgspec`, не дублируются Pydantic DTO. FastAPI использует `msgspec` для JSON encode (через `msgspec.json.encode` или существующий pattern); Pydantic не добавляется как dependency. Все enums (`RuntimeState`, `GitActivityState`) — `enum.StrEnum`.
+Snapshot models MUST быть frozen `msgspec.Struct(frozen=True, forbid_unknown_fields=True, kw_only=True)` — reusing принятый в SDK `msgspec`, не дублируются Pydantic DTO. FastAPI использует `msgspec.json.encode(snapshot)` only; Pydantic не добавляется как dependency. Все enums (`RuntimeState`, `GitActivityState`) — `enum.StrEnum`.
 
 Приложение может использовать collector внутри своего FastAPI/Flask/worker process без зависимости от встроенного FastAPI backend (extra `metrics` достаточно для SDK; `dashboard` только для built-in server).
 
@@ -508,7 +575,7 @@ Snapshot models MUST быть frozen `msgspec.Struct(frozen=True, forbid_unknown
 #### Scenario: FastAPI without Pydantic
 
 - **WHEN** the built-in FastAPI server serialises a snapshot
-- **THEN** it uses `msgspec.json.encode` (or equivalent), not Pydantic; `pydantic` is not a runtime dependency
+- **THEN** it uses `msgspec.json.encode`, not Pydantic; `pydantic` is not a runtime dependency
 
 ### Requirement: No second catalog, no docker-py, no generic provider, no event bus
 

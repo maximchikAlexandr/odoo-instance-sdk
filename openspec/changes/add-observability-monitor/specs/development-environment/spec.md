@@ -11,7 +11,7 @@ OdooClient
 └── environments      # EnvironmentResource
 ```
 
-`EnvironmentResource.list()` остаётся источником environment rows; `EnvironmentMonitor` и `odcli env list`/`monitor` потребляют его (или catalog напрямую read-only) и MUST NOT дублировать project discovery. `EnvironmentResource` не открывает runtime-методы; current-runtime record (см. ниже) — internal catalog table, доступная только для read-only через `BackupCatalog.get_environment_runtime(environment_id)`.
+`EnvironmentResource.list()` остаётся источником environment rows для SDK callers. `EnvironmentMonitor` reads `BackupCatalog.list_environments` / `list_environment_runtimes` directly (via `get_catalog_path()` or injected `catalog_path`) and MUST NOT reimplement catalog schema or scan the filesystem. `odcli env list` / `odcli monitor` consume `EnvironmentMonitor.snapshot()`. `EnvironmentResource` does not grow runtime methods; `environment_runtime` is catalog-internal.
 
 #### Scenario: Three facades
 
@@ -59,7 +59,7 @@ Schema migration v8 → v9 (additive: новая таблица, существ�
 - `upsert_environment_runtime(environment_id, *, root_pid, create_time, started_at, checkout_branch, commit_sha, http_url, http_port, database_name) -> None`;
 - `clear_environment_runtime(environment_id) -> None`.
 
-Collector (`EnvironmentMonitor`) и `odcli env list` (для runtime columns) читают `get_environment_runtime`/`list_environment_runtimes` read-only. Collector MUST NOT писать в `environment_runtime`. Очистка stale records — ответственность `run_foreground` (см. `server-lifecycle` delta) или отдельной reconciliation (out of scope для MVP).
+Collector (`EnvironmentMonitor`) and `odcli env list` (via snapshot) read `get_environment_runtime`/`list_environment_runtimes` read-only. Collector MUST NOT write `environment_runtime`. Stale-row cleanup is `run_foreground` `finally` only (no extra reconciliation in this change).
 
 PID safety: collector считает process живым только при `psutil.Process(pid).create_time() == recorded_create_time` и `psutil.pid_exists(pid)`; несовпадение → `runtime.state="stopped"` (PID reuse). Каталог-запись остаётся, пока `run_foreground`/reconciliation её не очистит.
 

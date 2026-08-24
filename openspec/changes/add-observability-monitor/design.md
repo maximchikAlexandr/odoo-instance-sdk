@@ -45,63 +45,36 @@ Issue #11 требует read-only observability surface поверх сущес
 ```python
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EnvironmentMonitor:
-    catalog_path: Path | None = None              # default get_catalog_path()
-    process_provider: ProcessProvider | None = None  # fake psutil for tests
-    git_provider: GitProvider | None = None        # fake git for tests
-    docker_provider: DockerProvider | None = None  # fake docker inspect/stats
+    catalog_path: Path | None = None
+    process_provider: ProcessProvider | None = None
+    git_provider: GitProvider | None = None
+    docker_provider: DockerProvider | None = None
 ```
 
-Cache TTLs — hardcoded константы (15s для expensive sections, 5s для cluster `status()`); без настраиваемого поля (YAGNI — issue не требует configurable cache). Providers — small internal Protocols для тест-инъекции; не публичные, не generic plugin architecture (единственная реализация default). `EnvironmentMonitor` — единственная public реализация; не оборачивать в ABC/Protocol с одним impl.
+In-memory cache живёт в mutable `dict` field (`field(default_factory=dict, hash=False, compare=False)`); frozen dataclass не мешает мутировать содержимое dict. Cache TTLs — hardcoded константы `EXPENSIVE_TTL_SECONDS = 15.0`, `CLUSTER_STATUS_TTL_SECONDS = 5.0`; без настраиваемого поля.
 
-`snapshot(project_id=None) -> Snapshot` синхронный (psutil/Docker/Git — blocking subprocess); `watch()` — async generator поверх `snapshot()` + `asyncio.sleep`. FastAPI endpoint вызывает `snapshot()` синхронно в handler (sufficient для MVP; async background refresh out of scope).
+Internal test Protocols (не публичные, не generic plugin architecture):
+
+```python
+class ProcessProvider(Protocol):
+    def collect(
+        self, root_pid: int, create_time: float, *, prev_cpu_point: object | None
+    ) -> ProcessTreeResult | None: ...
+
+class GitProvider(Protocol):
+    def collect(self, worktree: Path) -> GitActivity: ...
+
+class DockerProvider(Protocol):
+    def inspect_stats(self, container_ids: tuple[str, ...]) -> dict[str, ClusterResourceSnapshot]: ...
+```
+
+Default `None` → collector использует `internal/process_metrics.py`, `internal/git_activity.py`, `internal/cluster_resources.py`. `EnvironmentMonitor` — единственная public реализация; не оборачивать в ABC/Protocol с одним impl.
+
+`snapshot(project_id: str | None = None) -> Snapshot` синхронный. `watch(interval: float = 2.0, project_id: str | None = None)` — async generator поверх `snapshot()` + `asyncio.sleep(interval)`. FastAPI `GET /api/v1/snapshot` вызывает `snapshot()` синхронно в handler.
 
 ### D2: Snapshot models — frozen `msgspec.Struct`
 
-Все snapshot models в `models.py` (file-organization deferral — см. D16):
-
-```python
-class RuntimeState(enum.StrEnum):
-    STOPPED = "stopped"
-    READY = "ready"
-    NOT_READY = "not_ready"
-
-class GitActivityState(enum.StrEnum):
-    CLEAN = "clean"
-    AHEAD = "ahead"
-    BEHIND = "behind"
-    DIVERGED = "diverged"
-    ORPHAN = "orphan"
-
-class PidScope(enum.StrEnum):
-    HOST = "host"
-    DOCKER_VM = "docker_vm"
-    UNAVAILABLE = "unavailable"
-
-class GitDiff(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    added: int
-    deleted: int
-
-class GitActivity(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True): ...
-class PythonEnvFootprint(msgspec.Struct, ...): ...
-class DatabaseFootprint(msgspec.Struct, ...): ...
-class StorageFootprint(msgspec.Struct, ...): ...
-class ProcessTreeMetrics(msgspec.Struct, ...): ...   # child_pids/process_count
-class RuntimeMetrics(msgspec.Struct, ...): ...        # state/root_pid/cpu_percent/rss_bytes/started_at/http_url/...
-class ClusterContainer(msgspec.Struct, ...): ...     # id/name/image/pid/pid_scope
-class ClusterMetrics(msgspec.Struct, ...): ...        # cpu_percent/memory_*/volume_usage_bytes/sampled_at
-class ClusterEndpoint(msgspec.Struct, ...): ...       # host/port (redacted)
-class ClusterSnapshot(msgspec.Struct, ...): ...      # mode/owned/state/endpoint/container/metrics/unavailability_reason/sampled_at
-class EnvironmentSnapshot(msgspec.Struct, ...): ...  # id/name/branch/short_sha/db_mode/database/runtime/git/storage
-class ProjectSummary(msgspec.Struct, ...): ...       # id/name/display_hint/environment_count/cluster
-class Snapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    schema_version: int
-    generated_at: datetime
-    projects: tuple[ProjectSummary, ...]
-    environments: tuple[EnvironmentSnapshot, ...]
-```
-
-`kw_only=True` + `frozen=True` + `forbid_unknown_fields=True` (как existing `Backup`/`Database`). FastAPI encode через `msgspec.json.encode(snapshot)` (не Pydantic).
-
+Все public snapshot models живут только в `models.py` (не выделять `monitor_models.py`). Полные `field: type` списки — единственный канон; см. `specs/environment-monitor/spec.md` Requirement "Canonical snapshot types". `ProcessTreeResult` — internal dataclass в `internal/process_metrics.py`, не export, не часть snapshot JSON. `EnvironmentSnapshot.project_id: str` связывает flat `environments` с `projects`. FastAPI encode только через `msgspec.json.encode(snapshot)` (не Pydantic).
 ### D3: Catalog current-runtime record (schema v8 → v9)
 
 Новая таблица `environment_runtime` (одна строка на `environment_id`, upsert). Migration v8→v9 additive (`CREATE TABLE IF NOT EXISTS`):
@@ -141,32 +114,40 @@ Manual instance (`instance(base_url=...)`/`from_config()`) — без `environme
 
 ### D5: Odoo process tree metrics (psutil)
 
-`internal/process_metrics.py`:
+`internal/process_metrics.py` — internal only:
 
 ```python
-def collect_process_tree(root_pid: int, create_time: float, *, prev_cpu_point: dict | None) -> ProcessTreeMetrics:
-    proc = psutil.Process(root_pid)
-    if proc.create_time() != create_time:
-        return ProcessTreeMetrics(state="stopped", ...)  # PID reuse
-    children = proc.children(recursive=True)
-    child_pids = tuple(c.pid for c in children)
-    process_count = 1 + len(child_pids)
-    rss = sum(p.memory_info().rss for p in [proc, *children] if p.status() not in ZOMBIE)
-    cpu_percent = sum(p.cpu_percent() for p in [proc, *children])  # requires two samples
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProcessTreeResult:
+    child_pids: tuple[int, ...]
+    process_count: int
+    cpu_percent: float | None
+    rss_bytes: int | None
+
+def collect_process_tree(
+    root_pid: int, create_time: float, *, prev_cpu_point: object | None
+) -> ProcessTreeResult | None:
     ...
 ```
 
-CPU requires two samples с интервалом; first `snapshot()` returns `cpu_percent=None`, subsequent `watch()` iterations produce numeric. Collector хранит prev CPU point в памяти по `(pid, create_time)`. `NoSuchProcess`/`AccessDenied`/`ZombieProcess` изолируются на один environment. `psutil` import ленивый; missing → `MonitorExtrasMissingError` с actionable hint.
+Returns `None` (collector maps to `RuntimeMetrics.state=STOPPED`, all resource fields null, `child_pids=()`, `process_count=0`) when: PID missing, `create_time` mismatch (`!=` exact float), `NoSuchProcess`, `AccessDenied` on the **root** process, or `ZombieProcess` on the root. Child `AccessDenied`/`ZombieProcess`: skip that child, still return root metrics.
+
+CPU: first call with no `prev_cpu_point` MUST set `cpu_percent=None`; collector stores prev CPU point in-memory keyed by `(pid, create_time)`; subsequent `watch()` iterations produce numeric. `cpu_percent(interval=None)` — non-blocking second sample using stored point, no extra sleep.
+
+Readiness (collector, not `wait_ready`/`poll_health`): after a live `ProcessTreeResult`, one `httpx.get(f"{http_url}/web/health?db_server_status=true", timeout=2.0)`; `ready` iff HTTP 200 and JSON `status == "pass"`; timeout/connect/HTTP/JSON error → `not_ready` with process metrics still populated. Budget per environment is that one 2.0s request.
+
+`psutil` import ленивый; missing → `MonitorExtrasMissingError` with `pip install odoo-instance-sdk[metrics]`.
 
 ### D6: Git activity (three-dot diff, Worktrunk semantics)
 
 `internal/git_activity.py`:
 
-- `default_branch` — из project manifest (если есть поле) или fallback `main` (явный, стабильный; не гадается из remote refs).
-- upstream tip если доступен (`git rev-parse --verify <default>@{upstream}`), fallback локальная default branch.
+- `default_branch` is always `"main"`. Do not read `ProjectConfig` (no such field exists) and do not guess from remotes/`origin/HEAD`.
+- Default-branch tip: `git rev-parse --verify main@{upstream}` if that succeeds; else `git rev-parse --verify refs/heads/main`. Git subprocess timeout 10s.
 - `git rev-list --count <merge-base>..<HEAD>` = ahead; `git rev-list --count HEAD..<merge-base>` = behind; merge-base via `git merge-base <default-tip> HEAD`.
-- `git diff --numstat <merge-base>...HEAD` → sum added/deleted text lines; binary files (`-` в numstat) пропускаются.
-- no-common-ancestor → `git merge-base` fails → `state="orphan"`, counts `None`.
+- `git diff --numstat <merge-base>...HEAD` → sum added/deleted text lines; binary files (`-` in numstat) skipped (contribute 0).
+- no-common-ancestor (`git merge-base` exit ≠ 0) → `state="orphan"`, `ahead=behind=diff=None`.
+- Any other Git CLI failure (timeout, not a repo, missing worktree) → same orphan shape: `GitActivity(default_branch="main", head_sha=None, short_sha=None, branch="unknown", ahead=None, behind=None, diff=None, state=ORPHAN)`. `complete` is not a GitActivity field.
 - `state`: `clean` (0/0), `ahead` (>0/0), `behind` (0/>0), `diverged` (>0/>0), `orphan`.
 - Bounded cache по `(worktree_path, HEAD SHA, default-branch SHA)`, TTL 15s.
 
@@ -174,22 +155,23 @@ CPU requires two samples с интервалом; first `snapshot()` returns `cp
 
 `internal/storage_footprint.py`:
 
-- worktree: `du -sb <worktree>` (или stdlib `os.walk` + `Path.stat().st_size`, без следования symlinks за owned roots; дедупликация по realpath).
-- owned venv (`python_environment_owned=true`): size of `python_environment_path`.
-- owned DB (`db_mode="copy"`, journal-owned `target_db`): PostgreSQL logical size via read-only `pg_database_size(target_db)` (через existing `DatabaseResource`/SQL connection, не general cluster/volume); filestore via existing containment checks (`<data_dir>/filestore/<db>`).
-- other files: generated config, dependency lock, local logs/cache/artifacts в environment root, не вошедшие выше.
-- `total_bytes` — сумма; `complete=False` если любой owned component недоступен.
-- Shared/source DB, external venv, shared Git object store, shared cluster volume — исключены.
+- Directory size: run `du -sb <path>` iff `shutil.which("du")` is not None and the subprocess exits 0 with stdout that parses as a single integer (timeout 10s). Otherwise walk with `os.walk(followlinks=False)` + `Path.stat().st_size`, skip symlink directories, dedup by `Path.resolve()`. No third path. On timeout or OSError for an owned component: that field `None`, `complete=False`.
+- owned venv (`python_environment_owned=true`): size of `python_environment_path` via the same directory-size rule.
+- owned DB (`db_mode="copy"`, journal-owned `target_db`): `internal/postgres_size.py::database_size_bytes(*, host, port, user, password, database_name, timeout=10.0) -> int | None` using the same `psql -c` subprocess pattern as `DatabaseResource._verify_database_via_psql` (`PGPASSWORD` in env, never argv; `SELECT pg_database_size('escaped')`; `-t -A`; timeout 10s). Never Odoo HTTP, never `DatabaseResource` public API, never psycopg. Connection params MUST come from the environment generated `odoo.conf` via `StartConfig.from_odoo_config` (`db_host` default `127.0.0.1`, `db_port` default `5432`, `db_user`, `db_password`). Failure → `postgres_bytes=None`, `complete=False`. Filestore via `validate_filestore_containment(data_dir, db_name)` then directory-size on that path.
+- other files: generated config, dependency lock, local logs/cache/artifacts in environment root not counted above.
+- `total_bytes` — sum of known components (0 for missing optional); `complete=False` if any **owned** component is unavailable.
+- Shared/source DB, external venv, shared Git object store, shared cluster volume — excluded.
 - Bounded cache по `environment_id`, TTL 15s.
-
 ### D8: Cluster container identity + resources (Docker inspect/stats)
 
 `PostgresCluster.resource_snapshot() -> ClusterResourceSnapshot | None` — новый public read-only метод на `PostgresCluster`. Per-cluster single-container inspect делегирует в internal `internal/cluster_resources.py` batch helper (не отдельная public abstraction, а batch-оптимизация): helper выполняет batch `docker inspect`/`docker stats --no-stream` для нескольких containers одним call и кеширует результаты по `container_id` (shared между всеми `PostgresCluster` instances одного `EnvironmentMonitor` snapshot pass). `PostgresCluster.resource_snapshot()` для одного кластера (без collector context) вызывает helper с одним container — helper переиспользует existing `ComposeRunner` (`internal/postgres_compose.py`). Это выбранный design, не альтернатива: public surface — `PostgresCluster.resource_snapshot()`; internal batch helper существует и covered/tested через `test_cluster_resources.py`.
 
-- Compose: `docker inspect <container-id>` (через Compose project name + service identity) → container ID/name/image/init PID. PID scope: detect platform (`sys.platform == "darwin"` → `docker_vm` для Docker Desktop/Colima; Linux → `host`; stopped/missing → `unavailable`).
+Collector never passes the monitor opaque id (`project_{repo_key}`) into compose naming. Compose project name stays `odcli_pg_{repo_key}` via `PostgresCluster.from_project(repository_root)` / existing `compose_project_name(_project_id)` where `_project_id` is unprefixed `repo_key`. Service name is `postgres`.
+
+- Compose: `docker inspect <container-id>` (Compose project name + service `postgres`) → container ID/name/image/init PID. PID scope: `sys.platform == "darwin"` → `docker_vm`; else `host`; stopped/missing → `unavailable`.
 - `docker stats --no-stream --format json <id>` → CPU percent, memory usage/limit. Volume usage: `docker inspect` `Mounts` + `docker system df -v` (только если Docker предоставляет без privileged host traversal; иначе `None`).
 - External: `None` (не инспектируется).
-- Stopped/missing compose: `ClusterResourceSnapshot(container=None, metrics=None, unavailability_reason="stopped"/"missing")` (не `None`, чтобы отличить от external).
+- Stopped vs missing compose: `unavailability_reason="stopped"` iff `status() == STOPPED`; `"missing"` iff `status()` is not `STOPPED` and container ID cannot be resolved. `sampled_at` is one UTC datetime copied to metrics/resource/snapshot; all None when metrics is None.
 - Batch: для нескольких managed projects — один `docker stats --no-stream <id1> <id2> ...` / один `docker inspect <id1> <id2> ...`, не один subprocess на карточку. Один container stats failure не блокирует остальные.
 
 ### D9: Bounded caching
@@ -207,36 +189,36 @@ CPU requires two samples с интервалом; first `snapshot()` returns `cp
 
 ### D10: FastAPI server + SPA mount
 
-`internal/serve.py` (или `resources/serve.py`, не публичный):
+`internal/serve.py` only (not public, not `resources/serve.py`):
 
-- FastAPI app, `GET /api/v1/snapshot` (calls `EnvironmentMonitor().snapshot()`, returns `msgspec.json.encode`), `GET /healthz`.
-- Default UI mode: mount собранный React SPA (`StaticFiles` из `odoo_instance_sdk/web/dist/` или equivalent data location).
+- FastAPI app, `GET /api/v1/snapshot` (HTTP 200, `Content-Type: application/json`, body `msgspec.json.encode(snapshot)`), `GET /healthz` (`{"status":"ok"}` 200). Catalog `MonitorError` → HTTP 500 with JSON `{"error": "<redacted>"}`. Query `?project_id=` forwarded to `snapshot(project_id=...)`.
+- Default UI mode: mount `StaticFiles` from `importlib.resources` path `odoo_instance_sdk/web/dist/`.
 - Headless: only API routes, no static mount.
 - `uvicorn.run(app, host, port)`.
-- Import guard: если `fastapi`/`uvicorn` не installed → `MonitorExtrasMissingError`-equivalent, CLI hint.
-- Browser open: `webbrowser.open(url)` если не `--no-open` и не `--headless`.
-- Port auto-select: если default 8069 занят, следующий free loopback в disjoint range `8100–8120` (не `[8069, 8099]`, зарезервированном для environment checkout — monitor не должен отбирать порт у будущего checkout).
+- Import guard: missing `fastapi`/`uvicorn` → CLI `odcli monitor` exits 1 with `pip install odoo-instance-sdk[dashboard]` (do not construct the app).
+- Browser open: `webbrowser.open(url)` unless `--no-open` or `--headless`.
+- Bind default `127.0.0.1`. Port: if `--port` set, bind that port (fail exit 1 if occupied). If `--port` omitted: try `8069`; if occupied, scan `8100` through `8120` inclusive for the first free loopback port; never bind `8070–8099` via auto-select. If `8069` and `8100–8120` are all occupied, exit 1 with a message naming that range.
 
 ### D11: React + Mantine UI
 
-`src/odoo_instance_sdk/web/` — Vite + React + Mantine project. Build output `dist/` shipped in package (sdist + wheel) via `uv_build` data inclusion (`[tool.uv.build-backend]` data config или `package-data`). Одна responsive страница, без router/Redux/query lib:
+`src/odoo_instance_sdk/web/` — Vite + React + Mantine. Build output `dist/` shipped via `uv_build` including `odoo_instance_sdk/web/dist/**` as package data. One responsive page, no router/Redux/query lib:
 
 - project selector (Mantine `Select`): "All projects" + each `ProjectSummary`.
 - cluster card per displayed project (Mantine `Card` + `Badge`): mode/state/container ID+PID+scope/CPU/RAM/volume.
-- one `Card` per `EnvironmentSnapshot`: project, name, branch+short SHA, database, port, lifecycle/runtime badges; Git ahead/behind/`+added/-deleted`; Total disk + breakdown (Worktree/Database/Filestore/Python env/Other); Odoo process root PID + optional worker PIDs + CPU/RAM для живого process tree, `—` для stopped; **Open Odoo** active только при `ready`, открывает `http_url`.
+- one `Card` per `EnvironmentSnapshot`: project, name, branch+short SHA, database, port (`runtime.http_port` if live else `allocated_http_port`), `lifecycle_state` + `runtime.state` badges; Git ahead/behind/`+added/-deleted`; Total disk + breakdown; Odoo process root PID + optional worker PIDs + CPU/RAM for a live tree, `—` for stopped; **Open Odoo** active only when `runtime.state=="ready"`, opens `http_url`.
 - loading, API error, empty-catalog states.
-- polling `fetch('/api/v1/snapshot')` ~раз в 2 секунды.
+- polling `fetch('/api/v1/snapshot')` every 2000 ms (`setInterval(..., 2000)`).
 - Mantine components: `Select`, `SimpleGrid`, `Card`, `Badge`, `Text`, `Button`, `Progress`. No chart dependency, no router, no Redux/query lib.
 
-Build: `npm install && npm run build` (или `pnpm`) в `src/odoo_instance_sdk/web/`; output committed/shipped. CI step (out of code scope; build pipeline) builds assets; `uv build` includes them. Node.js не требуется для установленного пакета.
+Build: `npm ci && npm run build` in `src/odoo_instance_sdk/web/` (commit `package-lock.json`; do not use pnpm/yarn). CI builds assets; `uv build` includes `dist/`. Node.js is not required for the installed package.
 
 ### D12: CLI `env list` grouping + `postgres status` extension + `monitor` command
 
-`internal/cli_env.py::env_list` рефакторится на `EnvironmentMonitor.snapshot()` (или эквивалентный collector helper) для cluster summary + runtime columns; preserves existing `--all`/`--all-projects`/`--json`. `_print_env_table` → grouped output с project header.
+`internal/cli_env.py::env_list` MUST call `EnvironmentMonitor.snapshot()` (no parallel collector helper). `_print_env_table` becomes grouped output with a project header. Flags `--all` / `--all-projects` / `--json` stay.
 
-`cli.py::postgres status` расширяется read-only container fields через `PostgresCluster.resource_snapshot()` (или collector helper); parity с monitor.
+`cli.py::postgres status` MUST call `cluster.status()` and `cluster.resource_snapshot()`, then emit `ClusterSnapshot` fields (no parallel Docker helper).
 
-`cli.py::monitor` — новая команда (замена planned `dashboard`), `--headless`/`--host`/`--port`/`--no-open`, запускает FastAPI через `internal/serve.py`. Import guard для `dashboard` extra.
+`cli.py::monitor` — `--headless`/`--host`/`--port`/`--no-open`, starts FastAPI via `internal/serve.py`. Import guard for `dashboard` extra.
 
 ### D13: Optional extras + packaging
 
@@ -248,7 +230,7 @@ metrics = ["psutil>=5.9,<7"]
 dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30,<1.0"]
 ```
 
-Built React assets включаются в package via `uv_build` data inclusion (`[tool.uv.build-backend]` data config). Coverage regexs: добавить `monitor` regex (`odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|serve)\\.py)$`) + thresholds (80/70, новый код).
+Built React assets включаются в package via `uv_build` including `src/odoo_instance_sdk/web/dist/**`. Coverage regexs: добавить `monitor` regex (`odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)$`) + thresholds (80 line / 70 branch).
 
 ### D14: Typed errors
 
@@ -266,7 +248,7 @@ Component failures изолируются в snapshot (`complete=False`/`unavail
 - `tests/unit/test_monitor_snapshot.py`: multi-project discovery, stopped/running Odoo, PID reuse, compose/external/stopped cluster, Linux/VM PID scope, Docker stats errors, Git divergence, storage ownership, component failure isolation, redaction.
 - `tests/unit/test_process_metrics.py`: fake `psutil.Process`, CPU two-sample, `AccessDenied` isolation.
 - `tests/unit/test_git_activity.py`: clean/ahead/behind/diverged/orphan, binary files, stale-local-main fallback.
-- `tests/unit/test_storage_footprint.py`: owned/reused venv, shared/copy DB, symlinks, incomplete.
+- `tests/unit/test_storage_footprint.py`: owned/reused venv, shared/copy DB, `du` vs walk fallback, `postgres_size` psql failure → complete=False, symlinks, incomplete.
 - `tests/unit/test_cluster_resources.py`: fake Docker inspect/stats, PID scope, batch, external/stopped.
 - `tests/unit/test_serve.py`: FastAPI routes (`/api/v1/snapshot`, `/healthz`), project filter, headless vs UI, missing extra guard.
 - `tests/unit/test_cli_monitor.py`: `odcli monitor --headless`, port auto-select, missing extra hint.
@@ -278,12 +260,14 @@ Component failures изолируются в snapshot (`complete=False`/`unavail
 
 Frontend production TypeScript build — `npm run build` в CI (no UI test framework in MVP).
 
-### D16: Resolved placement/implementation choices
+### D16: Resolved placement
 
-- `EnvironmentMonitor` живёт в `resources/monitor.py` (public primitive, как `resources/postgres.py`), re-exported из `__init__.py` (не `internal/`).
-- Snapshot models живут в `models.py` (следуя существующему pattern — все public typed models там). Если `models.py` станет слишком большим, implementer MAY выделить `monitor_models.py` рядом, re-exported из `__init__.py` — это pure file-organization refactor, не behavioral change; spec не диктует имя файла.
-- Filesystem size: `du -sb <path>` (native, fast) где доступен; fallback pure-Python `os.walk` + `Path.stat().st_size` на системах без `du`. Spec mandate: no symlink-following за owned roots, realpath dedup, no double counting.
-- `pg_database_size(target_db)`: через existing `DatabaseResource` read-only query (без добавления `psycopg`). Если existing `DatabaseResource` не exposes read-only size query, implementer добавляет minimal read-only helper (через existing SQL connection path, не новую dependency); `psql -c` subprocess — last-resort fallback, не primary.
+- `EnvironmentMonitor` — `resources/monitor.py`, re-exported from `__init__.py`.
+- Public snapshot models — `models.py` only. Do not add `monitor_models.py`.
+- FastAPI app — `internal/serve.py` only.
+- Directory size — D7 (`du -sb` then `os.walk`).
+- DB size — `internal/postgres_size.py` via `psql` (D7).
+- Monitor opaque id — `project_{repo_key(...)}`. Compose/PostgresCluster id — unprefixed `repo_key` (D8).
 
 ## Risks / Trade-offs
 

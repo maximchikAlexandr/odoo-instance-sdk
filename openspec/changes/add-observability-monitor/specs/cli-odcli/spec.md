@@ -19,27 +19,41 @@ Project comerta
 
 Для external/stopped/missing cluster — явные `external`/`stopped`/`—` в соответствующих полях (без падения).
 
-Environment row:
+Exact environment-row columns, left to right (space-separated, compact truncation, no wrap):
+
+`NAME  BRANCH  STATE  RUNTIME  OBSERVED  ODOO_PID  CPU  RAM  GIT_AHEAD  GIT_DIFF  SIZE  DB_MODE  DATABASE  PORT  ARTIFACTS`
 
 ```text
-  Environment       Branch          State    Odoo PID       CPU    RAM       main↕    main…±      Size
-  comerta-CMRT-376  feat/CMRT-376   ready    43120 (+2)    37.4%  1.2 GiB   ↑4 ↓1    +234 -24    3.2 GiB
-  comerta-main      main            stopped  —              —      —         —         —           2.6 GiB
+  NAME              BRANCH          STATE  RUNTIME   OBSERVED      ODOO_PID     CPU    RAM      GIT_AHEAD  GIT_DIFF   SIZE     DB_MODE  DATABASE     PORT  ARTIFACTS
+  comerta-CMRT-376  feat/CMRT-376   ready  ready     port-occupied 43120 (+2)   37.4%  1.2 GiB  ↑4 ↓1      +234 -24   3.2 GiB  copy     comerta_376  8070  ok
+  comerta-main      main            ready  stopped   —             —            —      —        ↑0 ↓0      +0 -0      2.6 GiB  shared   comerta      8069  ok
 ```
 
-- environment row показывает Odoo root PID и количество child PIDs (`43120 (+2)` = root + 2 children), но не повторяет PostgreSQL PID/resources (те только в project header);
-- сохраняются `main↕` (ahead/behind) и `main…±` (added/deleted) Git columns и одна environment **Size** column (total disk);
-- при узком terminal действуют существующие правила compact output (truncate columns, не wrap);
-- `OBSERVED` column (port-free/occupied) остаётся для `ready` environments; для stopped — `—`;
-- `failed`/`cleanup_failed` видны (как раньше); `removed` скрыты (как раньше), `--all` их включает.
+- `PORT` = `runtime.http_port` when `RUNTIME` is `ready` or `not_ready`, else `allocated_http_port` (or `—` if both None);
+- `STATE` = `lifecycle_state` from snapshot when the row is in snapshot, else catalog `state` for `--all` removed rows;
+- `RUNTIME` = `RuntimeState` (`stopped`/`ready`/`not_ready`);
+- `OBSERVED` = `port-free`/`port-occupied` when catalog `STATE==ready` using `socket.bind((http_interface, allocated_http_port))`, else `—`;
+- `ODOO_PID` = `{root} (+{n})` where n = `len(child_pids)`, or `—` when `RUNTIME=stopped`;
+- `GIT_AHEAD` = `↑{ahead} ↓{behind}` or `—` when orphan;
+- `GIT_DIFF` = `+{added} -{deleted}` or `—` when orphan;
+- `SIZE` = environment `storage.total_bytes` humanized; prefix `>=` when `complete=False`;
+- `ARTIFACTS` = existing reconciliation compact list (`ok` or comma-separated missing names: `worktree,registered,config,python,python-contained,lock,backup`);
+- Drop from human output: `ID`, `PYTHON_MODE`, `LAST_USED`, `WORKTREE` (absolute paths). IDs remain in `--json` snapshot payload as `environments[].id`.
+- PostgreSQL PID/resources appear only on the project header, never on environment rows.
+- `failed`/`cleanup_failed` remain visible; `removed` hidden unless `--all`.
 
-Cluster summary и environment rows берутся из одного `EnvironmentMonitor.snapshot()` (или эквивалентного collector helper), чтобы CLI не дублировал расчёт metrics. Ошибка Docker/psutil/Git для одного project/environment не роняет весь list; affected project/environment показывает partial с индикатором ошибки.
+Cluster summary and metric columns for non-removed rows MUST come from `EnvironmentMonitor.snapshot()` (no second collector). `--all` is human-only: enumerate `BackupCatalog.list_environments(include_removed=True)`, merge snapshot metrics by `environment.id`. Removed rows (absent from snapshot) print `RUNTIME=—`, `ODOO_PID=—`, `CPU=—`, `RAM=—`, `GIT_AHEAD=—`, `GIT_DIFF=—`, `SIZE=—`, `OBSERVED=—`; `STATE=removed`; `PORT` from generated config if readable else `—`; `ARTIFACTS` from reconciliation. `--json` always wraps non-removed `Snapshot` only; `--all` MUST NOT change the JSON payload.
 
-`--json` использует тот же top-level `projects[].cluster` и `environments[].runtime` contract, что Python SDK/FastAPI monitor snapshot (JSON envelope v1 оборачивает `Snapshot` в `result`/`data`; envelope shape CLI-specific, payload contract — общий с monitor). `schema_version` snapshot внутри envelope — `1`.
+`--json` wraps that `Snapshot` in CLI envelope v1 `result`/`data` (`command="env.list"`). `schema_version` inside the snapshot is `1`.
 
 Existing `--all` (include removed) и `--all-projects` flags сохраняются. Default `env list` без project context работает как `--all-projects`.
 
-Существующая quick reconciliation (worktree/config/Python/lock/backup existence, `OBSERVED` port state) MUST сохраняться — `env list` выполняет её в дополнение к потреблению `EnvironmentMonitor.snapshot()` (snapshot даёт cluster/runtime/Git/Size; reconciliation даёт per-artifact existence indicators и `OBSERVED` port probe, которые не входят в snapshot contract). `OBSERVED` вычисляется CLI через существующий `socket.bind((http_interface, http_port))` (не collector); для stopped/non-ready — `—`. Reconciliation индикаторы отображаются как и раньше (existing compact artifacts column или эквивалент). Ошибка одной компоненты reconciliation не роняет row.
+Reconciliation (`ARTIFACTS`) MUST still run in the CLI after `snapshot()`: worktree/config/Python/lock/backup existence using the existing `_reconcile_environment` checks. `OBSERVED` MUST use existing `socket.bind((http_interface, http_port))`. One reconciliation failure MUST NOT drop the row (`ARTIFACTS` lists the failed check).
+
+#### Scenario: --all human includes removed, JSON does not
+
+- **WHEN** `odcli env list --all` prints human table and `odcli env list --json --all` emits JSON
+- **THEN** human table includes `STATE=removed` rows; JSON `result.environments` contains only non-removed snapshot rows
 
 #### Scenario: Default hides removed
 
@@ -54,7 +68,7 @@ Existing `--all` (include removed) и `--all-projects` flags сохраняют�
 #### Scenario: Stopped environment row
 
 - **WHEN** an environment has no running Odoo
-- **THEN** its row shows `State=stopped`, `Odoo PID=—`, `CPU=—`, `RAM=—`, Git/Size still populated, `OBSERVED=—`
+- **THEN** its row shows `RUNTIME=stopped`, `ODOO_PID=—`, `CPU=—`, `RAM=—`, Git/Size still populated, `OBSERVED=—`; `STATE` remains the catalog lifecycle value
 
 #### Scenario: External cluster header
 
@@ -116,7 +130,14 @@ odcli postgres status [--json]
 
 Human и `--json` значения MUST совпадать с project cluster snapshot из `odcli monitor` / `EnvironmentMonitor` (один collector, parity). `--json`: JSON envelope v1 с `result` содержащим `state`, `mode`, `owned`, `endpoint` (redacted) + новые container/resource fields.
 
-`postgres status` переиспользует `PostgresCluster.resource_snapshot()` (или эквивалентный collector helper) — CLI не дублирует Docker inspect/stats расчёт. Ошибка Docker для одного project (multi-project case) не роняет status; affected project получает `unavailability_reason`.
+`postgres status` MUST call both `cluster.status()` and `cluster.resource_snapshot()`, then emit a `ClusterSnapshot`-shaped object:
+
+- `mode` / `owned` / `endpoint` from `PostgresCluster` properties;
+- `state` from `status()`;
+- `container` / `metrics` / `unavailability_reason` / `sampled_at` from `resource_snapshot()` when not `None`;
+- when `resource_snapshot()` is `None` (external): `container=None`, `metrics=None`, `unavailability_reason="external_not_owned"`, `sampled_at=None`.
+
+Do not invent a third Docker inspect path. Docker error MUST NOT crash the command.
 
 #### Scenario: Status inside initialized project
 
@@ -161,11 +182,11 @@ odcli monitor [--headless] [--host HOST] [--port PORT] [--no-open]
 - `GET /api/v1/snapshot` — возвращает один `Snapshot` JSON (контракт `EnvironmentMonitor.snapshot()`, `schema_version=1`); supports optional `?project_id=<opaque>` query;
 - `GET /healthz` — возвращает `{"status":"ok"}` HTTP 200 (liveness, без cluster/catalog probe).
 
-Default UI mode (без `--headless`): обслуживает `/api/v1/snapshot`, `/healthz` и собранный React SPA (static assets); default bind `127.0.0.1:8069` (loopback); `--host` переопределяет; `--port` переопределяет (default auto-select free loopback port в disjoint range `8100–8120` если 8069 занят, чтобы не конфликтовать с environment port allocation range `[8069, 8099]` — monitor не должен отбирать порт у будущего environment checkout); по умолчанию открывает браузер на `http://<host>:<port>/`; `--no-open` suppress.
+Default UI mode (без `--headless`): serves `/api/v1/snapshot`, `/healthz`, and the React SPA. Default bind `127.0.0.1`. `--host` overrides bind address. `--port` binds that exact port (exit 1 if occupied). Without `--port`: try `8069`, then scan `8100`–`8120` inclusive; never auto-select `8070`–`8099`. If all of those ports are occupied, exit 1. Default opens `http://<host>:<port>/`; `--no-open` suppresses.
 
 Headless mode (`--headless`): обслуживает только versioned JSON API (`/api/v1/snapshot`, `/healthz`); static assets НЕ монтируются, браузер НЕ открывается; предназначен для server-to-server интеграции или размещения за внешним control-plane proxy. CORS, authentication и TLS не изобретать внутри MVP; non-loopback bind (`--host 0.0.0.0` или non-loopback) — explicit opt-in (команда требует `--host` явно для non-loopback; default loopback не требует подтверждения); production boundary обеспечивает вызывающая система/reverse proxy. API не возвращает credentials, environment variables, command line, secret paths, absolute local paths или raw Docker inspect payload.
 
-Обычный `GET /api/v1/snapshot` достаточен для polling; frontend polls ~раз в 2 секунды. SSE/WebSocket и persistent sampler не добавляются. Server переиспользует `EnvironmentMonitor.snapshot()` (один collector); FastAPI только сериализует typed snapshot через `msgspec.json.encode`.
+Обычный `GET /api/v1/snapshot` достаточен для polling; frontend polls every 2000 ms.
 
 Требуемый extra: `dashboard` (FastAPI + Uvicorn + `metrics`). Без extra команда завершается с короткой actionable install hint (`pip install odoo-instance-sdk[dashboard]`), exit 1. `odcli monitor` не добавляется, если extra `dashboard` не установлен (runtime import guard).
 
@@ -207,7 +228,7 @@ Headless mode (`--headless`): обслуживает только versioned JSON
 #### Scenario: Port auto-select when 8069 occupied
 
 - **WHEN** `odcli monitor` runs without `--port` and `127.0.0.1:8069` is already in use
-- **THEN** server binds the next free loopback port in disjoint range `8100–8120` (not `[8069, 8099]`, which is reserved for environment checkout) and the opened browser URL uses the selected port
+- **THEN** server binds the first free loopback port in `8100–8120` inclusive and the opened browser URL uses that port
 
 #### Scenario: No secrets in API response
 

@@ -20,7 +20,7 @@ cluster.approve_image(digest, timeout=60.0)
 snapshot = cluster.resource_snapshot()  # NEW: read-only container identity + metrics
 ```
 
-`resolve_image_digest` and `approve_image` are public compose-only consent operations; external mode raises `PostgresClusterNotOwnedError`. `status()` remains read-only and intentionally does not acquire the lifecycle lock; `ensure_running()` and `stop()` acquire the canonical lock for all state-changing transitions. `resource_snapshot()` (new) is read-only, does not acquire the lifecycle lock, does not start/stop the cluster, и возвращает typed `ClusterResourceSnapshot` (container identity + resource metrics) или `None` для external cluster. `EnvironmentMonitor` потребляет `PostgresCluster.resource_snapshot()` напрямую для `ClusterSnapshot` (collector вызывает per-cluster `resource_snapshot()`; batch-вызовы Docker inspect/stats для нескольких projects делегирует в internal `internal/cluster_resources.py` helper, см. design D8 — helper не отдельная public abstraction, а batch-оптимизация под cap одного `docker stats` call).
+`resolve_image_digest` and `approve_image` are public compose-only consent operations; external mode raises `PostgresClusterNotOwnedError`. `status()` remains read-only and intentionally does not acquire the lifecycle lock; `ensure_running()` and `stop()` acquire the canonical lock for all state-changing transitions. `resource_snapshot()` (new) is read-only, does not acquire the lifecycle lock, does not start/stop the cluster, и возвращает typed `ClusterResourceSnapshot` или `None` для external cluster. `EnvironmentMonitor` потребляет `PostgresCluster.resource_snapshot()` напрямую. Collector MUST call `PostgresCluster.from_project(repository_root)` so compose naming stays `odcli_pg_{repo_key}` (unprefixed). Batch `docker inspect`/`stats` for several projects goes through `internal/cluster_resources.py` (not a public abstraction).
 
 `mode` и `owned` MUST быть read-only properties. `mode: Literal["external", "compose"]`. `owned` — `True` iff `mode == "compose"`.
 
@@ -80,20 +80,20 @@ snapshot = cluster.resource_snapshot()  # NEW: read-only container identity + me
 
 - быть read-only: не запускать/останавливать cluster, не вызывать `compose up`/`stop`, не создавать файлы, не acquire lifecycle lock;
 - для `external` — возвращать `None` (external cluster не инспектируется SDK);
-- для `compose` — через read-only `docker inspect`/`docker stats --no-stream` (переиспользует existing Compose runner / `subprocess`, не docker-py) разрешать container через recorded project provenance + deterministic Compose project name (`odcli_pg_<project-id>`) + service identity, и возвращать:
+- для `compose` — через read-only `docker inspect`/`docker stats --no-stream` (existing Compose runner / `subprocess`, не docker-py) resolve container via `compose_project_name(repo_key)` + service `postgres`, и возвращать:
   - container ID (12 hex short), name, image;
-  - Docker-reported init PID + PID scope (`host` на native Linux, `docker_vm` на macOS Docker Desktop/Colima, `unavailable` для stopped/missing). Known limitation: Docker Desktop on Linux также использует VM, но помечается `host` (issue #11 требует только "host на native Linux"; refinement out of scope);
-  - container CPU percent, memory usage/limit bytes, optional managed volume usage bytes (только если Docker предоставляет без privileged host traversal);
-  - sampled-at timestamp;
-  - component-local error/availability state (`unavailability_reason`: `stopped`/`missing`/`docker_unavailable`/`inspect_failed`/`stats_failed`);
-- для stopped/missing compose cluster — возвращать `ClusterResourceSnapshot` с `container=None`, `metrics=None` и `unavailability_reason="stopped"`/`"missing"` (не `None`, чтобы отличить от external);
-- не падать при transient Docker errors (возвращает snapshot с `unavailability_reason`);
-- не логировать пароль и не возвращать raw Docker inspect payload (только redacted fields выше);
-- не отображать individual PostgreSQL backend PIDs клиентских соединений (короткоживущие, не identity cluster runtime); container init PID — identity.
+  - Docker-reported init PID + `PidScope` (`host` on native Linux, `docker_vm` on macOS, `unavailable` when stopped/missing). Docker Desktop on Linux is reported as `host` (`sys.platform`); that limitation is accepted.
+  - container CPU percent, memory usage/limit bytes, optional managed volume usage bytes (from `docker inspect` Mounts named volume + `docker system df -v` JSON; if the command fails or the volume is absent → `None`; no host bind-mount traversal);
+  - `sampled_at` (one UTC datetime copied to `ClusterMetrics.sampled_at`; both None when metrics is None);
+  - `unavailability_reason="stopped"` iff `status() == STOPPED`; `"missing"` iff `status()` is not `STOPPED` and the `postgres` container ID cannot be resolved after `compose ps`; also `docker_unavailable` / `inspect_failed` / `stats_failed`;
+- для stopped/missing compose — `ClusterResourceSnapshot` with `container=None`, `metrics=None` and the reason above (не `None`);
+- не падать при transient Docker errors;
+- не логировать пароль и не возвращать raw Docker inspect payload;
+- не отображать individual PostgreSQL backend PIDs; container init PID only.
 
-Тип `ClusterResourceSnapshot` — frozen `msgspec.Struct`, переиспользуется `EnvironmentMonitor` для `ClusterSnapshot` (collector мапит `ClusterResourceSnapshot` + `status()` + endpoint в `ClusterSnapshot`).
+`ClusterResourceSnapshot` fields: `container: ClusterContainer | None`, `metrics: ClusterMetrics | None`, `unavailability_reason: str | None`, `sampled_at: datetime | None`. Collector maps this plus `status()` plus endpoint into `ClusterSnapshot`.
 
-`resource_snapshot()` MAY использовать bounded internal cache (например 5s для `status` + один `docker stats --no-stream` call per snapshot), но collector управляет собственным bounded cache по `container_id`; `PostgresCluster.resource_snapshot()` сам по себе не кеширует между вызовами (тонкая read-only операция).
+`resource_snapshot()` MUST NOT cache between calls. `EnvironmentMonitor` owns the 15s inspect/stats cache and the 5s `status()` cache.
 
 #### Scenario: External resource_snapshot returns None
 
@@ -115,7 +115,10 @@ snapshot = cluster.resource_snapshot()  # NEW: read-only container identity + me
 - **WHEN** `resource_snapshot()` runs on macOS Docker Desktop/Colima
 - **THEN** `container.pid_scope == "docker_vm"`, `container.pid` is a Linux-VM PID (not a macOS PID)
 
-#### Scenario: Stopped compose returns reason
+#### Scenario: Missing compose container
+
+- **WHEN** `resource_snapshot()` runs on compose mode, `status()` is not `STOPPED`, and `compose ps` does not yield a `postgres` container ID
+- **THEN** returns `ClusterResourceSnapshot` with `container=None`, `metrics=None`, `unavailability_reason="missing"`
 
 - **WHEN** `cluster.resource_snapshot()` on a stopped compose cluster
 - **THEN** returns `ClusterResourceSnapshot` with `container=None`, `metrics=None`, `unavailability_reason="stopped"` (not `None`)

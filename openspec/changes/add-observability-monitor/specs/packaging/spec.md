@@ -14,7 +14,7 @@ dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30
 
 - `metrics` — `psutil` + Python collector + typed snapshot models; НЕ включает FastAPI/Uvicorn; приложение может использовать `EnvironmentMonitor` внутри своего процесса без зависимости от встроенного backend.
 - `dashboard` — `metrics` + FastAPI + Uvicorn; требуется для `odcli monitor` (UI и headless).
-- React/Mantine/Vite — build-time только (через `npm`/`pnpm` в `src/odoo_instance_sdk/web/`); готовые static assets (собранный SPA) включаются в package (sdist + wheel) через `uv_build` data inclusion; Node.js не требуется для установленного UI/headless/SDK режима.
+- React/Mantine/Vite — build-time only via `npm ci && npm run build` in `src/odoo_instance_sdk/web/` (`package-lock.json` committed; do not use pnpm or yarn); built SPA assets ship in sdist + wheel; Node.js is not required for the installed package.
 - container inspection переиспользует установленный Docker CLI/Compose runner из `PostgresCluster`; docker-py не добавляется.
 - Команда без требуемого extra (например `EnvironmentMonitor()` без `metrics`, или `odcli monitor` без `dashboard`) завершается с короткой actionable install hint, exit 1 (для CLI) или typed `MonitorExtrasMissingError` (для SDK).
 
@@ -38,12 +38,12 @@ dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30
 #### Scenario: No psutil in core install
 
 - **WHEN** `uv add odoo-instance-sdk` (no extras) is run in another project
-- **THEN** `psutil` is NOT installed; `EnvironmentMonitor()` raises `MonitorExtrasMissingError` with install hint
+- **THEN** `psutil` is NOT installed; `EnvironmentMonitor().snapshot()` raises `MonitorExtrasMissingError` with install hint
 
 #### Scenario: Built assets included without Node.js
 
 - **WHEN** the installed package is inspected after `pip install odoo-instance-sdk[dashboard]`
-- **THEN** the React SPA static assets are present under `odoo_instance_sdk/web/` (or equivalent data location); no Node.js required to serve `odcli monitor`
+- **THEN** the React SPA static assets are present under `odoo_instance_sdk/web/dist/`; no Node.js required to serve `odcli monitor`
 
 #### Scenario: SDK mode without FastAPI
 
