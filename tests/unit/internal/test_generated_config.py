@@ -184,3 +184,44 @@ class TestGenerateConfig:
         )
         gen = _read_config(dest)
         assert gen["http_interface"] == "127.0.0.1"
+
+    def test_source_logfile_rewritten_to_env_owned_path(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        src = tmp_path / "odoo.conf"
+        _write_source_config(src, logfile="/tmp/shared.log")
+        dest = tmp_path / "env" / "odoo.conf"
+        generate_config(
+            src,
+            dest,
+            repo_root=repo,
+            worktree=worktree,
+            http_interface="127.0.0.1",
+            http_port=8070,
+            db_name="mydb",
+        )
+        gen = _read_config(dest)
+        assert gen["logfile"] == str((dest.parent / "odoo.log").resolve())
+        assert not (dest.parent / "odoo.log").exists()
+        assert _read_config(src)["logfile"] == "/tmp/shared.log"
+
+    def test_absent_logfile_preserved(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        src = tmp_path / "odoo.conf"
+        _write_source_config(src, db_host="localhost")
+        dest = tmp_path / "generated.conf"
+        generate_config(
+            src,
+            dest,
+            repo_root=repo,
+            worktree=worktree,
+            http_interface="127.0.0.1",
+            http_port=8070,
+            db_name="mydb",
+        )
+        assert "logfile" not in _read_config(dest)

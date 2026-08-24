@@ -21,7 +21,7 @@ from odoo_instance_sdk.models import (
     StartConfig,
 )
 
-_SENSITIVE_FIELDS = frozenset({"db_password", "admin_passwd", "config_path"})
+_SENSITIVE_FIELDS = frozenset({"db_password", "admin_passwd", "config_path", "logfile"})
 
 
 def _cli_flag(field_name: str) -> str:

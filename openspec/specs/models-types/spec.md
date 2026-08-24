@@ -25,7 +25,7 @@ Public data types, dataclasses, msgspec models, and SDK errors.
 - `BackupEvent` — frozen;
 - `BackupValidationResult` — frozen;
 - `BackupDeletionResult` — frozen;
-- `StartConfig` — с `forbid_unknown_fields=True`, без изменений к полям; метакласс `_StructMeta` и helper `_matches` удаляются как последний источник `Any` и `type: ignore` в production code;
+- `StartConfig` — с `forbid_unknown_fields=True` и полем `logfile: str | None`; метакласс `_StructMeta` и helper `_matches` удаляются как последний источник `Any` и `type: ignore` в production code;
 - существующие модели `CommandResult`, `OdooProcess`, `ProcessStatus`, `ReadinessResult`, `DropResult` — без изменений;
 - `RestoreResult` — поле `source` меняет тип с удалённого `BackupArtifact` на `Backup`;
 - внутренних DTO ответов Odoo HTTP API.
@@ -189,6 +189,22 @@ f"configured_database_names={self.configured_database_names!r})"
 
 - **WHEN** `from_config()` строит `StartConfig(db_host="localhost", db_port=5432, db_user="odoo", db_password="secret")`
 - **THEN** `InstanceConfig` получает те же значения: `db_host="localhost"`, `db_port=5432`, `db_user="odoo", db_password="secret"`
+
+### Requirement: `StartConfig` preserves `logfile`
+
+`StartConfig` MUST включать `logfile: str | None = None`. `StartConfig.from_odoo_config(path)` MUST читать option `logfile` из odoo.conf (empty → `None`).
+
+`_build_cli_args()` MUST NOT добавлять `--logfile`. Log destination MUST оставаться только в bound config file.
+
+#### Scenario: logfile preserved from config
+
+- **WHEN** `StartConfig.from_odoo_config(path)` читает `logfile = /tmp/odoo.log`
+- **THEN** `StartConfig.logfile == "/tmp/odoo.log"`
+
+#### Scenario: No second log destination in argv
+
+- **WHEN** `_build_cli_args()` builds argv for a `StartConfig` with `logfile` and `config_path` set
+- **THEN** argv contains `--config` once and does not contain `--logfile`
 
 ### Requirement: `StartConfig.from_odoo_config(path)` records actual path
 

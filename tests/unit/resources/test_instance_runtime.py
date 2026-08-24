@@ -210,6 +210,17 @@ class TestBuildCliArgsSingleConfig:
         config_indices = [i for i, a in enumerate(args) if a == "--config"]
         assert len(config_indices) == 1
 
+    def test_logfile_not_emitted_as_argv(self, tmp_path: Path) -> None:
+        cfg = StartConfig(
+            http_port=8069,
+            http_interface="127.0.0.1",
+            config_path=str(tmp_path / "odoo.conf"),
+            logfile=str(tmp_path / "odoo.log"),
+        )
+        args = _build_cli_args(cfg)
+        assert "--logfile" not in args
+        assert args.count("--config") == 1
+
     def test_no_secret_config_when_config_path_set(self, tmp_path: Path) -> None:
         cfg = StartConfig(
             http_port=8069,

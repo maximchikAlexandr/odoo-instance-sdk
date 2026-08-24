@@ -314,7 +314,8 @@ Worktree MUST храниться в пользовательском data direct
 - `db_name` становится source DB в `shared` mode и target DB в `copy` mode;
 - `dbfilter` ограничивается выбранной БД;
 - DB connection settings, `admin_passwd` и `data_dir` сохраняются;
-- исходные logfile/stdout semantics сохраняются: CLI не добавляет собственный log capture или tee.
+- если source config содержит непустой `logfile`, generated config MUST переписать его в environment-owned абсолютный path рядом с generated conf (`<env-root>/odoo.log`); если `logfile` отсутствует или пуст — поведение сохраняется (ключ не добавляется);
+- CLI не добавляет собственный log capture или tee и MUST NOT создавать сам log file.
 
 Для MVP достаточно stdlib `configparser`, `pathlib`, `shutil`, `tempfile` и `os.replace`. Комментарии generated copy могут не сохраняться; неизвестные keys и values MUST сохраняться.
 
@@ -322,6 +323,16 @@ Worktree MUST храниться в пользовательском data direct
 
 - **WHEN** generated config записывается
 - **THEN** atomic write (`os.replace`), права `0600`, исходный config не изменяется
+
+#### Scenario: Source logfile rewritten to env-owned path
+
+- **WHEN** source `odoo.conf` contains `logfile = /tmp/shared.log`
+- **THEN** generated config has an absolute `logfile` under the environment root and the source file is unchanged; the log file itself is not created
+
+#### Scenario: Absent logfile preserved
+
+- **WHEN** source `odoo.conf` has no `logfile`
+- **THEN** generated config also has no `logfile`
 
 #### Scenario: Repo-local addons rebased
 

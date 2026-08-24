@@ -90,7 +90,10 @@ def test_init_json_success_has_stable_result_and_provenance(
     assert envelope["result"] == envelope["data"]
 
 
-@pytest.mark.parametrize("command, method", [("run", "run_foreground"), ("shell", "shell")])
+@pytest.mark.parametrize(
+    "command, method",
+    [("run", "run_foreground"), ("shell", "shell"), ("logs", "iter_logs")],
+)
 def test_run_and_shell_sanitize_runtime_exception(command: str, method: str) -> None:
     runner = CliRunner()
     instance = MagicMock()

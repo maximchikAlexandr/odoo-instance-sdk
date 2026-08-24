@@ -171,6 +171,11 @@ class TestStartConfigFromOdooConfig:
         sc = StartConfig.from_odoo_config(path)
         assert sc.log_level == "info"
 
+    def test_logfile_preserved(self, tmp_path: Path) -> None:
+        path = _write_config("[options]\nlogfile = /tmp/odoo.log\n", tmp_path)
+        sc = StartConfig.from_odoo_config(path)
+        assert sc.logfile == "/tmp/odoo.log"
+
     def test_dev_mode_all_stays_string(self, tmp_path: Path) -> None:
         path = _write_config("[options]\ndev_mode = all\n", tmp_path)
         sc = StartConfig.from_odoo_config(path)

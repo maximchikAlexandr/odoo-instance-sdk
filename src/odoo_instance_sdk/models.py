@@ -131,6 +131,7 @@ class StartConfig(msgspec.Struct, forbid_unknown_fields=True):
     max_cron_threads: int | None = None
     log_level: Literal["debug", "info", "warning", "error", "critical", "notset"] | None = None
     log_handler: str | None = None
+    logfile: str | None = None
     dev_mode: Literal["all"] | list[str] | None = None
     db_host: str | None = None
     db_port: int | None = None
@@ -197,6 +198,7 @@ class StartConfig(msgspec.Struct, forbid_unknown_fields=True):
                 _get("log_level"),
             ),
             log_handler=_get("log_handler"),
+            logfile=_get("logfile"),
             dev_mode=_dev_mode(),
             db_host=_get("db_host"),
             db_port=_int("db_port"),

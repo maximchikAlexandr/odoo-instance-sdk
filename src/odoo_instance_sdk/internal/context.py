@@ -224,7 +224,13 @@ def _verify_env_runtime(env_obj: DevelopmentEnvironment) -> None:
 def ready_instance(ctx: click.Context) -> tuple[OdooClient, DevelopmentEnvironment, OdooInstance]:
     """Resolve a ready environment from Click context and return a live instance."""
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
+    raw_project = ctx.obj.get("project")
+    project_root = resolve_project_path(ctx).resolve() if raw_project is not None else None
     env_obj = resolve_environment(client, ctx.obj.get("env"))
+    if project_root is not None and Path(env_obj.repository_root).resolve() != project_root:
+        raise EnvironmentResolutionError(
+            f"Environment {env_obj.name} ({env_obj.id}) does not belong to project {project_root}"
+        )
     if env_obj.state != EnvironmentState.READY:
         raise RuntimeError(
             f"Environment {env_obj.name} ({env_obj.id}) is not ready (state={env_obj.state})"

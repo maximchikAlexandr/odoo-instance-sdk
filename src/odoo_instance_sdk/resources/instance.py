@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import time
+from collections import deque
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TextIO, cast
 
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
+    LogfileAccessError,
     NonLocalInstanceError,
 )
 from odoo_instance_sdk.internal.locks import environment_lock_path, exclusive_lock, shared_lock
@@ -187,6 +191,65 @@ def _resolve_python_binary(env: DevelopmentEnvironment) -> str:
     return str(py_path)
 
 
+def _iter_logfile(path: Path, *, tail: int, follow: bool) -> Iterator[str]:
+    handle = _open_logfile(path)
+    try:
+        lines = deque(handle, maxlen=tail)
+        cursor, sentinel = _logfile_cursor_snapshot(handle)
+        yield from lines
+        while follow:
+            try:
+                path_stat = path.stat()
+                descriptor_stat = os.fstat(handle.fileno())
+                replaced = (path_stat.st_dev, path_stat.st_ino) != (
+                    descriptor_stat.st_dev,
+                    descriptor_stat.st_ino,
+                )
+                truncated = descriptor_stat.st_size < cursor
+                rewritten = (
+                    descriptor_stat.st_size >= cursor
+                    and _logfile_sentinel(handle.fileno(), cursor) != sentinel
+                )
+                if replaced or truncated or rewritten:
+                    new_handle = _open_logfile(path)
+                    handle.close()
+                    handle = new_handle
+                    cursor, sentinel = _logfile_cursor_snapshot(handle)
+            except OSError:
+                time.sleep(0.2)
+                continue
+            line = handle.readline()
+            if line:
+                cursor, sentinel = _logfile_cursor_snapshot(handle)
+                yield line
+                continue
+            time.sleep(0.2)
+    finally:
+        handle.close()
+
+
+_LOGFILE_SENTINEL_BYTES = 4096
+
+
+def _open_logfile(path: Path) -> TextIO:
+    try:
+        return path.open(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise LogfileAccessError(str(path), exc.strerror or type(exc).__name__) from exc
+
+
+def _logfile_sentinel(fd: int, cursor: int) -> bytes:
+    """Read a fixed window immediately before the current follow cursor."""
+    length = min(cursor, _LOGFILE_SENTINEL_BYTES)
+    return os.pread(fd, length, cursor - length)
+
+
+def _logfile_cursor_snapshot(handle: TextIO) -> tuple[int, bytes]:
+    fd = handle.fileno()
+    cursor = handle.tell()
+    return cursor, _logfile_sentinel(fd, cursor)
+
+
 _FORBIDDEN_SHELL_FLAGS = ("-c", "--config", "-d", "--database")
 
 
@@ -300,6 +363,23 @@ class OdooInstance:
                 cwd=resolved_cwd,
                 env=env,
             )
+
+    def iter_logs(self, *, tail: int = 100, follow: bool = False) -> Iterator[str]:
+        """Yield the last ``tail`` lines of the bound logfile, optionally following appends."""
+        if tail < 1:
+            raise InstanceConfigurationError("tail must be >= 1")
+        config = self.config.start_config
+        if config is None:
+            raise InstanceConfigurationError(
+                "No StartConfig — create instance via from_config() or from_environment()"
+            )
+        raw = config.logfile
+        if raw is None or not raw.strip():
+            raise InstanceConfigurationError(
+                "logfile is absent or empty; set logfile in the bound odoo.conf"
+            )
+        path = (self.config.default_cwd or Path.cwd()) / raw.strip()
+        yield from _iter_logfile(path, tail=tail, follow=follow)
 
     def shell(self, *, args: Sequence[str] = ()) -> int:
         config = self.config.start_config
