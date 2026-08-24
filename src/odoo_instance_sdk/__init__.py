@@ -1,5 +1,6 @@
 """Odoo Instance SDK — typed Python API for managing local Odoo 19.0 instances."""
 
+import odoo_instance_sdk.models as _models
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.exceptions import (
@@ -21,6 +22,8 @@ from odoo_instance_sdk.exceptions import (
     InvalidBaseUrlError,
     LockConflictError,
     MasterPasswordRequiredError,
+    MonitorError,
+    MonitorExtrasMissingError,
     NonLocalInstanceError,
     OdooInstanceSdkError,
     PostgresClusterError,
@@ -51,16 +54,33 @@ from odoo_instance_sdk.models import (
     BackupState,
     BackupValidationResult,
     BackupValidationStatus,
+    ClusterContainer,
+    ClusterEndpoint,
+    ClusterMetrics,
+    ClusterResourceSnapshot,
+    ClusterSnapshot,
     CommandResult,
     Database,
+    DatabaseFootprint,
     DropResult,
+    EnvironmentSnapshot,
+    GitActivity,
+    GitActivityState,
+    GitDiff,
     NoBackup,
     OdooProcess,
+    PidScope,
     PostgresClusterState,
     ProcessStatus,
+    ProjectSummary,
+    PythonEnvFootprint,
     ReadinessResult,
     RestoreResult,
+    RuntimeMetrics,
+    RuntimeState,
+    Snapshot,
     StartConfig,
+    StorageFootprint,
 )
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.backup import BackupResource
@@ -74,6 +94,11 @@ from odoo_instance_sdk.resources.environment import (
 )
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+# ponytail: populate models module globals so msgspec can resolve the string
+# annotation "EnvironmentState" on EnvironmentSnapshot at encode time; a real
+# import in models.py would create a cycle (resources.environment -> models).
+_models.EnvironmentState = EnvironmentState  # type: ignore[attr-defined]
 
 __version__ = "0.1.0"
 __all__ = [
@@ -91,12 +116,18 @@ __all__ = [
     "BackupValidationResult",
     "BackupValidationStatus",
     "BackupValidationUnavailableError",
+    "ClusterContainer",
+    "ClusterEndpoint",
+    "ClusterMetrics",
+    "ClusterResourceSnapshot",
+    "ClusterSnapshot",
     "CommandResult",
     "CommandTimeoutError",
     "ConfigError",
     "Database",
     "DatabaseAlreadyExistsError",
     "DatabaseError",
+    "DatabaseFootprint",
     "DatabaseManagerUnavailableError",
     "DatabaseResource",
     "DevelopmentEnvironment",
@@ -108,13 +139,19 @@ __all__ = [
     "EnvironmentNotFoundError",
     "EnvironmentResolutionError",
     "EnvironmentResource",
+    "EnvironmentSnapshot",
     "EnvironmentState",
+    "GitActivity",
+    "GitActivityState",
+    "GitDiff",
     "InstanceConfig",
     "InstanceConfigurationError",
     "InstanceFactory",
     "InvalidBaseUrlError",
     "LockConflictError",
     "MasterPasswordRequiredError",
+    "MonitorError",
+    "MonitorExtrasMissingError",
     "NoBackup",
     "NonLocalInstanceError",
     "OdooClient",
@@ -122,6 +159,7 @@ __all__ = [
     "OdooInstance",
     "OdooInstanceSdkError",
     "OdooProcess",
+    "PidScope",
     "PostgresCluster",
     "PostgresClusterError",
     "PostgresClusterNotOwnedError",
@@ -142,10 +180,16 @@ __all__ = [
     "ProjectConfig",
     "ProjectContextError",
     "ProjectManifestNotFoundError",
+    "ProjectSummary",
+    "PythonEnvFootprint",
     "ReadinessResult",
     "ReadinessTimeoutError",
     "RestoreFailedError",
     "RestoreResult",
+    "RuntimeMetrics",
+    "RuntimeState",
+    "Snapshot",
     "StartConfig",
+    "StorageFootprint",
     "VscodeImportError",
 ]

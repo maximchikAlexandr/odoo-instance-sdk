@@ -215,3 +215,11 @@ class PostgresComposeInvalidError(PostgresClusterError):
 
 class PostgresPortCollisionError(PostgresClusterError):
     """Configured/persisted port is not free at compose up time."""
+
+
+class MonitorError(OdooInstanceSdkError):
+    """Monitor snapshot failed (messages are redacted)."""
+
+
+class MonitorExtrasMissingError(MonitorError):
+    """An optional extra (psutil/fastapi/uvicorn) is not installed."""

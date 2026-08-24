@@ -1,9 +1,9 @@
 ## 1. Catalog current-runtime record (schema v8 → v9)
 
-- [ ] 1.1 Добавить `environment_runtime` table migration в `BackupCatalog._create_schema` (v8→v9, `CREATE TABLE IF NOT EXISTS`, FK на `environments(id)`); `CURRENT_SCHEMA_VERSION = 9`
-- [ ] 1.2 Добавить `get_environment_runtime(environment_id) -> Row | None` и `list_environment_runtimes() -> list[Row]` (read-only)
-- [ ] 1.3 Добавить `upsert_environment_runtime(environment_id, *, root_pid, create_time, started_at, checkout_branch, commit_sha, http_url, http_port, database_name) -> None` и `clear_environment_runtime(environment_id) -> None`
-- [ ] 1.4 Обновить catalog migration tests (version 9, upsert/clear idempotency, FK constraint, read-only API)
+- [x] 1.1 Добавить `environment_runtime` table migration в `BackupCatalog._create_schema` (v8→v9, `CREATE TABLE IF NOT EXISTS`, FK на `environments(id)`); `CURRENT_SCHEMA_VERSION = 9`
+- [x] 1.2 Добавить `get_environment_runtime(environment_id) -> Row | None` и `list_environment_runtimes() -> list[Row]` (read-only)
+- [x] 1.3 Добавить `upsert_environment_runtime(environment_id, *, root_pid, create_time, started_at, checkout_branch, commit_sha, http_url, http_port, database_name) -> None` и `clear_environment_runtime(environment_id) -> None`
+- [x] 1.4 Обновить catalog migration tests (version 9, upsert/clear idempotency, FK constraint, read-only API)
 
 ## 2. `run_foreground` persist/clear runtime identity
 
@@ -15,10 +15,10 @@
 
 ## 3. Snapshot typed models
 
-- [ ] 3.1 Добавить `RuntimeState`, `GitActivityState`, `PidScope` StrEnums в `models.py`
-- [ ] 3.2 Добавить frozen `msgspec.Struct` models exactly as Canonical snapshot types: `GitDiff`, `GitActivity`, `PythonEnvFootprint`, `DatabaseFootprint`, `StorageFootprint`, `RuntimeMetrics`, `ClusterContainer`, `ClusterMetrics`, `ClusterEndpoint`, `ClusterResourceSnapshot`, `ClusterSnapshot`, `EnvironmentSnapshot` (includes `project_id`, `lifecycle_state`, `allocated_http_port`), `ProjectSummary`, `Snapshot`. Do not add public `ProcessTreeMetrics`.
-- [ ] 3.3 Export snapshot models из `odoo_instance_sdk/__init__.py`
-- [ ] 3.4 Typed errors в `exceptions.py`: `MonitorError` (base), `MonitorExtrasMissingError` (все redacted, наследники `OdooInstanceSdkError`); export из `__init__.py`
+- [x] 3.1 Добавить `RuntimeState`, `GitActivityState`, `PidScope` StrEnums в `models.py`
+- [x] 3.2 Добавить frozen `msgspec.Struct` models exactly as Canonical snapshot types: `GitDiff`, `GitActivity`, `PythonEnvFootprint`, `DatabaseFootprint`, `StorageFootprint`, `RuntimeMetrics`, `ClusterContainer`, `ClusterMetrics`, `ClusterEndpoint`, `ClusterResourceSnapshot`, `ClusterSnapshot`, `EnvironmentSnapshot` (includes `project_id`, `lifecycle_state`, `allocated_http_port`), `ProjectSummary`, `Snapshot`. Do not add public `ProcessTreeMetrics`.
+- [x] 3.3 Export snapshot models из `odoo_instance_sdk/__init__.py`
+- [x] 3.4 Typed errors в `exceptions.py`: `MonitorError` (base), `MonitorExtrasMissingError` (все redacted, наследники `OdooInstanceSdkError`); export из `__init__.py`
 
 ## 4. `EnvironmentMonitor` collector
 
@@ -112,7 +112,7 @@
 - [ ] 14.7 `tests/unit/test_cli_monitor.py`: `odcli monitor --headless`, port auto-select, missing extra hint
 - [ ] 14.8 `tests/unit/test_cli_env_list_grouping.py`: project header, cluster summary, stopped row, `--all` human removed vs JSON non-removed, JSON parity
 - [ ] 14.9 `tests/unit/test_cli_postgres_status_resources.py`: container fields, external/stopped/docker-unavailable, parity
-- [ ] 14.10 `tests/unit/test_catalog_runtime_record.py`: schema v9 migration, upsert/clear, read-only
+- [x] 14.10 `tests/unit/test_catalog_runtime_record.py`: schema v9 migration, upsert/clear, read-only
 - [ ] 14.11 `tests/unit/test_run_foreground_runtime_identity.py`: persist after spawn, clear in `finally` (normal/crash/Ctrl+C), manual instance no persist, `psutil` fallback
 - [ ] 14.12 `tests/integration/test_monitor_smoke.py` (opt-in `integration` marker, skip без Docker/psutil): two projects, several environments, часть stopped; verify selector/cards/headless API и Open Odoo
 
