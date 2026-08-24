@@ -55,12 +55,12 @@
 
 ## 8. Cluster container identity + resources (Docker inspect/stats)
 
-- [ ] 8.1 Добавить `PostgresCluster.resource_snapshot() -> ClusterResourceSnapshot | None` (read-only, без lifecycle lock, без start/stop); external → `None`; compose → `docker inspect`/`docker stats --no-stream` через existing `ComposeRunner`
-- [ ] 8.2 Container ID (12 hex short)/name/image, Docker-reported init PID, `pid_scope` (`host` Linux / `docker_vm` macOS Docker Desktop+Colima / `unavailable` stopped/missing)
-- [ ] 8.3 CPU percent, memory usage/limit bytes, optional volume usage bytes (без privileged host traversal; иначе `None`); `sampled_at`
-- [ ] 8.4 `unavailability_reason="stopped"` iff `status()==STOPPED`; `"missing"` iff not STOPPED and container ID unresolved; docker-unavailable → `"docker_unavailable"` (не raise); `sampled_at` copied to metrics/resource/snapshot or all None
-- [ ] 8.5 Batch для нескольких managed projects: один `docker stats --no-stream <id1> <id2> ...` / один `docker inspect <id1> <id2> ...`; один container failure не блокирует остальные (`unavailability_reason="stats_failed"/"inspect_failed"`)
-- [ ] 8.6 No raw Docker payload, no `POSTGRES_PASSWORD_FILE` value, no individual PostgreSQL backend PIDs
+- [x] 8.1 Добавить `PostgresCluster.resource_snapshot() -> ClusterResourceSnapshot | None` (read-only, без lifecycle lock, без start/stop); external → `None`; compose → `docker inspect`/`docker stats --no-stream` через existing `ComposeRunner`
+- [x] 8.2 Container ID (12 hex short)/name/image, Docker-reported init PID, `pid_scope` (`host` Linux / `docker_vm` macOS Docker Desktop+Colima / `unavailable` stopped/missing)
+- [x] 8.3 CPU percent, memory usage/limit bytes, optional volume usage bytes (без privileged host traversal; иначе `None`); `sampled_at`
+- [x] 8.4 `unavailability_reason="stopped"` iff `status()==STOPPED`; `"missing"` iff not STOPPED and container ID unresolved; docker-unavailable → `"docker_unavailable"` (не raise); `sampled_at` copied to metrics/resource/snapshot or all None
+- [x] 8.5 Batch для нескольких managed projects: один `docker stats --no-stream <id1> <id2> ...` / один `docker inspect <id1> <id2> ...`; один container failure не блокирует остальные (`unavailability_reason="stats_failed"/"inspect_failed"`)
+- [x] 8.6 No raw Docker payload, no `POSTGRES_PASSWORD_FILE` value, no individual PostgreSQL backend PIDs
 
 ## 9. Bounded caching
 
@@ -107,7 +107,7 @@
 - [x] 14.2 `tests/unit/test_process_metrics.py`: fake `psutil.Process`, CPU two-sample, `AccessDenied` isolation
 - [x] 14.3 `tests/unit/test_git_activity.py`: clean/ahead/behind/diverged/orphan, binary files, stale-local-main fallback
 - [x] 14.4 `tests/unit/test_storage_footprint.py`: owned/reused venv, shared/copy DB, `du` vs walk fallback, psql size failure → complete=False, symlinks
-- [ ] 14.5 `tests/unit/test_cluster_resources.py`: fake Docker inspect/stats, PID scope, batch, external/stopped/docker-unavailable
+- [x] 14.5 `tests/unit/test_cluster_resources.py`: fake Docker inspect/stats, PID scope, batch, external/stopped/docker-unavailable
 - [ ] 14.6 `tests/unit/test_serve.py`: FastAPI routes (`/api/v1/snapshot`, `/healthz`), project filter, headless vs UI, missing extra guard
 - [ ] 14.7 `tests/unit/test_cli_monitor.py`: `odcli monitor --headless`, port auto-select, missing extra hint
 - [ ] 14.8 `tests/unit/test_cli_env_list_grouping.py`: project header, cluster summary, stopped row, `--all` human removed vs JSON non-removed, JSON parity

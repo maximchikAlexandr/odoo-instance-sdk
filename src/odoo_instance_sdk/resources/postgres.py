@@ -42,7 +42,7 @@ from odoo_instance_sdk.internal.postgres_compose import (
     write_compose_file_atomic,
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
-from odoo_instance_sdk.models import PostgresClusterState, StartConfig
+from odoo_instance_sdk.models import ClusterResourceSnapshot, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 
 _DEFAULT_TIMEOUT = 60.0
@@ -402,6 +402,25 @@ class PostgresCluster:
             "image": self._image if self.owned else None,
             "user": self._user if self.owned else None,
         }
+
+    def resource_snapshot(self) -> ClusterResourceSnapshot | None:
+        """Read-only container identity + resource metrics. External → None.
+
+        No lifecycle lock, no start/stop. Compose clusters resolve the
+        container via `docker compose ps` then batch `docker inspect`/`docker
+        stats --no-stream` through the internal cache helper.
+        """
+        if self._mode == "external":
+            return None
+        from odoo_instance_sdk.internal.cluster_resources import cluster_resource_snapshot
+
+        return cluster_resource_snapshot(
+            compose_file=self._compose_file(),
+            compose_project_name=self.compose_project_name,
+            service="postgres",
+            runner=self._compose_runner,
+            state=self.status(),
+        )
 
 
 __all__ = ["PostgresCluster"]
