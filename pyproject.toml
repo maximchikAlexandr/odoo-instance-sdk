@@ -21,6 +21,14 @@ dependencies = [
     "json5>=0.15,<1",
 ]
 
+[project.optional-dependencies]
+metrics = ["psutil>=5.9,<7"]
+dashboard = [
+    "odoo-instance-sdk[metrics]",
+    "fastapi>=0.115,<1.0",
+    "uvicorn>=0.30,<1.0",
+]
+
 [project.scripts]
 odcli = "odoo_instance_sdk.cli:cli"
 
@@ -30,6 +38,14 @@ Source = "https://github.com/maximchikAlexandr/odoo-instance-sdk"
 [build-system]
 requires = ["uv_build>=0.10.8,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Built React assets (web/dist/) live under the module root and are included
+# automatically in sdist + wheel. Exclude the Node.js dependency tree and
+# sources from the distributions to keep them lean; Node.js is not required
+# at runtime — the built SPA in web/dist/ is all that ships.
+source-exclude = ["src/odoo_instance_sdk/web/node_modules/**"]
+wheel-exclude = ["src/odoo_instance_sdk/web/node_modules/**"]
 
 [dependency-groups]
 lint = ["ruff>=0.15"]
@@ -88,6 +104,7 @@ environment = "odoo_instance_sdk/(resources/environment\\.py|internal/git_worktr
 catalog = "odoo_instance_sdk/(resources/database\\.py|storage/backup_catalog\\.py)$"
 security = "odoo_instance_sdk/internal/(redact|sanitize|db_name|urls|address)\\.py$"
 postgres = "odoo_instance_sdk/(resources/postgres\\.py|internal/postgres_compose\\.py)$"
+monitor = "odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)$"
 
 [tool.coverage.thresholds]
 cli = 71
@@ -96,6 +113,7 @@ environment = 76
 catalog = 92
 security = 94
 postgres = 80
+monitor = 80
 
 [tool.coverage.branch_thresholds]
 cli = 53
@@ -104,6 +122,7 @@ environment = 57
 catalog = 83
 security = 89
 postgres = 70
+monitor = 70
 
 [tool.mutmut]
 source_paths = [
@@ -122,6 +141,11 @@ pytest_add_cli_args_test_selection = [
 
 [tool.mypy]
 strict = true
+
+[[tool.mypy.overrides]]
+module = ["fastapi", "fastapi.*", "uvicorn", "uvicorn.*"]
+ignore_missing_imports = true
+follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = ["tests.*", "scripts.*"]
