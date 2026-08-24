@@ -1,0 +1,323 @@
+from __future__ import annotations
+
+import sys
+import uuid
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
+from odoo_instance_sdk.models import StartConfig
+from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+
+class _FakeCatalog:
+    """Stand-in catalog with slots-free methods for patch-free assertions."""
+
+    def __init__(self, *, upsert_raises: Exception | None = None) -> None:
+        self.upsert_calls: list[tuple[str, dict[str, object]]] = []
+        self.clear_calls: list[str] = []
+        self._upsert_raises = upsert_raises
+
+    def upsert_environment_runtime(self, environment_id: str, **kw: object) -> None:
+        self.upsert_calls.append((environment_id, dict(kw)))
+        if self._upsert_raises is not None:
+            raise self._upsert_raises
+
+    def clear_environment_runtime(self, environment_id: str) -> None:
+        self.clear_calls.append(environment_id)
+
+    def get_environment_runtime(self, environment_id: str) -> None:
+        return None
+
+
+def _make_env(env_id: str) -> dict[str, object]:
+    return {
+        "id": env_id,
+        "name": "test",
+        "repository_root": "/repo",
+        "git_common_dir": "/repo/.git",
+        "branch": "main",
+        "base_ref": "HEAD",
+        "worktree_path": "/wt",
+        "generated_config_path": "/wt/odoo.conf",
+        "python_environment_path": "/venv",
+        "python_environment_owned": False,
+        "dependency_lock_path": "/lock",
+        "db_mode": "shared",
+        "source_db_name": "mydb",
+        "target_db_name": None,
+        "backup_id": None,
+        "runtime_json": "{}",
+        "state": "ready",
+        "created_at": "2026-01-01T00:00:00",
+        "last_used_at": None,
+        "removed_at": None,
+        "last_error": None,
+    }
+
+
+def _init_git_worktree(path: Path) -> tuple[str, str]:
+    """Init a tiny git repo with one commit; return (branch, commit_sha)."""
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=path, check=True)
+    (path / "f.txt").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=path, check=True)
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    return branch, sha
+
+
+def _make_tracked_instance(
+    *,
+    client: OdooClient,
+    env_id: str,
+    cwd: Path,
+    command_prefix: tuple[str, ...],
+) -> OdooInstance:
+    start_cfg = StartConfig(
+        http_port=8069,
+        http_interface="127.0.0.1",
+        config_path=str(cwd / "odoo.conf"),
+        db_name="mydb",
+    )
+    return OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:8069",
+            start_config=start_cfg,
+            command_prefix=command_prefix,
+            default_cwd=cwd,
+        ),
+        _client=client,
+        _environment_id=env_id,
+    )
+
+
+def _make_manual_instance(client: OdooClient, cwd: Path) -> OdooInstance:
+    start_cfg = StartConfig(
+        http_port=8069,
+        http_interface="127.0.0.1",
+        config_path=str(cwd / "odoo.conf"),
+        db_name="mydb",
+    )
+    return OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:8069",
+            start_config=start_cfg,
+            command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+            default_cwd=cwd,
+        ),
+        _client=client,
+    )
+
+
+def _client_with_catalog(catalog: object) -> OdooClient:
+    c = OdooClient(config=OdooClientConfig(executable="odoo"))
+    c._catalog = catalog  # type: ignore[attr-defined]
+    return c
+
+
+@pytest.fixture()
+def real_catalog(tmp_path: Path) -> BackupCatalog:
+    return BackupCatalog(db_path=tmp_path / "cat.sqlite3")
+
+
+@pytest.fixture()
+def env_id(real_catalog: BackupCatalog) -> str:
+    eid = str(uuid.uuid4())
+    real_catalog.create_environment(_make_env(eid))
+    return eid
+
+
+@pytest.mark.unit
+def test_persist_after_spawn_and_clear_on_normal_exit(
+    env_id: str, tmp_path: Path, real_catalog: BackupCatalog
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    client = _client_with_catalog(real_catalog)
+    inst = _make_tracked_instance(
+        client=client,
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+    )
+    exit_code = inst.run_foreground()
+    assert exit_code == 0
+    # cleared in finally
+    assert real_catalog.get_environment_runtime(env_id) is None
+
+
+@pytest.mark.unit
+def test_persist_called_with_expected_fields(env_id: str, tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    branch, sha = _init_git_worktree(wt)
+    fake = _FakeCatalog()
+    client = _client_with_catalog(fake)
+    inst = _make_tracked_instance(
+        client=client,
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+    )
+
+    exit_code = inst.run_foreground()
+
+    assert exit_code == 0
+    assert len(fake.upsert_calls) == 1
+    eid, kw = fake.upsert_calls[0]
+    assert eid == env_id
+    assert isinstance(kw["root_pid"], int)
+    assert kw["root_pid"] > 0
+    assert isinstance(kw["create_time"], float)
+    assert isinstance(kw["started_at"], str)
+    assert kw["checkout_branch"] == branch
+    assert kw["commit_sha"] == sha
+    assert kw["http_url"] == "http://127.0.0.1:8069"
+    assert kw["http_port"] == 8069
+    assert kw["database_name"] == "mydb"
+    assert fake.clear_calls == [env_id]
+
+
+@pytest.mark.unit
+def test_clear_on_nonzero_exit(env_id: str, tmp_path: Path, real_catalog: BackupCatalog) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    client = _client_with_catalog(real_catalog)
+    inst = _make_tracked_instance(
+        client=client,
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=("python", "-c", "import sys; sys.exit(7)"),
+    )
+    exit_code = inst.run_foreground()
+    assert exit_code == 7
+    assert real_catalog.get_environment_runtime(env_id) is None
+
+
+@pytest.mark.unit
+def test_clear_on_crash_exception_propagates(env_id: str, tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    fake = _FakeCatalog()
+    client = _client_with_catalog(fake)
+    inst = _make_tracked_instance(
+        client=client,
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+    )
+
+    boom = RuntimeError("wait blew up")
+    with (
+        patch("odoo_instance_sdk.resources.instance.wait_foreground_process", side_effect=boom),
+        pytest.raises(RuntimeError, match="wait blew up"),
+    ):
+        inst.run_foreground()
+
+    assert fake.clear_calls == [env_id]
+
+
+@pytest.mark.unit
+def test_clear_on_keyboard_interrupt(env_id: str, tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    fake = _FakeCatalog()
+    client = _client_with_catalog(fake)
+    inst = _make_tracked_instance(
+        client=client,
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+    )
+
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.wait_foreground_process",
+            side_effect=KeyboardInterrupt,
+        ),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        inst.run_foreground()
+
+    assert fake.clear_calls == [env_id]
+
+
+@pytest.mark.unit
+def test_manual_instance_no_persist_no_clear(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    fake = _FakeCatalog()
+    client = _client_with_catalog(fake)
+    inst = _make_manual_instance(client, wt)
+
+    exit_code = inst.run_foreground()
+
+    assert exit_code == 0
+    assert fake.upsert_calls == []
+    assert fake.clear_calls == []
+
+
+@pytest.mark.unit
+def test_psutil_fallback_uses_time_time(env_id: str, tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    fake = _FakeCatalog()
+    client = _client_with_catalog(fake)
+    inst = _make_tracked_instance(
+        client=client,
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+    )
+
+    # psutil is not installed in this env, so the fallback path is exercised
+    # naturally. Block any injected psutil to be explicit.
+    saved = sys.modules.pop("psutil", None)
+    try:
+        with patch.dict(sys.modules, {"psutil": None}):
+            inst.run_foreground()
+    finally:
+        if saved is not None:
+            sys.modules["psutil"] = saved
+
+    assert len(fake.upsert_calls) == 1
+    _, kw = fake.upsert_calls[0]
+    assert isinstance(kw["create_time"], float)
+    assert kw["create_time"] > 0
+
+
+@pytest.mark.unit
+def test_persist_failure_does_not_break_run_foreground(env_id: str, tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    fake = _FakeCatalog(upsert_raises=RuntimeError("catalog down"))
+    client = _client_with_catalog(fake)
+    inst = _make_tracked_instance(
+        client=client,
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+    )
+
+    exit_code = inst.run_foreground()
+
+    assert exit_code == 0
+    # clear still attempted in finally despite persist failure
+    assert fake.clear_calls == [env_id]

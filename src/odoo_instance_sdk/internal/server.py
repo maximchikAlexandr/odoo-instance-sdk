@@ -173,17 +173,22 @@ def run_command(
     )
 
 
-def run_foreground_process(
+def spawn_foreground_process(
     executable: str | Sequence[str],
     args: list[str],
     *,
     cwd: str | Path | None = None,
     env: dict[str, str] | None = None,
     inherit_stdio: bool = True,
-) -> int:
+) -> subprocess.Popen[bytes]:
+    """Spawn a foreground process without waiting. Caller owns ``proc.wait()``.
+
+    The returned process is in its own session (``start_new_session=True``)
+    so a Ctrl+C forwarded via ``os.killpg`` reaches the whole tree.
+    """
     prefix = [executable] if isinstance(executable, str) else list(executable)
     full_args = [*prefix, *args]
-    proc = subprocess.Popen(
+    return subprocess.Popen(
         full_args,
         cwd=cwd,
         env=env,
@@ -192,6 +197,14 @@ def run_foreground_process(
         stdout=None if inherit_stdio else subprocess.PIPE,
         stderr=None if inherit_stdio else subprocess.PIPE,
     )
+
+
+def wait_foreground_process(proc: subprocess.Popen[bytes]) -> int:
+    """Block until ``proc`` exits, forwarding SIGINT to its process group.
+
+    Returns the process exit code (130 on Ctrl+C). Restores the previous
+    SIGINT handler on return.
+    """
     interrupted = False
     prev_handler = signal.getsignal(signal.SIGINT)
 
@@ -219,6 +232,18 @@ def run_foreground_process(
     if interrupted:
         exit_code = 130
     return exit_code
+
+
+def run_foreground_process(
+    executable: str | Sequence[str],
+    args: list[str],
+    *,
+    cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
+    inherit_stdio: bool = True,
+) -> int:
+    proc = spawn_foreground_process(executable, args, cwd=cwd, env=env, inherit_stdio=inherit_stdio)
+    return wait_foreground_process(proc)
 
 
 _RESULT_SNIPPET = (

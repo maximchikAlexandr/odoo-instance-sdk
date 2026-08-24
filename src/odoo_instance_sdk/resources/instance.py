@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import contextlib
 import os
+import subprocess
+import sys
 import time
 from collections import deque
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO, cast
 
@@ -25,8 +28,10 @@ from odoo_instance_sdk.internal.server import (
     get_process_status,
     run_command,
     run_foreground_process,
+    spawn_foreground_process,
     start_process,
     stop_process,
+    wait_foreground_process,
 )
 from odoo_instance_sdk.internal.urls import assert_local, normalize_base_url
 from odoo_instance_sdk.models import (
@@ -171,6 +176,7 @@ class InstanceFactory:
             _client=self._client,
             _artifact_lock_path=environment_lock_path(str(environment.id)),
             _postgres_cluster=cluster,
+            _environment_id=str(environment.id),
         )
 
 
@@ -253,6 +259,47 @@ def _logfile_cursor_snapshot(handle: TextIO) -> tuple[int, bytes]:
 _FORBIDDEN_SHELL_FLAGS = ("-c", "--config", "-d", "--database")
 
 
+def _process_create_time(pid: int) -> float:
+    """Best-effort process start time; falls back to wall clock if psutil absent."""
+    try:
+        import psutil  # type: ignore[import-untyped]
+
+        return float(psutil.Process(pid).create_time())
+    except Exception:
+        # ponytail: psutil optional; wall clock is good enough for liveness checks
+        return time.time()
+
+
+def _worktree_ref(cwd: str | Path | None) -> tuple[str, str]:
+    """Return ``(branch, commit_sha)`` for the worktree at ``cwd``.
+
+    Best-effort: on any git failure returns ``("unknown", "")``.
+    """
+    if cwd is None:
+        return "unknown", ""
+    target = str(cwd)
+    try:
+        branch_proc = subprocess.run(
+            ["git", "-C", target, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        sha_proc = subprocess.run(
+            ["git", "-C", target, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return "unknown", ""
+    branch = branch_proc.stdout.strip() if branch_proc.returncode == 0 else "unknown"
+    sha = sha_proc.stdout.strip() if sha_proc.returncode == 0 else ""
+    return branch or "unknown", sha
+
+
 def _check_shell_overrides(args: Sequence[str]) -> None:
     for tok in args:
         if tok in _FORBIDDEN_SHELL_FLAGS:
@@ -275,6 +322,7 @@ class OdooInstance:
     databases: DatabaseResource = field(init=False)
     _artifact_lock_path: Path | None = field(default=None, repr=False)
     _postgres_cluster: PostgresCluster | None = field(default=None, repr=False)
+    _environment_id: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.databases = DatabaseResource(
@@ -357,12 +405,70 @@ class OdooInstance:
 
         cli_args = _build_cli_args(config)
         with self._artifact_lock():
-            return run_foreground_process(
-                self._executable_prefix(),
-                cli_args,
-                cwd=resolved_cwd,
-                env=env,
+            if self._environment_id is None:
+                return run_foreground_process(
+                    self._executable_prefix(),
+                    cli_args,
+                    cwd=resolved_cwd,
+                    env=env,
+                )
+            return self._run_foreground_tracked(config, cli_args, resolved_cwd, env)
+
+    def _run_foreground_tracked(
+        self,
+        config: StartConfig,
+        cli_args: list[str],
+        resolved_cwd: str | Path | None,
+        env: dict[str, str] | None,
+    ) -> int:
+        """Spawn, persist runtime identity, wait, then clear in finally.
+
+        Bound to an environment (``_environment_id`` set); manual instances
+        take the untracked branch in :meth:`run_foreground`.
+        """
+        proc = spawn_foreground_process(
+            self._executable_prefix(), cli_args, cwd=resolved_cwd, env=env
+        )
+        self._persist_runtime_identity(proc.pid, config, resolved_cwd)
+        try:
+            return wait_foreground_process(proc)
+        finally:
+            self._clear_runtime_identity()
+
+    def _persist_runtime_identity(
+        self,
+        root_pid: int,
+        config: StartConfig,
+        cwd: str | Path | None,
+    ) -> None:
+        """Best-effort persist of runtime identity; never raises into run_foreground."""
+        if self._environment_id is None:
+            return
+        try:
+            create_time = _process_create_time(root_pid)
+            checkout_branch, commit_sha = _worktree_ref(cwd)
+            http_url = f"http://{config.http_interface}:{config.http_port}"
+            self._client.get_catalog().upsert_environment_runtime(
+                self._environment_id,
+                root_pid=root_pid,
+                create_time=create_time,
+                started_at=datetime.now(UTC).isoformat(),
+                checkout_branch=checkout_branch,
+                commit_sha=commit_sha,
+                http_url=http_url,
+                http_port=config.http_port,
+                database_name=config.db_name or "",
             )
+        except Exception as e:
+            print(f"failed to persist environment runtime: {e}", file=sys.stderr)
+
+    def _clear_runtime_identity(self) -> None:
+        if self._environment_id is None:
+            return
+        try:
+            self._client.get_catalog().clear_environment_runtime(self._environment_id)
+        except Exception as e:
+            print(f"failed to clear environment runtime: {e}", file=sys.stderr)
 
     def iter_logs(self, *, tail: int = 100, follow: bool = False) -> Iterator[str]:
         """Yield the last ``tail`` lines of the bound logfile, optionally following appends."""
