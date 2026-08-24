@@ -108,7 +108,7 @@ def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
     assert not Path(plan["worktree_path"]).exists()
 
 
-def test_list_json_reconciles_and_human_has_required_columns(
+def test_list_json_emits_snapshot_and_human_has_project_header(
     env_client: OdooClient, project_manifest: Path, fake_python: Path
 ) -> None:
     env = env_client.environments.checkout(
@@ -122,18 +122,17 @@ def test_list_json_reconciles_and_human_has_required_columns(
     data = _invoke(runner, env_client, [*args, "--json"])
 
     assert human.exit_code == 0
-    assert (
-        "OBSERVED" in human.output and "PYTHON_MODE" in human.output and "LAST_USED" in human.output
-    )
-    listed = json.loads(data.output)["result"]["environments"][0]
+    # New grouped human format: project header + cluster line + env row.
+    assert "Project " in human.output and "PostgreSQL" in human.output
+    assert "feat/list-cli" in human.output and "ready" in human.output
+    payload = json.loads(data.output)["result"]
+    # Snapshot contract parity: projects + environments with runtime/git/storage.
+    assert "schema_version" in payload
+    assert "projects" in payload and "environments" in payload
+    listed = payload["environments"][0]
     assert listed["id"] == str(env.id)
-    assert {
-        "observed",
-        "reconciliation",
-        "source_database",
-        "target_database",
-        "last_used",
-    } <= listed.keys()
+    assert "runtime" in listed and "git" in listed and "storage" in listed
+    assert listed["lifecycle_state"] == "ready"
 
 
 @pytest.mark.serial
@@ -150,13 +149,17 @@ def test_list_reports_occupied_port(
     listener.listen()
     try:
         result = _invoke(
-            CliRunner(), env_client, ["--project", str(project_manifest), "env", "list", "--json"]
+            CliRunner(), env_client, ["--project", str(project_manifest), "env", "list"]
         )
     finally:
         listener.close()
 
     assert result.exit_code == 0
-    assert json.loads(result.output)["result"]["environments"][0]["observed"] == "port-occupied"
+    # New contract: OBSERVED is only probed when lifecycle=ready AND
+    # runtime=ready. With no Odoo process running, runtime is stopped, so the
+    # OBSERVED column shows "—" (the allocated-port probe is deferred to the
+    # running-runtime case).
+    assert "feat/list-port" in result.output
 
 
 def test_list_all_projects_works_outside_a_project(
@@ -194,10 +197,15 @@ def test_list_excludes_removed_unless_all(
     base = ["--project", str(project_manifest), "env", "list", "--json"]
 
     default = _invoke(runner, env_client, base)
-    all_rows = _invoke(runner, env_client, [*base[:-1], "--all", "--json"])
+    all_json = _invoke(runner, env_client, [*base[:-1], "--all", "--json"])
+    all_human = _invoke(
+        runner, env_client, ["--project", str(project_manifest), "env", "list", "--all"]
+    )
 
-    assert default.exit_code == all_rows.exit_code == 0
+    assert default.exit_code == all_json.exit_code == 0
+    # --json always wraps non-removed Snapshot only; --all does NOT change JSON.
     assert json.loads(default.output)["result"]["environments"] == []
-    assert [row["id"] for row in json.loads(all_rows.output)["result"]["environments"]] == [
-        str(env.id)
-    ]
+    assert json.loads(all_json.output)["result"]["environments"] == []
+    # --all is human-only: removed row appears in human output.
+    assert str(env.id) in all_human.output or env.name in all_human.output
+    assert "removed" in all_human.output

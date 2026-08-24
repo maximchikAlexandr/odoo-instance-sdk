@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, TypeVar, cast
 
 import click
+import msgspec
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import OdooClientConfig
@@ -39,7 +40,14 @@ from odoo_instance_sdk.internal.vscode_generate import (
     write_launch_json,
 )
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
-from odoo_instance_sdk.models import PostgresClusterState, StartConfig
+from odoo_instance_sdk.models import (
+    ClusterContainer,
+    ClusterEndpoint,
+    ClusterMetrics,
+    ClusterSnapshot,
+    PostgresClusterState,
+    StartConfig,
+)
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -941,6 +949,131 @@ def _emit_postgres_result(
         )
 
 
+def _cluster_snapshot_dict(cluster: PostgresCluster, state: PostgresClusterState) -> dict[str, Any]:
+    """Assemble a ClusterSnapshot-shaped dict from cluster status + resource_snapshot.
+
+    External clusters (resource_snapshot is None) → container/metrics/sampled_at None
+    with ``unavailability_reason="external_not_owned"``.
+    """
+    endpoint: ClusterEndpoint | None = None
+    try:
+        endpoint = ClusterEndpoint(host=cluster.endpoint_host, port=cluster.endpoint_port)
+    except Exception:
+        endpoint = None
+
+    container: ClusterContainer | None = None
+    metrics: ClusterMetrics | None = None
+    unavailability_reason: str | None = None
+    sampled_at: Any = None
+
+    if cluster.owned:
+        crs = cluster.resource_snapshot()
+        if crs is not None:
+            container = crs.container
+            metrics = crs.metrics
+            unavailability_reason = crs.unavailability_reason
+            sampled_at = crs.sampled_at
+    else:
+        unavailability_reason = "external_not_owned"
+
+    snap = ClusterSnapshot(
+        mode=cluster.mode,
+        owned=cluster.owned,
+        state=state,
+        endpoint=endpoint,
+        container=container,
+        metrics=metrics,
+        unavailability_reason=unavailability_reason,
+        sampled_at=sampled_at,
+    )
+    return cast("dict[str, Any]", msgspec.to_builtins(snap))
+
+
+def _postgres_status_exit_code(
+    state: PostgresClusterState, unavailability_reason: str | None
+) -> int:
+    # ponytail: exit 0 for diagnostic states (the cluster is genuinely not
+    # unhealthy, just not running / not owned / docker unavailable);
+    # exit 1 only for genuine lifecycle problems (UNHEALTHY/UNREACHABLE/
+    # STARTING/UNKNOWN).
+    if state is PostgresClusterState.HEALTHY:
+        return 0
+    if unavailability_reason in {
+        "external_not_owned",
+        "stopped",
+        "missing",
+        "docker_unavailable",
+    }:
+        return 0
+    return 1
+
+
+def _print_postgres_status(snap_dict: dict[str, Any]) -> None:
+    """One-line human status with container + resources."""
+    parts = [
+        f"mode={snap_dict['mode']}",
+        f"owned={snap_dict['owned']}",
+        f"state={snap_dict['state']}",
+        f"endpoint={_endpoint_str(snap_dict.get('endpoint'))}",
+    ]
+    reason = snap_dict.get("unavailability_reason")
+    if reason is not None and reason not in {"external_not_owned"}:
+        parts.append(f"reason={reason}")
+    parts.extend(_container_parts(snap_dict.get("container")))
+    parts.extend(_metrics_parts(snap_dict.get("metrics")))
+    click.echo("  ".join(parts))
+
+
+def _endpoint_str(ep: dict[str, Any] | None) -> str:
+    return f"{ep['host']}:{ep['port']}" if ep is not None else "—"
+
+
+def _container_parts(container: dict[str, Any] | None) -> list[str]:
+    if container is None:
+        return []
+    out: list[str] = []
+    cid = container.get("id")
+    out.append(f"container={cid[:12] if cid else 'missing'}")
+    if container.get("name"):
+        out.append(f"name={container['name']}")
+    if container.get("image"):
+        out.append(f"image={container['image']}")
+    pid = container.get("pid")
+    scope = container.get("pid_scope")
+    if pid is not None and scope is not None:
+        scope_prefix = "vm" if scope == "docker_vm" else "host"
+        out.append(f"pid={scope_prefix}:{pid}")
+    return out
+
+
+def _metrics_parts(metrics: dict[str, Any] | None) -> list[str]:
+    if metrics is None:
+        return []
+    out: list[str] = []
+    cpu = metrics.get("cpu_percent")
+    if cpu is not None:
+        out.append(f"cpu={cpu:.1f}%")
+    mem = metrics.get("memory_usage_bytes")
+    if mem is not None:
+        out.append(f"ram={_human_bytes(mem)}")
+    vol = metrics.get("volume_usage_bytes")
+    if vol is not None:
+        out.append(f"disk={_human_bytes(vol)}")
+    return out
+
+
+def _human_bytes(n: int) -> str:
+    # ponytail: 1024 ladder, one decimal; one helper for the whole CLI.
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if abs(n) < 1024 or unit == "TiB":
+            if unit == "B":
+                return f"{n} {unit}"
+            formatted = f"{n:.1f} {unit}"
+            return formatted.rstrip("0").rstrip(".")
+        n //= 1024
+    return f"{n} TiB"
+
+
 @postgres_group.command("approve-image")
 @click.option("--image-digest", required=True, help="Exact OCI RepoDigest shown by Docker.")
 @click.option(
@@ -986,10 +1119,12 @@ def postgres_status(ctx: click.Context, json_output: bool) -> None:
         json_output=json_output,
         operation=lambda candidate: candidate.status(),
     )
-    _emit_postgres_result(
-        cluster=cluster, state=state, command="postgres.status", json_output=json_output
-    )
-    sys.exit(0 if state is PostgresClusterState.HEALTHY else 1)
+    snap_dict = _cluster_snapshot_dict(cluster, state)
+    if json_output:
+        emit_json_envelope(ok=True, command="postgres.status", result=snap_dict)
+    else:
+        _print_postgres_status(snap_dict)
+    sys.exit(_postgres_status_exit_code(state, snap_dict.get("unavailability_reason")))
 
 
 @postgres_group.command("up")
@@ -1038,6 +1173,25 @@ def postgres_stop(ctx: click.Context, timeout: float, json_output: bool) -> None
         cluster=cluster, state=state, command="postgres.stop", json_output=json_output
     )
     sys.exit(0)
+
+
+@cli.command("monitor")
+@click.option("--headless", is_flag=True, default=False, help="Serve API only, no UI/browser.")
+@click.option("--host", default="127.0.0.1", help="Bind address (non-loopback is explicit opt-in).")
+@click.option(
+    "--port", type=int, default=None, help="Exact port (else auto-select 8069 or 8100-8120)."
+)
+@click.option("--no-open", is_flag=True, default=False, help="Do not open a browser.")
+@click.pass_context
+def monitor_cmd(
+    ctx: click.Context, headless: bool, host: str, port: int | None, no_open: bool
+) -> None:
+    """Start the observability monitor (FastAPI + React UI)."""
+    from odoo_instance_sdk.internal.serve import run_server
+
+    # run_server raises SystemExit with an actionable hint if the dashboard
+    # extra (fastapi/uvicorn) is missing; that propagates as exit 1.
+    run_server(host=host, port=port, headless=headless, no_open=no_open)
 
 
 def _resolve_odoo_bin(

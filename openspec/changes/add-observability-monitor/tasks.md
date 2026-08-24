@@ -90,10 +90,10 @@
 
 ## 12. CLI extensions
 
-- [ ] 12.1 Рефакторить `internal/cli_env.py::env_list` to call `EnvironmentMonitor.snapshot()`; grouped human table with exact columns from cli-odcli spec; `--all` human-only catalog merge of removed rows; `--json` always non-removed Snapshot; preserve `--all-projects`
-- [ ] 12.2 `odcli postgres status [--json]` MUST call `cluster.status()` and `cluster.resource_snapshot()`, assemble `ClusterSnapshot` fields; external/stopped/missing/docker-unavailable reasons; exit 0 для diagnostic (docker-unavailable)
-- [ ] 12.3 Добавить `odcli monitor [--headless] [--host HOST] [--port PORT] [--no-open]` в `cli.py`; запускает FastAPI через `internal/serve.py`; import guard для `dashboard` extra (exit 1 + hint если missing)
-- [ ] 12.4 JSON envelope v1 остаётся; `env list --json` payload parity с monitor snapshot contract
+- [x] 12.1 Рефакторить `internal/cli_env.py::env_list` to call `EnvironmentMonitor.snapshot()`; grouped human table with exact columns from cli-odcli spec; `--all` human-only catalog merge of removed rows; `--json` always non-removed Snapshot; preserve `--all-projects`
+- [x] 12.2 `odcli postgres status [--json]` MUST call `cluster.status()` and `cluster.resource_snapshot()`, assemble `ClusterSnapshot` fields; external/stopped/missing/docker-unavailable reasons; exit 0 для diagnostic (docker-unavailable)
+- [x] 12.3 Добавить `odcli monitor [--headless] [--host HOST] [--port PORT] [--no-open]` в `cli.py`; запускает FastAPI через `internal/serve.py`; import guard для `dashboard` extra (exit 1 + hint если missing)
+- [x] 12.4 JSON envelope v1 остаётся; `env list --json` payload parity с monitor snapshot contract
 
 ## 13. Packaging: optional extras + built assets
 
@@ -109,18 +109,18 @@
 - [x] 14.4 `tests/unit/test_storage_footprint.py`: owned/reused venv, shared/copy DB, `du` vs walk fallback, psql size failure → complete=False, symlinks
 - [x] 14.5 `tests/unit/test_cluster_resources.py`: fake Docker inspect/stats, PID scope, batch, external/stopped/docker-unavailable
 - [x] 14.6 `tests/unit/test_serve.py`: FastAPI routes (`/api/v1/snapshot`, `/healthz`), project filter, headless vs UI, missing extra guard
-- [ ] 14.7 `tests/unit/test_cli_monitor.py`: `odcli monitor --headless`, port auto-select, missing extra hint
-- [ ] 14.8 `tests/unit/test_cli_env_list_grouping.py`: project header, cluster summary, stopped row, `--all` human removed vs JSON non-removed, JSON parity
-- [ ] 14.9 `tests/unit/test_cli_postgres_status_resources.py`: container fields, external/stopped/docker-unavailable, parity
+- [x] 14.7 `tests/unit/test_cli_monitor.py`: `odcli monitor --headless`, port auto-select, missing extra hint
+- [x] 14.8 `tests/unit/test_cli_env_list_grouping.py`: project header, cluster summary, stopped row, `--all` human removed vs JSON non-removed, JSON parity
+- [x] 14.9 `tests/unit/test_cli_postgres_status_resources.py`: container fields, external/stopped/docker-unavailable, parity
 - [x] 14.10 `tests/unit/test_catalog_runtime_record.py`: schema v9 migration, upsert/clear, read-only
 - [x] 14.11 `tests/unit/test_run_foreground_runtime_identity.py`: persist after spawn, clear in `finally` (normal/crash/Ctrl+C), manual instance no persist, `psutil` fallback
-- [ ] 14.12 `tests/integration/test_monitor_smoke.py` (opt-in `integration` marker, skip без Docker/psutil): two projects, several environments, часть stopped; verify selector/cards/headless API и Open Odoo
+- [x] 14.12 `tests/integration/test_monitor_smoke.py` (opt-in `integration` marker, skip без Docker/psutil): two projects, several environments, часть stopped; verify selector/cards/headless API и Open Odoo
 
 ## 15. Quality gates
 
-- [ ] 15.1 `ruff check` clean
-- [ ] 15.2 `mypy --strict src/odoo_instance_sdk` clean
-- [ ] 15.3 `pytest -m "not real_odoo and not packaging"` green; coverage thresholds pass (новый `monitor` regex + thresholds)
-- [ ] 15.4 `pytest -m integration` green locally (with Docker/psutil) или skips gracefully
+- [x] 15.1 `ruff check` clean
+- [x] 15.2 `mypy --strict src/odoo_instance_sdk` clean
+- [x] 15.3 `pytest -m "not real_odoo and not packaging"` green; coverage thresholds pass (новый `monitor` regex + thresholds)
+- [x] 15.4 `pytest -m integration` green locally (with Docker/psutil) или skips gracefully
 - [x] 15.5 Frontend production TypeScript build green (`npm ci && npm run build` в `src/odoo_instance_sdk/web/` with `package-lock.json`); собранные assets включены в package  # ponytail: build verified green (tsc+vite), package-lock.json committed; package data inclusion handled by Block L
 - [x] 15.6 `pyproject.toml::[tool.coverage.regexs]` + thresholds добавлены; core deps без `psutil`/`fastapi`/`uvicorn`/`pydantic`/`docker-py`

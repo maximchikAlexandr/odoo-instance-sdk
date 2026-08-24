@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -89,13 +89,21 @@ class TestInstancePrefix:
         )
         instance = env_client.instance.from_environment(env)
 
-        def spawn(*args: object, **kwargs: object) -> int:
+        def spawn(*args: object, **kwargs: object) -> MagicMock:
             events.append("spawn")
-            return 0
+            proc = MagicMock()
+            proc.pid = 4242
+            return proc
 
-        with patch(
-            "odoo_instance_sdk.resources.instance.run_foreground_process",
-            side_effect=spawn,
+        with (
+            patch(
+                "odoo_instance_sdk.resources.instance.spawn_foreground_process",
+                side_effect=spawn,
+            ),
+            patch(
+                "odoo_instance_sdk.resources.instance.wait_foreground_process",
+                return_value=0,
+            ),
         ):
             instance.run_foreground()
         assert events == ["healthy", "spawn"]
@@ -283,12 +291,18 @@ class TestRunForeground:
         inst = env_client.instance.from_environment(env)
         with (
             patch.object(OdooInstance, "_ensure_dependencies_ready"),
-            patch("odoo_instance_sdk.resources.instance.run_foreground_process") as mock_fg,
+            patch("odoo_instance_sdk.resources.instance.spawn_foreground_process") as mock_spawn,
+            patch(
+                "odoo_instance_sdk.resources.instance.wait_foreground_process",
+                return_value=0,
+            ),
         ):
-            mock_fg.return_value = 0
+            mock_proc = MagicMock()
+            mock_proc.pid = 4242
+            mock_spawn.return_value = mock_proc
             inst.run_foreground()
-            mock_fg.assert_called_once()
-            called_exec = mock_fg.call_args.args[0]
+            mock_spawn.assert_called_once()
+            called_exec = mock_spawn.call_args.args[0]
             assert isinstance(called_exec, tuple)
             assert called_exec[0] == str(fake_python)
 
