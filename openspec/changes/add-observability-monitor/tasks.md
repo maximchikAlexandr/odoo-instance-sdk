@@ -73,20 +73,20 @@
 
 ## 10. FastAPI server + SPA mount
 
-- [ ] 10.1 Создать `internal/serve.py` (only this path) with FastAPI: `GET /api/v1/snapshot` (`msgspec.json.encode`, HTTP 200), `GET /healthz` (`{"status":"ok"}` 200); catalog error HTTP 500 `{"error":"<redacted>"}`
-- [ ] 10.2 Default UI mode: mount `StaticFiles` from `odoo_instance_sdk/web/dist/`; bind `127.0.0.1`; `--port` exact or auto: try 8069 then scan 8100–8120 inclusive; never auto-select 8070–8099; browser open unless `--no-open`
-- [ ] 10.3 `--headless`: only API routes, no static mount, no browser open
-- [ ] 10.4 Non-loopback bind explicit opt-in via `--host`; CORS/auth/TLS out of scope
-- [ ] 10.5 Import guard: `fastapi`/`uvicorn` missing → actionable hint (`pip install odoo-instance-sdk[dashboard]`)
+- [x] 10.1 Создать `internal/serve.py` (only this path) with FastAPI: `GET /api/v1/snapshot` (`msgspec.json.encode`, HTTP 200), `GET /healthz` (`{"status":"ok"}` 200); catalog error HTTP 500 `{"error":"<redacted>"}`
+- [x] 10.2 Default UI mode: mount `StaticFiles` from `odoo_instance_sdk/web/dist/`; bind `127.0.0.1`; `--port` exact or auto: try 8069 then scan 8100–8120 inclusive; never auto-select 8070–8099; browser open unless `--no-open`
+- [x] 10.3 `--headless`: only API routes, no static mount, no browser open
+- [x] 10.4 Non-loopback bind explicit opt-in via `--host`; CORS/auth/TLS out of scope
+- [x] 10.5 Import guard: `fastapi`/`uvicorn` missing → actionable hint (`pip install odoo-instance-sdk[dashboard]`)
 
 ## 11. React + Mantine UI
 
-- [ ] 11.1 Создать `src/odoo_instance_sdk/web/` Vite + React + Mantine project; одна responsive страница, без router/Redux/query lib
-- [ ] 11.2 Project selector (Mantine `Select`): "All projects" + each `ProjectSummary`; polling `fetch('/api/v1/snapshot')` every 2000 ms
-- [ ] 11.3 Cluster card per displayed project (mode/state/container ID+PID+scope/CPU/RAM/volume); одна `Card` per `EnvironmentSnapshot` (project, name, branch+short SHA, database, port from runtime or `allocated_http_port`, `lifecycle_state`+runtime badges; Git; disk; Odoo PID/workers/CPU/RAM для live, `—` для stopped; **Open Odoo** active только при `runtime.state=="ready"`)
-- [ ] 11.4 Loading, API error, empty-catalog states
-- [ ] 11.5 Mantine components: `Select`, `SimpleGrid`, `Card`, `Badge`, `Text`, `Button`, `Progress`; no chart/router/Redux/query lib
-- [ ] 11.6 Build output `dist/` shipped in package (sdist + wheel) via `uv_build` data inclusion; Node.js не требуется для установленного пакета
+- [x] 11.1 Создать `src/odoo_instance_sdk/web/` Vite + React + Mantine project; одна responsive страница, без router/Redux/query lib
+- [x] 11.2 Project selector (Mantine `Select`): "All projects" + each `ProjectSummary`; polling `fetch('/api/v1/snapshot')` every 2000 ms
+- [x] 11.3 Cluster card per displayed project (mode/state/container ID+PID+scope/CPU/RAM/volume); одна `Card` per `EnvironmentSnapshot` (project, name, branch+short SHA, database, port from runtime or `allocated_http_port`, `lifecycle_state`+runtime badges; Git; disk; Odoo PID/workers/CPU/RAM для live, `—` для stopped; **Open Odoo** active только при `runtime.state=="ready"`)
+- [x] 11.4 Loading, API error, empty-catalog states
+- [x] 11.5 Mantine components: `Select`, `SimpleGrid`, `Card`, `Badge`, `Text`, `Button`, `Progress`; no chart/router/Redux/query lib
+- [x] 11.6 Build output `dist/` shipped in package (sdist + wheel) via `uv_build` data inclusion; Node.js не требуется для установленного пакета  # ponytail: uv_build auto-includes web/dist under module root; verified via uv build (Block L)
 
 ## 12. CLI extensions
 
@@ -97,9 +97,9 @@
 
 ## 13. Packaging: optional extras + built assets
 
-- [ ] 13.1 Добавить `[project.optional-dependencies] metrics = ["psutil>=5.9,<7"]` и `dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30,<1.0"]` в `pyproject.toml`
-- [ ] 13.2 Настроить `uv_build` data inclusion для собранного React SPA (sdist + wheel); Node.js не требуется для установленного пакета
-- [ ] 13.3 Coverage regexs: добавить `monitor` regex (`odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)$`) + thresholds (80 line / 70 branch)
+- [x] 13.1 Добавить `[project.optional-dependencies] metrics = ["psutil>=5.9,<7"]` и `dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30,<1.0"]` в `pyproject.toml`
+- [x] 13.2 Настроить `uv_build` data inclusion для собранного React SPA (sdist + wheel); Node.js не требуется для установленного пакета
+- [x] 13.3 Coverage regexs: добавить `monitor` regex (`odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)$`) + thresholds (80 line / 70 branch)
 
 ## 14. Tests
 
@@ -108,7 +108,7 @@
 - [x] 14.3 `tests/unit/test_git_activity.py`: clean/ahead/behind/diverged/orphan, binary files, stale-local-main fallback
 - [x] 14.4 `tests/unit/test_storage_footprint.py`: owned/reused venv, shared/copy DB, `du` vs walk fallback, psql size failure → complete=False, symlinks
 - [x] 14.5 `tests/unit/test_cluster_resources.py`: fake Docker inspect/stats, PID scope, batch, external/stopped/docker-unavailable
-- [ ] 14.6 `tests/unit/test_serve.py`: FastAPI routes (`/api/v1/snapshot`, `/healthz`), project filter, headless vs UI, missing extra guard
+- [x] 14.6 `tests/unit/test_serve.py`: FastAPI routes (`/api/v1/snapshot`, `/healthz`), project filter, headless vs UI, missing extra guard
 - [ ] 14.7 `tests/unit/test_cli_monitor.py`: `odcli monitor --headless`, port auto-select, missing extra hint
 - [ ] 14.8 `tests/unit/test_cli_env_list_grouping.py`: project header, cluster summary, stopped row, `--all` human removed vs JSON non-removed, JSON parity
 - [ ] 14.9 `tests/unit/test_cli_postgres_status_resources.py`: container fields, external/stopped/docker-unavailable, parity
@@ -122,5 +122,5 @@
 - [ ] 15.2 `mypy --strict src/odoo_instance_sdk` clean
 - [ ] 15.3 `pytest -m "not real_odoo and not packaging"` green; coverage thresholds pass (новый `monitor` regex + thresholds)
 - [ ] 15.4 `pytest -m integration` green locally (with Docker/psutil) или skips gracefully
-- [ ] 15.5 Frontend production TypeScript build green (`npm ci && npm run build` в `src/odoo_instance_sdk/web/` with `package-lock.json`); собранные assets включены в package
-- [ ] 15.6 `pyproject.toml::[tool.coverage.regexs]` + thresholds добавлены; core deps без `psutil`/`fastapi`/`uvicorn`/`pydantic`/`docker-py`
+- [x] 15.5 Frontend production TypeScript build green (`npm ci && npm run build` в `src/odoo_instance_sdk/web/` with `package-lock.json`); собранные assets включены в package  # ponytail: build verified green (tsc+vite), package-lock.json committed; package data inclusion handled by Block L
+- [x] 15.6 `pyproject.toml::[tool.coverage.regexs]` + thresholds добавлены; core deps без `psutil`/`fastapi`/`uvicorn`/`pydantic`/`docker-py`
