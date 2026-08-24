@@ -10,11 +10,11 @@ from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
-def test_fresh_install_creates_v8_directly(tmp_path: Path) -> None:
+def test_fresh_install_creates_v9_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 8
+    assert version == 9
     tables = {
         r[0]
         for r in catalog._conn.execute(
@@ -23,6 +23,7 @@ def test_fresh_install_creates_v8_directly(tmp_path: Path) -> None:
     }
     assert "environments" in tables
     assert "environment_events" in tables
+    assert "environment_runtime" in tables
     catalog.close()
 
 
@@ -97,8 +98,37 @@ def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None
     schema = catalog._conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='environment_copy_journal'"
     ).fetchone()[0]
-    assert version == 8
+    assert version == 9
     assert "restore_pending" in schema
+    catalog.close()
+
+
+def test_v8_catalog_upgrades_to_v9_environment_runtime(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA user_version = 8")
+    conn.executescript("""
+        CREATE TABLE backups (
+            id TEXT PRIMARY KEY,
+            source_base_url TEXT NOT NULL,
+            database_name TEXT NOT NULL,
+            state TEXT NOT NULL,
+            downloaded_at TEXT
+        );
+        CREATE TABLE environments (id TEXT PRIMARY KEY);
+    """)
+    conn.close()
+
+    catalog = BackupCatalog(db_path=db)
+    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
+    tables = {
+        r[0]
+        for r in catalog._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert version == 9
+    assert "environment_runtime" in tables
     catalog.close()
 
 
@@ -221,7 +251,7 @@ def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
         (env_id,),
     ).fetchone()
 
-    assert version == 8
+    assert version == 9
     assert "http_port" not in columns
     assert "http_interface" not in columns
     assert "environments_one_active_branch" in indexes
