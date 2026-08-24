@@ -30,6 +30,7 @@ odcli run
 odcli logs [-n|--tail N] [-f|--follow]
 odcli shell [-- ODOO_ARGS...]
 odcli doctor [OPTIONS]
+odcli monitor [--headless] [--host HOST] [--port PORT] [--no-open]
 odcli eval EXPRESSION [OPTIONS]
 odcli exec SCRIPT [-- SCRIPT_ARGS...]
 odcli module list [MODULE...] [OPTIONS]
@@ -43,7 +44,7 @@ odcli vscode generate [OPTIONS]
 #### Scenario: Help shows full command surface
 
 - **WHEN** `odcli --help` runs
-- **THEN** shows init, env, run, logs, shell, doctor, eval, exec, module, translations, deps, vscode
+- **THEN** shows init, env, run, logs, shell, doctor, monitor, eval, exec, module, translations, deps, vscode
 
 ### Requirement: CLI not a third runtime
 
@@ -470,7 +471,72 @@ Entry point MUST остаться `odoo_instance_sdk.cli:cli`. Имена ком
 #### Scenario: Help still lists full command surface
 
 - **WHEN** `odcli --help` runs
-- **THEN** shows init, env, run, logs, shell, doctor, eval, exec, module, translations, deps, vscode
+- **THEN** shows init, env, run, logs, shell, doctor, monitor, eval, exec, module, translations, deps, vscode
+
+### Requirement: `odcli env list`
+
+```bash
+odcli env list
+odcli env list --all
+odcli env list --json
+```
+
+Default table: human output MUST группироваться по project — один project header (имя + cluster summary) на project, затем environment rows этого project. `--all-projects` MUST печатать по одной секции на project (поведение по умолчанию для CLI без project context эквивалентно `--all-projects`).
+
+Project header:
+
+```text
+Project comerta
+  PostgreSQL  healthy  container=4fc83d  pid=vm:9124  cpu=4.2%  ram=512 MiB  disk=12 GiB
+```
+
+Exact environment-row columns: `NAME  BRANCH  STATE  RUNTIME  OBSERVED  ODOO_PID  CPU  RAM  GIT_AHEAD  GIT_DIFF  SIZE  DB_MODE  DATABASE  PORT  ARTIFACTS`.
+
+Cluster summary and metric columns for non-removed rows MUST come from `EnvironmentMonitor.snapshot()` (no second collector). `--json` wraps non-removed `Snapshot` in CLI envelope v1 (`command="env.list"`). `--all` is human-only for removed rows.
+
+Reconciliation (`ARTIFACTS`) MUST still run in the CLI after `snapshot()`. `OBSERVED` MUST reuse existing `probe_address`/`_check_port_free` on allocated port from generated `odoo.conf`.
+
+#### Scenario: Grouped by project with cluster header
+
+- **WHEN** `env list` runs with two projects
+- **THEN** output has two `Project <name>` headers each followed by a `PostgreSQL ...` cluster summary line, then that project's environment rows
+
+#### Scenario: JSON parity with monitor snapshot
+
+- **WHEN** `odcli env list --json --all-projects` runs
+- **THEN** `result`/`data` payload uses the same `projects[].cluster` and `environments[].runtime` contract as `EnvironmentMonitor.snapshot()` and `GET /api/v1/snapshot`
+
+#### Scenario: --all human includes removed, JSON does not
+
+- **WHEN** `odcli env list --all` prints human table and `odcli env list --json --all` emits JSON
+- **THEN** human table includes `STATE=removed` rows; JSON `result.environments` contains only non-removed snapshot rows
+
+### Requirement: `odcli postgres status`
+
+```bash
+odcli postgres status [--json]
+```
+
+`status` MUST быть read-only (не меняет cluster state). `status` MUST NOT вызывать Docker в external mode (только TCP probe).
+
+Human и `--json` output дополнительно возвращают read-only cluster container fields (parity с monitor cluster snapshot): container ID/name/image, Docker-reported init PID + PID scope, CPU/memory/volume metrics, `sampled_at`, `unavailability_reason`.
+
+`postgres status` MUST call both `cluster.status()` and `cluster.resource_snapshot()`, then emit a `ClusterSnapshot`-shaped object. External → `unavailability_reason="external_not_owned"`. Stopped/missing/docker-unavailable — diagnostic exit 0.
+
+#### Scenario: Status JSON envelope with container fields
+
+- **WHEN** `odcli postgres status --json` runs on a healthy compose cluster
+- **THEN** JSON envelope v1 `result` contains `state`, `mode`, `owned`, `endpoint`, `container`, `metrics`, `sampled_at`
+
+#### Scenario: Status external does not invoke Docker
+
+- **WHEN** `odcli postgres status` on external mode
+- **THEN** only TCP probe is performed, container/resource fields `null` with `unavailability_reason="external_not_owned"`
+
+#### Scenario: Parity with monitor cluster snapshot
+
+- **WHEN** `odcli postgres status --json` and `odcli monitor --headless` `GET /api/v1/snapshot` run in the same instant for the same project
+- **THEN** container PID/resource values match between the two outputs
 
 ### Requirement: `odcli postgres` command group
 
@@ -485,7 +551,9 @@ odcli postgres approve-image --image-digest REPOSITORY@sha256:DIGEST [--timeout 
 
 Все три MUST использовать existing project resolution rules (`resolve_project_path`) — без project argument внутри initialized project или registered worktree.
 
-`status` MUST быть read-only (не меняет cluster state). `status` MUST NOT вызывать Docker в external mode (только TCP probe). `--json` output: JSON envelope v1 с `state`, `mode`, `owned`, `endpoint` (redacted).
+`status` MUST быть read-only (не меняет cluster state). `status` MUST NOT вызывать Docker в external mode (только TCP probe). Human и `--json` output дополнительно возвращают read-only cluster container fields (parity с monitor cluster snapshot): container ID/name/image, Docker-reported init PID + PID scope, CPU/memory/volume metrics, `sampled_at`, `unavailability_reason`.
+
+`postgres status` MUST call both `cluster.status()` and `cluster.resource_snapshot()`, then emit a `ClusterSnapshot`-shaped object. External mode — container/resource fields `null` with `unavailability_reason="external_not_owned"`. Stopped/missing/docker-unavailable — diagnostic exit 0.
 
 `up` MUST быть idempotent. Для managed (compose) cluster — вызывает `PostgresCluster.ensure_running(timeout)` (Compose `up --detach --wait`). Для external cluster — только reachability check (вызывает `status()`), не вызывает Docker. `--wait-timeout SECONDS` переходит в `ensure_running(timeout=...)`.
 
@@ -500,17 +568,32 @@ JSON envelope v1 MUST остаться (`emit_json_envelope`/`fail`). Entry poin
 #### Scenario: Status inside initialized project
 
 - **WHEN** `odcli postgres status` runs inside a project with `[postgres] mode="compose"`
-- **THEN** output reports `state`, `mode`, `owned`, `endpoint` without starting/stopping cluster
+- **THEN** output reports `state`, `mode`, `owned`, `endpoint`, container ID/name/image/PID+scope, CPU, memory, optional volume without starting/stopping cluster
 
-#### Scenario: Status JSON envelope
+#### Scenario: Status JSON envelope with container fields
 
-- **WHEN** `odcli postgres status --json` runs
-- **THEN** JSON envelope v1 with `result` containing `state`, `mode`, `owned`, `endpoint` (no password)
+- **WHEN** `odcli postgres status --json` runs on a healthy compose cluster
+- **THEN** JSON envelope v1 `result` contains `state`, `mode`, `owned`, `endpoint`, `container`, `metrics`, `sampled_at`
 
 #### Scenario: Status external does not invoke Docker
 
 - **WHEN** `odcli postgres status` on external mode
-- **THEN** only TCP probe is performed, no `docker compose` invocation
+- **THEN** only TCP probe is performed, container/resource fields `null` with `unavailability_reason="external_not_owned"`, no `docker compose`/`docker inspect` invocation
+
+#### Scenario: Status stopped compose
+
+- **WHEN** `odcli postgres status` on a stopped compose cluster
+- **THEN** `state=stopped`, container/resource fields `null`, `unavailability_reason="stopped"`, exit 0
+
+#### Scenario: Docker unavailable is diagnostic not error
+
+- **WHEN** `odcli postgres status` on compose mode and `docker` not in PATH
+- **THEN** `unavailability_reason="docker_unavailable"`, exit 0 (not 1)
+
+#### Scenario: Parity with monitor cluster snapshot
+
+- **WHEN** `odcli postgres status --json` and `odcli monitor --headless` `GET /api/v1/snapshot` run in the same instant for the same project
+- **THEN** container PID/resource values match between the two outputs
 
 #### Scenario: Up compose starts cluster
 
@@ -541,6 +624,31 @@ JSON envelope v1 MUST остаться (`emit_json_envelope`/`fail`). Entry poin
 
 - **WHEN** `odcli postgres status` runs inside an initialized project
 - **THEN** project is resolved via existing two-rule context, no `--project` required
+
+### Requirement: `odcli monitor` command
+
+```bash
+odcli monitor [--headless] [--host HOST] [--port PORT] [--no-open]
+```
+
+`odcli monitor` MUST запускать FastAPI server с `GET /api/v1/snapshot` (typed `Snapshot` JSON, optional `?project_id=`) и `GET /healthz` (`{"status":"ok"}`).
+
+Default UI mode: serves API + React SPA, bind `127.0.0.1`, auto port `8069` then `8100`–`8120` (never `8070`–`8099`), opens browser unless `--no-open`. `--headless`: API only, no static mount, no browser. Requires `dashboard` extra (`pip install odoo-instance-sdk[dashboard]`); missing extra → exit 1 with actionable hint.
+
+#### Scenario: Default UI mode serves SPA and API
+
+- **WHEN** `odcli monitor` runs without `--headless`
+- **THEN** FastAPI serves `/api/v1/snapshot`, `/healthz` and the React SPA; browser opens on `http://127.0.0.1:<port>/`
+
+#### Scenario: Headless serves API only
+
+- **WHEN** `odcli monitor --headless --no-open` runs
+- **THEN** `/api/v1/snapshot` and `/healthz` respond; static assets not mounted; browser not opened
+
+#### Scenario: Missing dashboard extra actionable hint
+
+- **WHEN** `odcli monitor` runs and `fastapi`/`uvicorn` not installed
+- **THEN** exits 1 with message containing `pip install odoo-instance-sdk[dashboard]`
 
 ### Requirement: `init` wires `--postgres*` options
 

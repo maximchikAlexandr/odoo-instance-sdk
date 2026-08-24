@@ -10,12 +10,39 @@ The project SHALL be managed by `uv`. `pyproject.toml` SHALL declare build backe
 
 ### Requirement: Runtime dependencies are minimal
 
-The `pyproject.toml` SHALL declare runtime dependencies as exactly: `httpx` (pinned `>=0.27,<1.0`), `msgspec`, and `platformdirs` (pinned `>=4.3,<5`). No other runtime dependencies SHALL be introduced.
+The `pyproject.toml` SHALL declare core runtime dependencies as exactly: `httpx` (pinned `>=0.27,<1.0`), `msgspec`, `platformdirs` (pinned `>=4.3,<5`), `click`, `json5`. No other runtime dependencies SHALL be introduced in the core dependency list.
+
+Optional extras:
+
+```toml
+[project.optional-dependencies]
+metrics = ["psutil>=5.9,<7"]
+dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30,<1.0"]
+```
+
+- `metrics` — collector + typed snapshot models; no FastAPI/Uvicorn.
+- `dashboard` — `metrics` + FastAPI + Uvicorn; required for `odcli monitor`.
+- React SPA assets ship in sdist + wheel; Node.js not required for installed package.
 
 #### Scenario: Runtime dependencies enumerated
+
 - **WHEN** the published metadata is inspected
-- **THEN** runtime dependencies are `httpx>=0.27,<1.0`, `msgspec`, and `platformdirs>=4.3,<5`
-- **AND** no `psutil` or `pytest` appear as runtime dependencies
+- **THEN** core runtime dependencies are `httpx>=0.27,<1.0`, `msgspec`, `platformdirs>=4.3,<5`, `click`, `json5`; no `psutil`, `fastapi`, `uvicorn`, `pydantic` or `docker-py` in core deps
+
+#### Scenario: metrics extra contains psutil only
+
+- **WHEN** `pip install odoo-instance-sdk[metrics]` is run
+- **THEN** installed extra dependencies are exactly `psutil>=5.9,<7` (plus existing core deps); no FastAPI/Uvicorn
+
+#### Scenario: dashboard extra pulls metrics + fastapi + uvicorn
+
+- **WHEN** `pip install odoo-instance-sdk[dashboard]` is run
+- **THEN** installed extra dependencies include `psutil`, `fastapi`, `uvicorn` (via `metrics` + dashboard-specific)
+
+#### Scenario: Monitor command hint when extra missing
+
+- **WHEN** `odcli monitor` runs and `fastapi`/`uvicorn` not installed
+- **THEN** exits 1 with message containing `pip install odoo-instance-sdk[dashboard]`
 
 ### Requirement: Strict mypy and ruff
 

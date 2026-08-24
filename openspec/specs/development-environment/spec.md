@@ -171,6 +171,8 @@ OdooClient
 └── environments      # EnvironmentResource
 ```
 
+`EnvironmentResource.list()` остаётся источником environment rows для SDK callers. `EnvironmentMonitor` reads `BackupCatalog.list_environments` / `list_environment_runtimes` directly (via `get_catalog_path()` or injected `catalog_path`) and MUST NOT reimplement catalog schema or scan the filesystem. `odcli env list` / `odcli monitor` consume `EnvironmentMonitor.snapshot()`. `EnvironmentResource` does not grow runtime methods; `environment_runtime` is catalog-internal.
+
 #### Scenario: Three facades
 
 - **WHEN** `OdooClient` constructed
@@ -195,6 +197,29 @@ Selector не выбирается по recency и не выбирается п�
 
 - **WHEN** checkout для repo+branch с уже active environment
 - **THEN** `EnvironmentConflictError` с code и details
+
+### Requirement: Catalog current-runtime record (schema v8 → v9)
+
+Catalog MUST хранить одну current runtime-запись на environment в таблице `environment_runtime` (schema migration v8 → v9, `CURRENT_SCHEMA_VERSION = 9`).
+
+`BackupCatalog` MUST предоставлять read-only `get_environment_runtime(environment_id)` и `list_environment_runtimes()`, и write `upsert_environment_runtime(...)` / `clear_environment_runtime(environment_id)` (только из `run_foreground`).
+
+Collector (`EnvironmentMonitor`) reads runtime rows read-only. PID safety: collector считает process живым только при `psutil.Process(pid).create_time() == recorded_create_time` и `psutil.pid_exists(pid)`; mismatch → `runtime.state="stopped"`.
+
+#### Scenario: Migration adds runtime table
+
+- **WHEN** catalog at schema v8 is opened
+- **THEN** `environment_runtime` table is created, `PRAGMA user_version = 9`, existing environments have no runtime row
+
+#### Scenario: Upsert is one-row-per-environment
+
+- **WHEN** `upsert_environment_runtime(env_id, ...)` is called twice for the same environment
+- **THEN** one row exists with the latest values (no duplicates)
+
+#### Scenario: Collector reads runtime read-only
+
+- **WHEN** `EnvironmentMonitor.snapshot()` runs
+- **THEN** it calls `list_environment_runtimes()` (read-only); collector never calls `upsert`/`clear`
 
 ### Requirement: Operation locks
 

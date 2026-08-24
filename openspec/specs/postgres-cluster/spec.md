@@ -22,9 +22,10 @@ cluster.ensure_running(timeout=60.0)
 cluster.stop(timeout=30.0)  # SDK-owned compose mode only
 digest = cluster.resolve_image_digest(timeout=60.0)
 cluster.approve_image(digest, timeout=60.0)
+snapshot = cluster.resource_snapshot()  # read-only container identity + metrics
 ```
 
-`resolve_image_digest` and `approve_image` are public compose-only consent operations; external mode raises `PostgresClusterNotOwnedError`. `status()` remains read-only and intentionally does not acquire the lifecycle lock; `ensure_running()` and `stop()` acquire the canonical lock for all state-changing transitions.
+`resolve_image_digest` and `approve_image` are public compose-only consent operations; external mode raises `PostgresClusterNotOwnedError`. `status()` remains read-only and intentionally does not acquire the lifecycle lock; `ensure_running()` and `stop()` acquire the canonical lock for all state-changing transitions. `resource_snapshot()` is read-only, does not acquire the lifecycle lock, does not start/stop the cluster, и возвращает typed `ClusterResourceSnapshot` или `None` для external cluster. `EnvironmentMonitor` потребляет `PostgresCluster.resource_snapshot()` напрямую.
 
 `mode` и `owned` MUST быть read-only properties. `mode: Literal["external", "compose"]`. `owned` — `True` iff `mode == "compose"`.
 
@@ -44,6 +45,11 @@ cluster.approve_image(digest, timeout=60.0)
 
 - **WHEN** `repr(cluster)` is rendered for a compose-mode cluster
 - **THEN** output contains `mode=`, `owned=` and `endpoint=` but never contains the password or any secret file content
+
+#### Scenario: resource_snapshot is read-only
+
+- **WHEN** `cluster.resource_snapshot()` is called on a compose cluster
+- **THEN** it returns a `ClusterResourceSnapshot` without acquiring the lifecycle lock and without starting/stopping the cluster
 
 ### Requirement: `PostgresCluster.from_project()`
 
@@ -106,7 +112,7 @@ cluster.approve_image(digest, timeout=60.0)
 - не логировать пароль;
 - возвращать `PostgresClusterState`, не падать при transient Docker errors (возвращает `UNKNOWN`).
 
-`status()` не дублирует preflight — это отдельная read-only operation.
+`status()` не дублирует preflight — это отдельная read-only operation. `resource_snapshot()` — отдельная read-only operation для container identity + resource metrics; `status()` возвращает только lifecycle state.
 
 #### Scenario: External status probes without Docker
 
@@ -122,6 +128,27 @@ cluster.approve_image(digest, timeout=60.0)
 
 - **WHEN** `cluster.status()` on compose mode and `docker` not in PATH
 - **THEN** returns `UNKNOWN` without raising
+
+### Requirement: `resource_snapshot()` — read-only container identity and metrics
+
+`PostgresCluster.resource_snapshot() -> ClusterResourceSnapshot | None` MUST быть read-only: не запускать/останавливать cluster, не acquire lifecycle lock. External → `None`. Compose → `docker inspect`/`docker stats --no-stream` via existing Compose runner; returns container ID/name/image, init PID + `PidScope`, CPU/memory/volume metrics, `sampled_at`, `unavailability_reason` (`stopped`/`missing`/`docker_unavailable`/`inspect_failed`/`stats_failed`). No raw Docker payload, no backend PIDs.
+
+`resource_snapshot()` MUST NOT cache between calls; `EnvironmentMonitor` owns caching.
+
+#### Scenario: External resource_snapshot returns None
+
+- **WHEN** `cluster.resource_snapshot()` on external mode
+- **THEN** returns `None` (no Docker invocation)
+
+#### Scenario: Compose healthy returns container metrics
+
+- **WHEN** `cluster.resource_snapshot()` on a healthy compose cluster
+- **THEN** returns `ClusterResourceSnapshot` with non-null `container` and `metrics`
+
+#### Scenario: Docker unavailable does not raise
+
+- **WHEN** `docker` is not in PATH and `resource_snapshot()` runs on compose mode
+- **THEN** returns `ClusterResourceSnapshot` with `unavailability_reason="docker_unavailable"`, no exception
 
 ### Requirement: `ensure_running()` is idempotent
 
