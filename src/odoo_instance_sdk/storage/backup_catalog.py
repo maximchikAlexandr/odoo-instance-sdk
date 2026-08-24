@@ -876,6 +876,24 @@ class BackupCatalog:
         ).fetchall()
 
     @_translate_sqlite_error
+    def list_environments_with_runtimes(self) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
+        """Read monitor rows and runtime identities from one SQLite snapshot."""
+        self._conn.execute("BEGIN")
+        try:
+            environments = self._conn.execute(
+                "SELECT * FROM environments WHERE state != 'removed' ORDER BY created_at DESC, id DESC"
+            ).fetchall()
+            runtimes = self._conn.execute(
+                "SELECT * FROM environment_runtime ORDER BY environment_id"
+            ).fetchall()
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        by_environment = {str(runtime["environment_id"]): runtime for runtime in runtimes}
+        return [(row, by_environment.get(str(row["id"]))) for row in environments]
+
+    @_translate_sqlite_error
     def upsert_environment_runtime(
         self,
         environment_id: str,

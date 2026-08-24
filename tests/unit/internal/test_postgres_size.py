@@ -22,8 +22,10 @@ def test_database_size_uses_safe_argv_environment_and_escaping(
         captured.update(kwargs)
         return _run_result(args)
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_cli.shutil.which", lambda _: "/psql")
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_cli.subprocess.run", run)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/psql"
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
     assert (
         database_size_bytes(
             host="127.0.0.1", port=5432, user="odoo", password="secret", database_name="db'o"
@@ -37,7 +39,7 @@ def test_database_size_uses_safe_argv_environment_and_escaping(
     assert captured["timeout"] == 10.0
 
 
-def test_database_size_omits_host_and_accepts_custom_timeout(
+def test_database_size_defaults_to_tcp_loopback_and_accepts_custom_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: dict[str, Any] = {}
@@ -47,15 +49,17 @@ def test_database_size_omits_host_and_accepts_custom_timeout(
         seen.update(kwargs)
         return _run_result(args)
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_cli.shutil.which", lambda _: "/psql")
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_cli.subprocess.run", run)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/psql"
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
     assert (
         database_size_bytes(
             host=None, port=5433, user="u", password=None, database_name="db", timeout=1.5
         )
         == 123
     )
-    assert "-h" not in seen["args"]
+    assert seen["args"][:3] == ["psql", "-h", "127.0.0.1"]
     assert seen["timeout"] == 1.5
     assert "PGPASSWORD" not in seen["env"]
 
@@ -68,8 +72,10 @@ def test_database_size_never_inherits_ambient_password(monkeypatch: pytest.Monke
         return _run_result(args)
 
     monkeypatch.setenv("PGPASSWORD", "ambient-secret")
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_cli.shutil.which", lambda _: "/psql")
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_cli.subprocess.run", run)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/psql"
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
     assert (
         database_size_bytes(host=None, port=5432, user="u", password=None, database_name="db")
         == 123
@@ -90,7 +96,9 @@ def test_database_size_never_inherits_ambient_password(monkeypatch: pytest.Monke
 def test_database_size_failure_modes(
     monkeypatch: pytest.MonkeyPatch, which: str | None, outcome: object
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_cli.shutil.which", lambda _: which)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: which
+    )
     if outcome is not None:
 
         def run(*_args: Any, **_kwargs: Any) -> Any:
@@ -98,7 +106,7 @@ def test_database_size_failure_modes(
                 raise outcome
             return outcome
 
-        monkeypatch.setattr("odoo_instance_sdk.internal.postgres_cli.subprocess.run", run)
+        monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
     assert (
         database_size_bytes(host=None, port=5432, user="u", password=None, database_name="db")
         is None

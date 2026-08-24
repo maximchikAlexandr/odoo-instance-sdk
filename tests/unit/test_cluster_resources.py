@@ -31,8 +31,6 @@ def _cp(
 class FakeDockerRunner:
     """Duck-typed ComposeRunner returning scripted docker compose/inspect/stats output."""
 
-    requires_docker = True
-
     def __init__(
         self,
         *,
@@ -42,7 +40,12 @@ class FakeDockerRunner:
         inspect_rc: int = 0,
         stats_lines: list[dict[str, object]] | None = None,
         stats_rc: int = 0,
+        volume_lines: list[dict[str, object]] | None = None,
+        requires_docker: bool = False,
     ) -> None:
+        # Scripted runners never need host Docker unless a test explicitly
+        # exercises the availability guard.
+        self.requires_docker = requires_docker
         self.calls: list[list[str]] = []
         self._ps_rows = ps_rows if ps_rows is not None else []
         self._ps_rc = ps_rc
@@ -50,6 +53,7 @@ class FakeDockerRunner:
         self._inspect_rc = inspect_rc
         self._stats_lines = stats_lines if stats_lines is not None else []
         self._stats_rc = stats_rc
+        self._volume_lines = volume_lines if volume_lines is not None else []
 
     def run(
         self,
@@ -69,6 +73,8 @@ class FakeDockerRunner:
         if args[:2] == ["docker", "stats"]:
             out = "\n".join(json.dumps(r) for r in self._stats_lines)
             return _cp(args, self._stats_rc, out, "" if self._stats_rc == 0 else "stats fail")
+        if args[:3] == ["docker", "system", "df"]:
+            return _cp(args, 0, "\n".join(json.dumps(row) for row in self._volume_lines))
         return _cp(args, 0, "", "")
 
 
@@ -89,6 +95,27 @@ def _healthy_inspect() -> dict[str, object]:
         },
         "State": {"Pid": 9124, "Running": True},
     }
+
+
+@pytest.mark.unit
+def test_resource_snapshot_reads_named_volume_usage() -> None:
+    inspect = _healthy_inspect()
+    inspect["Mounts"] = [{"Type": "volume", "Name": "odcli_pg_x_data"}]
+    runner = FakeDockerRunner(
+        ps_rows=[{"Service": "postgres", "ID": FULL_ID}],
+        inspect_payload=[inspect],
+        stats_lines=[_healthy_stats()],
+        volume_lines=[{"Name": "odcli_pg_x_data", "Size": "1.5GiB"}],
+    )
+    snap = cluster_resources.cluster_resource_snapshot(
+        compose_file=Path("/tmp/compose.yaml"),
+        compose_project_name="odcli_pg_x",
+        service="postgres",
+        runner=runner,
+        state=PostgresClusterState.HEALTHY,
+    )
+    assert snap.metrics is not None
+    assert snap.metrics.volume_usage_bytes == int(1.5 * 1024**3)
 
 
 def _healthy_stats() -> dict[str, object]:
@@ -135,7 +162,7 @@ def test_resource_snapshot_external_returns_none(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_resource_snapshot_stopped() -> None:
-    runner = FakeDockerRunner(ps_rows=[])
+    runner = FakeDockerRunner(ps_rows=[], requires_docker=True)
     snap = cluster_resources.cluster_resource_snapshot(
         compose_file=Path("/tmp/compose.yaml"),
         compose_project_name="odcli_pg_x",
@@ -152,7 +179,7 @@ def test_resource_snapshot_stopped() -> None:
 @pytest.mark.unit
 def test_resource_snapshot_docker_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cluster_resources, "docker_available", lambda: False)
-    runner = FakeDockerRunner()
+    runner = FakeDockerRunner(requires_docker=True)
     snap = cluster_resources.cluster_resource_snapshot(
         compose_file=Path("/tmp/compose.yaml"),
         compose_project_name="odcli_pg_x",

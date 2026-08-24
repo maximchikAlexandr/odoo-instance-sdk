@@ -98,19 +98,25 @@ def _directory_size(path: Path) -> int | None:
     return _walk_size(path)
 
 
-def _other_files_bytes(generated_config_path: Path, dependency_lock_path: Path) -> int:
-    """Sum sizes of generated config and lock files. Missing files contribute 0.
-
-    ponytail: local logs/cache/artifacts live inside the worktree and are already
-    counted by ``worktree_bytes``; scanning them separately would double-count.
-    """
+def _other_files_bytes(
+    generated_config_path: Path, dependency_lock_path: Path, environment_root: Path | None
+) -> int | None:
+    """Measure environment-owned config, logs and artifact directories once."""
     total = 0
-    for p in (generated_config_path, dependency_lock_path):
+    paths = [generated_config_path, dependency_lock_path]
+    if environment_root is not None:
+        paths.extend(environment_root / name for name in ("odoo.log", "cache", "artifacts"))
+    for p in paths:
         try:
             if p.is_file():
                 total += p.stat().st_size
+            elif p.is_dir():
+                size = _directory_size(p)
+                if size is None:
+                    return None
+                total += size
         except OSError:
-            continue
+            return None
     return total
 
 
@@ -122,6 +128,7 @@ def collect_storage_footprint(
     database: DatabaseStorageInput,
     generated_config_path: Path,
     dependency_lock_path: Path,
+    environment_root: Path | None = None,
 ) -> StorageFootprint:
     """Pure compute (no cache): bounded ``StorageFootprint`` for one environment.
 
@@ -178,9 +185,11 @@ def collect_storage_footprint(
             owned=False, postgres_bytes=None, filestore_bytes=None, total_bytes=None
         )
 
-    other = _other_files_bytes(generated_config_path, dependency_lock_path)
+    other = _other_files_bytes(generated_config_path, dependency_lock_path, environment_root)
+    if other is None:
+        complete_flags.append(False)
 
-    total = (worktree_bytes or 0) + (py.bytes or 0) + (db.total_bytes or 0) + other
+    total = (worktree_bytes or 0) + (py.bytes or 0) + (db.total_bytes or 0) + (other or 0)
     return StorageFootprint(
         total_bytes=total,
         complete=all(complete_flags),

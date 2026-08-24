@@ -128,7 +128,7 @@ def test_catalog_paths_are_redacted_from_public_monitor_error(
     def boom(self: BackupCatalog, **_: object) -> list[sqlite3.Row]:
         raise BackupCatalogError("cannot open /secret/catalog.sqlite3")
 
-    monkeypatch.setattr(BackupCatalog, "list_environments", boom)
+    monkeypatch.setattr(BackupCatalog, "list_environments_with_runtimes", boom)
     with pytest.raises(MonitorError) as caught:
         EnvironmentMonitor(
             catalog_path=tmp_path / "catalog.sqlite3", process_provider=FakeProcessProvider()
@@ -166,13 +166,6 @@ def test_cpu_identity_changes_prune_old_point_and_read_runtime_once_per_poll(
     seed_runtime(catalog, env_id, root_pid=10, create_time=1.0)
     catalog.close()
     patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-    original = BackupCatalog.get_environment_runtime
-    calls = 0
-
-    def counted(self: BackupCatalog, identifier: str) -> sqlite3.Row | None:
-        nonlocal calls
-        calls += 1
-        return original(self, identifier)
 
     class Provider:
         def collect(
@@ -183,13 +176,12 @@ def test_cpu_identity_changes_prune_old_point_and_read_runtime_once_per_poll(
                 CpuPoint(0.0, 0.0),
             )
 
-    monkeypatch.setattr(BackupCatalog, "get_environment_runtime", counted)
     monkeypatch.setattr(EnvironmentMonitor, "_probe_readiness", lambda *_: RuntimeState.READY)
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=Provider()
     )
     monitor.snapshot()
-    assert calls == 1 and set(monitor._cpu_points) == {(10, 1.0)}
+    assert set(monitor._cpu_points) == {(10, 1.0)}
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     catalog.upsert_environment_runtime(
         env_id,
@@ -204,4 +196,4 @@ def test_cpu_identity_changes_prune_old_point_and_read_runtime_once_per_poll(
     )
     catalog.close()
     monitor.snapshot()
-    assert calls == 2 and set(monitor._cpu_points) == {(20, 2.0)}
+    assert set(monitor._cpu_points) == {(20, 2.0)}

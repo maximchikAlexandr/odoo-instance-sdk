@@ -166,7 +166,9 @@ def test_persist_after_spawn_and_clear_on_normal_exit(
 
 
 @pytest.mark.unit
-def test_persist_called_with_expected_fields(env_id: str, tmp_path: Path) -> None:
+def test_persist_called_with_expected_fields(
+    env_id: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     wt = tmp_path / "wt"
     branch, sha = _init_git_worktree(wt)
     fake = _FakeCatalog()
@@ -177,6 +179,7 @@ def test_persist_called_with_expected_fields(env_id: str, tmp_path: Path) -> Non
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
     )
+    monkeypatch.setattr("odoo_instance_sdk.resources.instance._process_create_time", lambda _: 1.0)
 
     exit_code = inst.run_foreground()
 
@@ -276,7 +279,9 @@ def test_manual_instance_no_persist_no_clear(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_psutil_fallback_uses_time_time(env_id: str, tmp_path: Path) -> None:
+def test_psutil_fallback_does_not_persist_unverifiable_pid_identity(
+    env_id: str, tmp_path: Path
+) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     fake = _FakeCatalog()
@@ -298,10 +303,7 @@ def test_psutil_fallback_uses_time_time(env_id: str, tmp_path: Path) -> None:
         if saved is not None:
             sys.modules["psutil"] = saved
 
-    assert len(fake.upsert_calls) == 1
-    _, kw = fake.upsert_calls[0]
-    assert isinstance(kw["create_time"], float)
-    assert kw["create_time"] > 0
+    assert fake.upsert_calls == []
 
 
 @pytest.mark.unit

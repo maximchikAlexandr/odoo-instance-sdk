@@ -398,7 +398,7 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
         "shared",
         "",
         "8069",
-        "worktree,registered,config,python,python-contained,lock,backup",
+        "worktree,registered,con…",
     ]
 
 

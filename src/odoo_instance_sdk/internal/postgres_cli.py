@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -136,32 +133,3 @@ def print_status(snapshot: ClusterSnapshot) -> None:
         if metrics.volume_usage_bytes is not None:
             parts.append(f"disk={human_bytes(metrics.volume_usage_bytes)}")
     click.echo("  ".join(parts))
-
-
-def run_psql(
-    *,
-    host: str | None,
-    port: int,
-    user: str | None,
-    password: str | None,
-    query: str,
-    timeout: float,
-) -> subprocess.CompletedProcess[str] | None:
-    """Run one read-only psql query with a scrubbed password environment."""
-    if user is None or shutil.which("psql") is None:
-        return None
-    env = os.environ.copy()
-    # Do not accidentally inherit credentials from the agent/CI process.
-    env.pop("PGPASSWORD", None)
-    if password is not None:
-        env["PGPASSWORD"] = password
-    cmd = ["psql"]
-    if host is not None:
-        cmd.extend(["-h", host])
-    cmd.extend(["-p", str(port), "-U", user, "-d", "postgres", "-t", "-A", "-c", query])
-    try:
-        return subprocess.run(
-            cmd, env=env, capture_output=True, text=True, timeout=timeout, shell=False, check=False
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return None

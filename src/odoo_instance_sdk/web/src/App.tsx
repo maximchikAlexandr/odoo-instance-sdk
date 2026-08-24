@@ -46,9 +46,13 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let nextAt = Date.now();
     const poll = async () => {
       await load();
-      if (!cancelled) timeout = setTimeout(() => void poll(), POLL_MS);
+      nextAt += POLL_MS;
+      // Fixed cadence avoids interval drift while serial polling guarantees
+      // no overlapping fetches. A slow request coalesces missed ticks.
+      if (!cancelled) timeout = setTimeout(() => void poll(), Math.max(0, nextAt - Date.now()));
     };
     setLoading(true);
     void poll();
@@ -244,7 +248,7 @@ function EnvironmentCard({
 
         <Stack gap={2}>
             <Text size="sm">
-              disk: {formatBytes(st.total_bytes)} {st.complete ? "" : "(partial)"}
+              disk: {st.complete ? "" : "≥ "}{formatBytes(st.total_bytes)}
             </Text>
             <Text size="xs" c="dimmed">
               worktree {formatBytes(st.worktree_bytes)} · venv{" "}

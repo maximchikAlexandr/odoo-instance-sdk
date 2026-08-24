@@ -100,7 +100,7 @@ def test_shared_db_excluded(tmp_path: Path) -> None:
 
 def test_copy_db_psql_missing_marks_incomplete(tmp_path: Path) -> None:
     worktree = _make_worktree(tmp_path)
-    with patch("odoo_instance_sdk.internal.postgres_cli.shutil.which", return_value=None):
+    with patch("odoo_instance_sdk.internal.postgres_transport.shutil.which", return_value=None):
         footprint = collect_storage_footprint(
             **_kwargs(
                 tmp_path,

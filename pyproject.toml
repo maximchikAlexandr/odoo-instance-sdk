@@ -151,6 +151,13 @@ ignore_missing_imports = true
 follow_imports = "silent"
 
 [[tool.mypy.overrides]]
+# FastAPI is deliberately an optional dashboard extra.  In the core-only type
+# environment its route decorators are Any, while the route bodies remain
+# checked under strict mode.
+module = ["odoo_instance_sdk.internal.serve"]
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
 module = ["tests.*", "scripts.*"]
 ignore_missing_imports = true
 follow_imports = "silent"

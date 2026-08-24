@@ -161,6 +161,41 @@ def stats_containers(
     return {cid: by_id.get(cid) or by_id.get(cid[:12]) for cid in container_ids}
 
 
+def volume_sizes(*, runner: ComposeRunner, timeout: float | None = None) -> dict[str, int]:
+    """Return named-volume sizes reported by Docker, without host traversal."""
+    result = _safe_run(
+        runner, ["docker", "system", "df", "-v", "--format", "{{json .}}"], timeout=timeout
+    )
+    if result is None or result.returncode != 0:
+        return {}
+    sizes: dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        name, size = row.get("Name"), row.get("Size")
+        if isinstance(name, str) and isinstance(size, str):
+            parsed = _parse_mem_value(size)
+            if parsed is not None:
+                sizes[name] = parsed
+    return sizes
+
+
+def _volume_name(inspect_entry: dict[str, object]) -> str | None:
+    mounts = inspect_entry.get("Mounts")
+    if not isinstance(mounts, list):
+        return None
+    for mount in mounts:
+        if isinstance(mount, dict) and mount.get("Type") == "volume":
+            name = mount.get("Name")
+            if isinstance(name, str) and name:
+                return name
+    return None
+
+
 def _lookup_id(entry: dict[str, object], candidates: list[str]) -> str:
     """Match an inspect entry back to one of the requested container IDs."""
     ident = entry.get("Id")
@@ -312,6 +347,13 @@ def collect_cluster_resource_batch(
         inspected = inspect_containers(ids, runner=runner, timeout=timeout)
         inspectable = tuple(cid for cid in ids if inspected.get(cid) is not None)
         stats = stats_containers(inspectable, runner=runner, timeout=timeout) if inspectable else {}
+        volume_names = {
+            name
+            for cid in inspectable
+            if (entry := inspected.get(cid)) is not None
+            if (name := _volume_name(entry)) is not None
+        }
+        volumes = volume_sizes(runner=runner, timeout=timeout) if volume_names else {}
         sampled_at = datetime.now(UTC)
         for request, container_id in group:
             inspect_entry = inspected.get(container_id)
@@ -325,10 +367,12 @@ def collect_cluster_resource_batch(
                 continue
             container = build_container(inspect_entry)
             stat = stats.get(container_id)
+            named_volume = _volume_name(inspect_entry)
+            volume_usage = volumes.get(named_volume) if named_volume is not None else None
             resources[request.project_id] = (
                 ClusterResourceSnapshot(
                     container=container,
-                    metrics=build_metrics(stat, sampled_at),
+                    metrics=build_metrics(stat, sampled_at, volume_usage),
                     unavailability_reason=None,
                     sampled_at=sampled_at,
                 )
@@ -369,7 +413,9 @@ def build_container(inspect_entry: dict[str, object]) -> ClusterContainer:
     )
 
 
-def build_metrics(stats_entry: dict[str, object], sampled_at: datetime) -> ClusterMetrics:
+def build_metrics(
+    stats_entry: dict[str, object], sampled_at: datetime, volume_usage_bytes: int | None = None
+) -> ClusterMetrics:
     cpu_raw = stats_entry.get("CPUPerc")
     cpu_percent: float | None = None
     if isinstance(cpu_raw, str):
@@ -383,12 +429,11 @@ def build_metrics(stats_entry: dict[str, object], sampled_at: datetime) -> Clust
         memory_usage_bytes = _parse_mem_value(usage_str)
         memory_limit_bytes = _parse_mem_value(limit_str)
 
-    # ponytail: volume usage via `docker system df -v` is heavy and platform-dependent; None is spec-allowed.
     return ClusterMetrics(
         cpu_percent=cpu_percent,
         memory_usage_bytes=memory_usage_bytes,
         memory_limit_bytes=memory_limit_bytes,
-        volume_usage_bytes=None,
+        volume_usage_bytes=volume_usage_bytes,
         sampled_at=sampled_at,
     )
 
@@ -403,4 +448,5 @@ __all__ = [
     "inspect_containers",
     "resolve_container_id",
     "stats_containers",
+    "volume_sizes",
 ]

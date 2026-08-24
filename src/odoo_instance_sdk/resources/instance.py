@@ -259,15 +259,16 @@ def _logfile_cursor_snapshot(handle: TextIO) -> tuple[int, bytes]:
 _FORBIDDEN_SHELL_FLAGS = ("-c", "--config", "-d", "--database")
 
 
-def _process_create_time(pid: int) -> float:
-    """Best-effort process start time; falls back to wall clock if psutil absent."""
+def _process_create_time(pid: int) -> float | None:
+    """Return an exact process identity, or ``None`` when it is unverifiable."""
     try:
         import psutil  # type: ignore[import-untyped]
 
         return float(psutil.Process(pid).create_time())
     except Exception:
-        # ponytail: psutil optional; wall clock is good enough for liveness checks
-        return time.time()
+        # Never persist a wall-clock approximation: the monitor compares this
+        # value exactly to protect against PID reuse.
+        return None
 
 
 def _worktree_ref(cwd: str | Path | None) -> tuple[str, str]:
@@ -446,6 +447,8 @@ class OdooInstance:
             return
         try:
             create_time = _process_create_time(root_pid)
+            if create_time is None:
+                return
             checkout_branch, commit_sha = _worktree_ref(cwd)
             http_url = f"http://{config.http_interface}:{config.http_port}"
             self._client.get_catalog().upsert_environment_runtime(

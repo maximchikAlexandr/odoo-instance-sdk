@@ -254,15 +254,14 @@ class EnvironmentMonitor:
     def _plan_snapshot(self, catalog: BackupCatalog) -> _SnapshotPlan:
         """Read catalog runtime once and derive deterministic project plans."""
         try:
-            rows = catalog.list_environments(include_removed=False)
+            rows = catalog.list_environments_with_runtimes()
         except (BackupCatalogError, sqlite3.Error) as exc:
             raise MonitorError("monitor catalog unavailable") from exc
         groups: dict[str, list[_EnvironmentPlan]] = {}
         environment_ids: set[str] = set()
         worktrees: set[Path] = set()
         cpu_points: set[tuple[int, float]] = set()
-        for row in rows:
-            runtime = self._runtime_for_row(catalog, row)
+        for row, runtime in rows:
             groups.setdefault(str(row["git_common_dir"]), []).append(_EnvironmentPlan(row, runtime))
             environment_ids.add(str(row["id"]))
             worktrees.add(Path(str(row["worktree_path"])).resolve())
@@ -695,6 +694,7 @@ class EnvironmentMonitor:
                 python_environment_owned=python_owned,
                 generated_config_path=generated_config,
                 dependency_lock_path=dependency_lock,
+                environment_root=generated_config.parent,
                 database=DatabaseStorageInput(
                     mode=db_mode,
                     target_name=target_db_str,

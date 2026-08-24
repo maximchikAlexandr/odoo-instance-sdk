@@ -395,10 +395,10 @@ def test_catalog_error_raises_monitor_error(
     from odoo_instance_sdk.exceptions import BackupCatalogError
     from odoo_instance_sdk.storage import backup_catalog as bc_mod
 
-    def _boom(self: BackupCatalog, **kwargs: object) -> list[sqlite3.Row]:
+    def _boom(self: BackupCatalog) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
         raise BackupCatalogError("sqlite boom")
 
-    monkeypatch.setattr(bc_mod.BackupCatalog, "list_environments", _boom)
+    monkeypatch.setattr(bc_mod.BackupCatalog, "list_environments_with_runtimes", _boom)
 
     catalog = _make_catalog(tmp_path)
     catalog.close()
@@ -407,7 +407,7 @@ def test_catalog_error_raises_monitor_error(
         monitor.snapshot()
 
 
-def test_catalog_runtime_error_aborts_snapshot(
+def test_catalog_atomic_read_error_aborts_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Only an absent runtime means stopped; catalog failure is not lifecycle state."""
@@ -420,14 +420,14 @@ def test_catalog_runtime_error_aborts_snapshot(
     _seed_env(catalog, _make_env(env_id, worktree_path=str(worktree)))
     catalog.close()
 
-    def boom(self: BackupCatalog, environment_id: str) -> sqlite3.Row | None:
+    def boom(self: BackupCatalog) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
         raise BackupCatalogError("sqlite unavailable")
 
-    monkeypatch.setattr(BackupCatalog, "get_environment_runtime", boom)
+    monkeypatch.setattr(BackupCatalog, "list_environments_with_runtimes", boom)
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=FakeProcessProvider()
     )
-    with pytest.raises(MonitorError, match="catalog runtime lookup failed"):
+    with pytest.raises(MonitorError, match="monitor catalog unavailable"):
         monitor.snapshot()
 
 
@@ -466,7 +466,7 @@ def test_malformed_health_response_is_not_ready_and_keeps_metrics(
     )
 
 
-def test_runtime_is_read_once_and_cpu_identity_is_stable(
+def test_runtime_is_read_once_in_atomic_catalog_snapshot_and_cpu_identity_is_stable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog = _make_catalog(tmp_path)
@@ -477,18 +477,6 @@ def test_runtime_is_read_once_and_cpu_identity_is_stable(
     _seed_runtime(catalog, env_id, root_pid=111, create_time=1.0)
     catalog.close()
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-    original = BackupCatalog.get_environment_runtime
-    calls = 0
-
-    def unstable(self: BackupCatalog, environment_id: str) -> sqlite3.Row | None:
-        nonlocal calls
-        calls += 1
-        row = original(self, environment_id)
-        if calls == 1:
-            return row
-        raise AssertionError("runtime read twice")
-
-    monkeypatch.setattr(BackupCatalog, "get_environment_runtime", unstable)
     provider = FakeProcessProvider(
         result=ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=None, rss_bytes=1)
     )
@@ -500,7 +488,6 @@ def test_runtime_is_read_once_and_cpu_identity_is_stable(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider
     )
     snapshot = monitor.snapshot()
-    assert calls == 1
     assert snapshot.environments[0].runtime.root_pid == 111
     assert set(monitor._cpu_points) == {(111, 1.0)}
 

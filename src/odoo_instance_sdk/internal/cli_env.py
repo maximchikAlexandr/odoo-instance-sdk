@@ -45,6 +45,31 @@ from odoo_instance_sdk.resources.environment import (
 )
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
+_ENV_LIST_COLUMNS = (
+    "NAME",
+    "BRANCH",
+    "STATE",
+    "RUNTIME",
+    "OBSERVED",
+    "ODOO_PID",
+    "CPU",
+    "RAM",
+    "GIT_AHEAD",
+    "GIT_DIFF",
+    "SIZE",
+    "DB_MODE",
+    "DATABASE",
+    "PORT",
+    "ARTIFACTS",
+)
+_TABLE_CELL_WIDTH = 24
+
+
+def _table_cell(value: object) -> str:
+    """Keep human table records single-line and bounded without affecting JSON."""
+    text = str(value).replace("\n", " ").replace("\r", " ")
+    return text if len(text) <= _TABLE_CELL_WIDTH else f"{text[: _TABLE_CELL_WIDTH - 1]}…"
+
 
 @click.group()
 def env_group() -> None:
@@ -221,6 +246,7 @@ def _print_env_list_human(
     for project in snapshot.projects:
         printed_ids.add(project.id)
         _print_project_header(project)
+        click.echo("  ".join(_ENV_LIST_COLUMNS))
         project_envs = envs_by_project.get(project.id, [])
         for env in project_envs:
             catalog_env = _lookup_catalog_env(client, env.id)
@@ -344,9 +370,25 @@ def _format_env_row(
     port = _port_str(env)
     database = env.database or ""
     artifacts = _artifacts_str(catalog_env, backup_ids=backup_ids)
-    return (
-        f"{name}  {branch}  {state}  {runtime}  {observed}  {odoo_pid}  {cpu}  {ram}  "
-        f"{git_ahead}  {git_diff}  {size}  {env.db_mode}  {database}  {port}  {artifacts}"
+    return "  ".join(
+        _table_cell(value)
+        for value in (
+            name,
+            branch,
+            state,
+            runtime,
+            observed,
+            odoo_pid,
+            cpu,
+            ram,
+            git_ahead,
+            git_diff,
+            size,
+            env.db_mode,
+            database,
+            port,
+            artifacts,
+        )
     )
 
 
@@ -368,9 +410,25 @@ def _format_removed_row(env_obj: DevelopmentEnvironment, *, backup_ids: set[uuid
         pass
     # Keep the canonical 15-column shape even though removed rows have no
     # monitor metrics.  This is deliberately positional for shell users.
-    return (
-        f"{env_obj.name}  {env_obj.branch}  removed  —  —  —  —  —  —  —  —  "
-        f"{env_obj.db_mode}  {db or ''}  {port}  {artifacts}"
+    return "  ".join(
+        _table_cell(value)
+        for value in (
+            env_obj.name,
+            env_obj.branch,
+            "removed",
+            "—",
+            "—",
+            "—",
+            "—",
+            "—",
+            "—",
+            "—",
+            "—",
+            env_obj.db_mode,
+            db or "",
+            port,
+            artifacts,
+        )
     )
 
 

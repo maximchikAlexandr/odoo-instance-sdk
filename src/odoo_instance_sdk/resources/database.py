@@ -83,7 +83,7 @@ def _verify_database_via_psql(
     """
     if "\\" in database_name:
         return None
-    from odoo_instance_sdk.internal.postgres_cli import run_psql
+    from odoo_instance_sdk.internal.postgres_transport import run_psql
 
     escaped = database_name.replace("'", "''")
     proc = run_psql(

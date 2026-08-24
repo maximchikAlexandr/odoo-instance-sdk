@@ -343,8 +343,11 @@ def compose_ps(
     args = [*_compose_base_args(compose_file, project_name), "ps", "--format", "json"]
     try:
         res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise PostgresClusterTimeoutError(timeout or 0.0) from exc
+    except (subprocess.TimeoutExpired, OSError):
+        # This is monitor discovery, not lifecycle control.  Turn a broken
+        # Docker command into a missing service so one project cannot abort a
+        # cross-project snapshot.
+        return None
     if res.returncode != 0:
         return None
     rows: list[dict[str, object]] = []

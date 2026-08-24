@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from odoo_instance_sdk.internal.postgres_cli import run_psql
+from odoo_instance_sdk.internal.postgres_transport import run_psql
 
 
 def database_size_bytes(

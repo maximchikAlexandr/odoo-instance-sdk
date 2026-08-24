@@ -2,7 +2,7 @@
 
 Read-only observability surface over the existing lifecycle catalog, `PostgresCluster` and Docker CLI: one `EnvironmentMonitor` collector that produces a typed immutable snapshot of all catalog projects, their environments and one nullable project PostgreSQL cluster per project, consumed by Python SDK, headless FastAPI JSON API and a React+Mantine Web UI. No control operations, no historical metrics, no second catalog.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Canonical snapshot types
 
@@ -423,7 +423,7 @@ Shared/source database, external venv, shared Git object store and shared cluste
 
 ### Requirement: `ClusterSnapshot` container identity and resources
 
-`ClusterSnapshot` / `ClusterContainer` / `ClusterMetrics` / `ClusterEndpoint` / `ClusterResourceSnapshot` fields are those in Canonical snapshot types. `pid_scope` is `PidScope` StrEnum (not a bare Literal).
+`ClusterSnapshot` / `ClusterContainer` / `ClusterMetrics` / `ClusterEndpoint` / `ClusterResourceSnapshot` MUST expose exactly the fields in Canonical snapshot types. `pid_scope` MUST be `PidScope` StrEnum (not a bare Literal).
 
 Compose container is resolved via `PostgresCluster.from_project(repository_root)` → compose project `odcli_pg_{repo_key}` + service `postgres`, then batch `docker inspect` / `docker stats --no-stream`. External: `resource_snapshot()` returns `None`; collector still emits a `ClusterSnapshot` with `mode="external"`, `owned=False`, `container=None`, `metrics=None`, `unavailability_reason="external_not_owned"`.
 - Stopped vs missing compose: `unavailability_reason="stopped"` iff `PostgresCluster.status() == STOPPED`. `unavailability_reason="missing"` iff `status()` is not `STOPPED` and the `postgres` service container ID cannot be resolved after `compose ps`. Never emit both. `sampled_at`: one tz-aware UTC `datetime.now(UTC)` at collection; copy the same value into `ClusterMetrics.sampled_at`, `ClusterResourceSnapshot.sampled_at`, and `ClusterSnapshot.sampled_at`. If `metrics is None`, all three `sampled_at` are `None`.
