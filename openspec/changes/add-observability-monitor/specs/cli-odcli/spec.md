@@ -32,7 +32,7 @@ Exact environment-row columns, left to right (space-separated, compact truncatio
 - `PORT` = `runtime.http_port` when `RUNTIME` is `ready` or `not_ready`, else `allocated_http_port` (or `—` if both None);
 - `STATE` = `lifecycle_state` from snapshot when the row is in snapshot, else catalog `state` for `--all` removed rows;
 - `RUNTIME` = `RuntimeState` (`stopped`/`ready`/`not_ready`);
-- `OBSERVED` = `port-free`/`port-occupied` when catalog `STATE==ready` using `socket.bind((http_interface, allocated_http_port))`, else `—`;
+- `OBSERVED` = `port-free`/`port-occupied` iff `lifecycle_state=="ready"` and `runtime.state=="ready"` and `allocated_http_port` is not None; probe via existing `probe_address`/`_check_port_free` on `(StartConfig.http_interface, allocated_http_port)` from `StartConfig.from_odoo_config(generated_config_path)` (same source as snapshot `allocated_http_port`). Otherwise `—` (`runtime.state` in `{stopped, not_ready}`, any non-`ready` lifecycle, missing config, `--all` removed rows).
 - `ODOO_PID` = `{root} (+{n})` where n = `len(child_pids)`, or `—` when `RUNTIME=stopped`;
 - `GIT_AHEAD` = `↑{ahead} ↓{behind}` or `—` when orphan;
 - `GIT_DIFF` = `+{added} -{deleted}` or `—` when orphan;
@@ -48,7 +48,7 @@ Cluster summary and metric columns for non-removed rows MUST come from `Environm
 
 Existing `--all` (include removed) и `--all-projects` flags сохраняются. Default `env list` без project context работает как `--all-projects`.
 
-Reconciliation (`ARTIFACTS`) MUST still run in the CLI after `snapshot()`: worktree/config/Python/lock/backup existence using the existing `_reconcile_environment` checks. `OBSERVED` MUST use existing `socket.bind((http_interface, http_port))`. One reconciliation failure MUST NOT drop the row (`ARTIFACTS` lists the failed check).
+Reconciliation (`ARTIFACTS`) MUST still run in the CLI after `snapshot()`: worktree/config/Python/lock/backup existence using the existing `_reconcile_environment` checks. `OBSERVED` MUST reuse existing `probe_address`/`_check_port_free` on `(StartConfig.http_interface, allocated_http_port)` from the generated `odoo.conf`; do not probe `runtime.http_port` and do not add a new bind path. One reconciliation failure MUST NOT drop the row (`ARTIFACTS` lists the failed check).
 
 #### Scenario: --all human includes removed, JSON does not
 
@@ -90,10 +90,10 @@ Reconciliation (`ARTIFACTS`) MUST still run in the CLI after `snapshot()`: workt
 - **WHEN** `env list` (с reconciliation) для environment где worktree отсутствует в `git worktree list --porcelain -z`
 - **THEN** environment listed с indicator missing worktree
 
-#### Scenario: OBSERVED reflects live socket.bind
+#### Scenario: OBSERVED reflects allocated port probe
 
-- **WHEN** `env list` для environment с allocated port и `socket.bind((http_interface, http_port))` succeeds
-- **THEN** `OBSERVED` = `port-free`; если fails → `port-occupied`; для stopped/non-ready → `—`
+- **WHEN** `env list` for an environment with `lifecycle_state=="ready"`, `runtime.state=="ready"`, and `_check_port_free(http_interface, allocated_http_port)` succeeds
+- **THEN** `OBSERVED` = `port-free`; if that probe fails → `port-occupied`; if `runtime.state` is `stopped` or `not_ready`, or `lifecycle_state` is not `ready`, or `allocated_http_port` is None → `—`
 
 #### Scenario: Reconciliation detects missing generated config
 
