@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import sqlite3
 import time
 from collections.abc import AsyncIterator
@@ -14,15 +16,30 @@ import httpx
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
     MonitorError,
+    MonitorExtrasMissingError,
     PostgresClusterError,
     ProjectManifestNotFoundError,
 )
-from odoo_instance_sdk.internal.cluster_resources import _compute_cluster_resource
-from odoo_instance_sdk.internal.git_activity import _compute_git_activity
+from odoo_instance_sdk.internal.cluster_resources import (
+    BatchClusterRequest,
+    collect_cluster_resource_batch,
+)
+from odoo_instance_sdk.internal.git_activity import (
+    _resolve_identity,
+    collect_git_activity_from_identity,
+)
 from odoo_instance_sdk.internal.paths import get_catalog_path
+from odoo_instance_sdk.internal.postgres_compose import (
+    ComposeRunner,
+    SubprocessComposeRunner,
+    docker_available,
+)
 from odoo_instance_sdk.internal.process_metrics import CpuPoint, ProcessTreeResult
 from odoo_instance_sdk.internal.repo_key import repo_key
-from odoo_instance_sdk.internal.storage_footprint import _compute_storage_footprint
+from odoo_instance_sdk.internal.storage_footprint import (
+    DatabaseStorageInput,
+    collect_storage_footprint,
+)
 from odoo_instance_sdk.models import (
     ClusterEndpoint,
     ClusterResourceSnapshot,
@@ -45,7 +62,7 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
-_SCHEME_VERSION = 1
+_SCHEMA_VERSION = 1
 
 
 class _ProcessProvider(Protocol):
@@ -67,6 +84,42 @@ class _DockerProvider(Protocol):
         service: str,
         state: PostgresClusterState,
     ) -> ClusterResourceSnapshot: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectPlan:
+    """One catalog project and its manifest-derived PostgreSQL plan."""
+
+    project_id: str
+    repo_root: Path
+    group_rows: list[sqlite3.Row]
+    cluster: PostgresCluster | None
+    state: PostgresClusterState | None
+    environments: tuple[_EnvironmentPlan, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _EnvironmentPlan:
+    """A catalog row and the single runtime read for this snapshot pass."""
+
+    row: sqlite3.Row
+    runtime: sqlite3.Row | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SnapshotPlan:
+    """The catalog-derived, immutable input to one collection pass.
+
+    Planning owns catalog reads and cache liveness; collection never reaches
+    back into SQLite.  This is deliberately a real boundary: it prevents a
+    second runtime read halfway through rendering a snapshot.
+    """
+
+    projects: tuple[_ProjectPlan, ...]
+    environment_ids: frozenset[str]
+    worktrees: frozenset[Path]
+    statuses: frozenset[str]
+    cpu_points: frozenset[tuple[int, float]]
 
 
 def _orphan_git() -> GitActivity:
@@ -136,85 +189,175 @@ class EnvironmentMonitor:
     _cluster_status_cache: dict[str, tuple[float, PostgresClusterState]] = field(
         default_factory=dict, repr=False, hash=False, compare=False
     )
-    # ponytail: git cache keyed by worktree.resolve() alone (not (worktree,HEAD,tip))
-    # — HEAD changes within TTL aren't reflected until expiry. Acceptable for MVP
-    # polling at 2s with 15s TTL; the exact (worktree,HEAD,tip) key would require a
-    # cheap rev-parse pre-pass before the cache check. Upgrade: add that pre-pass.
-    _git_cache: dict[Path, tuple[float, GitActivity]] = field(
+    _git_cache: dict[tuple[Path, str, str | None], tuple[float, GitActivity]] = field(
         default_factory=dict, repr=False, hash=False, compare=False
     )
     _storage_cache: dict[str, tuple[float, StorageFootprint]] = field(
         default_factory=dict, repr=False, hash=False, compare=False
     )
+    # A Docker ID is only meaningful within the process boundary that resolved
+    # it.  In production that boundary is the monitor-owned runner; injected
+    # runners deliberately stay isolated even if a fake returns the same ID.
+    # Only the persistent monitor-owned production runner is cacheable.  An
+    # injected runner is an explicit test/integration boundary and may be
+    # short-lived, so using ``id(runner)`` as a durable cache identity is not
+    # safe (CPython can reuse it after the object is collected).
     _cluster_resource_cache: dict[str, tuple[float, ClusterResourceSnapshot]] = field(
         default_factory=dict, repr=False, hash=False, compare=False
+    )
+    _docker_runner: ComposeRunner = field(
+        default_factory=SubprocessComposeRunner, repr=False, hash=False, compare=False
     )
 
     def snapshot(self, project_id: str | None = None) -> Snapshot:
         """Perform one coherent collection pass and return an immutable ``Snapshot``."""
+        # ``psutil`` is the metrics extra's required capability.  Validate it
+        # before catalog discovery so even an empty catalog has the same public
+        # dependency contract.  Explicit providers are a test seam and do not
+        # require the optional runtime dependency.
+        if self.process_provider is None:
+            try:
+                import psutil  # type: ignore[import-untyped]  # noqa: F401
+            except ImportError:
+                from odoo_instance_sdk.exceptions import MonitorExtrasMissingError
+
+                raise MonitorExtrasMissingError(
+                    "psutil is not installed; pip install odoo-instance-sdk[metrics]"
+                ) from None
         generated_at = datetime.now(UTC)
         db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
         try:
             catalog = BackupCatalog(db_path=db_path)
-        except BackupCatalogError as exc:
-            raise MonitorError(str(exc)) from exc
+        except (BackupCatalogError, sqlite3.Error) as exc:
+            raise MonitorError("monitor catalog unavailable") from exc
 
         try:
-            try:
-                rows = catalog.list_environments(include_removed=False)
-            except BackupCatalogError as exc:
-                raise MonitorError(str(exc)) from exc
-
-            # Group rows by git_common_dir (shared within a project).
-            groups: dict[str, list[sqlite3.Row]] = {}
-            for row in rows:
-                gcd = str(row["git_common_dir"])
-                groups.setdefault(gcd, []).append(row)
-
-            projects: list[ProjectSummary] = []
-            environments: list[EnvironmentSnapshot] = []
-
-            for gcd in sorted(groups):
-                group_rows = groups[gcd]
-                first = group_rows[0]
-                repo_root = Path(str(first["repository_root"]))
-                git_common = Path(gcd)
-                key = repo_key(repo_root, git_common)
-                pid = f"project_{key}"
-                if project_id is not None and pid != project_id:
-                    continue
-
-                cluster_snapshot = self._collect_cluster(repo_root)
-                projects.append(
-                    ProjectSummary(
-                        id=pid,
-                        name=repo_root.name,
-                        display_hint=key,
-                        environment_count=len(group_rows),
-                        cluster=cluster_snapshot,
-                    )
-                )
-                for row in sorted(group_rows, key=lambda r: str(r["id"])):
-                    environments.append(self._collect_environment(row, pid, catalog))
+            plan = self._plan_snapshot(catalog)
         finally:
             catalog.close()
-
-        environments.sort(key=lambda e: e.id)
-
-        if project_id is not None and not projects:
-            return Snapshot(
-                schema_version=_SCHEME_VERSION,
-                generated_at=generated_at,
-                projects=(),
-                environments=(),
-            )
-
-        return Snapshot(
-            schema_version=_SCHEME_VERSION,
-            generated_at=generated_at,
-            projects=tuple(projects),
-            environments=tuple(environments),
+        resources, active_clusters = self._collect_cluster_resources(list(plan.projects))
+        projects, environments = self._collect_snapshot_rows(plan.projects, resources, project_id)
+        self._prune_caches(
+            set(plan.environment_ids),
+            set(plan.worktrees),
+            active_clusters,
+            set(plan.statuses),
+            set(plan.cpu_points),
         )
+        return Snapshot(
+            schema_version=_SCHEMA_VERSION,
+            generated_at=generated_at,
+            projects=projects,
+            environments=environments,
+        )
+
+    def _plan_snapshot(self, catalog: BackupCatalog) -> _SnapshotPlan:
+        """Read catalog runtime once and derive deterministic project plans."""
+        try:
+            rows = catalog.list_environments(include_removed=False)
+        except (BackupCatalogError, sqlite3.Error) as exc:
+            raise MonitorError("monitor catalog unavailable") from exc
+        groups: dict[str, list[_EnvironmentPlan]] = {}
+        environment_ids: set[str] = set()
+        worktrees: set[Path] = set()
+        cpu_points: set[tuple[int, float]] = set()
+        for row in rows:
+            runtime = self._runtime_for_row(catalog, row)
+            groups.setdefault(str(row["git_common_dir"]), []).append(_EnvironmentPlan(row, runtime))
+            environment_ids.add(str(row["id"]))
+            worktrees.add(Path(str(row["worktree_path"])).resolve())
+            if runtime is not None:
+                with contextlib.suppress(TypeError, ValueError):
+                    cpu_points.add((int(runtime["root_pid"]), float(runtime["create_time"])))
+        plans: list[_ProjectPlan] = []
+        statuses: set[str] = set()
+        for git_common, environments in groups.items():
+            first = environments[0].row
+            repo_root = Path(str(first["repository_root"]))
+            cluster, state = self._project_cluster(repo_root, statuses)
+            plans.append(
+                _ProjectPlan(
+                    f"project_{repo_key(repo_root, Path(git_common))}",
+                    repo_root,
+                    [item.row for item in environments],
+                    cluster,
+                    state,
+                    tuple(environments),
+                )
+            )
+        return _SnapshotPlan(
+            tuple(sorted(plans, key=lambda item: item.project_id)),
+            frozenset(environment_ids),
+            frozenset(worktrees),
+            frozenset(statuses),
+            frozenset(cpu_points),
+        )
+
+    @staticmethod
+    def _runtime_for_row(catalog: BackupCatalog, row: sqlite3.Row) -> sqlite3.Row | None:
+        try:
+            return catalog.get_environment_runtime(str(row["id"]))
+        except (BackupCatalogError, sqlite3.Error) as exc:
+            raise MonitorError("catalog runtime lookup failed") from exc
+
+    def _project_cluster(
+        self, repo_root: Path, statuses: set[str]
+    ) -> tuple[PostgresCluster | None, PostgresClusterState | None]:
+        try:
+            cluster = PostgresCluster.from_project(repo_root)
+            statuses.add(str(cluster.compose_file.resolve()))
+            return cluster, self._cached_status(cluster)
+        except (ProjectManifestNotFoundError, PostgresClusterError, OSError):
+            return None, None
+
+    def _collect_snapshot_rows(
+        self,
+        plans: tuple[_ProjectPlan, ...],
+        resources: dict[str, ClusterResourceSnapshot],
+        project_id: str | None,
+    ) -> tuple[tuple[ProjectSummary, ...], tuple[EnvironmentSnapshot, ...]]:
+        selected = (plan for plan in plans if project_id is None or plan.project_id == project_id)
+        projects: list[ProjectSummary] = []
+        environments: list[EnvironmentSnapshot] = []
+        for plan in selected:
+            projects.append(
+                ProjectSummary(
+                    id=plan.project_id,
+                    name=plan.repo_root.name,
+                    display_hint=plan.project_id.removeprefix("project_"),
+                    environment_count=len(plan.group_rows),
+                    cluster=self._cluster_snapshot(plan, resources.get(plan.project_id)),
+                )
+            )
+            environments.extend(
+                self._collect_environment(item.row, plan.project_id, item.runtime)
+                for item in sorted(plan.environments, key=lambda item: str(item.row["id"]))
+            )
+        return tuple(projects), tuple(sorted(environments, key=lambda item: item.id))
+
+    def _prune_caches(
+        self,
+        environment_ids: set[str],
+        worktrees: set[Path],
+        clusters: set[str],
+        statuses: set[str],
+        cpu_points: set[tuple[int, float]],
+    ) -> None:
+        """Bound monitor memory to the catalog entries seen in the current pass."""
+        for key in set(self._storage_cache) - environment_ids:
+            del self._storage_cache[key]
+        for cache_key in tuple(self._git_cache):
+            if cache_key[0] not in worktrees:
+                del self._git_cache[cache_key]
+        # Stateless default collection probes identity every time; injected test
+        # providers have no identity API, so only those use this bounded cache.
+        for key in set(self._cluster_status_cache) - statuses:
+            del self._cluster_status_cache[key]
+        for resource_key in tuple(self._cluster_resource_cache):
+            if resource_key not in clusters:
+                del self._cluster_resource_cache[resource_key]
+        for cpu_key in set(self._cpu_points) - cpu_points:
+            del self._cpu_points[cpu_key]
 
     async def watch(
         self, interval: float = 2.0, project_id: str | None = None
@@ -233,17 +376,13 @@ class EnvironmentMonitor:
 
     # ------------------------------------------------------------------ cluster
 
-    def _collect_cluster(self, repo_root: Path) -> ClusterSnapshot | None:
-        try:
-            cluster = PostgresCluster.from_project(repo_root)
-        except (ProjectManifestNotFoundError, PostgresClusterError, OSError):
-            # ponytail: any manifest load failure (missing manifest, corrupt TOML,
-            # OSError, invalid cluster config) → cluster=None per spec; environments
-            # continue. A bare Exception would swallow programming errors, so we
-            # list the concrete failure modes.
+    def _cluster_snapshot(
+        self, plan: _ProjectPlan, resource: ClusterResourceSnapshot | None
+    ) -> ClusterSnapshot | None:
+        cluster = plan.cluster
+        state = plan.state
+        if cluster is None or state is None:
             return None
-
-        state = self._cached_status(cluster)
         endpoint = ClusterEndpoint(host=cluster.endpoint_host, port=cluster.endpoint_port)
 
         if cluster.mode == "external":
@@ -258,7 +397,9 @@ class EnvironmentMonitor:
                 sampled_at=None,
             )
 
-        crs = self._collect_cluster_resource(cluster, state)
+        crs = resource or ClusterResourceSnapshot(
+            container=None, metrics=None, unavailability_reason="missing", sampled_at=None
+        )
         return ClusterSnapshot(
             mode="compose",
             owned=True,
@@ -271,7 +412,9 @@ class EnvironmentMonitor:
         )
 
     def _cached_status(self, cluster: PostgresCluster) -> PostgresClusterState:
-        name = cluster.compose_project_name
+        # A compose project name is user-configurable and can collide.  The
+        # manifest root is the ownership boundary for status caching.
+        name = str(cluster.compose_file.resolve())
         now = time.monotonic()
         cached = self._cluster_status_cache.get(name)
         if cached is not None and now - cached[0] < _CLUSTER_STATUS_TTL:
@@ -280,40 +423,100 @@ class EnvironmentMonitor:
         self._cluster_status_cache[name] = (now, state)
         return state
 
-    def _collect_cluster_resource(
-        self, cluster: PostgresCluster, state: PostgresClusterState
-    ) -> ClusterResourceSnapshot:
-        name = cluster.compose_project_name
+    def _collect_cluster_resources(
+        self, plans: list[_ProjectPlan]
+    ) -> tuple[dict[str, ClusterResourceSnapshot], set[str]]:
+        """Collect compose resources in one inspect/stats pass for the catalog.
+
+        Each manifest was already parsed once by ``from_project`` above.  We do
+        still resolve each compose service separately because compose files can
+        use different project names; after that all uncached Docker identities
+        share exactly one inspect and one stats invocation.  Cache ownership is
+        the immutable Docker ID, so a recreated container cannot inherit old
+        metrics merely because its compose project name stayed the same.
+        """
+        result: dict[str, ClusterResourceSnapshot] = {}
+        active_ids: set[str] = set()
+        pending: list[BatchClusterRequest] = []
         now = time.monotonic()
-        cached = self._cluster_resource_cache.get(name)
-        if cached is not None and now - cached[0] < _EXPENSIVE_TTL:
-            return cached[1]
-        if self.docker_provider is not None:
-            crs = self.docker_provider.collect(
-                compose_file=cluster.compose_file,
-                compose_project_name=name,
-                service="postgres",
-                state=state,
+
+        for plan in plans:
+            cluster = plan.cluster
+            state = plan.state
+            if cluster is None or state is None or cluster.mode == "external":
+                continue
+            if state is PostgresClusterState.STOPPED:
+                result[plan.project_id] = ClusterResourceSnapshot(
+                    container=None, metrics=None, unavailability_reason="stopped", sampled_at=None
+                )
+                continue
+            if self.docker_provider is not None:
+                resource = self.docker_provider.collect(
+                    compose_file=cluster.compose_file,
+                    compose_project_name=cluster.compose_project_name,
+                    service="postgres",
+                    state=state,
+                )
+                result[plan.project_id] = resource
+                continue
+            # Production clusters each construct a stateless subprocess runner.
+            # Use one monitor-owned runner so they form one Docker batch.  A
+            # supplied runner is an explicit boundary and remains isolated.
+            runner = (
+                self._docker_runner
+                if isinstance(cluster.compose_runner, SubprocessComposeRunner)
+                else cluster.compose_runner
             )
-        else:
-            # ponytail: per-cluster resource_snapshot with instance cache; the helper's
-            # container_id module cache is bypassed by calling _compute_cluster_resource
-            # directly so a fresh monitor instance recomputes. True cross-project
-            # batching would need a pre-pass resolving all container_ids first.
-            crs = _compute_cluster_resource(
-                compose_file=cluster.compose_file,
-                compose_project_name=name,
-                service="postgres",
-                runner=cluster._compose_runner,
-                state=state,
+            if getattr(runner, "requires_docker", True) and not docker_available():
+                result[plan.project_id] = ClusterResourceSnapshot(
+                    container=None,
+                    metrics=None,
+                    unavailability_reason="docker_unavailable",
+                    sampled_at=None,
+                )
+                continue
+            pending.append(
+                BatchClusterRequest(
+                    project_id=plan.project_id,
+                    compose_file=cluster.compose_file,
+                    compose_project_name=cluster.compose_project_name,
+                    service="postgres",
+                    runner=runner,
+                    state=state,
+                    cacheable=runner is self._docker_runner,
+                )
             )
-        self._cluster_resource_cache[name] = (now, crs)
-        return crs
+
+        if pending:
+            cache = {
+                container_id: resource
+                for container_id, (cached_at, resource) in self._cluster_resource_cache.items()
+                if now - cached_at < _EXPENSIVE_TTL
+            }
+            batch = collect_cluster_resource_batch(tuple(pending), cached=cache)
+            active_ids.update(
+                container_id
+                for request in pending
+                if request.cacheable
+                for project_id, container_id in batch.container_ids.items()
+                if project_id == request.project_id
+            )
+            result.update(batch.resources)
+            # Failure results are deliberately not cached: a next poll retries.
+            cacheable_projects = {request.project_id for request in pending if request.cacheable}
+            for project_id, container_id in batch.container_ids.items():
+                resource = batch.resources[project_id]
+                if project_id in cacheable_projects and resource.unavailability_reason not in {
+                    "inspect_failed",
+                    "stats_failed",
+                }:
+                    self._cluster_resource_cache[container_id] = (now, resource)
+        return result, active_ids
 
     # ------------------------------------------------------------- environment
 
     def _collect_environment(
-        self, row: sqlite3.Row, project_id: str, catalog: BackupCatalog
+        self, row: sqlite3.Row, project_id: str, runtime_record: sqlite3.Row | None
     ) -> EnvironmentSnapshot:
         env_id = str(row["id"])
         db_mode = str(row["db_mode"])
@@ -322,7 +525,14 @@ class EnvironmentMonitor:
 
         allocated_port = self._allocated_http_port(row)
 
-        runtime = self._collect_runtime(row, catalog)
+        # Process collection is an environment boundary.  One unavailable PID
+        # or psutil failure must not erase healthy siblings from the snapshot.
+        try:
+            runtime = self._collect_runtime(runtime_record)
+        except MonitorExtrasMissingError:
+            raise
+        except Exception:
+            runtime = _stopped_runtime()
 
         worktree = Path(str(row["worktree_path"]))
         git = self._collect_git(worktree)
@@ -355,13 +565,7 @@ class EnvironmentMonitor:
             return None
         return cfg.http_port
 
-    def _collect_runtime(self, row: sqlite3.Row, catalog: BackupCatalog) -> RuntimeMetrics:
-        env_id = str(row["id"])
-        try:
-            rt = catalog.get_environment_runtime(env_id)
-        except BackupCatalogError:
-            return _stopped_runtime()
-
+    def _collect_runtime(self, rt: sqlite3.Row | None) -> RuntimeMetrics:
         if rt is None:
             return _stopped_runtime()
 
@@ -412,25 +616,41 @@ class EnvironmentMonitor:
         except Exception:
             return RuntimeState.NOT_READY
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                return RuntimeState.NOT_READY
             if isinstance(data, dict) and data.get("status") == "pass":
                 return RuntimeState.READY
         return RuntimeState.NOT_READY
 
     def _collect_git(self, worktree: Path) -> GitActivity:
-        key = worktree.resolve()
-        now = time.monotonic()
-        cached = self._git_cache.get(key)
-        if cached is not None and now - cached[0] < _EXPENSIVE_TTL:
-            return cached[1]
         try:
             if self.git_provider is not None:
+                key = worktree.resolve()
+                cache_key: tuple[Path, str, str | None] = (key, "provider", None)
+                cached = self._git_cache.get(cache_key)
+                if cached is not None and time.monotonic() - cached[0] < _EXPENSIVE_TTL:
+                    return cached[1]
                 result = self.git_provider.collect(worktree)
+                self._git_cache[cache_key] = (time.monotonic(), result)
             else:
-                result = _compute_git_activity(worktree)
+                resolved = worktree.resolve()
+                identity = _resolve_identity(resolved)
+                cache_key = (resolved, identity[0], identity[3])
+                # Identity probing is cheap.  Keep at most one expensive value
+                # per worktree: a new HEAD or default tip must invalidate the old
+                # result instead of growing the monitor for every commit.
+                for stale_key in tuple(self._git_cache):
+                    if stale_key[0] == resolved and stale_key != cache_key:
+                        del self._git_cache[stale_key]
+                cached = self._git_cache.get(cache_key)
+                if cached is not None and time.monotonic() - cached[0] < _EXPENSIVE_TTL:
+                    return cached[1]
+                result = collect_git_activity_from_identity(resolved, identity)
+                self._git_cache[cache_key] = (time.monotonic(), result)
         except Exception:
             result = _orphan_git()
-        self._git_cache[key] = (now, result)
         return result
 
     def _collect_storage(self, row: sqlite3.Row, env_id: str, db_mode: str) -> StorageFootprint:
@@ -469,20 +689,21 @@ class EnvironmentMonitor:
             data_dir = None
 
         try:
-            footprint = _compute_storage_footprint(
-                environment_id=env_id,
+            footprint = collect_storage_footprint(
                 worktree_path=worktree_path,
                 python_environment_path=python_path,
                 python_environment_owned=python_owned,
-                db_mode=db_mode,
                 generated_config_path=generated_config,
                 dependency_lock_path=dependency_lock,
-                target_db_name=target_db_str,
-                db_host=db_host,
-                db_port=db_port,
-                db_user=db_user,
-                db_password=db_password,
-                data_dir=data_dir,
+                database=DatabaseStorageInput(
+                    mode=db_mode,
+                    target_name=target_db_str,
+                    host=db_host,
+                    port=db_port,
+                    user=db_user,
+                    password=db_password,
+                    data_dir=data_dir,
+                ),
             )
         except Exception:
             footprint = _empty_storage()

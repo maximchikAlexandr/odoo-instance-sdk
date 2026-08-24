@@ -30,6 +30,8 @@ def test_wheel_contains_package_typed_marker_and_odcli() -> None:
         entry = zf.read(next(n for n in names if n.endswith("entry_points.txt"))).decode()
     assert any(n.endswith("odoo_instance_sdk/__init__.py") for n in names)
     assert any(n.endswith("odoo_instance_sdk/py.typed") for n in names)
+    assert any(n.endswith("odoo_instance_sdk/web/dist/index.html") for n in names)
+    assert any("odoo_instance_sdk/web/dist/assets/" in n for n in names)
     assert "odcli = odoo_instance_sdk.cli:cli" in entry
 
 
@@ -38,6 +40,8 @@ def test_sdist_contains_package() -> None:
     with tarfile.open(sdist) as tf:
         names = tf.getnames()
     assert any("src/odoo_instance_sdk" in name for name in names)
+    assert any(name.endswith("src/odoo_instance_sdk/web/dist/index.html") for name in names)
+    assert any("src/odoo_instance_sdk/web/dist/assets/" in name for name in names)
 
 
 def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
@@ -91,3 +95,17 @@ def test_current_version_artifacts() -> None:
     wheel, sdist = _dist()
     assert version in wheel.name
     assert version in sdist.name
+
+
+def test_dashboard_source_has_stable_monitor_affordances() -> None:
+    """Keep the user-visible card/open controls in the built dashboard contract.
+
+    This repository has no browser/component-test runner; source-level selectors
+    are the narrow deterministic boundary and the package gate separately proves
+    that Vite type-checks and bundles the same source.
+    """
+    app = (_REPO / "src/odoo_instance_sdk/web/src/App.tsx").read_text(encoding="utf-8")
+    assert 'data-testid="cluster-card"' in app
+    assert 'data-testid="environment-card"' in app
+    assert 'data-testid="open-odoo"' in app
+    assert "window.open(rt.http_url" in app

@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.internal.cli_format import human_bytes
 from odoo_instance_sdk.models import (
     ClusterContainer,
     ClusterMetrics,
@@ -100,8 +101,11 @@ class _ExternalCluster:
     endpoint_port = 5432
     resource_calls = 0
 
+    def __init__(self, state: PostgresClusterState = PostgresClusterState.HEALTHY) -> None:
+        self._state = state
+
     def status(self) -> PostgresClusterState:
-        return PostgresClusterState.HEALTHY
+        return self._state
 
     def resource_snapshot(self) -> ClusterResourceSnapshot:
         self.resource_calls += 1
@@ -154,6 +158,12 @@ def test_postgres_status_human_includes_container_fields(
 
 
 @pytest.mark.unit
+def test_human_bytes_preserves_fractional_binary_units() -> None:
+    assert human_bytes(1536) == "1.5 KiB"
+    assert human_bytes(5 * 1024**2 + 512 * 1024) == "5.5 MiB"
+
+
+@pytest.mark.unit
 def test_postgres_status_external_skips_resource_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -174,6 +184,26 @@ def test_postgres_status_external_skips_resource_snapshot(
     assert snap["metrics"] is None
     assert snap["unavailability_reason"] == "external_not_owned"
     assert cluster.resource_calls == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("state", "exit_code"),
+    [
+        (PostgresClusterState.HEALTHY, 0),
+        (PostgresClusterState.UNREACHABLE, 1),
+        (PostgresClusterState.UNHEALTHY, 1),
+    ],
+)
+def test_postgres_status_external_exit_tracks_tcp_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: PostgresClusterState, exit_code: int
+) -> None:
+    root = _write_project(tmp_path, mode="external")
+    cluster = _ExternalCluster(state)
+    monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(lambda _path: cluster))
+    result = CliRunner().invoke(cli, ["--project", str(root), "postgres", "status", "--json"])
+    assert result.exit_code == exit_code, result.output
+    assert json.loads(result.output)["result"]["unavailability_reason"] == "external_not_owned"
 
 
 @pytest.mark.unit

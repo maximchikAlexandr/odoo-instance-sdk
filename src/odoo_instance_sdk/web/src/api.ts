@@ -4,9 +4,9 @@ export interface EndpointSnapshot {
 }
 
 export interface ContainerSnapshot {
-  id: string;
-  name: string;
-  image: string;
+  id: string | null;
+  name: string | null;
+  image: string | null;
   pid: number | null;
   pid_scope: "host" | "docker_vm" | "unavailable";
 }
@@ -71,12 +71,12 @@ export interface GitDiff {
 }
 
 export interface GitActivity {
-  default_branch: string | null;
+  default_branch: string;
   head_sha: string | null;
   short_sha: string | null;
-  branch: string | null;
-  ahead: number;
-  behind: number;
+  branch: string;
+  ahead: number | null;
+  behind: number | null;
   diff: GitDiff | null;
   state: GitState;
 }
@@ -94,11 +94,11 @@ export interface DatabaseFootprint {
 }
 
 export interface StorageFootprint {
-  total_bytes: number | null;
+  total_bytes: number;
   complete: boolean;
   worktree_bytes: number | null;
-  python_environment: PythonEnvironmentFootprint | null;
-  database: DatabaseFootprint | null;
+  python_environment: PythonEnvironmentFootprint;
+  database: DatabaseFootprint;
   other_files_bytes: number | null;
 }
 
@@ -114,15 +114,15 @@ export interface EnvironmentSnapshot {
   id: string;
   project_id: string;
   name: string;
-  branch: string | null;
+  branch: string;
   short_sha: string | null;
-  db_mode: string | null;
+  db_mode: "shared" | "copy";
   database: string | null;
   lifecycle_state: LifecycleState;
   allocated_http_port: number | null;
-  runtime: RuntimeMetrics | null;
-  git: GitActivity | null;
-  storage: StorageFootprint | null;
+  runtime: RuntimeMetrics;
+  git: GitActivity;
+  storage: StorageFootprint;
 }
 
 export interface Snapshot {

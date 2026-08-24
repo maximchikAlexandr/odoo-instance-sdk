@@ -1,19 +1,12 @@
 from __future__ import annotations
 
 import subprocess
-import time
 from pathlib import Path
 
 from odoo_instance_sdk.models import GitActivity, GitActivityState, GitDiff
 
 _DEFAULT_BRANCH = "main"
 _GIT_TIMEOUT = 10.0
-
-# ponytail: module-level in-memory cache, not persistent; cleared on process exit.
-# Bounded by (worktree_resolved, head_sha, default_tip_sha) — at most one entry per
-# distinct (worktree, HEAD, tip) tuple observed, evicted lazily on TTL miss.
-_git_cache: dict[tuple[Path, str, str], tuple[float, GitActivity]] = {}
-_CACHE_TTL = 15.0
 
 
 def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
@@ -110,27 +103,39 @@ def _resolve_counts(
     return ahead, behind, _sum_numstat(numstat_out)
 
 
-def _compute_git_activity(worktree: Path) -> GitActivity:
+def collect_git_activity(worktree: Path) -> GitActivity:
     """Pure compute (no cache): three-dot git activity against the default branch tip.
 
     Resolves HEAD SHA, branch name, default-tip SHA (upstream then local main),
     merge-base, and ahead/behind/numstat. Any git failure degrades to an orphan
     shape (full or partial). The monitor owns instance-level caching; this is the
-    non-caching core shared with ``collect_git_activity``.
+    This is the sole stateless collector; callers own any cache.
     """
-    head_sha, short_sha, branch, default_tip = _resolve_identity(worktree)
+    return collect_git_activity_from_identity(worktree, _resolve_identity(worktree))
+
+
+def collect_git_activity_from_identity(
+    worktree: Path, identity: tuple[str, str, str, str | None]
+) -> GitActivity:
+    """Compute expensive activity data from a caller-probed git identity."""
+    head_sha, short_sha, branch, default_tip = identity
     if not head_sha:
         return _orphan_full()
     if default_tip is None:
-        return _orphan_partial(head_sha, short_sha, branch)
+        return _orphan_full()
 
     rc, mb_out, _ = _run_git(["merge-base", default_tip, "HEAD"], worktree)
-    if rc != 0:
+    # Exit 1 is Git's documented "no merge base" result.  It is a normal
+    # orphan shape and retains the identity; every other CLI failure is fully
+    # redacted as required by the public snapshot contract.
+    if rc == 1:
         return _orphan_partial(head_sha, short_sha, branch)
+    if rc != 0:
+        return _orphan_full()
 
     counts = _resolve_counts(worktree, default_tip, mb_out.strip())
     if counts is None:
-        return _orphan_partial(head_sha, short_sha, branch)
+        return _orphan_full()
     ahead, behind, diff = counts
 
     if ahead == 0 and behind == 0:
@@ -165,63 +170,14 @@ def _resolve_identity(worktree: Path) -> tuple[str, str, str, str | None]:
     head_sha = head_out.strip()
     short_sha = head_sha[:7]
     rc, branch_out, _ = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], worktree)
-    branch = branch_out.strip() if rc == 0 and branch_out.strip() else "unknown"
+    # A branch probe failure is not the documented no-common-ancestor case.
+    # Do not retain an otherwise plausible HEAD identity after an arbitrary Git
+    # command failure: the public fallback is deliberately fully redacted.
+    if rc != 0 or not branch_out.strip():
+        return "", "", "unknown", None
+    branch = branch_out.strip()
     rc, tip_out, _ = _run_git(["rev-parse", "--verify", "main@{upstream}"], worktree)
     if rc != 0:
         rc, tip_out, _ = _run_git(["rev-parse", "--verify", "refs/heads/main"], worktree)
     default_tip = tip_out.strip() if rc == 0 else None
     return head_sha, short_sha, branch, default_tip
-
-
-def collect_git_activity(worktree: Path) -> GitActivity:
-    """Collect three-dot git activity for a worktree against the default branch tip.
-
-    Cache key: (worktree.resolve(), head_sha, default_tip_sha), TTL 15s.
-    The expensive part (rev-list / diff) only runs on cache miss; rev-parse for the
-    key is cheap and runs every call.
-    """
-    head_sha, short_sha, branch, default_tip = _resolve_identity(worktree)
-    if not head_sha:
-        return _orphan_full()
-    if default_tip is None:
-        return _orphan_partial(head_sha, short_sha, branch)
-
-    key = (worktree.resolve(), head_sha, default_tip)
-    cached = _git_cache.get(key)
-    if cached is not None and time.monotonic() - cached[0] < _CACHE_TTL:
-        return cached[1]
-
-    rc, mb_out, _ = _run_git(["merge-base", default_tip, "HEAD"], worktree)
-    if rc != 0:
-        result = _orphan_partial(head_sha, short_sha, branch)
-        _git_cache[key] = (time.monotonic(), result)
-        return result
-
-    counts = _resolve_counts(worktree, default_tip, mb_out.strip())
-    if counts is None:
-        result = _orphan_partial(head_sha, short_sha, branch)
-        _git_cache[key] = (time.monotonic(), result)
-        return result
-    ahead, behind, diff = counts
-
-    if ahead == 0 and behind == 0:
-        state = GitActivityState.CLEAN
-    elif behind == 0:
-        state = GitActivityState.AHEAD
-    elif ahead == 0:
-        state = GitActivityState.BEHIND
-    else:
-        state = GitActivityState.DIVERGED
-
-    result = GitActivity(
-        default_branch=_DEFAULT_BRANCH,
-        head_sha=head_sha,
-        short_sha=short_sha,
-        branch=branch,
-        ahead=ahead,
-        behind=behind,
-        diff=diff,
-        state=state,
-    )
-    _git_cache[key] = (time.monotonic(), result)
-    return result

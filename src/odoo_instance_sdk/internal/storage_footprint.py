@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from odoo_instance_sdk.exceptions import ConfigError
@@ -15,9 +15,20 @@ from odoo_instance_sdk.models import (
     StorageFootprint,
 )
 
-_CACHE: dict[str, tuple[float, StorageFootprint]] = {}
-_CACHE_TTL = 15.0
 _DU_TIMEOUT = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseStorageInput:
+    """Database and filestore inputs belonging to one storage measurement."""
+
+    mode: str
+    target_name: str | None
+    host: str | None
+    port: int | None
+    user: str | None
+    password: str | None
+    data_dir: Path | None
 
 
 def _du_size(du: str, path: Path) -> int | None:
@@ -103,27 +114,19 @@ def _other_files_bytes(generated_config_path: Path, dependency_lock_path: Path) 
     return total
 
 
-def _compute_storage_footprint(
+def collect_storage_footprint(
     *,
-    environment_id: str,
     worktree_path: Path,
     python_environment_path: Path,
     python_environment_owned: bool,
-    db_mode: str,
+    database: DatabaseStorageInput,
     generated_config_path: Path,
     dependency_lock_path: Path,
-    target_db_name: str | None,
-    db_host: str | None,
-    db_port: int | None,
-    db_user: str | None,
-    db_password: str | None,
-    data_dir: Path | None,
 ) -> StorageFootprint:
     """Pure compute (no cache): bounded ``StorageFootprint`` for one environment.
 
     ``complete=False`` flags any owned component (worktree, owned venv, owned DB)
-    that could not be measured. The monitor owns instance-level caching; this is
-    the non-caching core shared with ``collect_storage_footprint``.
+    that could not be measured. It is stateless; the monitor owns cache lifetime.
     """
     complete_flags: list[bool] = []
 
@@ -137,20 +140,20 @@ def _compute_storage_footprint(
     else:
         py = PythonEnvFootprint(owned=False, bytes=None)
 
-    if db_mode == "copy":
+    if database.mode == "copy":
         pg_bytes: int | None = None
-        if target_db_name is not None:
+        if database.target_name is not None:
             pg_bytes = database_size_bytes(
-                host=db_host,
-                port=db_port if db_port is not None else 5432,
-                user=db_user,
-                password=db_password,
-                database_name=target_db_name,
+                host=database.host,
+                port=database.port if database.port is not None else 5432,
+                user=database.user,
+                password=database.password,
+                database_name=database.target_name,
             )
         fs_bytes: int | None = None
-        if data_dir is not None and target_db_name is not None:
+        if database.data_dir is not None and database.target_name is not None:
             try:
-                fs_path = validate_filestore_containment(data_dir, target_db_name)
+                fs_path = validate_filestore_containment(database.data_dir, database.target_name)
             except ConfigError:
                 fs_path = None
             if fs_path is not None:
@@ -186,57 +189,3 @@ def _compute_storage_footprint(
         database=db,
         other_files_bytes=other,
     )
-
-
-def collect_storage_footprint(
-    *,
-    environment_id: str,
-    worktree_path: Path,
-    python_environment_path: Path,
-    python_environment_owned: bool,
-    db_mode: str,
-    generated_config_path: Path,
-    dependency_lock_path: Path,
-    target_db_name: str | None,
-    db_host: str | None,
-    db_port: int | None,
-    db_user: str | None,
-    db_password: str | None,
-    data_dir: Path | None,
-) -> StorageFootprint:
-    """Collect a bounded-cached ``StorageFootprint`` for one environment.
-
-    Cache is keyed by ``environment_id`` with a 15s TTL; concurrent callers within
-    that window get the same result. ``complete=False`` flags any owned component
-    (worktree, owned venv, owned DB) that could not be measured.
-    """
-    now = time.monotonic()
-    cached = _CACHE.get(environment_id)
-    if cached is not None and (now - cached[0]) < _CACHE_TTL:
-        return cached[1]
-
-    footprint = _compute_storage_footprint(
-        environment_id=environment_id,
-        worktree_path=worktree_path,
-        python_environment_path=python_environment_path,
-        python_environment_owned=python_environment_owned,
-        db_mode=db_mode,
-        generated_config_path=generated_config_path,
-        dependency_lock_path=dependency_lock_path,
-        target_db_name=target_db_name,
-        db_host=db_host,
-        db_port=db_port,
-        db_user=db_user,
-        db_password=db_password,
-        data_dir=data_dir,
-    )
-    _CACHE[environment_id] = (time.monotonic(), footprint)
-    return footprint
-
-
-def clear_storage_footprint_cache(environment_id: str | None = None) -> None:
-    """Drop cached footprint. ``None`` clears all entries (test helper)."""
-    if environment_id is None:
-        _CACHE.clear()
-    else:
-        _CACHE.pop(environment_id, None)

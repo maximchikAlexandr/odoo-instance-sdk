@@ -5,11 +5,11 @@
 ```bash
 git clone https://github.com/maximchikAlexandr/odoo-instance-sdk.git
 cd odoo-instance-sdk
-uv sync --frozen --dev
+uv sync --frozen --dev --extra dashboard
 git config core.hooksPath .githooks
 ```
 
-`uv sync --dev` installs the `lint`, `type-check`, and `test` groups. Mutation testing also needs:
+`uv sync --dev --extra dashboard` installs the local PR dependencies, including the monitor API/smoke-test extra. Mutation testing also needs:
 
 ```bash
 uv sync --frozen --group mutation --group test
@@ -23,7 +23,7 @@ make types
 make test
 ```
 
-`make pr` is the local equivalent of the required PR gates: lint, types, offline tests with zonal coverage, and package checks. It does not run mutation or live Odoo.
+`make pr` is the local equivalent of the required PR gates: lint, types, coverage tests, compatibility tests, dashboard unit/build checks, the mandatory monitor smoke check, and package checks. `make smoke` is intentionally separate so its integration marker cannot be hidden by dashboard unit-test selection. It does not run mutation or live Odoo. The package gate builds the bundled dashboard, so install a supported Node.js/npm runtime (CI uses Node 22) before running it locally.
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/) and are enforced by the local `commit-msg` hook. The `pre-commit` hook runs Ruff and mypy only.
 

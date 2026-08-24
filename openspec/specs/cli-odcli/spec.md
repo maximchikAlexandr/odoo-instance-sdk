@@ -120,8 +120,8 @@ odcli vscode generate [OPTIONS]
 
 ### Requirement: Command-specific context rules
 
-- `env checkout BRANCH`, default `env list` и `doctor` требуют project context;
-- `env list --all-projects` читает durable global registry из любой directory и не требует project; default list ограничен current project, а `--all` означает include removed;
+- `env checkout BRANCH` и `doctor` требуют project context;
+- `env list` вне project context эквивалентен `env list --all-projects` и читает durable global registry; `--all` означает include removed;
 - lifecycle `env sync/remove [ENVIRONMENT]` используют positional selector; без него команда разрешена только из exact registered worktree. Root `--env` с lifecycle command — usage error;
 - root context options `--project`/`--env` должны появляться в resolved plan/JSON provenance как `explicit` или `cwd`; поле `defaulted` для environment не используется.
 
@@ -633,7 +633,7 @@ odcli monitor [--headless] [--host HOST] [--port PORT] [--no-open]
 
 `odcli monitor` MUST запускать FastAPI server с `GET /api/v1/snapshot` (typed `Snapshot` JSON, optional `?project_id=`) и `GET /healthz` (`{"status":"ok"}`).
 
-Default UI mode: serves API + React SPA, bind `127.0.0.1`, auto port `8069` then `8100`–`8120` (never `8070`–`8099`), opens browser unless `--no-open`. `--headless`: API only, no static mount, no browser. Requires `dashboard` extra (`pip install odoo-instance-sdk[dashboard]`); missing extra → exit 1 with actionable hint.
+Default UI mode: serves API + React SPA, bind `127.0.0.1`, auto port `8069` then `8100`–`8120` (never `8070`–`8099`), opens browser unless `--no-open`. `--headless`: API only, no static mount, no browser. Built-in server accepts only loopback bind addresses (`127.0.0.1`, `localhost`, `::1`) and loopback HTTP Host headers because it has no authentication. Requires `dashboard` extra (`pip install odoo-instance-sdk[dashboard]`); missing extra → exit 1 with actionable hint.
 
 #### Scenario: Default UI mode serves SPA and API
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Badge,
   Button,
@@ -31,7 +31,9 @@ export default function App() {
 
   const load = useCallback(async () => {
     try {
-      const snap = await fetchSnapshot(selectedProjectId);
+      // Keep an authoritative project list while the selector is narrowed;
+      // filtering is a view concern, not an API polling concern.
+      const snap = await fetchSnapshot();
       setSnapshot(snap);
       setError(null);
     } catch (e) {
@@ -39,39 +41,38 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [selectedProjectId]);
+  }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      await load();
+      if (!cancelled) timeout = setTimeout(() => void poll(), POLL_MS);
+    };
     setLoading(true);
-    void load();
-    const id = setInterval(() => void load(), POLL_MS);
-    return () => clearInterval(id);
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timeout) clearTimeout(timeout);
+    };
   }, [load]);
 
   const projects = snapshot?.projects ?? [];
   const environments = snapshot?.environments ?? [];
 
-  const selectData = useMemo(
-    () => [
-      { value: "", label: "All projects" },
-      ...projects.map((p) => ({ value: p.id, label: `${p.name} (${p.display_hint})` })),
-    ],
-    [projects],
-  );
-
-  const filteredEnvs = useMemo(
-    () =>
-      selectedProjectId
-        ? environments.filter((e) => e.project_id === selectedProjectId)
-        : environments,
-    [environments, selectedProjectId],
-  );
-
-  const projectsById = useMemo(() => {
+  const selectData = [
+    { value: "", label: "All projects" },
+    ...projects.map((p) => ({ value: p.id, label: `${p.name} (${p.display_hint})` })),
+  ];
+  const filteredEnvs = selectedProjectId
+    ? environments.filter((e) => e.project_id === selectedProjectId)
+    : environments;
+  const projectsById = (() => {
     const m = new Map<string, ProjectSummary>();
     for (const p of projects) m.set(p.id, p);
     return m;
-  }, [projects]);
+  })();
 
   const displayedProjects = selectedProjectId
     ? projects.filter((p) => p.id === selectedProjectId)
@@ -106,11 +107,9 @@ export default function App() {
           </Text>
         ) : (
           <>
-            {displayedProjects.map((p) =>
-              p.cluster ? (
-                <ClusterCard key={`cluster-${p.id}`} project={p} cluster={p.cluster} />
-              ) : null,
-            )}
+            {displayedProjects.map((p) => (
+              <ClusterCard key={`cluster-${p.id}`} project={p} cluster={p.cluster} />
+            ))}
             <SimpleGrid
               cols={{ base: 1, sm: 2, lg: 3 }}
               spacing="md"
@@ -135,12 +134,20 @@ function ClusterCard({
   cluster,
 }: {
   project: ProjectSummary;
-  cluster: ClusterSnapshot;
+  cluster: ClusterSnapshot | null;
 }) {
+  if (cluster === null) {
+    return (
+      <Card data-testid="cluster-card" withBorder padding="md" radius="sm">
+        <Text fw={600}>Cluster — {project.name}</Text>
+        <Text size="sm" c="dimmed">PostgreSQL: unavailable (manifest missing)</Text>
+      </Card>
+    );
+  }
   const c = cluster.container;
   const m = cluster.metrics;
   return (
-    <Card withBorder padding="md" radius="sm">
+    <Card data-testid="cluster-card" withBorder padding="md" radius="sm">
       <Group justify="space-between" align="baseline" mb="xs">
         <Group gap="xs" align="baseline">
           <Text fw={600}>Cluster — {project.name}</Text>
@@ -160,7 +167,7 @@ function ClusterCard({
       </Group>
       {c ? (
         <Text size="sm" c="dimmed">
-          container {c.id.slice(0, 12)} · {c.name} · {c.image}
+          container {c.id?.slice(0, 12) ?? "—"} · {c.name ?? "—"} · {c.image ?? "—"}
           {c.pid !== null ? ` · PID ${c.pid} (${c.pid_scope})` : ""}
         </Text>
       ) : (
@@ -193,7 +200,7 @@ function EnvironmentCard({
   env: EnvironmentSnapshot;
   projectName: string;
 }) {
-  const rt: RuntimeMetrics | null = env.runtime;
+  const rt: RuntimeMetrics = env.runtime;
   const git = env.git;
   const st = env.storage;
 
@@ -202,12 +209,12 @@ function EnvironmentCard({
       ? rt.http_port
       : env.allocated_http_port;
 
-  const workerCount = rt && rt.child_pids.length > 0 ? rt.child_pids.length : 0;
+  const workerPids = rt?.child_pids ?? [];
   const isLive = rt?.state === "ready" || rt?.state === "not_ready";
   const isOpenEnabled = rt?.state === "ready" && rt.http_url !== null;
 
   return (
-    <Card withBorder padding="md" radius="sm">
+    <Card data-testid="environment-card" withBorder padding="md" radius="sm">
       <Stack gap="xs">
         <Group justify="space-between" align="baseline">
           <Text fw={600}>{env.name}</Text>
@@ -230,15 +237,12 @@ function EnvironmentCard({
           database: {env.database ?? "—"} · port: {port ?? "—"}
         </Text>
 
-        {git ? (
-          <Text size="sm" c="dimmed">
-            git: {git.state} · ↑{git.ahead} ↓{git.behind}
-            {git.diff ? ` · +${git.diff.added} -${git.diff.deleted}` : ""}
-          </Text>
-        ) : null}
+        <Text size="sm" c="dimmed">
+          git: {git.state} · ↑{git.ahead ?? "—"} ↓{git.behind ?? "—"}
+          {git.diff ? ` · +${git.diff.added} -${git.diff.deleted}` : ""}
+        </Text>
 
-        {st ? (
-          <Stack gap={2}>
+        <Stack gap={2}>
             <Text size="sm">
               disk: {formatBytes(st.total_bytes)} {st.complete ? "" : "(partial)"}
             </Text>
@@ -248,15 +252,16 @@ function EnvironmentCard({
               {formatBytes(st.database?.total_bytes ?? null)} · other{" "}
               {formatBytes(st.other_files_bytes)}
             </Text>
-          </Stack>
-        ) : null}
+        </Stack>
 
         <Group justify="space-between" align="baseline">
           <Text size="sm">
             {isLive && rt ? (
               <>
                 Odoo PID {rt.root_pid ?? "—"}
-                {workerCount > 0 ? ` (+${workerCount} workers)` : ""}
+                {workerPids.length > 0 ? (
+                  <span data-testid="worker-pids"> · workers {workerPids.join(", ")}</span>
+                ) : null}
                 {" · CPU "}
                 {formatPercent(rt.cpu_percent)}
                 {" · RAM "}
@@ -267,6 +272,7 @@ function EnvironmentCard({
             )}
           </Text>
           <Button
+            data-testid="open-odoo"
             size="xs"
             disabled={!isOpenEnabled}
             onClick={() => {

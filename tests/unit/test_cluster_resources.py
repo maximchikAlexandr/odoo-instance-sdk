@@ -100,11 +100,6 @@ def _healthy_stats() -> dict[str, object]:
     }
 
 
-@pytest.fixture(autouse=True)
-def _clear_caches() -> None:
-    cluster_resources._clear_caches()
-
-
 @pytest.mark.unit
 def test_parse_mem_value_units() -> None:
     assert _parse_mem_value("512MiB") == 512 * 1024**2
@@ -151,7 +146,7 @@ def test_resource_snapshot_stopped() -> None:
     assert snap.unavailability_reason == "stopped"
     assert snap.container is None
     assert snap.metrics is None
-    assert snap.sampled_at is not None
+    assert snap.sampled_at is None
 
 
 @pytest.mark.unit
@@ -187,7 +182,7 @@ def test_resource_snapshot_missing() -> None:
 
 @pytest.mark.unit
 def test_resource_snapshot_healthy_linux(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cluster_resources.sys, "platform", "linux")
+    monkeypatch.setattr("sys.platform", "linux")
     runner = FakeDockerRunner(
         ps_rows=[{"Service": "postgres", "ID": FULL_ID}],
         inspect_payload=[_healthy_inspect()],
@@ -217,7 +212,7 @@ def test_resource_snapshot_healthy_linux(monkeypatch: pytest.MonkeyPatch) -> Non
 
 @pytest.mark.unit
 def test_resource_snapshot_healthy_darwin_vm(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cluster_resources.sys, "platform", "darwin")
+    monkeypatch.setattr("sys.platform", "darwin")
     runner = FakeDockerRunner(
         ps_rows=[{"Service": "postgres", "ID": FULL_ID}],
         inspect_payload=[_healthy_inspect()],
@@ -347,7 +342,33 @@ def test_inspect_batch_partial_failure_does_not_block() -> None:
 
 
 @pytest.mark.unit
-def test_cache_reuses_entries_within_ttl() -> None:
+def test_inspect_batch_keeps_valid_partial_stdout_on_nonzero_exit() -> None:
+    id1 = "a1b2c3d4e5f6" + "0" * 20
+    id2 = "f6e5d4c3b2a1" + "0" * 20
+    runner = FakeDockerRunner(
+        inspect_rc=1,
+        inspect_payload=[{"Id": id1, "Name": "/c1", "Config": {"Image": "i"}, "State": {"Pid": 1}}],
+    )
+    result = inspect_containers((id1, id2), runner=runner)
+    assert result[id1] is not None
+    assert result[id2] is None
+
+
+@pytest.mark.unit
+def test_stats_batch_keeps_valid_partial_stdout_on_nonzero_exit() -> None:
+    id1 = "a1b2c3d4e5f6" + "0" * 20
+    id2 = "f6e5d4c3b2a1" + "0" * 20
+    runner = FakeDockerRunner(
+        stats_rc=1,
+        stats_lines=[{"container": id1, "CPUPerc": "1%", "MemUsage": "1MiB / 2MiB"}],
+    )
+    result = stats_containers((id1, id2), runner=runner)
+    assert result[id1] is not None
+    assert result[id2] is None
+
+
+@pytest.mark.unit
+def test_standalone_collection_has_no_global_cache() -> None:
     runner = FakeDockerRunner(
         ps_rows=[{"Service": "postgres", "ID": FULL_ID}],
         inspect_payload=[_healthy_inspect()],
@@ -369,12 +390,12 @@ def test_cache_reuses_entries_within_ttl() -> None:
     )
     inspect_calls = [c for c in runner.calls if c[:2] == ["docker", "inspect"]]
     stats_calls = [c for c in runner.calls if c[:2] == ["docker", "stats"]]
-    assert len(inspect_calls) == 1
-    assert len(stats_calls) == 1
+    assert len(inspect_calls) == 2
+    assert len(stats_calls) == 2
 
 
 @pytest.mark.unit
-def test_cache_expires_after_clear() -> None:
+def test_standalone_collection_needs_no_test_only_cache_reset() -> None:
     runner = FakeDockerRunner(
         ps_rows=[{"Service": "postgres", "ID": FULL_ID}],
         inspect_payload=[_healthy_inspect()],
@@ -388,7 +409,6 @@ def test_cache_expires_after_clear() -> None:
             runner=runner,
             state=PostgresClusterState.HEALTHY,
         )
-        cluster_resources._clear_caches()
     inspect_calls = [c for c in runner.calls if c[:2] == ["docker", "inspect"]]
     assert len(inspect_calls) == 2
 

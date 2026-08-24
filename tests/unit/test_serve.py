@@ -1,11 +1,44 @@
 from __future__ import annotations
 
 import socket
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from odoo_instance_sdk.internal import serve
+from odoo_instance_sdk.models import (
+    ClusterContainer,
+    ClusterEndpoint,
+    ClusterMetrics,
+    ClusterSnapshot,
+    DatabaseFootprint,
+    EnvironmentSnapshot,
+    EnvironmentState,
+    GitActivity,
+    GitActivityState,
+    PidScope,
+    PostgresClusterState,
+    ProjectSummary,
+    PythonEnvFootprint,
+    RuntimeMetrics,
+    RuntimeState,
+    Snapshot,
+    StorageFootprint,
+)
+
+# This module exercises the built-in FastAPI server.  Core CI deliberately
+# installs no dashboard extras; command-level missing-extra behavior is covered
+# separately in test_cli_monitor.py.
+pytestmark = pytest.mark.dashboard
+
+
+@pytest.mark.dashboard
+def test_dashboard_dependencies_are_installed() -> None:
+    import fastapi  # noqa: F401
+    import psutil  # noqa: F401
+    import uvicorn  # noqa: F401
 
 
 # --------------------------------------------------------------------- _select_port
@@ -23,6 +56,13 @@ def test_select_port_explicit_free() -> None:
         probe.bind(("127.0.0.1", 0))
         free = probe.getsockname()[1]
     assert serve._select_port("127.0.0.1", free) == free
+
+
+def test_select_port_ipv6_loopback_free() -> None:
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+        probe.bind(("::1", 0))
+        free = probe.getsockname()[1]
+    assert serve._select_port("::1", free) == free
 
 
 def test_select_port_explicit_occupied() -> None:
@@ -92,12 +132,42 @@ def test_run_server_missing_dashboard_extra(monkeypatch: pytest.MonkeyPatch) -> 
     assert "pip install odoo-instance-sdk[dashboard]" in msg
 
 
+@pytest.mark.parametrize("missing", ["fastapi", "uvicorn"])
+def test_run_server_missing_each_dashboard_dependency(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == missing:
+            raise ImportError(f"no module named {missing}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(SystemExit) as exc:
+        serve.run_server(headless=True)
+    # ``SystemExit(<message>)`` is a process exit status of 1 while retaining
+    # the actionable installation hint on stderr.
+    assert exc.value.code != 0
+    assert "pip install odoo-instance-sdk[dashboard]" in str(exc.value)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "example.test"])
+def test_run_server_rejects_unauthenticated_network_bind(host: str) -> None:
+    with pytest.raises(SystemExit, match="loopback"):
+        serve.run_server(host=host, headless=True)
+
+
 # --------------------------------------------------------------------- FastAPI routes
-def _client(headless: bool):  # type: ignore[no-untyped-def]
+def _client(headless: bool, monitor: Any = None):  # type: ignore[no-untyped-def]
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
-    return TestClient(serve.create_app(headless=headless))
+    return TestClient(
+        serve.create_app(headless=headless, monitor=monitor), base_url="http://localhost"
+    )
 
 
 def test_healthz() -> None:
@@ -105,6 +175,19 @@ def test_healthz() -> None:
         resp = client.get("/healthz")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
+
+
+def test_untrusted_host_is_rejected() -> None:
+    with _client(headless=True) as client:
+        response = client.get("/healthz", headers={"host": "attacker.example"})
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("host", ["[::1]", "[::1]:8069", "::1"])
+def test_ipv6_loopback_host_is_accepted(host: str) -> None:
+    with _client(headless=True) as client:
+        response = client.get("/healthz", headers={"host": host})
+    assert response.status_code == 200
 
 
 def test_snapshot_ok() -> None:
@@ -115,6 +198,202 @@ def test_snapshot_ok() -> None:
         assert "schema_version" in payload
         assert "projects" in payload
         assert "environments" in payload
+
+
+def test_snapshot_reuses_injected_monitor_and_forwards_filter() -> None:
+    class Monitor:
+        def __init__(self) -> None:
+            self.calls: list[str | None] = []
+
+        def snapshot(self, project_id: str | None = None) -> dict[str, object]:
+            self.calls.append(project_id)
+            return {"schema_version": 1, "projects": [], "environments": []}
+
+    monitor = Monitor()
+    with _client(headless=True, monitor=monitor) as client:
+        assert client.get("/api/v1/snapshot?project_id=project_x").status_code == 200
+        assert client.get("/api/v1/snapshot").status_code == 200
+    assert monitor.calls == ["project_x", None]
+
+
+def test_snapshot_has_exact_json_content_type_and_body() -> None:
+    class Monitor:
+        def snapshot(self, project_id: str | None = None) -> Snapshot:
+            assert project_id == "project_x"
+            return Snapshot(
+                schema_version=1,
+                generated_at=datetime(2026, 8, 24, tzinfo=UTC),
+                projects=(
+                    ProjectSummary(
+                        id="project_x",
+                        name="x",
+                        display_hint="x",
+                        environment_count=1,
+                        cluster=ClusterSnapshot(
+                            mode="compose",
+                            owned=True,
+                            state=PostgresClusterState.HEALTHY,
+                            endpoint=ClusterEndpoint(host="127.0.0.1", port=5432),
+                            container=ClusterContainer(
+                                id="container",
+                                name="postgres",
+                                image="postgres:16",
+                                pid=7,
+                                pid_scope=PidScope.DOCKER_VM,
+                            ),
+                            metrics=ClusterMetrics(
+                                cpu_percent=2.5,
+                                memory_usage_bytes=1,
+                                memory_limit_bytes=2,
+                                volume_usage_bytes=None,
+                                sampled_at=None,
+                            ),
+                            unavailability_reason=None,
+                            sampled_at=None,
+                        ),
+                    ),
+                ),
+                environments=(
+                    EnvironmentSnapshot(
+                        id="env_x",
+                        project_id="project_x",
+                        name="x",
+                        branch="main",
+                        short_sha="abc1234",
+                        db_mode="shared",
+                        database="db_x",
+                        lifecycle_state=EnvironmentState.READY,
+                        allocated_http_port=8069,
+                        runtime=RuntimeMetrics(
+                            state=RuntimeState.READY,
+                            root_pid=1,
+                            child_pids=(2, 3),
+                            process_count=3,
+                            cpu_percent=1.5,
+                            rss_bytes=1024,
+                            started_at=None,
+                            http_url="http://127.0.0.1:8069",
+                            http_port=8069,
+                            database_name="db_x",
+                            commit_sha="abc",
+                            branch="main",
+                        ),
+                        git=GitActivity(
+                            default_branch="main",
+                            head_sha="abc",
+                            short_sha="abc",
+                            branch="main",
+                            ahead=0,
+                            behind=0,
+                            diff=None,
+                            state=GitActivityState.CLEAN,
+                        ),
+                        storage=StorageFootprint(
+                            total_bytes=3,
+                            complete=True,
+                            worktree_bytes=1,
+                            python_environment=PythonEnvFootprint(owned=True, bytes=1),
+                            database=DatabaseFootprint(
+                                owned=False,
+                                postgres_bytes=None,
+                                filestore_bytes=None,
+                                total_bytes=None,
+                            ),
+                            other_files_bytes=1,
+                        ),
+                    ),
+                ),
+            )
+
+    with _client(headless=True, monitor=Monitor()) as client:
+        response = client.get("/api/v1/snapshot?project_id=project_x")
+    assert response.headers["content-type"] == "application/json"
+    payload = response.json()
+    payload["generated_at"] = "<generated_at>"
+    assert payload == {
+        "schema_version": 1,
+        "generated_at": "<generated_at>",
+        "projects": [
+            {
+                "id": "project_x",
+                "name": "x",
+                "display_hint": "x",
+                "environment_count": 1,
+                "cluster": {
+                    "mode": "compose",
+                    "owned": True,
+                    "state": "healthy",
+                    "endpoint": {"host": "127.0.0.1", "port": 5432},
+                    "container": {
+                        "id": "container",
+                        "name": "postgres",
+                        "image": "postgres:16",
+                        "pid": 7,
+                        "pid_scope": "docker_vm",
+                    },
+                    "metrics": {
+                        "cpu_percent": 2.5,
+                        "memory_usage_bytes": 1,
+                        "memory_limit_bytes": 2,
+                        "volume_usage_bytes": None,
+                        "sampled_at": None,
+                    },
+                    "unavailability_reason": None,
+                    "sampled_at": None,
+                },
+            }
+        ],
+        "environments": [
+            {
+                "id": "env_x",
+                "project_id": "project_x",
+                "name": "x",
+                "branch": "main",
+                "short_sha": "abc1234",
+                "db_mode": "shared",
+                "database": "db_x",
+                "lifecycle_state": "ready",
+                "allocated_http_port": 8069,
+                "runtime": {
+                    "state": "ready",
+                    "root_pid": 1,
+                    "child_pids": [2, 3],
+                    "process_count": 3,
+                    "cpu_percent": 1.5,
+                    "rss_bytes": 1024,
+                    "started_at": None,
+                    "http_url": "http://127.0.0.1:8069",
+                    "http_port": 8069,
+                    "database_name": "db_x",
+                    "commit_sha": "abc",
+                    "branch": "main",
+                },
+                "git": {
+                    "default_branch": "main",
+                    "head_sha": "abc",
+                    "short_sha": "abc",
+                    "branch": "main",
+                    "ahead": 0,
+                    "behind": 0,
+                    "diff": None,
+                    "state": "clean",
+                },
+                "storage": {
+                    "total_bytes": 3,
+                    "complete": True,
+                    "worktree_bytes": 1,
+                    "python_environment": {"owned": True, "bytes": 1},
+                    "database": {
+                        "owned": False,
+                        "postgres_bytes": None,
+                        "filestore_bytes": None,
+                        "total_bytes": None,
+                    },
+                    "other_files_bytes": 1,
+                },
+            }
+        ],
+    }
 
 
 def test_snapshot_project_filter_unknown() -> None:
@@ -167,12 +446,10 @@ def test_headless_no_static_mount() -> None:
         assert resp.status_code == 404
 
 
-def test_ui_no_dist_skips_mount(monkeypatch: pytest.MonkeyPatch) -> None:
-    # In this dev env web/dist does not exist; create_app(headless=False) must
-    # still build and serve API routes without mounting static.
-    monkeypatch.setattr(serve, "_WEB_DIST", serve.Path("/nonexistent/dist-xyz"))
-    with _client(headless=False) as client:
-        resp = client.get("/healthz")
-        assert resp.status_code == 200
-        resp_root = client.get("/")
-        assert resp_root.status_code == 404
+def test_ui_no_dist_fails_actionably(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UI mode must never silently become an API-only service."""
+    monkeypatch.setattr(serve, "_WEB_DIST", Path("/nonexistent/dist-xyz"))
+    with pytest.raises(RuntimeError, match="SPA assets are missing"):
+        serve.create_app(headless=False)
+    with _client(headless=True) as client:
+        assert client.get("/healthz").status_code == 200

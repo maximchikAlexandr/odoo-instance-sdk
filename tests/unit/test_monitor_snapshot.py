@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import uuid
+from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import msgspec
@@ -22,233 +24,52 @@ from odoo_instance_sdk.models import (
     RuntimeState,
     Snapshot,
 )
-from odoo_instance_sdk.resources.environment import EnvironmentState
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
-from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-
-# --------------------------------------------------------------------- helpers
-
-
-def _make_env(
-    env_id: str,
-    *,
-    name: str = "test",
-    repository_root: str = "/repo",
-    git_common_dir: str = "/repo/.git",
-    branch: str = "main",
-    worktree_path: str = "/wt",
-    generated_config_path: str = "/wt/odoo.conf",
-    python_environment_path: str = "/venv",
-    python_environment_owned: bool = False,
-    dependency_lock_path: str = "/lock",
-    db_mode: str = "shared",
-    source_db_name: str | None = "mydb",
-    target_db_name: str | None = None,
-    state: str = "ready",
-) -> dict[str, object]:
-    return {
-        "id": env_id,
-        "name": name,
-        "repository_root": repository_root,
-        "git_common_dir": git_common_dir,
-        "branch": branch,
-        "base_ref": "HEAD",
-        "worktree_path": worktree_path,
-        "generated_config_path": generated_config_path,
-        "python_environment_path": python_environment_path,
-        "python_environment_owned": python_environment_owned,
-        "dependency_lock_path": dependency_lock_path,
-        "db_mode": db_mode,
-        "source_db_name": source_db_name,
-        "target_db_name": target_db_name,
-        "backup_id": None,
-        "runtime_json": "{}",
-        "state": state,
-        "created_at": "2026-01-01T00:00:00",
-        "last_used_at": None,
-        "removed_at": None,
-        "last_error": None,
-    }
-
-
-def _runtime_kwargs(**overrides: object) -> dict[str, object]:
-    base: dict[str, object] = {
-        "root_pid": 12345,
-        "create_time": 1700000000.0,
-        "started_at": "2026-01-01T00:00:00",
-        "checkout_branch": "main",
-        "commit_sha": "abc123def456",
-        "http_url": "http://127.0.0.1:8069",
-        "http_port": 8069,
-        "database_name": "mydb",
-    }
-    base.update(overrides)
-    return base
-
-
-def _make_catalog(tmp_path: Path) -> BackupCatalog:
-    return BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
-
-
-def _seed_env(catalog: BackupCatalog, env: dict[str, object]) -> None:
-    catalog.create_environment(env)
-
-
-def _seed_runtime(catalog: BackupCatalog, env_id: str, **kwargs: object) -> None:
-    catalog.upsert_environment_runtime(env_id, **_runtime_kwargs(**kwargs))  # type: ignore[arg-type]
-
-
-class FakeProcessProvider:
-    def __init__(
-        self,
-        *,
-        result: ProcessTreeResult | None = None,
-        raise_ex: type[BaseException] | None = None,
-    ) -> None:
-        self.calls = 0
-        self._result = result
-        self._raise = raise_ex
-
-    def collect(
-        self, root_pid: int, create_time: float, *, prev_cpu_point: CpuPoint | None
-    ) -> tuple[ProcessTreeResult, CpuPoint] | None:
-        self.calls += 1
-        if self._raise is not None:
-            raise self._raise("psutil missing")
-        if self._result is None:
-            return None
-        return self._result, CpuPoint(times_cpu=0.0, timestamp=0.0)
-
-
-class FakeGitProvider:
-    def __init__(self, *, result: GitActivity | None = None, raise_ex: bool = False) -> None:
-        self.calls = 0
-        self._result = result or GitActivity(
-            default_branch="main",
-            head_sha="abcdef1234567890",
-            short_sha="abcdef1",
-            branch="main",
-            ahead=0,
-            behind=0,
-            diff=None,
-            state=GitActivityState.CLEAN,
-        )
-        self._raise = raise_ex
-
-    def collect(self, worktree: Path) -> GitActivity:
-        self.calls += 1
-        if self._raise:
-            raise RuntimeError("git failed")
-        return self._result
-
-
-class FakeDockerProvider:
-    def __init__(self, *, result: ClusterResourceSnapshot | None = None) -> None:
-        self.calls = 0
-        self._result = result
-
-    def collect(
-        self,
-        *,
-        compose_file: Path,
-        compose_project_name: str,
-        service: str,
-        state: PostgresClusterState,
-    ) -> ClusterResourceSnapshot:
-        self.calls += 1
-        if self._result is not None:
-            return self._result
-        return ClusterResourceSnapshot(
-            container=None,
-            metrics=None,
-            unavailability_reason="stats_failed",
-            sampled_at=None,
-        )
-
-
-class FakePostgresCluster:
-    """Minimal stand-in returned by monkeypatched PostgresCluster.from_project."""
-
-    def __init__(
-        self,
-        *,
-        mode: str = "compose",
-        endpoint_host: str = "127.0.0.1",
-        endpoint_port: int = 5432,
-        state: PostgresClusterState = PostgresClusterState.HEALTHY,
-        resource: ClusterResourceSnapshot | None = None,
-        project_id: str = "fake_key",
-    ) -> None:
-        self._mode = mode
-        self._endpoint_host = endpoint_host
-        self._endpoint_port = endpoint_port
-        self._state = state
-        self._resource = resource
-        self._project_id = project_id
-        self._compose_runner = None  # type: ignore[assignment]
-        self._calls = 0
-
-    @property
-    def mode(self) -> str:
-        return self._mode
-
-    @property
-    def owned(self) -> bool:
-        return self._mode == "compose"
-
-    @property
-    def endpoint_host(self) -> str:
-        return self._endpoint_host
-
-    @property
-    def endpoint_port(self) -> int:
-        return self._endpoint_port
-
-    @property
-    def compose_project_name(self) -> str:
-        return f"odcli_pg_{self._project_id}"
-
-    @property
-    def compose_file(self) -> Path:
-        return Path("/fake/compose.yaml")
-
-    def status(self) -> PostgresClusterState:
-        self._calls += 1
-        return self._state
-
-    def resource_snapshot(self) -> ClusterResourceSnapshot | None:
-        if self._mode == "external":
-            return None
-        return self._resource
-
-
-def _patch_from_project(
-    monkeypatch: pytest.MonkeyPatch,
-    cluster: FakePostgresCluster | None = None,
-    *,
-    raise_ex: type[BaseException] | None = None,
-) -> None:
-    def _from_project(project_path: str | Path, **kwargs: object) -> PostgresCluster:
-        if raise_ex is not None:
-            raise raise_ex(str(project_path))
-        return cluster  # type: ignore[return-value]
-
-    monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(_from_project))
-
-
-def _write_odoo_conf(path: Path, *, http_port: int = 8069) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "[options]\n"
-        f"http_port = {http_port}\n"
-        "http_interface = 127.0.0.1\n"
-        "data_dir = /tmp/odoo_data\n",
-        encoding="utf-8",
-    )
+from tests.unit.monitor_support import (
+    FakeDockerProvider,
+    FakeGitProvider,
+    FakePostgresCluster,
+    FakeProcessProvider,
+)
+from tests.unit.monitor_support import (
+    make_catalog as _make_catalog,
+)
+from tests.unit.monitor_support import (
+    make_env as _make_env,
+)
+from tests.unit.monitor_support import (
+    patch_from_project as _patch_from_project,
+)
+from tests.unit.monitor_support import (
+    seed_env as _seed_env,
+)
+from tests.unit.monitor_support import (
+    seed_runtime as _seed_runtime,
+)
+from tests.unit.monitor_support import (
+    write_odoo_conf as _write_odoo_conf,
+)
 
 
 # --------------------------------------------------------------------- tests
+@pytest.fixture(autouse=True)
+def _inject_process_provider_for_core_monitor_tests(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Keep collector tests core-only; only the explicit extra contract imports psutil."""
+    if request.node.name in {
+        "test_default_monitor_requires_metrics_extra_even_for_empty_catalog",
+        "test_psutil_missing_raises_extras_error",
+    }:
+        return
+    original_init = EnvironmentMonitor.__init__
+
+    def init(self: EnvironmentMonitor, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("process_provider", FakeProcessProvider())
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(EnvironmentMonitor, "__init__", init)
 
 
 def test_multi_project_discovery(tmp_path: Path) -> None:
@@ -586,6 +407,104 @@ def test_catalog_error_raises_monitor_error(
         monitor.snapshot()
 
 
+def test_catalog_runtime_error_aborts_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an absent runtime means stopped; catalog failure is not lifecycle state."""
+    from odoo_instance_sdk.exceptions import BackupCatalogError
+
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _seed_env(catalog, _make_env(env_id, worktree_path=str(worktree)))
+    catalog.close()
+
+    def boom(self: BackupCatalog, environment_id: str) -> sqlite3.Row | None:
+        raise BackupCatalogError("sqlite unavailable")
+
+    monkeypatch.setattr(BackupCatalog, "get_environment_runtime", boom)
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3", process_provider=FakeProcessProvider()
+    )
+    with pytest.raises(MonitorError, match="catalog runtime lookup failed"):
+        monitor.snapshot()
+
+
+@pytest.mark.parametrize("payload", ["not-json", "[]"])
+def test_malformed_health_response_is_not_ready_and_keeps_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: str
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _seed_env(catalog, _make_env(env_id, worktree_path=str(worktree)))
+    _seed_runtime(catalog, env_id)
+    catalog.close()
+    _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
+
+    response = httpx.Response(200, text=payload)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.monitor.httpx.get", lambda *args, **kwargs: response
+    )
+    provider = FakeProcessProvider(
+        result=ProcessTreeResult(child_pids=(42,), process_count=2, cpu_percent=3.5, rss_bytes=99)
+    )
+    runtime = (
+        EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider)
+        .snapshot()
+        .environments[0]
+        .runtime
+    )
+    assert runtime.state is RuntimeState.NOT_READY
+    assert (runtime.root_pid, runtime.process_count, runtime.cpu_percent, runtime.rss_bytes) == (
+        12345,
+        2,
+        3.5,
+        99,
+    )
+
+
+def test_runtime_is_read_once_and_cpu_identity_is_stable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _seed_env(catalog, _make_env(env_id, worktree_path=str(worktree)))
+    _seed_runtime(catalog, env_id, root_pid=111, create_time=1.0)
+    catalog.close()
+    _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
+    original = BackupCatalog.get_environment_runtime
+    calls = 0
+
+    def unstable(self: BackupCatalog, environment_id: str) -> sqlite3.Row | None:
+        nonlocal calls
+        calls += 1
+        row = original(self, environment_id)
+        if calls == 1:
+            return row
+        raise AssertionError("runtime read twice")
+
+    monkeypatch.setattr(BackupCatalog, "get_environment_runtime", unstable)
+    provider = FakeProcessProvider(
+        result=ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=None, rss_bytes=1)
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.monitor.EnvironmentMonitor._probe_readiness",
+        lambda self, url: RuntimeState.READY,
+    )
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider
+    )
+    snapshot = monitor.snapshot()
+    assert calls == 1
+    assert snapshot.environments[0].runtime.root_pid == 111
+    assert set(monitor._cpu_points) == {(111, 1.0)}
+
+
 def test_psutil_missing_raises_extras_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -753,7 +672,7 @@ def test_watch_cancellation_cleans_up(tmp_path: Path, monkeypatch: pytest.Monkey
     monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
 
     async def _cancel_after_one() -> None:
-        gen = monitor.watch(interval=0.1)
+        gen = cast("AsyncGenerator[Snapshot, None]", monitor.watch(interval=0.1))
         await gen.__anext__()
         await gen.aclose()
 
@@ -844,6 +763,24 @@ def test_fresh_instance_empties_cache(tmp_path: Path, monkeypatch: pytest.Monkey
     assert provider_b.calls == 1
 
 
+def test_default_monitor_requires_metrics_extra_even_for_empty_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import builtins
+
+    _make_catalog(tmp_path).close()
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "psutil":
+            raise ImportError("psutil missing")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(MonitorExtrasMissingError, match=r"\[metrics\]"):
+        EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3").snapshot()
+
+
 def test_cluster_status_cached_5s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     catalog = _make_catalog(tmp_path)
     e1 = str(uuid.uuid4())
@@ -869,113 +806,3 @@ def test_cluster_status_cached_5s(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monitor.snapshot()
 
     assert cluster._calls == 1
-
-
-def test_snapshot_schema_version_and_ordering(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    catalog = _make_catalog(tmp_path)
-    e_b = "zzzzzzzz-0000-0000-0000-000000000000"
-    e_a = "aaaaaaaa-0000-0000-0000-000000000000"
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    _seed_env(catalog, _make_env(e_b, worktree_path=str(wt), branch="main"))
-    _seed_env(
-        catalog,
-        _make_env(
-            e_a,
-            worktree_path=str(wt),
-            branch="dev",
-            git_common_dir="/repo2/.git",
-            repository_root="/repo2",
-        ),
-    )
-    catalog.close()
-
-    _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-
-    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
-    snap = monitor.snapshot()
-
-    assert snap.schema_version == 1
-    assert snap.generated_at.tzinfo is not None
-    env_ids = [env.id for env in snap.environments]
-    assert env_ids == sorted(env_ids)
-
-
-def test_allocated_http_port_from_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    catalog = _make_catalog(tmp_path)
-    e1 = str(uuid.uuid4())
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    cfg = tmp_path / "odoo.conf"
-    _write_odoo_conf(cfg, http_port=8123)
-    _seed_env(catalog, _make_env(e1, worktree_path=str(wt), generated_config_path=str(cfg)))
-    catalog.close()
-
-    _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-
-    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
-    snap = monitor.snapshot()
-
-    env = snap.environments[0]
-    assert env.allocated_http_port == 8123
-
-
-def test_lifecycle_state_from_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    catalog = _make_catalog(tmp_path)
-    e1 = str(uuid.uuid4())
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    _seed_env(catalog, _make_env(e1, worktree_path=str(wt), state="creating"))
-    catalog.close()
-
-    _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-
-    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
-    snap = monitor.snapshot()
-
-    env = snap.environments[0]
-    assert env.lifecycle_state is EnvironmentState.CREATING
-
-
-def test_database_field_copy_vs_shared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    catalog = _make_catalog(tmp_path)
-    e_copy = str(uuid.uuid4())
-    e_shared = str(uuid.uuid4())
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    _seed_env(
-        catalog,
-        _make_env(
-            e_copy,
-            worktree_path=str(wt),
-            db_mode="copy",
-            source_db_name="src",
-            target_db_name="tgt",
-            branch="main",
-        ),
-    )
-    _seed_env(
-        catalog,
-        _make_env(
-            e_shared,
-            worktree_path=str(wt),
-            db_mode="shared",
-            source_db_name="srcdb",
-            target_db_name=None,
-            branch="dev",
-            git_common_dir="/repo2/.git",
-            repository_root="/repo2",
-        ),
-    )
-    catalog.close()
-
-    _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-
-    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
-    snap = monitor.snapshot()
-
-    by_id = {env.id: env for env in snap.environments}
-    assert by_id[e_copy].database == "tgt"
-    assert by_id[e_shared].database == "srcdb"

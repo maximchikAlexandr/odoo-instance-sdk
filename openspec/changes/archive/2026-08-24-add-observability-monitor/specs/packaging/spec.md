@@ -9,7 +9,7 @@ The `pyproject.toml` SHALL declare core runtime dependencies as exactly: `httpx`
 ```toml
 [project.optional-dependencies]
 metrics = ["psutil>=5.9,<7"]           # collector + typed models, без FastAPI
-dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30,<1.0"]
+dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.141,<1.0", "starlette>=1.3.1,<2.0", "uvicorn>=0.30,<1.0"]
 ```
 
 - `metrics` — `psutil` + Python collector + typed snapshot models; НЕ включает FastAPI/Uvicorn; приложение может использовать `EnvironmentMonitor` внутри своего процесса без зависимости от встроенного backend.

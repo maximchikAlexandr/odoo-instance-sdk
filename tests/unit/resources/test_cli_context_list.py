@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
+from tests.unit.monitor_support import FakeProcessProvider
 
 if TYPE_CHECKING:
     from click.testing import Result
@@ -21,6 +22,19 @@ if TYPE_CHECKING:
 def _invoke(runner: CliRunner, client: OdooClient, args: list[str]) -> Result:
     with patch("odoo_instance_sdk.internal.cli_env.OdooClient", return_value=client):
         return runner.invoke(cli, args)
+
+
+@pytest.fixture(autouse=True)
+def _inject_monitor_process_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+
+    original_init = EnvironmentMonitor.__init__
+
+    def init(self: EnvironmentMonitor, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("process_provider", FakeProcessProvider())
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(EnvironmentMonitor, "__init__", init)
 
 
 def test_nested_worktree_infers_remove_selector(
@@ -55,14 +69,16 @@ def test_nested_worktree_infers_remove_selector(
     assert Path(env.worktree_path).is_dir()
 
 
-def test_outside_context_requires_explicit_project(
+def test_outside_context_lists_all_projects(
     env_client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     result = _invoke(CliRunner(), env_client, ["env", "list", "--json"])
 
-    assert result.exit_code == 1
-    assert json.loads(result.output)["error"]["code"] == "env_list_failed"
+    assert result.exit_code == 0, result.output
+    snapshot = json.loads(result.output)["result"]
+    assert snapshot["environments"] == []
+    assert snapshot["projects"] == []
 
 
 def test_sync_rejects_root_env_as_usage_error(env_client: OdooClient) -> None:

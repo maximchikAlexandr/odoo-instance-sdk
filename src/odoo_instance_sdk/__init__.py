@@ -1,6 +1,5 @@
 """Odoo Instance SDK — typed Python API for managing local Odoo 19.0 instances."""
 
-import odoo_instance_sdk.models as _models
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.exceptions import (
@@ -64,6 +63,7 @@ from odoo_instance_sdk.models import (
     DatabaseFootprint,
     DropResult,
     EnvironmentSnapshot,
+    EnvironmentState,
     GitActivity,
     GitActivityState,
     GitDiff,
@@ -90,16 +90,10 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
     EnvironmentResource,
-    EnvironmentState,
 )
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-# ponytail: populate models module globals so msgspec can resolve the string
-# annotation "EnvironmentState" on EnvironmentSnapshot at encode time; a real
-# import in models.py would create a cycle (resources.environment -> models).
-_models.EnvironmentState = EnvironmentState  # type: ignore[attr-defined]
 
 __version__ = "0.1.0"
 __all__ = [

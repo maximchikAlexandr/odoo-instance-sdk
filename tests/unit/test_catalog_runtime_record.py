@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import uuid
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
@@ -36,7 +37,18 @@ def _make_env(env_id: str) -> dict[str, object]:
     }
 
 
-def _runtime_kwargs() -> dict[str, object]:
+class RuntimeKwargs(TypedDict):
+    root_pid: int
+    create_time: float
+    started_at: str
+    checkout_branch: str
+    commit_sha: str
+    http_url: str
+    http_port: int
+    database_name: str
+
+
+def _runtime_kwargs() -> RuntimeKwargs:
     return {
         "root_pid": 12345,
         "create_time": 1700000000.0,
@@ -108,14 +120,14 @@ def test_upsert_inserts_then_updates_single_row(tmp_path: Path) -> None:
     env_id = str(uuid.uuid4())
     catalog.create_environment(_make_env(env_id))
 
-    catalog.upsert_environment_runtime(env_id, **_runtime_kwargs())  # type: ignore[arg-type]
+    catalog.upsert_environment_runtime(env_id, **_runtime_kwargs())
     row = catalog.get_environment_runtime(env_id)
     assert row is not None
     assert row["root_pid"] == 12345
     assert row["http_port"] == 8069
 
-    updated = {**_runtime_kwargs(), "root_pid": 99999, "http_port": 8100}
-    catalog.upsert_environment_runtime(env_id, **updated)  # type: ignore[arg-type]
+    updated: RuntimeKwargs = {**_runtime_kwargs(), "root_pid": 99999, "http_port": 8100}
+    catalog.upsert_environment_runtime(env_id, **updated)
     rows = catalog._conn.execute(
         "SELECT * FROM environment_runtime WHERE environment_id = ?", (env_id,)
     ).fetchall()
@@ -129,7 +141,7 @@ def test_clear_removes_row_and_is_idempotent(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     env_id = str(uuid.uuid4())
     catalog.create_environment(_make_env(env_id))
-    catalog.upsert_environment_runtime(env_id, **_runtime_kwargs())  # type: ignore[arg-type]
+    catalog.upsert_environment_runtime(env_id, **_runtime_kwargs())
     assert catalog.get_environment_runtime(env_id) is not None
 
     catalog.clear_environment_runtime(env_id)
@@ -143,7 +155,7 @@ def test_clear_removes_row_and_is_idempotent(tmp_path: Path) -> None:
 def test_upsert_on_missing_environment_raises_fk(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     with pytest.raises(BackupCatalogError):
-        catalog.upsert_environment_runtime("no-such-env", **_runtime_kwargs())  # type: ignore[arg-type]
+        catalog.upsert_environment_runtime("no-such-env", **_runtime_kwargs())
     catalog.close()
 
 
@@ -151,7 +163,7 @@ def test_readonly_api_returns_row_with_columns(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     env_id = str(uuid.uuid4())
     catalog.create_environment(_make_env(env_id))
-    catalog.upsert_environment_runtime(env_id, **_runtime_kwargs())  # type: ignore[arg-type]
+    catalog.upsert_environment_runtime(env_id, **_runtime_kwargs())
 
     row = catalog.get_environment_runtime(env_id)
     assert row is not None
@@ -174,10 +186,10 @@ def test_list_environment_runtimes_ordered(tmp_path: Path) -> None:
     env_b = "bbb-bbb"
     catalog.create_environment(_make_env(env_a))
     catalog.create_environment(
-        {**_make_env(env_b), "name": "b", "git_common_dir": "/repo2/.git", "branch": "dev"}  # type: ignore[arg-type]
+        {**_make_env(env_b), "name": "b", "git_common_dir": "/repo2/.git", "branch": "dev"}
     )
-    catalog.upsert_environment_runtime(env_b, **_runtime_kwargs())  # type: ignore[arg-type]
-    catalog.upsert_environment_runtime(env_a, **_runtime_kwargs())  # type: ignore[arg-type]
+    catalog.upsert_environment_runtime(env_b, **_runtime_kwargs())
+    catalog.upsert_environment_runtime(env_a, **_runtime_kwargs())
 
     listed = catalog.list_environment_runtimes()
     assert [r["environment_id"] for r in listed] == [env_a, env_b]

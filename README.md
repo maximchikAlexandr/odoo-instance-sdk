@@ -165,12 +165,12 @@ Backup files and audit metadata are stored under `~/.cache/odoo-instance-sdk/`:
 Requires Python 3.12+ on POSIX (Linux/macOS).
 
 ```bash
-uv sync --frozen --dev
+uv sync --frozen --dev --extra dashboard
 git config core.hooksPath .githooks
 make pr
 ```
 
-`make pr` runs lint, types, the offline test suite with zonal coverage, and package checks. Live Odoo is opt-in via `make live`. See [CONTRIBUTING.md](CONTRIBUTING.md) for markers, targeted runs, mutation, and package prerequisites.
+`make pr` runs lint, types, coverage and compatibility suites, dashboard unit/build checks, the mandatory monitor API smoke gate, and package checks. Live Odoo is opt-in via `make live`; monitor smoke is not opt-in. See [CONTRIBUTING.md](CONTRIBUTING.md) for markers, targeted runs, mutation, and package prerequisites.
 
 ## Examples
 

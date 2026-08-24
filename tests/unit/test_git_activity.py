@@ -1,22 +1,45 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from odoo_instance_sdk.internal import git_activity
 from odoo_instance_sdk.internal.git_activity import collect_git_activity
 from odoo_instance_sdk.models import GitActivityState
+
+# These are deterministic local-repository integration tests, not pure unit tests.
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def _isolated_git_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep both test setup and the production collector off user Git state."""
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", os.devnull)
 
 
 def _git(args: list[str], cwd: Path) -> str:
     """Run git, assert success, return stdout."""
+    # These are real Git integration tests even though they live beside unit
+    # tests.  Never inherit a developer's aliases, global config, or hooks.
+    env = os.environ | {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.hooksPath",
+        "GIT_CONFIG_VALUE_0": os.devnull,
+    }
     proc = subprocess.run(
         ["git", "-C", str(cwd), *args],
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     assert proc.returncode == 0, f"git {args} failed: {proc.stderr}"
     return proc.stdout
@@ -42,13 +65,6 @@ def _commit(path: Path, msg: str, files: dict[str, str | bytes] | None = None) -
             _git(["add", "--", name], path)
     _git(["commit", "-q", "--allow-empty", "-m", msg], path)
     return _git(["rev-parse", "HEAD"], path).strip()
-
-
-@pytest.fixture(autouse=True)
-def _clear_cache() -> None:
-    git_activity._git_cache.clear()
-    yield
-    git_activity._git_cache.clear()
 
 
 def test_clean(tmp_path: Path) -> None:
@@ -144,10 +160,11 @@ def test_orphan_no_main_no_upstream(tmp_path: Path) -> None:
     _commit(repo, "x", {"a.txt": "1\n"})
     act = collect_git_activity(repo)
     assert act.state is GitActivityState.ORPHAN
-    # HEAD is known, identity preserved.
-    assert act.head_sha is not None
-    assert act.short_sha == act.head_sha[:7]
-    assert act.branch == "other"
+    # A missing canonical default branch is a Git collector failure and must
+    # use the fully redacted orphan contract.
+    assert act.head_sha is None
+    assert act.short_sha is None
+    assert act.branch == "unknown"
     assert act.ahead is None
     assert act.behind is None
     assert act.diff is None
@@ -239,30 +256,14 @@ def test_upstream_used_when_configured(tmp_path: Path) -> None:
     assert act.behind == 1
 
 
-def test_cache_returns_same_object_within_ttl(tmp_path: Path) -> None:
+def test_collection_is_stateless(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
     _commit(repo, "init", {"a.txt": "hi\n"})
     first = collect_git_activity(repo)
     second = collect_git_activity(repo)
-    # Frozen struct — equality holds; identity proves cache hit.
-    assert first is second
-
-
-def test_cache_recomputes_after_ttl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _commit(repo, "init", {"a.txt": "hi\n"})
-
-    t = [0.0]
-    monkeypatch.setattr(git_activity.time, "monotonic", lambda: t[0])
-
-    first = collect_git_activity(repo)
-    # Advance past TTL.
-    t[0] = git_activity._CACHE_TTL + 1.0
-    second = collect_git_activity(repo)
-    assert first == second  # same content
-    assert first is not second  # recomputed, distinct object
+    assert first == second
+    assert first is not second
 
 
 def test_cache_invalidated_on_head_change(tmp_path: Path) -> None:
@@ -276,3 +277,58 @@ def test_cache_invalidated_on_head_change(tmp_path: Path) -> None:
     second = collect_git_activity(repo)
     assert second.state is GitActivityState.AHEAD
     assert second.ahead == 1
+
+
+@pytest.mark.parametrize("failed_command", ["branch", "merge-base", "counts"])
+def test_unexpected_git_failures_are_fully_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_command: str
+) -> None:
+    """Only merge-base rc=1 is the documented partial/orphan exception."""
+    import odoo_instance_sdk.internal.git_activity as activity
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "base")
+    original = activity._run_git
+
+    def failing(args: list[str], cwd: Path) -> tuple[int, str, str]:
+        if (
+            (failed_command == "branch" and args[:2] == ["rev-parse", "--abbrev-ref"])
+            or (failed_command == "merge-base" and args[0] == "merge-base")
+            or (failed_command == "counts" and args[:2] == ["rev-list", "--count"])
+        ):
+            return 2, "", "unexpected"
+        return original(args, cwd)
+
+    monkeypatch.setattr(activity, "_run_git", failing)
+    result = activity.collect_git_activity(repo)
+    assert result.state is GitActivityState.ORPHAN
+    assert (
+        result.head_sha,
+        result.short_sha,
+        result.branch,
+        result.ahead,
+        result.behind,
+        result.diff,
+    ) == (None, None, "unknown", None, None, None)
+
+
+def test_no_common_ancestor_keeps_known_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import odoo_instance_sdk.internal.git_activity as activity
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "base")
+    original = activity._run_git
+
+    def no_merge_base(args: list[str], cwd: Path) -> tuple[int, str, str]:
+        if args[0] == "merge-base":
+            return 1, "", ""
+        return original(args, cwd)
+
+    monkeypatch.setattr(activity, "_run_git", no_merge_base)
+    result = activity.collect_git_activity(repo)
+    assert result.state is GitActivityState.ORPHAN
+    assert result.head_sha is not None and result.branch == "main"

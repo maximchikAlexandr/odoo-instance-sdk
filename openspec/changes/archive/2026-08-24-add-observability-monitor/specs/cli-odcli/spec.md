@@ -184,7 +184,7 @@ odcli monitor [--headless] [--host HOST] [--port PORT] [--no-open]
 
 Default UI mode (без `--headless`): serves `/api/v1/snapshot`, `/healthz`, and the React SPA. Default bind `127.0.0.1`. `--host` overrides bind address. `--port` binds that exact port (exit 1 if occupied). Without `--port`: try `8069`, then scan `8100`–`8120` inclusive; never auto-select `8070`–`8099`. If all of those ports are occupied, exit 1. Default opens `http://<host>:<port>/`; `--no-open` suppresses.
 
-Headless mode (`--headless`): обслуживает только versioned JSON API (`/api/v1/snapshot`, `/healthz`); static assets НЕ монтируются, браузер НЕ открывается; предназначен для server-to-server интеграции или размещения за внешним control-plane proxy. CORS, authentication и TLS не изобретать внутри MVP; non-loopback bind (`--host 0.0.0.0` или non-loopback) — explicit opt-in (команда требует `--host` явно для non-loopback; default loopback не требует подтверждения); production boundary обеспечивает вызывающая система/reverse proxy. API не возвращает credentials, environment variables, command line, secret paths, absolute local paths или raw Docker inspect payload.
+Headless mode (`--headless`): обслуживает только versioned JSON API (`/api/v1/snapshot`, `/healthz`); static assets НЕ монтируются, браузер НЕ открывается. Built-in server binds loopback hosts only (`127.0.0.1`, `localhost`, `::1`) and rejects every non-loopback `--host`, because it has no authentication. It also accepts only loopback HTTP Host headers. API не возвращает credentials, environment variables, command line, secret paths, absolute local paths или raw Docker inspect payload.
 
 Обычный `GET /api/v1/snapshot` достаточен для polling; frontend polls every 2000 ms.
 
@@ -215,10 +215,10 @@ Headless mode (`--headless`): обслуживает только versioned JSON
 - **WHEN** `odcli monitor` runs without `--host`
 - **THEN** server binds `127.0.0.1`, not `0.0.0.0`
 
-#### Scenario: Non-loopback requires explicit host
+#### Scenario: Non-loopback is rejected
 
 - **WHEN** `odcli monitor --host 0.0.0.0` runs
-- **THEN** binds `0.0.0.0` (explicit opt-in); no additional confirmation prompt (CORS/auth/TLS out of scope, boundary is caller responsibility)
+- **THEN** exits non-zero before binding and explains that unauthenticated network binds are refused
 
 #### Scenario: Missing dashboard extra actionable hint
 

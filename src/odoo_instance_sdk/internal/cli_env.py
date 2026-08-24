@@ -11,8 +11,10 @@ import msgspec
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import OdooClientConfig
+from odoo_instance_sdk.exceptions import ProjectContextError
 from odoo_instance_sdk.internal import context as cli_context
 from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail
 from odoo_instance_sdk.internal.git_worktree import (
     rev_parse_git_common_dir,
@@ -176,16 +178,20 @@ def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output
         snapshot,
         backup_ids=backup_ids,
         all_envs=all_envs,
+        all_projects=all_projects,
+        project_id=project_id,
     )
 
 
 def _resolve_monitor_project_id(ctx: click.Context, all_projects: bool) -> str | None:
     if all_projects:
         return None
-    # resolve_project_path raises ProjectContextError when no project context
-    # is found; that surfaces as env_list_failed (cli-odcli spec: default
-    # `env list` requires project context).
-    project_path = cli_context.resolve_project_path(ctx)
+    # Outside a project, ``env list`` is the cross-project listing; this keeps
+    # the command useful from a neutral working directory.
+    try:
+        project_path = cli_context.resolve_project_path(ctx)
+    except ProjectContextError:
+        return None
     repo_root = rev_parse_toplevel(project_path)
     git_common = rev_parse_git_common_dir(repo_root)
     return f"project_{repo_key(repo_root, git_common)}"
@@ -197,28 +203,66 @@ def _print_env_list_human(
     *,
     backup_ids: set[uuid.UUID],
     all_envs: bool,
+    all_projects: bool,
+    project_id: str | None,
 ) -> None:
     envs_by_project: dict[str, list[EnvironmentSnapshot]] = {}
     for env in snapshot.environments:
         envs_by_project.setdefault(env.project_id, []).append(env)
 
+    # A context-resolved listing is a project view, including its removed rows;
+    # only --all-projects may surface removed rows from other projects.
+    visible_project_ids = None if all_projects or project_id is None else {project_id}
+    removed_by_project = (
+        _removed_environments_by_project(client, visible_project_ids) if all_envs else {}
+    )
+
+    printed_ids: set[str] = set()
     for project in snapshot.projects:
+        printed_ids.add(project.id)
         _print_project_header(project)
         project_envs = envs_by_project.get(project.id, [])
         for env in project_envs:
             catalog_env = _lookup_catalog_env(client, env.id)
             click.echo(_format_env_row(env, catalog_env, backup_ids=backup_ids))
+        for env_obj in sorted(removed_by_project.get(project.id, []), key=lambda item: item.name):
+            click.echo(_format_removed_row(env_obj, backup_ids=backup_ids))
 
-    if all_envs:
-        try:
-            removed = [
-                e
-                for e in client.environments.list(include_removed=True)
-                if e.state == EnvironmentState.REMOVED
-            ]
-        except Exception:
-            removed = []
-        for env_obj in removed:
+    _print_removed_only_projects(removed_by_project, printed_ids, backup_ids)
+
+
+def _removed_environments_by_project(
+    client: OdooClient,
+    visible_project_ids: set[str] | None = None,
+) -> dict[str, list[DevelopmentEnvironment]]:
+    grouped: dict[str, list[DevelopmentEnvironment]] = {}
+    try:
+        environments = client.environments.list(include_removed=True)
+    except Exception:
+        return grouped
+    for env_obj in environments:
+        if env_obj.state != EnvironmentState.REMOVED:
+            continue
+        project_id = (
+            f"project_{repo_key(Path(env_obj.repository_root), Path(env_obj.git_common_dir))}"
+        )
+        if visible_project_ids is not None and project_id not in visible_project_ids:
+            continue
+        grouped.setdefault(project_id, []).append(env_obj)
+    return grouped
+
+
+def _print_removed_only_projects(
+    removed_by_project: dict[str, list[DevelopmentEnvironment]],
+    printed_ids: set[str],
+    backup_ids: set[uuid.UUID],
+) -> None:
+    """Render removed-only projects which are absent from the live snapshot."""
+    for project_id in sorted(set(removed_by_project) - printed_ids):
+        env_objs = removed_by_project[project_id]
+        click.echo(f"Project {Path(env_objs[0].repository_root).name}")
+        click.echo("  PostgreSQL  —")
+        for env_obj in sorted(env_objs, key=lambda item: item.name):
             click.echo(_format_removed_row(env_obj, backup_ids=backup_ids))
 
 
@@ -313,9 +357,20 @@ def _format_removed_row(env_obj: DevelopmentEnvironment, *, backup_ids: set[uuid
         if env_obj.db_mode == EnvironmentDatabaseMode.SHARED
         else env_obj.target_db_name
     )
+    port = "—"
+    try:
+        from odoo_instance_sdk.models import StartConfig
+
+        parsed = StartConfig.from_odoo_config(str(env_obj.generated_config_path))
+        if parsed.http_port is not None:
+            port = str(parsed.http_port)
+    except Exception:
+        pass
+    # Keep the canonical 15-column shape even though removed rows have no
+    # monitor metrics.  This is deliberately positional for shell users.
     return (
-        f"{env_obj.name}  {env_obj.branch}  removed  stopped  —  —  —  "
-        f"{env_obj.db_mode}  {db or ''}  —  {artifacts}"
+        f"{env_obj.name}  {env_obj.branch}  removed  —  —  —  —  —  —  —  —  "
+        f"{env_obj.db_mode}  {db or ''}  {port}  {artifacts}"
     )
 
 
@@ -394,18 +449,6 @@ def _artifacts_str(
         )
         or "ok"
     )
-
-
-def _human_bytes(n: int) -> str:
-    # ponytail: 1024 ladder, one decimal; shared with cli.py printer.
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(n) < 1024 or unit == "TiB":
-            if unit == "B":
-                return f"{n} {unit}"
-            formatted = f"{n:.1f} {unit}"
-            return formatted.rstrip("0").rstrip(".")
-        n //= 1024
-    return f"{n} TiB"
 
 
 @env_group.command("remove")

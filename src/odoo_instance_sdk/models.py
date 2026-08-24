@@ -5,16 +5,9 @@ import uuid
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal, cast
 
 import msgspec
-
-if TYPE_CHECKING:
-    # ponytail: imported only for type checkers; msgspec resolves the string
-    # annotation "EnvironmentState" at encode time from this module's globals,
-    # which odoo_instance_sdk/__init__.py populates after package init to
-    # avoid the resources.environment <-> models circular import.
-    from odoo_instance_sdk.resources.environment import EnvironmentState
 
 
 class BackupFormat(enum.StrEnum):
@@ -62,6 +55,17 @@ class BackupValidationStatus(enum.StrEnum):
     VALID = "valid"
     INVALID = "invalid"
     UNAVAILABLE = "unavailable"
+
+
+class EnvironmentState(enum.StrEnum):
+    """Persisted lifecycle state shared by catalog and monitor contracts."""
+
+    CREATING = "creating"
+    READY = "ready"
+    FAILED = "failed"
+    REMOVING = "removing"
+    CLEANUP_FAILED = "cleanup_failed"
+    REMOVED = "removed"
 
 
 class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):

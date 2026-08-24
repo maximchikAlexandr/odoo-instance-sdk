@@ -178,6 +178,11 @@ class PostgresCluster:
         return compose_project_name(self._project_id)
 
     @property
+    def compose_runner(self) -> ComposeRunner:
+        """Read-only command boundary used by monitoring collectors."""
+        return self._compose_runner
+
+    @property
     def password_file(self) -> Path:
         return self.compose_file.parent / "postgres-password"
 

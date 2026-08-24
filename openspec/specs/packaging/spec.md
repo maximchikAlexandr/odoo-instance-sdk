@@ -17,7 +17,7 @@ Optional extras:
 ```toml
 [project.optional-dependencies]
 metrics = ["psutil>=5.9,<7"]
-dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30,<1.0"]
+dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.141,<1.0", "starlette>=1.3.1,<2.0", "uvicorn>=0.30,<1.0"]
 ```
 
 - `metrics` — collector + typed snapshot models; no FastAPI/Uvicorn.

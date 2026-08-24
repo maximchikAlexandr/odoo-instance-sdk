@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -26,6 +27,20 @@ from odoo_instance_sdk.models import (
     StorageFootprint,
 )
 from odoo_instance_sdk.resources.environment import EnvironmentState
+from tests.unit.monitor_support import FakeProcessProvider
+
+
+@pytest.fixture(autouse=True)
+def _inject_monitor_process_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+
+    original_init = EnvironmentMonitor.__init__
+
+    def init(self: EnvironmentMonitor, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("process_provider", FakeProcessProvider())
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(EnvironmentMonitor, "__init__", init)
 
 
 def _runtime(
@@ -220,6 +235,24 @@ def test_env_list_human_env_row_columns(monkeypatch: pytest.MonkeyPatch) -> None
     # GIT_AHEAD / GIT_DIFF
     assert "↑2 ↓0" in out
     assert "+10 -3" in out
+    row = next(line for line in out.splitlines() if line.startswith("myenv  "))
+    assert row.split("  ") == [
+        "myenv",
+        "feat/x",
+        "ready",
+        "ready",
+        "—",
+        "4242 (+2)",
+        "12.3%",
+        "256.0 MiB",
+        "↑2 ↓0",
+        "+10 -3",
+        "100.0 KiB",
+        "shared",
+        "comerta",
+        "8069",
+        "—",
+    ]
 
 
 @pytest.mark.unit
@@ -322,6 +355,9 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
     removed_env.db_mode = "shared"
     removed_env.source_db_name = None
     removed_env.target_db_name = None
+    removed_env.repository_root = "/tmp/gone-repo"
+    removed_env.git_common_dir = "/tmp/gone-repo/.git"
+    removed_env.generated_config_path = "/tmp/gone-repo/missing.conf"
 
     fake_client = MagicMock()
     fake_client.environments.list.return_value = [removed_env]
@@ -344,6 +380,94 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
     assert human_result.exit_code == 0, human_result.output
     assert "gone-env" in human_result.output
     assert "removed" in human_result.output
+    assert human_result.output.index("Project gone-repo") < human_result.output.index("gone-env")
+    row = next(line for line in human_result.output.splitlines() if line.startswith("gone-env  "))
+    columns = row.split("  ")
+    assert columns == [
+        "gone-env",
+        "feat/gone",
+        "removed",
+        "—",
+        "—",
+        "—",
+        "—",
+        "—",
+        "—",
+        "—",
+        "—",
+        "shared",
+        "",
+        "8069",
+        "worktree,registered,config,python,python-contained,lock,backup",
+    ]
+
+
+@pytest.mark.unit
+def test_env_list_all_orders_active_and_removed_rows_per_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Human --all is a deterministic project-scoped rendering, not a side list."""
+    from unittest.mock import MagicMock
+
+    project_a = ProjectSummary(
+        id="project_a",
+        name="alpha",
+        display_hint="a",
+        environment_count=1,
+        cluster=_healthy_cluster(),
+    )
+    project_b = ProjectSummary(
+        id="project_b",
+        name="beta",
+        display_hint="b",
+        environment_count=1,
+        cluster=_healthy_cluster(),
+    )
+    active_a = _env(
+        env_id="11111111-1111-1111-1111-111111111111", project_id="project_a", name="a-active"
+    )
+    active_b = _env(
+        env_id="22222222-2222-2222-2222-222222222222", project_id="project_b", name="b-active"
+    )
+    _patch_snapshot(monkeypatch, _snapshot((project_a, project_b), (active_a, active_b)))
+
+    def removed(name: str, root: str, uid: str) -> MagicMock:
+        item = MagicMock()
+        item.name, item.branch, item.id = name, "main", UUID(uid)
+        item.state, item.db_mode = EnvironmentState.REMOVED, "shared"
+        item.source_db_name = item.target_db_name = None
+        item.repository_root, item.git_common_dir = root, f"{root}/.git"
+        item.generated_config_path = f"{root}/missing.conf"
+        return item
+
+    fake_client = MagicMock()
+    fake_client.environments.list.return_value = [
+        removed("a-removed", "/alpha", "33333333-3333-3333-3333-333333333333"),
+        removed("b-removed", "/beta", "44444444-4444-4444-4444-444444444444"),
+    ]
+    fake_client.environments.get.return_value = None
+    fake_client.backups.list.return_value = []
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.cli_env.OdooClient", lambda *_, **__: fake_client
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.cli_env.repo_key",
+        lambda root, _common: "a" if Path(root).name == "alpha" else "b",
+    )
+
+    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--all"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert [
+        line
+        for line in lines
+        if line.startswith(("a-active", "a-removed", "b-active", "b-removed"))
+    ] == [
+        line
+        for name in ("a-active", "a-removed", "b-active", "b-removed")
+        for line in lines
+        if line.startswith(name)
+    ]
 
 
 @pytest.mark.unit

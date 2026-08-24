@@ -227,7 +227,7 @@ Build: `npm ci && npm run build` in `src/odoo_instance_sdk/web/` (commit `packag
 ```toml
 [project.optional-dependencies]
 metrics = ["psutil>=5.9,<7"]
-dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30,<1.0"]
+dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.141,<1.0", "starlette>=1.3.1,<2.0", "uvicorn>=0.30,<1.0"]
 ```
 
 Built React assets включаются в package via `uv_build` including `src/odoo_instance_sdk/web/dist/**`. Coverage regexs: добавить `monitor` regex (`odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)$`) + thresholds (80 line / 70 branch).

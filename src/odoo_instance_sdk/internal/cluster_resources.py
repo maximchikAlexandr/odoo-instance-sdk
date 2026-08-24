@@ -4,8 +4,8 @@ import json
 import re
 import subprocess
 import sys
-import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,13 +17,6 @@ from odoo_instance_sdk.models import (
     PidScope,
     PostgresClusterState,
 )
-
-# ponytail: in-memory, process-local caches keyed by container_id, TTL 15s.
-_inspect_cache: dict[str, tuple[float, dict[str, object]]] = {}
-_stats_cache: dict[str, tuple[float, dict[str, object]]] = {}
-_CACHE_TTL = 15.0
-
-_HEXDIGITS = "0123456789abcdef"
 
 _MEM_UNITS: dict[str, int] = {
     "b": 1,
@@ -38,17 +31,6 @@ _MEM_UNITS: dict[str, int] = {
 }
 
 _MEM_RE = re.compile(r"^\s*(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>[A-Za-z]*)\s*$")
-
-
-def _clear_caches() -> None:
-    """Test hook: reset module-level caches."""
-    _inspect_cache.clear()
-    _stats_cache.clear()
-
-
-def _short_id(container_id: str) -> str:
-    short = container_id[:12]
-    return short if all(c in _HEXDIGITS for c in short) else container_id[:12]
 
 
 def _pid_scope() -> PidScope:
@@ -107,23 +89,6 @@ def resolve_container_id(
     return None
 
 
-def _partition_cached(
-    container_ids: tuple[str, ...],
-    cache: dict[str, tuple[float, dict[str, object]]],
-) -> tuple[dict[str, dict[str, object] | None], list[str]]:
-    """Split requested IDs into cached results and pending IDs needing a fetch."""
-    result: dict[str, dict[str, object] | None] = {}
-    pending: list[str] = []
-    now = time.monotonic()
-    for cid in container_ids:
-        cached = cache.get(cid)
-        if cached is not None and now - cached[0] < _CACHE_TTL:
-            result[cid] = cached[1]
-        else:
-            pending.append(cid)
-    return result, pending
-
-
 def _parse_inspect_payload(stdout: str, candidates: list[str]) -> dict[str, dict[str, object]]:
     parsed: dict[str, dict[str, object]] = {}
     try:
@@ -144,27 +109,16 @@ def inspect_containers(
     runner: ComposeRunner,
     timeout: float | None = None,
 ) -> dict[str, dict[str, object] | None]:
-    """Batch `docker inspect <id1> <id2> ...`; one CLI call for uncached IDs.
-
-    Returns a dict keyed by the *full* container_id; None marks a failed or
-    missing entry. Cached entries (TTL 15s) are reused without a subprocess call.
-    """
-    result, pending = _partition_cached(container_ids, _inspect_cache)
-    if not pending:
-        return result
-    res = _safe_run(runner, ["docker", "inspect", "--format", "json", *pending], timeout=timeout)
-    parsed = (
-        _parse_inspect_payload(res.stdout, pending)
-        if res is not None and res.returncode == 0
-        else {}
+    """Batch `docker inspect <id1> <id2> ...` in one read-only CLI call."""
+    res = _safe_run(
+        runner, ["docker", "inspect", "--format", "json", *container_ids], timeout=timeout
     )
-    now = time.monotonic()
-    for cid in pending:
-        entry: dict[str, object] | None = parsed.get(cid)
-        result[cid] = entry
-        # ponytail: cache miss as empty sentinel so we don't refetch within TTL.
-        _inspect_cache[cid] = (now, entry) if entry is not None else (now, {})
-    return result
+    # Docker returns a non-zero status when one requested ID is absent, while
+    # still writing valid JSON for its healthy siblings.  The payload is the
+    # authoritative per-container result; a non-zero status is not global
+    # failure.  Malformed/non-list output deliberately remains a failure.
+    parsed = _parse_inspect_payload(res.stdout, list(container_ids)) if res is not None else {}
+    return {cid: parsed.get(cid) for cid in container_ids}
 
 
 def _parse_stats_payload(stdout: str) -> dict[str, dict[str, object]]:
@@ -194,22 +148,17 @@ def stats_containers(
 ) -> dict[str, dict[str, object] | None]:
     """Batch `docker stats --no-stream --format json <id1> <id2> ...`.
 
-    One JSON object per line, identified by its `container`/`Container` field
-    (full or short ID). Cached entries (TTL 15s) are reused.
+    One JSON object per line, identified by its `container`/`Container` field.
     """
-    result, pending = _partition_cached(container_ids, _stats_cache)
-    if not pending:
-        return result
     res = _safe_run(
-        runner, ["docker", "stats", "--no-stream", "--format", "json", *pending], timeout=timeout
+        runner,
+        ["docker", "stats", "--no-stream", "--format", "json", *container_ids],
+        timeout=timeout,
     )
-    by_id = _parse_stats_payload(res.stdout) if res is not None and res.returncode == 0 else {}
-    now = time.monotonic()
-    for cid in pending:
-        entry = by_id.get(cid) or by_id.get(cid[:12])
-        result[cid] = entry
-        _stats_cache[cid] = (now, entry) if entry is not None else (now, {})
-    return result
+    # Like inspect, stats can contain useful lines before reporting a missing
+    # container.  Preserve those samples and leave only absent IDs as None.
+    by_id = _parse_stats_payload(res.stdout) if res is not None else {}
+    return {cid: by_id.get(cid) or by_id.get(cid[:12]) for cid in container_ids}
 
 
 def _lookup_id(entry: dict[str, object], candidates: list[str]) -> str:
@@ -240,83 +189,6 @@ def _safe_run(
     return result
 
 
-def _compute_cluster_resource(
-    *,
-    compose_file: Path,
-    compose_project_name: str,
-    service: str,
-    runner: ComposeRunner,
-    state: PostgresClusterState,
-    timeout: float | None = None,
-) -> ClusterResourceSnapshot:
-    """Pure compute (no module cache): read-only `ClusterResourceSnapshot`.
-
-    No lifecycle lock, no start/stop. The caller passes the already-computed
-    cluster state so we can distinguish `stopped` from `missing` without a second
-    status call. The monitor owns instance-level caching; this is the non-caching
-    core shared with ``cluster_resource_snapshot`` (which keeps the module cache).
-    """
-    sampled_at = datetime.now(UTC)
-
-    requires_docker = bool(getattr(runner, "requires_docker", True))
-    if requires_docker and not docker_available():
-        return ClusterResourceSnapshot(
-            container=None,
-            metrics=None,
-            unavailability_reason="docker_unavailable",
-            sampled_at=sampled_at,
-        )
-
-    if state is PostgresClusterState.STOPPED:
-        return ClusterResourceSnapshot(
-            container=None,
-            metrics=None,
-            unavailability_reason="stopped",
-            sampled_at=sampled_at,
-        )
-
-    container_id = resolve_container_id(
-        compose_file, compose_project_name, service, runner=runner, timeout=timeout
-    )
-    if container_id is None:
-        return ClusterResourceSnapshot(
-            container=None,
-            metrics=None,
-            unavailability_reason="missing",
-            sampled_at=sampled_at,
-        )
-
-    inspect_map = inspect_containers((container_id,), runner=runner, timeout=timeout)
-    inspect_entry = inspect_map.get(container_id)
-    if not inspect_entry:
-        return ClusterResourceSnapshot(
-            container=None,
-            metrics=None,
-            unavailability_reason="inspect_failed",
-            sampled_at=sampled_at,
-        )
-
-    container = _build_container(inspect_entry)
-
-    stats_map = stats_containers((container_id,), runner=runner, timeout=timeout)
-    stats_entry = stats_map.get(container_id)
-    if not stats_entry:
-        return ClusterResourceSnapshot(
-            container=container,
-            metrics=None,
-            unavailability_reason="stats_failed",
-            sampled_at=sampled_at,
-        )
-
-    metrics = _build_metrics(stats_entry, sampled_at)
-    return ClusterResourceSnapshot(
-        container=container,
-        metrics=metrics,
-        unavailability_reason=None,
-        sampled_at=sampled_at,
-    )
-
-
 def cluster_resource_snapshot(
     *,
     compose_file: Path,
@@ -329,20 +201,149 @@ def cluster_resource_snapshot(
     """Build a read-only `ClusterResourceSnapshot` for one compose service.
 
     No lifecycle lock, no start/stop. The caller passes the already-computed
-    cluster state so we can distinguish `stopped` from `missing` without a
-    second status call. Container inspect/stats are cached by container_id.
+    cluster state so we can distinguish `stopped` from `missing` without a second
+    status call. The monitor owns instance-level caching; this is the non-caching
+    core shared with batch collection. This standalone helper has no TTL cache.
     """
-    return _compute_cluster_resource(
-        compose_file=compose_file,
-        compose_project_name=compose_project_name,
-        service=service,
-        runner=runner,
-        state=state,
+    requires_docker = bool(getattr(runner, "requires_docker", True))
+    if requires_docker and not docker_available():
+        return ClusterResourceSnapshot(
+            container=None,
+            metrics=None,
+            unavailability_reason="docker_unavailable",
+            sampled_at=None,
+        )
+
+    if state is PostgresClusterState.STOPPED:
+        return ClusterResourceSnapshot(
+            container=None,
+            metrics=None,
+            unavailability_reason="stopped",
+            sampled_at=None,
+        )
+
+    # Keep the public single-resource operation behaviorally identical to the
+    # monitor's batch path; only the monitor owns TTL cache policy.
+    return collect_cluster_resource_batch(
+        (
+            BatchClusterRequest(
+                project_id="single",
+                compose_file=compose_file,
+                compose_project_name=compose_project_name,
+                service=service,
+                runner=runner,
+                state=state,
+            ),
+        ),
         timeout=timeout,
-    )
+    ).resources["single"]
 
 
-def _build_container(inspect_entry: dict[str, object]) -> ClusterContainer:
+@dataclass(frozen=True, slots=True)
+class BatchClusterRequest:
+    """One compose cluster request owned by a monitor collection pass."""
+
+    project_id: str
+    compose_file: Path
+    compose_project_name: str
+    service: str
+    runner: ComposeRunner
+    state: PostgresClusterState
+    # Cache policy belongs to EnvironmentMonitor.  Only its persistent
+    # production runner is cacheable; injected runners are isolated seams.
+    cacheable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BatchClusterResult:
+    """Assembled resources plus the Docker identities seen in this pass."""
+
+    resources: dict[str, ClusterResourceSnapshot]
+    container_ids: dict[str, str]
+
+
+def collect_cluster_resource_batch(
+    requests: Sequence[BatchClusterRequest],
+    *,
+    cached: dict[str, ClusterResourceSnapshot] | None = None,
+    timeout: float | None = None,
+) -> BatchClusterResult:
+    """Resolve and collect compose resources, batching only compatible runners.
+
+    Docker IDs are global, but injected runners are an explicit process boundary:
+    their results must never be executed through another project's runner.
+    ``cached`` is supplied by the monitor, which remains cache owner.
+    """
+    resources: dict[str, ClusterResourceSnapshot] = {}
+    container_ids: dict[str, str] = {}
+    pending: list[list[tuple[BatchClusterRequest, str]]] = []
+    for request in requests:
+        if request.state is PostgresClusterState.STOPPED:
+            resources[request.project_id] = ClusterResourceSnapshot(
+                container=None, metrics=None, unavailability_reason="stopped", sampled_at=None
+            )
+            continue
+        container_id = resolve_container_id(
+            request.compose_file,
+            request.compose_project_name,
+            request.service,
+            runner=request.runner,
+            timeout=timeout,
+        )
+        if container_id is None:
+            resources[request.project_id] = ClusterResourceSnapshot(
+                container=None, metrics=None, unavailability_reason="missing", sampled_at=None
+            )
+            continue
+        container_ids[request.project_id] = container_id
+        if request.cacheable and cached is not None and container_id in cached:
+            resources[request.project_id] = cached[container_id]
+            continue
+        for group in pending:
+            if group[0][0].runner is request.runner:
+                group.append((request, container_id))
+                break
+        else:
+            pending.append([(request, container_id)])
+
+    for group in pending:
+        runner = group[0][0].runner
+        ids = tuple(dict.fromkeys(container_id for _, container_id in group))
+        inspected = inspect_containers(ids, runner=runner, timeout=timeout)
+        inspectable = tuple(cid for cid in ids if inspected.get(cid) is not None)
+        stats = stats_containers(inspectable, runner=runner, timeout=timeout) if inspectable else {}
+        sampled_at = datetime.now(UTC)
+        for request, container_id in group:
+            inspect_entry = inspected.get(container_id)
+            if inspect_entry is None:
+                resources[request.project_id] = ClusterResourceSnapshot(
+                    container=None,
+                    metrics=None,
+                    unavailability_reason="inspect_failed",
+                    sampled_at=None,
+                )
+                continue
+            container = build_container(inspect_entry)
+            stat = stats.get(container_id)
+            resources[request.project_id] = (
+                ClusterResourceSnapshot(
+                    container=container,
+                    metrics=build_metrics(stat, sampled_at),
+                    unavailability_reason=None,
+                    sampled_at=sampled_at,
+                )
+                if stat is not None
+                else ClusterResourceSnapshot(
+                    container=container,
+                    metrics=None,
+                    unavailability_reason="stats_failed",
+                    sampled_at=None,
+                )
+            )
+    return BatchClusterResult(resources=resources, container_ids=container_ids)
+
+
+def build_container(inspect_entry: dict[str, object]) -> ClusterContainer:
     name_raw = inspect_entry.get("Name")
     name = name_raw[1:] if isinstance(name_raw, str) and name_raw.startswith("/") else name_raw
     config = inspect_entry.get("Config")
@@ -357,7 +358,7 @@ def _build_container(inspect_entry: dict[str, object]) -> ClusterContainer:
         if isinstance(raw_pid, int) and raw_pid > 0:
             pid = raw_pid
     ident = inspect_entry.get("Id")
-    short = _short_id(ident) if isinstance(ident, str) else None
+    short = ident[:12] if isinstance(ident, str) else None
     pid_scope = _pid_scope() if pid is not None else PidScope.UNAVAILABLE
     return ClusterContainer(
         id=short,
@@ -368,7 +369,7 @@ def _build_container(inspect_entry: dict[str, object]) -> ClusterContainer:
     )
 
 
-def _build_metrics(stats_entry: dict[str, object], sampled_at: datetime) -> ClusterMetrics:
+def build_metrics(stats_entry: dict[str, object], sampled_at: datetime) -> ClusterMetrics:
     cpu_raw = stats_entry.get("CPUPerc")
     cpu_percent: float | None = None
     if isinstance(cpu_raw, str):
@@ -393,7 +394,12 @@ def _build_metrics(stats_entry: dict[str, object], sampled_at: datetime) -> Clus
 
 
 __all__ = [
+    "BatchClusterRequest",
+    "BatchClusterResult",
+    "build_container",
+    "build_metrics",
     "cluster_resource_snapshot",
+    "collect_cluster_resource_batch",
     "inspect_containers",
     "resolve_container_id",
     "stats_containers",

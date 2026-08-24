@@ -76,7 +76,7 @@
 - [x] 10.1 Создать `internal/serve.py` (only this path) with FastAPI: `GET /api/v1/snapshot` (`msgspec.json.encode`, HTTP 200), `GET /healthz` (`{"status":"ok"}` 200); catalog error HTTP 500 `{"error":"<redacted>"}`
 - [x] 10.2 Default UI mode: mount `StaticFiles` from `odoo_instance_sdk/web/dist/`; bind `127.0.0.1`; `--port` exact or auto: try 8069 then scan 8100–8120 inclusive; never auto-select 8070–8099; browser open unless `--no-open`
 - [x] 10.3 `--headless`: only API routes, no static mount, no browser open
-- [x] 10.4 Non-loopback bind explicit opt-in via `--host`; CORS/auth/TLS out of scope
+- [x] 10.4 Loopback-only bind (`localhost`, `127.0.0.1`, `::1`); unauthenticated non-loopback bind is rejected. CORS/auth/TLS are out of scope.
 - [x] 10.5 Import guard: `fastapi`/`uvicorn` missing → actionable hint (`pip install odoo-instance-sdk[dashboard]`)
 
 ## 11. React + Mantine UI
@@ -97,7 +97,7 @@
 
 ## 13. Packaging: optional extras + built assets
 
-- [x] 13.1 Добавить `[project.optional-dependencies] metrics = ["psutil>=5.9,<7"]` и `dashboard = ["odoo-instance-sdk[metrics]", "fastapi>=0.115,<1.0", "uvicorn>=0.30,<1.0"]` в `pyproject.toml`
+- [x] 13.1 Добавить `[project.optional-dependencies] metrics = ["psutil>=5.9,<7"]` и secure `dashboard` extra (`fastapi>=0.141,<1.0`, `starlette>=1.3.1,<2.0`, `uvicorn>=0.30,<1.0`) в `pyproject.toml`
 - [x] 13.2 Настроить `uv_build` data inclusion для собранного React SPA (sdist + wheel); Node.js не требуется для установленного пакета
 - [x] 13.3 Coverage regexs: добавить `monitor` regex (`odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)$`) + thresholds (80 line / 70 branch)
 
@@ -114,7 +114,7 @@
 - [x] 14.9 `tests/unit/test_cli_postgres_status_resources.py`: container fields, external/stopped/docker-unavailable, parity
 - [x] 14.10 `tests/unit/test_catalog_runtime_record.py`: schema v9 migration, upsert/clear, read-only
 - [x] 14.11 `tests/unit/test_run_foreground_runtime_identity.py`: persist after spawn, clear in `finally` (normal/crash/Ctrl+C), manual instance no persist, `psutil` fallback
-- [x] 14.12 `tests/integration/test_monitor_smoke.py` (opt-in `integration` marker, skip без Docker/psutil): two projects, several environments, часть stopped; verify selector/cards/headless API и Open Odoo
+- [x] 14.12 Two-part smoke proof: `tests/integration/test_monitor_smoke.py` validates the real Python/headless API across multiple projects and stopped environments; `web/src/App.test.tsx` validates selector, cluster/environment cards and Open Odoo. This is not a Docker/browser E2E.
 
 ## 15. Quality gates
 

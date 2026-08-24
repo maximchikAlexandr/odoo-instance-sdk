@@ -17,9 +17,9 @@ def _make_psutil(
     *,
     pid_exists: bool = True,
     root: Any = None,
-) -> types.ModuleType:
+) -> Any:
     """Build a fake `psutil` module with the exception classes used by the code."""
-    mod = types.ModuleType("psutil")
+    mod: Any = types.ModuleType("psutil")
 
     class ProcessError(Exception):
         pass
@@ -97,10 +97,10 @@ class FakeProcess:
         return types.SimpleNamespace(rss=self._rss)
 
 
-_current_psutil: types.ModuleType = _make_psutil(pid_exists=True, root=None)
+_current_psutil: Any = _make_psutil(pid_exists=True, root=None)
 
 
-def _install_psutil(monkeypatch: pytest.MonkeyPatch, fake: types.ModuleType) -> None:
+def _install_psutil(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
     global _current_psutil  # noqa: PLW0603
     _current_psutil = fake
     monkeypatch.setitem(sys.modules, "psutil", fake)
@@ -159,7 +159,9 @@ def test_live_root_no_children(monkeypatch: pytest.MonkeyPatch) -> None:
     proc = FakeProcess(pid=1, create_time=100.0, rss=42, cpu_times=(1.0, 2.0))
     fake = _make_psutil(root={"pid": 1, "instance": proc})
     _install_psutil(monkeypatch, fake)
-    result, point = collect_process_tree(1, 100.0, prev_cpu_point=None)
+    outcome = collect_process_tree(1, 100.0, prev_cpu_point=None)
+    assert outcome is not None
+    result, point = outcome
     assert result.child_pids == ()
     assert result.process_count == 1
     assert result.cpu_percent is None
@@ -181,7 +183,9 @@ def test_two_children(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     fake = _make_psutil(root={"pid": 1, "instance": proc})
     _install_psutil(monkeypatch, fake)
-    result, _ = collect_process_tree(1, 100.0, prev_cpu_point=None)
+    outcome = collect_process_tree(1, 100.0, prev_cpu_point=None)
+    assert outcome is not None
+    result, _ = outcome
     assert result.child_pids == (2, 3)
     assert result.process_count == 3
     assert result.rss_bytes == 72
@@ -201,7 +205,9 @@ def test_cpu_two_sample(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _make_psutil(root={"pid": 1, "instance": proc})
     _install_psutil(monkeypatch, fake)
 
-    first, point1 = collect_process_tree(1, 100.0, prev_cpu_point=None)
+    first_outcome = collect_process_tree(1, 100.0, prev_cpu_point=None)
+    assert first_outcome is not None
+    first, point1 = first_outcome
     assert first.cpu_percent is None
     assert point1.times_cpu == 4.0
 
@@ -210,7 +216,9 @@ def test_cpu_two_sample(monkeypatch: pytest.MonkeyPatch) -> None:
     total_delta_cpu = 7.0
 
     prev = CpuPoint(times_cpu=point1.times_cpu, timestamp=point1.timestamp - 10.0)
-    second, point2 = collect_process_tree(1, 100.0, prev_cpu_point=prev)
+    second_outcome = collect_process_tree(1, 100.0, prev_cpu_point=prev)
+    assert second_outcome is not None
+    second, point2 = second_outcome
     assert second.cpu_percent is not None
     elapsed = point2.timestamp - prev.timestamp
     assert second.cpu_percent == pytest.approx(total_delta_cpu / elapsed * 100.0)
@@ -230,7 +238,9 @@ def test_child_access_denied_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     fake = _make_psutil(root={"pid": 1, "instance": proc})
     _install_psutil(monkeypatch, fake)
-    result, _ = collect_process_tree(1, 100.0, prev_cpu_point=None)
+    outcome = collect_process_tree(1, 100.0, prev_cpu_point=None)
+    assert outcome is not None
+    result, _ = outcome
     assert result.child_pids == (2, 3)
     assert result.process_count == 3
     assert result.rss_bytes == 52

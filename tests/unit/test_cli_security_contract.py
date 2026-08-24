@@ -9,6 +9,20 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.resources.environment import EnvironmentState
+from tests.unit.monitor_support import FakeProcessProvider
+
+
+@pytest.fixture(autouse=True)
+def _inject_monitor_process_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+
+    original_init = EnvironmentMonitor.__init__
+
+    def init(self: EnvironmentMonitor, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("process_provider", FakeProcessProvider())
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(EnvironmentMonitor, "__init__", init)
 
 
 @pytest.mark.parametrize(

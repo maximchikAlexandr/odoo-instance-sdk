@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import os
 import shutil
-import time
 from pathlib import Path
+from typing import TypedDict, cast
 from unittest.mock import patch
 
 import pytest
 
-from odoo_instance_sdk.internal import storage_footprint
 from odoo_instance_sdk.internal.storage_footprint import (
+    DatabaseStorageInput,
     _directory_size,
-    clear_storage_footprint_cache,
     collect_storage_footprint,
 )
 
@@ -24,29 +23,33 @@ def _make_worktree(tmp_path: Path) -> Path:
     return worktree
 
 
-def _kwargs(tmp_path: Path, **overrides: object) -> dict[str, object]:
-    base: dict[str, object] = {
-        "environment_id": "env-1",
+class StorageKwargs(TypedDict):
+    worktree_path: Path
+    python_environment_path: Path
+    python_environment_owned: bool
+    generated_config_path: Path
+    dependency_lock_path: Path
+    database: DatabaseStorageInput
+
+
+def _kwargs(tmp_path: Path, **overrides: object) -> StorageKwargs:
+    base: StorageKwargs = {
         "worktree_path": tmp_path / "worktree",
         "python_environment_path": tmp_path / "venv",
         "python_environment_owned": False,
-        "db_mode": "shared",
         "generated_config_path": tmp_path / "cfg.conf",
         "dependency_lock_path": tmp_path / "lock.txt",
-        "target_db_name": None,
-        "db_host": None,
-        "db_port": None,
-        "db_user": None,
-        "db_password": None,
-        "data_dir": None,
+        "database": DatabaseStorageInput(
+            mode="shared",
+            target_name=None,
+            host=None,
+            port=None,
+            user=None,
+            password=None,
+            data_dir=None,
+        ),
     }
-    base.update(overrides)
-    return base
-
-
-@pytest.fixture(autouse=True)
-def _clear_cache() -> None:
-    clear_storage_footprint_cache()
+    return cast("StorageKwargs", {**base, **overrides})
 
 
 def test_owned_venv_included_in_total(tmp_path: Path) -> None:
@@ -64,11 +67,9 @@ def test_owned_venv_included_in_total(tmp_path: Path) -> None:
     )
     assert footprint.python_environment.owned is True
     assert footprint.python_environment.bytes is not None
+    python_bytes = footprint.python_environment.bytes
     assert footprint.python_environment.bytes >= 64
-    assert (
-        footprint.total_bytes
-        >= (footprint.worktree_bytes or 0) + footprint.python_environment.bytes
-    )
+    assert footprint.total_bytes >= (footprint.worktree_bytes or 0) + python_bytes
 
 
 def test_reused_venv_excluded_from_total(tmp_path: Path) -> None:
@@ -81,15 +82,15 @@ def test_reused_venv_excluded_from_total(tmp_path: Path) -> None:
     assert footprint.python_environment.owned is False
     assert footprint.python_environment.bytes is None
     assert footprint.complete is True
-    base = (footprint.worktree_bytes or 0) + footprint.other_files_bytes
+    other_files_bytes = footprint.other_files_bytes
+    assert other_files_bytes is not None
+    base = (footprint.worktree_bytes or 0) + other_files_bytes
     assert footprint.total_bytes == base
 
 
 def test_shared_db_excluded(tmp_path: Path) -> None:
     worktree = _make_worktree(tmp_path)
-    footprint = collect_storage_footprint(
-        **_kwargs(tmp_path, worktree_path=worktree, db_mode="shared")
-    )
+    footprint = collect_storage_footprint(**_kwargs(tmp_path, worktree_path=worktree))
     assert footprint.database.owned is False
     assert footprint.database.postgres_bytes is None
     assert footprint.database.filestore_bytes is None
@@ -99,15 +100,20 @@ def test_shared_db_excluded(tmp_path: Path) -> None:
 
 def test_copy_db_psql_missing_marks_incomplete(tmp_path: Path) -> None:
     worktree = _make_worktree(tmp_path)
-    with patch("odoo_instance_sdk.internal.postgres_size.shutil.which", return_value=None):
+    with patch("odoo_instance_sdk.internal.postgres_cli.shutil.which", return_value=None):
         footprint = collect_storage_footprint(
             **_kwargs(
                 tmp_path,
                 worktree_path=worktree,
-                db_mode="copy",
-                target_db_name="mydb",
-                db_user="u",
-                db_port=5432,
+                database=DatabaseStorageInput(
+                    mode="copy",
+                    target_name="mydb",
+                    host=None,
+                    port=5432,
+                    user="u",
+                    password=None,
+                    data_dir=None,
+                ),
             )
         )
     assert footprint.database.owned is True
@@ -125,10 +131,15 @@ def test_copy_db_success_included(tmp_path: Path) -> None:
             **_kwargs(
                 tmp_path,
                 worktree_path=worktree,
-                db_mode="copy",
-                target_db_name="mydb",
-                db_user="u",
-                db_port=5432,
+                database=DatabaseStorageInput(
+                    mode="copy",
+                    target_name="mydb",
+                    host=None,
+                    port=5432,
+                    user="u",
+                    password=None,
+                    data_dir=None,
+                ),
             )
         )
     assert footprint.database.owned is True
@@ -187,27 +198,9 @@ def test_du_path_uses_du(tmp_path: Path) -> None:
     assert called_du
 
 
-def test_cache_returns_same_result_then_expires(tmp_path: Path) -> None:
+def test_collection_is_stateless(tmp_path: Path) -> None:
     worktree = _make_worktree(tmp_path)
     first = collect_storage_footprint(**_kwargs(tmp_path, worktree_path=worktree))
     second = collect_storage_footprint(**_kwargs(tmp_path, worktree_path=worktree))
-    assert first is second
-    # expire the cache and confirm recomputation
-    clear_storage_footprint_cache()
-    third = collect_storage_footprint(**_kwargs(tmp_path, worktree_path=worktree))
-    assert third.total_bytes == first.total_bytes
-    assert third is not first
-
-
-def test_cache_ttl_window(tmp_path: Path) -> None:
-    worktree = _make_worktree(tmp_path)
-    base = time.monotonic()
-    calls: list[float] = []
-
-    def fake_monotonic() -> float:
-        return base + len(calls) * 0.001
-
-    with patch.object(storage_footprint.time, "monotonic", side_effect=fake_monotonic):
-        first = collect_storage_footprint(**_kwargs(tmp_path, worktree_path=worktree))
-        second = collect_storage_footprint(**_kwargs(tmp_path, worktree_path=worktree))
-    assert first is second
+    assert first == second
+    assert first is not second

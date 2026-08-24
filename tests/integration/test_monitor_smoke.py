@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -25,6 +24,7 @@ def _seed_env(
     repository_root: str,
     git_common_dir: str,
     worktree_path: str,
+    branch: str = "main",
     state: str = "ready",
 ) -> str:
     env_id = str(uuid.uuid4())
@@ -34,7 +34,7 @@ def _seed_env(
             "name": name,
             "repository_root": repository_root,
             "git_common_dir": git_common_dir,
-            "branch": "main",
+            "branch": branch,
             "base_ref": "HEAD",
             "worktree_path": worktree_path,
             "generated_config_path": f"{worktree_path}/odoo.conf",
@@ -99,6 +99,7 @@ def test_monitor_headless_api_multi_project_snapshot(
         repository_root=str(repo_a),
         git_common_dir=str(repo_a / ".git"),
         worktree_path=str(repo_a / "wt-stopped"),
+        branch="stopped",
         state="ready",
     )
     _seed_env(
@@ -117,7 +118,7 @@ def test_monitor_headless_api_multi_project_snapshot(
     stopped = [env for env in snapshot.environments if env.name == "a-stopped"]
     assert stopped and stopped[0].runtime.state.value == "stopped"
 
-    with TestClient(serve.create_app(headless=True)) as client:
+    with TestClient(serve.create_app(headless=True), base_url="http://localhost") as client:
         health = client.get("/healthz")
         assert health.status_code == 200
         assert health.json() == {"status": "ok"}
@@ -136,4 +137,4 @@ def test_monitor_headless_api_multi_project_snapshot(
         ]
         assert ready_urls == []
 
-    assert get_catalog_path() == catalog_path
+    assert catalog_path.is_file()

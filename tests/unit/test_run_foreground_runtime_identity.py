@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import uuid
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -120,7 +121,7 @@ def _make_manual_instance(client: OdooClient, cwd: Path) -> OdooInstance:
         config=InstanceConfig(
             base_url="http://127.0.0.1:8069",
             start_config=start_cfg,
-            command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+            command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
             default_cwd=cwd,
         ),
         _client=client,
@@ -129,7 +130,7 @@ def _make_manual_instance(client: OdooClient, cwd: Path) -> OdooInstance:
 
 def _client_with_catalog(catalog: object) -> OdooClient:
     c = OdooClient(config=OdooClientConfig(executable="odoo"))
-    c._catalog = catalog  # type: ignore[attr-defined]
+    c._catalog = cast("BackupCatalog | None", catalog)
     return c
 
 
@@ -156,7 +157,7 @@ def test_persist_after_spawn_and_clear_on_normal_exit(
         client=client,
         env_id=env_id,
         cwd=wt,
-        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
     )
     exit_code = inst.run_foreground()
     assert exit_code == 0
@@ -174,7 +175,7 @@ def test_persist_called_with_expected_fields(env_id: str, tmp_path: Path) -> Non
         client=client,
         env_id=env_id,
         cwd=wt,
-        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
     )
 
     exit_code = inst.run_foreground()
@@ -204,7 +205,7 @@ def test_clear_on_nonzero_exit(env_id: str, tmp_path: Path, real_catalog: Backup
         client=client,
         env_id=env_id,
         cwd=wt,
-        command_prefix=("python", "-c", "import sys; sys.exit(7)"),
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(7)"),
     )
     exit_code = inst.run_foreground()
     assert exit_code == 7
@@ -221,7 +222,7 @@ def test_clear_on_crash_exception_propagates(env_id: str, tmp_path: Path) -> Non
         client=client,
         env_id=env_id,
         cwd=wt,
-        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
     )
 
     boom = RuntimeError("wait blew up")
@@ -244,7 +245,7 @@ def test_clear_on_keyboard_interrupt(env_id: str, tmp_path: Path) -> None:
         client=client,
         env_id=env_id,
         cwd=wt,
-        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
     )
 
     with (
@@ -284,7 +285,7 @@ def test_psutil_fallback_uses_time_time(env_id: str, tmp_path: Path) -> None:
         client=client,
         env_id=env_id,
         cwd=wt,
-        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
     )
 
     # psutil is not installed in this env, so the fallback path is exercised
@@ -313,7 +314,7 @@ def test_persist_failure_does_not_break_run_foreground(env_id: str, tmp_path: Pa
         client=client,
         env_id=env_id,
         cwd=wt,
-        command_prefix=("python", "-c", "import sys; sys.exit(0)"),
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
     )
 
     exit_code = inst.run_foreground()
