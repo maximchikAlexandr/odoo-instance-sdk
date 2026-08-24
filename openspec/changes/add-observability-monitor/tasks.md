@@ -7,11 +7,11 @@
 
 ## 2. `run_foreground` persist/clear runtime identity
 
-- [ ] 2.1 В `OdooInstance.run_foreground()` (только для instance bound к environment через `from_environment()`) persist runtime identity в `environment_runtime` после spawn (root_pid, `psutil.Process(pid).create_time()` или `time.time()` fallback, started_at, branch/commit SHA из worktree, http_url/port, db_name)
-- [ ] 2.2 В `finally` (normal/crash/Ctrl+C/exception) `clear_environment_runtime(environment_id)` best-effort (ошибка логируется в stderr, не маскирует exit code/exception)
-- [ ] 2.3 Manual instance (`instance(base_url=...)`/`from_config()`) — без `environment_id`, runtime identity НЕ пишется
-- [ ] 2.4 `shell()`/`run_shell_script()`/`start()`/`stop()` — без persist (только `run_foreground`)
-- [ ] 2.5 `psutil` import ленивый; `run_foreground` сам не требует `psutil` (fallback `time.time()`)
+- [x] 2.1 В `OdooInstance.run_foreground()` (только для instance bound к environment через `from_environment()`) persist runtime identity в `environment_runtime` после spawn (root_pid, `psutil.Process(pid).create_time()` или `time.time()` fallback, started_at, branch/commit SHA из worktree, http_url/port, db_name)
+- [x] 2.2 В `finally` (normal/crash/Ctrl+C/exception) `clear_environment_runtime(environment_id)` best-effort (ошибка логируется в stderr, не маскирует exit code/exception)
+- [x] 2.3 Manual instance (`instance(base_url=...)`/`from_config()`) — без `environment_id`, runtime identity НЕ пишется
+- [x] 2.4 `shell()`/`run_shell_script()`/`start()`/`stop()` — без persist (только `run_foreground`)
+- [x] 2.5 `psutil` import ленивый; `run_foreground` сам не требует `psutil` (fallback `time.time()`)
 
 ## 3. Snapshot typed models
 
@@ -30,28 +30,28 @@
 
 ## 5. Odoo process tree metrics (psutil)
 
-- [ ] 5.1 Создать `internal/process_metrics.py` с internal `ProcessTreeResult` и `collect_process_tree(...) -> ProcessTreeResult | None`; `psutil` import ленивый, missing → `MonitorExtrasMissingError`
-- [ ] 5.2 PID+`create_time` verification (`==` exact float and `pid_exists`); mismatch / root `NoSuchProcess`/`AccessDenied`/`ZombieProcess` → `None` → collector `runtime.state="stopped"`
-- [ ] 5.3 Recursive children (`proc.children(recursive=True)`), `child_pids`, `process_count = 1 + len(children)`, aggregated `rss_bytes`
-- [ ] 5.4 CPU two-sample: first sample `cpu_percent=None`, subsequent numeric; collector хранит prev CPU point по `(pid, create_time)` in-memory
-- [ ] 5.5 After a live tree, one `httpx.get("{http_url}/web/health?db_server_status=true", timeout=2.0)`; HTTP 200 and JSON `status=="pass"` → `ready`, else `not_ready` with metrics kept
+- [x] 5.1 Создать `internal/process_metrics.py` с internal `ProcessTreeResult` и `collect_process_tree(...) -> ProcessTreeResult | None`; `psutil` import ленивый, missing → `MonitorExtrasMissingError`
+- [x] 5.2 PID+`create_time` verification (`==` exact float and `pid_exists`); mismatch / root `NoSuchProcess`/`AccessDenied`/`ZombieProcess` → `None` → collector `runtime.state="stopped"`
+- [x] 5.3 Recursive children (`proc.children(recursive=True)`), `child_pids`, `process_count = 1 + len(children)`, aggregated `rss_bytes`
+- [x] 5.4 CPU two-sample: first sample `cpu_percent=None`, subsequent numeric; collector хранит prev CPU point по `(pid, create_time)` in-memory
+- [x] 5.5 After a live tree, one `httpx.get("{http_url}/web/health?db_server_status=true", timeout=2.0)`; HTTP 200 and JSON `status=="pass"` → `ready`, else `not_ready` with metrics kept
 
 ## 6. Git activity (three-dot diff)
 
-- [ ] 6.1 Создать `internal/git_activity.py`; `default_branch` always `"main"`; tip = `main@{upstream}` if `rev-parse --verify` succeeds else `refs/heads/main`; Git CLI failure → orphan shape
-- [ ] 6.2 ahead/behind via `git rev-list --count <merge-base>..<HEAD>` / `HEAD..<merge-base>`; merge-base via `git merge-base`
-- [ ] 6.3 added/deleted text lines via `git diff --numstat <merge-base>...HEAD`; binary files (`-`) пропускаются
-- [ ] 6.4 no-common-ancestor → `state="orphan"`, counts `None`; `state`: clean/ahead/behind/diverged/orphan
-- [ ] 6.5 Bounded cache по `(worktree_path, HEAD SHA, default-tip SHA)`, TTL 15s
+- [x] 6.1 Создать `internal/git_activity.py`; `default_branch` always `"main"`; tip = `main@{upstream}` if `rev-parse --verify` succeeds else `refs/heads/main`; Git CLI failure → orphan shape
+- [x] 6.2 ahead/behind via `git rev-list --count <merge-base>..<HEAD>` / `HEAD..<merge-base>`; merge-base via `git merge-base`
+- [x] 6.3 added/deleted text lines via `git diff --numstat <merge-base>...HEAD`; binary files (`-`) пропускаются
+- [x] 6.4 no-common-ancestor → `state="orphan"`, counts `None`; `state`: clean/ahead/behind/diverged/orphan
+- [x] 6.5 Bounded cache по `(worktree_path, HEAD SHA, default-tip SHA)`, TTL 15s
 
 ## 7. Storage footprint (disk ownership)
 
-- [ ] 7.1 Создать `internal/storage_footprint.py`; directory size: `du -sb` iff `shutil.which("du")` and exit 0 with parseable int (timeout 10s), else `os.walk(followlinks=False)` + realpath dedup
-- [ ] 7.2 Owned venv size при `python_environment_owned=true`; reused/external — `owned=False`, `bytes=None`, excluded from total
-- [ ] 7.3 Owned DB (`db_mode="copy"`): `internal/postgres_size.py::database_size_bytes` via `psql -c SELECT pg_database_size(...)` (same pattern as `_verify_database_via_psql`); filestore via `validate_filestore_containment`; `shared` — `owned=False`, excluded
-- [ ] 7.4 Other files (generated config/lock/local logs/cache/artifacts в environment root)
-- [ ] 7.5 `total_bytes` сумма; `complete=False` если owned component недоступен; shared cluster volume только на cluster card
-- [ ] 7.6 Bounded cache по `environment_id`, TTL 15s
+- [x] 7.1 Создать `internal/storage_footprint.py`; directory size: `du -sb` iff `shutil.which("du")` and exit 0 with parseable int (timeout 10s), else `os.walk(followlinks=False)` + realpath dedup
+- [x] 7.2 Owned venv size при `python_environment_owned=true`; reused/external — `owned=False`, `bytes=None`, excluded from total
+- [x] 7.3 Owned DB (`db_mode="copy"`): `internal/postgres_size.py::database_size_bytes` via `psql -c SELECT pg_database_size(...)` (same pattern as `_verify_database_via_psql`); filestore via `validate_filestore_containment`; `shared` — `owned=False`, excluded
+- [x] 7.4 Other files (generated config/lock/local logs/cache/artifacts в environment root)
+- [x] 7.5 `total_bytes` сумма; `complete=False` если owned component недоступен; shared cluster volume только на cluster card
+- [x] 7.6 Bounded cache по `environment_id`, TTL 15s
 
 ## 8. Cluster container identity + resources (Docker inspect/stats)
 
@@ -104,16 +104,16 @@
 ## 14. Tests
 
 - [ ] 14.1 `tests/unit/test_monitor_snapshot.py`: multi-project discovery, stopped/running Odoo, PID reuse, compose/external/stopped cluster, Linux/VM PID scope, Docker stats errors, Git divergence, storage ownership, component failure isolation, redaction
-- [ ] 14.2 `tests/unit/test_process_metrics.py`: fake `psutil.Process`, CPU two-sample, `AccessDenied` isolation
-- [ ] 14.3 `tests/unit/test_git_activity.py`: clean/ahead/behind/diverged/orphan, binary files, stale-local-main fallback
-- [ ] 14.4 `tests/unit/test_storage_footprint.py`: owned/reused venv, shared/copy DB, `du` vs walk fallback, psql size failure → complete=False, symlinks
+- [x] 14.2 `tests/unit/test_process_metrics.py`: fake `psutil.Process`, CPU two-sample, `AccessDenied` isolation
+- [x] 14.3 `tests/unit/test_git_activity.py`: clean/ahead/behind/diverged/orphan, binary files, stale-local-main fallback
+- [x] 14.4 `tests/unit/test_storage_footprint.py`: owned/reused venv, shared/copy DB, `du` vs walk fallback, psql size failure → complete=False, symlinks
 - [ ] 14.5 `tests/unit/test_cluster_resources.py`: fake Docker inspect/stats, PID scope, batch, external/stopped/docker-unavailable
 - [ ] 14.6 `tests/unit/test_serve.py`: FastAPI routes (`/api/v1/snapshot`, `/healthz`), project filter, headless vs UI, missing extra guard
 - [ ] 14.7 `tests/unit/test_cli_monitor.py`: `odcli monitor --headless`, port auto-select, missing extra hint
 - [ ] 14.8 `tests/unit/test_cli_env_list_grouping.py`: project header, cluster summary, stopped row, `--all` human removed vs JSON non-removed, JSON parity
 - [ ] 14.9 `tests/unit/test_cli_postgres_status_resources.py`: container fields, external/stopped/docker-unavailable, parity
 - [x] 14.10 `tests/unit/test_catalog_runtime_record.py`: schema v9 migration, upsert/clear, read-only
-- [ ] 14.11 `tests/unit/test_run_foreground_runtime_identity.py`: persist after spawn, clear in `finally` (normal/crash/Ctrl+C), manual instance no persist, `psutil` fallback
+- [x] 14.11 `tests/unit/test_run_foreground_runtime_identity.py`: persist after spawn, clear in `finally` (normal/crash/Ctrl+C), manual instance no persist, `psutil` fallback
 - [ ] 14.12 `tests/integration/test_monitor_smoke.py` (opt-in `integration` marker, skip без Docker/psutil): two projects, several environments, часть stopped; verify selector/cards/headless API и Open Odoo
 
 ## 15. Quality gates
