@@ -21,6 +21,21 @@ from odoo_instance_sdk.resources.instance import OdooInstance
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
 
+def _wait_for_ready_pid(pid_file: Path) -> int:
+    """Return a complete child PID published after its signal handler is ready."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            pid = int(pid_file.read_text())
+        except (FileNotFoundError, ValueError):
+            time.sleep(0.01)
+            continue
+        if pid > 0:
+            return pid
+        time.sleep(0.01)
+    pytest.fail("child did not publish a valid PID after installing SIGTERM_IGN")
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX process groups")
 def test_wait_error_kills_sigterm_ignoring_descendant_after_leader_exit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -30,7 +45,10 @@ def test_wait_error_kills_sigterm_ignoring_descendant_after_leader_exit(
     child_code = (
         "import pathlib, signal, sys, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "pathlib.Path(sys.argv[1]).write_text(str(__import__('os').getpid()))\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "ready = path.with_name(path.name + '.tmp')\n"
+        "ready.write_text(str(__import__('os').getpid()))\n"
+        "ready.replace(path)\n"
         "time.sleep(60)"
     )
     leader_code = (
@@ -59,11 +77,7 @@ def test_wait_error_kills_sigterm_ignoring_descendant_after_leader_exit(
 
     def leader_exits_then_wait_fails(proc: Any) -> int:
         nonlocal child_pid, process_group_id
-        deadline = time.monotonic() + 5
-        while not child_pid_file.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert child_pid_file.exists()
-        child_pid = int(child_pid_file.read_text())
+        child_pid = _wait_for_ready_pid(child_pid_file)
         process_group_id = proc.pid
         proc.wait(timeout=5)
         assert os.getpgid(child_pid) == process_group_id
@@ -112,7 +126,10 @@ def test_manual_wait_error_kills_ready_sigterm_ignoring_descendant(
     child_code = (
         "import pathlib, signal, sys, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "pathlib.Path(sys.argv[1]).write_text(str(__import__('os').getpid()))\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "ready = path.with_name(path.name + '.tmp')\n"
+        "ready.write_text(str(__import__('os').getpid()))\n"
+        "ready.replace(path)\n"
         "time.sleep(60)"
     )
     leader_code = (
@@ -136,11 +153,7 @@ def test_manual_wait_error_kills_ready_sigterm_ignoring_descendant(
 
     def wait_then_fail(proc: Any) -> int:
         nonlocal child_pid, process_group_id
-        deadline = time.monotonic() + 5
-        while not child_pid_file.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert child_pid_file.exists(), "child did not signal readiness after SIGTERM_IGN"
-        child_pid = int(child_pid_file.read_text())
+        child_pid = _wait_for_ready_pid(child_pid_file)
         process_group_id = proc.pid
         proc.wait(timeout=5)
         raise RuntimeError("manual wait blew up")
