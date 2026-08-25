@@ -1,6 +1,7 @@
 """Opt-in smoke test for monitor snapshot + headless API across multiple projects.
 
-Requires psutil (metrics extra). Skips gracefully when psutil or fastapi is missing.
+Requires core psutil and the dashboard FastAPI extra. Skips gracefully when
+FastAPI is missing.
 Run with: ``pytest -m integration tests/integration/test_monitor_smoke.py``
 """
 

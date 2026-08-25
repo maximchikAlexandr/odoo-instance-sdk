@@ -22,6 +22,7 @@ from odoo_instance_sdk.models import (
 )
 
 _SENSITIVE_FIELDS = frozenset({"db_password", "admin_passwd", "config_path", "logfile"})
+_FOREGROUND_PROCESS_CLEANUP_TIMEOUT = 5.0
 
 
 def _cli_flag(field_name: str) -> str:
@@ -67,7 +68,12 @@ def _write_secret_config(config: StartConfig) -> str | None:
     return path
 
 
-def _kill_pg(proc: subprocess.Popen[bytes], *, force: bool) -> None:
+def _kill_pg(
+    proc: subprocess.Popen[bytes],
+    *,
+    force: bool,
+    process_group_id: int | None = None,
+) -> None:
     if sys.platform == "win32":
         args = ["taskkill", "/T", "/PID", str(proc.pid)]
         if force:
@@ -76,8 +82,45 @@ def _kill_pg(proc: subprocess.Popen[bytes], *, force: bool) -> None:
             subprocess.run(args, capture_output=True, timeout=5, check=False)
         return
     with contextlib.suppress(OSError, subprocess.SubprocessError):
-        pgid = os.getpgid(proc.pid)
+        # A foreground child is spawned with ``start_new_session=True``.  Its
+        # PID is therefore the session/process-group ID at spawn time.  Keep
+        # using that known value during exceptional cleanup: the leader may
+        # already have exited while descendants of its group are still alive,
+        # in which case ``os.getpgid(proc.pid)`` cannot recover the group.
+        pgid = process_group_id if process_group_id is not None else os.getpgid(proc.pid)
         os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
+
+
+def _process_group_is_alive(process_group_id: int) -> bool:
+    """Return whether a POSIX process group still exists.
+
+    ``killpg(..., 0)`` observes the group without signalling it.  A permission
+    error still proves that the group exists; only ``ProcessLookupError`` means
+    it is gone.
+    """
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_process_group_exit(
+    proc: subprocess.Popen[bytes], process_group_id: int, *, timeout: float
+) -> bool:
+    """Wait a bounded period for the captured POSIX process group to vanish."""
+    deadline = time.monotonic() + timeout
+    while True:
+        # ``Popen.poll`` reaps an exited leader.  Without it a zombie leader
+        # keeps its PGID observable even after the actual process group ended.
+        proc.poll()
+        if not _process_group_is_alive(process_group_id):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
 
 
 def start_process(
@@ -199,21 +242,87 @@ def spawn_foreground_process(
     )
 
 
-def wait_foreground_process(proc: subprocess.Popen[bytes]) -> int:
-    """Block until ``proc`` exits, forwarding SIGINT to its process group.
+def terminate_foreground_process(
+    proc: subprocess.Popen[bytes], *, process_group_id: int | None = None
+) -> None:
+    """Terminate an owned foreground process group and reap its leader.
 
-    Returns the process exit code (130 on Ctrl+C). Restores the previous
-    SIGINT handler on return.
+    ``process_group_id`` is captured at spawn for cleanup after a leader has
+    exited.  On POSIX it remains valid for a surviving descendant group.
+    """
+    if sys.platform == "win32":
+        _kill_pg(proc, force=False, process_group_id=process_group_id)
+        try:
+            proc.wait(timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            _kill_pg(proc, force=True, process_group_id=process_group_id)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
+        return
+
+    # Do not use leader liveness as a proxy for group liveness: a wrapper can
+    # exit while an owned descendant ignores SIGTERM.  The saved PGID is the
+    # session created at spawn, and this immediate, bounded cleanup avoids
+    # discovering a group through a potentially exited/reused leader PID.
+    if process_group_id is None:
+        try:
+            group_id = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
+            return
+    else:
+        group_id = process_group_id
+    _kill_pg(proc, force=False, process_group_id=group_id)
+    if not _wait_for_process_group_exit(
+        proc, group_id, timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT
+    ):
+        _kill_pg(proc, force=True, process_group_id=group_id)
+        _wait_for_process_group_exit(proc, group_id, timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
+
+    # Reap independently after addressing the entire owned group.  The caller
+    # is already handling an original exception, so cleanup remains best effort.
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
+
+
+def wait_foreground_process_with_cleanup(proc: subprocess.Popen[bytes]) -> int:
+    """Wait for an owned foreground process, reaping its group on failure.
+
+    This is the single exceptional-wait boundary for manual and
+    environment-tracked ``run_foreground`` calls. Cleanup is best-effort: it
+    must not replace the original wait exception.
+    """
+    process_group_id = proc.pid
+    try:
+        return wait_foreground_process(proc)
+    except BaseException:
+        with contextlib.suppress(BaseException):
+            terminate_foreground_process(proc, process_group_id=process_group_id)
+        raise
+
+
+def wait_foreground_process(proc: subprocess.Popen[bytes]) -> int:
+    """Block until ``proc`` exits, terminating its owned group on Ctrl+C.
+
+    Ctrl+C uses the same bounded TERM/KILL/reap cleanup as exceptional wait
+    failures, then returns 130. Restores the previous SIGINT handler on return.
     """
     interrupted = False
+    # start_new_session=True makes the leader PID the PGID at spawn.  Retain it
+    # before a signal can make the leader disappear; descendants can survive
+    # that exit and must still receive the bounded TERM/KILL/reap sequence.
+    process_group_id = proc.pid
     prev_handler = signal.getsignal(signal.SIGINT)
+
+    def _terminate_after_interrupt() -> None:
+        with contextlib.suppress(BaseException):
+            terminate_foreground_process(proc, process_group_id=process_group_id)
 
     def _on_sigint(signum: int, frame: object) -> None:
         nonlocal interrupted
         interrupted = True
-        with contextlib.suppress(OSError, ProcessLookupError):
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGINT)
+        _terminate_after_interrupt()
 
     if sys.platform != "win32":
         signal.signal(signal.SIGINT, _on_sigint)
@@ -221,10 +330,7 @@ def wait_foreground_process(proc: subprocess.Popen[bytes]) -> int:
         exit_code = proc.wait()
     except KeyboardInterrupt:
         interrupted = True
-        with contextlib.suppress(OSError, ProcessLookupError):
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        proc.wait()
+        _terminate_after_interrupt()
         exit_code = 130
     finally:
         if sys.platform != "win32":
@@ -243,7 +349,7 @@ def run_foreground_process(
     inherit_stdio: bool = True,
 ) -> int:
     proc = spawn_foreground_process(executable, args, cwd=cwd, env=env, inherit_stdio=inherit_stdio)
-    return wait_foreground_process(proc)
+    return wait_foreground_process_with_cleanup(proc)
 
 
 _RESULT_SNIPPET = (

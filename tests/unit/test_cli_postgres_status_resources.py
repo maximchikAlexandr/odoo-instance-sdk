@@ -13,6 +13,7 @@ from odoo_instance_sdk.models import (
     ClusterContainer,
     ClusterMetrics,
     ClusterResourceSnapshot,
+    ClusterUnavailabilityReason,
     PidScope,
     PostgresClusterState,
 )
@@ -41,7 +42,7 @@ def _write_project(tmp_path: Path, *, mode: str = "compose") -> Path:
 
 def _resource_snapshot(
     *,
-    unavailability_reason: str | None = None,
+    unavailability_reason: ClusterUnavailabilityReason | None = None,
     with_metrics: bool = True,
 ) -> ClusterResourceSnapshot:
     now = datetime.now(UTC)

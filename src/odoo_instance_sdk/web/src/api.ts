@@ -132,9 +132,8 @@ export interface Snapshot {
   environments: EnvironmentSnapshot[];
 }
 
-export async function fetchSnapshot(projectId?: string | null): Promise<Snapshot> {
-  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
-  const res = await fetch(`/api/v1/snapshot${qs}`);
+export async function fetchSnapshot(): Promise<Snapshot> {
+  const res = await fetch("/api/v1/snapshot");
   if (!res.ok) {
     throw new Error(`snapshot fetch failed: ${res.status} ${res.statusText}`);
   }

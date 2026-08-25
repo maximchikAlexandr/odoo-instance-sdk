@@ -5,7 +5,6 @@ from typing import TypeVar
 
 import click
 
-from odoo_instance_sdk.exceptions import OdooInstanceSdkError
 from odoo_instance_sdk.internal import context as cli_context
 from odoo_instance_sdk.internal.cli_format import human_bytes
 from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail
@@ -14,6 +13,7 @@ from odoo_instance_sdk.models import (
     ClusterEndpoint,
     ClusterMetrics,
     ClusterSnapshot,
+    ClusterUnavailabilityReason,
     PostgresClusterState,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -34,8 +34,6 @@ def run_postgres_command(
         return cluster, operation(cluster)
     except SystemExit:
         raise
-    except OdooInstanceSdkError as exc:
-        fail(json_output, command, str(exc))
     except Exception as exc:
         fail(json_output, command, str(exc))
     raise AssertionError("fail always exits")
@@ -65,7 +63,7 @@ def cluster_snapshot(cluster: PostgresCluster, state: PostgresClusterState) -> C
 
     container: ClusterContainer | None = None
     metrics: ClusterMetrics | None = None
-    reason: str | None = "external_not_owned" if not cluster.owned else None
+    reason: ClusterUnavailabilityReason | None = "external_not_owned" if not cluster.owned else None
     sampled_at = None
     if cluster.owned:
         resource = cluster.resource_snapshot()

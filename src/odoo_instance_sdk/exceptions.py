@@ -219,7 +219,3 @@ class PostgresPortCollisionError(PostgresClusterError):
 
 class MonitorError(OdooInstanceSdkError):
     """Monitor snapshot failed (messages are redacted)."""
-
-
-class MonitorExtrasMissingError(MonitorError):
-    """An optional extra (psutil/fastapi/uvicorn) is not installed."""

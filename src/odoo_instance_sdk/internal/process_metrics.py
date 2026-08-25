@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -22,69 +21,40 @@ class CpuPoint:
     timestamp: float
 
 
-def _aggregate_cpu_times(proc: Any, children: list[Any]) -> float:
-    """Sum user+system cpu times for root + accessible children.
-
-    ponytail: aggregated tree CPU, dead children drop to 0 between samples
-    (they're absent from the new children list, so the delta only reflects
-    survivors + root). Matches "sum across the tree" per design D5.
-    """
-    total = 0.0
-    with contextlib.suppress(Exception):
-        ct = proc.cpu_times()
-        total += ct.user + ct.system
-    for child in children:
-        with contextlib.suppress(Exception):
-            cct = child.cpu_times()
-            total += cct.user + cct.system
-    return total
-
-
-def _root_rss(proc: Any) -> int | None:
-    with contextlib.suppress(Exception):
-        return int(proc.memory_info().rss)
-    return None
-
-
-def _collect_children(proc: Any, psutil: Any) -> list[Any]:
-    """Recursive children; root-level AccessDenied/NoSuchProcess/Zombie → empty."""
-    try:
-        return list(proc.children(recursive=True))
-    except psutil.AccessDenied:
-        return []
-    except (psutil.NoSuchProcess, psutil.ZombieProcess):
-        return []
-
-
-def _child_metrics(child: Any, psutil: Any) -> tuple[int, int] | None:
-    """Return (pid, rss) for one child, or None if the child must be skipped.
+def _child_metrics(child: Any, psutil: Any) -> tuple[int, int, float] | None:
+    """Return one complete child sample, or ``None`` when it must be skipped.
 
     Skip on NoSuchProcess/ZombieProcess/AccessDenied (per spec D5: child
     AccessDenied → skip that child).
     """
     try:
         pid = child.pid
+        rss = int(child.memory_info().rss)
+        cpu_times = child.cpu_times()
     except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
         return None
-    rss = 0
-    with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-        rss = int(child.memory_info().rss)
-    return pid, rss
+    return pid, rss, cpu_times.user + cpu_times.system
 
 
-def _build_tree(proc: Any, psutil: Any) -> tuple[list[int], int, list[Any], int | None]:
-    """Returns (child_pids, rss_bytes_sum_for_children, children_list, root_rss)."""
-    children = _collect_children(proc, psutil)
+def _build_tree(proc: Any, psutil: Any) -> tuple[list[int], int, float]:
+    """Return child PID, RSS, and CPU totals.
+
+    Root process operations intentionally propagate psutil lifecycle errors to
+    ``collect_process_tree``. A child that cannot provide its full sample is
+    omitted, rather than being represented as a zero-RSS process.
+    """
+    children = list(proc.children(recursive=True))
     child_pids: list[int] = []
     children_rss = 0
+    children_cpu = 0.0
     for child in children:
         cm = _child_metrics(child, psutil)
         if cm is None:
             continue
         child_pids.append(cm[0])
         children_rss += cm[1]
-    root_rss = _root_rss(proc)
-    return child_pids, children_rss, children, root_rss
+        children_cpu += cm[2]
+    return child_pids, children_rss, children_cpu
 
 
 def collect_process_tree(
@@ -106,33 +76,22 @@ def collect_process_tree(
     minimal way to let the caller store it without a mutable callback or
     shared mutable state.
     """
-    try:
-        import psutil  # type: ignore[import-untyped]
-    except ImportError:
-        from odoo_instance_sdk.exceptions import MonitorExtrasMissingError
-
-        raise MonitorExtrasMissingError(
-            "psutil is not installed; pip install odoo-instance-sdk[metrics]"
-        ) from None
-
-    if not psutil.pid_exists(root_pid):
-        return None
+    import psutil
 
     try:
+        if not psutil.pid_exists(root_pid):
+            return None
         proc = psutil.Process(root_pid)
         if proc.create_time() != create_time:
             return None
-    except psutil.NoSuchProcess:
+        child_pids, children_rss, children_cpu = _build_tree(proc, psutil)
+        root_rss = int(proc.memory_info().rss)
+        root_cpu_times = proc.cpu_times()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return None
-    except psutil.AccessDenied:
-        return None
-    except psutil.ZombieProcess:
-        return None
-
-    child_pids, children_rss, children, root_rss = _build_tree(proc, psutil)
 
     now = time.monotonic()
-    total_times_cpu = _aggregate_cpu_times(proc, children)
+    total_times_cpu = root_cpu_times.user + root_cpu_times.system + children_cpu
     new_point = CpuPoint(times_cpu=total_times_cpu, timestamp=now)
 
     cpu_percent: float | None
@@ -146,7 +105,7 @@ def collect_process_tree(
         else:
             cpu_percent = None
 
-    rss_bytes = (root_rss + children_rss) if root_rss is not None else None
+    rss_bytes = root_rss + children_rss
     return (
         ProcessTreeResult(
             child_pids=tuple(child_pids),

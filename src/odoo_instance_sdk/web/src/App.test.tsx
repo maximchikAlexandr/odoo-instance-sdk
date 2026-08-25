@@ -67,7 +67,7 @@ const snapshot: Snapshot = {
   ],
 };
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("App", () => {
   it("keeps all selector options while filtering cards and opens only ready Odoo", async () => {
@@ -95,5 +95,28 @@ describe("App", () => {
     await waitFor(() => expect(screen.getAllByTestId("environment-card")).toHaveLength(1));
     expect(screen.getByText("beta (b)")).toBeTruthy();
     expect(fetchSnapshot).toHaveBeenCalledWith();
+  });
+
+  it("polls on a fixed cadence without overlap, coalesces misses, and cancels on unmount", async () => {
+    vi.useFakeTimers();
+    let resolveFirst!: (value: Snapshot) => void;
+    vi.mocked(fetchSnapshot).mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
+    vi.mocked(fetchSnapshot).mockResolvedValue(snapshot);
+    const view = render(<MantineProvider><App /></MantineProvider>);
+
+    expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5_500);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+
+    resolveFirst(snapshot);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(499);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(2);
+
+    view.unmount();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchSnapshot).toHaveBeenCalledTimes(2);
   });
 });

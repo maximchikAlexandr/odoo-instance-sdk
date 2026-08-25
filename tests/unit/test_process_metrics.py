@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 
-from odoo_instance_sdk.exceptions import MonitorExtrasMissingError
 from odoo_instance_sdk.internal.process_metrics import (
     CpuPoint,
     collect_process_tree,
@@ -62,6 +61,7 @@ class FakeProcess:
         access_denied: bool = False,
         zombie: bool = False,
         no_such_process: bool = False,
+        fail_operations: set[str] | None = None,
     ) -> None:
         self.pid = pid
         self._create_time = create_time
@@ -71,14 +71,28 @@ class FakeProcess:
         self.access_denied = access_denied
         self.zombie = zombie
         self.no_such_process = no_such_process
+        self.fail_operations = fail_operations or set()
+
+    def _raise_if_unavailable(self, operation: str) -> None:
+        if operation not in self.fail_operations:
+            return
+        if self.access_denied:
+            raise _current_psutil.AccessDenied(self.pid)
+        if self.zombie:
+            raise _current_psutil.ZombieProcess(self.pid)
+        if self.no_such_process:
+            raise _current_psutil.NoSuchProcess(self.pid)
 
     def create_time(self) -> float:
+        self._raise_if_unavailable("create_time")
         return self._create_time
 
     def children(self, recursive: bool = True) -> list[FakeProcess]:
+        self._raise_if_unavailable("children")
         return self._children
 
     def cpu_times(self) -> Any:
+        self._raise_if_unavailable("cpu_times")
         if self.access_denied:
             raise _current_psutil.AccessDenied(self.pid)
         if self.zombie:
@@ -88,6 +102,7 @@ class FakeProcess:
         return types.SimpleNamespace(user=self._cpu_times[0], system=self._cpu_times[1])
 
     def memory_info(self) -> Any:
+        self._raise_if_unavailable("memory_info")
         if self.access_denied:
             raise _current_psutil.AccessDenied(self.pid)
         if self.zombie:
@@ -226,9 +241,27 @@ def test_cpu_two_sample(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.unit
-def test_child_access_denied_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("root_operation", ["create_time", "children", "memory_info", "cpu_times"])
+def test_root_access_denied_in_any_metric_boundary_returns_none(
+    monkeypatch: pytest.MonkeyPatch, root_operation: str
+) -> None:
+    proc = FakeProcess(pid=1, create_time=100.0, rss=42, cpu_times=(1.0, 2.0))
+    proc.access_denied = True
+    proc.fail_operations = {root_operation}
+    fake = _make_psutil(root={"pid": 1, "instance": proc})
+    _install_psutil(monkeypatch, fake)
+    assert collect_process_tree(1, 100.0, prev_cpu_point=None) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["access_denied", "zombie", "no_such_process"])
+@pytest.mark.parametrize("operation", ["memory_info", "cpu_times"])
+def test_child_lifecycle_error_is_omitted_entirely(
+    monkeypatch: pytest.MonkeyPatch, failure: str, operation: str
+) -> None:
     child_a = FakeProcess(pid=2, create_time=100.0, rss=10, cpu_times=(0.5, 0.5))
-    child_b = FakeProcess(pid=3, create_time=100.0, access_denied=True, rss=20)
+    child_b = FakeProcess(pid=3, create_time=100.0, rss=20, fail_operations={operation})
+    setattr(child_b, failure, True)
     proc = FakeProcess(
         pid=1,
         create_time=100.0,
@@ -241,15 +274,6 @@ def test_child_access_denied_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     outcome = collect_process_tree(1, 100.0, prev_cpu_point=None)
     assert outcome is not None
     result, _ = outcome
-    assert result.child_pids == (2, 3)
-    assert result.process_count == 3
+    assert result.child_pids == (2,)
+    assert result.process_count == 2
     assert result.rss_bytes == 52
-
-
-@pytest.mark.unit
-def test_monitor_extras_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    _uninstall_psutil(monkeypatch)
-    monkeypatch.setitem(sys.modules, "psutil", None)
-    with pytest.raises(MonitorExtrasMissingError) as excinfo:
-        collect_process_tree(1, 0.0, prev_cpu_point=None)
-    assert "pip install odoo-instance-sdk[metrics]" in str(excinfo.value)

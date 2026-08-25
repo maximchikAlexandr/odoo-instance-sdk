@@ -9,6 +9,15 @@ from typing import Literal, cast
 
 import msgspec
 
+type ClusterUnavailabilityReason = Literal[
+    "external_not_owned",
+    "stopped",
+    "missing",
+    "docker_unavailable",
+    "inspect_failed",
+    "stats_failed",
+]
+
 
 class BackupFormat(enum.StrEnum):
     ZIP = "zip"
@@ -373,7 +382,7 @@ class ClusterResourceSnapshot(
 ):
     container: ClusterContainer | None
     metrics: ClusterMetrics | None
-    unavailability_reason: str | None
+    unavailability_reason: ClusterUnavailabilityReason | None
     sampled_at: datetime | None
 
 
@@ -384,7 +393,7 @@ class ClusterSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, k
     endpoint: ClusterEndpoint | None
     container: ClusterContainer | None
     metrics: ClusterMetrics | None
-    unavailability_reason: str | None
+    unavailability_reason: ClusterUnavailabilityReason | None
     sampled_at: datetime | None
 
 

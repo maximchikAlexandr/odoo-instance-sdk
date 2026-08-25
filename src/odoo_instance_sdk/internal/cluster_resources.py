@@ -176,11 +176,17 @@ def volume_sizes(*, runner: ComposeRunner, timeout: float | None = None) -> dict
             continue
         if not isinstance(row, dict):
             continue
-        name, size = row.get("Name"), row.get("Size")
-        if isinstance(name, str) and isinstance(size, str):
-            parsed = _parse_mem_value(size)
-            if parsed is not None:
-                sizes[name] = parsed
+        volumes = row.get("Volumes")
+        if not isinstance(volumes, list):
+            continue
+        for volume in volumes:
+            if not isinstance(volume, dict):
+                continue
+            name, size = volume.get("Name"), volume.get("Size")
+            if isinstance(name, str) and isinstance(size, str):
+                parsed = _parse_mem_value(size)
+                if parsed is not None:
+                    sizes[name] = parsed
     return sizes
 
 
@@ -240,20 +246,20 @@ def cluster_resource_snapshot(
     status call. The monitor owns instance-level caching; this is the non-caching
     core shared with batch collection. This standalone helper has no TTL cache.
     """
+    if state is PostgresClusterState.STOPPED:
+        return ClusterResourceSnapshot(
+            container=None,
+            metrics=None,
+            unavailability_reason="stopped",
+            sampled_at=None,
+        )
+
     requires_docker = bool(getattr(runner, "requires_docker", True))
     if requires_docker and not docker_available():
         return ClusterResourceSnapshot(
             container=None,
             metrics=None,
             unavailability_reason="docker_unavailable",
-            sampled_at=None,
-        )
-
-    if state is PostgresClusterState.STOPPED:
-        return ClusterResourceSnapshot(
-            container=None,
-            metrics=None,
-            unavailability_reason="stopped",
             sampled_at=None,
         )
 

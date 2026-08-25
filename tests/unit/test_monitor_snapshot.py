@@ -5,14 +5,14 @@ import sqlite3
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import httpx
 import msgspec
 import pytest
 
-from odoo_instance_sdk.exceptions import MonitorError, MonitorExtrasMissingError
-from odoo_instance_sdk.internal.process_metrics import CpuPoint, ProcessTreeResult
+from odoo_instance_sdk.exceptions import MonitorError
+from odoo_instance_sdk.internal.process_metrics import ProcessTreeResult
 from odoo_instance_sdk.models import (
     ClusterContainer,
     ClusterMetrics,
@@ -25,6 +25,7 @@ from odoo_instance_sdk.models import (
     Snapshot,
 )
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.monitor_support import (
     FakeDockerProvider,
@@ -492,34 +493,6 @@ def test_runtime_is_read_once_in_atomic_catalog_snapshot_and_cpu_identity_is_sta
     assert set(monitor._cpu_points) == {(111, 1.0)}
 
 
-def test_psutil_missing_raises_extras_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    catalog = _make_catalog(tmp_path)
-    e1 = str(uuid.uuid4())
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    _seed_env(catalog, _make_env(e1, worktree_path=str(wt)))
-    _seed_runtime(catalog, e1)
-    catalog.close()
-
-    _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-
-    def _raise_import(*args: object, **kwargs: object) -> tuple[ProcessTreeResult, CpuPoint] | None:
-        raise MonitorExtrasMissingError(
-            "psutil is not installed; pip install odoo-instance-sdk[metrics]"
-        )
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.process_metrics.collect_process_tree", _raise_import
-    )
-
-    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
-    with pytest.raises(MonitorExtrasMissingError) as exc_info:
-        monitor.snapshot()
-    assert "pip install odoo-instance-sdk[metrics]" in str(exc_info.value)
-
-
 def test_redaction_no_secrets_or_absolute_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -607,6 +580,29 @@ def test_project_filter_unknown_returns_empty(
 
     assert snap.projects == ()
     assert snap.environments == ()
+
+
+def test_project_filter_avoids_cluster_work_for_unknown_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    _seed_env(
+        catalog, _make_env(str(uuid.uuid4()), repository_root="/repo", git_common_dir="/repo/.git")
+    )
+    catalog.close()
+    calls: list[Path] = []
+
+    def forbidden(repo_root: Path) -> FakePostgresCluster:
+        calls.append(repo_root)
+        raise AssertionError("filtered project must not load a cluster")
+
+    monkeypatch.setattr(PostgresCluster, "from_project", forbidden)
+    snap = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3").snapshot(
+        project_id="project_unknown"
+    )
+    assert snap.projects == ()
+    assert snap.environments == ()
+    assert calls == []
 
 
 def test_watch_interval_floor_raises_value_error(tmp_path: Path) -> None:
@@ -750,22 +746,10 @@ def test_fresh_instance_empties_cache(tmp_path: Path, monkeypatch: pytest.Monkey
     assert provider_b.calls == 1
 
 
-def test_default_monitor_requires_metrics_extra_even_for_empty_catalog(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import builtins
-
+def test_default_monitor_works_with_core_process_dependency(tmp_path: Path) -> None:
     _make_catalog(tmp_path).close()
-    real_import = builtins.__import__
-
-    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "psutil":
-            raise ImportError("psutil missing")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    with pytest.raises(MonitorExtrasMissingError, match=r"\[metrics\]"):
-        EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3").snapshot()
+    snapshot = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3").snapshot()
+    assert snapshot.environments == ()
 
 
 def test_cluster_status_cached_5s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

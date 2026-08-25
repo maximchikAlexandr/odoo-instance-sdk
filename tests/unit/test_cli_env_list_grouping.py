@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -256,6 +257,53 @@ def test_env_list_human_env_row_columns(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.unit
+def test_env_list_human_table_is_15_columns_bounded_and_json_is_lossless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = ProjectSummary(
+        id="project_comerta_abc12345",
+        name="comerta",
+        display_hint="comerta_abc12345",
+        environment_count=1,
+        cluster=_healthy_cluster(),
+    )
+    original_name = "very-long\r\nname-that-must-stay-in-json"
+    env = _env(name=original_name)
+    _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
+    _patch_empty_catalog_env(monkeypatch)
+
+    human = CliRunner().invoke(cli, ["env", "list", "--all-projects"])
+    assert human.exit_code == 0, human.output
+    lines = human.output.splitlines()
+    header = next(line for line in lines if line.startswith("NAME  "))
+    assert header.split("  ") == [
+        "NAME",
+        "BRANCH",
+        "STATE",
+        "RUNTIME",
+        "OBSERVED",
+        "ODOO_PID",
+        "CPU",
+        "RAM",
+        "GIT_AHEAD",
+        "GIT_DIFF",
+        "SIZE",
+        "DB_MODE",
+        "DATABASE",
+        "PORT",
+        "ARTIFACTS",
+    ]
+    row = next(line for line in lines if "very-long" in line)
+    assert len(row.split("  ")) == 15
+    assert all(len(cell) <= 24 for cell in row.split("  "))
+    assert "\r" not in row and "\n" not in row and "…" in row
+
+    encoded = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    assert encoded.exit_code == 0, encoded.output
+    assert json.loads(encoded.output)["result"]["environments"][0]["name"] == original_name
+
+
+@pytest.mark.unit
 def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> None:
     project = ProjectSummary(
         id="project_comerta_abc12345",
@@ -468,6 +516,53 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
         for line in lines
         if line.startswith(name)
     ]
+
+
+@pytest.mark.unit
+def test_reconciliation_retains_row_when_filesystem_metadata_raises_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.internal import cli_env
+
+    env = SimpleNamespace(
+        id=UUID("11111111-1111-1111-1111-111111111111"),
+        name="broken",
+        state="ready",
+        branch="main",
+        db_mode="shared",
+        http_port=8069,
+        worktree_path="/missing/wt",
+        repository_root="/missing",
+        python_environment_path="/missing/python",
+        python_environment_owned=True,
+        dependency_lock_path="/missing/lock",
+        generated_config_path="/missing/odoo.conf",
+        backup_id=None,
+        source_db_name="db",
+        target_db_name=None,
+        last_used_at=None,
+    )
+    monkeypatch.setattr(
+        cli_env, "worktree_list_porcelain", lambda _: (_ for _ in ()).throw(OSError())
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.context._check_port_free", lambda _: True)
+    monkeypatch.setattr(Path, "is_file", lambda _: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(Path, "is_dir", lambda _: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(Path, "resolve", lambda _: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(Path, "read_bytes", lambda _: (_ for _ in ()).throw(OSError()))
+
+    row = cli_env._reconcile_environment(env, backup_ids=set())
+    assert row["name"] == "broken"
+    assert row["reconciliation"] == {
+        "worktree_exists": False,
+        "worktree_registered": False,
+        "config_exists": False,
+        "python_exists": False,
+        "dependency_lock_exists": False,
+        "dependency_fingerprint": None,
+        "backup_exists": None,
+        "python_contained": False,
+    }
 
 
 @pytest.mark.unit

@@ -101,9 +101,10 @@ class TestInstancePrefix:
                 side_effect=spawn,
             ),
             patch(
-                "odoo_instance_sdk.resources.instance.wait_foreground_process",
+                "odoo_instance_sdk.internal.server.wait_foreground_process",
                 return_value=0,
             ),
+            patch("odoo_instance_sdk.resources.instance._process_create_time", return_value=1.0),
         ):
             instance.run_foreground()
         assert events == ["healthy", "spawn"]
@@ -293,9 +294,10 @@ class TestRunForeground:
             patch.object(OdooInstance, "_ensure_dependencies_ready"),
             patch("odoo_instance_sdk.resources.instance.spawn_foreground_process") as mock_spawn,
             patch(
-                "odoo_instance_sdk.resources.instance.wait_foreground_process",
+                "odoo_instance_sdk.internal.server.wait_foreground_process",
                 return_value=0,
             ),
+            patch("odoo_instance_sdk.resources.instance._process_create_time", return_value=1.0),
         ):
             mock_proc = MagicMock()
             mock_proc.pid = 4242

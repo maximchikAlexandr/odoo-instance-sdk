@@ -514,8 +514,8 @@ class TestVerifyPsql:
         monkeypatch.setattr("subprocess.run", fake_run)
         assert _verify_database_via_psql("localhost", 5432, "odoo", None, "mydb") is False
 
-    def test_missing_host_uses_loopback_tcp(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """db_host=None must not silently select a Unix socket."""
+    def test_missing_host_preserves_unix_socket(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Restore tracking intentionally lets libpq select its Unix socket."""
         from odoo_instance_sdk.resources.database import _verify_database_via_psql
 
         captured: dict[str, object] = {}
@@ -532,7 +532,7 @@ class TestVerifyPsql:
         monkeypatch.setattr("subprocess.run", fake_run)
         result = _verify_database_via_psql(None, 5432, "odoo", None, "mydb")
         assert result is True
-        assert cast("list[str]", captured["cmd"])[1:3] == ["-h", "127.0.0.1"]
+        assert "-h" not in cast("list[str]", captured["cmd"])
 
 
 def test_missing_password_raises(instance_no_pwd: OdooInstance) -> None:

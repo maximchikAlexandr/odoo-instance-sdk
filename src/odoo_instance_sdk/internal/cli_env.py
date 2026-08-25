@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import Any, cast
@@ -67,7 +68,7 @@ _TABLE_CELL_WIDTH = 24
 
 def _table_cell(value: object) -> str:
     """Keep human table records single-line and bounded without affecting JSON."""
-    text = str(value).replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"[\r\n]+", " ", str(value))
     return text if len(text) <= _TABLE_CELL_WIDTH else f"{text[: _TABLE_CELL_WIDTH - 1]}…"
 
 
@@ -711,21 +712,40 @@ def _reconcile_environment(e: object, *, backup_ids: set[uuid.UUID]) -> dict[str
     observed = "unknown"
     if env.state == "ready":
         observed = "port-free" if cli_context._check_port_free(env) else "port-occupied"
+
+    def is_file(path: Path) -> bool:
+        try:
+            return path.is_file()
+        except OSError:
+            return False
+
+    def is_dir(path: Path) -> bool:
+        try:
+            return path.is_dir()
+        except OSError:
+            return False
+
     python_path = Path(env.python_environment_path)
     python_exists = (
-        (python_path / "bin" / "python").is_file()
+        is_file(python_path / "bin" / "python")
         if env.python_environment_owned
-        else python_path.is_file()
+        else is_file(python_path)
     )
     backup_exists_val = None if env.backup_id is None else env.backup_id in backup_ids
     lock_path = Path(env.dependency_lock_path)
-    fingerprint = (
-        hashlib.sha256(lock_path.read_bytes()).hexdigest() if lock_path.is_file() else None
-    )
-    root = Path(env.worktree_path).parent.resolve()
-    python_contained = not env.python_environment_owned or python_path.resolve().is_relative_to(
-        root
-    )
+    try:
+        fingerprint = (
+            hashlib.sha256(lock_path.read_bytes()).hexdigest() if is_file(lock_path) else None
+        )
+    except OSError:
+        fingerprint = None
+    try:
+        root = Path(env.worktree_path).parent.resolve()
+        python_contained = not env.python_environment_owned or python_path.resolve().is_relative_to(
+            root
+        )
+    except OSError:
+        python_contained = False
     return {
         **_env_dict(env),
         "source_database": env.source_db_name,
@@ -734,11 +754,11 @@ def _reconcile_environment(e: object, *, backup_ids: set[uuid.UUID]) -> dict[str
         "observed": observed,
         "python_mode": "create" if env.python_environment_owned else "reuse",
         "reconciliation": {
-            "worktree_exists": worktree.is_dir(),
+            "worktree_exists": is_dir(worktree),
             "worktree_registered": registered,
-            "config_exists": Path(env.generated_config_path).is_file(),
+            "config_exists": is_file(Path(env.generated_config_path)),
             "python_exists": python_exists,
-            "dependency_lock_exists": lock_path.is_file(),
+            "dependency_lock_exists": is_file(lock_path),
             "dependency_fingerprint": fingerprint,
             "backup_exists": backup_exists_val,
             "python_contained": python_contained,

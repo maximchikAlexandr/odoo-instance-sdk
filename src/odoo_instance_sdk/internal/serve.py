@@ -44,9 +44,7 @@ def _select_port(host: str, port: int | None) -> int:
     raise SystemExit("no free port in 8069, 8100-8120; specify --port")
 
 
-def create_app(  # noqa: C901
-    *, headless: bool, monitor: _SnapshotProvider | None = None
-) -> Any:
+def create_app(*, headless: bool, monitor: _SnapshotProvider | None = None) -> Any:
     """Build the FastAPI app. Imports fastapi lazily (dashboard extra).
 
     headless=True: API routes only, no static mount.
@@ -56,7 +54,7 @@ def create_app(  # noqa: C901
     from fastapi import FastAPI, Query, Request
     from fastapi.responses import JSONResponse, Response
 
-    from odoo_instance_sdk.exceptions import MonitorError, MonitorExtrasMissingError
+    from odoo_instance_sdk.exceptions import MonitorError
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
     # Keep the monitor (and its bounded caches) app-scoped rather than recreating
@@ -89,13 +87,6 @@ def create_app(  # noqa: C901
         try:
             with snapshot_lock:
                 snap = app_monitor.snapshot(project_id=project_id)
-        except MonitorExtrasMissingError as exc:
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "error": f"metrics extra required: pip install odoo-instance-sdk[metrics] ({exc})"
-                },
-            )
         except MonitorError:
             # ponytail: redacted — never leak paths/secrets; the dashboard only
             # needs to signal failure, not diagnose it.

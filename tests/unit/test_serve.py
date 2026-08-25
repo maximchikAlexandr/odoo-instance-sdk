@@ -405,7 +405,7 @@ def test_snapshot_project_filter_unknown() -> None:
         assert payload["environments"] == []
 
 
-def test_snapshot_monitor_error_500(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_snapshot_legacy_monitor_error_500(monkeypatch: pytest.MonkeyPatch) -> None:
     from odoo_instance_sdk.exceptions import MonitorError
     from odoo_instance_sdk.resources import monitor as monitor_mod
 
@@ -423,20 +423,19 @@ def test_snapshot_monitor_error_500(monkeypatch: pytest.MonkeyPatch) -> None:
         assert "boom" not in body["error"]
 
 
-def test_snapshot_extras_missing_500(monkeypatch: pytest.MonkeyPatch) -> None:
-    from odoo_instance_sdk.exceptions import MonitorExtrasMissingError
+def test_snapshot_monitor_error_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    from odoo_instance_sdk.exceptions import MonitorError
     from odoo_instance_sdk.resources import monitor as monitor_mod
 
     def boom(self: Any, project_id: str | None = None) -> Any:
-        raise MonitorExtrasMissingError("psutil missing")
+        raise MonitorError("process metrics unavailable")
 
     monkeypatch.setattr(monitor_mod.EnvironmentMonitor, "snapshot", boom)
     with _client(headless=True) as client:
         resp = client.get("/api/v1/snapshot")
         assert resp.status_code == 500
         body = resp.json()
-        assert "metrics" in body["error"]
-        assert "pip install odoo-instance-sdk[metrics]" in body["error"]
+        assert body["error"] == "monitor snapshot failed"
 
 
 def test_headless_no_static_mount() -> None:

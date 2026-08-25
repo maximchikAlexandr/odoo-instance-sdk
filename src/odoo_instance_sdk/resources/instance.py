@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO, cast
 
+import psutil
+
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
@@ -31,7 +33,8 @@ from odoo_instance_sdk.internal.server import (
     spawn_foreground_process,
     start_process,
     stop_process,
-    wait_foreground_process,
+    terminate_foreground_process,
+    wait_foreground_process_with_cleanup,
 )
 from odoo_instance_sdk.internal.urls import assert_local, normalize_base_url
 from odoo_instance_sdk.models import (
@@ -259,16 +262,9 @@ def _logfile_cursor_snapshot(handle: TextIO) -> tuple[int, bytes]:
 _FORBIDDEN_SHELL_FLAGS = ("-c", "--config", "-d", "--database")
 
 
-def _process_create_time(pid: int) -> float | None:
-    """Return an exact process identity, or ``None`` when it is unverifiable."""
-    try:
-        import psutil  # type: ignore[import-untyped]
-
-        return float(psutil.Process(pid).create_time())
-    except Exception:
-        # Never persist a wall-clock approximation: the monitor compares this
-        # value exactly to protect against PID reuse.
-        return None
+def _process_create_time(pid: int) -> float:
+    """Return the exact process identity used by runtime reconciliation."""
+    return float(psutil.Process(pid).create_time())
 
 
 def _worktree_ref(cwd: str | Path | None) -> tuple[str, str]:
@@ -430,9 +426,22 @@ class OdooInstance:
         proc = spawn_foreground_process(
             self._executable_prefix(), cli_args, cwd=resolved_cwd, env=env
         )
-        self._persist_runtime_identity(proc.pid, config, resolved_cwd)
+        # ``spawn_foreground_process`` uses ``start_new_session=True``.  The
+        # PID is consequently the owned process-group ID even if the leader
+        # exits before exceptional wait cleanup runs.
+        process_group_id = proc.pid
         try:
-            return wait_foreground_process(proc)
+            try:
+                self._persist_runtime_identity(proc.pid, config, resolved_cwd)
+            except BaseException:
+                # Runtime identity is mandatory for tracked instances.  Do not leave
+                # a child running when catalog/git/process inspection rejects it.
+                # Preserve the persistence exception even if best-effort
+                # process-group cleanup itself encounters an OS error.
+                with contextlib.suppress(BaseException):
+                    terminate_foreground_process(proc, process_group_id=process_group_id)
+                raise
+            return wait_foreground_process_with_cleanup(proc)
         finally:
             self._clear_runtime_identity()
 
@@ -442,28 +451,23 @@ class OdooInstance:
         config: StartConfig,
         cwd: str | Path | None,
     ) -> None:
-        """Best-effort persist of runtime identity; never raises into run_foreground."""
+        """Persist the exact runtime identity before foreground waiting begins."""
         if self._environment_id is None:
             return
-        try:
-            create_time = _process_create_time(root_pid)
-            if create_time is None:
-                return
-            checkout_branch, commit_sha = _worktree_ref(cwd)
-            http_url = f"http://{config.http_interface}:{config.http_port}"
-            self._client.get_catalog().upsert_environment_runtime(
-                self._environment_id,
-                root_pid=root_pid,
-                create_time=create_time,
-                started_at=datetime.now(UTC).isoformat(),
-                checkout_branch=checkout_branch,
-                commit_sha=commit_sha,
-                http_url=http_url,
-                http_port=config.http_port,
-                database_name=config.db_name or "",
-            )
-        except Exception as e:
-            print(f"failed to persist environment runtime: {e}", file=sys.stderr)
+        create_time = _process_create_time(root_pid)
+        checkout_branch, commit_sha = _worktree_ref(cwd)
+        http_url = f"http://{config.http_interface}:{config.http_port}"
+        self._client.get_catalog().upsert_environment_runtime(
+            self._environment_id,
+            root_pid=root_pid,
+            create_time=create_time,
+            started_at=datetime.now(UTC).isoformat(),
+            checkout_branch=checkout_branch,
+            commit_sha=commit_sha,
+            http_url=http_url,
+            http_port=config.http_port,
+            database_name=config.db_name or "",
+        )
 
     def _clear_runtime_identity(self) -> None:
         if self._environment_id is None:

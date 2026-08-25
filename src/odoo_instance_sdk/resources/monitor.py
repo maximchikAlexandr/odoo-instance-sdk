@@ -16,7 +16,6 @@ import httpx
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
     MonitorError,
-    MonitorExtrasMissingError,
     PostgresClusterError,
     ProjectManifestNotFoundError,
 )
@@ -92,7 +91,6 @@ class _ProjectPlan:
 
     project_id: str
     repo_root: Path
-    group_rows: list[sqlite3.Row]
     cluster: PostgresCluster | None
     state: PostgresClusterState | None
     environments: tuple[_EnvironmentPlan, ...]
@@ -169,7 +167,7 @@ def _stopped_runtime() -> RuntimeMetrics:
 class EnvironmentMonitor:
     """Read-only collector that assembles a typed ``Snapshot`` from the catalog.
 
-    Construction is cheap (no psutil import, no catalog open). ``snapshot()``
+    Construction is cheap (no catalog open). ``snapshot()``
     discovers environments from the catalog, groups them by ``git_common_dir``,
     resolves the project cluster, and collects per-environment runtime/git/storage
     with instance-level bounded caches. Component failures are isolated into
@@ -211,19 +209,6 @@ class EnvironmentMonitor:
 
     def snapshot(self, project_id: str | None = None) -> Snapshot:
         """Perform one coherent collection pass and return an immutable ``Snapshot``."""
-        # ``psutil`` is the metrics extra's required capability.  Validate it
-        # before catalog discovery so even an empty catalog has the same public
-        # dependency contract.  Explicit providers are a test seam and do not
-        # require the optional runtime dependency.
-        if self.process_provider is None:
-            try:
-                import psutil  # type: ignore[import-untyped]  # noqa: F401
-            except ImportError:
-                from odoo_instance_sdk.exceptions import MonitorExtrasMissingError
-
-                raise MonitorExtrasMissingError(
-                    "psutil is not installed; pip install odoo-instance-sdk[metrics]"
-                ) from None
         generated_at = datetime.now(UTC)
         db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
         try:
@@ -232,11 +217,11 @@ class EnvironmentMonitor:
             raise MonitorError("monitor catalog unavailable") from exc
 
         try:
-            plan = self._plan_snapshot(catalog)
+            plan = self._plan_snapshot(catalog, project_id=project_id)
         finally:
             catalog.close()
         resources, active_clusters = self._collect_cluster_resources(list(plan.projects))
-        projects, environments = self._collect_snapshot_rows(plan.projects, resources, project_id)
+        projects, environments = self._collect_snapshot_rows(plan.projects, resources)
         self._prune_caches(
             set(plan.environment_ids),
             set(plan.worktrees),
@@ -251,7 +236,9 @@ class EnvironmentMonitor:
             environments=environments,
         )
 
-    def _plan_snapshot(self, catalog: BackupCatalog) -> _SnapshotPlan:
+    def _plan_snapshot(
+        self, catalog: BackupCatalog, *, project_id: str | None = None
+    ) -> _SnapshotPlan:
         """Read catalog runtime once and derive deterministic project plans."""
         try:
             rows = catalog.list_environments_with_runtimes()
@@ -273,12 +260,16 @@ class EnvironmentMonitor:
         for git_common, environments in groups.items():
             first = environments[0].row
             repo_root = Path(str(first["repository_root"]))
+            resolved_project_id = f"project_{repo_key(repo_root, Path(git_common))}"
+            # Filtering is intentionally before manifest/status/Docker work.
+            # The catalog grouping and cache-pruning inputs remain cheap.
+            if project_id is not None and resolved_project_id != project_id:
+                continue
             cluster, state = self._project_cluster(repo_root, statuses)
             plans.append(
                 _ProjectPlan(
-                    f"project_{repo_key(repo_root, Path(git_common))}",
+                    resolved_project_id,
                     repo_root,
-                    [item.row for item in environments],
                     cluster,
                     state,
                     tuple(environments),
@@ -291,13 +282,6 @@ class EnvironmentMonitor:
             frozenset(statuses),
             frozenset(cpu_points),
         )
-
-    @staticmethod
-    def _runtime_for_row(catalog: BackupCatalog, row: sqlite3.Row) -> sqlite3.Row | None:
-        try:
-            return catalog.get_environment_runtime(str(row["id"]))
-        except (BackupCatalogError, sqlite3.Error) as exc:
-            raise MonitorError("catalog runtime lookup failed") from exc
 
     def _project_cluster(
         self, repo_root: Path, statuses: set[str]
@@ -313,18 +297,16 @@ class EnvironmentMonitor:
         self,
         plans: tuple[_ProjectPlan, ...],
         resources: dict[str, ClusterResourceSnapshot],
-        project_id: str | None,
     ) -> tuple[tuple[ProjectSummary, ...], tuple[EnvironmentSnapshot, ...]]:
-        selected = (plan for plan in plans if project_id is None or plan.project_id == project_id)
         projects: list[ProjectSummary] = []
         environments: list[EnvironmentSnapshot] = []
-        for plan in selected:
+        for plan in plans:
             projects.append(
                 ProjectSummary(
                     id=plan.project_id,
                     name=plan.repo_root.name,
                     display_hint=plan.project_id.removeprefix("project_"),
-                    environment_count=len(plan.group_rows),
+                    environment_count=len(plan.environments),
                     cluster=self._cluster_snapshot(plan, resources.get(plan.project_id)),
                 )
             )
@@ -528,8 +510,6 @@ class EnvironmentMonitor:
         # or psutil failure must not erase healthy siblings from the snapshot.
         try:
             runtime = self._collect_runtime(runtime_record)
-        except MonitorExtrasMissingError:
-            raise
         except Exception:
             runtime = _stopped_runtime()
 

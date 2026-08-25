@@ -40,7 +40,7 @@ class FakeDockerRunner:
         inspect_rc: int = 0,
         stats_lines: list[dict[str, object]] | None = None,
         stats_rc: int = 0,
-        volume_lines: list[dict[str, object]] | None = None,
+        volume_payload: object | None = None,
         requires_docker: bool = False,
     ) -> None:
         # Scripted runners never need host Docker unless a test explicitly
@@ -53,7 +53,7 @@ class FakeDockerRunner:
         self._inspect_rc = inspect_rc
         self._stats_lines = stats_lines if stats_lines is not None else []
         self._stats_rc = stats_rc
-        self._volume_lines = volume_lines if volume_lines is not None else []
+        self._volume_payload = volume_payload if volume_payload is not None else {"Volumes": []}
 
     def run(
         self,
@@ -74,7 +74,7 @@ class FakeDockerRunner:
             out = "\n".join(json.dumps(r) for r in self._stats_lines)
             return _cp(args, self._stats_rc, out, "" if self._stats_rc == 0 else "stats fail")
         if args[:3] == ["docker", "system", "df"]:
-            return _cp(args, 0, "\n".join(json.dumps(row) for row in self._volume_lines))
+            return _cp(args, 0, json.dumps(self._volume_payload))
         return _cp(args, 0, "", "")
 
 
@@ -105,7 +105,7 @@ def test_resource_snapshot_reads_named_volume_usage() -> None:
         ps_rows=[{"Service": "postgres", "ID": FULL_ID}],
         inspect_payload=[inspect],
         stats_lines=[_healthy_stats()],
-        volume_lines=[{"Name": "odcli_pg_x_data", "Size": "1.5GiB"}],
+        volume_payload={"Volumes": [{"Name": "odcli_pg_x_data", "Size": "1.5GiB"}]},
     )
     snap = cluster_resources.cluster_resource_snapshot(
         compose_file=Path("/tmp/compose.yaml"),
@@ -116,6 +116,37 @@ def test_resource_snapshot_reads_named_volume_usage() -> None:
     )
     assert snap.metrics is not None
     assert snap.metrics.volume_usage_bytes == int(1.5 * 1024**3)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("volume_payload", "expected"),
+    [
+        ({"Volumes": [{"Name": "another", "Size": "1GiB"}]}, None),
+        ({"Volumes": [{"Name": "odcli_pg_x_data", "Size": "broken"}]}, None),
+        ({"Volumes": "not-an-array"}, None),
+    ],
+)
+def test_resource_snapshot_named_volume_payload_degrades_per_volume(
+    volume_payload: object, expected: int | None
+) -> None:
+    inspect = _healthy_inspect()
+    inspect["Mounts"] = [{"Type": "volume", "Name": "odcli_pg_x_data"}]
+    runner = FakeDockerRunner(
+        ps_rows=[{"Service": "postgres", "ID": FULL_ID}],
+        inspect_payload=[inspect],
+        stats_lines=[_healthy_stats()],
+        volume_payload=volume_payload,
+    )
+    snap = cluster_resources.cluster_resource_snapshot(
+        compose_file=Path("/tmp/compose.yaml"),
+        compose_project_name="odcli_pg_x",
+        service="postgres",
+        runner=runner,
+        state=PostgresClusterState.HEALTHY,
+    )
+    assert snap.metrics is not None
+    assert snap.metrics.volume_usage_bytes == expected
 
 
 def _healthy_stats() -> dict[str, object]:

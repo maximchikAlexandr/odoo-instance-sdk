@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import os
+import signal
 import sys
 import uuid
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
+from odoo_instance_sdk.internal.process_metrics import collect_process_tree
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -230,7 +233,7 @@ def test_clear_on_crash_exception_propagates(env_id: str, tmp_path: Path) -> Non
 
     boom = RuntimeError("wait blew up")
     with (
-        patch("odoo_instance_sdk.resources.instance.wait_foreground_process", side_effect=boom),
+        patch("odoo_instance_sdk.internal.server.wait_foreground_process", side_effect=boom),
         pytest.raises(RuntimeError, match="wait blew up"),
     ):
         inst.run_foreground()
@@ -253,7 +256,7 @@ def test_clear_on_keyboard_interrupt(env_id: str, tmp_path: Path) -> None:
 
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.wait_foreground_process",
+            "odoo_instance_sdk.internal.server.wait_foreground_process",
             side_effect=KeyboardInterrupt,
         ),
         pytest.raises(KeyboardInterrupt),
@@ -279,8 +282,8 @@ def test_manual_instance_no_persist_no_clear(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_psutil_fallback_does_not_persist_unverifiable_pid_identity(
-    env_id: str, tmp_path: Path
+def test_core_psutil_persists_exact_identity(
+    env_id: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
@@ -293,21 +296,49 @@ def test_psutil_fallback_does_not_persist_unverifiable_pid_identity(
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
     )
 
-    # psutil is not installed in this env, so the fallback path is exercised
-    # naturally. Block any injected psutil to be explicit.
-    saved = sys.modules.pop("psutil", None)
-    try:
-        with patch.dict(sys.modules, {"psutil": None}):
-            inst.run_foreground()
-    finally:
-        if saved is not None:
-            sys.modules["psutil"] = saved
-
-    assert fake.upsert_calls == []
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance._process_create_time", lambda _: 123.0
+    )
+    assert inst.run_foreground() == 0
+    assert fake.upsert_calls[0][1]["create_time"] == 123.0
 
 
 @pytest.mark.unit
-def test_persist_failure_does_not_break_run_foreground(env_id: str, tmp_path: Path) -> None:
+def test_persisted_live_identity_is_accepted_by_default_process_collector(
+    env_id: str, tmp_path: Path
+) -> None:
+    """The writer and default collector must share psutil's exact clock."""
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    catalog = _FakeCatalog()
+    inst = _make_tracked_instance(
+        client=_client_with_catalog(catalog),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(60)"),
+    )
+
+    def inspect_live_identity(proc: Any) -> int:
+        assert len(catalog.upsert_calls) == 1
+        identity = catalog.upsert_calls[0][1]
+        result = collect_process_tree(
+            cast("int", identity["root_pid"]),
+            cast("float", identity["create_time"]),
+            prev_cpu_point=None,
+        )
+        assert result is not None
+        proc.terminate()
+        return cast("int", proc.wait(timeout=5))
+
+    with patch(
+        "odoo_instance_sdk.internal.server.wait_foreground_process",
+        side_effect=inspect_live_identity,
+    ):
+        assert inst.run_foreground() == -signal.SIGTERM
+
+
+@pytest.mark.unit
+def test_persist_failure_aborts_run_but_still_clears_runtime(env_id: str, tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     fake = _FakeCatalog(upsert_raises=RuntimeError("catalog down"))
@@ -316,11 +347,50 @@ def test_persist_failure_does_not_break_run_foreground(env_id: str, tmp_path: Pa
         client=client,
         env_id=env_id,
         cwd=wt,
-        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(60)"),
     )
 
-    exit_code = inst.run_foreground()
+    spawned: list[object] = []
+    from odoo_instance_sdk.internal.server import spawn_foreground_process as spawn
 
-    assert exit_code == 0
-    # clear still attempted in finally despite persist failure
+    def record_spawn(*args: Any, **kwargs: Any) -> Any:
+        proc = spawn(*args, **kwargs)
+        spawned.append(proc)
+        return proc
+
+    with (
+        patch("odoo_instance_sdk.resources.instance.spawn_foreground_process", record_spawn),
+        pytest.raises(RuntimeError, match="catalog down"),
+    ):
+        inst.run_foreground()
+
+    # Clear is attempted even when mandatory persistence fails.
+    assert fake.clear_calls == [env_id]
+    proc = cast("Any", spawned[0])
+    assert proc.poll() is not None
+    with pytest.raises(ProcessLookupError):
+        os.kill(proc.pid, 0)
+
+
+@pytest.mark.unit
+def test_persist_failure_preserves_original_error_when_cleanup_fails(
+    env_id: str, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    fake = _FakeCatalog(upsert_raises=RuntimeError("catalog down"))
+    inst = _make_tracked_instance(
+        client=_client_with_catalog(fake),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+    )
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.terminate_foreground_process",
+            side_effect=OSError("cleanup failed"),
+        ),
+        pytest.raises(RuntimeError, match="catalog down"),
+    ):
+        inst.run_foreground()
     assert fake.clear_calls == [env_id]

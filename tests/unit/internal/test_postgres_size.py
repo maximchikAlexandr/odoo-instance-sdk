@@ -32,7 +32,7 @@ def test_database_size_uses_safe_argv_environment_and_escaping(
         )
         == 123
     )
-    assert captured["args"][:7] == ["psql", "-h", "127.0.0.1", "-p", "5432", "-U", "odoo"]
+    assert captured["args"][:8] == ["psql", "-X", "-h", "127.0.0.1", "-p", "5432", "-U", "odoo"]
     assert "db''o" in captured["args"][-1]
     assert captured["env"]["PGPASSWORD"] == "secret"
     assert captured["shell"] is False
@@ -59,7 +59,7 @@ def test_database_size_defaults_to_tcp_loopback_and_accepts_custom_timeout(
         )
         == 123
     )
-    assert seen["args"][:3] == ["psql", "-h", "127.0.0.1"]
+    assert seen["args"][:4] == ["psql", "-X", "-h", "127.0.0.1"]
     assert seen["timeout"] == 1.5
     assert "PGPASSWORD" not in seen["env"]
 

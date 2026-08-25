@@ -23,7 +23,9 @@ def database_size_bytes(
         return None
     escaped = database_name.replace("'", "''")
     proc = run_psql(
-        host=host,
+        # Monitor collection requires explicit loopback TCP.  The shared
+        # transport preserves host=None for restore tracking's Unix socket.
+        host=host if host is not None else "127.0.0.1",
         port=port,
         user=user,
         password=password,

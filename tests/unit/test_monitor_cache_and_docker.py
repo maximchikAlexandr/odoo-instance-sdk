@@ -37,7 +37,7 @@ from tests.unit.monitor_support import (
 
 @pytest.fixture(autouse=True)
 def _inject_process_provider_for_core_monitor_tests(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Docker/Git contracts do not require the optional psutil implementation."""
+    """Docker/Git contracts inject process collection to stay narrowly focused."""
     original_init = EnvironmentMonitor.__init__
 
     def init(self: EnvironmentMonitor, *args: object, **kwargs: object) -> None:

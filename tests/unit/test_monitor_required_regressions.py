@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from odoo_instance_sdk.exceptions import BackupCatalogError, MonitorError, MonitorExtrasMissingError
+from odoo_instance_sdk.exceptions import BackupCatalogError, MonitorError
 from odoo_instance_sdk.internal.process_metrics import CpuPoint, ProcessTreeResult
 from odoo_instance_sdk.models import RuntimeState
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
@@ -26,7 +26,7 @@ from tests.unit.monitor_support import (
 
 @pytest.fixture(autouse=True)
 def _inject_process_provider_for_core_monitor_tests(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These regressions isolate monitor behavior from the metrics extra."""
+    """These regressions isolate process collection from unrelated behavior."""
     original_init = EnvironmentMonitor.__init__
 
     def init(self: EnvironmentMonitor, *args: object, **kwargs: object) -> None:
@@ -67,9 +67,7 @@ def test_projects_sort_by_id_even_when_paths_sort_inversely(
     assert [project.name for project in snapshot.projects] == ["z-path", "a-path"]
 
 
-def test_process_failure_is_local_but_missing_metrics_extra_is_global(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_process_failure_is_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     catalog = make_catalog(tmp_path)
     first, second = str(uuid.uuid4()), str(uuid.uuid4())
     for env_id, pid in ((first, 11), (second, 22)):
@@ -106,17 +104,6 @@ def test_process_failure_is_local_but_missing_metrics_extra_is_global(
     runtimes = {env.runtime.root_pid: env.runtime for env in snapshot.environments}
     assert runtimes[None].state is RuntimeState.STOPPED
     assert runtimes[22].state is RuntimeState.READY
-
-    class ExtrasProvider:
-        def collect(
-            self, root_pid: int, create_time: float, *, prev_cpu_point: CpuPoint | None
-        ) -> tuple[ProcessTreeResult, CpuPoint] | None:
-            raise MonitorExtrasMissingError("metrics missing")
-
-    with pytest.raises(MonitorExtrasMissingError):
-        EnvironmentMonitor(
-            catalog_path=tmp_path / "catalog.sqlite3", process_provider=ExtrasProvider()
-        ).snapshot()
 
 
 def test_catalog_paths_are_redacted_from_public_monitor_error(

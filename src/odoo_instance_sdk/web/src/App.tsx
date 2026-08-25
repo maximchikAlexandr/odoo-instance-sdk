@@ -49,10 +49,11 @@ export default function App() {
     let nextAt = Date.now();
     const poll = async () => {
       await load();
-      nextAt += POLL_MS;
-      // Fixed cadence avoids interval drift while serial polling guarantees
-      // no overlapping fetches. A slow request coalesces missed ticks.
-      if (!cancelled) timeout = setTimeout(() => void poll(), Math.max(0, nextAt - Date.now()));
+      // Keep the wall-clock cadence while serial execution prevents overlap.
+      // Slow requests skip missed slots and resume at the first future slot.
+      const now = Date.now();
+      do nextAt += POLL_MS; while (nextAt <= now);
+      if (!cancelled) timeout = setTimeout(() => void poll(), nextAt - now);
     };
     setLoading(true);
     void poll();
