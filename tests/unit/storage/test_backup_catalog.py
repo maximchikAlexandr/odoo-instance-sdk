@@ -10,6 +10,7 @@ import pytest
 from odoo_instance_sdk.exceptions import BackupNotAvailableError, BackupNotFoundError
 from odoo_instance_sdk.models import Backup, BackupFormat, BackupValidationStatus
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from tests.unit.monitor_support import make_env, runtime_kwargs
 
 
 def _create_backup_file(tmp_path: Path, name: str = "backup.zip") -> Path:
@@ -56,6 +57,62 @@ def test_schema_creation(tmp_path: Path) -> None:
     assert "backups" in table_names
     assert "backup_events" in table_names
     catalog.close()
+
+
+def test_monitor_rows_use_one_wal_snapshot_during_concurrent_runtime_commit(tmp_path: Path) -> None:
+    """The production monitor read is consistent if a writer commits mid-read."""
+    db_path = tmp_path / "catalog.sqlite3"
+    reader = BackupCatalog(db_path=db_path)
+    reader._conn.execute("PRAGMA journal_mode=WAL")
+    env_id = _u("monitor-snapshot")
+    reader.create_environment(make_env(env_id))
+    reader.upsert_environment_runtime(env_id, **runtime_kwargs(root_pid=101))  # type: ignore[arg-type]
+    writer = BackupCatalog(db_path=db_path)
+    writer._conn.execute("PRAGMA journal_mode=WAL")
+    connection = reader._conn
+
+    class _CommitAfterFirstFetch:
+        def __init__(self, cursor: sqlite3.Cursor) -> None:
+            self._cursor = cursor
+            self._committed = False
+
+        def fetchall(self) -> list[sqlite3.Row]:
+            rows = self._cursor.fetchall()
+            if not self._committed:
+                self._committed = True
+                writer.upsert_environment_runtime(
+                    env_id,
+                    root_pid=202,
+                    create_time=1700000000.0,
+                    started_at="2026-01-01T00:00:00",
+                    checkout_branch="main",
+                    commit_sha="abc123def456",
+                    http_url="http://127.0.0.1:8069",
+                    http_port=8069,
+                    database_name="mydb",
+                )
+            return rows
+
+    class _ConnectionWithMidReadCommit:
+        def execute(self, sql: str) -> sqlite3.Cursor | _CommitAfterFirstFetch:
+            cursor = connection.execute(sql)
+            if sql.startswith("SELECT * FROM environments"):
+                return _CommitAfterFirstFetch(cursor)
+            return cursor
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(connection, name)
+
+    reader._conn = _ConnectionWithMidReadCommit()  # type: ignore[assignment]
+    rows = reader.list_environments_with_runtimes()
+    assert rows[0][0]["id"] == env_id
+    assert rows[0][1] is not None
+    assert rows[0][1]["root_pid"] == 101
+    current = writer.get_environment_runtime(env_id)
+    assert current is not None
+    assert current["root_pid"] == 202
+    writer.close()
+    reader.close()
 
 
 def test_start_download_records_event(tmp_path: Path) -> None:
@@ -304,7 +361,7 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
     assert "database_events" in tables
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 8
+    assert version == 9
 
     # Existing backups table still works
     path = _create_backup_file(tmp_path, "migrated.zip")
@@ -380,7 +437,7 @@ def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None
     assert event_row["event_type"] == "download_started"
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 8
+    assert version == 9
 
     catalog.close()
 
@@ -389,12 +446,12 @@ def test_schema_creation_v2_reopen(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     catalog = BackupCatalog(db_path=db)
     version1 = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version1 == 8
+    assert version1 == 9
     catalog.close()
 
     catalog2 = BackupCatalog(db_path=db)
     version2 = catalog2._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version2 == 8
+    assert version2 == 9
     tables = {
         r[0]
         for r in catalog2._conn.execute(

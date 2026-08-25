@@ -114,8 +114,8 @@ odcli vscode generate [OPTIONS]
 
 ### Requirement: Command-specific context rules
 
-- `env checkout BRANCH`, default `env list` и `doctor` требуют project context;
-- `env list --all-projects` читает durable global registry из любой directory и не требует project; default list ограничен current project, а `--all` означает include removed;
+- `env checkout BRANCH` и `doctor` требуют project context;
+- `env list` вне project context эквивалентен `env list --all-projects` и читает durable global registry; `--all` означает include removed;
 - lifecycle `env sync/remove [ENVIRONMENT]` используют positional selector; без него команда разрешена только из exact registered worktree. Root `--env` с lifecycle command — usage error;
 - root context options `--project`/`--env` должны появляться в resolved plan/JSON provenance как `explicit` или `cwd`; поле `defaulted` для environment не используется.
 

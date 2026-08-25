@@ -53,6 +53,7 @@ from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.urls import assert_local
 from odoo_instance_sdk.models import Backup, BackupFormat
+from odoo_instance_sdk.models import EnvironmentState as _EnvironmentState
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize_db_host
 
@@ -63,16 +64,10 @@ if TYPE_CHECKING:
 
 EnvironmentSelector = Union[str, "DevelopmentEnvironment"]
 
+# Re-export the dependency-neutral contract for backwards-compatible imports.
+EnvironmentState = _EnvironmentState
+
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-class EnvironmentState(enum.StrEnum):
-    CREATING = "creating"
-    READY = "ready"
-    FAILED = "failed"
-    REMOVING = "removing"
-    CLEANUP_FAILED = "cleanup_failed"
-    REMOVED = "removed"
 
 
 class EnvironmentDatabaseMode(enum.StrEnum):

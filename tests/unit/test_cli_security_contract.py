@@ -9,6 +9,20 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.resources.environment import EnvironmentState
+from tests.unit.monitor_support import FakeProcessProvider
+
+
+@pytest.fixture(autouse=True)
+def _inject_monitor_process_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+
+    original_init = EnvironmentMonitor.__init__
+
+    def init(self: EnvironmentMonitor, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("process_provider", FakeProcessProvider())
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(EnvironmentMonitor, "__init__", init)
 
 
 @pytest.mark.parametrize(
@@ -121,15 +135,33 @@ def test_run_and_shell_sanitize_runtime_exception(command: str, method: str) -> 
 def test_env_list_is_read_only_through_public_resources() -> None:
     runner = CliRunner()
     client = MagicMock()
-    client.environments.list.return_value = []
     client.backups.list.return_value = []
-    with patch("odoo_instance_sdk.internal.cli_env.OdooClient", return_value=client):
+    # New contract: env list delegates to EnvironmentMonitor.snapshot(); patch
+    # it to avoid the real catalog and assert the CLI body itself does not
+    # touch client.get_catalog() or write environment events.
+    from datetime import UTC, datetime
+
+    from odoo_instance_sdk.models import Snapshot
+
+    empty_snapshot = Snapshot(
+        schema_version=1, generated_at=datetime.now(UTC), projects=(), environments=()
+    )
+    with (
+        patch("odoo_instance_sdk.internal.cli_env.OdooClient", return_value=client),
+        patch(
+            "odoo_instance_sdk.internal.cli_env.EnvironmentMonitor.snapshot",
+            return_value=empty_snapshot,
+        ),
+    ):
         result = runner.invoke(cli, ["env", "list", "--all-projects", "--json"])
 
     assert result.exit_code == 0, result.output
-    client.environments.list.assert_called_once_with(project=None, include_removed=False)
-    client.backups.list.assert_called_once_with()
+    # The CLI body no longer calls client.environments.list / client.backups.list
+    # for the JSON path (the monitor owns discovery). It must not open the
+    # catalog through the client or write environment events.
+    client.environments.list.assert_not_called()
     client.get_catalog.assert_not_called()
+    client.environments.record_use.assert_not_called()
 
 
 def test_run_records_use_once_before_foreground_start() -> None:

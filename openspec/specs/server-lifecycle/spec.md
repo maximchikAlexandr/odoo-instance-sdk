@@ -48,10 +48,12 @@ Process registry (зарегистрированные `OdooProcess` и subproce
 - блокироваться до завершения Odoo и возвращать exit code;
 - на Ctrl+C корректно остановить owned process group.
 
+После spawn (только для instance bound к environment через `from_environment()`) `run_foreground()` MUST persist current runtime identity в catalog `environment_runtime` (`root_pid`, `create_time`, `started_at`, branch/commit, `http_url`/`http_port`, `database_name`). В `finally` MUST очистить runtime identity (`clear_environment_runtime`) best-effort. Manual instance — без persist. `shell()`/`run_shell_script()`/`start()`/`stop()` — без persist (только `run_foreground`).
+
 #### Scenario: Foreground run with explicit config
 
 - **WHEN** `instance.run_foreground(config=cfg)` and Odoo exits with code 0
-- **THEN** returns `0`
+- **THEN** returns `0`, runtime identity is cleared in catalog `finally`
 
 #### Scenario: Foreground run uses start_config
 
@@ -66,7 +68,17 @@ Process registry (зарегистрированные `OdooProcess` и subproce
 #### Scenario: Ctrl+C stops process group
 
 - **WHEN** `instance.run_foreground()` получает Ctrl+C
-- **THEN** owned process group stopped, CLI exits 130
+- **THEN** owned process group stopped, runtime identity cleared in `finally`, CLI exits 130
+
+#### Scenario: Manual instance does not persist runtime identity
+
+- **WHEN** `client.instance("http://localhost:8069").run_foreground()` (no environment_id)
+- **THEN** no `environment_runtime` row is written or cleared
+
+#### Scenario: Shell does not persist runtime identity
+
+- **WHEN** `instance.shell()` executes
+- **THEN** no `environment_runtime` row is written (only `run_foreground` persists identity)
 
 ### Requirement: `OdooInstance.iter_logs()`
 

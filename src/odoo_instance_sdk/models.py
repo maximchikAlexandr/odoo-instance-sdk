@@ -9,6 +9,15 @@ from typing import Literal, cast
 
 import msgspec
 
+type ClusterUnavailabilityReason = Literal[
+    "external_not_owned",
+    "stopped",
+    "missing",
+    "docker_unavailable",
+    "inspect_failed",
+    "stats_failed",
+]
+
 
 class BackupFormat(enum.StrEnum):
     ZIP = "zip"
@@ -55,6 +64,17 @@ class BackupValidationStatus(enum.StrEnum):
     VALID = "valid"
     INVALID = "invalid"
     UNAVAILABLE = "unavailable"
+
+
+class EnvironmentState(enum.StrEnum):
+    """Persisted lifecycle state shared by catalog and monitor contracts."""
+
+    CREATING = "creating"
+    READY = "ready"
+    FAILED = "failed"
+    REMOVING = "removing"
+    CLEANUP_FAILED = "cleanup_failed"
+    REMOVED = "removed"
 
 
 class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -262,3 +282,146 @@ class RestoreResult(msgspec.Struct):
 
 class DropResult(msgspec.Struct):
     db: str
+
+
+class RuntimeState(enum.StrEnum):
+    STOPPED = "stopped"
+    READY = "ready"
+    NOT_READY = "not_ready"
+
+
+class GitActivityState(enum.StrEnum):
+    CLEAN = "clean"
+    AHEAD = "ahead"
+    BEHIND = "behind"
+    DIVERGED = "diverged"
+    ORPHAN = "orphan"
+
+
+class PidScope(enum.StrEnum):
+    HOST = "host"
+    DOCKER_VM = "docker_vm"
+    UNAVAILABLE = "unavailable"
+
+
+class GitDiff(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    added: int
+    deleted: int
+
+
+class GitActivity(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    default_branch: str
+    head_sha: str | None
+    short_sha: str | None
+    branch: str
+    ahead: int | None
+    behind: int | None
+    diff: GitDiff | None
+    state: GitActivityState
+
+
+class PythonEnvFootprint(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    owned: bool
+    bytes: int | None
+
+
+class DatabaseFootprint(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    owned: bool
+    postgres_bytes: int | None
+    filestore_bytes: int | None
+    total_bytes: int | None
+
+
+class StorageFootprint(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    total_bytes: int
+    complete: bool
+    worktree_bytes: int | None
+    python_environment: PythonEnvFootprint
+    database: DatabaseFootprint
+    other_files_bytes: int | None
+
+
+class RuntimeMetrics(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    state: RuntimeState
+    root_pid: int | None
+    child_pids: tuple[int, ...]
+    process_count: int
+    cpu_percent: float | None
+    rss_bytes: int | None
+    started_at: datetime | None
+    http_url: str | None
+    http_port: int | None
+    database_name: str | None
+    commit_sha: str | None
+    branch: str | None
+
+
+class ClusterContainer(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    id: str | None
+    name: str | None
+    image: str | None
+    pid: int | None
+    pid_scope: PidScope
+
+
+class ClusterMetrics(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    cpu_percent: float | None
+    memory_usage_bytes: int | None
+    memory_limit_bytes: int | None
+    volume_usage_bytes: int | None
+    sampled_at: datetime | None
+
+
+class ClusterEndpoint(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    host: str
+    port: int
+
+
+class ClusterResourceSnapshot(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    container: ClusterContainer | None
+    metrics: ClusterMetrics | None
+    unavailability_reason: ClusterUnavailabilityReason | None
+    sampled_at: datetime | None
+
+
+class ClusterSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    mode: Literal["external", "compose"]
+    owned: bool
+    state: PostgresClusterState
+    endpoint: ClusterEndpoint | None
+    container: ClusterContainer | None
+    metrics: ClusterMetrics | None
+    unavailability_reason: ClusterUnavailabilityReason | None
+    sampled_at: datetime | None
+
+
+class EnvironmentSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    id: str
+    project_id: str
+    name: str
+    branch: str
+    short_sha: str | None
+    db_mode: Literal["shared", "copy"]
+    database: str | None
+    lifecycle_state: EnvironmentState
+    allocated_http_port: int | None
+    runtime: RuntimeMetrics
+    git: GitActivity
+    storage: StorageFootprint
+
+
+class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    id: str
+    name: str
+    display_hint: str
+    environment_count: int
+    cluster: ClusterSnapshot | None
+
+
+class Snapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    schema_version: int
+    generated_at: datetime
+    projects: tuple[ProjectSummary, ...]
+    environments: tuple[EnvironmentSnapshot, ...]

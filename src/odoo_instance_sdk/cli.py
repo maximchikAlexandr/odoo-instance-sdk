@@ -2,19 +2,18 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, cast
 
 import click
+import msgspec
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     LogfileAccessError,
-    OdooInstanceSdkError,
     VscodeImportError,
 )
 from odoo_instance_sdk.internal import context as cli_context
@@ -32,6 +31,13 @@ from odoo_instance_sdk.internal.cli_env import env_group
 from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail, sanitize_diagnostic
 from odoo_instance_sdk.internal.doctor import DoctorReport, run_doctor
 from odoo_instance_sdk.internal.port_allocation import find_free_port
+from odoo_instance_sdk.internal.postgres_cli import (
+    cluster_snapshot,
+    emit_postgres_result,
+    print_status,
+    run_postgres_command,
+    status_exit_code,
+)
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.vscode_generate import (
     build_launch_profile,
@@ -900,47 +906,6 @@ def postgres_group() -> None:
     """Project-level PostgreSQL cluster lifecycle (read-only / idempotent)."""
 
 
-def _resolve_cluster(ctx: click.Context, json_output: bool) -> PostgresCluster:
-    project_path = cli_context.resolve_project_path(ctx)
-    try:
-        return PostgresCluster.from_project(project_path)
-    except OdooInstanceSdkError as e:
-        fail(json_output, "postgres", str(e))
-
-
-_PostgresCommandResult = TypeVar("_PostgresCommandResult")
-
-
-def _run_postgres_command(
-    ctx: click.Context,
-    *,
-    command: str,
-    json_output: bool,
-    operation: Callable[[PostgresCluster], _PostgresCommandResult],
-) -> tuple[PostgresCluster, _PostgresCommandResult]:
-    """Resolve a cluster and give every postgres subcommand one error envelope."""
-    cluster = _resolve_cluster(ctx, json_output)
-    try:
-        return cluster, operation(cluster)
-    except SystemExit:
-        raise
-    except Exception as exc:
-        fail(json_output, command, str(exc))
-
-
-def _emit_postgres_result(
-    *, cluster: PostgresCluster, state: PostgresClusterState, command: str, json_output: bool
-) -> None:
-    diag = dict(cluster.to_diagnostic_dict())
-    diag["state"] = state.value
-    if json_output:
-        emit_json_envelope(ok=True, command=command, result=diag)
-    else:
-        click.echo(
-            f"mode={cluster.mode} owned={cluster.owned} state={state.value} endpoint={cluster.endpoint}"
-        )
-
-
 @postgres_group.command("approve-image")
 @click.option("--image-digest", required=True, help="Exact OCI RepoDigest shown by Docker.")
 @click.option(
@@ -956,7 +921,7 @@ def postgres_approve_image(
     ctx: click.Context, image_digest: str, timeout: float, json_output: bool
 ) -> None:
     """Approve the current compose image in the local, non-repository trust store."""
-    cluster, _ = _run_postgres_command(
+    cluster, _ = run_postgres_command(
         ctx,
         command="postgres.approve-image",
         json_output=json_output,
@@ -980,16 +945,18 @@ def postgres_approve_image(
 @click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
 @click.pass_context
 def postgres_status(ctx: click.Context, json_output: bool) -> None:
-    cluster, state = _run_postgres_command(
+    cluster, state = run_postgres_command(
         ctx,
         command="postgres.status",
         json_output=json_output,
         operation=lambda candidate: candidate.status(),
     )
-    _emit_postgres_result(
-        cluster=cluster, state=state, command="postgres.status", json_output=json_output
-    )
-    sys.exit(0 if state is PostgresClusterState.HEALTHY else 1)
+    snapshot = cluster_snapshot(cluster, state)
+    if json_output:
+        emit_json_envelope(ok=True, command="postgres.status", result=msgspec.to_builtins(snapshot))
+    else:
+        print_status(snapshot)
+    sys.exit(status_exit_code(snapshot))
 
 
 @postgres_group.command("up")
@@ -1007,10 +974,10 @@ def postgres_up(ctx: click.Context, wait_timeout: float, json_output: bool) -> N
         candidate.ensure_running(timeout=wait_timeout)
         return candidate.status()
 
-    cluster, state = _run_postgres_command(
+    cluster, state = run_postgres_command(
         ctx, command="postgres.up", json_output=json_output, operation=ensure
     )
-    _emit_postgres_result(
+    emit_postgres_result(
         cluster=cluster, state=state, command="postgres.up", json_output=json_output
     )
     sys.exit(0)
@@ -1031,13 +998,34 @@ def postgres_stop(ctx: click.Context, timeout: float, json_output: bool) -> None
         candidate.stop(timeout=timeout)
         return candidate.status()
 
-    cluster, state = _run_postgres_command(
+    cluster, state = run_postgres_command(
         ctx, command="postgres.stop", json_output=json_output, operation=stop
     )
-    _emit_postgres_result(
+    emit_postgres_result(
         cluster=cluster, state=state, command="postgres.stop", json_output=json_output
     )
     sys.exit(0)
+
+
+@cli.command("monitor")
+@click.option("--headless", is_flag=True, default=False, help="Serve API only, no UI/browser.")
+@click.option(
+    "--host", default="127.0.0.1", help="Loopback bind address (127.0.0.1, localhost, or ::1)."
+)
+@click.option(
+    "--port", type=int, default=None, help="Exact port (else auto-select 8069 or 8100-8120)."
+)
+@click.option("--no-open", is_flag=True, default=False, help="Do not open a browser.")
+@click.pass_context
+def monitor_cmd(
+    ctx: click.Context, headless: bool, host: str, port: int | None, no_open: bool
+) -> None:
+    """Start the observability monitor (FastAPI + React UI)."""
+    from odoo_instance_sdk.internal.serve import run_server
+
+    # run_server raises SystemExit with an actionable hint if the dashboard
+    # extra (fastapi/uvicorn) is missing; that propagates as exit 1.
+    run_server(host=host, port=port, headless=headless, no_open=no_open)
 
 
 def _resolve_odoo_bin(

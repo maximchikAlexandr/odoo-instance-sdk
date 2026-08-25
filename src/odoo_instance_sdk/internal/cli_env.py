@@ -2,23 +2,74 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import Any, cast
 
 import click
+import msgspec
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import OdooClientConfig
+from odoo_instance_sdk.exceptions import ProjectContextError
 from odoo_instance_sdk.internal import context as cli_context
+from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail
-from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
+from odoo_instance_sdk.internal.git_worktree import (
+    rev_parse_git_common_dir,
+    rev_parse_toplevel,
+    worktree_list_porcelain,
+)
+from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.models import (
+    ClusterMetrics,
+    ClusterSnapshot,
+    EnvironmentSnapshot,
+    GitActivity,
+    GitActivityState,
+    PidScope,
+    PostgresClusterState,
+    ProjectSummary,
+    RuntimeMetrics,
+    RuntimeState,
+    Snapshot,
+    StorageFootprint,
+)
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
+    EnvironmentState,
     _CheckoutPlan,
 )
+from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+
+_ENV_LIST_COLUMNS = (
+    "NAME",
+    "BRANCH",
+    "STATE",
+    "RUNTIME",
+    "OBSERVED",
+    "ODOO_PID",
+    "CPU",
+    "RAM",
+    "GIT_AHEAD",
+    "GIT_DIFF",
+    "SIZE",
+    "DB_MODE",
+    "DATABASE",
+    "PORT",
+    "ARTIFACTS",
+)
+_TABLE_CELL_WIDTH = 24
+
+
+def _table_cell(value: object) -> str:
+    """Keep human table records single-line and bounded without affecting JSON."""
+    text = re.sub(r"[\r\n]+", " ", str(value))
+    return text if len(text) <= _TABLE_CELL_WIDTH else f"{text[: _TABLE_CELL_WIDTH - 1]}…"
 
 
 @click.group()
@@ -124,25 +175,339 @@ def env_checkout(
 def env_list(ctx: click.Context, all_envs: bool, all_projects: bool, json_output: bool) -> None:
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     try:
-        project = None if all_projects else cli_context.resolve_project_path(ctx)
-        envs = client.environments.list(project=project, include_removed=all_envs)
+        project_id = _resolve_monitor_project_id(ctx, all_projects)
+        monitor = EnvironmentMonitor()
+        snapshot = monitor.snapshot(project_id=project_id)
     except Exception as e:
         fail(json_output, "env.list", str(e))
+
     if json_output:
-        backup_ids = {backup.id for backup in client.backups.list()}
-        data = {"environments": [_reconcile_environment(e, backup_ids=backup_ids) for e in envs]}
+        # ponytail: --json always wraps the non-removed Snapshot only; --all does
+        # NOT change the JSON payload. msgspec round-trips enums/datetimes to
+        # plain JSON-safe builtins.
+        result = msgspec.to_builtins(snapshot)
         emit_json_envelope(
             ok=True,
             command="env.list",
-            result=data,
+            result=result,
             provenance={
                 "project_source": "null" if all_projects else ctx.obj.get("project_source", "null"),
                 "environment_source": "null",
             },
         )
-    else:
-        backup_ids = {backup.id for backup in client.backups.list()}
-        _print_env_table(envs, backup_ids=backup_ids)
+        return
+
+    # Human output: grouped by project, with cluster summary + environment rows.
+    backup_ids = {backup.id for backup in client.backups.list()}
+    _print_env_list_human(
+        client,
+        snapshot,
+        backup_ids=backup_ids,
+        all_envs=all_envs,
+        all_projects=all_projects,
+        project_id=project_id,
+    )
+
+
+def _resolve_monitor_project_id(ctx: click.Context, all_projects: bool) -> str | None:
+    if all_projects:
+        return None
+    # Outside a project, ``env list`` is the cross-project listing; this keeps
+    # the command useful from a neutral working directory.
+    try:
+        project_path = cli_context.resolve_project_path(ctx)
+    except ProjectContextError:
+        return None
+    repo_root = rev_parse_toplevel(project_path)
+    git_common = rev_parse_git_common_dir(repo_root)
+    return f"project_{repo_key(repo_root, git_common)}"
+
+
+def _print_env_list_human(
+    client: OdooClient,
+    snapshot: Snapshot,
+    *,
+    backup_ids: set[uuid.UUID],
+    all_envs: bool,
+    all_projects: bool,
+    project_id: str | None,
+) -> None:
+    envs_by_project: dict[str, list[EnvironmentSnapshot]] = {}
+    for env in snapshot.environments:
+        envs_by_project.setdefault(env.project_id, []).append(env)
+
+    # A context-resolved listing is a project view, including its removed rows;
+    # only --all-projects may surface removed rows from other projects.
+    visible_project_ids = None if all_projects or project_id is None else {project_id}
+    removed_by_project = (
+        _removed_environments_by_project(client, visible_project_ids) if all_envs else {}
+    )
+
+    printed_ids: set[str] = set()
+    for project in snapshot.projects:
+        printed_ids.add(project.id)
+        _print_project_header(project)
+        click.echo("  ".join(_ENV_LIST_COLUMNS))
+        project_envs = envs_by_project.get(project.id, [])
+        for env in project_envs:
+            catalog_env = _lookup_catalog_env(client, env.id)
+            click.echo(_format_env_row(env, catalog_env, backup_ids=backup_ids))
+        for env_obj in sorted(removed_by_project.get(project.id, []), key=lambda item: item.name):
+            click.echo(_format_removed_row(env_obj, backup_ids=backup_ids))
+
+    _print_removed_only_projects(removed_by_project, printed_ids, backup_ids)
+
+
+def _removed_environments_by_project(
+    client: OdooClient,
+    visible_project_ids: set[str] | None = None,
+) -> dict[str, list[DevelopmentEnvironment]]:
+    grouped: dict[str, list[DevelopmentEnvironment]] = {}
+    try:
+        environments = client.environments.list(include_removed=True)
+    except Exception:
+        return grouped
+    for env_obj in environments:
+        if env_obj.state != EnvironmentState.REMOVED:
+            continue
+        project_id = (
+            f"project_{repo_key(Path(env_obj.repository_root), Path(env_obj.git_common_dir))}"
+        )
+        if visible_project_ids is not None and project_id not in visible_project_ids:
+            continue
+        grouped.setdefault(project_id, []).append(env_obj)
+    return grouped
+
+
+def _print_removed_only_projects(
+    removed_by_project: dict[str, list[DevelopmentEnvironment]],
+    printed_ids: set[str],
+    backup_ids: set[uuid.UUID],
+) -> None:
+    """Render removed-only projects which are absent from the live snapshot."""
+    for project_id in sorted(set(removed_by_project) - printed_ids):
+        env_objs = removed_by_project[project_id]
+        click.echo(f"Project {Path(env_objs[0].repository_root).name}")
+        click.echo("  PostgreSQL  —")
+        for env_obj in sorted(env_objs, key=lambda item: item.name):
+            click.echo(_format_removed_row(env_obj, backup_ids=backup_ids))
+
+
+def _print_project_header(project: ProjectSummary) -> None:
+    click.echo(f"Project {project.name}")
+    cluster = project.cluster
+    if cluster is None:
+        click.echo("  PostgreSQL  —")
+        return
+    click.echo(_cluster_summary_line(cluster))
+
+
+def _cluster_summary_line(cluster: ClusterSnapshot) -> str:
+    parts = ["  PostgreSQL", cluster.state.value]
+    if cluster.unavailability_reason and cluster.unavailability_reason not in {
+        "external_not_owned"
+    }:
+        parts.append(cluster.unavailability_reason)
+        return "  ".join(parts)
+    parts.extend(_cluster_identity_parts(cluster))
+    parts.extend(_cluster_metrics_parts(cluster.metrics))
+    return "  ".join(parts)
+
+
+def _cluster_identity_parts(cluster: ClusterSnapshot) -> list[str]:
+    out: list[str] = []
+    container = cluster.container
+    if container is not None and container.id is not None:
+        out.append(f"container={container.id[:12]}")
+        if container.pid is not None:
+            scope_prefix = "vm" if container.pid_scope is PidScope.DOCKER_VM else "host"
+            out.append(f"pid={scope_prefix}:{container.pid}")
+    elif cluster.mode == "external":
+        out.append("external")
+    elif cluster.state is PostgresClusterState.STOPPED:
+        out.append("stopped")
+    elif cluster.container is None:
+        out.append("missing")
+    return out
+
+
+def _cluster_metrics_parts(metrics: ClusterMetrics | None) -> list[str]:
+    if metrics is None:
+        return []
+    out: list[str] = []
+    if metrics.cpu_percent is not None:
+        out.append(f"cpu={metrics.cpu_percent:.1f}%")
+    if metrics.memory_usage_bytes is not None:
+        out.append(f"ram={_human_bytes(metrics.memory_usage_bytes)}")
+    if metrics.volume_usage_bytes is not None:
+        out.append(f"disk={_human_bytes(metrics.volume_usage_bytes)}")
+    return out
+
+
+def _lookup_catalog_env(client: OdooClient, env_id: str) -> DevelopmentEnvironment | None:
+    try:
+        return client.environments.get(env_id)
+    except Exception:
+        return None
+
+
+def _format_env_row(
+    env: EnvironmentSnapshot,
+    catalog_env: DevelopmentEnvironment | None,
+    *,
+    backup_ids: set[uuid.UUID],
+) -> str:
+    name = env.name
+    branch = env.branch
+    state = env.lifecycle_state.value
+    runtime = _runtime_str(env.runtime.state)
+    observed = _observed_str(env, catalog_env)
+    odoo_pid = _odoo_pid_str(env.runtime)
+    cpu = f"{env.runtime.cpu_percent:.1f}%" if env.runtime.cpu_percent is not None else "—"
+    ram = _human_bytes(env.runtime.rss_bytes) if env.runtime.rss_bytes is not None else "—"
+    git_ahead = _git_ahead_str(env.git)
+    git_diff = _git_diff_str(env.git)
+    size = _size_str(env.storage)
+    port = _port_str(env)
+    database = env.database or ""
+    artifacts = _artifacts_str(catalog_env, backup_ids=backup_ids)
+    return "  ".join(
+        _table_cell(value)
+        for value in (
+            name,
+            branch,
+            state,
+            runtime,
+            observed,
+            odoo_pid,
+            cpu,
+            ram,
+            git_ahead,
+            git_diff,
+            size,
+            env.db_mode,
+            database,
+            port,
+            artifacts,
+        )
+    )
+
+
+def _format_removed_row(env_obj: DevelopmentEnvironment, *, backup_ids: set[uuid.UUID]) -> str:
+    artifacts = _artifacts_str(env_obj, backup_ids=backup_ids)
+    db = (
+        env_obj.source_db_name
+        if env_obj.db_mode == EnvironmentDatabaseMode.SHARED
+        else env_obj.target_db_name
+    )
+    port = "—"
+    try:
+        from odoo_instance_sdk.models import StartConfig
+
+        parsed = StartConfig.from_odoo_config(str(env_obj.generated_config_path))
+        if parsed.http_port is not None:
+            port = str(parsed.http_port)
+    except Exception:
+        pass
+    # Keep the canonical 15-column shape even though removed rows have no
+    # monitor metrics.  This is deliberately positional for shell users.
+    return "  ".join(
+        _table_cell(value)
+        for value in (
+            env_obj.name,
+            env_obj.branch,
+            "removed",
+            "—",
+            "—",
+            "—",
+            "—",
+            "—",
+            "—",
+            "—",
+            "—",
+            env_obj.db_mode,
+            db or "",
+            port,
+            artifacts,
+        )
+    )
+
+
+def _runtime_str(state: RuntimeState) -> str:
+    return state.value
+
+
+def _observed_str(env: EnvironmentSnapshot, catalog_env: DevelopmentEnvironment | None) -> str:
+    if env.lifecycle_state != EnvironmentState.READY:
+        return "—"
+    if env.runtime.state != RuntimeState.READY:
+        return "—"
+    if env.allocated_http_port is None or catalog_env is None:
+        return "—"
+    interface = catalog_env.http_interface
+    port = env.allocated_http_port
+    return "port-free" if _probe_port_free(interface, port) else "port-occupied"
+
+
+def _probe_port_free(interface: str, port: int) -> bool:
+    # ponytail: thin shim over probe_address; reused from cli_context to avoid
+    # building a fake env object just to call _check_port_free.
+    return probe_address(interface, port) is AddressState.FREE
+
+
+def _odoo_pid_str(runtime: RuntimeMetrics) -> str:
+    if runtime.state == RuntimeState.STOPPED or runtime.root_pid is None:
+        return "—"
+    child = len(runtime.child_pids)
+    return f"{runtime.root_pid} (+{child})" if child else str(runtime.root_pid)
+
+
+def _git_ahead_str(git: GitActivity) -> str:
+    if git.state == GitActivityState.ORPHAN or git.ahead is None or git.behind is None:
+        return "—"
+    return f"↑{git.ahead} ↓{git.behind}"
+
+
+def _git_diff_str(git: GitActivity) -> str:
+    if git.diff is None:
+        return "—"
+    return f"+{git.diff.added} -{git.diff.deleted}"
+
+
+def _size_str(storage: StorageFootprint) -> str:
+    prefix = ">=" if not storage.complete else ""
+    return f"{prefix}{_human_bytes(storage.total_bytes)}"
+
+
+def _port_str(env: EnvironmentSnapshot) -> str:
+    if env.runtime.state in (RuntimeState.READY, RuntimeState.NOT_READY):
+        return str(env.runtime.http_port) if env.runtime.http_port is not None else "—"
+    return str(env.allocated_http_port) if env.allocated_http_port is not None else "—"
+
+
+def _artifacts_str(
+    catalog_env: DevelopmentEnvironment | None, *, backup_ids: set[uuid.UUID]
+) -> str:
+    if catalog_env is None:
+        return "—"
+    data = _reconcile_environment(catalog_env, backup_ids=backup_ids)
+    reconciliation = data["reconciliation"]
+    return (
+        ",".join(
+            name
+            for name, value in (
+                ("worktree", reconciliation["worktree_exists"]),
+                ("registered", reconciliation["worktree_registered"]),
+                ("config", reconciliation["config_exists"]),
+                ("python", reconciliation["python_exists"]),
+                ("python-contained", reconciliation["python_contained"]),
+                ("lock", reconciliation["dependency_lock_exists"]),
+                ("backup", reconciliation["backup_exists"]),
+            )
+            if value is False
+        )
+        or "ok"
+    )
 
 
 @env_group.command("remove")
@@ -347,21 +712,40 @@ def _reconcile_environment(e: object, *, backup_ids: set[uuid.UUID]) -> dict[str
     observed = "unknown"
     if env.state == "ready":
         observed = "port-free" if cli_context._check_port_free(env) else "port-occupied"
+
+    def is_file(path: Path) -> bool:
+        try:
+            return path.is_file()
+        except OSError:
+            return False
+
+    def is_dir(path: Path) -> bool:
+        try:
+            return path.is_dir()
+        except OSError:
+            return False
+
     python_path = Path(env.python_environment_path)
     python_exists = (
-        (python_path / "bin" / "python").is_file()
+        is_file(python_path / "bin" / "python")
         if env.python_environment_owned
-        else python_path.is_file()
+        else is_file(python_path)
     )
     backup_exists_val = None if env.backup_id is None else env.backup_id in backup_ids
     lock_path = Path(env.dependency_lock_path)
-    fingerprint = (
-        hashlib.sha256(lock_path.read_bytes()).hexdigest() if lock_path.is_file() else None
-    )
-    root = Path(env.worktree_path).parent.resolve()
-    python_contained = not env.python_environment_owned or python_path.resolve().is_relative_to(
-        root
-    )
+    try:
+        fingerprint = (
+            hashlib.sha256(lock_path.read_bytes()).hexdigest() if is_file(lock_path) else None
+        )
+    except OSError:
+        fingerprint = None
+    try:
+        root = Path(env.worktree_path).parent.resolve()
+        python_contained = not env.python_environment_owned or python_path.resolve().is_relative_to(
+            root
+        )
+    except OSError:
+        python_contained = False
     return {
         **_env_dict(env),
         "source_database": env.source_db_name,
@@ -370,47 +754,13 @@ def _reconcile_environment(e: object, *, backup_ids: set[uuid.UUID]) -> dict[str
         "observed": observed,
         "python_mode": "create" if env.python_environment_owned else "reuse",
         "reconciliation": {
-            "worktree_exists": worktree.is_dir(),
+            "worktree_exists": is_dir(worktree),
             "worktree_registered": registered,
-            "config_exists": Path(env.generated_config_path).is_file(),
+            "config_exists": is_file(Path(env.generated_config_path)),
             "python_exists": python_exists,
-            "dependency_lock_exists": lock_path.is_file(),
+            "dependency_lock_exists": is_file(lock_path),
             "dependency_fingerprint": fingerprint,
             "backup_exists": backup_exists_val,
             "python_contained": python_contained,
         },
     }
-
-
-def _print_env_table(envs: list[Any], *, backup_ids: set[uuid.UUID]) -> None:
-    rows: list[str] = []
-    for e in envs:
-        data = _reconcile_environment(e, backup_ids=backup_ids)
-        db = data["source_database"] if e.db_mode == "shared" else data["target_database"]
-        reconciliation = data["reconciliation"]
-        artifacts = (
-            ",".join(
-                name
-                for name, value in (
-                    ("worktree", reconciliation["worktree_exists"]),
-                    ("registered", reconciliation["worktree_registered"]),
-                    ("config", reconciliation["config_exists"]),
-                    ("python", reconciliation["python_exists"]),
-                    ("python-contained", reconciliation["python_contained"]),
-                    ("lock", reconciliation["dependency_lock_exists"]),
-                    ("backup", reconciliation["backup_exists"]),
-                )
-                if value is False
-            )
-            or "ok"
-        )
-        rows.append(
-            f"{e.id}  {e.name}  {e.state}  {data['observed']}  {e.branch}  "
-            f"{data['python_mode']}  {e.db_mode}  {db or ''}  {e.http_port}  "
-            f"{artifacts}  {data['last_used'] or ''}  {e.worktree_path}"
-        )
-    click.echo(
-        "ID  NAME  STATE  OBSERVED  BRANCH  PYTHON_MODE  DB_MODE  DATABASE  PORT  ARTIFACTS  LAST_USED  WORKTREE"
-    )
-    for r in rows:
-        click.echo(r)

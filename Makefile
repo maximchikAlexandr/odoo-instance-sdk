@@ -1,11 +1,11 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help lint types test targeted coverage mutation package compat live pr
+.PHONY: help lint types test targeted coverage mutation package compat dashboard smoke live pr
 
-OFFLINE := not real_odoo and not packaging
+OFFLINE := not real_odoo and not packaging and not dashboard
 
 help:
-	@printf '%s\n' 'make lint|types|test|targeted|coverage|mutation|package|compat|live|pr'
+	@printf '%s\n' 'make lint|types|test|targeted|coverage|mutation|package|compat|dashboard|smoke|live|pr'
 
 lint:
 	uv run ruff format --check .
@@ -36,6 +36,7 @@ mutation:
 
 package:
 	rm -rf dist
+	cd src/odoo_instance_sdk/web && npm ci && npm run build
 	uv build
 	@test "$$(find dist -maxdepth 1 -name '*.whl' | wc -l | tr -d ' ')" -eq 1
 	@test "$$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l | tr -d ' ')" -eq 1
@@ -46,6 +47,13 @@ compat:
 		-m "$(OFFLINE) and not serial" -n auto --dist loadscope
 	uv run pytest -o addopts="" -q --tb=short --strict-markers -m "serial and $(OFFLINE)"
 
+dashboard:
+	cd src/odoo_instance_sdk/web && npm ci && npm test && npm run build
+	uv run pytest -q -o addopts='' -m dashboard
+
+smoke:
+	uv run pytest -q tests/integration/test_monitor_smoke.py -o addopts='' -m integration
+
 live:
 	@if [ "$$ODCLI_REAL_ODOO_ENABLE" != "1" ]; then \
 		printf '%s\n' 'make live requires ODCLI_REAL_ODOO_ENABLE=1 and ODCLI_REAL_PROJECT, ODCLI_REAL_ODOO_BIN, ODCLI_REAL_PYTHON, ODCLI_REAL_CONFIG, ODCLI_REAL_DATABASE'; \
@@ -53,4 +61,4 @@ live:
 	fi
 	uv run pytest -o addopts="" -v --tb=short --strict-markers -m real_odoo
 
-pr: lint types test package
+pr: lint types test compat dashboard smoke package

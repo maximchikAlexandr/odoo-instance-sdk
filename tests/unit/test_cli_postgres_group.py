@@ -110,7 +110,7 @@ def test_postgres_status_compose_json(tmp_path: Path) -> None:
     root = _write_project(tmp_path)
     runner = CliRunner()
     result = runner.invoke(cli, ["--project", str(root), "postgres", "status", "--json"])
-    assert result.exit_code == 1  # STOPPED → exit 1
+    assert result.exit_code == 0  # STOPPED → diagnostic exit 0
     envelope = json.loads(result.output)
     assert envelope["ok"] is True
     assert envelope["command"] == "postgres.status"
@@ -257,7 +257,7 @@ def test_postgres_status_resolves_project_without_arg(
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
     result = runner.invoke(cli, ["postgres", "status", "--json"], catch_exceptions=False)
-    assert result.exit_code == 1
+    assert result.exit_code == 0  # STOPPED → diagnostic exit 0
     assert json.loads(result.output)["command"] == "postgres.status"
 
 

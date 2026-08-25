@@ -42,7 +42,7 @@ from odoo_instance_sdk.internal.postgres_compose import (
     write_compose_file_atomic,
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
-from odoo_instance_sdk.models import PostgresClusterState, StartConfig
+from odoo_instance_sdk.models import ClusterResourceSnapshot, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 
 _DEFAULT_TIMEOUT = 60.0
@@ -161,6 +161,14 @@ class PostgresCluster:
         return f"{host}:{self._endpoint_port}"
 
     @property
+    def endpoint_host(self) -> str:
+        return self._endpoint_host
+
+    @property
+    def endpoint_port(self) -> int:
+        return self._endpoint_port
+
+    @property
     def compose_file(self) -> Path:
         """Managed compose artifact path, exposed for operational cleanup tooling."""
         return self._compose_file()
@@ -168,6 +176,11 @@ class PostgresCluster:
     @property
     def compose_project_name(self) -> str:
         return compose_project_name(self._project_id)
+
+    @property
+    def compose_runner(self) -> ComposeRunner:
+        """Read-only command boundary used by monitoring collectors."""
+        return self._compose_runner
 
     @property
     def password_file(self) -> Path:
@@ -402,6 +415,25 @@ class PostgresCluster:
             "image": self._image if self.owned else None,
             "user": self._user if self.owned else None,
         }
+
+    def resource_snapshot(self) -> ClusterResourceSnapshot | None:
+        """Read-only container identity + resource metrics. External → None.
+
+        No lifecycle lock, no start/stop. Compose clusters resolve the
+        container via `docker compose ps` then batch `docker inspect`/`docker
+        stats --no-stream` through the internal cache helper.
+        """
+        if self._mode == "external":
+            return None
+        from odoo_instance_sdk.internal.cluster_resources import cluster_resource_snapshot
+
+        return cluster_resource_snapshot(
+            compose_file=self._compose_file(),
+            compose_project_name=self.compose_project_name,
+            service="postgres",
+            runner=self._compose_runner,
+            state=self.status(),
+        )
 
 
 __all__ = ["PostgresCluster"]

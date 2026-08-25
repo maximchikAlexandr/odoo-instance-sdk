@@ -3,8 +3,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
-import shutil
-import subprocess
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -83,42 +81,22 @@ def _verify_database_via_psql(
       * ``None``  — inconclusive: psql not in PATH, returned non-zero, or
                     timed out. Callers MUST NOT treat this as a drop.
     """
-    if db_user is None:
-        return None
     if "\\" in database_name:
         return None
-    if shutil.which("psql") is None:
-        return None
-    env = os.environ.copy()
-    if db_password is not None:
-        env["PGPASSWORD"] = db_password
+    from odoo_instance_sdk.internal.postgres_transport import run_psql
+
     escaped = database_name.replace("'", "''")
-    cmd = ["psql"]
-    if db_host is not None:
-        cmd.extend(["-h", db_host])
-    cmd.extend(
-        [
-            "-p",
-            str(db_port),
-            "-U",
-            db_user,
-            "-d",
-            "postgres",
-            "-t",
-            "-A",
-            "-c",
-            f"SELECT 1 FROM pg_database WHERE datname='{escaped}'",
-        ]
+    proc = run_psql(
+        host=db_host,
+        port=db_port,
+        user=db_user,
+        password=db_password,
+        query=f"SELECT 1 FROM pg_database WHERE datname='{escaped}'",
+        timeout=30,
     )
-    try:
-        proc = subprocess.run(
-            cmd, env=env, capture_output=True, text=True, timeout=30, shell=False, check=False
-        )
-        if proc.returncode != 0:
-            return None
-        return bool(proc.stdout.strip())
-    except subprocess.TimeoutExpired:
+    if proc is None or proc.returncode != 0:
         return None
+    return bool(proc.stdout.strip())
 
 
 @dataclass(slots=True, kw_only=True)

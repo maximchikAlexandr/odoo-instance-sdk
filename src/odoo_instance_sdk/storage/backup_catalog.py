@@ -28,7 +28,7 @@ from odoo_instance_sdk.models import (
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 
 class CopyJournalStage(StrEnum):
@@ -114,6 +114,9 @@ class BackupCatalog:
         conn.commit()
 
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        self._run_migrations(conn, user_version)
+
+    def _run_migrations(self, conn: sqlite3.Connection, user_version: int) -> None:
         if user_version < 2:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS restores (
@@ -248,23 +251,7 @@ class BackupCatalog:
             conn.commit()
             user_version = 6
         if user_version < 7:
-            # A port is a global host resource.  Never silently mark a live
-            # environment removed merely to make an index creation succeed.
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(environments)")}
-            if {"state", "http_port", "created_at"} <= columns:
-                duplicate = conn.execute(
-                    "SELECT http_port FROM environments WHERE state <> 'removed' "
-                    "GROUP BY http_port HAVING COUNT(*) > 1 LIMIT 1"
-                ).fetchone()
-                if duplicate is not None:
-                    raise BackupCatalogError(
-                        f"catalog has multiple active environments reserving port {duplicate[0]}; "
-                        "resolve the conflict before upgrading"
-                    )
-                conn.execute(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS environments_one_active_port "
-                    "ON environments(http_port) WHERE state <> 'removed'"
-                )
+            self._migrate_v7_one_active_port(conn)
             conn.execute("PRAGMA user_version = 7")
             conn.commit()
             user_version = 7
@@ -273,6 +260,46 @@ class BackupCatalog:
             conn.execute("PRAGMA user_version = 8")
             conn.commit()
             user_version = 8
+        if user_version < 9:
+            self._migrate_v9_environment_runtime(conn)
+            conn.execute("PRAGMA user_version = 9")
+            conn.commit()
+            user_version = 9
+
+    def _migrate_v9_environment_runtime(self, conn: sqlite3.Connection) -> None:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS environment_runtime (
+                environment_id TEXT PRIMARY KEY REFERENCES environments(id),
+                root_pid INTEGER NOT NULL,
+                create_time REAL NOT NULL,
+                started_at TEXT NOT NULL,
+                checkout_branch TEXT NOT NULL,
+                commit_sha TEXT NOT NULL,
+                http_url TEXT NOT NULL,
+                http_port INTEGER NOT NULL,
+                database_name TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+        """)
+
+    def _migrate_v7_one_active_port(self, conn: sqlite3.Connection) -> None:
+        # A port is a global host resource.  Never silently mark a live
+        # environment removed merely to make an index creation succeed.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(environments)")}
+        if {"state", "http_port", "created_at"} <= columns:
+            duplicate = conn.execute(
+                "SELECT http_port FROM environments WHERE state <> 'removed' "
+                "GROUP BY http_port HAVING COUNT(*) > 1 LIMIT 1"
+            ).fetchone()
+            if duplicate is not None:
+                raise BackupCatalogError(
+                    f"catalog has multiple active environments reserving port {duplicate[0]}; "
+                    "resolve the conflict before upgrading"
+                )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS environments_one_active_port "
+                "ON environments(http_port) WHERE state <> 'removed'"
+            )
 
     def _migrate_v8_drop_http_port(self, conn: sqlite3.Connection) -> None:
         """Drop catalog HTTP columns; generated odoo.conf is the source of truth.
@@ -833,6 +860,85 @@ class BackupCatalog:
             (git_common_dir, branch),
         ).fetchone()
         return row
+
+    @_translate_sqlite_error
+    def get_environment_runtime(self, environment_id: str) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM environment_runtime WHERE environment_id = ?",
+            (environment_id,),
+        ).fetchone()
+        return row
+
+    @_translate_sqlite_error
+    def list_environment_runtimes(self) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT * FROM environment_runtime ORDER BY environment_id"
+        ).fetchall()
+
+    @_translate_sqlite_error
+    def list_environments_with_runtimes(self) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
+        """Read monitor rows and runtime identities from one SQLite snapshot."""
+        self._conn.execute("BEGIN")
+        try:
+            environments = self._conn.execute(
+                "SELECT * FROM environments WHERE state != 'removed' ORDER BY created_at DESC, id DESC"
+            ).fetchall()
+            runtimes = self._conn.execute(
+                "SELECT * FROM environment_runtime ORDER BY environment_id"
+            ).fetchall()
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        by_environment = {str(runtime["environment_id"]): runtime for runtime in runtimes}
+        return [(row, by_environment.get(str(row["id"]))) for row in environments]
+
+    @_translate_sqlite_error
+    def upsert_environment_runtime(
+        self,
+        environment_id: str,
+        *,
+        root_pid: int,
+        create_time: float,
+        started_at: str,
+        checkout_branch: str,
+        commit_sha: str,
+        http_url: str,
+        http_port: int,
+        database_name: str,
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO environment_runtime
+               (environment_id, root_pid, create_time, started_at, checkout_branch,
+                commit_sha, http_url, http_port, database_name, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(environment_id) DO UPDATE SET
+                 root_pid=excluded.root_pid, create_time=excluded.create_time,
+                 started_at=excluded.started_at, checkout_branch=excluded.checkout_branch,
+                 commit_sha=excluded.commit_sha, http_url=excluded.http_url,
+                 http_port=excluded.http_port, database_name=excluded.database_name,
+                 updated_at=excluded.updated_at""",
+            (
+                environment_id,
+                root_pid,
+                create_time,
+                started_at,
+                checkout_branch,
+                commit_sha,
+                http_url,
+                http_port,
+                database_name,
+            ),
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def clear_environment_runtime(self, environment_id: str) -> None:
+        self._conn.execute(
+            "DELETE FROM environment_runtime WHERE environment_id = ?",
+            (environment_id,),
+        )
+        self._conn.commit()
 
     def _add_event(
         self,
