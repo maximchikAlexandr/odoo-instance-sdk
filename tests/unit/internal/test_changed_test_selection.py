@@ -242,7 +242,8 @@ def test_git_output_limit_terminates_real_child_immediately(
     fake_git = fake_bin / "git"
     fake_git.write_text(
         "#!/bin/sh\n"
-        "trap 'printf terminated > \"$GIT_TERM_MARKER\"; exit 0' TERM INT\n"
+        'trap \'printf terminated > "${GIT_TERM_MARKER}.tmp"; '
+        'mv "${GIT_TERM_MARKER}.tmp" "$GIT_TERM_MARKER"; exit 0\' TERM INT\n'
         "while :; do printf '%s' "
         f"'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'{redirect}; done\n"
     )
