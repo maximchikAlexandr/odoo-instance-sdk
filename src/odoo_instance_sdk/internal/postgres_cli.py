@@ -3,11 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TypeVar
 
-import click
-
-from odoo_instance_sdk.internal import context as cli_context
+from odoo_instance_sdk.commands.context import CliContext, resolve_project_path
+from odoo_instance_sdk.commands.output import OutputMode, emit_json_envelope, fail, rich_print
 from odoo_instance_sdk.internal.cli_format import human_bytes
-from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail
 from odoo_instance_sdk.models import (
     ClusterContainer,
     ClusterEndpoint,
@@ -22,32 +20,32 @@ _PostgresCommandResult = TypeVar("_PostgresCommandResult")
 
 
 def run_postgres_command(
-    ctx: click.Context,
+    ctx: CliContext,
     *,
     command: str,
-    json_output: bool,
+    output_mode: OutputMode,
     operation: Callable[[PostgresCluster], _PostgresCommandResult],
 ) -> tuple[PostgresCluster, _PostgresCommandResult]:
     """Resolve a cluster and run one postgres command under the CLI envelope."""
     try:
-        cluster = PostgresCluster.from_project(cli_context.resolve_project_path(ctx))
+        cluster = PostgresCluster.from_project(resolve_project_path(ctx))
         return cluster, operation(cluster)
     except SystemExit:
         raise
     except Exception as exc:
-        fail(json_output, command, str(exc))
+        fail(output_mode, command, str(exc))
     raise AssertionError("fail always exits")
 
 
 def emit_postgres_result(
-    *, cluster: PostgresCluster, state: PostgresClusterState, command: str, json_output: bool
+    *, cluster: PostgresCluster, state: PostgresClusterState, command: str, output_mode: OutputMode
 ) -> None:
     diag = dict(cluster.to_diagnostic_dict())
     diag["state"] = state.value
-    if json_output:
-        emit_json_envelope(ok=True, command=command, result=diag)
+    if output_mode is not OutputMode.RICH:
+        emit_json_envelope(ok=True, command=command, result=diag, mode=output_mode)
     else:
-        click.echo(
+        rich_print(
             f"mode={cluster.mode} owned={cluster.owned} state={state.value} endpoint={cluster.endpoint}"
         )
 
@@ -130,4 +128,4 @@ def print_status(snapshot: ClusterSnapshot) -> None:
             parts.append(f"ram={human_bytes(metrics.memory_usage_bytes)}")
         if metrics.volume_usage_bytes is not None:
             parts.append(f"disk={human_bytes(metrics.volume_usage_bytes)}")
-    click.echo("  ".join(parts))
+    rich_print("  ".join(parts))

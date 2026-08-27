@@ -396,7 +396,7 @@ def test_catalog_error_raises_monitor_error(
     from odoo_instance_sdk.exceptions import BackupCatalogError
     from odoo_instance_sdk.storage import backup_catalog as bc_mod
 
-    def _boom(self: BackupCatalog) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
+    def _boom(self: BackupCatalog, **_: object) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
         raise BackupCatalogError("sqlite boom")
 
     monkeypatch.setattr(bc_mod.BackupCatalog, "list_environments_with_runtimes", _boom)
@@ -421,7 +421,7 @@ def test_catalog_atomic_read_error_aborts_snapshot(
     _seed_env(catalog, _make_env(env_id, worktree_path=str(worktree)))
     catalog.close()
 
-    def boom(self: BackupCatalog) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
+    def boom(self: BackupCatalog, **_: object) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
         raise BackupCatalogError("sqlite unavailable")
 
     monkeypatch.setattr(BackupCatalog, "list_environments_with_runtimes", boom)

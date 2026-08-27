@@ -38,6 +38,32 @@ result = instance.wait_ready(proc, timeout=60.0)
 print(f"Ready: {result.ok} in {result.elapsed:.1f}s")
 ```
 
+## CLI output and environment inventory
+
+The installed `odcli` command keeps `odoo_instance_sdk.cli:cli` as its stable
+Click entry point. Structured output is selected locally on supported leaves
+with `--format rich|json|toon`; Rich is the default. The existing `--json`
+option is an alias for `--format json`. Supplying `--json` with `--format json`
+is accepted; other combinations are usage errors.
+
+The format option is available on `init`, `doctor`, `env checkout`, `env list`,
+`env remove`, `env sync`, `eval`, `exec`, `module list`, `module update`,
+`module test`, `translations export`, `deps verify`, `vscode generate`, and
+`postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`.
+TOON is a machine-readable single-document output mode for these commands;
+JSON and TOON contain the same sanitized envelope data.
+
+`odcli env list --watch --interval 2.0` refreshes the Rich inventory in the
+foreground. Watch mode requires an interactive TTY and rejects machine output;
+the interval must be at least `0.1` seconds. Rich `--all` includes removed
+environments. JSON/TOON `--all` retain the active-only compatibility behavior.
+The root command, `run`, interactive shell (`shell`), and `logs --follow` intentionally
+do not accept document formats or a Rich live wrapper.
+
+The public monitor snapshot uses additive schema v2 fields `observed_port` and
+`artifacts`; existing version-1 fields retain their meanings. The CLI envelope
+version remains independent and is still v1.
+
 ### Database operations
 
 ```python

@@ -10,7 +10,7 @@ from click.testing import CliRunner, Result
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.config import InstanceConfig
-from odoo_instance_sdk.exceptions import InstanceConfigurationError
+from odoo_instance_sdk.exceptions import InstanceConfigurationError, LogfileAccessError
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
@@ -246,8 +246,25 @@ def test_cli_logs_file_errors_write_only_stderr(tmp_path: Path, is_directory: bo
     result = _invoke_logs(instance=instance)
     assert result.exit_code == 1
     assert result.stdout == ""
-    assert str(logfile) in result.stderr
+    assert str(logfile) not in result.stderr
+    assert "<path>" in result.stderr
     assert "set logfile" in result.stderr
+
+
+def test_cli_logs_file_error_neutralizes_terminal_controls() -> None:
+    instance = MagicMock()
+    instance.iter_logs.side_effect = LogfileAccessError(
+        "evil\x00\x1b[31m\x9b2J\x7f.log", "not readable"
+    )
+
+    result = _invoke_logs(instance=instance)
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "evil\\x00\\x1b[31m\\x9b2J\\x7f.log" in result.stderr
+    assert "not readable" in result.stderr
+    assert not any(ord(char) < 32 and char != "\n" for char in result.stderr)
+    assert not any(127 <= ord(char) <= 159 for char in result.stderr)
 
 
 def test_cli_logs_keyboard_interrupt_exits_130() -> None:
@@ -303,7 +320,7 @@ def test_cli_logs_resolves_registered_worktree_without_ready_instance_mock(
     logfile = Path(env.generated_config_path).parent / "odoo.log"
     logfile.write_text("from-worktree\n")
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: env_client
+        "odoo_instance_sdk.commands.context.OdooClient", lambda **_kwargs: env_client
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.git_worktree.rev_parse_toplevel",
@@ -341,7 +358,7 @@ def test_cli_logs_resolves_explicit_project_and_environment_outside_worktree(
     logfile = Path(env.generated_config_path).parent / "odoo.log"
     logfile.write_text("from-explicit-context\n")
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.context.OdooClient", lambda **_kwargs: env_client
+        "odoo_instance_sdk.commands.context.OdooClient", lambda **_kwargs: env_client
     )
     monkeypatch.chdir(tmp_path)
 

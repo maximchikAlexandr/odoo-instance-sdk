@@ -120,7 +120,7 @@ def test_run_and_shell_sanitize_runtime_exception(command: str, method: str) -> 
         http_port=8069,
     )
     with (
-        patch("odoo_instance_sdk.internal.context.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.context.OdooClient", return_value=client),
         patch("odoo_instance_sdk.internal.context.resolve_environment", return_value=env),
         patch("odoo_instance_sdk.internal.context._verify_env_runtime", return_value=None),
         patch("odoo_instance_sdk.internal.context._check_port_free", return_value=True),
@@ -144,12 +144,12 @@ def test_env_list_is_read_only_through_public_resources() -> None:
     from odoo_instance_sdk.models import Snapshot
 
     empty_snapshot = Snapshot(
-        schema_version=1, generated_at=datetime.now(UTC), projects=(), environments=()
+        schema_version=2, generated_at=datetime.now(UTC), projects=(), environments=()
     )
     with (
-        patch("odoo_instance_sdk.internal.cli_env.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch(
-            "odoo_instance_sdk.internal.cli_env.EnvironmentMonitor.snapshot",
+            "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
             return_value=empty_snapshot,
         ),
     ):

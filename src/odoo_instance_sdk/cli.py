@@ -10,13 +10,24 @@ import click
 import msgspec
 
 from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.commands import context as cli_context
+from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
+from odoo_instance_sdk.commands.env import env_group
+from odoo_instance_sdk.commands.output import (
+    OutputMode,
+    emit_json_envelope,
+    fail,
+    output_options,
+    resolve_output_mode,
+    rich_print,
+    sanitize_diagnostic,
+)
 from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     LogfileAccessError,
     VscodeImportError,
 )
-from odoo_instance_sdk.internal import context as cli_context
 from odoo_instance_sdk.internal.automation import (
     eval_expression,
     exec_script,
@@ -27,8 +38,6 @@ from odoo_instance_sdk.internal.automation import (
     update_modules,
     verify_deps,
 )
-from odoo_instance_sdk.internal.cli_env import env_group
-from odoo_instance_sdk.internal.cli_output import emit_json_envelope, fail, sanitize_diagnostic
 from odoo_instance_sdk.internal.doctor import DoctorReport, run_doctor
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.postgres_cli import (
@@ -61,9 +70,7 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 @click.option("--env", "env_selector", default=None, help="Environment selector (UUID or name).")
 @click.pass_context
 def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> None:
-    ctx.ensure_object(dict)
-    ctx.obj["project"] = project
-    ctx.obj["env"] = env_selector
+    ctx.obj = CliContext(project=project, env=env_selector)
 
 
 cli.add_command(env_group, name="env")
@@ -120,7 +127,7 @@ cli.add_command(env_group, name="env")
 )
 @click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Do not write.")
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
+@output_options
 @click.option(
     "--project", "project_path", type=click.Path(exists=False), default=None, help="Project path."
 )
@@ -141,9 +148,12 @@ def init(
     postgres_user: str | None,
     no_input: bool,
     dry_run: bool,
+    output_format: str | None,
     json_output: bool,
     project_path: str | None,
 ) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     resolved_project = Path(project_path) if project_path is not None else Path.cwd()
     provenance: dict[str, list[str]] = {"option": [], "vscode": [], "discovery": [], "default": []}
 
@@ -160,12 +170,12 @@ def init(
     _record_option_provenance(option_state, provenance)
 
     if from_vscode is not None:
-        vscode_cfg = _import_vscode(from_vscode, launch_name, no_input, json_output)
+        vscode_cfg = _import_vscode(from_vscode, launch_name, no_input, output_mode)
         if vscode_cfg is None:
             return
         _merge_vscode(option_state, vscode_cfg, provenance)
 
-    _resolve_odoo_bin(option_state, no_input, json_output, dry_run, provenance)
+    _resolve_odoo_bin(option_state, no_input, output_mode, dry_run, provenance)
 
     postgres_cfg, postgres_allocated = _resolve_postgres_state(
         postgres_mode=postgres_mode,
@@ -174,7 +184,7 @@ def init(
         postgres_user=postgres_user,
         source_config=option_state.source_config,
         no_input=no_input,
-        json_output=json_output,
+        output_mode=output_mode,
         project_path=resolved_project,
     )
     if postgres_cfg is not None:
@@ -195,7 +205,7 @@ def init(
 
     existing = manifest_path(resolved_project)
     if existing.is_file() and _handle_existing_manifest(
-        existing, resolved_project, config, no_input, json_output
+        existing, resolved_project, config, no_input, output_mode
     ):
         return
 
@@ -207,10 +217,11 @@ def init(
                 result=_manifest_dict(config, postgres_allocated=postgres_allocated),
                 provenance=provenance,
                 dry_run=True,
+                mode=output_mode,
             )
         else:
-            click.echo("Dry run — no files written.")
-            click.echo(config.to_manifest())
+            rich_print("Dry run — no files written.")
+            rich_print(config.to_manifest(), preserve_newlines=True)
         return
 
     write_manifest(resolved_project, config)
@@ -221,9 +232,10 @@ def init(
             result=_manifest_dict(config, postgres_allocated=postgres_allocated),
             provenance=provenance,
             dry_run=False,
+            mode=output_mode,
         )
     else:
-        click.echo(f"Wrote {existing}")
+        rich_print(f"Wrote {existing}")
 
 
 def _resolve_postgres_state(
@@ -234,7 +246,7 @@ def _resolve_postgres_state(
     postgres_user: str | None,
     source_config: Path | None,
     no_input: bool,
-    json_output: bool,
+    output_mode: OutputMode,
     project_path: Path,
 ) -> tuple[PostgresProjectConfig | None, bool]:
     mode = "compose" if postgres_mode.lower() == "compose" else "external"
@@ -242,8 +254,8 @@ def _resolve_postgres_state(
         return None, False
 
     if postgres_image is None:
-        if no_input or json_output:
-            fail(json_output, "init", "Missing required option --postgres-image for compose mode")
+        if no_input or output_mode is not OutputMode.RICH:
+            fail(output_mode, "init", "Missing required option --postgres-image for compose mode")
         postgres_image = click.prompt("PostgreSQL image (e.g. pgvector/pgvector:pg16)")
 
     allocated = False
@@ -322,12 +334,12 @@ def _record_option_provenance(state: _OptionState, provenance: dict[str, list[st
 
 
 def _import_vscode(
-    from_vscode: str, launch_name: str | None, no_input: bool, json_output: bool
+    from_vscode: str, launch_name: str | None, no_input: bool, output_mode: OutputMode
 ) -> ProjectConfig | None:
     try:
         result = import_vscode_launch(from_vscode, launch_name=launch_name, no_input=no_input)
     except VscodeImportError as e:
-        fail(json_output, "init", str(e))
+        fail(output_mode, "init", str(e))
     return result.config
 
 
@@ -356,26 +368,31 @@ def _handle_existing_manifest(
     resolved_project: Path,
     config: ProjectConfig,
     no_input: bool,
-    json_output: bool,
+    output_mode: OutputMode,
 ) -> bool:
     try:
         existing_cfg = ProjectConfig.load(resolved_project)
     except Exception as e:
-        fail(json_output, "init", f"Existing manifest unreadable: {e}")
+        fail(output_mode, "init", f"Existing manifest unreadable: {e}")
     # Comparison excludes ``postgres_allocated`` (dry-run-only flag); both
     # sides default to False here.
     if _manifest_dict(existing_cfg) == _manifest_dict(config):
-        if json_output:
+        if output_mode is not OutputMode.RICH:
             emit_json_envelope(
-                ok=True, command="init", result=_manifest_dict(config), provenance={}, dry_run=True
+                ok=True,
+                command="init",
+                result=_manifest_dict(config),
+                provenance={},
+                dry_run=True,
+                mode=output_mode,
             )
         else:
-            click.echo("Manifest already up to date; no-op.")
+            rich_print("Manifest already up to date; no-op.")
         return True
-    if no_input or json_output:
-        fail(json_output, "init", "manifest exists and differs; remove it first or adjust options")
+    if no_input or output_mode is not OutputMode.RICH:
+        fail(output_mode, "init", "manifest exists and differs; remove it first or adjust options")
     if not click.confirm("Manifest exists and differs; overwrite?", default=False):
-        click.echo("Aborted.")
+        rich_print("Aborted.")
         return True
     return False
 
@@ -404,15 +421,17 @@ def _manifest_dict(config: ProjectConfig, *, postgres_allocated: bool = False) -
 
 
 @cli.command()
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
-def doctor(ctx: click.Context, json_output: bool) -> None:
-    project_path = cli_context.resolve_project_path(ctx)
-    client = OdooClient(config=OdooClientConfig(executable="odoo"))
+@output_options
+@pass_cli_context
+def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     try:
+        project_path = cli_context.resolve_project_path(ctx)
+        client = OdooClient(config=OdooClientConfig(executable="odoo"))
         report = run_doctor(client, project_path if project_path != Path.cwd() else None)
     except Exception as e:
-        fail(json_output, "doctor", str(e))
+        fail(output_mode, "doctor", str(e))
     if json_output:
         emit_json_envelope(
             ok=report.ok,
@@ -432,6 +451,7 @@ def doctor(ctx: click.Context, json_output: bool) -> None:
             },
             error_code="doctor_failed" if not report.ok else None,
             error_message="doctor reported failed checks" if not report.ok else None,
+            mode=output_mode,
         )
     else:
         _print_doctor(report)
@@ -444,16 +464,17 @@ def _print_doctor(report: object) -> None:
     for c in rep.checks:
         if c.environment_id and c.environment_id != current_env:
             current_env = c.environment_id
-            click.echo(f"\n[{current_env}] {c.environment_name or ''}")
+            rich_print("")
+            rich_print(f"[{current_env}] {c.environment_name or ''}")
         marker = {"ok": "OK", "warn": "WARN", "error": "ERROR", "info": "INFO"}.get(
             c.status, c.status
         )
-        click.echo(f"  {marker:<5} {c.name}: {sanitize_diagnostic(c.detail)}")
+        rich_print(f"  {marker:<5} {c.name}: {sanitize_diagnostic(c.detail)}")
 
 
 @cli.command()
-@click.pass_context
-def run(ctx: click.Context) -> None:
+@pass_cli_context
+def run(ctx: CliContext) -> None:
     try:
         client, env_obj, instance = cli_context.ready_instance(ctx)
         if not cli_context._check_port_free(env_obj):
@@ -480,8 +501,8 @@ def run(ctx: click.Context) -> None:
 @cli.command()
 @click.option("-n", "--tail", type=click.IntRange(min=1), default=100, show_default=True)
 @click.option("-f", "--follow", is_flag=True, default=False)
-@click.pass_context
-def logs(ctx: click.Context, tail: int, follow: bool) -> None:
+@pass_cli_context
+def logs(ctx: CliContext, tail: int, follow: bool) -> None:
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
         for line in instance.iter_logs(tail=tail, follow=follow):
@@ -490,8 +511,7 @@ def logs(ctx: click.Context, tail: int, follow: bool) -> None:
     except KeyboardInterrupt:
         sys.exit(130)
     except LogfileAccessError as e:
-        click.echo(str(e), err=True)
-        raise click.exceptions.Exit(1)
+        fail(False, "logs", str(e))
     except InstanceConfigurationError as e:
         fail(False, "logs", str(e))
     except Exception as e:
@@ -500,8 +520,8 @@ def logs(ctx: click.Context, tail: int, follow: bool) -> None:
 
 @cli.command()
 @click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
-@click.pass_context
-def shell(ctx: click.Context, odoo_args: tuple[str, ...]) -> None:
+@pass_cli_context
+def shell(ctx: CliContext, odoo_args: tuple[str, ...]) -> None:
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
     except SystemExit:
@@ -522,23 +542,36 @@ def shell(ctx: click.Context, odoo_args: tuple[str, ...]) -> None:
 @click.option(
     "--commit", "commit", is_flag=True, default=False, help="Commit after eval (best-effort)."
 )
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
-def eval_cmd(ctx: click.Context, expression: str, commit: bool, json_output: bool) -> None:
+@output_options
+@pass_cli_context
+def eval_cmd(
+    ctx: CliContext,
+    expression: str,
+    commit: bool,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
         outcome = eval_expression(instance, expression, commit=commit)
     except SystemExit:
         raise
     except Exception as e:
-        fail(json_output, "eval", str(e))
+        fail(output_mode, "eval", str(e))
     if outcome.returncode != 0:
-        fail(json_output, "eval", f"shell exited {outcome.returncode}: {outcome.stderr.strip()}")
+        fail(output_mode, "eval", f"shell exited {outcome.returncode}: {outcome.stderr.strip()}")
     result = outcome.payload.get("result") if outcome.payload else None
     if json_output:
-        emit_json_envelope(ok=True, command="eval", result={"result": result, "commit": commit})
+        emit_json_envelope(
+            ok=True,
+            command="eval",
+            result={"result": result, "commit": commit},
+            mode=output_mode,
+        )
     else:
-        click.echo(json.dumps(result, default=str, indent=2))
+        rich_print(json.dumps(result, default=str, indent=2), preserve_newlines=True)
     sys.exit(0)
 
 
@@ -548,32 +581,35 @@ def eval_cmd(ctx: click.Context, expression: str, commit: bool, json_output: boo
 @click.option(
     "--commit", "commit", is_flag=True, default=False, help="Commit after exec (best-effort)."
 )
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
+@output_options
+@pass_cli_context
 def exec_cmd(
-    ctx: click.Context,
+    ctx: CliContext,
     script: str,
     script_args: tuple[str, ...],
     commit: bool,
+    output_format: str | None,
     json_output: bool,
 ) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     if script == "-":
         source = sys.stdin.read()
     else:
         p = Path(script)
         if not p.is_file():
-            fail(json_output, "exec", f"script not found: {script}")
+            fail(output_mode, "exec", f"script not found: {script}")
         try:
             source = p.read_text(encoding="utf-8")
         except OSError as e:
-            fail(json_output, "exec", f"cannot read script: {e}")
+            fail(output_mode, "exec", f"cannot read script: {e}")
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
         outcome = exec_script(instance, source, argv=tuple(script_args), commit=commit)
     except SystemExit:
         raise
     except Exception as e:
-        fail(json_output, "exec", str(e))
+        fail(output_mode, "exec", str(e))
     if json_output:
         emit_json_envelope(
             ok=True,
@@ -584,9 +620,10 @@ def exec_cmd(
                 "stderr": sanitize_diagnostic(outcome.stderr) if outcome.stderr else "",
                 "commit": commit,
             },
+            mode=output_mode,
         )
     else:
-        click.echo(outcome.stdout, nl=False)
+        rich_print(outcome.stdout, end="", preserve_newlines=True)
         if outcome.stderr:
             click.echo(sanitize_diagnostic(outcome.stderr), err=True, nl=False)
     sys.exit(outcome.returncode)
@@ -600,26 +637,35 @@ def module_group() -> None:
 @module_group.command("list")
 @click.argument("modules", nargs=-1)
 @click.option("--state", "state", default=None, help="Filter by state.")
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
+@output_options
+@pass_cli_context
 def module_list(
-    ctx: click.Context, modules: tuple[str, ...], state: str | None, json_output: bool
+    ctx: CliContext,
+    modules: tuple[str, ...],
+    state: str | None,
+    output_format: str | None,
+    json_output: bool,
 ) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
         records = list_modules(instance, names=tuple(modules), state=state)
     except SystemExit:
         raise
     except Exception as e:
-        fail(json_output, "module.list", str(e))
+        fail(output_mode, "module.list", str(e))
     if json_output:
         emit_json_envelope(
-            ok=True, command="module.list", result={"modules": [r.to_dict() for r in records]}
+            ok=True,
+            command="module.list",
+            result={"modules": [r.to_dict() for r in records]},
+            mode=output_mode,
         )
     else:
-        click.echo(f"{'NAME':<30} {'STATE':<15} {'VERSION'}")
+        rich_print(f"{'NAME':<30} {'STATE':<15} {'VERSION'}")
         for r in records:
-            click.echo(
+            rich_print(
                 f"{r.name:<30} {r.state:<15} {r.installed_version or r.latest_version or ''}"
             )
     sys.exit(0)
@@ -629,42 +675,48 @@ def module_list(
 @click.argument("modules", nargs=-1, required=True)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Plan only.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Confirm execution.")
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
+@output_options
+@pass_cli_context
 def module_update(
-    ctx: click.Context,
+    ctx: CliContext,
     modules: tuple[str, ...],
     dry_run: bool,
     yes: bool,
+    output_format: str | None,
     json_output: bool,
 ) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     try:
         _client, env_obj, instance = cli_context.ready_instance(ctx)
         plan = plan_module_update(instance, tuple(modules))
     except SystemExit:
         raise
     except Exception as e:
-        fail(json_output, "module.update", str(e))
+        fail(output_mode, "module.update", str(e))
     if plan.not_installed:
         fail(
-            json_output,
+            output_mode,
             "module.update",
             f"modules not installed: {', '.join(plan.not_installed)}",
         )
     if dry_run:
         if json_output:
             emit_json_envelope(
-                ok=True, command="module.update", result={"modules": plan.modules, "dry_run": True}
+                ok=True,
+                command="module.update",
+                result={"modules": plan.modules, "dry_run": True},
+                mode=output_mode,
             )
         else:
-            click.echo("Dry run — modules to update:")
+            rich_print("Dry run — modules to update:")
             for m in plan.modules:
-                click.echo(f"  {m}")
+                rich_print(f"  {m}")
         sys.exit(0)
         return
     if not yes:
-        fail(json_output, "module.update", "module update requires --yes")
-    _module_update_execute(instance, plan.modules, env_obj, json_output=json_output)
+        fail(output_mode, "module.update", "module update requires --yes")
+    _module_update_execute(instance, plan.modules, env_obj, output_mode=output_mode)
 
 
 def _module_update_execute(
@@ -672,29 +724,32 @@ def _module_update_execute(
     modules: list[str],
     env_obj: Any,
     *,
-    json_output: bool,
+    output_mode: OutputMode,
 ) -> None:
     try:
         outcome = update_modules(instance, tuple(modules), env_id=str(env_obj.id))
     except SystemExit:
         raise
     except Exception as e:
-        fail(json_output, "module.update", str(e))
+        fail(output_mode, "module.update", str(e))
     if outcome.returncode != 0:
         fail(
-            json_output,
+            output_mode,
             "module.update",
             f"shell exited {outcome.returncode}: {outcome.stderr.strip()}",
         )
     updated = outcome.payload.get("result", {}).get("updated", []) if outcome.payload else []
-    if json_output:
+    if output_mode is not OutputMode.RICH:
         emit_json_envelope(
-            ok=True, command="module.update", result={"updated": updated, "dry_run": False}
+            ok=True,
+            command="module.update",
+            result={"updated": updated, "dry_run": False},
+            mode=output_mode,
         )
     else:
-        click.echo("Updated modules:")
+        rich_print("Updated modules:")
         for m in updated:
-            click.echo(f"  {m}")
+            rich_print(f"  {m}")
     sys.exit(0)
 
 
@@ -703,16 +758,19 @@ def _module_update_execute(
 @click.option("--test-tags", "test_tags", required=True, help="Test tags.")
 @click.option("--reload-tests", "reload_tests", is_flag=True, default=False)
 @click.option("--allow-empty", "allow_empty", is_flag=True, default=False)
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
+@output_options
+@pass_cli_context
 def module_test(
-    ctx: click.Context,
+    ctx: CliContext,
     modules: tuple[str, ...],
     test_tags: str,
     reload_tests: bool,
     allow_empty: bool,
+    output_format: str | None,
     json_output: bool,
 ) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     try:
         _client, env_obj, instance = cli_context.ready_instance(ctx)
         res, exit_code = run_module_tests(
@@ -728,7 +786,7 @@ def module_test(
     except SystemExit:
         raise
     except Exception as e:
-        fail(json_output, "module.test", str(e))
+        fail(output_mode, "module.test", str(e))
     if json_output:
         emit_json_envelope(
             ok=True,
@@ -743,9 +801,10 @@ def module_test(
                 "had_zero_tests": res.had_zero_tests,
                 "allow_empty": allow_empty,
             },
+            mode=output_mode,
         )
     else:
-        click.echo(
+        rich_print(
             f"tests={res.tests_count} ok={res.tests_success} "
             f"failed={res.tests_failed} errors={res.tests_errors} skipped={res.skipped}"
         )
@@ -760,14 +819,17 @@ def translations_group() -> None:
 @translations_group.command("export")
 @click.option("--module", "modules", multiple=True, required=True, help="Module name.")
 @click.option("--language", "languages", multiple=True, required=True, help="Language code.")
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
+@output_options
+@pass_cli_context
 def translations_export(
-    ctx: click.Context,
+    ctx: CliContext,
     modules: tuple[str, ...],
     languages: tuple[str, ...],
+    output_format: str | None,
     json_output: bool,
 ) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     try:
         _client, env_obj, instance = cli_context.ready_instance(ctx)
         results = export_translations(
@@ -779,7 +841,7 @@ def translations_export(
     except SystemExit:
         raise
     except Exception as e:
-        fail(json_output, "translations.export", str(e))
+        fail(output_mode, "translations.export", str(e))
     if json_output:
         emit_json_envelope(
             ok=True,
@@ -796,10 +858,11 @@ def translations_export(
                     for r in results
                 ]
             },
+            mode=output_mode,
         )
     else:
         for r in results:
-            click.echo(
+            rich_print(
                 f"{r.module} {r.requested_lang} -> {r.actual_filename} "
                 f"({r.bytes_written} bytes at {r.path})"
             )
@@ -812,9 +875,11 @@ def deps_group() -> None:
 
 
 @deps_group.command("verify")
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
-def deps_verify(ctx: click.Context, json_output: bool) -> None:
+@output_options
+@pass_cli_context
+def deps_verify(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     try:
         _client, env_obj, _instance = cli_context.ready_instance(ctx)
         recorded_python = Path(env_obj.python_environment_path)
@@ -827,7 +892,7 @@ def deps_verify(ctx: click.Context, json_output: bool) -> None:
     except SystemExit:
         raise
     except Exception as e:
-        fail(json_output, "deps.verify", str(e))
+        fail(output_mode, "deps.verify", str(e))
     exit_code = 1 if result.missing_imports else 0
     if json_output:
         emit_json_envelope(
@@ -839,20 +904,21 @@ def deps_verify(ctx: click.Context, json_output: bool) -> None:
                 "pip_check_ok": result.pip_check_ok,
                 "pip_check_output": result.pip_check_output,
             },
+            mode=output_mode,
         )
     else:
         if result.pip_check_ok:
-            click.echo("pip check: ok")
+            rich_print("pip check: ok")
         else:
-            click.echo("pip check: issues")
+            rich_print("pip check: issues")
             for d in result.distributions:
-                click.echo(f"  {d['detail']}")
+                rich_print(f"  {d['detail']}")
         if result.missing_imports:
-            click.echo("missing imports:")
+            rich_print("missing imports:")
             for m in result.missing_imports:
-                click.echo(f"  {m['module']}: {m['import']}")
+                rich_print(f"  {m['module']}: {m['import']}")
         else:
-            click.echo("imports: ok")
+            rich_print("imports: ok")
     sys.exit(exit_code)
 
 
@@ -865,39 +931,47 @@ def vscode_group() -> None:
 @click.option(
     "--write", "write_file", is_flag=True, default=False, help="Write .vscode/launch.json."
 )
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
-def vscode_generate(ctx: click.Context, write_file: bool, json_output: bool) -> None:
+@output_options
+@pass_cli_context
+def vscode_generate(
+    ctx: CliContext, write_file: bool, output_format: str | None, json_output: bool
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     try:
         client, env_obj, _instance = cli_context.ready_instance(ctx)
         profile = build_launch_profile(client, env_obj)
     except SystemExit:
         raise
     except Exception as e:
-        fail(json_output, "vscode.generate", str(e))
+        fail(output_mode, "vscode.generate", str(e))
     if write_file:
         try:
             project_path = cli_context.resolve_project_path(ctx)
             content = launch_json(profile)
             written = write_launch_json(project_path, content)
         except Exception as e:
-            fail(json_output, "vscode.generate", str(e))
+            fail(output_mode, "vscode.generate", str(e))
         if json_output:
             emit_json_envelope(
                 ok=True,
                 command="vscode.generate",
                 result={"profile": profile, "written": str(written), "dry_run": False},
+                mode=output_mode,
             )
         else:
-            click.echo(f"Wrote {written}")
+            rich_print(f"Wrote {written}")
         sys.exit(0)
         return
     if json_output:
         emit_json_envelope(
-            ok=True, command="vscode.generate", result={"profile": profile, "dry_run": True}
+            ok=True,
+            command="vscode.generate",
+            result={"profile": profile, "dry_run": True},
+            mode=output_mode,
         )
     else:
-        click.echo(launch_json(profile), nl=False)
+        rich_print(launch_json(profile), end="", preserve_newlines=True)
     sys.exit(0)
 
 
@@ -915,16 +989,22 @@ def postgres_group() -> None:
     show_default=True,
     help="Seconds allowed for Docker pull and inspect.",
 )
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
+@output_options
+@pass_cli_context
 def postgres_approve_image(
-    ctx: click.Context, image_digest: str, timeout: float, json_output: bool
+    ctx: CliContext,
+    image_digest: str,
+    timeout: float,
+    output_format: str | None,
+    json_output: bool,
 ) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     """Approve the current compose image in the local, non-repository trust store."""
     cluster, _ = run_postgres_command(
         ctx,
         command="postgres.approve-image",
-        json_output=json_output,
+        output_mode=output_mode,
         operation=lambda candidate: candidate.approve_image(image_digest, timeout=timeout),
     )
     if json_output:
@@ -936,24 +1016,32 @@ def postgres_approve_image(
                 "image": cluster.to_diagnostic_dict()["image"],
                 "digest": image_digest,
             },
+            mode=output_mode,
         )
     else:
-        click.echo(f"approved image={cluster.to_diagnostic_dict()['image']} digest={image_digest}")
+        rich_print(f"approved image={cluster.to_diagnostic_dict()['image']} digest={image_digest}")
 
 
 @postgres_group.command("status")
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
-def postgres_status(ctx: click.Context, json_output: bool) -> None:
+@output_options
+@pass_cli_context
+def postgres_status(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
     cluster, state = run_postgres_command(
         ctx,
         command="postgres.status",
-        json_output=json_output,
+        output_mode=output_mode,
         operation=lambda candidate: candidate.status(),
     )
     snapshot = cluster_snapshot(cluster, state)
     if json_output:
-        emit_json_envelope(ok=True, command="postgres.status", result=msgspec.to_builtins(snapshot))
+        emit_json_envelope(
+            ok=True,
+            command="postgres.status",
+            result=msgspec.to_builtins(snapshot),
+            mode=output_mode,
+        )
     else:
         print_status(snapshot)
     sys.exit(status_exit_code(snapshot))
@@ -967,18 +1055,23 @@ def postgres_status(ctx: click.Context, json_output: bool) -> None:
     default=60.0,
     help="Seconds to wait for the cluster to become healthy.",
 )
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
-def postgres_up(ctx: click.Context, wait_timeout: float, json_output: bool) -> None:
+@output_options
+@pass_cli_context
+def postgres_up(
+    ctx: CliContext, wait_timeout: float, output_format: str | None, json_output: bool
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
+
     def ensure(candidate: PostgresCluster) -> PostgresClusterState:
         candidate.ensure_running(timeout=wait_timeout)
         return candidate.status()
 
     cluster, state = run_postgres_command(
-        ctx, command="postgres.up", json_output=json_output, operation=ensure
+        ctx, command="postgres.up", output_mode=output_mode, operation=ensure
     )
     emit_postgres_result(
-        cluster=cluster, state=state, command="postgres.up", json_output=json_output
+        cluster=cluster, state=state, command="postgres.up", output_mode=output_mode
     )
     sys.exit(0)
 
@@ -991,18 +1084,23 @@ def postgres_up(ctx: click.Context, wait_timeout: float, json_output: bool) -> N
     default=30.0,
     help="Seconds to wait for graceful stop.",
 )
-@click.option("--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope.")
-@click.pass_context
-def postgres_stop(ctx: click.Context, timeout: float, json_output: bool) -> None:
+@output_options
+@pass_cli_context
+def postgres_stop(
+    ctx: CliContext, timeout: float, output_format: str | None, json_output: bool
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    json_output = output_mode is not OutputMode.RICH
+
     def stop(candidate: PostgresCluster) -> PostgresClusterState:
         candidate.stop(timeout=timeout)
         return candidate.status()
 
     cluster, state = run_postgres_command(
-        ctx, command="postgres.stop", json_output=json_output, operation=stop
+        ctx, command="postgres.stop", output_mode=output_mode, operation=stop
     )
     emit_postgres_result(
-        cluster=cluster, state=state, command="postgres.stop", json_output=json_output
+        cluster=cluster, state=state, command="postgres.stop", output_mode=output_mode
     )
     sys.exit(0)
 
@@ -1031,17 +1129,17 @@ def monitor_cmd(
 def _resolve_odoo_bin(
     option_state: _OptionState,
     no_input: bool,
-    json_output: bool,
+    output_mode: OutputMode,
     dry_run: bool,
     provenance: dict[str, list[str]],
 ) -> None:
     if option_state.odoo_bin is None:
-        if no_input or json_output or dry_run:
-            fail(json_output, "init", "Missing required option --odoo-bin")
+        if no_input or output_mode is not OutputMode.RICH or dry_run:
+            fail(output_mode, "init", "Missing required option --odoo-bin")
         option_state.odoo_bin = Path(click.prompt("Path to odoo-bin"))
         provenance["discovery"].append("odoo_bin")
     if not option_state.odoo_bin:
-        fail(json_output, "init", "odoo_bin is required")
+        fail(output_mode, "init", "odoo_bin is required")
 
 
 if __name__ == "__main__":

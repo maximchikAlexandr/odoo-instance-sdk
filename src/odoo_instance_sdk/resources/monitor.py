@@ -19,6 +19,7 @@ from odoo_instance_sdk.exceptions import (
     PostgresClusterError,
     ProjectManifestNotFoundError,
 )
+from odoo_instance_sdk.internal.address import probe_address
 from odoo_instance_sdk.internal.cluster_resources import (
     BatchClusterRequest,
     collect_cluster_resource_batch,
@@ -27,6 +28,7 @@ from odoo_instance_sdk.internal.git_activity import (
     _resolve_identity,
     collect_git_activity_from_identity,
 )
+from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.postgres_compose import (
     ComposeRunner,
@@ -44,9 +46,11 @@ from odoo_instance_sdk.models import (
     ClusterResourceSnapshot,
     ClusterSnapshot,
     DatabaseFootprint,
+    EnvironmentArtifacts,
     EnvironmentSnapshot,
     GitActivity,
     GitActivityState,
+    PortObservation,
     PostgresClusterState,
     ProjectSummary,
     PythonEnvFootprint,
@@ -61,7 +65,7 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 class _ProcessProvider(Protocol):
@@ -207,7 +211,7 @@ class EnvironmentMonitor:
         default_factory=SubprocessComposeRunner, repr=False, hash=False, compare=False
     )
 
-    def snapshot(self, project_id: str | None = None) -> Snapshot:
+    def snapshot(self, project_id: str | None = None, *, include_removed: bool = False) -> Snapshot:
         """Perform one coherent collection pass and return an immutable ``Snapshot``."""
         generated_at = datetime.now(UTC)
         db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
@@ -217,7 +221,9 @@ class EnvironmentMonitor:
             raise MonitorError("monitor catalog unavailable") from exc
 
         try:
-            plan = self._plan_snapshot(catalog, project_id=project_id)
+            plan = self._plan_snapshot(
+                catalog, project_id=project_id, include_removed=include_removed
+            )
         finally:
             catalog.close()
         resources, active_clusters = self._collect_cluster_resources(list(plan.projects))
@@ -237,11 +243,15 @@ class EnvironmentMonitor:
         )
 
     def _plan_snapshot(
-        self, catalog: BackupCatalog, *, project_id: str | None = None
+        self,
+        catalog: BackupCatalog,
+        *,
+        project_id: str | None = None,
+        include_removed: bool = False,
     ) -> _SnapshotPlan:
         """Read catalog runtime once and derive deterministic project plans."""
         try:
-            rows = catalog.list_environments_with_runtimes()
+            rows = catalog.list_environments_with_runtimes(include_removed=include_removed)
         except (BackupCatalogError, sqlite3.Error) as exc:
             raise MonitorError("monitor catalog unavailable") from exc
         groups: dict[str, list[_EnvironmentPlan]] = {}
@@ -341,7 +351,11 @@ class EnvironmentMonitor:
             del self._cpu_points[cpu_key]
 
     async def watch(
-        self, interval: float = 2.0, project_id: str | None = None
+        self,
+        interval: float = 2.0,
+        project_id: str | None = None,
+        *,
+        include_removed: bool = False,
     ) -> AsyncIterator[Snapshot]:
         """Thin async generator over ``snapshot()`` + ``asyncio.sleep``.
 
@@ -352,7 +366,7 @@ class EnvironmentMonitor:
         if interval < 0.1:
             raise ValueError(f"interval must be >= 0.1, got {interval}")
         while True:
-            yield self.snapshot(project_id=project_id)
+            yield self.snapshot(project_id=project_id, include_removed=include_removed)
             await asyncio.sleep(interval)
 
     # ------------------------------------------------------------------ cluster
@@ -506,18 +520,25 @@ class EnvironmentMonitor:
 
         allocated_port = self._allocated_http_port(row)
 
-        # Process collection is an environment boundary.  One unavailable PID
-        # or psutil failure must not erase healthy siblings from the snapshot.
-        try:
-            runtime = self._collect_runtime(runtime_record)
-        except Exception:
+        lifecycle_state = EnvironmentState(str(row["state"]))
+        # Removed rows retain catalog identity but never perform live probes.
+        # Process collection is an environment boundary for active rows: one
+        # unavailable PID or psutil failure must not erase healthy siblings.
+        if lifecycle_state is EnvironmentState.REMOVED:
             runtime = _stopped_runtime()
+        else:
+            try:
+                runtime = self._collect_runtime(runtime_record)
+            except Exception:
+                runtime = _stopped_runtime()
 
         worktree = Path(str(row["worktree_path"]))
         git = self._collect_git(worktree)
         short_sha = git.head_sha[:7] if git.head_sha else None
 
         storage = self._collect_storage(row, env_id, db_mode)
+        artifacts = self._collect_artifacts(row)
+        observed_port = self._observe_port(row, lifecycle_state, runtime, allocated_port)
 
         return EnvironmentSnapshot(
             id=env_id,
@@ -527,12 +548,96 @@ class EnvironmentMonitor:
             short_sha=short_sha,
             db_mode=db_mode,  # type: ignore[arg-type]
             database=database_str,
-            lifecycle_state=EnvironmentState(str(row["state"])),
+            lifecycle_state=lifecycle_state,
             allocated_http_port=allocated_port,
+            observed_port=observed_port,
+            artifacts=artifacts,
             runtime=runtime,
             git=git,
             storage=storage,
         )
+
+    def _collect_artifacts(self, row: sqlite3.Row) -> EnvironmentArtifacts:
+        """Reconcile independent catalog/filesystem artifacts defensively."""
+        worktree = Path(str(row["worktree_path"]))
+        repository_root = Path(str(row["repository_root"]))
+        generated_config = Path(str(row["generated_config_path"]))
+        dependency_lock = Path(str(row["dependency_lock_path"]))
+        python_path = Path(str(row["python_environment_path"]))
+        python_owned = bool(int(row["python_environment_owned"]))
+
+        def is_file(path: Path) -> bool:
+            try:
+                return path.is_file()
+            except OSError:
+                return False
+
+        def is_dir(path: Path) -> bool:
+            try:
+                return path.is_dir()
+            except OSError:
+                return False
+
+        try:
+            registered = any(
+                Path(entry.worktree).resolve() == worktree.resolve()
+                for entry in worktree_list_porcelain(repository_root)
+            )
+        except Exception:
+            registered = False
+
+        if python_owned:
+            python_exists = is_file(python_path / "bin" / "python")
+            try:
+                python_contained = python_path.resolve().is_relative_to(worktree.parent.resolve())
+            except OSError:
+                python_contained = False
+        else:
+            python_exists = is_file(python_path)
+            python_contained = True
+
+        backup_id = row["backup_id"]
+        if backup_id is None:
+            backup_exists: bool | None = None
+        else:
+            backup_state = row["backup_state"]
+            backup_path = row["backup_path"]
+            backup_exists = (
+                backup_state == "available"
+                and backup_path is not None
+                and is_file(Path(str(backup_path)))
+            )
+        return EnvironmentArtifacts(
+            worktree_exists=is_dir(worktree),
+            worktree_registered=registered,
+            config_exists=is_file(generated_config),
+            python_exists=python_exists,
+            python_contained=python_contained,
+            dependency_lock_exists=is_file(dependency_lock),
+            backup_exists=backup_exists,
+        )
+
+    def _observe_port(
+        self,
+        row: sqlite3.Row,
+        lifecycle_state: EnvironmentState,
+        runtime: RuntimeMetrics,
+        allocated_port: int | None,
+    ) -> PortObservation | None:
+        """Probe only a live ready environment's allocated HTTP endpoint."""
+        if (
+            lifecycle_state is not EnvironmentState.READY
+            or runtime.state not in (RuntimeState.READY, RuntimeState.NOT_READY)
+            or allocated_port is None
+        ):
+            return None
+        try:
+            from odoo_instance_sdk.models import StartConfig
+
+            cfg = StartConfig.from_odoo_config(str(row["generated_config_path"]))
+            return PortObservation(probe_address(cfg.http_interface, allocated_port).value)
+        except Exception:
+            return PortObservation.UNKNOWN
 
     def _allocated_http_port(self, row: sqlite3.Row) -> int | None:
         cfg_path = str(row["generated_config_path"])

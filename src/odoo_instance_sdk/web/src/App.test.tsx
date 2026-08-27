@@ -24,7 +24,7 @@ Object.defineProperty(globalThis, "ResizeObserver", { writable: true, value: Res
 Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { value: () => {} });
 
 const snapshot: Snapshot = {
-  schema_version: 1,
+  schema_version: 2,
   generated_at: "2026-08-24T00:00:00Z",
   projects: [
     {
@@ -49,6 +49,9 @@ const snapshot: Snapshot = {
     {
       id: "a", project_id: "project_a", name: "ready-env", branch: "main", short_sha: "abc1234",
       db_mode: "shared", database: "a", lifecycle_state: "ready", allocated_http_port: 8069,
+      observed_port: "free",
+      artifacts: { worktree_exists: true, worktree_registered: true, config_exists: true,
+        python_exists: true, python_contained: true, dependency_lock_exists: true, backup_exists: null },
       runtime: { state: "ready", root_pid: 11, child_pids: [12, 13], process_count: 3,
         cpu_percent: 1, rss_bytes: 1024, started_at: null, http_url: "http://127.0.0.1:8069",
         http_port: 8069, database_name: "a", commit_sha: "abc", branch: "main" },
@@ -58,6 +61,9 @@ const snapshot: Snapshot = {
     {
       id: "b", project_id: "project_b", name: "stopped-env", branch: "main", short_sha: "def5678",
       db_mode: "shared", database: "b", lifecycle_state: "ready", allocated_http_port: 8070,
+      observed_port: null,
+      artifacts: { worktree_exists: false, worktree_registered: false, config_exists: false,
+        python_exists: false, python_contained: true, dependency_lock_exists: false, backup_exists: null },
       runtime: { state: "stopped", root_pid: null, child_pids: [], process_count: 0,
         cpu_percent: null, rss_bytes: null, started_at: null, http_url: null,
         http_port: null, database_name: null, commit_sha: null, branch: null },

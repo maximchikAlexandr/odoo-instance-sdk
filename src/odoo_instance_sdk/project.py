@@ -7,6 +7,7 @@ from typing import Literal, cast
 import msgspec
 
 from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError
+from odoo_instance_sdk.internal.sanitize import sanitize_terminal_text
 
 
 class PostgresProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
@@ -100,14 +101,14 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         if self.source_config is not None:
             lines.append(f'source_config = "{_toml_path(self.source_config)}"')
         if self.default_source_database is not None:
-            lines.append(f'default_source_database = "{self.default_source_database}"')
+            lines.append(f'default_source_database = "{_toml_str(self.default_source_database)}"')
         if self.preferred_http_port is not None:
             lines.append(f"preferred_http_port = {self.preferred_http_port}")
         if self.requirements:
-            reqs = ", ".join(f'"{r}"' for r in self.requirements)
+            reqs = ", ".join(f'"{_toml_str(r)}"' for r in self.requirements)
             lines.append(f"requirements = [{reqs}]")
         if self.default_run_args:
-            args = ", ".join(f'"{a}"' for a in self.default_run_args)
+            args = ", ".join(f'"{_toml_str(a)}"' for a in self.default_run_args)
             lines.append(f"default_run_args = [{args}]")
         if self.runtime_cwd is not None:
             lines.append(f'runtime_cwd = "{_toml_path(self.runtime_cwd)}"')
@@ -195,8 +196,9 @@ def _str_list(value: object) -> list[str]:
 
 
 def _toml_path(p: Path) -> str:
-    return str(p).replace("\\", "\\\\").replace('"', '\\"')
+    return _toml_str(p)
 
 
 def _toml_str(v: str | Path) -> str:
-    return str(v).replace("\\", "\\\\").replace('"', '\\"')
+    sanitized = sanitize_terminal_text(str(v))
+    return sanitized.replace("\\", "\\\\").replace('"', '\\"')

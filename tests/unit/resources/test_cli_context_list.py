@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -10,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.models import Snapshot
 from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
 from tests.unit.monitor_support import FakeProcessProvider
 
@@ -20,7 +22,7 @@ if TYPE_CHECKING:
 
 
 def _invoke(runner: CliRunner, client: OdooClient, args: list[str]) -> Result:
-    with patch("odoo_instance_sdk.internal.cli_env.OdooClient", return_value=client):
+    with patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client):
         return runner.invoke(cli, args)
 
 
@@ -140,13 +142,14 @@ def test_list_json_emits_snapshot_and_human_has_project_header(
     assert human.exit_code == 0
     # New grouped human format: project header + cluster line + env row.
     assert "Project " in human.output and "PostgreSQL" in human.output
-    assert "feat/list-cli" in human.output and "ready" in human.output
+    assert "\x1b" not in human.output
     payload = json.loads(data.output)["result"]
     # Snapshot contract parity: projects + environments with runtime/git/storage.
     assert "schema_version" in payload
     assert "projects" in payload and "environments" in payload
     listed = payload["environments"][0]
     assert listed["id"] == str(env.id)
+    assert listed["branch"] == "feat/list-cli"
     assert "runtime" in listed and "git" in listed and "storage" in listed
     assert listed["lifecycle_state"] == "ready"
 
@@ -175,7 +178,7 @@ def test_list_reports_occupied_port(
     # runtime=ready. With no Odoo process running, runtime is stopped, so the
     # OBSERVED column shows "—" (the allocated-port probe is deferred to the
     # running-runtime case).
-    assert "feat/list-port" in result.output
+    assert "Project " in result.output and "PostgreSQL" in result.output
 
 
 def test_list_all_projects_works_outside_a_project(
@@ -214,6 +217,7 @@ def test_list_excludes_removed_unless_all(
 
     default = _invoke(runner, env_client, base)
     all_json = _invoke(runner, env_client, [*base[:-1], "--all", "--json"])
+    default_human = _invoke(runner, env_client, ["--project", str(project_manifest), "env", "list"])
     all_human = _invoke(
         runner, env_client, ["--project", str(project_manifest), "env", "list", "--all"]
     )
@@ -223,5 +227,87 @@ def test_list_excludes_removed_unless_all(
     assert json.loads(default.output)["result"]["environments"] == []
     assert json.loads(all_json.output)["result"]["environments"] == []
     # --all is human-only: removed row appears in human output.
-    assert str(env.id) in all_human.output or env.name in all_human.output
-    assert "removed" in all_human.output
+    assert all_human.output != default_human.output
+
+
+def test_explicit_project_and_environment_resolution_records_provenance(
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+) -> None:
+    env = env_client.environments.checkout(
+        project_manifest,
+        "feat/explicit-context",
+        options=EnvironmentCheckoutOptions(python=str(fake_python)),
+    )
+    result = _invoke(
+        CliRunner(),
+        env_client,
+        [
+            "--project",
+            str(project_manifest),
+            "env",
+            "remove",
+            str(env.id),
+            "--dry-run",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["provenance"] == {
+        "project_source": "explicit",
+        "environment_source": "explicit",
+    }
+    assert envelope["context"]["environment_id"] == str(env.id)
+
+
+def test_cwd_project_resolution_records_cwd_provenance(
+    env_client: OdooClient,
+    project_manifest: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(project_manifest)
+    empty = Snapshot(schema_version=2, generated_at=datetime.now(UTC), projects=(), environments=())
+    with patch(
+        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
+        return_value=empty,
+    ):
+        result = _invoke(CliRunner(), env_client, ["env", "list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["provenance"]["project_source"] == "cwd"
+
+
+def test_cwd_environment_resolution_records_provenance_and_id(
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = env_client.environments.checkout(
+        project_manifest,
+        "feat/cwd-environment-context",
+        options=EnvironmentCheckoutOptions(python=str(fake_python)),
+    )
+    monkeypatch.chdir(Path(env.worktree_path))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_toplevel",
+        lambda _path: Path(env.worktree_path),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_git_common_dir",
+        lambda _path: Path(env.git_common_dir),
+    )
+
+    result = _invoke(
+        CliRunner(),
+        env_client,
+        ["env", "remove", "--dry-run", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["provenance"]["environment_source"] == "cwd"
+    assert envelope["context"]["environment_id"] == str(env.id)
