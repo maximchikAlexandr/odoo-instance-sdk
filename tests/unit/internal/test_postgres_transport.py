@@ -114,3 +114,73 @@ def test_run_psql_explicit_host_uses_tcp_h(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured["args"][:6] == ["psql", "-X", "-h", "127.0.0.1", "-p", "5432"]
     assert "PGHOST" not in captured["env"]
     assert "PGHOSTADDR" not in captured["env"]
+
+
+def test_run_psql_targets_requested_database_without_changing_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args, 0, "sale\n", "")
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/usr/bin/psql"
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
+
+    run_psql(
+        host=None,
+        port=5432,
+        user="odoo",
+        password=None,
+        query="SELECT name FROM ir_module_module",
+        timeout=3,
+        database="bound_db",
+    )
+
+    args = captured["args"]
+    assert args[args.index("-d") + 1] == "bound_db"
+    assert captured["kwargs"]["timeout"] == 3
+    assert captured["kwargs"]["shell"] is False
+
+
+def test_run_psql_returns_none_for_missing_tool_or_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: None
+    )
+    assert (
+        run_psql(
+            host=None,
+            port=5432,
+            user="odoo",
+            password=None,
+            query="SELECT 1",
+            timeout=1,
+        )
+        is None
+    )
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/usr/bin/psql"
+    )
+
+    def timeout(*args: Any, **kwargs: Any) -> None:
+        raise subprocess.TimeoutExpired(kwargs["timeout"], 1)
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", timeout)
+    assert (
+        run_psql(
+            host=None,
+            port=5432,
+            user="odoo",
+            password=None,
+            query="SELECT 1",
+            timeout=1,
+        )
+        is None
+    )

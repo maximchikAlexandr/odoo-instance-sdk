@@ -15,6 +15,7 @@ def run_psql(
     password: str | None,
     query: str,
     timeout: float,
+    database: str = "postgres",
 ) -> subprocess.CompletedProcess[str] | None:
     """Run one read-only psql query with explicit connection inputs.
 
@@ -48,7 +49,7 @@ def run_psql(
         "-U",
         user,
         "-d",
-        "postgres",
+        database,
         "-t",
         "-A",
         "-c",

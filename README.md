@@ -46,7 +46,7 @@ with `--format rich|json|toon`; Rich is the default. The existing `--json`
 option is an alias for `--format json`. Supplying `--json` with `--format json`
 is accepted; other combinations are usage errors.
 
-The format option is available on `init`, `doctor`, `env checkout`, `env list`,
+The format option is available on `init`, `doctor`, `env checkout`, `env list`, `test`,
 `env remove`, `env sync`, `eval`, `exec`, `module list`, `module update`,
 `module test`, `translations export`, `deps verify`, `vscode generate`, and
 `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`.
@@ -59,6 +59,59 @@ the interval must be at least `0.1` seconds. Rich `--all` includes removed
 environments. JSON/TOON `--all` retain the active-only compatibility behavior.
 The root command, `run`, interactive shell (`shell`), and `logs --follow` intentionally
 do not accept document formats or a Rich live wrapper.
+
+### Run local Odoo tests
+
+`odcli test [TARGET]` resolves one ready environment first, then selects tests
+only from the generated, worktree-contained `addons_path` roots. A bare module,
+the current directory, or one test file can be selected:
+
+```bash
+odcli --env feature-env test sale
+odcli --env feature-env test                 # nearest addon for the current directory
+odcli --env feature-env test addons/sale/tests/test_sale_order.py
+odcli --env feature-env test sale --tags '/sale:TestSale.test_confirm'
+```
+
+Module and cwd selection default to the native `/<module>` tag. A file defaults
+to the native `/<module>/tests/<path>` tag. `--tags` is passed byte-for-byte for
+module, cwd, and changed selection; a file target cannot be combined with
+`--tags`. Targets are singular, and a target cannot be combined with
+`--changed`.
+
+Changed-addon selection uses only direct worktree changes and accepts an
+explicit base or the environment's recorded non-`HEAD` base:
+
+```bash
+odcli --env feature-env test --changed --base origin/dev --dry-run --format json
+odcli --env feature-env test --changed --tags '/sale,/stock'
+```
+
+The changed plan is deterministic: modules are sorted and deduplicated, and
+without explicit tags their selector is joined as `/sale,/stock`. Changes
+outside configured addon roots are a successful `no_addon_changes` result;
+unsafe paths inside an addon root are reported as fatal unmapped paths. External,
+missing, and symlinked addon roots are never selected, and reverse dependants
+are not inferred.
+
+`--dry-run` is available only with `--changed`; it reports environment, Git, and
+selection provenance without contacting PostgreSQL or starting Odoo. An actual
+run performs a read-only check against exactly one configured database and
+requires every selected module to be installed before invoking Odoo's native
+test runner. The command never installs, updates, restores, commits, or otherwise
+mutates application data. Rich is the default; `--format json|toon` returns the
+same envelope data, and execution counts are omitted from dry-run and
+`no_addon_changes` results.
+
+The compatibility alias retains its plural parser and required native tags:
+
+```bash
+odcli --env feature-env module test sale stock \
+  --test-tags '/sale,/stock' --reload-tests --allow-empty
+```
+
+`module test` uses the same safe selection boundary, read-only preflight,
+single native runner, typed result, and `--format`/`--json` output contract.
 
 The public monitor snapshot uses additive schema v2 fields `observed_port` and
 `artifacts`; existing version-1 fields retain their meanings. The CLI envelope

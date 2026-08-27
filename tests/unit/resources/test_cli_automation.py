@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import base64
 import json
 import textwrap
@@ -18,12 +19,12 @@ from odoo_instance_sdk.internal.automation import (
     export_translations,
     list_modules,
     plan_module_update,
-    run_module_tests,
+    run_odoo_tests,
     update_modules,
     verify_deps,
 )
 from odoo_instance_sdk.internal.server import _build_shell_wrapper, parse_payload
-from odoo_instance_sdk.models import CommandResult
+from odoo_instance_sdk.models import CommandResult, OdooTestSpec
 from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
@@ -56,6 +57,7 @@ def _stub_run_shell_script(
     payload: dict[str, Any] | None = None,
     *,
     returncode: int = 0,
+    stderr_override: str = "",
     stdout_override: str | None = None,
     captured_source: list[str] | None = None,
     captured_argv: list[list[str]] | None = None,
@@ -77,10 +79,16 @@ def _stub_run_shell_script(
             captured_commit.append(commit)
         if stdout_override is not None:
             return CommandResult(
-                args=[], returncode=returncode, stdout=stdout_override, stderr="", duration=0.0
+                args=[],
+                returncode=returncode,
+                stdout=stdout_override,
+                stderr=stderr_override,
+                duration=0.0,
             )
         out = _payload_stdout(payload or {})
-        return CommandResult(args=[], returncode=returncode, stdout=out, stderr="", duration=0.0)
+        return CommandResult(
+            args=[], returncode=returncode, stdout=out, stderr=stderr_override, duration=0.0
+        )
 
     return _impl  # type: ignore[return-value]
 
@@ -249,24 +257,92 @@ class TestModuleUpdate:
             update_modules(inst, ("missing_mod",), env_id="env-1")
 
 
-class TestModuleTest:
-    def test_pass(self, tmp_path: Path) -> None:
+class TestOdooTestRunner:
+    def test_native_counts_and_single_locked_shell_call(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
         payload = {
             "ok": True,
             "commit": False,
             "result": {
-                "tests_count": 5,
-                "tests_success": 5,
-                "tests_errors": 0,
-                "tests_failed": 0,
-                "skipped": 0,
-                "had_failures": False,
-                "had_zero_tests": False,
+                "tests": 7,
+                "successful": 3,
+                "failed": 1,
+                "errors": 2,
+                "skipped": 1,
             },
         }
+        captured_source: list[str] = []
+        captured_commit: list[bool] = []
         with (
-            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch.object(
+                type(inst),
+                "_run_shell_script_exclusive",
+                _stub_run_shell_script(
+                    payload,
+                    captured_source=captured_source,
+                    captured_commit=captured_commit,
+                ),
+            ),
+            patch(
+                "odoo_instance_sdk.internal.automation.probe_address",
+                return_value=AddressState.FREE,
+            ),
+        ):
+            result, diagnostic = run_odoo_tests(
+                inst,
+                OdooTestSpec(
+                    modules=("sale", "stock"),
+                    test_tags="/sale,/stock",
+                    reload_tests=True,
+                ),
+                http_interface="127.0.0.1",
+                http_port=18080,
+            )
+
+        assert diagnostic is None
+        assert result.counts == {
+            "tests": 7,
+            "successful": 3,
+            "failed": 1,
+            "errors": 2,
+            "skipped": 1,
+        }
+        assert result.failures is True
+        assert result.zero_tests is False
+        assert result.exit_code == 1
+        assert len(captured_source) == 1
+        assert captured_commit == [False]
+        assert captured_source[0].count("_odcli_run_tests(") == 1
+        assert "_odcli_config['workers'] = 0" in captured_source[0]
+        calls = [
+            node
+            for node in ast.walk(ast.parse(captured_source[0]))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_odcli_run_tests"
+        ]
+        assert len(calls) == 1
+        arguments = {
+            keyword.arg: ast.literal_eval(keyword.value)
+            for keyword in calls[0].keywords
+            if keyword.arg is not None
+        }
+        assert arguments == {
+            "modules": ("sale", "stock"),
+            "test_tags": "/sale,/stock",
+            "reload_tests": True,
+        }
+        assert type(arguments["modules"]) is tuple
+        assert type(arguments["test_tags"]) is str
+        assert type(arguments["reload_tests"]) is bool
+
+    @pytest.mark.parametrize("allow_empty, expected_exit", [(False, 1), (True, 0)])
+    def test_native_zero_tests_respects_allow_empty(
+        self, tmp_path: Path, allow_empty: bool, expected_exit: int
+    ) -> None:
+        inst = _make_instance(tmp_path)
+        payload = {"result": {"tests": 0, "successful": 0, "failed": 0, "errors": 0, "skipped": 0}}
+        with (
             patch.object(
                 type(inst), "_run_shell_script_exclusive", _stub_run_shell_script(payload)
             ),
@@ -275,72 +351,85 @@ class TestModuleTest:
                 return_value=AddressState.FREE,
             ),
         ):
-            res, code = run_module_tests(
+            result, diagnostic = run_odoo_tests(
                 inst,
-                ("comerta_base",),
-                "/comerta_base",
-                env_id="e1",
+                OdooTestSpec(modules=("sale",), test_tags="/sale", allow_empty=allow_empty),
                 http_interface="127.0.0.1",
-                http_port=18069,
+                http_port=18081,
             )
-        assert code == 0
-        assert res.tests_count == 5
+        assert result.zero_tests is True
+        assert result.exit_code == expected_exit
+        assert diagnostic is None
 
-    def test_zero_tests_without_allow_empty_nonzero(self, tmp_path: Path) -> None:
+    def test_process_failure_returns_sanitized_stderr_diagnostic(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
-        payload = {
-            "ok": True,
-            "commit": False,
-            "result": {
-                "tests_count": 0,
-                "tests_success": 0,
-                "tests_errors": 0,
-                "tests_failed": 0,
-                "skipped": 0,
-                "had_failures": False,
-                "had_zero_tests": True,
-            },
-        }
         with (
-            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
             patch.object(
-                type(inst), "_run_shell_script_exclusive", _stub_run_shell_script(payload)
+                type(inst),
+                "_run_shell_script_exclusive",
+                _stub_run_shell_script(
+                    returncode=2,
+                    stderr_override="password='secret' token=hidden /private/runtime/odoo.log",
+                ),
             ),
             patch(
                 "odoo_instance_sdk.internal.automation.probe_address",
                 return_value=AddressState.FREE,
             ),
         ):
-            res, code = run_module_tests(
+            result, diagnostic = run_odoo_tests(
                 inst,
-                ("comerta_base",),
-                "/tag",
-                env_id="e1",
+                OdooTestSpec(modules=("sale",), test_tags="/sale"),
                 http_interface="127.0.0.1",
-                http_port=18070,
+                http_port=18082,
             )
-        assert code == 1
-        assert res.had_zero_tests
+        assert result.exit_code == 1
+        assert diagnostic is not None
+        assert "secret" not in diagnostic
+        assert "hidden" not in diagnostic
+        assert "/private/runtime/odoo.log" not in diagnostic
 
-    def test_port_conflict_precondition_error(self, tmp_path: Path) -> None:
+    def test_exit_uses_native_counts_not_log_words(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
-
+        payload = {"result": {"tests": 2, "successful": 2, "failed": 0, "errors": 0, "skipped": 0}}
         with (
-            patch.object(type(inst), "run_shell_script", _stub_run_shell_script()),
+            patch.object(
+                type(inst),
+                "_run_shell_script_exclusive",
+                _stub_run_shell_script(payload, stderr_override="FAILED error 0 tests"),
+            ),
+            patch(
+                "odoo_instance_sdk.internal.automation.probe_address",
+                return_value=AddressState.FREE,
+            ),
+        ):
+            result, diagnostic = run_odoo_tests(
+                inst,
+                OdooTestSpec(modules=("sale",), test_tags="/sale"),
+                http_interface="127.0.0.1",
+                http_port=18083,
+            )
+        assert result.exit_code == 0
+        assert result.failures is False
+        assert diagnostic is None
+
+    def test_port_conflict_does_not_call_shell(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        with (
+            patch.object(type(inst), "_run_shell_script_exclusive") as runner,
             patch(
                 "odoo_instance_sdk.internal.automation.probe_address",
                 return_value=AddressState.OCCUPIED,
             ),
             pytest.raises(ConfigError, match="port occupied"),
         ):
-            run_module_tests(
+            run_odoo_tests(
                 inst,
-                ("comerta_base",),
-                "/tag",
-                env_id="e1",
+                OdooTestSpec(modules=("sale",), test_tags="/sale"),
                 http_interface="127.0.0.1",
-                http_port=18071,
+                http_port=18084,
             )
+        runner.assert_not_called()
 
 
 class TestTranslationsExport:

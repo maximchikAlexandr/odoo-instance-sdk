@@ -27,11 +27,8 @@ from odoo_instance_sdk.internal.automation import (
     ShellOutcome,
     TranslationExportResult,
 )
-from odoo_instance_sdk.internal.automation import (
-    TestRunResult as ModuleTestRunResult,
-)
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
-from odoo_instance_sdk.models import Snapshot
+from odoo_instance_sdk.models import OdooTestResult, Snapshot
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -44,6 +41,7 @@ BOUNDED_LEAVES = (
     ("env", "sync"),
     ("eval",),
     ("exec",),
+    ("test",),
     ("module", "list"),
     ("module", "update"),
     ("module", "test"),
@@ -76,6 +74,7 @@ PUBLIC_LEAF_CASES = tuple(
             ("env", "sync", "env-1"),
             ("eval", "1"),
             ("exec", "-"),
+            ("test", "--changed", "--dry-run"),
             ("module", "list", "sale"),
             ("module", "update", "sale", "--yes"),
             ("module", "test", "sale", "--test-tags", "/sale"),
@@ -102,6 +101,7 @@ def _matrix_environment() -> SimpleNamespace:
         name="demo",
         state="ready",
         branch="main",
+        base_ref="main",
         db_mode=EnvironmentDatabaseMode.SHARED,
         http_interface="127.0.0.1",
         http_port=8069,
@@ -191,6 +191,7 @@ def _patch_leaf_external(  # noqa: C901
     if (
         path in {("eval",), ("exec",)}
         or path[:1] == ("module",)
+        or path[:1] == ("test",)
         or path[:1]
         in {
             ("translations",),
@@ -232,6 +233,24 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
+    if path == ("test",):
+        plan = SimpleNamespace(
+            base_source="explicit",
+            requested_base="main",
+            resolved_base="base-sha",
+            merge_base="merge-sha",
+            head="head-sha",
+            changed_files=("addons/sale/tests/test_sale.py",),
+            modules=("sale",),
+            ignored_paths=(),
+            unmapped_paths=(),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.test.resolve_changed_selection",
+            fail_operation if failing else lambda *_args, **_kwargs: plan,
+        )
+        return
+
     if path == ("module", "update"):
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.plan_module_update",
@@ -247,12 +266,37 @@ def _patch_leaf_external(  # noqa: C901
 
     if path == ("module", "test"):
         monkeypatch.setattr(
+            "odoo_instance_sdk.cli.resolve_module_test_selection",
+            lambda *_args, **_kwargs: (
+                SimpleNamespace(
+                    modules=("sale",),
+                    provenance=SimpleNamespace(
+                        kind="module",
+                        value="sale",
+                        module_path=tmp_path / "sale",
+                        file_path=None,
+                    ),
+                ),
+            ),
+        )
+        monkeypatch.setattr(
             "odoo_instance_sdk.cli.run_module_tests",
             fail_operation
             if failing
             else lambda *_args, **_kwargs: (
-                ModuleTestRunResult(1, 1, 0, 0, 0, False, False),
-                0,
+                OdooTestResult(
+                    counts={
+                        "tests": 1,
+                        "successful": 1,
+                        "failed": 0,
+                        "errors": 0,
+                        "skipped": 0,
+                    },
+                    failures=False,
+                    zero_tests=False,
+                    exit_code=0,
+                ),
+                None,
             ),
         )
         return
