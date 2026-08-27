@@ -365,6 +365,16 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                 "database": "db_x",
                 "lifecycle_state": "ready",
                 "allocated_http_port": 8069,
+                "observed_port": None,
+                "artifacts": {
+                    "worktree_exists": True,
+                    "worktree_registered": True,
+                    "config_exists": True,
+                    "python_exists": True,
+                    "python_contained": True,
+                    "dependency_lock_exists": True,
+                    "backup_exists": None,
+                },
                 "runtime": {
                     "state": "ready",
                     "root_pid": 1,
