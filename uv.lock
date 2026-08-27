@@ -625,6 +625,8 @@ dependencies = [
     { name = "msgspec" },
     { name = "platformdirs" },
     { name = "psutil" },
+    { name = "python-toon" },
+    { name = "rich" },
 ]
 
 [package.optional-dependencies]
@@ -674,6 +676,8 @@ requires-dist = [
     { name = "msgspec", specifier = ">=0.18,<1.0" },
     { name = "platformdirs", specifier = ">=4.3,<5" },
     { name = "psutil", specifier = ">=5.9,<7" },
+    { name = "python-toon", specifier = "==0.1.3" },
+    { name = "rich", specifier = ">=15,<16" },
     { name = "starlette", marker = "extra == 'dashboard'", specifier = ">=1.3.1,<2.0" },
     { name = "uvicorn", marker = "extra == 'dashboard'", specifier = ">=0.30,<1.0" },
 ]
@@ -922,6 +926,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/78/b4/439b179d1ff526791eb921115fca8e44e596a13efeda518b9d845a619450/pytest_xdist-3.8.0.tar.gz", hash = "sha256:7e578125ec9bc6050861aa93f2d59f1d8d085595d6551c2c90b6f4fad8d3a9f1", size = 88069, upload-time = "2025-07-01T13:30:59.346Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ca/31/d4e37e9e550c2b92a9cbc2e4d0b7420a27224968580b5a447f420847c975/pytest_xdist-3.8.0-py3-none-any.whl", hash = "sha256:202ca578cfeb7370784a8c33d6d05bc6e13b4f25b5053c30a152269fd10f0b88", size = 46396, upload-time = "2025-07-01T13:30:56.632Z" },
+]
+
+[[package]]
+name = "python-toon"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/92/640c83ca46d5fe9c49895449a8932f55252537dd13dd22186cbac3a1ce59/python_toon-0.1.3.tar.gz", hash = "sha256:ca348b214c4f1cdad3579fd83dd60032d9eb87eb349c2d430ad9eb6371f174bf", size = 31280, upload-time = "2025-11-04T09:12:20.949Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/26/a4/2f2def0378b44f913d2d6cb3bc5b1a15267b363937ab1cb9afb07ce2313c/python_toon-0.1.3-py3-none-any.whl", hash = "sha256:a27b0ee4a729e730d1037d0a63eb8b344b3e5a26e3dc9a173067b6c31a868ee6", size = 21797, upload-time = "2025-11-04T09:12:19.443Z" },
 ]
 
 [[package]]

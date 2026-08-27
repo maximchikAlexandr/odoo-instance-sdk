@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
@@ -192,3 +193,63 @@ def test_from_vscode_import(tmp_path: Path) -> None:
     assert "8068" in content
     assert "--dev=qweb,xml" in content
     assert "comerta_base" not in content
+
+
+@pytest.mark.parametrize("source", ["direct", "vscode"])
+def test_dry_run_manifest_sanitizes_cli_and_vscode_controls(source: str, tmp_path: Path) -> None:
+    payload = "\x00\x1b[2J\x9b31m\x7f"
+    runner = CliRunner()
+    if source == "direct":
+        args = [
+            "init",
+            "--no-input",
+            "--dry-run",
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--python",
+            f"python-{payload}",
+            "--database",
+            f"db-{payload}",
+            "--project",
+            str(tmp_path),
+        ]
+    else:
+        launch = tmp_path / "launch.json"
+        launch.write_text(
+            json.dumps(
+                {
+                    "configurations": [
+                        {
+                            "name": "Odoo malicious",
+                            "type": "debugpy",
+                            "request": "launch",
+                            "program": "${workspaceFolder}/odoo-bin",
+                            "python": f"python-{payload}",
+                            "args": [f"--dev={payload}"],
+                        }
+                    ]
+                }
+            )
+        )
+        args = [
+            "init",
+            "--no-input",
+            "--dry-run",
+            "--from-vscode",
+            str(launch),
+            "--project",
+            str(tmp_path),
+        ]
+
+    result = runner.invoke(cli, args)
+
+    assert result.exit_code == 0, result.output
+    assert "[project]" in result.output
+    assert "\x00" not in result.output
+    assert "\x1b" not in result.output
+    assert "\x7f" not in result.output
+    assert "\x9b" not in result.output
+    assert r"\x00" in result.output
+    assert r"\x1b[2J" in result.output
+    assert r"\x9b31m" in result.output
+    assert r"\x7f" in result.output

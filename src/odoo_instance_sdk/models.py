@@ -304,6 +304,12 @@ class PidScope(enum.StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class PortObservation(enum.StrEnum):
+    FREE = "free"
+    OCCUPIED = "occupied"
+    UNKNOWN = "unknown"
+
+
 class GitDiff(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     added: int
     deleted: int
@@ -339,6 +345,16 @@ class StorageFootprint(msgspec.Struct, frozen=True, forbid_unknown_fields=True, 
     python_environment: PythonEnvFootprint
     database: DatabaseFootprint
     other_files_bytes: int | None
+
+
+class EnvironmentArtifacts(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    worktree_exists: bool
+    worktree_registered: bool
+    config_exists: bool
+    python_exists: bool
+    python_contained: bool
+    dependency_lock_exists: bool
+    backup_exists: bool | None
 
 
 class RuntimeMetrics(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -407,6 +423,8 @@ class EnvironmentSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     database: str | None
     lifecycle_state: EnvironmentState
     allocated_http_port: int | None
+    observed_port: PortObservation | None
+    artifacts: EnvironmentArtifacts
     runtime: RuntimeMetrics
     git: GitActivity
     storage: StorageFootprint

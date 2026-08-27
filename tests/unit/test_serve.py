@@ -14,6 +14,7 @@ from odoo_instance_sdk.models import (
     ClusterMetrics,
     ClusterSnapshot,
     DatabaseFootprint,
+    EnvironmentArtifacts,
     EnvironmentSnapshot,
     EnvironmentState,
     GitActivity,
@@ -207,7 +208,7 @@ def test_snapshot_reuses_injected_monitor_and_forwards_filter() -> None:
 
         def snapshot(self, project_id: str | None = None) -> dict[str, object]:
             self.calls.append(project_id)
-            return {"schema_version": 1, "projects": [], "environments": []}
+            return {"schema_version": 2, "projects": [], "environments": []}
 
     monitor = Monitor()
     with _client(headless=True, monitor=monitor) as client:
@@ -221,7 +222,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
         def snapshot(self, project_id: str | None = None) -> Snapshot:
             assert project_id == "project_x"
             return Snapshot(
-                schema_version=1,
+                schema_version=2,
                 generated_at=datetime(2026, 8, 24, tzinfo=UTC),
                 projects=(
                     ProjectSummary(
@@ -264,6 +265,16 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                         database="db_x",
                         lifecycle_state=EnvironmentState.READY,
                         allocated_http_port=8069,
+                        observed_port=None,
+                        artifacts=EnvironmentArtifacts(
+                            worktree_exists=True,
+                            worktree_registered=True,
+                            config_exists=True,
+                            python_exists=True,
+                            python_contained=True,
+                            dependency_lock_exists=True,
+                            backup_exists=None,
+                        ),
                         runtime=RuntimeMetrics(
                             state=RuntimeState.READY,
                             root_pid=1,
@@ -311,7 +322,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
     payload = response.json()
     payload["generated_at"] = "<generated_at>"
     assert payload == {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": "<generated_at>",
         "projects": [
             {
@@ -354,6 +365,16 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                 "database": "db_x",
                 "lifecycle_state": "ready",
                 "allocated_http_port": 8069,
+                "observed_port": None,
+                "artifacts": {
+                    "worktree_exists": True,
+                    "worktree_registered": True,
+                    "config_exists": True,
+                    "python_exists": True,
+                    "python_contained": True,
+                    "dependency_lock_exists": True,
+                    "backup_exists": None,
+                },
                 "runtime": {
                     "state": "ready",
                     "root_pid": 1,

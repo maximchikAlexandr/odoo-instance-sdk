@@ -1,0 +1,395 @@
+from __future__ import annotations
+
+import importlib
+import importlib.metadata
+import inspect
+import json
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import click
+import pytest
+from click.testing import CliRunner, Result
+
+from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.context import CliContext
+from odoo_instance_sdk.commands.output import OutputMode, build_envelope
+from odoo_instance_sdk.internal.context import resolve_environment, resolve_project
+from odoo_instance_sdk.models import Snapshot
+from odoo_instance_sdk.resources.environment import EnvironmentResource
+from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+BOUNDED_LEAVES = (
+    ("init",),
+    ("doctor",),
+    ("env", "checkout"),
+    ("env", "list"),
+    ("env", "remove"),
+    ("env", "sync"),
+    ("eval",),
+    ("exec",),
+    ("module", "list"),
+    ("module", "update"),
+    ("module", "test"),
+    ("translations", "export"),
+    ("deps", "verify"),
+    ("vscode", "generate"),
+    ("postgres", "approve-image"),
+    ("postgres", "status"),
+    ("postgres", "up"),
+    ("postgres", "stop"),
+)
+
+
+def _command(path: tuple[str, ...]) -> click.Command:
+    command: click.Command = cli
+    for name in path:
+        assert isinstance(command, click.Group)
+        command = command.commands[name]
+    return command
+
+
+def _option_names(command: click.Command) -> set[str]:
+    return {option for param in command.params for option in param.opts}
+
+
+def _passthrough_instance(
+    instance: object,
+    args: list[str],
+    *,
+    input_text: str = "",
+) -> Result:
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        return_value=(MagicMock(), SimpleNamespace(), instance),
+    ):
+        return CliRunner().invoke(cli, args, input=input_text)
+
+
+def test_cli_import_and_console_script_surface_are_stable() -> None:
+    module = importlib.import_module("odoo_instance_sdk.cli")
+    assert module.cli is cli
+    assert cli.name == "cli"
+
+    entrypoints = importlib.metadata.entry_points(group="console_scripts")
+    odcli = next(entry for entry in entrypoints if entry.name == "odcli")
+    assert odcli.value == "odoo_instance_sdk.cli:cli"
+    assert odcli.load() is cli
+
+
+def test_typed_cli_seam_and_reusable_resolvers_have_no_click_context_parameter() -> None:
+    assert CliContext.__slots__ == (
+        "project",
+        "env",
+        "project_source",
+        "environment_source",
+        "resolved_project",
+        "resolved_environment",
+    )
+    context = CliContext()
+    assert context.resolved_project is None
+    assert context.resolved_environment is None
+    assert set(OutputMode) == {OutputMode.RICH, OutputMode.JSON, OutputMode.TOON}
+    assert "click.Context" not in str(inspect.signature(resolve_project))
+    assert "click.Context" not in str(inspect.signature(resolve_environment))
+    envelope = build_envelope(
+        ok=True,
+        command="characterization",
+        result={"value": 1},
+    )
+    assert envelope["result"] == envelope["data"] == {"value": 1}
+    assert json.dumps(envelope, indent=2) == (
+        '{\n  "schema_version": 1,\n  "ok": true,\n  "command": "characterization",\n'
+        '  "context": {},\n  "provenance": {},\n  "dry_run": false,\n'
+        '  "warnings": [],\n  "result": {\n    "value": 1\n  },\n'
+        '  "data": {\n    "value": 1\n  }\n}'
+    )
+
+
+def test_cli_tree_help_and_root_selectors_are_stable() -> None:
+    result = CliRunner().invoke(cli, ["--help"])
+
+    assert result.exit_code == 0
+    assert {param.name for param in cli.params} == {"project", "env_selector"}
+    assert set(cli.list_commands(click.Context(cli))) == {
+        "init",
+        "env",
+        "run",
+        "logs",
+        "shell",
+        "doctor",
+        "eval",
+        "exec",
+        "module",
+        "translations",
+        "deps",
+        "vscode",
+        "postgres",
+        "monitor",
+    }
+    assert "--project" in result.output
+    assert "--env" in result.output
+
+
+def test_command_local_json_placement_is_stable() -> None:
+    for path in BOUNDED_LEAVES:
+        command = _command(path)
+        assert "--json" in _option_names(command), path
+        help_result = CliRunner().invoke(cli, [*path, "--help"])
+        assert help_result.exit_code == 0
+        assert "--json" in help_result.output
+
+    for path in (("run",), ("shell",), ("logs",), ("monitor",)):
+        assert "--json" not in _option_names(_command(path)), path
+
+    root_json = CliRunner().invoke(cli, ["--json", "env", "list"])
+    assert root_json.exit_code == 2
+    assert root_json.stdout == ""
+    assert "No such option" in root_json.stderr
+
+
+def test_discovered_public_methods() -> None:
+    expected = {
+        EnvironmentResource: (
+            "checkout",
+            "get",
+            "list",
+            "record_use",
+            "remove",
+            "sync_python",
+        ),
+        EnvironmentMonitor: ("snapshot", "watch"),
+        BackupCatalog: (
+            "active_environment_for",
+            "add_environment_event",
+            "clear_environment_runtime",
+            "close",
+            "create_environment",
+            "distinct_restored_database_names",
+            "fail_download",
+            "get_backup_history",
+            "get_by_id",
+            "get_copy_journal",
+            "get_environment",
+            "get_environment_runtime",
+            "has_tracked_database",
+            "latest_backup",
+            "latest_restore",
+            "list_backups",
+            "list_environment_runtimes",
+            "list_environments",
+            "list_environments_with_runtimes",
+            "record_database_dropped",
+            "record_deletion",
+            "record_environment_use",
+            "record_restore",
+            "record_validation",
+            "start_download",
+            "success_download",
+            "update_environment",
+            "update_environment_state",
+            "update_path",
+            "upsert_copy_journal",
+            "upsert_environment_runtime",
+            "verify_identity",
+        ),
+    }
+
+    for cls, names in expected.items():
+        discovered = tuple(
+            name
+            for name, value in inspect.getmembers(cls, inspect.isroutine)
+            if not name.startswith("_")
+        )
+        assert discovered == names
+
+
+def _assert_envelope_keys(envelope: dict[str, object], *, success: bool) -> None:
+    common = {"schema_version", "ok", "command", "context", "provenance", "dry_run", "warnings"}
+    expected = common | ({"result", "data"} if success else {"error"})
+    assert set(envelope) == expected
+    assert envelope["schema_version"] == 1
+    assert envelope["ok"] is success
+    assert envelope["context"] == {}
+    assert envelope["warnings"] == []
+    if success:
+        assert envelope["result"] == envelope["data"]
+
+
+def test_json_success_envelope_v1_is_complete_and_result_equals_data(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--no-input",
+            "--dry-run",
+            "--json",
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--project",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    envelope = json.loads(result.stdout)
+    _assert_envelope_keys(envelope, success=True)
+    assert envelope["command"] == "init"
+    assert envelope["dry_run"] is True
+    assert envelope["provenance"] == {
+        "option": ["odoo_bin"],
+        "vscode": [],
+        "discovery": [],
+        "default": [],
+    }
+
+
+def test_json_failure_envelope_v1_is_complete_and_sanitized() -> None:
+    diagnostic = "password='quoted secret' token=token-secret /private/runtime/secret-path"
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=RuntimeError(diagnostic),
+    ):
+        result = CliRunner().invoke(cli, ["eval", "1", "--json"])
+
+    assert result.exit_code == 1
+    assert result.stderr == ""
+    envelope = json.loads(result.stdout)
+    _assert_envelope_keys(envelope, success=False)
+    assert envelope["command"] == "eval"
+    assert envelope["error"]["code"] == "eval_failed"
+    assert "quoted secret" not in result.stdout
+    assert "token-secret" not in result.stdout
+    assert "/private/runtime/secret-path" not in result.stdout
+
+
+def test_non_json_failure_is_sanitized_to_stderr_only() -> None:
+    diagnostic = "password='quoted secret' /private/runtime/secret-path"
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=RuntimeError(diagnostic),
+    ):
+        result = CliRunner().invoke(cli, ["eval", "1"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "quoted secret" not in result.stderr
+    assert "/private/runtime/secret-path" not in result.stderr
+
+
+def test_click_parse_failure_remains_native_usage_error() -> None:
+    result = CliRunner().invoke(cli, ["eval", "1", "--json", "--not-an-option"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "Error: No such option" in result.stderr
+    assert "Usage:" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["run", "shell"])
+def test_passthrough_commands_forward_child_exit_code(command: str) -> None:
+    instance = MagicMock()
+    child_exit = 17 if command == "run" else 23
+    method = instance.run_foreground if command == "run" else instance.shell
+    method.return_value = child_exit
+
+    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+        result = _passthrough_instance(
+            instance, [command, "--", "--dev"] if command == "shell" else [command]
+        )
+
+    assert result.exit_code == child_exit
+    method.assert_called_once_with(**({"args": ["--dev"]} if command == "shell" else {}))
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("command", ["run", "shell"])
+def test_passthrough_commands_map_keyboard_interrupt_to_130(command: str) -> None:
+    instance = MagicMock()
+    method = instance.run_foreground if command == "run" else instance.shell
+    method.side_effect = KeyboardInterrupt
+
+    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+        result = _passthrough_instance(instance, [command])
+
+    assert result.exit_code == 130
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_passthrough_run_and_shell_preserve_native_streams() -> None:
+    run_instance = MagicMock()
+
+    def run_foreground() -> int:
+        sys.stdout.write("run stdout")
+        sys.stderr.write("run stderr")
+        return 0
+
+    run_instance.run_foreground.side_effect = run_foreground
+    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+        run_result = _passthrough_instance(run_instance, ["run"])
+    assert run_result.stdout == "run stdout"
+    assert run_result.stderr == "run stderr"
+
+    shell_instance = MagicMock()
+    received_stdin: list[str] = []
+
+    def shell(*, args: list[str]) -> int:
+        received_stdin.append(sys.stdin.read())
+        sys.stdout.write("shell stdout")
+        sys.stderr.write("shell stderr")
+        assert args == ["--dev"]
+        return 0
+
+    shell_instance.shell.side_effect = shell
+    shell_result = _passthrough_instance(
+        shell_instance,
+        ["shell", "--", "--dev"],
+        input_text="shell stdin",
+    )
+    assert shell_result.stdout == "shell stdout"
+    assert shell_result.stderr == "shell stderr"
+    assert received_stdin == ["shell stdin"]
+
+
+def test_logs_follow_preserves_raw_stdout_and_streaming_arguments() -> None:
+    instance = MagicMock()
+    raw_lines = ["first\n", "\x1b[31msecond\x1b[0m\n", "unterminated"]
+    instance.iter_logs.return_value = iter(raw_lines)
+
+    result = _passthrough_instance(instance, ["logs", "--follow", "--tail", "2"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "".join(raw_lines)
+    assert result.stderr == ""
+    instance.iter_logs.assert_called_once_with(tail=2, follow=True)
+
+
+def test_outside_project_all_projects_listing_does_not_require_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    empty = Snapshot(schema_version=2, generated_at=datetime.now(UTC), projects=(), environments=())
+    client = MagicMock()
+    with (
+        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
+        patch(
+            "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", return_value=empty
+        ) as snapshot,
+    ):
+        result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.stdout)
+    assert envelope["provenance"] == {
+        "project_source": "null",
+        "environment_source": "null",
+    }
+    snapshot.assert_called_once_with(project_id=None, include_removed=False)

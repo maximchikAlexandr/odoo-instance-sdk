@@ -96,7 +96,7 @@ def test_monitor_rows_use_one_wal_snapshot_during_concurrent_runtime_commit(tmp_
     class _ConnectionWithMidReadCommit:
         def execute(self, sql: str) -> sqlite3.Cursor | _CommitAfterFirstFetch:
             cursor = connection.execute(sql)
-            if sql.startswith("SELECT * FROM environments"):
+            if "FROM environments" in sql:
                 return _CommitAfterFirstFetch(cursor)
             return cursor
 

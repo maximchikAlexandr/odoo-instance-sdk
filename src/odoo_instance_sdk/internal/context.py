@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from odoo_instance_sdk.client import OdooClient
-from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import (
     EnvironmentNotFoundError,
     EnvironmentResolutionError,
@@ -16,11 +13,7 @@ from odoo_instance_sdk.internal import git_worktree
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.resources.environment import DevelopmentEnvironment, EnvironmentState
-from odoo_instance_sdk.resources.instance import OdooInstance
-
-if TYPE_CHECKING:
-    import click
+from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
 
 def _find_nearest_manifest(start: Path, boundary: Path | None) -> Path | None:
@@ -182,26 +175,6 @@ def _infer_from_worktree(
     return None
 
 
-def resolve_project_path(ctx: click.Context) -> Path:
-    raw = ctx.obj.get("project")
-    project = resolve_project(Path(raw) if raw is not None else None)
-    if raw is not None:
-        ctx.obj["project_source"] = "explicit"
-    else:
-        cwd = Path.cwd()
-        ctx.obj["project_source"] = (
-            "cwd"
-            if _find_nearest_manifest(cwd, None) is not None
-            else "worktree"
-            if _project_from_registered_worktree(cwd) is not None
-            else "null"
-        )
-    if isinstance(project, ProjectConfig):
-        assert project.repository_root is not None
-        return project.repository_root
-    return Path(project)
-
-
 def _check_port_free(env_obj: DevelopmentEnvironment) -> bool:
     return probe_address(env_obj.http_interface, env_obj.http_port) is AddressState.FREE
 
@@ -219,22 +192,3 @@ def _verify_env_runtime(env_obj: DevelopmentEnvironment) -> None:
             raise RuntimeError(f"recorded Python missing: {py_path / 'bin' / 'python'}")
     elif not py_path.exists():
         raise RuntimeError(f"recorded Python missing: {py_path}")
-
-
-def ready_instance(ctx: click.Context) -> tuple[OdooClient, DevelopmentEnvironment, OdooInstance]:
-    """Resolve a ready environment from Click context and return a live instance."""
-    client = OdooClient(config=OdooClientConfig(executable="odoo"))
-    raw_project = ctx.obj.get("project")
-    project_root = resolve_project_path(ctx).resolve() if raw_project is not None else None
-    env_obj = resolve_environment(client, ctx.obj.get("env"))
-    if project_root is not None and Path(env_obj.repository_root).resolve() != project_root:
-        raise EnvironmentResolutionError(
-            f"Environment {env_obj.name} ({env_obj.id}) does not belong to project {project_root}"
-        )
-    if env_obj.state != EnvironmentState.READY:
-        raise RuntimeError(
-            f"Environment {env_obj.name} ({env_obj.id}) is not ready (state={env_obj.state})"
-        )
-    _verify_env_runtime(env_obj)
-    instance = client.instance.from_environment(env_obj)
-    return client, env_obj, instance

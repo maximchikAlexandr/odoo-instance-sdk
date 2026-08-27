@@ -90,6 +90,43 @@ def test_isolated_sdist_import_and_odcli_help(tmp_path: Path) -> None:
     _install_and_smoke(sdist, tmp_path)
 
 
+def test_isolated_wheel_imports_rich_toon_and_runs_toon_env_list(tmp_path: Path) -> None:
+    """The installed core package does not depend on Node or dashboard extras."""
+    wheel, _sdist = _dist()
+    venv = tmp_path / "venv"
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    subprocess.run(["uv", "venv", str(venv)], check=True, cwd=tmp_path)
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    odcli = venv / ("Scripts/odcli.exe" if os.name == "nt" else "bin/odcli")
+    subprocess.run(
+        ["uv", "pip", "install", "--python", str(python), str(wheel)],
+        check=True,
+        cwd=tmp_path,
+    )
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    imports = subprocess.run(
+        [str(python), "-c", "import rich, toon; print(rich.__name__, toon.__name__)"],
+        cwd=empty,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert imports.stdout.strip() == "rich toon"
+    result = subprocess.run(
+        [str(odcli), "env", "list", "--all-projects", "--format", "toon"],
+        cwd=empty,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stderr == ""
+    assert result.stdout.strip()
+    assert "schema_version" in result.stdout
+
+
 def test_current_version_artifacts() -> None:
     version = tomllib.loads((_REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"][
         "version"
@@ -141,6 +178,8 @@ def test_wheel_metadata_has_strict_core_and_dashboard_dependency_contract() -> N
         ("msgspec", ("<1.0", ">=0.18")),
         ("platformdirs", ("<5", ">=4.3")),
         ("psutil", ("<7", ">=5.9")),
+        ("python-toon", ("==0.1.3",)),
+        ("rich", ("<16", ">=15")),
     }
     assert dashboard == {
         ("fastapi", ("<1.0", ">=0.141")),

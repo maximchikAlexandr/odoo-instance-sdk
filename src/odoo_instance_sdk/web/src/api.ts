@@ -110,6 +110,18 @@ export type LifecycleState =
   | "cleanup_failed"
   | "removed";
 
+export type PortObservation = "free" | "occupied" | "unknown";
+
+export interface EnvironmentArtifacts {
+  worktree_exists: boolean;
+  worktree_registered: boolean;
+  config_exists: boolean;
+  python_exists: boolean;
+  python_contained: boolean;
+  dependency_lock_exists: boolean;
+  backup_exists: boolean | null;
+}
+
 export interface EnvironmentSnapshot {
   id: string;
   project_id: string;
@@ -120,6 +132,8 @@ export interface EnvironmentSnapshot {
   database: string | null;
   lifecycle_state: LifecycleState;
   allocated_http_port: number | null;
+  observed_port: PortObservation | null;
+  artifacts: EnvironmentArtifacts;
   runtime: RuntimeMetrics;
   git: GitActivity;
   storage: StorageFootprint;

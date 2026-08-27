@@ -876,12 +876,17 @@ class BackupCatalog:
         ).fetchall()
 
     @_translate_sqlite_error
-    def list_environments_with_runtimes(self) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
-        """Read monitor rows and runtime identities from one SQLite snapshot."""
+    def list_environments_with_runtimes(
+        self, *, include_removed: bool = False
+    ) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
+        """Read monitor rows, backup metadata, and runtime identities atomically."""
         self._conn.execute("BEGIN")
         try:
+            state_clause = "" if include_removed else " WHERE e.state != 'removed'"
             environments = self._conn.execute(
-                "SELECT * FROM environments WHERE state != 'removed' ORDER BY created_at DESC, id DESC"
+                "SELECT e.*, b.state AS backup_state, b.path AS backup_path "
+                "FROM environments e LEFT JOIN backups b ON b.id = e.backup_id"
+                f"{state_clause} ORDER BY e.created_at DESC, e.id DESC"
             ).fetchall()
             runtimes = self._conn.execute(
                 "SELECT * FROM environment_runtime ORDER BY environment_id"
