@@ -32,6 +32,7 @@ BOUNDED_LEAVES = (
     ("env", "sync"),
     ("eval",),
     ("exec",),
+    ("test",),
     ("module", "list"),
     ("module", "update"),
     ("module", "test"),
@@ -43,6 +44,53 @@ BOUNDED_LEAVES = (
     ("postgres", "up"),
     ("postgres", "stop"),
 )
+
+ROOT_HELP_SNAPSHOT = """Usage: cli [OPTIONS] COMMAND [ARGS]...
+
+Options:
+  --project PATH  Explicit project path.
+  --env TEXT      Environment selector (UUID or name).
+  --help          Show this message and exit.
+
+Commands:
+  deps
+  doctor
+  env
+  eval
+  exec
+  init
+  logs
+  module
+  monitor       Start the observability monitor (FastAPI + React UI).
+  postgres      Project-level PostgreSQL cluster lifecycle (read-only /...
+  run
+  shell
+  test
+  translations
+  vscode
+"""
+
+MODULE_HELP_SNAPSHOT = """Usage: cli module [OPTIONS] COMMAND [ARGS]...
+
+Options:
+  --help  Show this message and exit.
+
+Commands:
+  list
+  test
+  update
+"""
+
+MODULE_TEST_HELP_SNAPSHOT = """Usage: cli module test [OPTIONS] MODULES...
+
+Options:
+  --test-tags TEXT           Test tags.  [required]
+  --reload-tests
+  --allow-empty
+  --format [rich|json|toon]  Output format (default: rich).
+  --json                     Emit JSON envelope.
+  --help                     Show this message and exit.
+"""
 
 
 def _command(path: tuple[str, ...]) -> click.Command:
@@ -124,6 +172,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "doctor",
         "eval",
         "exec",
+        "test",
         "module",
         "translations",
         "deps",
@@ -133,6 +182,13 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
     }
     assert "--project" in result.output
     assert "--env" in result.output
+
+
+def test_prechange_root_and_module_help_snapshots_are_stable() -> None:
+    runner = CliRunner()
+    assert runner.invoke(cli, ["--help"]).output == ROOT_HELP_SNAPSHOT
+    assert runner.invoke(cli, ["module", "--help"]).output == MODULE_HELP_SNAPSHOT
+    assert runner.invoke(cli, ["module", "test", "--help"]).output == MODULE_TEST_HELP_SNAPSHOT
 
 
 def test_command_local_json_placement_is_stable() -> None:

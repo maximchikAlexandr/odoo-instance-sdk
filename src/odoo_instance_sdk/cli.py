@@ -22,6 +22,12 @@ from odoo_instance_sdk.commands.output import (
     rich_print,
     sanitize_diagnostic,
 )
+from odoo_instance_sdk.commands.test import (
+    project_execution_result,
+    resolve_module_test_selection,
+    run_module_tests,
+    test_command,
+)
 from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
@@ -34,7 +40,6 @@ from odoo_instance_sdk.internal.automation import (
     export_translations,
     list_modules,
     plan_module_update,
-    run_module_tests,
     update_modules,
     verify_deps,
 )
@@ -54,7 +59,7 @@ from odoo_instance_sdk.internal.vscode_generate import (
     write_launch_json,
 )
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
-from odoo_instance_sdk.models import PostgresClusterState, StartConfig
+from odoo_instance_sdk.models import OdooTestSpec, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -74,6 +79,7 @@ def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> No
 
 
 cli.add_command(env_group, name="env")
+cli.add_command(test_command, name="test")
 
 
 @cli.command()
@@ -773,13 +779,27 @@ def module_test(
     json_output = output_mode is not OutputMode.RICH
     try:
         _client, env_obj, instance = cli_context.ready_instance(ctx)
-        res, exit_code = run_module_tests(
-            instance,
+        start_config = instance.config.start_config
+        if start_config is None:
+            raise RuntimeError(  # noqa: TRY301
+                "selected environment has no generated Odoo config"
+            )
+        selection = resolve_module_test_selection(
+            env_obj.worktree_path,
+            start_config,
             tuple(modules),
             test_tags,
+        )
+        spec = OdooTestSpec(
+            modules=tuple(sorted(set(modules))),
+            test_tags=test_tags,
             reload_tests=reload_tests,
             allow_empty=allow_empty,
-            env_id=str(env_obj.id),
+        )
+        typed, diagnostic = run_module_tests(
+            instance,
+            selection,
+            spec,
             http_interface=env_obj.http_interface,
             http_port=env_obj.http_port,
         )
@@ -787,28 +807,27 @@ def module_test(
         raise
     except Exception as e:
         fail(output_mode, "module.test", str(e))
+    result = project_execution_result(env_obj, selection, spec, typed)
     if json_output:
         emit_json_envelope(
             ok=True,
             command="module.test",
-            result={
-                "tests_count": res.tests_count,
-                "tests_success": res.tests_success,
-                "tests_errors": res.tests_errors,
-                "tests_failed": res.tests_failed,
-                "skipped": res.skipped,
-                "had_failures": res.had_failures,
-                "had_zero_tests": res.had_zero_tests,
-                "allow_empty": allow_empty,
-            },
+            result=result,
             mode=output_mode,
         )
     else:
+        rich_print(f"environment={env_obj.name} ({env_obj.id})")
+        rich_print("selection=module")
+        rich_print(f"modules={', '.join(sorted(set(modules)))}")
         rich_print(
-            f"tests={res.tests_count} ok={res.tests_success} "
-            f"failed={res.tests_failed} errors={res.tests_errors} skipped={res.skipped}"
+            f"tests={typed.counts['tests']} ok={typed.counts['successful']} "
+            f"failed={typed.counts['failed']} errors={typed.counts['errors']} "
+            f"skipped={typed.counts['skipped']}"
         )
-    sys.exit(exit_code)
+        rich_print(f"exit_code={typed.exit_code}")
+    if diagnostic:
+        click.echo(sanitize_diagnostic(diagnostic), err=True)
+    sys.exit(typed.exit_code)
 
 
 @cli.group("translations")

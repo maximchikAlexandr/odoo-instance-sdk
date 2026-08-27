@@ -78,12 +78,24 @@ def _record_backup(env_client: OdooClient, backup: Backup) -> None:
 class TestCheckoutPreflight:
     @pytest.mark.serial
     def test_auto_port_retries_after_os_reserved_default(
-        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import socket
 
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.bind(("127.0.0.1", 8069))
+        listener.bind(("127.0.0.1", 0))
+        reserved_port = int(listener.getsockname()[1])
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_START", reserved_port
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_END", reserved_port + 1
+        )
+        assert reserved_port > 1024
         listener.listen()
         try:
             env = env_client.environments.checkout(
@@ -93,7 +105,7 @@ class TestCheckoutPreflight:
             )
         finally:
             listener.close()
-        assert env.http_port == 8070
+        assert env.http_port == reserved_port + 1
 
     @pytest.mark.serial
     def test_second_branch_skips_generated_http_port(

@@ -15,6 +15,7 @@ from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
+from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -186,82 +187,99 @@ def update_modules(
     )
 
 
-@dataclass(slots=True)
-class TestRunResult:
-    tests_count: int
-    tests_success: int
-    tests_errors: int
-    tests_failed: int
-    skipped: int
-    had_failures: bool
-    had_zero_tests: bool
+def _test_runner_source(modules: tuple[str, ...], test_tags: str, reload_tests: bool) -> str:
+    """Build the single native Odoo test invocation used by both APIs."""
+    modules_repr = repr(modules)
+    tags_repr = repr(test_tags)
+    reload_repr = repr(reload_tests)
+    return (
+        "from odoo.tools import config as _odcli_config\n"
+        "_odcli_config['workers'] = 0\n"
+        "from odoo.tests.shell import run_tests as _odcli_run_tests\n"
+        f"_r = _odcli_run_tests(env, test_tags={tags_repr}, "
+        f"modules={modules_repr}, reload_tests={reload_repr})\n"
+        "_tests = getattr(_r, 'testsRun', getattr(_r, 'tests_count', 0))\n"
+        "_failed = getattr(_r, 'failures', getattr(_r, 'tests_failed', 0))\n"
+        "_errors = getattr(_r, 'errors', getattr(_r, 'tests_errors', 0))\n"
+        "_skipped = getattr(_r, 'skipped', 0)\n"
+        "def _odcli_count(value):\n"
+        "    if isinstance(value, int):\n"
+        "        return max(value, 0)\n"
+        "    try:\n"
+        "        return len(value)\n"
+        "    except TypeError:\n"
+        "        return 0\n"
+        "_tests = _odcli_count(_tests)\n"
+        "_failed = _odcli_count(_failed)\n"
+        "_errors = _odcli_count(_errors)\n"
+        "_skipped = _odcli_count(_skipped)\n"
+        "result = {'tests': _tests, 'successful': max(_tests - _failed - _errors - _skipped, 0), "
+        "'failed': _failed, 'errors': _errors, 'skipped': _skipped}\n"
+    )
 
 
-def run_module_tests(
+def _nonnegative_count(value: object) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _test_counts(payload: dict[str, Any]) -> dict[str, int]:
+    raw = payload.get("result", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        key: _nonnegative_count(raw.get(key))
+        for key in ("tests", "successful", "failed", "errors", "skipped")
+    }
+
+
+def run_odoo_tests(
     instance: OdooInstance,
-    modules: tuple[str, ...],
-    test_tags: str,
+    spec: OdooTestSpec,
     *,
-    reload_tests: bool = False,
-    allow_empty: bool = False,
-    env_id: str,
-    http_interface: str,
-    http_port: int,
-) -> tuple[TestRunResult, int]:
-    if not modules:
-        raise ConfigError("module test requires at least one module")
-    if not test_tags:
-        raise ConfigError("module test requires --test-tags")
+    http_interface: str | None = None,
+    http_port: int | None = None,
+) -> tuple[OdooTestResult, str | None]:
+    """Execute one validated native Odoo test plan under the bound lock."""
+    if not isinstance(spec, OdooTestSpec):
+        raise ConfigError("run_odoo_tests requires an OdooTestSpec")
+    config = instance.config.start_config
+    if http_interface is None:
+        http_interface = config.http_interface if config is not None else "127.0.0.1"
+    if http_port is None:
+        http_port = config.http_port if config is not None else 8069
+
     address_state = probe_address(http_interface, http_port)
     if address_state is not AddressState.FREE:
         raise ConfigError(
             f"port {address_state}: {http_interface}:{http_port} cannot be reserved for module tests"
         )
-
-    modules_repr = json.dumps(list(modules))
-    tags_repr = json.dumps(test_tags)
-    reload_repr = json.dumps(reload_tests)
-    source = (
-        "from odoo.tests.shell import run_tests as _odcli_run_tests\n"
-        f"_r = _odcli_run_tests(env, test_tags={tags_repr!r}, "
-        f"modules={modules_repr!r}, reload_tests={reload_repr!r})\n"
-        "result = {\n"
-        "    'tests_count': getattr(_r, 'tests_count', 0),\n"
-        "    'tests_success': getattr(_r, 'tests_success', 0),\n"
-        "    'tests_errors': getattr(_r, 'tests_errors', 0),\n"
-        "    'tests_failed': getattr(_r, 'tests_failed', 0),\n"
-        "    'skipped': getattr(_r, 'skipped', 0),\n"
-        "    'had_failures': bool(getattr(_r, 'tests_failed', 0) or getattr(_r, 'tests_errors', 0)),\n"
-        "    'had_zero_tests': not bool(getattr(_r, 'tests_count', 0)),\n"
-        "}\n"
+    result = instance._run_shell_script_exclusive(
+        _test_runner_source(spec.modules, spec.test_tags, spec.reload_tests), commit=False
     )
-    _ = env_id
-    result = instance._run_shell_script_exclusive(source)
     outcome = ShellOutcome(
         returncode=result.returncode,
         stdout=result.stdout,
         stderr=result.stderr,
         payload=parse_payload(result.stdout),
     )
-    if outcome.returncode != 0:
-        raise RuntimeError(
-            f"module test shell failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
-        )
-    payload = outcome.payload or {}
-    raw = payload.get("result", {})
-    if not isinstance(raw, dict):
-        raw = {}
-    res = TestRunResult(
-        tests_count=int(raw.get("tests_count", 0)),
-        tests_success=int(raw.get("tests_success", 0)),
-        tests_errors=int(raw.get("tests_errors", 0)),
-        tests_failed=int(raw.get("tests_failed", 0)),
-        skipped=int(raw.get("skipped", 0)),
-        had_failures=bool(raw.get("had_failures", False)),
-        had_zero_tests=bool(raw.get("had_zero_tests", True)),
+    counts = _test_counts(outcome.payload or {})
+    failures = counts["failed"] > 0 or counts["errors"] > 0
+    zero_tests = counts["tests"] == 0
+    exit_code = (
+        1 if outcome.returncode != 0 or failures or (zero_tests and not spec.allow_empty) else 0
     )
-    exit_code = 1 if res.had_failures or (res.had_zero_tests and not allow_empty) else 0
-    return res, exit_code
+    diagnostic = _safe_stderr(outcome.stderr) if outcome.returncode != 0 else None
+    if outcome.returncode == 0 and failures and outcome.stderr:
+        diagnostic = _safe_stderr(outcome.stderr)
+    return (
+        OdooTestResult(
+            counts=counts,
+            failures=failures,
+            zero_tests=zero_tests,
+            exit_code=exit_code,
+        ),
+        diagnostic,
+    )
 
 
 @dataclass(slots=True)
