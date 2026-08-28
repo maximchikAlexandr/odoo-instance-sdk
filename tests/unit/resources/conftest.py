@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -107,7 +108,9 @@ def fake_uv(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def env_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_uv: Path) -> OdooClient:
+def env_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_uv: Path
+) -> Iterator[OdooClient]:
     monkeypatch.setenv("PATH", str(fake_uv.parent) + os.pathsep + os.environ.get("PATH", ""))
     data_root = tmp_path / "data"
     state_root = tmp_path / "state"
@@ -138,7 +141,12 @@ def env_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_uv: Path) -
         "odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_END", port_start + 30
     )
 
-    return OdooClient(config=OdooClientConfig(executable="odoo"))
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
+    try:
+        yield client
+    finally:
+        if client._catalog is not None:
+            client._catalog.close()
 
 
 @pytest.fixture

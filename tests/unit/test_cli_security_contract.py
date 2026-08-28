@@ -144,7 +144,7 @@ def test_env_list_is_read_only_through_public_resources() -> None:
     from odoo_instance_sdk.models import Snapshot
 
     empty_snapshot = Snapshot(
-        schema_version=2, generated_at=datetime.now(UTC), projects=(), environments=()
+        schema_version=3, generated_at=datetime.now(UTC), projects=(), environments=()
     )
     with (
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),

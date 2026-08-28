@@ -107,6 +107,38 @@ class DatabaseManagerUnavailableError(OdooInstanceSdkError):
     """Database manager endpoint unavailable or listing disabled."""
 
 
+class PgAdminError(OdooInstanceSdkError):
+    """Base for sanitized pgAdmin operation errors."""
+
+
+class PgAdminEnvironmentNotFoundError(PgAdminError):
+    """The requested environment is not present in the catalog."""
+
+    def __init__(self) -> None:
+        super().__init__("environment was not found")
+
+
+class PgAdminNotEligibleError(PgAdminError):
+    """The selected environment does not satisfy the pgAdmin preconditions."""
+
+    def __init__(self) -> None:
+        super().__init__("pgAdmin is not eligible for this environment")
+
+
+class PgAdminDatabaseNotFoundError(PgAdminError):
+    """The selected environment database is confirmed absent."""
+
+    def __init__(self) -> None:
+        super().__init__("selected database was not found")
+
+
+class PgAdminUnavailableError(PgAdminError):
+    """The pgAdmin operation could not safely complete."""
+
+    def __init__(self) -> None:
+        super().__init__("pgAdmin is unavailable")
+
+
 class ProjectManifestNotFoundError(ConfigError):
     """Project manifest `.odcli/project.toml` not found."""
 

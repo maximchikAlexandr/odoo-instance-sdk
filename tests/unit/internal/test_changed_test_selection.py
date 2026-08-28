@@ -260,7 +260,11 @@ def test_git_output_limit_terminates_real_child_immediately(
     with pytest.raises(ConfigError, match="output exceeded"):
         test_selection._run_git_bytes(("status",), tmp_path, max_output_bytes=128)
 
-    assert marker.read_text() == "terminated"
+    # Some /bin/sh implementations can flush the interrupted printf chunk
+    # before the TERM trap atomically replaces the marker.  The terminal token
+    # still proves that the real child handled TERM before _run_git_bytes
+    # returned.
+    assert marker.read_text().endswith("terminated")
 
 
 def test_git_timeout_terminates_kills_and_reaps_real_child(

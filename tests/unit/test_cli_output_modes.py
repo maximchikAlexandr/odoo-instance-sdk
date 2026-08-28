@@ -241,7 +241,7 @@ def _patch_leaf_external(  # noqa: C901
 
     if path[:2] == ("env", "list"):
         snapshot = Snapshot(
-            schema_version=2,
+            schema_version=3,
             generated_at=datetime(2020, 1, 1, tzinfo=UTC),
             projects=(),
             environments=(),
@@ -715,7 +715,7 @@ def test_output_options_is_a_click_option_composition_helper() -> None:
 
 def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) -> None:
     snapshot = Snapshot(
-        schema_version=2,
+        schema_version=3,
         generated_at=datetime.now(UTC),
         projects=(),
         environments=(),
@@ -738,7 +738,7 @@ def test_env_list_json_aliases_have_identical_v1_envelopes(
     args: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshot = Snapshot(
-        schema_version=2,
+        schema_version=3,
         generated_at=datetime.now(UTC),
         projects=(),
         environments=(),

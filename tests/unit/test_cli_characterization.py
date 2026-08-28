@@ -219,6 +219,7 @@ def test_discovered_public_methods() -> None:
             "checkout_with_plan",
             "get",
             "list",
+            "open_pgadmin",
             "plan_checkout",
             "record_use",
             "refresh_database",
@@ -440,7 +441,7 @@ def test_outside_project_all_projects_listing_does_not_require_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    empty = Snapshot(schema_version=2, generated_at=datetime.now(UTC), projects=(), environments=())
+    empty = Snapshot(schema_version=3, generated_at=datetime.now(UTC), projects=(), environments=())
     client = MagicMock()
     with (
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),

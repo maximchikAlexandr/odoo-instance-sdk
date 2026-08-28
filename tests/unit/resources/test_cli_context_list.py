@@ -286,7 +286,7 @@ def test_cwd_project_resolution_records_cwd_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(project_manifest)
-    empty = Snapshot(schema_version=2, generated_at=datetime.now(UTC), projects=(), environments=())
+    empty = Snapshot(schema_version=3, generated_at=datetime.now(UTC), projects=(), environments=())
     with patch(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         return_value=empty,

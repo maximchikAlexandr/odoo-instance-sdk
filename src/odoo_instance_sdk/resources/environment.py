@@ -25,6 +25,12 @@ from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     MasterPasswordRequiredError,
     NonLocalInstanceError,
+    PgAdminDatabaseNotFoundError,
+    PgAdminEnvironmentNotFoundError,
+    PgAdminError,
+    PgAdminNotEligibleError,
+    PgAdminUnavailableError,
+    PostgresClusterError,
 )
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.database_preparation import (
@@ -66,6 +72,8 @@ from odoo_instance_sdk.models import (
     EnvironmentCheckoutPlan,
     EnvironmentCheckoutResult,
     EnvironmentPythonMode,
+    PgAdminOpenResult,
+    PostgresClusterState,
 )
 from odoo_instance_sdk.models import (
     DevelopmentEnvironment as _DevelopmentEnvironment,
@@ -82,6 +90,7 @@ from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 EnvironmentSelector = Union[str, "DevelopmentEnvironment"]
@@ -971,6 +980,104 @@ class EnvironmentResource:
         if isinstance(selector, DevelopmentEnvironment):
             return selector
         return self._resolve_selector(selector, include_removed=True)
+
+    def open_pgadmin(self, selector: EnvironmentSelector) -> PgAdminOpenResult:
+        """Open the selected environment through the private pgAdmin lifecycle seam.
+
+        Resolution and all security-critical preconditions live here so callers
+        cannot supply browser-controlled database or endpoint values. The
+        lifecycle itself is intentionally supplied by the later pgAdmin task.
+        """
+        try:
+            env = self.get(selector)
+        except EnvironmentNotFoundError:
+            raise PgAdminEnvironmentNotFoundError() from None
+        except EnvironmentResolutionError:
+            raise PgAdminUnavailableError() from None
+        self._require_pgadmin_environment(env)
+        database = self._pgadmin_database(env)
+        cluster = self._healthy_owned_compose(env)
+        instance = self._configured_pgadmin_instance(env)
+        self._require_pgadmin_database(instance, database)
+
+        try:
+            return self._open_pgadmin_lifecycle(
+                environment=env,
+                instance=instance,
+                cluster=cluster,
+                database=database,
+            )
+        except PgAdminError:
+            raise
+        except Exception:
+            raise PgAdminUnavailableError() from None
+
+    def _require_pgadmin_environment(self, env: DevelopmentEnvironment) -> None:
+        if env.state is not EnvironmentState.READY:
+            raise PgAdminNotEligibleError()
+
+    def _pgadmin_database(self, env: DevelopmentEnvironment) -> str:
+        database = (
+            env.target_db_name
+            if env.db_mode is EnvironmentDatabaseMode.COPY
+            else env.source_db_name
+        )
+        if database is None:
+            raise PgAdminNotEligibleError()
+        return database
+
+    def _healthy_owned_compose(self, env: DevelopmentEnvironment) -> PostgresCluster:
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        try:
+            cluster = PostgresCluster.from_project(Path(env.repository_root))
+        except (ConfigError, PostgresClusterError):
+            raise PgAdminNotEligibleError() from None
+        except Exception:
+            raise PgAdminUnavailableError() from None
+        if cluster.mode != "compose" or not cluster.owned:
+            raise PgAdminNotEligibleError()
+        try:
+            state = cluster.status()
+        except Exception:
+            raise PgAdminUnavailableError() from None
+        if state is PostgresClusterState.HEALTHY:
+            return cluster
+        if state in {PostgresClusterState.UNKNOWN, PostgresClusterState.UNREACHABLE}:
+            raise PgAdminUnavailableError()
+        raise PgAdminNotEligibleError()
+
+    def _configured_pgadmin_instance(self, env: DevelopmentEnvironment) -> OdooInstance:
+        try:
+            return self._client.instance.from_environment(env)
+        except Exception:
+            raise PgAdminUnavailableError() from None
+
+    def _require_pgadmin_database(self, instance: OdooInstance, database: str) -> None:
+        try:
+            exists = instance.databases.exists(database)
+        except Exception:
+            raise PgAdminUnavailableError() from None
+        if not exists:
+            raise PgAdminDatabaseNotFoundError()
+
+    def _open_pgadmin_lifecycle(
+        self,
+        *,
+        environment: DevelopmentEnvironment,
+        instance: OdooInstance,
+        cluster: object,
+        database: str,
+    ) -> PgAdminOpenResult:
+        """Delegate file/container mechanics to the private pgAdmin helper."""
+        from odoo_instance_sdk.internal.pgadmin import open_pgadmin_lifecycle
+
+        return open_pgadmin_lifecycle(
+            environment=environment,
+            instance=instance,
+            cluster=cluster,
+            database=database,
+        )
 
     def list(
         self,

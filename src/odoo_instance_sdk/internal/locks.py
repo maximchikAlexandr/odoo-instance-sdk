@@ -109,3 +109,10 @@ def python_env_lock_path(python_env_path: str) -> Path:
 
     digest = hashlib.sha256(python_env_path.encode("utf-8")).hexdigest()[:16]
     return get_locks_dir() / f"pyenv-{digest}.lock"
+
+
+def pgadmin_lock_path() -> Path:
+    """Return the one user-global lock for pgAdmin preparation and lifecycle."""
+    from odoo_instance_sdk.internal.paths import get_locks_dir
+
+    return get_locks_dir() / "pgadmin.lock"

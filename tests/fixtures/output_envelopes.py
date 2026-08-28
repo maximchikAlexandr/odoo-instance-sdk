@@ -18,7 +18,7 @@ CLI_ENVELOPE_V1_SUCCESS: dict[str, Any] = {
     "dry_run": False,
     "warnings": [],
     "result": {
-        "schema_version": 2,
+        "schema_version": 3,
         "projects": [
             {
                 "id": "project_demo",
@@ -39,6 +39,7 @@ CLI_ENVELOPE_V1_SUCCESS: dict[str, Any] = {
                             "dependency_lock_exists": False,
                             "backup_exists": None,
                         },
+                        "pgadmin": {"state": "eligible"},
                     }
                 ],
             }
@@ -49,7 +50,7 @@ CLI_ENVELOPE_V1_SUCCESS: dict[str, Any] = {
         "enabled": True,
     },
     "data": {
-        "schema_version": 2,
+        "schema_version": 3,
         "projects": [
             {
                 "id": "project_demo",
@@ -70,6 +71,7 @@ CLI_ENVELOPE_V1_SUCCESS: dict[str, Any] = {
                             "dependency_lock_exists": False,
                             "backup_exists": None,
                         },
+                        "pgadmin": {"state": "eligible"},
                     }
                 ],
             }

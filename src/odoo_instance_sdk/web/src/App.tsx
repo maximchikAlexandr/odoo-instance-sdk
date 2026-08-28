@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -12,13 +12,17 @@ import {
   Title,
 } from "@mantine/core";
 import {
+  getMonitorSnapshot,
+  openPgAdmin,
   type ClusterSnapshot,
   type EnvironmentSnapshot,
+  HttpErrorCode,
+  PgAdminEligibilityState,
   type ProjectSummary,
   type RuntimeMetrics,
   type Snapshot,
-  fetchSnapshot,
-} from "./api";
+} from "./generated";
+import client from "./client-config";
 import { formatBytes, formatPercent } from "./format";
 
 const POLL_MS = 2000;
@@ -28,19 +32,32 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const pendingLoad = useRef<Promise<void> | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      // Keep an authoritative project list while the selector is narrowed;
-      // filtering is a view concern, not an API polling concern.
-      const snap = await fetchSnapshot();
-      setSnapshot(snap);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
+  const load = useCallback(() => {
+    if (pendingLoad.current) return pendingLoad.current;
+    const request = (async () => {
+      try {
+        // Keep an authoritative project list while the selector is narrowed;
+        // filtering is a view concern, not an API polling concern.
+        const response = await getMonitorSnapshot({
+          client,
+          throwOnError: true,
+        });
+        const snap = response.data;
+        setSnapshot(snap);
+        setError(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Unable to load snapshot.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    pendingLoad.current = request;
+    void request.then(() => {
+      if (pendingLoad.current === request) pendingLoad.current = null;
+    });
+    return request;
   }, []);
 
   useEffect(() => {
@@ -217,6 +234,32 @@ function EnvironmentCard({
   const workerPids = rt?.child_pids ?? [];
   const isLive = rt?.state === "ready" || rt?.state === "not_ready";
   const isOpenEnabled = rt?.state === "ready" && rt.http_url !== null;
+  const [pgAdminPending, setPgAdminPending] = useState(false);
+  const [pgAdminError, setPgAdminError] = useState<string | null>(null);
+  const pgAdminState = env.pgadmin.state;
+  const pgAdminEligible = pgAdminState === PgAdminEligibilityState.ELIGIBLE;
+
+  const openEnvironmentPgAdmin = async () => {
+    if (!pgAdminEligible || pgAdminPending) return;
+    setPgAdminPending(true);
+    setPgAdminError(null);
+    try {
+      const result = await openPgAdmin({
+        client,
+        body: { environment_id: env.id },
+        throwOnError: true,
+      });
+      if (!isSafeLoopbackRoot(result.data.url)) {
+        setPgAdminError("pgAdmin returned an unsafe URL.");
+        return;
+      }
+      window.open(result.data.url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      setPgAdminError(pgAdminErrorMessage(error));
+    } finally {
+      setPgAdminPending(false);
+    }
+  };
 
   return (
     <Card data-testid="environment-card" withBorder padding="md" radius="sm">
@@ -246,6 +289,17 @@ function EnvironmentCard({
           git: {git.state} · ↑{git.ahead ?? "—"} ↓{git.behind ?? "—"}
           {git.diff ? ` · +${git.diff.added} -${git.diff.deleted}` : ""}
         </Text>
+
+        <Stack gap={2}>
+          <Text size="sm" data-testid="pgadmin-state">
+            pgAdmin: {pgAdminExplanation(pgAdminState)}
+          </Text>
+          {pgAdminError ? (
+            <Text size="xs" c="red" data-testid="pgadmin-error">
+              pgAdmin error: {pgAdminError}
+            </Text>
+          ) : null}
+        </Stack>
 
         <Stack gap={2}>
             <Text size="sm">
@@ -286,10 +340,67 @@ function EnvironmentCard({
           >
             Open Odoo
           </Button>
+          <Button
+            data-testid="open-pgadmin"
+            size="xs"
+            disabled={!pgAdminEligible || pgAdminPending}
+            loading={pgAdminPending}
+            onClick={() => void openEnvironmentPgAdmin()}
+          >
+            {pgAdminPending ? "Opening pgAdmin…" : "Open pgAdmin"}
+          </Button>
         </Group>
       </Stack>
     </Card>
   );
+}
+
+function pgAdminExplanation(state: PgAdminEligibilityState): string {
+  switch (state) {
+    case PgAdminEligibilityState.ELIGIBLE:
+      return "ready";
+    case PgAdminEligibilityState.ENVIRONMENT_NOT_READY:
+      return "environment is not ready";
+    case PgAdminEligibilityState.DATABASE_UNRESOLVED:
+      return "database is unresolved";
+    case PgAdminEligibilityState.CLUSTER_NOT_OWNED:
+      return "PostgreSQL cluster is not SDK-owned";
+    case PgAdminEligibilityState.CLUSTER_UNHEALTHY:
+      return "PostgreSQL cluster is unhealthy";
+  }
+}
+
+function pgAdminErrorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    switch (error.code) {
+      case HttpErrorCode.ENVIRONMENT_NOT_FOUND:
+        return "environment was not found";
+      case HttpErrorCode.PGADMIN_NOT_ELIGIBLE:
+        return "environment is not eligible";
+      case HttpErrorCode.DATABASE_NOT_FOUND:
+        return "database was not found";
+      case HttpErrorCode.PGADMIN_UNAVAILABLE:
+        return "pgAdmin is unavailable";
+    }
+  }
+  return "pgAdmin is unavailable";
+}
+
+function isSafeLoopbackRoot(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "http:" &&
+      ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) &&
+      !url.username &&
+      !url.password &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
 }
 
 function lifecycleColor(state: string): string {

@@ -652,15 +652,28 @@ class TestCheckoutPreflight:
         import socket
 
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.bind(("127.0.0.1", 0))
-        reserved_port = int(listener.getsockname()[1])
+        for _ in range(20):
+            listener.bind(("127.0.0.1", 0))
+            reserved = int(listener.getsockname()[1])
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                probe.bind(("127.0.0.1", reserved + 1))
+            except OSError:
+                listener.close()
+                listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                probe.close()
+                continue
+            probe.close()
+            break
+        else:
+            listener.close()
+            pytest.fail("could not find adjacent free ports for allocation test")
         monkeypatch.setattr(
-            "odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_START", reserved_port
+            "odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_START", reserved
         )
         monkeypatch.setattr(
-            "odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_END", reserved_port + 1
+            "odoo_instance_sdk.internal.port_allocation._HTTP_RANGE_END", reserved + 30
         )
-        assert reserved_port > 1024
         listener.listen()
         try:
             env = env_client.environments.checkout(
@@ -672,7 +685,7 @@ class TestCheckoutPreflight:
             )
         finally:
             listener.close()
-        assert env.http_port == reserved_port + 1
+        assert env.http_port == reserved + 1
 
     @pytest.mark.serial
     def test_second_branch_skips_generated_http_port(

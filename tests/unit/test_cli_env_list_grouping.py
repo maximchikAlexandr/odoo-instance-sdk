@@ -22,6 +22,8 @@ from odoo_instance_sdk.models import (
     GitActivity,
     GitActivityState,
     GitDiff,
+    PgAdminEligibility,
+    PgAdminEligibilityState,
     PostgresClusterState,
     ProjectSummary,
     PythonEnvFootprint,
@@ -142,6 +144,7 @@ def _env(
         runtime=runtime or _runtime(),
         git=git or _git(),
         storage=storage or _storage(),
+        pgadmin=PgAdminEligibility(state=PgAdminEligibilityState.ELIGIBLE),
     )
 
 
@@ -169,7 +172,7 @@ def _snapshot(
     environments: tuple[EnvironmentSnapshot, ...],
 ) -> Snapshot:
     return Snapshot(
-        schema_version=2,
+        schema_version=3,
         generated_at=datetime.now(UTC),
         projects=projects,
         environments=environments,
@@ -329,7 +332,7 @@ def test_env_list_json_emits_snapshot_contract(monkeypatch: pytest.MonkeyPatch) 
     assert envelope["command"] == "env.list"
     payload = envelope["result"]
     # Snapshot contract parity.
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert "generated_at" in payload
     assert "projects" in payload and "environments" in payload
     proj = payload["projects"][0]
