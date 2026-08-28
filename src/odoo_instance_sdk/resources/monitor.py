@@ -50,6 +50,8 @@ from odoo_instance_sdk.models import (
     EnvironmentSnapshot,
     GitActivity,
     GitActivityState,
+    PgAdminEligibility,
+    PgAdminEligibilityState,
     PortObservation,
     PostgresClusterState,
     ProjectSummary,
@@ -65,7 +67,7 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 class _ProcessProvider(Protocol):
@@ -275,7 +277,12 @@ class EnvironmentMonitor:
             # The catalog grouping and cache-pruning inputs remain cheap.
             if project_id is not None and resolved_project_id != project_id:
                 continue
-            cluster, state = self._project_cluster(repo_root, statuses)
+            if all(
+                str(item.row["state"]) == EnvironmentState.REMOVED.value for item in environments
+            ):
+                cluster, state = None, None
+            else:
+                cluster, state = self._project_cluster(repo_root, statuses)
             plans.append(
                 _ProjectPlan(
                     resolved_project_id,
@@ -321,7 +328,7 @@ class EnvironmentMonitor:
                 )
             )
             environments.extend(
-                self._collect_environment(item.row, plan.project_id, item.runtime)
+                self._collect_environment(item.row, plan, item.runtime)
                 for item in sorted(plan.environments, key=lambda item: str(item.row["id"]))
             )
         return tuple(projects), tuple(sorted(environments, key=lambda item: item.id))
@@ -511,7 +518,7 @@ class EnvironmentMonitor:
     # ------------------------------------------------------------- environment
 
     def _collect_environment(
-        self, row: sqlite3.Row, project_id: str, runtime_record: sqlite3.Row | None
+        self, row: sqlite3.Row, plan: _ProjectPlan, runtime_record: sqlite3.Row | None
     ) -> EnvironmentSnapshot:
         env_id = str(row["id"])
         db_mode = str(row["db_mode"])
@@ -539,10 +546,11 @@ class EnvironmentMonitor:
         storage = self._collect_storage(row, env_id, db_mode)
         artifacts = self._collect_artifacts(row)
         observed_port = self._observe_port(row, lifecycle_state, runtime, allocated_port)
+        pgadmin = self._pgadmin_eligibility(lifecycle_state, database_str, plan.cluster, plan.state)
 
         return EnvironmentSnapshot(
             id=env_id,
-            project_id=project_id,
+            project_id=plan.project_id,
             name=str(row["name"]),
             branch=str(row["branch"]),
             short_sha=short_sha,
@@ -555,7 +563,27 @@ class EnvironmentMonitor:
             runtime=runtime,
             git=git,
             storage=storage,
+            pgadmin=pgadmin,
         )
+
+    @staticmethod
+    def _pgadmin_eligibility(
+        lifecycle_state: EnvironmentState,
+        database: str | None,
+        cluster: PostgresCluster | None,
+        cluster_state: PostgresClusterState | None,
+    ) -> PgAdminEligibility:
+        if lifecycle_state is not EnvironmentState.READY:
+            state = PgAdminEligibilityState.ENVIRONMENT_NOT_READY
+        elif database is None:
+            state = PgAdminEligibilityState.DATABASE_UNRESOLVED
+        elif cluster is None or cluster.mode != "compose":
+            state = PgAdminEligibilityState.CLUSTER_NOT_OWNED
+        elif cluster_state is not PostgresClusterState.HEALTHY:
+            state = PgAdminEligibilityState.CLUSTER_UNHEALTHY
+        else:
+            state = PgAdminEligibilityState.ELIGIBLE
+        return PgAdminEligibility(state=state)
 
     def _collect_artifacts(self, row: sqlite3.Row) -> EnvironmentArtifacts:
         """Reconcile independent catalog/filesystem artifacts defensively."""

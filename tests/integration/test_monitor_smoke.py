@@ -15,7 +15,7 @@ import pytest
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.dashboard]
 
 
 def _seed_env(
@@ -127,7 +127,7 @@ def test_monitor_headless_api_multi_project_snapshot(
         resp = client.get("/api/v1/snapshot")
         assert resp.status_code == 200
         payload = resp.json()
-        assert payload["schema_version"] == 2
+        assert payload["schema_version"] == 3
         assert len(payload["projects"]) == 2
         assert len(payload["environments"]) == 3
 

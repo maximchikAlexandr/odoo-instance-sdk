@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from odoo_instance_sdk.internal import serve
+from odoo_instance_sdk.http import app as serve
 from odoo_instance_sdk.models import (
     ClusterContainer,
     ClusterEndpoint,
@@ -19,6 +19,8 @@ from odoo_instance_sdk.models import (
     EnvironmentState,
     GitActivity,
     GitActivityState,
+    PgAdminEligibility,
+    PgAdminEligibilityState,
     PidScope,
     PostgresClusterState,
     ProjectSummary,
@@ -29,12 +31,10 @@ from odoo_instance_sdk.models import (
     StorageFootprint,
 )
 
+
 # This module exercises the built-in FastAPI server.  Core CI deliberately
 # installs no dashboard extras; command-level missing-extra behavior is covered
 # separately in test_cli_monitor.py.
-pytestmark = pytest.mark.dashboard
-
-
 @pytest.mark.dashboard
 def test_dashboard_dependencies_are_installed() -> None:
     import fastapi  # noqa: F401
@@ -171,6 +171,7 @@ def _client(headless: bool, monitor: Any = None):  # type: ignore[no-untyped-def
     )
 
 
+@pytest.mark.dashboard
 def test_healthz() -> None:
     with _client(headless=True) as client:
         resp = client.get("/healthz")
@@ -178,6 +179,7 @@ def test_healthz() -> None:
         assert resp.json() == {"status": "ok"}
 
 
+@pytest.mark.dashboard
 def test_untrusted_host_is_rejected() -> None:
     with _client(headless=True) as client:
         response = client.get("/healthz", headers={"host": "attacker.example"})
@@ -185,12 +187,14 @@ def test_untrusted_host_is_rejected() -> None:
 
 
 @pytest.mark.parametrize("host", ["[::1]", "[::1]:8069", "::1"])
+@pytest.mark.dashboard
 def test_ipv6_loopback_host_is_accepted(host: str) -> None:
     with _client(headless=True) as client:
         response = client.get("/healthz", headers={"host": host})
     assert response.status_code == 200
 
 
+@pytest.mark.dashboard
 def test_snapshot_ok() -> None:
     with _client(headless=True) as client:
         resp = client.get("/api/v1/snapshot")
@@ -201,6 +205,7 @@ def test_snapshot_ok() -> None:
         assert "environments" in payload
 
 
+@pytest.mark.dashboard
 def test_snapshot_reuses_injected_monitor_and_forwards_filter() -> None:
     class Monitor:
         def __init__(self) -> None:
@@ -208,7 +213,7 @@ def test_snapshot_reuses_injected_monitor_and_forwards_filter() -> None:
 
         def snapshot(self, project_id: str | None = None) -> dict[str, object]:
             self.calls.append(project_id)
-            return {"schema_version": 2, "projects": [], "environments": []}
+            return {"schema_version": 3, "projects": [], "environments": []}
 
     monitor = Monitor()
     with _client(headless=True, monitor=monitor) as client:
@@ -217,12 +222,13 @@ def test_snapshot_reuses_injected_monitor_and_forwards_filter() -> None:
     assert monitor.calls == ["project_x", None]
 
 
+@pytest.mark.dashboard
 def test_snapshot_has_exact_json_content_type_and_body() -> None:
     class Monitor:
         def snapshot(self, project_id: str | None = None) -> Snapshot:
             assert project_id == "project_x"
             return Snapshot(
-                schema_version=2,
+                schema_version=3,
                 generated_at=datetime(2026, 8, 24, tzinfo=UTC),
                 projects=(
                     ProjectSummary(
@@ -312,6 +318,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                             ),
                             other_files_bytes=1,
                         ),
+                        pgadmin=PgAdminEligibility(state=PgAdminEligibilityState.ELIGIBLE),
                     ),
                 ),
             )
@@ -322,7 +329,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
     payload = response.json()
     payload["generated_at"] = "<generated_at>"
     assert payload == {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": "<generated_at>",
         "projects": [
             {
@@ -412,11 +419,13 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                     },
                     "other_files_bytes": 1,
                 },
+                "pgadmin": {"state": "eligible"},
             }
         ],
     }
 
 
+@pytest.mark.dashboard
 def test_snapshot_project_filter_unknown() -> None:
     with _client(headless=True) as client:
         resp = client.get("/api/v1/snapshot?project_id=does-not-exist")
@@ -426,6 +435,7 @@ def test_snapshot_project_filter_unknown() -> None:
         assert payload["environments"] == []
 
 
+@pytest.mark.dashboard
 def test_snapshot_legacy_monitor_error_500(monkeypatch: pytest.MonkeyPatch) -> None:
     from odoo_instance_sdk.exceptions import MonitorError
     from odoo_instance_sdk.resources import monitor as monitor_mod
@@ -438,12 +448,14 @@ def test_snapshot_legacy_monitor_error_500(monkeypatch: pytest.MonkeyPatch) -> N
         resp = client.get("/api/v1/snapshot")
         assert resp.status_code == 500
         body = resp.json()
-        assert "error" in body
+        assert body["code"] == "monitor_snapshot_failed"
+        assert body["message"] == "monitor snapshot failed"
         # Redacted: no secrets/paths leak.
-        assert "/abs/path" not in body["error"]
-        assert "boom" not in body["error"]
+        assert "/abs/path" not in resp.text
+        assert "boom" not in resp.text
 
 
+@pytest.mark.dashboard
 def test_snapshot_monitor_error_500(monkeypatch: pytest.MonkeyPatch) -> None:
     from odoo_instance_sdk.exceptions import MonitorError
     from odoo_instance_sdk.resources import monitor as monitor_mod
@@ -456,9 +468,13 @@ def test_snapshot_monitor_error_500(monkeypatch: pytest.MonkeyPatch) -> None:
         resp = client.get("/api/v1/snapshot")
         assert resp.status_code == 500
         body = resp.json()
-        assert body["error"] == "monitor snapshot failed"
+        assert body == {
+            "code": "monitor_snapshot_failed",
+            "message": "monitor snapshot failed",
+        }
 
 
+@pytest.mark.dashboard
 def test_headless_no_static_mount() -> None:
     with _client(headless=True) as client:
         # No SPA mount in headless mode: "/" is not a static file.
@@ -466,6 +482,7 @@ def test_headless_no_static_mount() -> None:
         assert resp.status_code == 404
 
 
+@pytest.mark.dashboard
 def test_ui_no_dist_fails_actionably(monkeypatch: pytest.MonkeyPatch) -> None:
     """UI mode must never silently become an API-only service."""
     monkeypatch.setattr(serve, "_WEB_DIST", Path("/nonexistent/dist-xyz"))

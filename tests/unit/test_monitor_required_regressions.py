@@ -138,7 +138,10 @@ def test_catalog_path_is_redacted_from_api_error() -> None:
         "/api/v1/snapshot", headers={"host": "127.0.0.1"}
     )
     assert response.status_code == 500
-    assert response.json() == {"error": "monitor snapshot failed"}
+    assert response.json() == {
+        "code": "monitor_snapshot_failed",
+        "message": "monitor snapshot failed",
+    }
     assert "/secret" not in response.text
 
 

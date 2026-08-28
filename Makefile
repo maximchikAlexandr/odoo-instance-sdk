@@ -1,11 +1,11 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help lint types test targeted coverage mutation package compat dashboard smoke live pr
+.PHONY: help lint types test targeted coverage mutation package compat dashboard pgadmin-smoke smoke live web-codegen web-codegen-check pr
 
 OFFLINE := not real_odoo and not packaging and not dashboard
 
 help:
-	@printf '%s\n' 'make lint|types|test|targeted|coverage|mutation|package|compat|dashboard|smoke|live|pr'
+	@printf '%s\n' 'make lint|types|test|targeted|coverage|mutation|package|compat|dashboard|pgadmin-smoke|smoke|live|web-codegen|web-codegen-check|pr'
 
 lint:
 	uv run ruff format --check .
@@ -48,8 +48,20 @@ compat:
 	uv run pytest -o addopts="" -q --tb=short --strict-markers -m "serial and $(OFFLINE)"
 
 dashboard:
-	cd src/odoo_instance_sdk/web && npm ci && npm test && npm run build
+	cd src/odoo_instance_sdk/web && npm ci
+	make web-codegen-check
+	cd src/odoo_instance_sdk/web && npm test && npm run build
 	uv run pytest -q -o addopts='' -m dashboard
+
+pgadmin-smoke:
+	uv run pytest -q tests/integration/test_pgadmin_docker_smoke.py -o addopts='' -m integration
+
+web-codegen:
+	uv run python scripts/export_openapi.py
+	cd src/odoo_instance_sdk/web && npm run generate
+
+web-codegen-check:
+	uv run python scripts/check_web_codegen.py
 
 smoke:
 	uv run pytest -q tests/integration/test_monitor_smoke.py -o addopts='' -m integration

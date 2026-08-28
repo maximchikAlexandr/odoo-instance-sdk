@@ -65,7 +65,12 @@ jobs:
           cache: npm
           cache-dependency-path: src/odoo_instance_sdk/web/package-lock.json
       - run: uv sync --frozen --group test --extra dashboard
-      - run: make dashboard
+      - run: cd src/odoo_instance_sdk/web && npm ci
+      - run: test ! -d src/odoo_instance_sdk/web/dist
+      - run: make web-codegen-check
+      - run: cd src/odoo_instance_sdk/web && npm test
+      - run: cd src/odoo_instance_sdk/web && npm run build
+      - run: uv run pytest -q -o addopts='' -m dashboard
       - run: make smoke
 
   compatibility:
