@@ -61,11 +61,11 @@ def _runtime_kwargs() -> RuntimeKwargs:
     }
 
 
-def test_fresh_catalog_has_schema_v9_and_runtime_table(tmp_path: Path) -> None:
-    assert CURRENT_SCHEMA_VERSION == 9
+def test_fresh_catalog_has_schema_v10_and_runtime_table(tmp_path: Path) -> None:
+    assert CURRENT_SCHEMA_VERSION == 10
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 9
+    assert version == 10
     tables = {
         r[0]
         for r in catalog._conn.execute(
@@ -76,17 +76,17 @@ def test_fresh_catalog_has_schema_v9_and_runtime_table(tmp_path: Path) -> None:
     catalog.close()
 
 
-def test_reopen_v9_catalog_is_idempotent(tmp_path: Path) -> None:
+def test_reopen_v10_catalog_is_idempotent(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=db)
     catalog.close()
     reopened = BackupCatalog(db_path=db)
     version = reopened._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 9
+    assert version == 10
     reopened.close()
 
 
-def test_v8_catalog_upgrades_to_v9_on_open(tmp_path: Path) -> None:
+def test_v8_catalog_upgrades_to_v10_on_open(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 8")
@@ -110,7 +110,7 @@ def test_v8_catalog_upgrades_to_v9_on_open(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert version == 9
+    assert version == 10
     assert "environment_runtime" in tables
     catalog.close()
 

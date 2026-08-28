@@ -656,6 +656,7 @@ class TestCliEval:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/eval-cli", options=opts)
         runner = CliRunner()
@@ -690,6 +691,7 @@ class TestCliModuleUpdate:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/modupd-cli", options=opts)
         runner = CliRunner()
@@ -726,6 +728,7 @@ class TestCliModuleUpdate:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/modupd-dry", options=opts)
         runner = CliRunner()
@@ -768,6 +771,7 @@ class TestCliExecStdin:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/exec-cli", options=opts)
         runner = CliRunner()
@@ -806,6 +810,7 @@ class TestCliModuleList:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/modlist-cli", options=opts)
         runner = CliRunner()

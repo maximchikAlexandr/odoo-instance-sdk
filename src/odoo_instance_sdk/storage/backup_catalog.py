@@ -28,7 +28,7 @@ from odoo_instance_sdk.models import (
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 
 class CopyJournalStage(StrEnum):
@@ -94,7 +94,8 @@ class BackupCatalog:
                 failed_at TEXT,
                 deleted_at TEXT,
                 error_type TEXT,
-                error_message TEXT
+                error_message TEXT,
+                source_git_branch TEXT
             );
             CREATE INDEX IF NOT EXISTS backups_lookup_idx ON backups (source_base_url, database_name, downloaded_at DESC);
             CREATE INDEX IF NOT EXISTS backups_state_idx ON backups (state);
@@ -265,6 +266,15 @@ class BackupCatalog:
             conn.execute("PRAGMA user_version = 9")
             conn.commit()
             user_version = 9
+        if user_version < 10:
+            self._migrate_v10_backup_source_branch(conn)
+            conn.execute("PRAGMA user_version = 10")
+            conn.commit()
+
+    def _migrate_v10_backup_source_branch(self, conn: sqlite3.Connection) -> None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(backups)")}
+        if "source_git_branch" not in columns:
+            conn.execute("ALTER TABLE backups ADD COLUMN source_git_branch TEXT")
 
     def _migrate_v9_environment_runtime(self, conn: sqlite3.Connection) -> None:
         conn.executescript("""
@@ -371,9 +381,11 @@ class BackupCatalog:
         format: str,
         filestore_requested: bool,
         path: Path,
+        *,
+        source_git_branch: str | None = None,
     ) -> None:
         self._conn.execute(
-            "INSERT INTO backups (id, source_base_url, database_name, format, filestore_requested, path, state, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            "INSERT INTO backups (id, source_base_url, database_name, format, filestore_requested, path, state, started_at, source_git_branch) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)",
             (
                 backup_id,
                 source_base_url,
@@ -382,6 +394,7 @@ class BackupCatalog:
                 int(filestore_requested),
                 str(path),
                 BackupState.DOWNLOADING.value,
+                source_git_branch,
             ),
         )
         self._add_event(backup_id, "download_started", path=str(path))
@@ -564,6 +577,7 @@ class BackupCatalog:
             ("format", row["format"], backup.format.value),
             ("database_name", row["database_name"], backup.database_name),
             ("sha256", row["sha256"], backup.sha256),
+            ("source_git_branch", row["source_git_branch"], backup.source_git_branch),
         )
         mismatches = [name for name, actual, expected_val in expected if actual != expected_val]
         if mismatches:
@@ -641,6 +655,32 @@ class BackupCatalog:
         if not row["path"]:
             return None
         return _row_to_backup(row)
+
+    @_translate_sqlite_error
+    def latest_restore_provenance(
+        self,
+        db_host: str | None,
+        db_port: int,
+        database_name: str,
+    ) -> Backup | None:
+        """Return the mapped backup audit row without availability checks.
+
+        This is intentionally separate from :meth:`latest_restore`: callers
+        deciding freshness or restore input still need the latter's available
+        file semantics, while provenance remains valid after deletion or a
+        missing archive.
+        """
+        host = normalize_db_host(db_host)
+        row = self._conn.execute(
+            "SELECT b.*, r.restored_at FROM restores r "
+            "INNER JOIN backups b ON b.id = r.backup_id "
+            "WHERE r.db_host=? AND r.db_port=? AND r.database_name=? "
+            "ORDER BY r.restored_at DESC, r.sequence DESC LIMIT 1",
+            (host, db_port, database_name),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_backup(row, require_file=False)
 
     @_translate_sqlite_error
     def distinct_restored_database_names(
@@ -967,9 +1007,10 @@ class BackupCatalog:
         )
 
 
-def _row_to_backup(row: sqlite3.Row) -> Backup | None:
-    if row["path"] and not Path(row["path"]).is_file():
+def _row_to_backup(row: sqlite3.Row, *, require_file: bool = True) -> Backup | None:
+    if require_file and row["path"] and not Path(row["path"]).is_file():
         return None
+    downloaded_at = row["downloaded_at"] or row["started_at"]
     return Backup(
         id=uuid.UUID(row["id"]),
         source_base_url=row["source_base_url"],
@@ -980,7 +1021,8 @@ def _row_to_backup(row: sqlite3.Row) -> Backup | None:
         filename=row["filename"] or "",
         size_bytes=row["size_bytes"] or 0,
         sha256=row["sha256"] or "",
-        downloaded_at=datetime.fromisoformat(row["downloaded_at"]),
+        downloaded_at=datetime.fromisoformat(downloaded_at),
+        source_git_branch=row["source_git_branch"],
     )
 
 

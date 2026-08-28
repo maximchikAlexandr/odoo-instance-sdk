@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import contextlib
-import enum
 import hashlib
 import re
 import shutil
+import sqlite3
 import subprocess
 import uuid
 from collections.abc import Mapping
@@ -13,9 +13,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Union, cast
-
-if TYPE_CHECKING:
-    import sqlite3
 
 import msgspec
 
@@ -30,6 +27,10 @@ from odoo_instance_sdk.exceptions import (
     NonLocalInstanceError,
 )
 from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.internal.database_preparation import (
+    classify_freshness,
+    compare_provenance,
+)
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
 from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.git_worktree import (
@@ -49,11 +50,32 @@ from odoo_instance_sdk.internal.odoo_config import (
 )
 from odoo_instance_sdk.internal.paths import get_environments_root
 from odoo_instance_sdk.internal.port_allocation import find_free_port
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.urls import assert_local
-from odoo_instance_sdk.models import Backup, BackupFormat
-from odoo_instance_sdk.models import EnvironmentState as _EnvironmentState
+from odoo_instance_sdk.models import (
+    Backup,
+    BackupFormat,
+    BackupFreshness,
+    BackupProvenanceComparison,
+    BackupProvenanceStatus,
+    DatabasePreparationAction,
+    DatabasePreparationResult,
+    DatabaseRefreshOptions,
+    EnvironmentCheckoutPlan,
+    EnvironmentCheckoutResult,
+    EnvironmentPythonMode,
+)
+from odoo_instance_sdk.models import (
+    DevelopmentEnvironment as _DevelopmentEnvironment,
+)
+from odoo_instance_sdk.models import (
+    EnvironmentDatabaseMode as _EnvironmentDatabaseMode,
+)
+from odoo_instance_sdk.models import (
+    EnvironmentState as _EnvironmentState,
+)
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize_db_host
 
@@ -66,38 +88,10 @@ EnvironmentSelector = Union[str, "DevelopmentEnvironment"]
 
 # Re-export the dependency-neutral contract for backwards-compatible imports.
 EnvironmentState = _EnvironmentState
+DevelopmentEnvironment = _DevelopmentEnvironment
+EnvironmentDatabaseMode = _EnvironmentDatabaseMode
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
-
-
-class EnvironmentDatabaseMode(enum.StrEnum):
-    SHARED = "shared"
-    COPY = "copy"
-
-
-class DevelopmentEnvironment(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    id: uuid.UUID
-    name: str
-    repository_root: str
-    git_common_dir: str
-    branch: str
-    base_ref: str
-    worktree_path: str
-    generated_config_path: str
-    python_environment_path: str
-    python_environment_owned: bool
-    dependency_lock_path: str
-    http_interface: str
-    http_port: int
-    db_mode: EnvironmentDatabaseMode
-    source_db_name: str | None = None
-    target_db_name: str | None = None
-    backup_id: uuid.UUID | None = None
-    state: EnvironmentState
-    created_at: datetime
-    last_used_at: datetime | None = None
-    removed_at: datetime | None = None
-    last_error: str | None = None
 
 
 class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
@@ -198,7 +192,7 @@ class EnvironmentResource:
 
         self._verify_tools()
 
-        base_ref = options.base_ref or "HEAD"
+        base_ref = options.base_ref or project_cfg.default_base_ref or "HEAD"
         from odoo_instance_sdk.internal.git_worktree import rev_parse_verify
 
         rev_parse_verify(repo_root, base_ref)
@@ -285,13 +279,162 @@ class EnvironmentResource:
     ) -> _CheckoutPlan:
         return self._prepare_checkout(project, branch, options=options, dry_run_paths=True)
 
-    def checkout(
+    def refresh_database(
+        self,
+        project: ProjectConfig | Path,
+        *,
+        options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
+    ) -> DatabasePreparationResult:
+        """Prepare the configured project database through the shared coordinator."""
+        from odoo_instance_sdk.internal.database_preparation import (
+            DatabasePreparationCoordinator,
+        )
+
+        return DatabasePreparationCoordinator(self._client).refresh_database(
+            project, options=options
+        )
+
+    def _refresh_checkout_if_stale(
+        self,
+        project: ProjectConfig | Path,
+        options: EnvironmentCheckoutOptions,
+        *,
+        freshness: BackupFreshness,
+    ) -> ProjectConfig | Path:
+        if isinstance(project, ProjectConfig):
+            project_config = project
+            root = project.repository_root
+        else:
+            root = Path(project)
+            project_config = ProjectConfig.load(root)
+        if project_config.refresh_after_hours is None:
+            return project
+
+        if freshness in (
+            BackupFreshness.MISSING,
+            BackupFreshness.UNAVAILABLE,
+            BackupFreshness.STALE,
+        ):
+            if project_config.test_instance is None:
+                raise ConfigError(
+                    "configured database freshness requires [test_instance] preparation settings"
+                )
+            from odoo_instance_sdk.internal.database_preparation import (
+                DatabasePreparationCoordinator,
+            )
+
+            DatabasePreparationCoordinator(self._client).prepare(
+                project_config,
+                options=DatabaseRefreshOptions(restore=True),
+                coalesce=True,
+            )
+            manifest = root / ".odcli" / "project.toml"
+            if manifest.is_file():
+                return ProjectConfig.load(root)
+        return project
+
+    def _audit_checkout_plan(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        options: EnvironmentCheckoutOptions,
+    ) -> tuple[BackupProvenanceComparison, BackupFreshness, tuple[str, ...]]:
+        """Resolve provenance and freshness without creating checkout artifacts."""
+        project_config = (
+            project if isinstance(project, ProjectConfig) else ProjectConfig.load(project)
+        )
+        root = project_config.repository_root
+        source_config = self._resolve_source_config(options, project_config, root)
+        config_values = parse_odoo_config(source_config) if source_config is not None else {}
+        source_database, _ = self._resolve_dbs(
+            options,
+            project_config,
+            config_values,
+            options.db_mode,
+            branch,
+            root,
+        )
+        effective_base = (
+            options.base_ref
+            if options.base_ref is not None
+            else project_config.default_base_ref or "HEAD"
+        )
+        provenance_backup = _restore_audit_backup(
+            self._client,
+            config_values,
+            source_database,
+            available=False,
+        )
+        available_backup = _restore_audit_backup(
+            self._client,
+            config_values,
+            source_database,
+            available=True,
+        )
+        recorded_branch = (
+            provenance_backup.source_git_branch if provenance_backup is not None else None
+        )
+        comparison = compare_provenance(effective_base, recorded_branch)
+        if comparison.status is BackupProvenanceStatus.MISMATCHED:
+            raise EnvironmentConflictError(
+                "backup_provenance_mismatch",
+                "backup source branch does not match checkout base ref",
+                details={
+                    "expected_base_ref": comparison.expected_base_ref,
+                    "recorded_branch": comparison.recorded_branch,
+                },
+            )
+        warnings: tuple[str, ...] = ()
+        if comparison.status is BackupProvenanceStatus.UNKNOWN:
+            if options.source_database is not None and source_database is not None:
+                warnings = (
+                    f"Backup provenance is unknown for explicit source database "
+                    f"{source_database!r}; branch compatibility could not be verified.",
+                )
+            else:
+                raise EnvironmentConflictError(
+                    "backup_provenance_unknown",
+                    "backup provenance is unknown; pass --source-db explicitly or refresh a "
+                    "provenance-bearing backup",
+                    details={"source_database": source_database},
+                )
+        freshness = classify_freshness(available_backup, project_config.refresh_after_hours)
+        if (
+            project_config.refresh_after_hours is not None
+            and freshness is not BackupFreshness.FRESH
+            and project_config.test_instance is None
+        ):
+            raise ConfigError(
+                "configured database freshness requires [test_instance] preparation settings"
+            )
+        return comparison, freshness, warnings
+
+    def plan_checkout(
         self,
         project: ProjectConfig | Path,
         branch: str,
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-    ) -> DevelopmentEnvironment:
+    ) -> EnvironmentCheckoutPlan:
+        """Return a secret-free checkout plan without performing mutations."""
+        provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
+        plan = self._prepare_checkout(project, branch, options=options, dry_run_paths=True)
+        return _public_checkout_plan(plan, provenance, freshness, warnings)
+
+    def checkout_with_plan(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
+    ) -> EnvironmentCheckoutResult:
+        """Execute checkout and return its final secret-free typed plan."""
+        # Apply the same provenance/freshness rejection policy before any
+        # stale refresh can acquire locks, contact the test instance, or edit
+        # the project manifest. The final audit below rechecks after refresh.
+        provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
+        project = self._refresh_checkout_if_stale(project, options, freshness=freshness)
+        provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
         plan = self._prepare_checkout(project, branch, options=options, dry_run_paths=False)
         if plan.db_mode is EnvironmentDatabaseMode.COPY:
             self._preflight_copy_checkout(plan)
@@ -306,7 +449,20 @@ class EnvironmentResource:
                     ),
                 )
             self._revalidate_checkout_locked(catalog, plan)
-            return self._do_checkout(catalog, plan)
+            environment = self._do_checkout(catalog, plan)
+        return EnvironmentCheckoutResult(
+            environment=environment,
+            plan=_public_checkout_plan(plan, provenance, freshness, warnings),
+        )
+
+    def checkout(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
+    ) -> DevelopmentEnvironment:
+        return self.checkout_with_plan(project, branch, options=options).environment
 
     def _revalidate_checkout_locked(self, catalog: object, plan: _CheckoutPlan) -> None:
         cat = cast("BackupCatalog", catalog)
@@ -740,6 +896,7 @@ class EnvironmentResource:
         venv.parent.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(
             ["uv", "venv", str(venv), "--python", selector],
+            env=sanitized_child_environment(),
             shell=False,
             capture_output=True,
             text=True,
@@ -764,7 +921,14 @@ class EnvironmentResource:
         if upgrade:
             cmd.append("--upgrade")
         cmd.extend(["-o", str(lock_file)])
-        proc = subprocess.run(cmd, shell=False, capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            cmd,
+            env=sanitized_child_environment(),
+            shell=False,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if proc.returncode != 0:
             if lock_file.is_file():
                 raise _CompileFailed(proc.stderr.strip() or "uv pip compile failed")
@@ -789,7 +953,14 @@ class EnvironmentResource:
                 "-r",
                 str(lock_file),
             ]
-        proc = subprocess.run(cmd, shell=False, capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            cmd,
+            env=sanitized_child_environment(),
+            shell=False,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if proc.returncode != 0:
             raise ConfigError(
                 f"uv pip {'sync' if env.python_environment_owned else 'install'} failed: "
@@ -1587,6 +1758,7 @@ def _is_venv(pybin: str) -> bool:
     try:
         proc = subprocess.run(
             [pybin, "-c", "import sys; print(sys.prefix != sys.base_prefix)"],
+            env=sanitized_child_environment(),
             shell=False,
             capture_output=True,
             text=True,
@@ -1627,6 +1799,118 @@ def _validate_owned_artifact(path: Path, expected: Path, kind: Literal["file", "
 
 class _CompileFailed(Exception):
     pass
+
+
+def _restore_audit_backup(
+    client: OdooClient,
+    config: Mapping[str, str],
+    database: str | None,
+    *,
+    available: bool,
+) -> Backup | None:
+    """Read restore provenance, using an existing catalog or SQLite read-only mode."""
+    if database is None:
+        return None
+    host = config.get("db_host")
+    try:
+        port = int(config.get("db_port", "5432"))
+    except ValueError:
+        port = 5432
+    catalog = getattr(client, "_catalog", None)
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    if isinstance(catalog, BackupCatalog):
+        if available:
+            return catalog.latest_restore(host, port, database)
+        return catalog.latest_restore_provenance(host, port, database)
+
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+
+    path = get_catalog_path()
+    if not path.is_file():
+        return None
+    return _restore_audit_backup_from_sqlite(path, config, database, available=available)
+
+
+def _restore_audit_backup_from_sqlite(
+    path: Path,
+    config: Mapping[str, str],
+    database: str,
+    *,
+    available: bool,
+) -> Backup | None:
+    host = config.get("db_host")
+    try:
+        port = int(config.get("db_port", "5432"))
+    except ValueError:
+        port = 5432
+    query = (
+        "SELECT b.* FROM restores r INNER JOIN backups b ON b.id = r.backup_id "
+        "WHERE r.db_host=? AND r.db_port=? AND r.database_name=?"
+    )
+    if available:
+        query += " AND b.state='available' AND b.path IS NOT NULL"
+    query += " ORDER BY r.restored_at DESC, r.sequence DESC LIMIT 1"
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(query, (normalize_db_host(host), port, database)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    if row is None:
+        return None
+    downloaded_at = row["downloaded_at"] or row["started_at"]
+    if downloaded_at is None:
+        return None
+    return Backup(
+        id=uuid.UUID(str(row["id"])),
+        source_base_url=str(row["source_base_url"]),
+        database_name=str(row["database_name"]),
+        format=BackupFormat(str(row["format"])),
+        filestore_requested=bool(row["filestore_requested"]),
+        path=str(row["path"] or ""),
+        filename=str(row["filename"] or ""),
+        size_bytes=int(row["size_bytes"] or 0),
+        sha256=str(row["sha256"] or ""),
+        downloaded_at=datetime.fromisoformat(str(downloaded_at)),
+        source_git_branch=(
+            str(row["source_git_branch"]) if row["source_git_branch"] is not None else None
+        ),
+    )
+
+
+def _public_checkout_plan(
+    plan: _CheckoutPlan,
+    provenance: BackupProvenanceComparison,
+    freshness: BackupFreshness,
+    warnings: tuple[str, ...],
+) -> EnvironmentCheckoutPlan:
+    actions: tuple[DatabasePreparationAction, ...] = ()
+    if plan.project.refresh_after_hours is not None and freshness is not BackupFreshness.FRESH:
+        actions = (
+            DatabasePreparationAction.DOWNLOAD,
+            DatabasePreparationAction.RESTORE,
+            DatabasePreparationAction.SWITCH_DEFAULT,
+        )
+    return EnvironmentCheckoutPlan(
+        name=plan.name,
+        branch=plan.branch,
+        effective_base_ref=plan.base_ref,
+        db_mode=plan.db_mode,
+        source_database=plan.source_database,
+        target_database=plan.target_database,
+        python_mode=(
+            EnvironmentPythonMode.CREATE if plan.python_owned else EnvironmentPythonMode.REUSE
+        ),
+        provenance=provenance,
+        freshness=freshness,
+        preparation_actions=actions,
+        warnings=warnings,
+    )
 
 
 def _load_project(env: DevelopmentEnvironment) -> ProjectConfig:

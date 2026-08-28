@@ -22,6 +22,7 @@ from odoo_instance_sdk.exceptions import (
     PostgresComposeUnavailableError,
     PostgresPortCollisionError,
 )
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.models import PostgresClusterState
 
 _PROJECT_NAME_PREFIX = "odcli_pg_"
@@ -70,6 +71,7 @@ class SubprocessComposeRunner(ComposeRunner):
         return subprocess.run(
             list(args),
             cwd=str(cwd) if cwd is not None else None,
+            env=sanitized_child_environment(),
             capture_output=True,
             text=True,
             timeout=timeout,

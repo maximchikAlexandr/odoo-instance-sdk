@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -11,12 +12,23 @@ import pytest
 
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
+    BackupDownloadError,
+    ConfigError,
+    DatabaseError,
     DatabaseManagerUnavailableError,
+    InstanceConfigurationError,
     MasterPasswordRequiredError,
     NonLocalInstanceError,
     RestoreFailedError,
 )
-from odoo_instance_sdk.models import Backup, BackupFormat, Database, NoBackup
+from odoo_instance_sdk.models import (
+    AdminPasswordResetResult,
+    Backup,
+    BackupFormat,
+    CommandResult,
+    Database,
+    NoBackup,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -46,7 +58,46 @@ def _make_backup(**kw: Any) -> Backup:
         size_bytes=kw.get("size_bytes", 100),
         sha256=kw.get("sha256", "abc"),
         downloaded_at=kw.get("downloaded_at", datetime.now(UTC)),
+        source_git_branch=kw.get("source_git_branch"),
     )
+
+
+def _exception_graph_text(error: BaseException) -> str:
+    """Inspect exception links and HTTP request/response objects recursively."""
+    pending: list[object] = [error]
+    seen: set[int] = set()
+    parts: list[str] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, bytes):
+            parts.append(repr(current))
+            continue
+        if isinstance(current, str):
+            parts.append(current)
+            continue
+        if isinstance(current, BaseException):
+            parts.extend((str(current), repr(current), repr(current.args)))
+            pending.extend(getattr(current, "__notes__", None) or ())
+            pending.extend(vars(current).values())
+            pending.extend(
+                linked for linked in (current.__cause__, current.__context__) if linked is not None
+            )
+            continue
+        if isinstance(current, Mapping):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+            continue
+        if isinstance(current, (list, tuple, set, frozenset)):
+            pending.extend(current)
+            continue
+        try:
+            pending.extend(vars(current).values())
+        except TypeError:
+            parts.append(repr(current))
+    return "\n".join(parts)
 
 
 def _make_instance_with_cluster_key(
@@ -535,6 +586,215 @@ class TestVerifyPsql:
         assert "-h" not in cast("list[str]", captured["cmd"])
 
 
+class TestBackupProvenance:
+    def test_direct_https_backup_does_not_require_repository_origin_pin(
+        self, client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", raising=False)
+        instance = client.instance("https://example.com", master_password="remote-secret")
+        captured: dict[str, Path] = {}
+        catalog = MagicMock()
+        catalog.start_download.side_effect = lambda **kwargs: captured.update(
+            path=Path(kwargs["path"])
+        )
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {}
+
+        def chunks(**_: object) -> Any:
+            part = captured["path"]
+            assert part.is_file()
+            assert part.stat().st_mode & 0o777 == 0o600
+            yield b"backup"
+
+        response.iter_bytes.side_effect = chunks
+        http_cm = _mock_http({})
+        http_cm.__enter__.return_value.post.return_value = response
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+        ):
+            backup = instance.databases.backup("testdb", destination=tmp_path)
+
+        assert tmp_path.stat().st_mode & 0o777 == 0o700
+        assert backup.path
+        assert Path(backup.path).stat().st_mode & 0o777 == 0o600
+
+    def test_backup_http_failure_does_not_retain_request_graph(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        remote_password = "remote-backup-password-sentinel"
+        backup_body = b"backup-body-sentinel"
+        request = httpx.Request(
+            "POST",
+            "https://example.com/web/database/backup",
+            content=f"master_pwd={remote_password}".encode() + backup_body,
+        )
+        response = httpx.Response(502, request=request, content=backup_body)
+        failure = httpx.HTTPStatusError("server failure", request=request, response=response)
+        http_cm = _mock_http({})
+        http_cm.__enter__.return_value.post.side_effect = failure
+        catalog = MagicMock()
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+            pytest.raises(BackupDownloadError) as raised,
+        ):
+            client.instance(
+                "https://example.com", master_password=remote_password
+            ).databases.backup("testdb", destination=tmp_path)
+
+        graph = _exception_graph_text(raised.value)
+        assert remote_password not in graph
+        assert backup_body.decode() not in graph
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+    def test_branch_is_normalized_and_audited_before_http(
+        self, instance: OdooInstance, tmp_path: Path
+    ) -> None:
+        events: list[str] = []
+        catalog = MagicMock()
+        catalog.start_download.side_effect = lambda **_: events.append("catalog")
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {}
+        response.iter_bytes.return_value = [b"backup"]
+        response.raise_for_status.side_effect = lambda: events.append("http")
+        http_cm = _mock_http({})
+        http_cm.__enter__.return_value.post.return_value = response
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+        ):
+            backup = instance.databases.backup(
+                "testdb", destination=tmp_path, source_git_branch="  release/19  "
+            )
+
+        assert events == ["catalog", "http"]
+        assert backup.source_git_branch == "release/19"
+        assert catalog.start_download.call_args.kwargs["source_git_branch"] == "release/19"
+
+    def test_omitted_branch_preserves_none(self, instance: OdooInstance, tmp_path: Path) -> None:
+        catalog = MagicMock()
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {}
+        response.iter_bytes.return_value = [b"backup"]
+        http_cm = _mock_http({})
+        http_cm.__enter__.return_value.post.return_value = response
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+        ):
+            backup = instance.databases.backup("testdb", destination=tmp_path)
+        assert backup.source_git_branch is None
+        assert catalog.start_download.call_args.kwargs["source_git_branch"] is None
+
+    @pytest.mark.parametrize("branch", ["", "   ", "release\n19", "release\x0019", "release\x8519"])
+    def test_invalid_branch_has_no_catalog_or_http_side_effect(
+        self, instance: OdooInstance, tmp_path: Path, branch: str
+    ) -> None:
+        destination = tmp_path / "backups"
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog") as get_catalog,
+            patch("httpx.Client") as http_client,
+            pytest.raises(ConfigError),
+        ):
+            instance.databases.backup("testdb", destination=destination, source_git_branch=branch)
+        get_catalog.assert_not_called()
+        http_client.assert_not_called()
+        assert not destination.exists()
+
+    def test_download_failure_keeps_branch_audit(
+        self, instance: OdooInstance, tmp_path: Path
+    ) -> None:
+        catalog = MagicMock()
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {}
+        response.raise_for_status.side_effect = httpx.HTTPError("download failed")
+        http_cm = _mock_http({})
+        http_cm.__enter__.return_value.post.return_value = response
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+            pytest.raises(BackupDownloadError),
+        ):
+            instance.databases.backup(
+                "testdb", destination=tmp_path, source_git_branch="release/19"
+            )
+        assert catalog.start_download.call_args.kwargs["source_git_branch"] == "release/19"
+        catalog.fail_download.assert_called_once()
+
+
+class TestAdminPasswordReset:
+    def test_uses_one_bound_database_and_committed_orm_script(self, client: OdooClient) -> None:
+        instance = _make_instance_with_cluster_key(client, configured_names=("prod",))
+        command = CommandResult(
+            args=["odoo", "shell"],
+            returncode=0,
+            stdout="password sentinel must not escape",
+            stderr="",
+            duration=0.1,
+        )
+        with patch(
+            "odoo_instance_sdk.resources.instance.OdooInstance._run_shell_script_exclusive",
+            return_value=command,
+        ) as run:
+            result = instance.databases.reset_admin_password()
+
+        assert isinstance(result, AdminPasswordResetResult)
+        assert result.database == "prod"
+        assert result.completed is True
+        assert result.xml_id == "base.user_admin"
+        source = run.call_args.args[0]
+        assert "env.ref('base.user_admin'" in source
+        assert "ensure_one()" in source
+        assert "write({'password': 'admin'})" in source
+        assert run.call_args.kwargs == {"commit": True}
+        assert "sentinel" not in repr(result)
+
+    @pytest.mark.parametrize("configured", [(), ("one", "two")])
+    def test_requires_exactly_one_configured_database(
+        self, client: OdooClient, configured: tuple[str, ...]
+    ) -> None:
+        instance = _make_instance_with_cluster_key(client, configured_names=configured)
+        with (
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance._run_shell_script_exclusive"
+            ) as run,
+            pytest.raises(InstanceConfigurationError),
+        ):
+            instance.databases.reset_admin_password()
+        run.assert_not_called()
+
+    def test_remote_instance_rejected_before_shell(self, instance_remote: OdooInstance) -> None:
+        object.__setattr__(instance_remote.config, "configured_database_names", ("prod",))
+        with (
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance._run_shell_script_exclusive"
+            ) as run,
+            pytest.raises(NonLocalInstanceError),
+        ):
+            instance_remote.databases.reset_admin_password()
+        run.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "failure", ["External ID not found", "Expected singleton", "shell unavailable"]
+    )
+    def test_shell_failure_is_sanitized(self, client: OdooClient, failure: str) -> None:
+        instance = _make_instance_with_cluster_key(client, configured_names=("prod",))
+        sentinel = "reset-password-sentinel"
+        with (
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance._run_shell_script_exclusive",
+                side_effect=RuntimeError(f"{failure}: password={sentinel}"),
+            ),
+            pytest.raises(DatabaseManagerUnavailableError) as raised,
+        ):
+            instance.databases.reset_admin_password()
+        assert sentinel not in str(raised.value)
+
+
 def test_missing_password_raises(instance_no_pwd: OdooInstance) -> None:
     dr = instance_no_pwd.databases
     with pytest.raises(MasterPasswordRequiredError):
@@ -591,10 +851,48 @@ def test_remote_drop_rejected(instance_remote: OdooInstance) -> None:
 
 
 class TestRestore:
+    def test_http_failure_does_not_retain_request_or_backup_graph(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        local_password = "local-restore-password-sentinel"
+        backup_body = b"restore-backup-body-sentinel"
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_bytes(backup_body)
+        backup = _make_backup(path=str(backup_path))
+        instance = _make_instance_with_cluster_key(client)
+        request = httpx.Request(
+            "POST",
+            "http://127.0.0.1:8069/web/database/restore",
+            content=f"master_pwd={local_password}".encode() + backup_body,
+        )
+        response = httpx.Response(500, request=request, content=backup_body)
+        failure = httpx.HTTPStatusError("restore failure", request=request, response=response)
+        http_cm = _mock_http({})
+        http_cm.__enter__.return_value.post.side_effect = failure
+        catalog = MagicMock()
+
+        with (
+            patch.object(instance, "_client") as mock_client,
+            patch("httpx.Client", return_value=http_cm),
+            patch(
+                "odoo_instance_sdk.resources.database.DatabaseResource.exists", return_value=False
+            ),
+            pytest.raises(DatabaseError) as raised,
+        ):
+            mock_client.get_catalog.return_value = catalog
+            instance.databases.restore(backup, "newdb")
+
+        graph = _exception_graph_text(raised.value)
+        assert local_password not in graph
+        assert backup_body.decode() not in graph
+        assert raised.value.body == b""
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
     def test_with_cluster_key_records_restore(self, client: OdooClient, tmp_path: Path) -> None:
         backup_path = tmp_path / "test.zip"
         backup_path.write_text("fake content")
-        backup = _make_backup(path=str(backup_path))
+        backup = _make_backup(path=str(backup_path), source_git_branch="release/19")
         inst = _make_instance_with_cluster_key(client)
 
         mock_cm = _mock_http({"result": True})
@@ -611,6 +909,7 @@ class TestRestore:
 
         assert result.new_db == "newdb"
         assert result.source == backup
+        mock_catalog.verify_identity.assert_called_once_with(backup)
         assert mock_cm.__enter__.return_value.post.call_args.kwargs["data"]["name"] == "newdb"
         mock_catalog.record_restore.assert_called_once_with(
             "localhost", 5432, "newdb", str(backup.id)

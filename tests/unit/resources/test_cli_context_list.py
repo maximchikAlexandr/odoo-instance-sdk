@@ -48,7 +48,7 @@ def test_nested_worktree_infers_remove_selector(
     env = env_client.environments.checkout(
         project_manifest,
         "feat/nested-context",
-        options=EnvironmentCheckoutOptions(python=str(fake_python)),
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
     )
     nested = Path(env.worktree_path) / "nested" / "child"
     nested.mkdir(parents=True)
@@ -106,6 +106,8 @@ def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
             "feat/plan",
             "--python",
             str(fake_python),
+            "--source-db",
+            "comerta",
             "--dry-run",
             "--json",
         ],
@@ -114,16 +116,31 @@ def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
     assert result.exit_code == 0, result.output
     plan = json.loads(result.output)["result"]
     assert {
-        "generated_config_path",
-        "dependency_lock_path",
+        "name",
+        "branch",
+        "effective_base_ref",
+        "db_mode",
+        "source_database",
+        "target_database",
         "python_mode",
-        "database",
-        "ownership",
-        "commands",
+        "provenance",
+        "freshness",
+        "preparation_actions",
+        "warnings",
     } <= plan.keys()
-    assert plan["database"]["mode"] == "shared"
+    assert plan["db_mode"] == "shared"
+    assert (
+        not {
+            "config",
+            "config_path",
+            "path",
+            "argv",
+            "generated_config_path",
+            "dependency_lock_path",
+        }
+        & plan.keys()
+    )
     assert env_client.environments.list(project=project_manifest, include_removed=True) == before
-    assert not Path(plan["worktree_path"]).exists()
 
 
 def test_list_json_emits_snapshot_and_human_has_project_header(
@@ -132,7 +149,7 @@ def test_list_json_emits_snapshot_and_human_has_project_header(
     env = env_client.environments.checkout(
         project_manifest,
         "feat/list-cli",
-        options=EnvironmentCheckoutOptions(python=str(fake_python)),
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
     )
     runner = CliRunner()
     args = ["--project", str(project_manifest), "env", "list"]
@@ -161,7 +178,7 @@ def test_list_reports_occupied_port(
     env = env_client.environments.checkout(
         project_manifest,
         "feat/list-port",
-        options=EnvironmentCheckoutOptions(python=str(fake_python)),
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
     )
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind((env.http_interface, env.http_port))
@@ -191,7 +208,7 @@ def test_list_all_projects_works_outside_a_project(
     env = env_client.environments.checkout(
         project_manifest,
         "feat/all-projects",
-        options=EnvironmentCheckoutOptions(python=str(fake_python)),
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
     )
     monkeypatch.chdir(tmp_path)
 
@@ -209,7 +226,7 @@ def test_list_excludes_removed_unless_all(
     env = env_client.environments.checkout(
         project_manifest,
         "feat/list-removed",
-        options=EnvironmentCheckoutOptions(python=str(fake_python)),
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
     )
     env_client.environments.remove(env)
     runner = CliRunner()
@@ -238,7 +255,7 @@ def test_explicit_project_and_environment_resolution_records_provenance(
     env = env_client.environments.checkout(
         project_manifest,
         "feat/explicit-context",
-        options=EnvironmentCheckoutOptions(python=str(fake_python)),
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
     )
     result = _invoke(
         CliRunner(),
@@ -289,7 +306,7 @@ def test_cwd_environment_resolution_records_provenance_and_id(
     env = env_client.environments.checkout(
         project_manifest,
         "feat/cwd-environment-context",
-        options=EnvironmentCheckoutOptions(python=str(fake_python)),
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
     )
     monkeypatch.chdir(Path(env.worktree_path))
     monkeypatch.setattr(

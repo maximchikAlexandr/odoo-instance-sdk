@@ -13,6 +13,7 @@ def test_top_level_click_surface_exposes_exactly_all_required_commands() -> None
     assert set(cli.list_commands(click.Context(cli))) == {
         "init",
         "env",
+        "db",
         "run",
         "logs",
         "shell",

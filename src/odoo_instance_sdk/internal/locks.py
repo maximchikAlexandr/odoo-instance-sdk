@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from odoo_instance_sdk.exceptions import LockConflictError
+from odoo_instance_sdk.internal.db_name import validate_db_name
 
 _LOCK_MODES = {"exclusive": fcntl.LOCK_EX, "shared": fcntl.LOCK_SH}
 
@@ -86,6 +87,21 @@ def postgres_cluster_lock_path(project_id: str) -> Path:
     from odoo_instance_sdk.internal.paths import get_locks_dir
 
     return get_locks_dir() / f"postgres-{project_id}.lock"
+
+
+def database_preparation_lock_path(project_id: str) -> Path:
+    """Return the canonical project-wide database preparation lock."""
+    from odoo_instance_sdk.internal.paths import get_locks_dir
+
+    return get_locks_dir() / f"database-preparation-{project_id}.lock"
+
+
+def database_preparation_artifact_lock_path(project_id: str, database_name: str) -> Path:
+    """Return the exclusive lock for a project preparation target database."""
+    from odoo_instance_sdk.internal.paths import get_locks_dir
+
+    validate_db_name(database_name)
+    return get_locks_dir() / f"database-preparation-{project_id}-{database_name}.lock"
 
 
 def python_env_lock_path(python_env_path: str) -> Path:

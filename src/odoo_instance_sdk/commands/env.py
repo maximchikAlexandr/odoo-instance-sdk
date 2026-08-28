@@ -23,6 +23,7 @@ from odoo_instance_sdk.commands.output import (
     OutputMode,
     emit_json_envelope,
     fail,
+    model_to_dict,
     output_options,
     resolve_output_mode,
     rich_print,
@@ -41,6 +42,8 @@ from odoo_instance_sdk.models import (
     ClusterMetrics,
     ClusterSnapshot,
     EnvironmentArtifacts,
+    EnvironmentCheckoutPlan,
+    EnvironmentCheckoutResult,
     EnvironmentSnapshot,
     GitActivity,
     GitActivityState,
@@ -55,7 +58,6 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
     EnvironmentState,
-    _CheckoutPlan,
 )
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
@@ -142,20 +144,28 @@ def env_checkout(
             create_venv=create_venv,
             http_port=http_port,
         )
-        result = (
-            client.environments._plan_checkout(project_path, branch, options=options)
+        result: EnvironmentCheckoutPlan | EnvironmentCheckoutResult = (
+            client.environments.plan_checkout(project_path, branch, options=options)
             if dry_run
-            else client.environments.checkout(project_path, branch, options=options)
+            else client.environments.checkout_with_plan(project_path, branch, options=options)
         )
     except Exception as e:
-        fail(output_mode, "env.checkout", str(e))
+        fail(output_mode, "env.checkout", e)
     if json_output:
-        data = _checkout_plan_dict(result) if dry_run else _env_dict(result)
+        data = model_to_dict(result)
+        environment = result.environment if isinstance(result, EnvironmentCheckoutResult) else None
         emit_json_envelope(
             ok=True,
             command="env.checkout",
             result=data,
-            context={"environment_id": data.get("id"), "worktree_path": data.get("worktree_path")},
+            context=(
+                {
+                    "environment_id": str(environment.id),
+                    "worktree_path": environment.worktree_path,
+                }
+                if environment is not None
+                else {}
+            ),
             provenance={
                 "project_source": cli_ctx.project_source,
                 "environment_source": "null",
@@ -165,13 +175,16 @@ def env_checkout(
         )
     else:
         if dry_run:
-            _print_plan("Checkout plan", _checkout_plan_dict(result))
+            _print_plan("Checkout plan", model_to_dict(result))
         else:
-            rendered = _env_dict(result)
-            rich_print(
-                f"Environment {rendered['name']} ({rendered['id']}) state={rendered['state']}"
-            )
-        if result.db_mode == EnvironmentDatabaseMode.SHARED:
+            assert isinstance(result, EnvironmentCheckoutResult)
+            rendered = result.environment
+            rich_print(f"Environment {rendered.name} ({rendered.id}) state={rendered.state}")
+            _print_plan("Checkout plan", model_to_dict(result.plan))
+        db_mode = (
+            result.db_mode if isinstance(result, EnvironmentCheckoutPlan) else result.plan.db_mode
+        )
+        if db_mode == EnvironmentDatabaseMode.SHARED:
             rich_print("Warning: code/process isolated, DB and filestore are NOT.")
 
 
@@ -665,53 +678,6 @@ def _env_dict(e: object) -> dict[str, Any]:
         "db_mode": str(env.db_mode),
         "http_port": env.http_port,
         "worktree_path": env.worktree_path,
-    }
-
-
-def _checkout_plan_dict(plan: object) -> dict[str, Any]:
-    if not isinstance(plan, _CheckoutPlan):
-        raise TypeError("checkout dry-run must return an internal checkout plan")
-    return {
-        "id": str(plan.env_id),
-        "name": plan.name,
-        "state": "creating",
-        "branch": plan.branch,
-        "db_mode": str(plan.db_mode),
-        "http_port": plan.http_port,
-        "worktree_path": str(plan.worktree),
-        "generated_config_path": str(plan.generated_config),
-        "dependency_lock_path": str(plan.dependency_lock),
-        "python_mode": "create" if plan.python_owned else "reuse",
-        "python_path": plan.python_path,
-        "database": {
-            "mode": str(plan.db_mode),
-            "source": plan.source_database,
-            "target": plan.target_database,
-            "owned": plan.db_mode.value == "copy",
-        },
-        "ownership": {
-            "worktree": True,
-            "generated_config": True,
-            "dependency_lock": True,
-            "python_environment": plan.python_owned,
-            "backup": False,
-        },
-        "commands": ["git worktree add", "generate odoo.conf", "uv pip compile"],
-        "dependency_inputs": {
-            "requirements": list(plan.dependency_inputs),
-            "lock_path": str(plan.dependency_lock),
-        },
-        "helper_argv": {
-            "git_worktree_add": list(plan.worktree_argv),
-            "uv_compile": [
-                "uv",
-                "pip",
-                "compile",
-                *plan.dependency_inputs,
-                "-o",
-                str(plan.dependency_lock),
-            ],
-        },
     }
 
 

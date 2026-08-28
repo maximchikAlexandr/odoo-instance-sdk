@@ -79,6 +79,7 @@ class TestInstancePrefix:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(
             project_manifest, "feat/postgres-preflight", options=options
@@ -135,6 +136,7 @@ class TestInstancePrefix:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/prefix", options=opts)
         assert env.state == EnvironmentState.READY
@@ -157,6 +159,7 @@ class TestInstancePrefix:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments._plan_checkout(
             project_manifest, "feat/notready", options=opts
@@ -176,6 +179,7 @@ class TestInstancePrefix:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/runprefix", options=opts)
         inst = env_client.instance.from_environment(env)
@@ -287,6 +291,7 @@ class TestRunForeground:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/fgprefix", options=opts)
         inst = env_client.instance.from_environment(env)
@@ -474,6 +479,7 @@ class TestPortConflictCli:
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
             odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/portconf", options=opts)
 

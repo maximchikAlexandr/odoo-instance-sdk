@@ -30,6 +30,8 @@ BOUNDED_LEAVES = (
     ("env", "list"),
     ("env", "remove"),
     ("env", "sync"),
+    ("db", "refresh"),
+    ("db", "reset-admin-password"),
     ("eval",),
     ("exec",),
     ("test",),
@@ -53,6 +55,7 @@ Options:
   --help          Show this message and exit.
 
 Commands:
+  db            Prepare and reset project databases.
   deps
   doctor
   env
@@ -166,6 +169,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
     assert set(cli.list_commands(click.Context(cli))) == {
         "init",
         "env",
+        "db",
         "run",
         "logs",
         "shell",
@@ -212,9 +216,12 @@ def test_discovered_public_methods() -> None:
     expected = {
         EnvironmentResource: (
             "checkout",
+            "checkout_with_plan",
             "get",
             "list",
+            "plan_checkout",
             "record_use",
+            "refresh_database",
             "remove",
             "sync_python",
         ),
@@ -235,6 +242,7 @@ def test_discovered_public_methods() -> None:
             "has_tracked_database",
             "latest_backup",
             "latest_restore",
+            "latest_restore_provenance",
             "list_backups",
             "list_environment_runtimes",
             "list_environments",

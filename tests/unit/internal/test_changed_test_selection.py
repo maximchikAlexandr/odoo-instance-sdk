@@ -180,20 +180,26 @@ def test_changed_selection_rejects_missing_base_ref(tmp_path: Path) -> None:
         resolve_changed_selection(repo, ["addons"], base="does-not-exist")
 
 
-def test_git_calls_are_bounded_argv_only_and_head_stability_is_checked(tmp_path: Path) -> None:
+def test_git_calls_are_bounded_argv_only_and_head_stability_is_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo, sale, _stock = _repo(tmp_path)
     base = _git(repo, "rev-parse", "HEAD")
     (sale / "tests" / "test_change.py").write_text("# change\n")
+    sentinel = "odcli-test-master-password-sentinel"
     with patch(
         "odoo_instance_sdk.internal.test_selection.subprocess.Popen",
         wraps=subprocess.Popen,
     ) as popen:
+        monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", sentinel)
         selection = resolve_changed_selection(repo, ["addons"], base=base)
 
     assert selection.modules == ("sale",)
     calls = [(list(call.args[0]), dict(call.kwargs)) for call in popen.call_args_list]
     assert calls
     assert all(kwargs["shell"] is False for _command, kwargs in calls)
+    assert all("ODCLI_TEST_MASTER_PASSWORD" not in kwargs["env"] for _command, kwargs in calls)
+    assert all(sentinel not in kwargs["env"].values() for _command, kwargs in calls)
     assert all(kwargs["stdout"] is subprocess.PIPE for _command, kwargs in calls)
     assert all(kwargs["stderr"] is subprocess.PIPE for _command, kwargs in calls)
     assert all(command[0:2] == ["git", "-C"] for command, _kwargs in calls)

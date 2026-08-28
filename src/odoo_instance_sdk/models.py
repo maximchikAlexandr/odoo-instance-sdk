@@ -77,6 +77,42 @@ class EnvironmentState(enum.StrEnum):
     REMOVED = "removed"
 
 
+class EnvironmentDatabaseMode(enum.StrEnum):
+    SHARED = "shared"
+    COPY = "copy"
+
+
+class EnvironmentPythonMode(enum.StrEnum):
+    CREATE = "create"
+    REUSE = "reuse"
+
+
+class BackupBranchOrigin(enum.StrEnum):
+    EXPLICIT = "explicit"
+    CONFIGURED = "configured"
+    UNKNOWN = "unknown"
+
+
+class BackupProvenanceStatus(enum.StrEnum):
+    MATCHED = "matched"
+    MISMATCHED = "mismatched"
+    UNKNOWN = "unknown"
+
+
+class BackupFreshness(enum.StrEnum):
+    FRESH = "fresh"
+    STALE = "stale"
+    MISSING = "missing"
+    UNAVAILABLE = "unavailable"
+
+
+class DatabasePreparationAction(enum.StrEnum):
+    DOWNLOAD = "download"
+    RESTORE = "restore"
+    RESET_ADMIN_PASSWORD = "reset_admin_password"
+    SWITCH_DEFAULT = "switch_default"
+
+
 class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """A successfully downloaded backup.
 
@@ -96,6 +132,7 @@ class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     size_bytes: int
     sha256: str
     downloaded_at: datetime
+    source_git_branch: str | None = None
 
 
 class NoBackup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -109,6 +146,94 @@ class NoBackup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     size_bytes: int = 0
     sha256: str = ""
     downloaded_at: datetime = datetime.fromtimestamp(0, UTC)
+    source_git_branch: str | None = None
+
+
+class DevelopmentEnvironment(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    id: uuid.UUID
+    name: str
+    repository_root: str
+    git_common_dir: str
+    branch: str
+    base_ref: str
+    worktree_path: str
+    generated_config_path: str
+    python_environment_path: str
+    python_environment_owned: bool
+    dependency_lock_path: str
+    http_interface: str
+    http_port: int
+    db_mode: EnvironmentDatabaseMode
+    source_db_name: str | None = None
+    target_db_name: str | None = None
+    backup_id: uuid.UUID | None = None
+    state: EnvironmentState
+    created_at: datetime
+    last_used_at: datetime | None = None
+    removed_at: datetime | None = None
+    last_error: str | None = None
+
+
+class BackupProvenanceComparison(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    status: BackupProvenanceStatus
+    expected_base_ref: str
+    recorded_branch: str | None
+
+
+class DatabaseRefreshOptions(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    restore: bool = False
+    source_branch: str | None = None
+    reset_admin_password: bool = False
+
+
+class DatabasePreparationResult(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    mode: DatabasePreparationAction
+    backup: Backup | None = None
+    source_git_branch: str | None = None
+    branch_origin: BackupBranchOrigin = BackupBranchOrigin.UNKNOWN
+    restored_database: str | None = None
+    admin_password_reset: bool = False
+    default_switched: bool = False
+    previous_default: str | None = None
+    effective_default: str | None = None
+    retained_artifacts: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+class AdminPasswordResetResult(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    database: str
+    completed: bool
+    xml_id: str
+    environment_id: uuid.UUID | None = None
+
+
+class EnvironmentCheckoutPlan(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    name: str
+    branch: str
+    effective_base_ref: str
+    db_mode: EnvironmentDatabaseMode
+    source_database: str | None
+    target_database: str | None
+    python_mode: EnvironmentPythonMode
+    provenance: BackupProvenanceComparison
+    freshness: BackupFreshness
+    preparation_actions: tuple[DatabasePreparationAction, ...]
+    warnings: tuple[str, ...]
+
+
+class EnvironmentCheckoutResult(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    environment: DevelopmentEnvironment
+    plan: EnvironmentCheckoutPlan
 
 
 class Database(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

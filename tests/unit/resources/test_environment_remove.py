@@ -95,6 +95,7 @@ def _checkout_copy(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.COPY,
             target_database="copy_target",
+            source_database="comerta",
         ),
     )
 
@@ -103,7 +104,7 @@ class TestEnvRemove:
     def test_dirty_worktree_blocks(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path, git_repo: Path
     ) -> None:
-        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        opts = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         env = env_client.environments.checkout(project_manifest, "feat/rm-dirty", options=opts)
         worktree = Path(env.worktree_path)
         (worktree / "dirty.txt").write_text("uncommitted")
@@ -117,7 +118,9 @@ class TestEnvRemove:
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
         opts = EnvironmentCheckoutOptions(
-            python=str(fake_python), db_mode=EnvironmentDatabaseMode.SHARED
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/rm-shared", options=opts)
         env_client.environments.remove(env)
@@ -127,7 +130,7 @@ class TestEnvRemove:
     def test_idempotent_missing_artifact(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
-        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        opts = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         env = env_client.environments.checkout(project_manifest, "feat/rm-idem", options=opts)
         import shutil
 
@@ -139,7 +142,7 @@ class TestEnvRemove:
     def test_remove_deletes_generated_config(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
-        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        opts = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         env = env_client.environments.checkout(project_manifest, "feat/rm-cfg", options=opts)
         cfg_path = Path(env.generated_config_path)
         assert cfg_path.is_file()
@@ -153,7 +156,7 @@ class TestEnvRemove:
         env = env_client.environments.checkout(
             project_manifest,
             "feat/rm-port",
-            options=EnvironmentCheckoutOptions(python=str(fake_python)),
+            options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
         )
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind((env.http_interface, env.http_port))
@@ -170,7 +173,7 @@ class TestEnvRemove:
     def test_audit_rows_kept(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
-        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        opts = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         env = env_client.environments.checkout(project_manifest, "feat/rm-audit", options=opts)
         env_client.environments.remove(env)
         catalog = env_client.get_catalog()

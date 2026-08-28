@@ -12,6 +12,7 @@ import msgspec
 from rich.console import Console
 from toon import encode
 
+from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
 
 
@@ -49,6 +50,32 @@ def resolve_output_mode(output_format: str | None, json_output: bool) -> OutputM
 def sanitize_diagnostic(value: object) -> str:
     """Make every non-interactive diagnostic safe and bounded before emission."""
     return sanitize_last_error(str(value)) or "operation failed"
+
+
+def model_to_dict(value: object) -> dict[str, Any]:
+    """Project one public typed model into the shared envelope mapping."""
+    builtins = msgspec.to_builtins(value)
+    if not isinstance(builtins, dict):
+        raise TypeError("CLI model result must be an object")
+    return cast("dict[str, Any]", builtins)
+
+
+def _failure_context(error: BaseException | None) -> dict[str, Any]:
+    """Project only the typed, secret-free retained-artifact context."""
+    context = getattr(error, "failure_context", None) if error is not None else None
+    if not isinstance(context, DatabasePreparationFailureContext):
+        return {}
+    return model_to_dict(context)
+
+
+def _failure_message(message: object, context: dict[str, Any]) -> str:
+    rendered = sanitize_diagnostic(message)
+    details: list[str] = []
+    if context.get("retained_backup_id") is not None:
+        details.append(f"retained backup {context['retained_backup_id']}")
+    if context.get("retained_database") is not None:
+        details.append(f"retained database {context['retained_database']}")
+    return f"{rendered}; {'; '.join(details)}" if details else rendered
 
 
 def rich_print(
@@ -145,7 +172,11 @@ def emit_json_envelope(
 
 
 def fail(
-    output_mode: OutputMode | bool, command: str, message: str, *, usage: bool = False
+    output_mode: OutputMode | bool,
+    command: str,
+    message: object,
+    *,
+    usage: bool = False,
 ) -> Never:
     mode = (
         output_mode
@@ -154,16 +185,19 @@ def fail(
         if output_mode
         else OutputMode.RICH
     )
+    context = _failure_context(message if isinstance(message, BaseException) else None)
+    rendered_message = _failure_message(message, context)
     if mode is not OutputMode.RICH:
         emit_json_envelope(
             ok=False,
             command=command,
+            context=context,
             error_code="usage_error" if usage else command.replace(".", "_") + "_failed",
-            error_message=message,
+            error_message=rendered_message,
             mode=mode,
         )
     else:
-        click.echo(sanitize_diagnostic(message), err=True)
+        click.echo(rendered_message, err=True)
     if usage:
         raise click.exceptions.Exit(2)
     sys.exit(1)
@@ -174,6 +208,7 @@ __all__ = [
     "build_envelope",
     "emit_json_envelope",
     "fail",
+    "model_to_dict",
     "output_options",
     "resolve_output_mode",
     "rich_print",

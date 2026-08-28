@@ -13,6 +13,7 @@ from typing import IO, TYPE_CHECKING, Literal, NoReturn, cast
 
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.postgres_transport import run_psql
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import StartConfig
 
@@ -428,6 +429,7 @@ def _run_git_bytes(  # noqa: C901
     try:
         process = subprocess.Popen(
             command,
+            env=sanitized_child_environment(),
             shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

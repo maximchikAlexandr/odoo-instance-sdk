@@ -1,3 +1,9 @@
+## Purpose
+
+Append-only catalog records for database restore and lifecycle tracking.
+
+## Requirements
+
 ### Requirement: Append-only restores table
 
 Catalog MUST хранить restore-mapping в таблице `restores` (append-only). Каждая строка представляет одно событие восстановления backup в database на PG-кластере.

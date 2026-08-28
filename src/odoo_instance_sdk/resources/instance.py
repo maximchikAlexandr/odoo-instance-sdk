@@ -26,6 +26,7 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_db_names,
     parse_odoo_config,
 )
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.server import (
     get_process_status,
     run_command,
@@ -278,6 +279,7 @@ def _worktree_ref(cwd: str | Path | None) -> tuple[str, str]:
     try:
         branch_proc = subprocess.run(
             ["git", "-C", target, "rev-parse", "--abbrev-ref", "HEAD"],
+            env=sanitized_child_environment(),
             capture_output=True,
             text=True,
             timeout=10,
@@ -285,6 +287,7 @@ def _worktree_ref(cwd: str | Path | None) -> tuple[str, str]:
         )
         sha_proc = subprocess.run(
             ["git", "-C", target, "rev-parse", "HEAD"],
+            env=sanitized_child_environment(),
             capture_output=True,
             text=True,
             timeout=10,
@@ -334,8 +337,9 @@ class OdooInstance:
     def _ensure_dependencies_ready(self) -> None:
         """Dependency preflight: ensure project PostgresCluster is ready before spawn.
 
-        Called exactly once per public spawn entrypoint (run_foreground/shell/
-        run_shell_script) before the artifact lock is acquired. External-mode
+        Called exactly once per public spawn entrypoint. The exclusive shell
+        mutator calls it after claiming the artifact lock, so its cluster
+        recheck is serialized with other artifact operations. External-mode
         clusters are probed only; compose-mode clusters are started if stopped.
         Manual instances (``instance(base_url=...)`` / ``from_config()``) have
         ``_postgres_cluster is None`` and skip preflight.
@@ -537,8 +541,10 @@ class OdooInstance:
         commit: bool = False,
     ) -> CommandResult:
         """Internal mutator entrypoint; lock choice belongs to this instance only."""
-        self._ensure_dependencies_ready()
         with self._artifact_operation(exclusive=True):
+            # Recheck the project cluster after claiming the artifact lock so a
+            # mutator cannot race a concurrent lifecycle operation.
+            self._ensure_dependencies_ready()
             return self._run_shell_script_unlocked(
                 source, argv=argv, timeout=timeout, commit=commit
             )

@@ -7,14 +7,32 @@ from pathlib import Path
 import pytest
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.backup_catalog import (
+    CURRENT_SCHEMA_VERSION,
+    BackupCatalog,
+)
+
+CATALOG_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
+NEXT_CATALOG_SCHEMA_VERSION = CATALOG_SCHEMA_VERSION + 1
+# These are the pre-change upgrade states represented by the migration tests;
+# keeping the list explicit makes a missing intermediate fixture fail loudly.
+MIGRATION_FIXTURE_VERSIONS = (5, 6, 7, 8, 9, 10)
 
 
-def test_fresh_install_creates_v9_directly(tmp_path: Path) -> None:
+def test_next_catalog_migration_version_and_fixtures_are_sequential() -> None:
+    assert CATALOG_SCHEMA_VERSION == 10
+    assert NEXT_CATALOG_SCHEMA_VERSION == 11
+    contiguous_versions = tuple(range(MIGRATION_FIXTURE_VERSIONS[0], CATALOG_SCHEMA_VERSION + 1))
+    assert contiguous_versions == MIGRATION_FIXTURE_VERSIONS
+
+
+def test_fresh_install_creates_v10_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 9
+    assert version == 10
+    backup_columns = {r[1] for r in catalog._conn.execute("PRAGMA table_info(backups)").fetchall()}
+    assert "source_git_branch" in backup_columns
     tables = {
         r[0]
         for r in catalog._conn.execute(
@@ -25,6 +43,129 @@ def test_fresh_install_creates_v9_directly(tmp_path: Path) -> None:
     assert "environment_events" in tables
     assert "environment_runtime" in tables
     catalog.close()
+
+
+def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    backup_id = str(uuid.uuid4())
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA user_version = 9")
+    conn.executescript("""
+        CREATE TABLE backups (
+            id TEXT PRIMARY KEY,
+            source_base_url TEXT NOT NULL,
+            database_name TEXT NOT NULL,
+            format TEXT NOT NULL,
+            filestore_requested INTEGER NOT NULL,
+            path TEXT,
+            filename TEXT,
+            size_bytes INTEGER,
+            sha256 TEXT,
+            state TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            downloaded_at TEXT,
+            failed_at TEXT,
+            deleted_at TEXT,
+            error_type TEXT,
+            error_message TEXT
+        );
+        CREATE TABLE backup_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            backup_id TEXT NOT NULL REFERENCES backups(id),
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            path TEXT,
+            validator TEXT,
+            exit_code INTEGER,
+            message TEXT
+        );
+        CREATE TABLE restores (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            db_host TEXT NOT NULL,
+            db_port INTEGER NOT NULL,
+            database_name TEXT NOT NULL,
+            backup_id TEXT NOT NULL REFERENCES backups(id),
+            restored_at TEXT NOT NULL
+        );
+        CREATE TABLE database_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            db_host TEXT NOT NULL,
+            db_port INTEGER NOT NULL,
+            database_name TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            backup_id TEXT REFERENCES backups(id)
+        );
+    """)
+    conn.execute(
+        "INSERT INTO backups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            backup_id,
+            "https://example.test",
+            "source",
+            "zip",
+            1,
+            str(tmp_path / "gone.zip"),
+            "gone.zip",
+            7,
+            "a" * 64,
+            "deleted",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:01+00:00",
+            None,
+            "2026-01-02T00:00:00+00:00",
+            None,
+            None,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO backup_events (backup_id, event_type, occurred_at) VALUES (?, ?, ?)",
+        (backup_id, "download_succeeded", "2026-01-01T00:00:01+00:00"),
+    )
+    conn.execute(
+        "INSERT INTO restores (db_host, db_port, database_name, backup_id, restored_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("localhost", 5432, "restored", backup_id, "2026-01-02T00:00:00+00:00"),
+    )
+    conn.execute(
+        "INSERT INTO database_events (db_host, db_port, database_name, event_type, occurred_at, backup_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("localhost", 5432, "restored", "restored", "2026-01-02T00:00:00+00:00", backup_id),
+    )
+    conn.commit()
+    conn.close()
+
+    catalog = BackupCatalog(db_path=db)
+    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM backup_events WHERE backup_id=?", (backup_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM restores WHERE backup_id=?", (backup_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE backup_id=?", (backup_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    catalog.close()
+
+    reopened = BackupCatalog(db_path=db)
+    columns = [row[1] for row in reopened._conn.execute("PRAGMA table_info(backups)")]
+    assert columns.count("source_git_branch") == 1
+    provenance = reopened.latest_restore_provenance("localhost", 5432, "restored")
+    assert provenance is not None
+    assert provenance.source_git_branch is None
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    reopened.close()
 
 
 def test_environment_methods_exist(tmp_path: Path) -> None:
@@ -98,12 +239,12 @@ def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None
     schema = catalog._conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='environment_copy_journal'"
     ).fetchone()[0]
-    assert version == 9
+    assert version == 10
     assert "restore_pending" in schema
     catalog.close()
 
 
-def test_v8_catalog_upgrades_to_v9_environment_runtime(tmp_path: Path) -> None:
+def test_v8_catalog_upgrades_to_v10_environment_runtime_and_branch_column(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 8")
@@ -127,8 +268,11 @@ def test_v8_catalog_upgrades_to_v9_environment_runtime(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert version == 9
+    assert version == 10
     assert "environment_runtime" in tables
+    columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(backups)")}
+    assert "source_git_branch" in columns
+    assert len([column for column in columns if column == "source_git_branch"]) == 1
     catalog.close()
 
 
@@ -251,7 +395,7 @@ def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
         (env_id,),
     ).fetchone()
 
-    assert version == 9
+    assert version == 10
     assert "http_port" not in columns
     assert "http_interface" not in columns
     assert "environments_one_active_branch" in indexes

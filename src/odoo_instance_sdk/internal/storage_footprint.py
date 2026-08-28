@@ -9,6 +9,7 @@ from pathlib import Path
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.db_name import validate_filestore_containment
 from odoo_instance_sdk.internal.postgres_size import database_size_bytes
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.models import (
     DatabaseFootprint,
     PythonEnvFootprint,
@@ -36,6 +37,7 @@ def _du_size(du: str, path: Path) -> int | None:
     try:
         proc = subprocess.run(
             [du, "-sb", str(path)],
+            env=sanitized_child_environment(),
             capture_output=True,
             text=True,
             timeout=_DU_TIMEOUT,
