@@ -1,322 +1,221 @@
 # odoo-instance-sdk
 
-[![CI Status](https://github.com/maximchikAlexandr/odoo-instance-sdk/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/maximchikAlexandr/odoo-instance-sdk/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+`odoo-instance-sdk` gives Odoo 19 developers one typed Python API and one
+CLI, `odcli`, for repeatable local environments. It manages Git worktrees,
+Python environments, Odoo processes, databases, an optional SDK-owned
+PostgreSQL cluster, backups, and local observability without hiding the
+underlying Odoo and PostgreSQL tools.
 
-A typed Python SDK for managing local Odoo 19.0 instances: process lifecycle, CLI commands, readiness checks, database operations, and an audited local backup catalog.
+## Concepts
 
-## Installation
+- A **Project** is a repository with an `.odcli/project.toml` manifest that
+  declares Odoo, Python, database, and runtime defaults.
+- An **Environment** is a registered development checkout: its own worktree,
+  generated config, Python environment, port, and database policy.
+- An **Odoo instance** is the typed SDK handle for one local or remote Odoo
+  endpoint and its process and database operations.
+- A **PostgreSQL cluster** is either an external cluster reused by the project
+  or an SDK-owned Docker Compose cluster with explicit image trust.
 
-From Git (recommended until first PyPI release):
+## Requirements and installation
 
-```bash
-uv add "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk"
-```
-
-## Quick start
-
-```python
-from odoo_instance_sdk import OdooClient, OdooClientConfig
-
-config = OdooClientConfig(executable="odoo")
-client = OdooClient(config)
-
-# From odoo.conf
-instance = client.instance.from_config("./odoo.conf", base_url="http://localhost:8069")
-```
-
-### Start a local Odoo server
-
-```python
-from odoo_instance_sdk import StartConfig
-
-instance = client.instance(base_url="http://localhost:8069", master_password="admin")
-proc = instance.start(StartConfig(http_port=8069))
-
-result = instance.wait_ready(proc, timeout=60.0)
-print(f"Ready: {result.ok} in {result.elapsed:.1f}s")
-```
-
-## CLI output and environment inventory
-
-The installed `odcli` command keeps `odoo_instance_sdk.cli:cli` as its stable
-Click entry point. Structured output is selected locally on supported leaves
-with `--format rich|json|toon`; Rich is the default. The existing `--json`
-option is an alias for `--format json`. Supplying `--json` with `--format json`
-is accepted; other combinations are usage errors.
-
-The format option is available on `init`, `doctor`, `env checkout`, `env list`, `test`,
-`env remove`, `env sync`, `eval`, `exec`, `module list`, `module update`,
-`module test`, `translations export`, `deps verify`, `vscode generate`, and
-`postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`.
-TOON is a machine-readable single-document output mode for these commands;
-JSON and TOON contain the same sanitized envelope data.
-
-`odcli env list --watch --interval 2.0` refreshes the Rich inventory in the
-foreground. Watch mode requires an interactive TTY and rejects machine output;
-the interval must be at least `0.1` seconds. Rich `--all` includes removed
-environments. JSON/TOON `--all` retain the active-only compatibility behavior.
-The root command, `run`, interactive shell (`shell`), and `logs --follow` intentionally
-do not accept document formats or a Rich live wrapper.
-
-### Run local Odoo tests
-
-`odcli test [TARGET]` resolves one ready environment first, then selects tests
-only from the generated, worktree-contained `addons_path` roots. A bare module,
-the current directory, or one test file can be selected:
+Use Python 3.12 or newer. Git and `uv` are needed for environment workflows;
+Docker Compose is needed only for SDK-owned PostgreSQL, and Node.js is needed
+only when developing the bundled dashboard.
 
 ```bash
-odcli --env feature-env test sale
-odcli --env feature-env test                 # nearest addon for the current directory
-odcli --env feature-env test addons/sale/tests/test_sale_order.py
-odcli --env feature-env test sale --tags '/sale:TestSale.test_confirm'
+uv tool install odoo-instance-sdk
+odcli --help
 ```
 
-Module and cwd selection default to the native `/<module>` tag. A file defaults
-to the native `/<module>/tests/<path>` tag. `--tags` is passed byte-for-byte for
-module, cwd, and changed selection; a file target cannot be combined with
-`--tags`. Targets are singular, and a target cannot be combined with
-`--changed`.
-
-Changed-addon selection uses only direct worktree changes and accepts an
-explicit base or the environment's recorded non-`HEAD` base:
+For the monitor dashboard, install the optional extra in a project environment:
 
 ```bash
-odcli --env feature-env test --changed --base origin/dev --dry-run --format json
-odcli --env feature-env test --changed --tags '/sale,/stock'
+uv add 'odoo-instance-sdk[dashboard]'
+uv run odcli monitor
 ```
 
-The changed plan is deterministic: modules are sorted and deduplicated, and
-without explicit tags their selector is joined as `/sale,/stock`. Changes
-outside configured addon roots are a successful `no_addon_changes` result;
-unsafe paths inside an addon root are reported as fatal unmapped paths. External,
-missing, and symlinked addon roots are never selected, and reverse dependants
-are not inferred.
+## CLI-first quick start
 
-`--dry-run` is available only with `--changed`; it reports environment, Git, and
-selection provenance without contacting PostgreSQL or starting Odoo. An actual
-run performs a read-only check against exactly one configured database and
-requires every selected module to be installed before invoking Odoo's native
-test runner. The command never installs, updates, restores, commits, or otherwise
-mutates application data. Rich is the default; `--format json|toon` returns the
-same envelope data, and execution counts are omitted from dry-run and
-`no_addon_changes` results.
-
-The compatibility alias retains its plural parser and required native tags:
+Run these commands from the Odoo project repository. `init` writes the project
+manifest; inspect the plan before creating a feature environment.
 
 ```bash
-odcli --env feature-env module test sale stock \
-  --test-tags '/sale,/stock' --reload-tests --allow-empty
+odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --config ./odoo.conf
+odcli doctor
+odcli env checkout feature/customer-credit --dry-run
+odcli env checkout feature/customer-credit
+odcli --env feature/customer-credit run
+odcli --env feature/customer-credit logs
+odcli env list
 ```
 
-`module test` uses the same safe selection boundary, read-only preflight,
-single native runner, typed result, and `--format`/`--json` output contract.
+Global selectors such as `--project` and `--env` belong before the subcommand.
+Exact flags are intentionally delegated to executable help, for example
+`odcli env checkout --help`. Structured output is leaf-local, not a root command
+promise: commands that support it expose `--format rich|json|toon` and/or
+`--json`. Supplying `--json` with `--format json` is allowed where both are
+documented. TOON is the compact structured form.
 
-The public monitor snapshot uses additive schema v2 fields `observed_port` and
-`artifacts`; existing version-1 fields retain their meanings. The CLI envelope
-version remains independent and is still v1.
+## Common workflows
+
+### Tests, modules, dependencies, translations, and VS Code
+
+```bash
+odcli test --changed
+odcli module list
+odcli module update sale
+odcli module test sale
+odcli deps verify
+odcli translations export sale
+odcli vscode generate
+```
+
+`test --changed` selects add-ons from the Git diff. Module commands provide an
+explicit module-oriented path; dependency verification, translation export,
+and VS Code generation remain separate inspectable operations.
+
+### PostgreSQL trust and lifecycle
+
+An SDK-owned cluster will not start an unapproved mutable image. Resolve and
+approve the image digest, then start and inspect the cluster:
+
+```bash
+odcli postgres approve-image
+odcli postgres up
+odcli postgres status
+odcli postgres stop
+```
+
+External PostgreSQL remains externally managed; `status` reports it but `stop`
+does not take ownership of it.
 
 ### Prepare a project database
 
-Projects may declare a remote test instance in `.odcli/project.toml`:
+Database refresh can use a pinned remote test instance while keeping its
+master password outside the manifest. This complete example refreshes backups
+older than 24 hours and verifies branch provenance against `main`:
 
 ```toml
 [project]
-default_base_ref = "main" # optional; checkout falls back to HEAD
-refresh_after_hours = 24 # optional; must be finite and greater than zero
+default_base_ref = "main"
+refresh_after_hours = 24.0
 
 [test_instance]
 base_url = "https://odoo-test.example"
 database = "testdb"
-git_branch = "main" # optional; --source-branch overrides it
+git_branch = "main"
 ```
-
-Set the remote instance master password only in the process environment. It is
-read from `ODCLI_TEST_MASTER_PASSWORD` for an explicit preparation request and
-is never stored in the manifest or emitted by the SDK.
-
-Repository-selected preparation also requires an external exact-origin approval
-for every non-loopback test instance. Set the sole approval variable to a
-comma-separated list of non-secret canonical origins before refreshing, for
-example:
 
 ```bash
-export ODCLI_TEST_INSTANCE_ORIGIN_PINS="https://odoo-test.example:443,https://staging.example:8443"
-odcli --project /path/to/project db refresh
+odcli --env feature/customer-credit db refresh
+odcli --env feature/customer-credit db reset-admin-password
 ```
 
-Entries are normalized to lowercase scheme/host plus effective port; paths,
-queries, fragments, wildcards, and host-only entries do not broaden approval.
-Each origin used by the repository's `[test_instance]` flow must match one pin.
-Loopback origins do not need a pin, while non-loopback HTTP is always rejected.
-The SDK checks transport and approval before preparation locking, PostgreSQL or
-database-manager work, HTTP, catalog, or manifest mutation. The variable is
-never persisted and does not contain a password. This repository approval is
-limited to project preparation; direct `instance.databases.backup()` retains
-its generic behavior and does not require a repository pin.
+Refresh follows the environment's configured database policy. Destructive
+database operations are local-only and validate provenance before mutation.
+
+### Automation and shell access
 
 ```bash
-odcli db refresh --format json
-odcli db refresh --restore --source-branch release/19
-odcli db refresh --restore --reset-admin-password
-odcli db reset-admin-password --format toon
+odcli --env feature/customer-credit eval 'env.user.search_count([])'
+odcli --env feature/customer-credit exec scripts/check_data.py
+odcli --env feature/customer-credit shell
+odcli --env feature/customer-credit logs --follow
 ```
 
-`db refresh` accepts an explicit `--project`, the nearest project manifest, or
-an exact registered worktree. A restore chooses a unique local target, records
-the source branch, and switches the project default only at the final manifest
-commit point. `--reset-admin-password` is allowed only with `--restore`; it
-does not accept a password option or prompt. Checkout freshness may invoke the
-same private preparation coordinator when `refresh_after_hours` is configured,
-but checkout never performs an automatic administrator-password reset.
+The interactive shell requires an interactive TTY. `logs --follow` stays
+attached until interrupted.
 
-If a download, restore, reset, mapping, concurrency, or manifest-switch step
-fails, the old default remains selected and the downloaded backup/new database
-are retained for inspection or manual cleanup. A backup whose recorded branch
-is unknown can be used for the current call only with an explicit
-`--source-db`; inferred sources fail closed and report the `--source-db` or
-refresh guidance. Use JSON or TOON for scripts; both are single, ANSI-free
-envelopes with the same public fields and diagnostics.
+## Complete CLI command reference
 
-### Database operations
+This is the complete shipped command-path inventory. The Click object
+`odoo_instance_sdk.cli:cli` is its source of truth. Every entry has one purpose
+sentence; use the entry's `--help` for exact options.
+
+<!-- cli-command-inventory:start -->
+- `odcli init` — Create or update the project manifest from explicit inputs.
+- `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
+- `odcli env checkout` — Plan or create an isolated branch worktree and environment.
+- `odcli env list` — List registered environments, active-only unless `--all` is requested.
+- `odcli env remove` — Remove a registered environment and its owned artifacts safely.
+- `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
+- `odcli run` — Start resolved Odoo in the foreground for the selected environment.
+- `odcli logs` — Read retained Odoo logs, optionally following new output.
+- `odcli shell` — Open an interactive Odoo shell in the selected environment.
+- `odcli eval` — Evaluate one Python expression through the Odoo shell boundary.
+- `odcli exec` — Execute a Python script through the Odoo shell boundary.
+- `odcli test` — Select and run Odoo tests, including changed-add-on selection.
+- `odcli module list` — Discover installable modules visible to the environment.
+- `odcli module test` — Run tests for explicitly named modules.
+- `odcli module update` — Upgrade explicitly named modules in the selected database.
+- `odcli translations export` — Export translations for a selected module and languages.
+- `odcli deps verify` — Verify Python and add-on dependency readiness.
+- `odcli vscode generate` — Generate VS Code launch configuration from project settings.
+- `odcli postgres approve-image` — Pin trust to the resolved PostgreSQL image digest.
+- `odcli postgres status` — Report the configured PostgreSQL cluster state and endpoint.
+- `odcli postgres up` — Start or verify the configured PostgreSQL cluster.
+- `odcli postgres stop` — Stop an SDK-owned PostgreSQL cluster without deleting its volume.
+- `odcli db refresh` — Refresh an environment database from its configured source policy.
+- `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
+- `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
+<!-- cli-command-inventory:end -->
+
+## Python SDK
+
+The public SDK mirrors the same resources without going through Click. Start
+with `OdooClient`, create an instance directly or from `odoo.conf`, and use its
+typed `databases`, process lifecycle, backup catalog, environment, monitor, and
+PostgreSQL resources.
 
 ```python
-# List databases — returns Database objects with backup info
-dbs = instance.databases.list()
-for db in dbs:
-    if db.backup.format is not None:
-        print(f"{db.name} → restored from {db.backup.downloaded_at}")
-    else:
-        print(f"{db.name} → no restore mapping")
+from odoo_instance_sdk import OdooClient, OdooClientConfig
 
-# Positional indexing
-db = instance.databases[0]
-print(db.name, db.backup.downloaded_at)
+client = OdooClient(config=OdooClientConfig(executable="odoo-bin"))
+instance = client.instance.from_config("./odoo.conf")
 
-# Current database (from configured_database_names[0])
-current = instance.databases.current()
-
-# Backup — works on local and remote instances
-backup = instance.databases.backup("mydb")
-print(f"Saved to: {backup.filename}")
-
-# Restore — local-only, guarded by SDK; writes restore-mapping for from_config() instances
-restored = instance.databases.restore(backup, "mydb_copy", copy=True)
-print(f"Restored as: {restored.new_db}")
-
-# Drop — local-only; records dropped event for from_config() instances
-result = instance.databases.drop("mydb_copy")
+for database in instance.databases.list():
+    print(database.name, database.backup)
 ```
 
-### Browse the backup catalog
+See [Python SDK examples](docs/python-sdk.md) for runnable examples covering
+database backup/restore, processes, environments, PostgreSQL, and monitoring.
 
-```python
-# List all available backups
-for b in client.backups.list():
-    print(f"{b.database_name} — {b.filename} ({b.size_bytes} bytes)")
-
-# Latest backup for a specific database
-latest = client.backups.latest(source_base_url="http://localhost:8069", database_name="mydb")
-
-# Full history for a database
-for event in client.backups.history(source_base_url="http://localhost:8069", database_name="mydb"):
-    print(f"{event.event_type.value}: {event.message}")
-```
-
-### Validate a backup
-
-```python
-result = client.backups.validate(backup)
-print(f"Valid: {result.valid}, errors: {result.errors}")
-```
-
-## API overview
-
-```
-OdooClient
-├── instance
-│   ├── __call__(base_url, master_password=None) -> OdooInstance
-│   └── from_config(path, base_url=None, master_password=None) -> OdooInstance
-└── backups
-    ├── list(...)
-    ├── latest(...)
-    ├── history(...)
-    ├── validate(...)
-    └── delete(...)
-
-OdooInstance
-├── base_url
-├── configured_database_names
-├── databases
-│   ├── backup(...)
-│   ├── restore(...)
-│   ├── drop(...)
-│   ├── list()
-│   ├── exists()
-│   ├── current()
-│   └── [n]
-├── run(args, *, cwd=None, env=None, timeout=None) -> CommandResult
-├── start(config: StartConfig, ...) -> OdooProcess
-├── stop(proc, *, timeout=10.0)
-├── status(proc) -> ProcessStatus
-└── wait_ready(proc, *, timeout=60.0) -> ReadinessResult
-```
-
-## Cache layout
-
-Backup files and audit metadata are stored under `~/.cache/odoo-instance-sdk/`:
-
-```
-~/.cache/odoo-instance-sdk/
-├── backups/
-│   └── <backup-uuid>_<safe-content-disposition-filename>
-└── backups.sqlite3   (SQLite, WAL mode)
-```
-
-- Backup filenames begin with the backup UUID and stay within the destination directory.
-- Catalog is a persistent SQLite database with full audit history.
-- Schema version 2: `backups` + `backup_events` tables (audit), `restores` + `database_events` tables (restore-tracking), with foreign keys.
-- Concurrent access uses WAL mode and 5-second busy timeout.
-- Catalog file and WAL/SHM sidecars are `chmod 0600`.
-
-## Validation semantics
-
-- **ZIP validation** (always available): checks `is_zipfile()`, required root members (`manifest.json`, `dump.sql`), `testzip()` CRC verification, and `manifest.json` JSON parse.
-- **Dump validation** (requires `pg_restore` in PATH): runs `pg_restore --list` against the file with a 60s timeout.
-- `raise_if_unavailable=True` raises `BackupValidationUnavailableError` when pg_restore is not found.
-
-## Readiness checks
-
-- GET `/web/health?db_server_status=true` with `httpx.Client(timeout=...)`.
-- No Basic Auth — endpoint has `auth="none"` in Odoo 19.0.
-- `wait_ready()` polls until the endpoint returns 200 or the linked process exits.
-- Configurable timeout (default 60s) and poll interval (default 1.0s).
-
-## Security
-
-- `master_pwd` and `db_password` are never in `repr`, exception messages, or logs.
-- Destructive operations (`restore`, `drop`) are local-only and cannot be bypassed.
-- HTTP interface defaults to loopback only.
-- Basic Auth removed: `master_pwd` is sent only as a form field in POST bodies.
-- Cleartext warning fires once per process when master password is sent over HTTP to non-local hosts.
-
-## Development
-
-Requires Python 3.12+ on POSIX (Linux/macOS).
+## Monitor and local API
 
 ```bash
-uv sync --frozen --dev --extra dashboard
-git config core.hooksPath .githooks
-make pr
+odcli monitor --headless
+odcli monitor --watch --interval 2
 ```
 
-`make pr` runs lint, types, coverage and compatibility suites, dashboard unit/build checks, the mandatory monitor API smoke gate, and package checks. Live Odoo is opt-in via `make live`; monitor smoke is not opt-in. See [CONTRIBUTING.md](CONTRIBUTING.md) for markers, targeted runs, mutation, and package prerequisites.
+The monitor binds to loopback only. The dashboard is an optional extra; the
+headless server does not require its static assets. Stable routes are:
 
-## Examples
+- `GET /healthz` — process health.
+- `GET /api/v1/snapshot` — the current typed environment snapshot, including
+  `observed_port` and `artifacts`.
+- `POST /api/v1/pgadmin/open` — UI-only pgAdmin launch, protected by same-origin,
+  CSRF, and JSON request checks.
 
-- [`examples/prepare_dev_instance.py`](examples/prepare_dev_instance.py) — back up from test, start local Odoo, restore, stop
+The default environment inventory is active-only. Use explicit include-removed
+options where supported. Monitor snapshots isolate component failures and never
+publish stored secrets or absolute catalog paths.
+
+## Security and data location
+
+Secrets are never written to the project manifest. Generated secret config and
+PostgreSQL credentials use restricted user-data files; the backup catalog uses
+the platform cache directory. Remote destructive database operations are
+rejected, and cleartext remote authentication emits a warning.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and verification, the
+[changelog](CHANGELOG.md) for shipped behavior, and
+[GitHub Issues](https://github.com/maximchikAlexandr/odoo-instance-sdk/issues)
+for defects and roadmap proposals. Roadmap issues describe planned work, not
+features shipped by the current package.
 
 ## License
 
-MIT
+[MIT](LICENSE)

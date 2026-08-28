@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- CLI-first project and environment workflows, including changed-test selection,
+  module operations, dependency verification, translation export, and VS Code generation
+- SDK-owned PostgreSQL lifecycle with digest approval, status, start, and stop commands
+- Environment database refresh and administrator-password reset workflows
+- Typed multi-project monitor snapshots, local headless API, optional dashboard, and pgAdmin launch
+- Complete shipped CLI command inventory and public Python SDK examples
+
+### Changed
+- Documentation now treats executable command help as the source of truth for exact flags
+
 ## [0.1.0] - 2026-07-15
 
 ### Added
