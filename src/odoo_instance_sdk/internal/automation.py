@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec
@@ -519,7 +520,14 @@ def verify_deps(
 ) -> DepsVerifyResult:
     result = DepsVerifyResult()
     pip_cmd = [uv_executable, "pip", "check", "--python", str(recorded_python)]
-    proc = subprocess.run(pip_cmd, shell=False, capture_output=True, text=True, check=False)
+    proc = subprocess.run(
+        pip_cmd,
+        env=sanitized_child_environment(),
+        shell=False,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     result.pip_check_output = (proc.stdout + proc.stderr).strip()
     result.pip_check_ok = proc.returncode == 0
     for raw_line in result.pip_check_output.splitlines():
@@ -531,6 +539,7 @@ def verify_deps(
     for module_name, import_name in declared:
         check = subprocess.run(
             [str(recorded_python), "-c", f"import {import_name}"],
+            env=sanitized_child_environment(),
             shell=False,
             capture_output=True,
             text=True,

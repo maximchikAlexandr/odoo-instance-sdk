@@ -64,7 +64,9 @@ def _checkout_reuse(
     env_client: OdooClient, project_manifest: Path, fake_python: Path, branch: str
 ) -> DevelopmentEnvironment:
     opts = EnvironmentCheckoutOptions(
-        python=str(fake_python), db_mode=EnvironmentDatabaseMode.SHARED
+        python=str(fake_python),
+        db_mode=EnvironmentDatabaseMode.SHARED,
+        source_database="comerta",
     )
     return env_client.environments.checkout(project_manifest, branch, options=opts)
 
@@ -79,7 +81,9 @@ def _checkout_reuse_reqs(
     _add_requirements(project_manifest, fake_python)
     _patch_subprocess(monkeypatch)
     opts = EnvironmentCheckoutOptions(
-        python=str(fake_python), db_mode=EnvironmentDatabaseMode.SHARED
+        python=str(fake_python),
+        db_mode=EnvironmentDatabaseMode.SHARED,
+        source_database="comerta",
     )
     return env_client.environments.checkout(project_manifest, branch, options=opts)
 
@@ -111,7 +115,10 @@ class TestCreateVenv:
     ) -> None:
         calls = _patch_subprocess(monkeypatch)
         opts = EnvironmentCheckoutOptions(
-            python="3.12", create_venv=True, db_mode=EnvironmentDatabaseMode.SHARED
+            python="3.12",
+            create_venv=True,
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/create1", options=opts)
         assert env.python_environment_owned is True
@@ -165,7 +172,10 @@ class TestSyncUpgradePreserve:
         _add_requirements(project_manifest, fake_python)
         calls = _patch_subprocess(monkeypatch)
         opts = EnvironmentCheckoutOptions(
-            python="3.12", create_venv=True, db_mode=EnvironmentDatabaseMode.SHARED
+            python="3.12",
+            create_venv=True,
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            source_database="comerta",
         )
         env = env_client.environments.checkout(project_manifest, "feat/syncowned", options=opts)
         calls.clear()

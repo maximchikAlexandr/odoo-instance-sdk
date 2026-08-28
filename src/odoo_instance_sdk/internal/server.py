@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from msgspec import structs
 
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.models import (
     CommandResult,
     OdooProcess,
@@ -79,7 +80,13 @@ def _kill_pg(
         if force:
             args.append("/F")
         with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(args, capture_output=True, timeout=5, check=False)
+            subprocess.run(
+                args,
+                env=sanitized_child_environment(),
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
         return
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         # A foreground child is spawned with ``start_new_session=True``.  Its
@@ -140,7 +147,7 @@ def start_process(
     proc = subprocess.Popen(
         full_args,
         cwd=cwd,
-        env=env,
+        env=sanitized_child_environment(env),
         start_new_session=True,
     )
 
@@ -201,7 +208,7 @@ def run_command(
     proc = subprocess.run(
         full_args,
         cwd=cwd,
-        env=env,
+        env=sanitized_child_environment(env),
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -234,7 +241,7 @@ def spawn_foreground_process(
     return subprocess.Popen(
         full_args,
         cwd=cwd,
-        env=env,
+        env=sanitized_child_environment(env),
         start_new_session=True,
         stdin=None if inherit_stdio else subprocess.PIPE,
         stdout=None if inherit_stdio else subprocess.PIPE,
@@ -478,7 +485,7 @@ def _run_captured_shell(
     proc = subprocess.run(
         full_args,
         cwd=cwd,
-        env=env,
+        env=sanitized_child_environment(env),
         input=wrapper,
         capture_output=True,
         text=True,

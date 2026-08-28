@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+Instance-bound Odoo database management operations and their local catalog contracts.
+
+## Requirements
 
 ### Requirement: REST-контракт database manager
 

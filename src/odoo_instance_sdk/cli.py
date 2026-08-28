@@ -12,6 +12,7 @@ import msgspec
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
+from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.env import env_group
 from odoo_instance_sdk.commands.output import (
     OutputMode,
@@ -80,6 +81,7 @@ def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> No
 
 cli.add_command(env_group, name="env")
 cli.add_command(test_command, name="test")
+cli.add_command(db_group, name="db")
 
 
 @cli.command()
@@ -413,11 +415,21 @@ def _manifest_dict(config: ProjectConfig, *, postgres_allocated: bool = False) -
             "user": config.postgres.user,
             "allocated_port": postgres_allocated,
         }
+    test_instance: dict[str, Any] | None = None
+    if config.test_instance is not None:
+        test_instance = {
+            "base_url": config.test_instance.base_url,
+            "database": config.test_instance.database,
+            "git_branch": config.test_instance.git_branch,
+        }
     return {
         "odoo_bin": str(config.odoo_bin) if config.odoo_bin else None,
         "python": str(config.python) if config.python else None,
         "source_config": str(config.source_config) if config.source_config else None,
         "default_source_database": config.default_source_database,
+        "default_base_ref": config.default_base_ref,
+        "refresh_after_hours": config.refresh_after_hours,
+        "test_instance": test_instance,
         "preferred_http_port": config.preferred_http_port,
         "requirements": list(config.requirements),
         "default_run_args": list(config.default_run_args),

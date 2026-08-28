@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.models import GitActivity, GitActivityState, GitDiff
 
 _DEFAULT_BRANCH = "main"
@@ -17,6 +18,7 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
             ["git", "-C", str(cwd), *args],
+            env=sanitized_child_environment(),
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,

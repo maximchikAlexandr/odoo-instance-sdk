@@ -34,6 +34,7 @@ def _make_backup(
     size_bytes: int = 100,
     sha256: str = "",
     path: Path | None = None,
+    source_git_branch: str | None = None,
 ) -> Backup:
     return Backup(
         id=uuid.UUID(backup_id),
@@ -46,6 +47,7 @@ def _make_backup(
         size_bytes=size_bytes,
         sha256=sha256,
         downloaded_at=datetime.now(UTC),
+        source_git_branch=source_git_branch,
     )
 
 
@@ -137,6 +139,33 @@ def test_start_download_records_event(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0]["event_type"] == "download_started"
     assert events[0]["sequence"] == 1
+    catalog.close()
+
+
+def test_source_branch_roundtrips_through_download_and_queries(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "branch.zip")
+    bid = _u("branch-roundtrip")
+    catalog.start_download(
+        bid,
+        "http://localhost:8069",
+        "testdb",
+        "zip",
+        True,
+        path,
+        source_git_branch="release/19",
+    )
+    catalog.success_download(bid, "branch.zip", 1, "")
+
+    row = catalog.get_by_id(bid)
+    listed = catalog.list_backups()
+    latest = catalog.latest_backup("http://localhost:8069", "testdb")
+
+    assert row is not None
+    assert row["source_git_branch"] == "release/19"
+    assert listed[0].source_git_branch == "release/19"
+    assert latest is not None
+    assert latest.source_git_branch == "release/19"
     catalog.close()
 
 
@@ -344,6 +373,26 @@ def test_verify_identity_rejects_path_mismatch(tmp_path: Path) -> None:
     catalog.close()
 
 
+def test_verify_identity_rejects_branch_mismatch(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "branch-verify.zip")
+    bid = _u("verify-branch")
+    catalog.start_download(
+        bid,
+        "http://localhost:8069",
+        "db",
+        "zip",
+        True,
+        path,
+        source_git_branch="develop",
+    )
+    catalog.success_download(bid, "branch-verify.zip", 100, "")
+
+    with pytest.raises(BackupNotAvailableError, match="source_git_branch"):
+        catalog.verify_identity(_make_backup(bid, path=path, source_git_branch="release/19"))
+    catalog.close()
+
+
 def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     conn = sqlite3.connect(str(db))
@@ -361,7 +410,7 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
     assert "database_events" in tables
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 9
+    assert version == 10
 
     # Existing backups table still works
     path = _create_backup_file(tmp_path, "migrated.zip")
@@ -437,7 +486,7 @@ def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None
     assert event_row["event_type"] == "download_started"
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 9
+    assert version == 10
 
     catalog.close()
 
@@ -446,12 +495,12 @@ def test_schema_creation_v2_reopen(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     catalog = BackupCatalog(db_path=db)
     version1 = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version1 == 9
+    assert version1 == 10
     catalog.close()
 
     catalog2 = BackupCatalog(db_path=db)
     version2 = catalog2._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version2 == 9
+    assert version2 == 10
     tables = {
         r[0]
         for r in catalog2._conn.execute(
@@ -570,6 +619,32 @@ def test_latest_restore_file_missing_returns_none(tmp_path: Path) -> None:
 
     latest = catalog.latest_restore("localhost", 5432, "mydb")
     assert latest is None
+    catalog.close()
+
+
+def test_latest_restore_provenance_survives_deleted_missing_archive(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "provenance.zip")
+    bid = _u("provenance-missing")
+    catalog.start_download(
+        bid,
+        "http://localhost:8069",
+        "mydb",
+        "zip",
+        True,
+        path,
+        source_git_branch="release/19",
+    )
+    catalog.success_download(bid, "provenance.zip", 100, "")
+    catalog.record_restore("localhost", 5432, "mydb", bid)
+    catalog.record_deletion(bid)
+    path.unlink()
+
+    assert catalog.latest_restore("localhost", 5432, "mydb") is None
+    provenance = catalog.latest_restore_provenance("localhost", 5432, "mydb")
+    assert provenance is not None
+    assert provenance.source_git_branch == "release/19"
+    assert provenance.id == uuid.UUID(bid)
     catalog.close()
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 
 
 class GitError(Exception):
@@ -27,6 +28,7 @@ def _run(
     return subprocess.run(
         args,
         cwd=str(cwd) if cwd is not None else None,
+        env=sanitized_child_environment(),
         shell=False,
         capture_output=True,
         text=True,

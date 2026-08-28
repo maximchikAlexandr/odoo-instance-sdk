@@ -44,11 +44,16 @@ from odoo_instance_sdk.exceptions import (
     VscodeImportError,
 )
 from odoo_instance_sdk.models import (
+    AdminPasswordResetResult,
     Backup,
+    BackupBranchOrigin,
     BackupDeletionResult,
     BackupEvent,
     BackupEventType,
     BackupFormat,
+    BackupFreshness,
+    BackupProvenanceComparison,
+    BackupProvenanceStatus,
     BackupState,
     BackupValidationResult,
     BackupValidationStatus,
@@ -60,8 +65,14 @@ from odoo_instance_sdk.models import (
     CommandResult,
     Database,
     DatabaseFootprint,
+    DatabasePreparationAction,
+    DatabasePreparationResult,
+    DatabaseRefreshOptions,
     DropResult,
     EnvironmentArtifacts,
+    EnvironmentCheckoutPlan,
+    EnvironmentCheckoutResult,
+    EnvironmentPythonMode,
     EnvironmentSnapshot,
     EnvironmentState,
     GitActivity,
@@ -85,7 +96,11 @@ from odoo_instance_sdk.models import (
     StartConfig,
     StorageFootprint,
 )
-from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
+from odoo_instance_sdk.project import (
+    PostgresProjectConfig,
+    ProjectConfig,
+    TestInstanceProjectConfig,
+)
 from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.environment import (
@@ -100,15 +115,20 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 __version__ = "0.1.0"
 __all__ = [
+    "AdminPasswordResetResult",
     "Backup",
+    "BackupBranchOrigin",
     "BackupCatalogError",
     "BackupDeletionResult",
     "BackupDownloadError",
     "BackupEvent",
     "BackupEventType",
     "BackupFormat",
+    "BackupFreshness",
     "BackupNotAvailableError",
     "BackupNotFoundError",
+    "BackupProvenanceComparison",
+    "BackupProvenanceStatus",
     "BackupResource",
     "BackupState",
     "BackupValidationResult",
@@ -127,16 +147,22 @@ __all__ = [
     "DatabaseError",
     "DatabaseFootprint",
     "DatabaseManagerUnavailableError",
+    "DatabasePreparationAction",
+    "DatabasePreparationResult",
+    "DatabaseRefreshOptions",
     "DatabaseResource",
     "DevelopmentEnvironment",
     "DropFailedError",
     "DropResult",
     "EnvironmentArtifacts",
     "EnvironmentCheckoutOptions",
+    "EnvironmentCheckoutPlan",
+    "EnvironmentCheckoutResult",
     "EnvironmentConflictError",
     "EnvironmentDatabaseMode",
     "EnvironmentMonitor",
     "EnvironmentNotFoundError",
+    "EnvironmentPythonMode",
     "EnvironmentResolutionError",
     "EnvironmentResource",
     "EnvironmentSnapshot",
@@ -193,5 +219,6 @@ __all__ = [
     "Snapshot",
     "StartConfig",
     "StorageFootprint",
+    "TestInstanceProjectConfig",
     "VscodeImportError",
 ]

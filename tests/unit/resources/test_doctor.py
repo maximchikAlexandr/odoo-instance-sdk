@@ -26,7 +26,9 @@ def _checkout_shared(
     env_client: OdooClient, project_manifest: Path, fake_python: Path, branch: str
 ) -> Any:
     opts = EnvironmentCheckoutOptions(
-        python=str(fake_python), db_mode=EnvironmentDatabaseMode.SHARED
+        python=str(fake_python),
+        db_mode=EnvironmentDatabaseMode.SHARED,
+        source_database="comerta",
     )
     return env_client.environments.checkout(project_manifest, branch, options=opts)
 

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
 
-from odoo_instance_sdk.exceptions import ProjectManifestNotFoundError
+from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError
 from odoo_instance_sdk.internal.project_manifest import assert_no_secrets, write_manifest
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
 
 
 def test_load_existing_manifest(tmp_path: Path) -> None:
@@ -97,3 +99,106 @@ def test_binding_does_not_change_manifest_equality(tmp_path: Path) -> None:
     right = ProjectConfig(repository_root=tmp_path / "two", odoo_bin=Path("/opt/odoo"))
     assert left != right
     assert left.to_manifest() == right.to_manifest()
+
+
+def test_configured_preparation_settings_normalize_and_roundtrip(tmp_path: Path) -> None:
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(
+        "[project]\n"
+        'odoo_bin = "/opt/odoo/odoo-bin"\n'
+        'default_base_ref = "develop"\n'
+        "refresh_after_hours = 24.5\n\n"
+        "[test_instance]\n"
+        'base_url = "HTTPS://Example.test:443/"\n'
+        'database = "remote_test"\n'
+        'git_branch = "release/19"\n'
+    )
+
+    cfg = ProjectConfig.load(tmp_path)
+
+    assert cfg.default_base_ref == "develop"
+    assert cfg.refresh_after_hours == 24.5
+    assert cfg.test_instance == ConfigTestInstance(
+        base_url="https://example.test", database="remote_test", git_branch="release/19"
+    )
+    assert (
+        ProjectConfig._from_mapping(
+            {
+                "odoo_bin": "/opt/odoo/odoo-bin",
+                "default_base_ref": "develop",
+                "refresh_after_hours": 24.5,
+            },
+            repository_root=tmp_path,
+            test_instance_data={
+                "base_url": "https://example.test",
+                "database": "remote_test",
+                "git_branch": "release/19",
+            },
+        ).to_manifest()
+        == cfg.to_manifest()
+    )
+
+
+def test_readme_preparation_manifest_parses_and_roundtrips(tmp_path: Path) -> None:
+    readme = Path(__file__).parents[3] / "README.md"
+    section = readme.read_text(encoding="utf-8").split("### Prepare a project database", 1)[1]
+    documented_manifest = section.split("```toml", 1)[1].split("```", 1)[0].strip() + "\n"
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(documented_manifest, encoding="utf-8")
+
+    config = ProjectConfig.load(tmp_path)
+    assert config.default_base_ref == "main"
+    assert config.refresh_after_hours == 24
+    assert config.test_instance == ConfigTestInstance(
+        base_url="https://odoo-test.example",
+        database="testdb",
+        git_branch="main",
+    )
+    assert tomllib.loads(config.to_manifest()) == tomllib.loads(documented_manifest)
+
+
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+def test_refresh_after_hours_must_be_finite_and_positive(tmp_path: Path, value: float) -> None:
+    with pytest.raises(ConfigError):
+        ProjectConfig(repository_root=tmp_path, refresh_after_hours=value)
+
+
+def test_test_instance_rejects_unknown_secret_without_echo(tmp_path: Path) -> None:
+    sentinel = "remote-secret-sentinel"
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(
+        "[project]\n\n"
+        "[test_instance]\n"
+        'base_url = "https://example.test"\n'
+        'database = "remote_test"\n'
+        f'master_password = "{sentinel}"\n'
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        ProjectConfig.load(tmp_path)
+    assert sentinel not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"base_url": "", "database": "db"},
+        {"base_url": "https://example.test", "database": ""},
+        {"base_url": "https://example.test", "database": "db", "git_branch": ""},
+    ],
+)
+def test_test_instance_rejects_empty_values(tmp_path: Path, value: dict[str, str]) -> None:
+    with pytest.raises(ConfigError):
+        ProjectConfig._from_mapping({}, repository_root=tmp_path, test_instance_data=value)
+
+
+def test_legacy_manifest_omits_new_sections_and_is_byte_stable(tmp_path: Path) -> None:
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
+    expected = '[project]\nodoo_bin = "/opt/odoo/odoo-bin"\n'
+    assert cfg.to_manifest() == expected
+    write_manifest(tmp_path, cfg)
+    assert (tmp_path / ".odcli" / "project.toml").read_text() == expected
+    assert ProjectConfig.load(tmp_path).to_manifest() == expected

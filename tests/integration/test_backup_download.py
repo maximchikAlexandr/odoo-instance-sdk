@@ -33,10 +33,11 @@ def test_successful_download(
         headers={"content-disposition": 'attachment; filename="testdb_backup.zip"'},
     )
 
-    backup = instance.databases.backup("testdb")
+    backup = instance.databases.backup("testdb", source_git_branch="main")
     assert backup.database_name == "testdb"
     assert backup.size_bytes == len(BACKUP_ZIP_CONTENT)
     assert backup.filename.endswith(".zip")
+    assert backup.source_git_branch == "main"
     assert "/" not in backup.filename
     assert Path(backup.path).is_file()
 
@@ -56,7 +57,7 @@ def test_backup_round_trips_through_catalog(
         headers={"content-disposition": 'attachment; filename="testdb_backup.zip"'},
     )
 
-    backup = instance.databases.backup("testdb")
+    backup = instance.databases.backup("testdb", source_git_branch="main")
 
     catalog = instance._client.get_catalog()
     backups = catalog.list_backups(source_base_url=instance.config.base_url, database_name="testdb")
@@ -65,6 +66,7 @@ def test_backup_round_trips_through_catalog(
     assert backups[0].filename == backup.filename
     assert backups[0].size_bytes == backup.size_bytes
     assert backups[0].path == backup.path
+    assert backups[0].source_git_branch == "main"
 
     history = catalog.get_backup_history(backup_id=str(backup.id))
     kinds = [e.event_type.value for e in history]

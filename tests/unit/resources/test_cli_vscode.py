@@ -32,6 +32,7 @@ def _checkout_ready_env(
         python=str(fake_python),
         db_mode=EnvironmentDatabaseMode.SHARED,
         odoo_bin=fake_python.parent / "odoo-bin",
+        source_database="comerta",
     )
     return env_client.environments.checkout(project_manifest, branch, options=opts)
 

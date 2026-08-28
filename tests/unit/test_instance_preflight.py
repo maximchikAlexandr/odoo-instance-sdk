@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import patch
 
@@ -7,7 +9,7 @@ import pytest
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
-from odoo_instance_sdk.models import PostgresClusterState, StartConfig
+from odoo_instance_sdk.models import CommandResult, PostgresClusterState, StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -179,3 +181,25 @@ def test_preflight_event_precedes_exclusive_script_operation() -> None:
     ):
         instance._run_shell_script_exclusive("print(1)")
     assert events[:2] == ["ensure", "exclusive-spawn"]
+
+
+@pytest.mark.unit
+def test_exclusive_script_rechecks_cluster_after_claiming_artifact_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    instance = _make_instance(cluster=_EventCluster(events))
+    result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
+
+    @contextlib.contextmanager
+    def claimed_operation(_self: OdooInstance, *, exclusive: bool) -> Iterator[None]:
+        assert exclusive is True
+        events.append("lock-claimed")
+        yield
+        events.append("lock-released")
+
+    monkeypatch.setattr(OdooInstance, "_artifact_operation", claimed_operation)
+    with patch("odoo_instance_sdk.internal.server._run_captured_shell", return_value=result):
+        instance._run_shell_script_exclusive("print(1)", commit=True)
+
+    assert events == ["lock-claimed", "ensure", "lock-released"]

@@ -16,7 +16,7 @@ class TestEnvList:
     def test_default_hides_removed(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
-        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        opts = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         env = env_client.environments.checkout(project_manifest, "feat/list-hidden", options=opts)
         env_client.environments.remove(env)
         envs = env_client.environments.list(project=project_manifest)
@@ -25,7 +25,7 @@ class TestEnvList:
     def test_all_shows_removed(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
-        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        opts = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         env = env_client.environments.checkout(project_manifest, "feat/list-all", options=opts)
         env_client.environments.remove(env)
         envs = env_client.environments.list(project=project_manifest, include_removed=True)
@@ -34,7 +34,7 @@ class TestEnvList:
     def test_failed_visible(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
-        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        opts = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         env = env_client.environments.checkout(project_manifest, "feat/list-failed", options=opts)
         catalog = env_client.get_catalog()
         catalog.update_environment_state(str(env.id), EnvironmentState.FAILED, last_error="test")
@@ -44,7 +44,7 @@ class TestEnvList:
     def test_reconciliation_detects_missing_worktree(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
-        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        opts = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         env = env_client.environments.checkout(project_manifest, "feat/list-recon", options=opts)
         import shutil
 
@@ -57,7 +57,7 @@ class TestEnvList:
     def test_all_projects_no_project_context(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
-        opts = EnvironmentCheckoutOptions(python=str(fake_python))
+        opts = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         env_client.environments.checkout(project_manifest, "feat/all-proj", options=opts)
         envs = env_client.environments.list()
         assert len(envs) >= 1

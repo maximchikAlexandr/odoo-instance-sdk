@@ -289,3 +289,93 @@ def test_real_odoo_test_command_is_disposable_and_read_only(
             capture_output=True,
             text=True,
         )
+
+
+def test_project_database_preparation_is_opt_in_and_disposable(tmp_path: Path) -> None:
+    """Exercise the complete remote-backup/local-restore contract in isolation."""
+    if os.environ.get("ODCLI_REAL_ODOO_ENABLE") != "1":
+        pytest.skip("set ODCLI_REAL_ODOO_ENABLE=1 with ODCLI_REAL_* prerequisites")
+    remote_url = _required("ODCLI_REAL_TEST_BASE_URL")
+    remote_database = _required("ODCLI_REAL_TEST_DATABASE")
+    master_password = _required("ODCLI_TEST_MASTER_PASSWORD")
+    source_project = Path(_required("ODCLI_REAL_PROJECT")).resolve()
+    odoo_bin = Path(_required("ODCLI_REAL_ODOO_BIN")).resolve()
+    python = Path(_required("ODCLI_REAL_PYTHON")).resolve()
+    config = Path(_required("ODCLI_REAL_CONFIG")).resolve()
+    missing = [
+        str(path) for path in (source_project, odoo_bin, python, config) if not path.exists()
+    ]
+    if missing:
+        pytest.fail(f"real Odoo lifecycle prerequisites do not exist: {', '.join(missing)}")
+
+    project = tmp_path / "project-preparation"
+    worktree = subprocess.run(
+        ["git", "-C", str(source_project), "worktree", "add", "--detach", str(project), "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if worktree.returncode:
+        pytest.fail(f"cannot create disposable project worktree: {worktree.stderr.strip()}")
+
+    runner = CliRunner()
+    try:
+        init = runner.invoke(
+            cli,
+            [
+                "init",
+                "--no-input",
+                "--project",
+                str(project),
+                "--odoo-bin",
+                str(odoo_bin),
+                "--python",
+                str(python),
+                "--config",
+                str(config),
+                "--database",
+                remote_database,
+            ],
+        )
+        assert init.exit_code == 0, init.output
+        manifest = project / ".odcli" / "project.toml"
+        with manifest.open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\n[test_instance]\n"
+                f'base_url = "{remote_url}"\n'
+                f'database = "{remote_database}"\n'
+                'git_branch = "main"\n'
+            )
+
+        os.environ["ODCLI_TEST_MASTER_PASSWORD"] = master_password
+        refresh = runner.invoke(
+            cli,
+            [
+                "--project",
+                str(project),
+                "db",
+                "refresh",
+                "--restore",
+                "--reset-admin-password",
+                "--format",
+                "json",
+            ],
+        )
+        assert refresh.exit_code == 0, refresh.output
+        document = json.loads(refresh.stdout)
+        prepared = document["result"]
+        assert prepared["backup"]["format"] == "zip"
+        assert prepared["backup"]["filestore_requested"] is True
+        assert prepared["source_git_branch"] == "main"
+        assert prepared["restored_database"]
+        assert prepared["admin_password_reset"] is True
+        assert prepared["default_switched"] is True
+        assert not list(project.glob(".odcli-refresh-*.conf"))
+    finally:
+        os.environ.pop("ODCLI_TEST_MASTER_PASSWORD", None)
+        subprocess.run(
+            ["git", "-C", str(source_project), "worktree", "remove", "--force", str(project)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )

@@ -117,6 +117,68 @@ The public monitor snapshot uses additive schema v2 fields `observed_port` and
 `artifacts`; existing version-1 fields retain their meanings. The CLI envelope
 version remains independent and is still v1.
 
+### Prepare a project database
+
+Projects may declare a remote test instance in `.odcli/project.toml`:
+
+```toml
+[project]
+default_base_ref = "main" # optional; checkout falls back to HEAD
+refresh_after_hours = 24 # optional; must be finite and greater than zero
+
+[test_instance]
+base_url = "https://odoo-test.example"
+database = "testdb"
+git_branch = "main" # optional; --source-branch overrides it
+```
+
+Set the remote instance master password only in the process environment. It is
+read from `ODCLI_TEST_MASTER_PASSWORD` for an explicit preparation request and
+is never stored in the manifest or emitted by the SDK.
+
+Repository-selected preparation also requires an external exact-origin approval
+for every non-loopback test instance. Set the sole approval variable to a
+comma-separated list of non-secret canonical origins before refreshing, for
+example:
+
+```bash
+export ODCLI_TEST_INSTANCE_ORIGIN_PINS="https://odoo-test.example:443,https://staging.example:8443"
+odcli --project /path/to/project db refresh
+```
+
+Entries are normalized to lowercase scheme/host plus effective port; paths,
+queries, fragments, wildcards, and host-only entries do not broaden approval.
+Each origin used by the repository's `[test_instance]` flow must match one pin.
+Loopback origins do not need a pin, while non-loopback HTTP is always rejected.
+The SDK checks transport and approval before preparation locking, PostgreSQL or
+database-manager work, HTTP, catalog, or manifest mutation. The variable is
+never persisted and does not contain a password. This repository approval is
+limited to project preparation; direct `instance.databases.backup()` retains
+its generic behavior and does not require a repository pin.
+
+```bash
+odcli db refresh --format json
+odcli db refresh --restore --source-branch release/19
+odcli db refresh --restore --reset-admin-password
+odcli db reset-admin-password --format toon
+```
+
+`db refresh` accepts an explicit `--project`, the nearest project manifest, or
+an exact registered worktree. A restore chooses a unique local target, records
+the source branch, and switches the project default only at the final manifest
+commit point. `--reset-admin-password` is allowed only with `--restore`; it
+does not accept a password option or prompt. Checkout freshness may invoke the
+same private preparation coordinator when `refresh_after_hours` is configured,
+but checkout never performs an automatic administrator-password reset.
+
+If a download, restore, reset, mapping, concurrency, or manifest-switch step
+fails, the old default remains selected and the downloaded backup/new database
+are retained for inspection or manual cleanup. A backup whose recorded branch
+is unknown can be used for the current call only with an explicit
+`--source-db`; inferred sources fail closed and report the `--source-db` or
+refresh guidance. Use JSON or TOON for scripts; both are single, ANSI-free
+envelopes with the same public fields and diagnostics.
+
 ### Database operations
 
 ```python

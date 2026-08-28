@@ -148,6 +148,7 @@ def test_from_environment_reads_rewritten_logfile(
         options=EnvironmentCheckoutOptions(
             python=str(fake_python),
             db_mode=EnvironmentDatabaseMode.SHARED,
+            source_database="comerta",
         ),
     )
     log_path = Path(env.generated_config_path).parent / "odoo.log"
@@ -314,7 +315,9 @@ def test_cli_logs_resolves_registered_worktree_without_ready_instance_mock(
         project_manifest,
         "feat/logs-cwd",
         options=EnvironmentCheckoutOptions(
-            python=str(fake_python), db_mode=EnvironmentDatabaseMode.SHARED
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            source_database="comerta",
         ),
     )
     logfile = Path(env.generated_config_path).parent / "odoo.log"
@@ -352,7 +355,9 @@ def test_cli_logs_resolves_explicit_project_and_environment_outside_worktree(
         project_manifest,
         "feat/logs-explicit",
         options=EnvironmentCheckoutOptions(
-            python=str(fake_python), db_mode=EnvironmentDatabaseMode.SHARED
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            source_database="comerta",
         ),
     )
     logfile = Path(env.generated_config_path).parent / "odoo.log"

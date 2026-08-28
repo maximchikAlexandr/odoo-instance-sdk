@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,8 +29,21 @@ from odoo_instance_sdk.internal.automation import (
     TranslationExportResult,
 )
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
-from odoo_instance_sdk.models import OdooTestResult, Snapshot
-from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode
+from odoo_instance_sdk.models import (
+    AdminPasswordResetResult,
+    BackupFreshness,
+    BackupProvenanceComparison,
+    BackupProvenanceStatus,
+    DatabasePreparationAction,
+    DatabasePreparationResult,
+    DevelopmentEnvironment,
+    EnvironmentCheckoutPlan,
+    EnvironmentCheckoutResult,
+    EnvironmentPythonMode,
+    OdooTestResult,
+    Snapshot,
+)
+from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 BOUNDED_LEAVES = (
@@ -39,6 +53,8 @@ BOUNDED_LEAVES = (
     ("env", "list"),
     ("env", "remove"),
     ("env", "sync"),
+    ("db", "refresh"),
+    ("db", "reset-admin-password"),
     ("eval",),
     ("exec",),
     ("test",),
@@ -72,6 +88,8 @@ PUBLIC_LEAF_CASES = tuple(
             ("env", "list", "--all-projects"),
             ("env", "remove", "env-1", "--yes"),
             ("env", "sync", "env-1"),
+            ("db", "refresh"),
+            ("db", "reset-admin-password"),
             ("eval", "1"),
             ("exec", "-"),
             ("test", "--changed", "--dry-run"),
@@ -109,6 +127,49 @@ def _matrix_environment() -> SimpleNamespace:
         python_environment_path="/venv",
         generated_config_path="/worktree/odoo.conf",
         backup_id=None,
+        source_db_name=None,
+        target_db_name="demo",
+    )
+
+
+def _matrix_checkout_plan(*, name: str = "demo") -> EnvironmentCheckoutPlan:
+    return EnvironmentCheckoutPlan(
+        name=name,
+        branch="main",
+        effective_base_ref="HEAD",
+        db_mode=EnvironmentDatabaseMode.SHARED,
+        source_database=None,
+        target_database=None,
+        python_mode=EnvironmentPythonMode.REUSE,
+        provenance=BackupProvenanceComparison(
+            status=BackupProvenanceStatus.UNKNOWN,
+            expected_base_ref="HEAD",
+            recorded_branch=None,
+        ),
+        freshness=BackupFreshness.MISSING,
+        preparation_actions=(),
+        warnings=(),
+    )
+
+
+def _matrix_public_environment(*, name: str = "demo") -> DevelopmentEnvironment:
+    return DevelopmentEnvironment(
+        id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+        name=name,
+        repository_root="/project",
+        git_common_dir="/project/.git",
+        branch="main",
+        base_ref="HEAD",
+        worktree_path="/worktree",
+        generated_config_path="/worktree/odoo.conf",
+        python_environment_path="/venv",
+        python_environment_owned=False,
+        dependency_lock_path="/project/uv.lock",
+        http_interface="127.0.0.1",
+        http_port=8069,
+        db_mode=EnvironmentDatabaseMode.SHARED,
+        state=EnvironmentState.READY,
+        created_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
 
 
@@ -140,17 +201,41 @@ def _patch_leaf_external(  # noqa: C901
 
     if path[:2] == ("env", "checkout"):
         client = MagicMock()
-        client.environments._plan_checkout.side_effect = fail_operation if failing else None
-        client.environments._plan_checkout.return_value = SimpleNamespace(
-            db_mode=EnvironmentDatabaseMode.SHARED
+        plan = _matrix_checkout_plan()
+        client.environments.plan_checkout.side_effect = fail_operation if failing else None
+        client.environments.plan_checkout.return_value = plan
+        client.environments.checkout_with_plan.side_effect = fail_operation if failing else None
+        client.environments.checkout_with_plan.return_value = EnvironmentCheckoutResult(
+            environment=_matrix_public_environment(), plan=plan
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.resolve_project_path", lambda _ctx: tmp_path
         )
         monkeypatch.setattr("odoo_instance_sdk.commands.env.OdooClient", lambda **_kwargs: client)
+        return
+
+    if path == ("db", "refresh"):
+        client = MagicMock()
+        client.environments.refresh_database.side_effect = fail_operation if failing else None
+        client.environments.refresh_database.return_value = DatabasePreparationResult(
+            mode=DatabasePreparationAction.DOWNLOAD
+        )
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env._checkout_plan_dict",
-            lambda _plan: {"id": "env-1", "name": "demo", "state": "creating"},
+            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
+        )
+        monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_kwargs: client)
+        return
+
+    if path == ("db", "reset-admin-password"):
+        instance = MagicMock()
+        instance.config.configured_database_names = ("demo",)
+        instance.databases.reset_admin_password.side_effect = fail_operation if failing else None
+        instance.databases.reset_admin_password.return_value = AdminPasswordResetResult(
+            database="demo", completed=True, xml_id="base.user_admin"
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.ready_instance",
+            lambda _ctx: (MagicMock(), _matrix_environment(), instance),
         )
         return
 
@@ -234,7 +319,7 @@ def _patch_leaf_external(  # noqa: C901
         return
 
     if path == ("test",):
-        plan = SimpleNamespace(
+        selection_plan = SimpleNamespace(
             base_source="explicit",
             requested_base="main",
             resolved_base="base-sha",
@@ -247,7 +332,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.test.resolve_changed_selection",
-            fail_operation if failing else lambda *_args, **_kwargs: plan,
+            fail_operation if failing else lambda *_args, **_kwargs: selection_plan,
         )
         return
 
@@ -406,7 +491,7 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
             assert success.stderr == ""
             assert success.stdout.strip()
             assert "\x1b" not in success.stdout
-            assert "password" not in success.stdout.lower()
+            assert "odcli_test_master_password" not in success.stdout.lower()
             assert "Would you like" not in success.stdout
             assert "Progress" not in success.stdout
             success_documents.append(
@@ -427,7 +512,7 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
             assert failure.stderr == ""
             assert failure.stdout.strip()
             assert "\x1b" not in failure.stdout
-            assert "password" not in failure.stdout.lower()
+            assert "odcli_test_master_password" not in failure.stdout.lower()
             assert "Would you like" not in failure.stdout
             assert "Progress" not in failure.stdout
             failure_documents.append(
@@ -777,6 +862,56 @@ def test_rich_env_remove_retains_confirmation_prompt(tmp_path: object) -> None:
     client.environments.remove.assert_not_called()
 
 
+def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) -> None:
+    plan = EnvironmentCheckoutPlan(
+        name="demo",
+        branch="feature",
+        effective_base_ref="main",
+        db_mode=EnvironmentDatabaseMode.SHARED,
+        source_database="comerta",
+        target_database="comerta",
+        python_mode=EnvironmentPythonMode.CREATE,
+        provenance=BackupProvenanceComparison(
+            status=BackupProvenanceStatus.MATCHED,
+            expected_base_ref="main",
+            recorded_branch="main",
+        ),
+        freshness=BackupFreshness.STALE,
+        preparation_actions=(
+            DatabasePreparationAction.DOWNLOAD,
+            DatabasePreparationAction.RESTORE,
+            DatabasePreparationAction.SWITCH_DEFAULT,
+        ),
+        warnings=("backup is stale and will be refreshed",),
+    )
+    client = MagicMock()
+    client.environments.checkout_with_plan.return_value = EnvironmentCheckoutResult(
+        environment=_matrix_public_environment(), plan=plan
+    )
+
+    with (
+        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+    ):
+        result = CliRunner().invoke(cli, ["env", "checkout", "feature"])
+
+    assert result.exit_code == 0, result.output
+    assert "Environment demo" in result.output
+    assert "Checkout plan" in result.output
+    assert 'provenance: {"expected_base_ref": "main"' in result.output
+    assert 'freshness: "stale"' in result.output
+    assert 'preparation_actions: ["download", "restore", "switch_default"]' in result.output
+    assert "backup is stale and will be refreshed" in result.output
+    for private_field in (
+        "project",
+        "options",
+        "worktree_argv",
+        "config_values",
+        "python_selector",
+    ):
+        assert f"{private_field}:" not in result.output
+
+
 def test_rich_print_sanitizes_by_default_and_preserves_document_line_feeds(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -831,7 +966,14 @@ def test_public_human_callbacks_neutralize_terminal_controls(
             result = runner.invoke(cli, ["doctor"])
     else:
         client.environments.get.return_value = env
-        client.environments.checkout.return_value = env
+        if command == "checkout":
+            plan = _matrix_checkout_plan(name=f"evil-{payload}")
+            client.environments.plan_checkout.return_value = plan
+            client.environments.checkout_with_plan.return_value = EnvironmentCheckoutResult(
+                environment=_matrix_public_environment(name=f"evil-{payload}"), plan=plan
+            )
+        else:
+            client.environments.checkout.return_value = env
         client.environments.sync_python.return_value = env
         with (
             patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),

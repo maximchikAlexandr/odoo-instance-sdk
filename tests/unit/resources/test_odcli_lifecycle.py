@@ -60,7 +60,15 @@ class TestOdcliLifecycle:
 
         checkout_result = _invoke(
             env_client,
-            ["--project", str(git_repo), "env", "checkout", "feat/lifecycle"],
+            [
+                "--project",
+                str(git_repo),
+                "env",
+                "checkout",
+                "feat/lifecycle",
+                "--source-db",
+                "comerta",
+            ],
         )
         assert checkout_result.exit_code == 0, checkout_result.output
 

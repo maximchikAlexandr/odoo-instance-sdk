@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+The server facade for executing Odoo CLI commands with typed results and failures.
+
+## Requirements
 
 ### Requirement: `server.run()` executes one CLI command
 

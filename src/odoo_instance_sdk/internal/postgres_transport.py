@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
+
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 
 
 def run_psql(
@@ -23,7 +24,7 @@ def run_psql(
     """
     if user is None or shutil.which("psql") is None:
         return None
-    env = os.environ.copy()
+    env = sanitized_child_environment()
     env.pop("PGPASSWORD", None)
     # The caller's explicit transport choice must not be silently overridden
     # by libpq environment settings.  In particular, PGHOST/PGHOSTADDR would

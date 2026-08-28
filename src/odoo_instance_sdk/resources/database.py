@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import unicodedata
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -16,10 +17,12 @@ from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
     BackupDownloadError,
     BackupNotAvailableError,
+    ConfigError,
     DatabaseAlreadyExistsError,
     DatabaseError,
     DatabaseManagerUnavailableError,
     DropFailedError,
+    InstanceConfigurationError,
     MasterPasswordRequiredError,
     RestoreFailedError,
 )
@@ -32,6 +35,7 @@ from odoo_instance_sdk.internal.paths import get_backups_dir
 from odoo_instance_sdk.internal.redact import format_error
 from odoo_instance_sdk.internal.urls import assert_local, warn_if_cleartext_secret
 from odoo_instance_sdk.models import (
+    AdminPasswordResetResult,
     Backup,
     BackupFormat,
     Database,
@@ -44,6 +48,30 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
+_RESET_ADMIN_PASSWORD_SCRIPT = """
+user = env.ref('base.user_admin', raise_if_not_found=True)
+user.ensure_one()
+user.write({'password': 'admin'})
+result = {'xml_id': 'base.user_admin', 'updated': True}
+"""
+
+
+def _normalize_source_git_branch(value: str | None) -> str | None:
+    """Validate declarative branch metadata before any backup side effect."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError("source_git_branch must be text")
+    if any(unicodedata.category(char) == "Cc" for char in value):
+        raise ConfigError(
+            "source_git_branch must be non-empty after trimming and contain no control characters"
+        )
+    branch = value.strip()
+    if not branch:
+        raise ConfigError(
+            "source_git_branch must be non-empty after trimming and contain no control characters"
+        )
+    return branch
 
 
 def _stream_response_to_file(
@@ -54,7 +82,8 @@ def _stream_response_to_file(
 ) -> tuple[int, str]:
     sha = hashlib.sha256()
     written = 0
-    with open(dest, "wb") as f:
+    fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
         for chunk in resp.iter_bytes(chunk_size=8192):
             written += len(chunk)
             if written > max_bytes:
@@ -290,9 +319,10 @@ class DatabaseResource:
         filestore: bool = True,
         destination: str | Path | None = None,
         timeout: float | None = None,
+        source_git_branch: str | None = None,
     ) -> Backup:
+        source_git_branch = _normalize_source_git_branch(source_git_branch)
         pwd = self._require_password()
-        # ponytail: remote backup sends master_pwd by spec design; warn_if_cleartext_secret covers HTTP
 
         if destination is None:
             destination = self._instance._client.config.backups_directory
@@ -300,10 +330,12 @@ class DatabaseResource:
             destination = Path(destination)
         if destination is None:
             destination = get_backups_dir()
-        destination.mkdir(parents=True, exist_ok=True)
+        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(destination, 0o700)
 
         backup_id = str(uuid.uuid4())
         part_path = ensure_destination(destination, f"{backup_id}.{format.value}.part")
+        part_preexisted = part_path.exists()
         catalog = self._instance._client.get_catalog()
         catalog.start_download(
             backup_id=backup_id,
@@ -312,27 +344,21 @@ class DatabaseResource:
             format=format.value,
             filestore_requested=filestore,
             path=part_path,
+            source_git_branch=source_git_branch,
         )
 
         try:
-            with self._http(timeout=timeout) as http:
-                resp = http.post(
-                    self._url("backup"),
-                    data={
-                        "master_pwd": pwd,
-                        "name": database_name,
-                        "backup_format": format.value,
-                        "filestore": "true" if filestore else "false",
-                    },
-                )
-                resp.raise_for_status()
-                server_filename = extract_server_filename(resp.headers.get("content-disposition"))
-                size_bytes, sha256_hex = _stream_response_to_file(resp, part_path)
+            server_filename, size_bytes, sha256_hex = self._download_backup_part(
+                database_name, pwd, part_path, timeout=timeout, format=format, filestore=filestore
+            )
 
             actual_filename = make_download_filename(backup_id, server_filename)
             final_path = ensure_destination(destination, actual_filename)
             if final_path != part_path:
+                if final_path.exists():
+                    raise BackupDownloadError("Backup destination already exists")  # noqa: TRY301
                 part_path.rename(final_path)
+            os.chmod(final_path, 0o600)
 
             if not final_path.resolve().is_relative_to(destination.resolve()):
                 with contextlib.suppress(OSError):
@@ -356,14 +382,87 @@ class DatabaseResource:
                 size_bytes=size_bytes,
                 sha256=sha256_hex,
                 downloaded_at=downloaded_at,
+                source_git_branch=source_git_branch,
             )
-        except (httpx.HTTPError, OSError, BackupCatalogError, BackupDownloadError) as e:
+        except (OSError, BackupCatalogError, BackupDownloadError) as e:
             with contextlib.suppress(BackupCatalogError):
                 catalog.fail_download(backup_id, type(e).__name__, format_error(e))
-            if part_path.exists():
+            if not part_preexisted and part_path.exists():
                 with contextlib.suppress(OSError):
                     part_path.unlink()
             raise
+
+    def _download_backup_part(
+        self,
+        database_name: str,
+        password: str,
+        part_path: Path,
+        *,
+        timeout: float | None,
+        format: BackupFormat,
+        filestore: bool,
+    ) -> tuple[str | None, int, str]:
+        """Fetch a backup, converting HTTPX failures without retaining them."""
+        http_failure: str | None = None
+        try:
+            with self._http(timeout=timeout) as http:
+                resp = http.post(
+                    self._url("backup"),
+                    data={
+                        "master_pwd": password,
+                        "name": database_name,
+                        "backup_format": format.value,
+                        "filestore": "true" if filestore else "false",
+                    },
+                )
+                resp.raise_for_status()
+                server_filename = extract_server_filename(resp.headers.get("content-disposition"))
+                size_bytes, sha256_hex = _stream_response_to_file(resp, part_path)
+        except httpx.HTTPStatusError as exc:
+            # Keep only a status-derived value. The HTTPX exception retains
+            # its request/response/stream graph, including master_pwd.
+            http_failure = f"Backup request failed with HTTP status {exc.response.status_code}"
+        except httpx.HTTPError:
+            # Do not format the exception: its request may contain the remote
+            # master password and response bodies can be unbounded.
+            http_failure = "Backup request failed"
+
+        if http_failure is not None:
+            raise BackupDownloadError(http_failure) from None
+        return server_filename, size_bytes, sha256_hex
+
+    def reset_admin_password(self) -> AdminPasswordResetResult:
+        """Reset ``base.user_admin`` on this instance's one bound database."""
+        self._assert_local()
+        configured = self._instance.config.configured_database_names
+        if len(configured) != 1 or not configured[0].strip():
+            raise InstanceConfigurationError(
+                "Administrator password reset requires exactly one configured database"
+            )
+
+        database = configured[0]
+        try:
+            command = self._instance._run_shell_script_exclusive(
+                _RESET_ADMIN_PASSWORD_SCRIPT,
+                commit=True,
+            )
+        except Exception:
+            # Shell diagnostics may contain application data. Never expose them through
+            # this resource's error surface.
+            raise DatabaseManagerUnavailableError("Administrator password reset failed") from None
+        if command.returncode != 0:
+            raise DatabaseManagerUnavailableError("Administrator password reset failed")
+
+        environment_id: uuid.UUID | None = None
+        if self._instance._environment_id is not None:
+            with contextlib.suppress(ValueError):
+                environment_id = uuid.UUID(self._instance._environment_id)
+        return AdminPasswordResetResult(
+            database=database,
+            completed=True,
+            xml_id="base.user_admin",
+            environment_id=environment_id,
+        )
 
     def restore(
         self,
@@ -389,28 +488,36 @@ class DatabaseResource:
                 f"Database {target_database_name!r} already exists on {self.base_url}"
             )
 
-        with open(backup_path, "rb") as fp, self._http(timeout=timeout) as http:
-            resp = http.post(
-                self._url("restore"),
-                data={
-                    "master_pwd": pwd,
-                    "name": target_database_name,
-                    "copy": "true" if copy else "false",
-                    "neutralize_database": "true" if neutralize_database else "false",
-                },
-                files={
-                    "backup_file": (backup.filename, fp, "application/octet-stream"),
-                },
-            )
-            try:
+        http_failure: tuple[int, str] | tuple[None, str] | None = None
+        try:
+            with open(backup_path, "rb") as fp, self._http(timeout=timeout) as http:
+                resp = http.post(
+                    self._url("restore"),
+                    data={
+                        "master_pwd": pwd,
+                        "name": target_database_name,
+                        "copy": "true" if copy else "false",
+                        "neutralize_database": "true" if neutralize_database else "false",
+                    },
+                    files={
+                        "backup_file": (backup.filename, fp, "application/octet-stream"),
+                    },
+                )
                 if resp.is_error:
                     resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise DatabaseError(
-                    status_code=exc.response.status_code,
-                    message=format_error(exc.response.text),
-                    body=exc.response.content,
-                ) from exc
+        except httpx.HTTPStatusError as exc:
+            # Convert outside the except scope so the SDK error has no HTTPX
+            # cause/context/request/response/stream references.
+            http_failure = (
+                exc.response.status_code,
+                f"Database restore failed with HTTP status {exc.response.status_code}",
+            )
+        except httpx.HTTPError:
+            http_failure = (None, "Database restore request failed")
+
+        if http_failure is not None:
+            status_code, message = http_failure
+            raise DatabaseError(status_code=status_code or 0, message=message, body=b"") from None
 
         if not self.exists(target_database_name):
             raise RestoreFailedError(
