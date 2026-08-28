@@ -60,3 +60,21 @@ make live
 4. Use [GitHub Issues](https://github.com/maximchikAlexandr/odoo-instance-sdk/issues) for bug reports and feature requests.
 
 By contributing, you agree that your contributions are licensed under the [MIT License](LICENSE).
+
+## Documentation source of truth
+
+The Click command tree in `odoo_instance_sdk.cli:cli` is the source of truth for
+shipped CLI paths and executable `--help` is the source of truth for flags. The
+README must keep the complete command-path inventory and one purpose sentence
+per leaf command; do not add a separate generated CLI reference.
+
+Public Python examples belong in `docs/python-sdk.md` and must use exported SDK
+types. When changing commands or public SDK usage, run:
+
+```bash
+uv run pytest -q tests/unit/test_documentation_contract.py
+```
+
+This contract recursively compares Click leaves with the README, compiles and
+imports documentation examples, checks shell fences with `bash -n`, and verifies
+relative Markdown links deterministically.
