@@ -50,6 +50,7 @@ BOUNDED_LEAVES = (
 ROOT_HELP_SNAPSHOT = """Usage: cli [OPTIONS] COMMAND [ARGS]...
 
 Options:
+  --version       Show the version and exit.
   --project PATH  Explicit project path.
   --env TEXT      Environment selector (UUID or name).
   --help          Show this message and exit.
@@ -165,7 +166,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
     result = CliRunner().invoke(cli, ["--help"])
 
     assert result.exit_code == 0
-    assert {param.name for param in cli.params} == {"project", "env_selector"}
+    assert {param.name for param in cli.params} == {"project", "env_selector", "version"}
     assert set(cli.list_commands(click.Context(cli))) == {
         "init",
         "env",

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import sys
+from typing import Any
 
 import click
 
-from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
@@ -22,7 +23,6 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     rich_print,
 )
-from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
@@ -61,7 +61,7 @@ def db_refresh(
         raise click.UsageError("--reset-admin-password requires --restore")
     try:
         project_path = resolve_project_path(ctx)
-        client = OdooClient(config=OdooClientConfig(executable="odoo"))
+        client = _client_class()(config=_client_config_class()(executable="odoo"))
         result = client.environments.refresh_database(
             project_path,
             options=DatabaseRefreshOptions(
@@ -128,6 +128,29 @@ def _validate_recorded_database_binding(instance: object, environment: object) -
         raise InstanceConfigurationError(
             "environment must bind exactly one recorded source or target database"
         )
+
+
+def _client_class() -> Any:
+    return getattr(sys.modules[__name__], "OdooClient")
+
+
+def _client_config_class() -> Any:
+    return getattr(sys.modules[__name__], "OdooClientConfig")
+
+
+def __getattr__(name: str) -> Any:
+    """Keep operation dependencies out of command discovery while preserving patch points."""
+    if name == "OdooClient":
+        from odoo_instance_sdk.client import OdooClient
+
+        globals()[name] = OdooClient
+        return OdooClient
+    if name == "OdooClientConfig":
+        from odoo_instance_sdk.config import OdooClientConfig
+
+        globals()[name] = OdooClientConfig
+        return OdooClientConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = ["db_group"]

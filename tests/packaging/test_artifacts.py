@@ -78,6 +78,28 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
         text=True,
     )
     assert "Usage" in help_result.stdout
+    metadata = subprocess.run(
+        [
+            str(python),
+            "-c",
+            "from importlib.metadata import version; print(version('odoo-instance-sdk'))",
+        ],
+        cwd=empty,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    version_result = subprocess.run(
+        [str(odcli), "--version"],
+        cwd=empty,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert version_result.stdout.strip() == f"odcli, version {metadata}"
+    assert version_result.stderr == ""
 
 
 def test_isolated_wheel_import_and_odcli_help(tmp_path: Path) -> None:
