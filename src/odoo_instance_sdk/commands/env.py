@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import click
 import msgspec
@@ -12,7 +13,6 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
-from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
@@ -30,7 +30,6 @@ from odoo_instance_sdk.commands.output import (
     sanitize_diagnostic,
     sanitize_terminal_text,
 )
-from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import ProjectContextError
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.internal.git_worktree import (
@@ -44,7 +43,9 @@ from odoo_instance_sdk.models import (
     EnvironmentArtifacts,
     EnvironmentCheckoutPlan,
     EnvironmentCheckoutResult,
+    EnvironmentDatabaseMode,
     EnvironmentSnapshot,
+    EnvironmentState,
     GitActivity,
     GitActivityState,
     PidScope,
@@ -54,12 +55,9 @@ from odoo_instance_sdk.models import (
     Snapshot,
     StorageFootprint,
 )
-from odoo_instance_sdk.resources.environment import (
-    EnvironmentCheckoutOptions,
-    EnvironmentDatabaseMode,
-    EnvironmentState,
-)
-from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
 _ENV_LIST_COLUMNS = (
     "NAME",
@@ -130,8 +128,10 @@ def env_checkout(
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     try:
+        from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
+
         project_path = resolve_project_path(cli_ctx)
-        client = OdooClient(config=OdooClientConfig(executable="odoo"))
+        client = _client_class()(config=_client_config_class()(executable="odoo"))
         options = EnvironmentCheckoutOptions(
             base_ref=base_ref,
             name=name,
@@ -219,7 +219,7 @@ def env_list(
     _validate_watch_options(output_mode, watch=watch, interval=interval)
     try:
         project_id = _resolve_monitor_project_id(ctx, all_projects)
-        monitor = EnvironmentMonitor()
+        monitor = _monitor_class()()
     except Exception as e:
         fail(output_mode, "env.list", str(e))
 
@@ -524,6 +524,43 @@ def _artifacts_str(artifacts: EnvironmentArtifacts) -> str:
     )
 
 
+def _client_class() -> Any:
+    return getattr(sys.modules[__name__], "OdooClient")
+
+
+def _client_config_class() -> Any:
+    return getattr(sys.modules[__name__], "OdooClientConfig")
+
+
+def _monitor_class() -> Any:
+    return getattr(sys.modules[__name__], "EnvironmentMonitor")
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve operation dependencies only when a command or test requests them."""
+    if name == "OdooClient":
+        from odoo_instance_sdk.client import OdooClient
+
+        globals()[name] = OdooClient
+        return OdooClient
+    if name == "OdooClientConfig":
+        from odoo_instance_sdk.config import OdooClientConfig
+
+        globals()[name] = OdooClientConfig
+        return OdooClientConfig
+    if name == "EnvironmentCheckoutOptions":
+        from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
+
+        globals()[name] = EnvironmentCheckoutOptions
+        return EnvironmentCheckoutOptions
+    if name == "EnvironmentMonitor":
+        from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+
+        globals()[name] = EnvironmentMonitor
+        return EnvironmentMonitor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
     if output_mode is OutputMode.RICH or yes:
         return
@@ -553,7 +590,7 @@ def env_remove(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
-    client = OdooClient(config=OdooClientConfig(executable="odoo"))
+    client = _client_class()(config=_client_config_class()(executable="odoo"))
     if environment is None:
         if ctx.env is not None:
             fail(
@@ -636,7 +673,7 @@ def env_sync(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
-    client = OdooClient(config=OdooClientConfig(executable="odoo"))
+    client = _client_class()(config=_client_config_class()(executable="odoo"))
     if environment is None:
         if ctx.env is not None:
             fail(

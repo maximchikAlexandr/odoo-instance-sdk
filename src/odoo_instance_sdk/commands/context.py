@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import click
 
-from odoo_instance_sdk.client import OdooClient
-from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import EnvironmentResolutionError
-from odoo_instance_sdk.internal import context as _resolution
-from odoo_instance_sdk.resources.environment import DevelopmentEnvironment, EnvironmentState
-from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentState
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 @dataclass(slots=True)
@@ -32,6 +34,8 @@ pass_cli_context = click.make_pass_decorator(CliContext, ensure=True)
 
 def resolve_project_path(cli_context: CliContext) -> Path:
     """Resolve the project selector while recording its source."""
+    from odoo_instance_sdk.internal import context as _resolution
+
     raw = cli_context.project
     project = _resolution.resolve_project(Path(raw) if raw is not None else None)
     if raw is not None:
@@ -62,6 +66,8 @@ def resolve_environment(
     cli_context: CliContext | None = None,
 ) -> DevelopmentEnvironment:
     """Resolve an environment from typed selectors and an optional cwd."""
+    from odoo_instance_sdk.internal import context as _resolution
+
     environment = _resolution.resolve_environment(client, explicit, cwd=cwd)
     if cli_context is not None:
         cli_context.resolved_environment = environment
@@ -70,6 +76,8 @@ def resolve_environment(
 
 
 def _check_port_free(env_obj: DevelopmentEnvironment) -> bool:
+    from odoo_instance_sdk.internal import context as _resolution
+
     return _resolution._check_port_free(env_obj)
 
 
@@ -77,7 +85,9 @@ def ready_instance(
     cli_context: CliContext,
 ) -> tuple[OdooClient, DevelopmentEnvironment, OdooInstance]:
     """Resolve a ready environment from typed CLI context values."""
-    client = OdooClient(config=OdooClientConfig(executable="odoo"))
+    from odoo_instance_sdk.internal import context as _resolution
+
+    client = _client_class()(config=_client_config_class()(executable="odoo"))
     project_root = (
         resolve_project_path(cli_context).resolve() if cli_context.project is not None else None
     )
@@ -98,6 +108,29 @@ def ready_instance(
     _resolution._verify_env_runtime(env_obj)
     instance = client.instance.from_environment(env_obj)
     return client, env_obj, instance
+
+
+def _client_class() -> Any:
+    return getattr(sys.modules[__name__], "OdooClient")
+
+
+def _client_config_class() -> Any:
+    return getattr(sys.modules[__name__], "OdooClientConfig")
+
+
+def __getattr__(name: str) -> Any:
+    """Keep legacy patch points lazy for operation-only dependencies."""
+    if name == "OdooClient":
+        from odoo_instance_sdk.client import OdooClient
+
+        globals()[name] = OdooClient
+        return OdooClient
+    if name == "OdooClientConfig":
+        from odoo_instance_sdk.config import OdooClientConfig
+
+        globals()[name] = OdooClientConfig
+        return OdooClientConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

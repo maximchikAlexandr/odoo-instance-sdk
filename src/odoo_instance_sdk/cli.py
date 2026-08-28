@@ -4,12 +4,11 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import click
 import msgspec
 
-from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.db import db_group
@@ -44,15 +43,7 @@ from odoo_instance_sdk.internal.automation import (
     update_modules,
     verify_deps,
 )
-from odoo_instance_sdk.internal.doctor import DoctorReport, run_doctor
 from odoo_instance_sdk.internal.port_allocation import find_free_port
-from odoo_instance_sdk.internal.postgres_cli import (
-    cluster_snapshot,
-    emit_postgres_result,
-    print_status,
-    run_postgres_command,
-    status_exit_code,
-)
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.vscode_generate import (
     build_launch_profile,
@@ -62,10 +53,59 @@ from odoo_instance_sdk.internal.vscode_generate import (
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
 from odoo_instance_sdk.models import OdooTestSpec, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
-from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.internal.doctor import DoctorReport
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve operation-only imports when a command callback actually needs them."""
+    if name == "OdooClient":
+        from odoo_instance_sdk.client import OdooClient
+
+        globals()[name] = OdooClient
+        return OdooClient
+    if name in {"DoctorReport", "run_doctor"}:
+        from odoo_instance_sdk.internal import doctor
+
+        value = getattr(doctor, name)
+        globals()[name] = value
+        return value
+    if name in {
+        "cluster_snapshot",
+        "emit_postgres_result",
+        "print_status",
+        "run_postgres_command",
+        "status_exit_code",
+    }:
+        from odoo_instance_sdk.internal import postgres_cli
+
+        value = getattr(postgres_cli, name)
+        globals()[name] = value
+        return value
+    if name == "PostgresCluster":
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        globals()[name] = PostgresCluster
+        return PostgresCluster
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _client_class() -> Any:
+    return getattr(sys.modules[__name__], "OdooClient")
+
+
+def _run_doctor() -> Any:
+    return getattr(sys.modules[__name__], "run_doctor")
+
+
+def _postgres_operation(name: str) -> Any:
+    return getattr(sys.modules[__name__], name)
 
 
 @click.group()
+@click.version_option(package_name="odoo-instance-sdk")
 @click.option(
     "--project",
     "project",
@@ -446,8 +486,8 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
     json_output = output_mode is not OutputMode.RICH
     try:
         project_path = cli_context.resolve_project_path(ctx)
-        client = OdooClient(config=OdooClientConfig(executable="odoo"))
-        report = run_doctor(client, project_path if project_path != Path.cwd() else None)
+        client = _client_class()(config=OdooClientConfig(executable="odoo"))
+        report = _run_doctor()(client, project_path if project_path != Path.cwd() else None)
     except Exception as e:
         fail(output_mode, "doctor", str(e))
     if json_output:
@@ -1032,7 +1072,7 @@ def postgres_approve_image(
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     """Approve the current compose image in the local, non-repository trust store."""
-    cluster, _ = run_postgres_command(
+    cluster, _ = _postgres_operation("run_postgres_command")(
         ctx,
         command="postgres.approve-image",
         output_mode=output_mode,
@@ -1059,13 +1099,13 @@ def postgres_approve_image(
 def postgres_status(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
-    cluster, state = run_postgres_command(
+    cluster, state = _postgres_operation("run_postgres_command")(
         ctx,
         command="postgres.status",
         output_mode=output_mode,
         operation=lambda candidate: candidate.status(),
     )
-    snapshot = cluster_snapshot(cluster, state)
+    snapshot = _postgres_operation("cluster_snapshot")(cluster, state)
     if json_output:
         emit_json_envelope(
             ok=True,
@@ -1074,8 +1114,8 @@ def postgres_status(ctx: CliContext, output_format: str | None, json_output: boo
             mode=output_mode,
         )
     else:
-        print_status(snapshot)
-    sys.exit(status_exit_code(snapshot))
+        _postgres_operation("print_status")(snapshot)
+    sys.exit(_postgres_operation("status_exit_code")(snapshot))
 
 
 @postgres_group.command("up")
@@ -1098,10 +1138,10 @@ def postgres_up(
         candidate.ensure_running(timeout=wait_timeout)
         return candidate.status()
 
-    cluster, state = run_postgres_command(
+    cluster, state = _postgres_operation("run_postgres_command")(
         ctx, command="postgres.up", output_mode=output_mode, operation=ensure
     )
-    emit_postgres_result(
+    _postgres_operation("emit_postgres_result")(
         cluster=cluster, state=state, command="postgres.up", output_mode=output_mode
     )
     sys.exit(0)
@@ -1127,10 +1167,10 @@ def postgres_stop(
         candidate.stop(timeout=timeout)
         return candidate.status()
 
-    cluster, state = run_postgres_command(
+    cluster, state = _postgres_operation("run_postgres_command")(
         ctx, command="postgres.stop", output_mode=output_mode, operation=stop
     )
-    emit_postgres_result(
+    _postgres_operation("emit_postgres_result")(
         cluster=cluster, state=state, command="postgres.stop", output_mode=output_mode
     )
     sys.exit(0)
