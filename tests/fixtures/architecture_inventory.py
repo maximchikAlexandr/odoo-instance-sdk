@@ -29,7 +29,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 169),
         ("src/odoo_instance_sdk/commands/output.py", 200),
         ("src/odoo_instance_sdk/commands/test.py", 180),
-        ("src/odoo_instance_sdk/resources/instance.py", 628),
+        ("src/odoo_instance_sdk/resources/instance.py", 661),
     }
 )
 
@@ -46,7 +46,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/cli.py", 568): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/cli.py", 686): "legacy exec native diagnostic transport",
     ("src/odoo_instance_sdk/cli.py", 881): "legacy module-test diagnostic transport",
-    ("src/odoo_instance_sdk/resources/instance.py", 628): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/resources/instance.py", 661): "lifecycle cleanup diagnostic transport",
 }
 
 

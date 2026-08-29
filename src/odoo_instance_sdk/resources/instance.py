@@ -10,7 +10,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO, TypeVar, cast
@@ -372,6 +372,39 @@ def _snapshot_start_inputs(
     args = tuple(_build_cli_args(snapshot, secret_config_path=secret_path))
     secrets = tuple(value for value in (snapshot.db_password, secret_path) if value is not None)
     return snapshot, args, secret_path, secrets
+
+
+def _build_shell_script_step(
+    config: StartConfig,
+    *,
+    executable_prefix: Sequence[str],
+    default_cwd: Path | None,
+    source: str,
+    argv: Sequence[str] = (),
+    timeout: float | None = None,
+    commit: bool = False,
+    nonce: str | None = None,
+) -> tuple[PreparedStep, StartConfig, str | None, tuple[str, ...]]:
+    """Capture one shell script's complete private process input."""
+    snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
+    from odoo_instance_sdk.internal.server import _build_shell_wrapper
+
+    wrapper_nonce = nonce or uuid.uuid4().hex
+    wrapper = _build_shell_wrapper(source, list(argv), commit=commit, nonce=wrapper_nonce)
+    step = PreparedStep(
+        step_id="instance.shell_script",
+        argv=(*executable_prefix, *cli_args, "shell"),
+        cwd=None if default_cwd is None else str(default_cwd),
+        environment=tuple(sorted(sanitized_child_environment(None).items())),
+        stdin=wrapper.encode(),
+        wrapper_nonce=wrapper_nonce,
+        public_input_preview=source,
+        timeout=timeout,
+        secret_values=secrets,
+        read_only=not commit,
+        mutating=commit,
+    )
+    return step, snapshot, secret_path, secrets
 
 
 @dataclass(slots=True, kw_only=True)
@@ -737,22 +770,14 @@ class OdooInstance:
             raise InstanceConfigurationError(
                 "No StartConfig — create instance via from_config() or from_environment()"
             )
-        snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
-        nonce = uuid.uuid4().hex
-        from odoo_instance_sdk.internal.server import _build_shell_wrapper
-
-        wrapper = _build_shell_wrapper(source, list(argv), commit=commit, nonce=nonce)
-        step = PreparedStep(
-            step_id="instance.shell_script",
-            argv=(*self._executable_prefix(), *cli_args, "shell"),
-            cwd=None if self.config.default_cwd is None else str(self.config.default_cwd),
-            environment=tuple(sorted(sanitized_child_environment(None).items())),
-            stdin=wrapper.encode(),
-            public_input_preview=source,
+        step, snapshot, secret_path, secrets = _build_shell_script_step(
+            config,
+            executable_prefix=self._executable_prefix(),
+            default_cwd=self.config.default_cwd,
+            source=source,
+            argv=argv,
             timeout=timeout,
-            secret_values=secrets,
-            read_only=not commit,
-            mutating=commit,
+            commit=commit,
         )
         action = PreparedAction(
             step_id="instance.shell_script.transaction",
@@ -833,23 +858,21 @@ class OdooInstance:
             raise InstanceConfigurationError(
                 "No StartConfig — create instance via from_config() or from_environment()"
             )
-        snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
-        nonce = uuid.uuid4().hex
-        from odoo_instance_sdk.internal.server import _build_shell_wrapper
-
-        wrapper = _build_shell_wrapper(source, list(argv), commit=commit, nonce=nonce)
-        step = PreparedStep(
-            step_id="instance.shell_script",
-            argv=(*self._executable_prefix(), *cli_args, "shell"),
-            cwd=None if self.config.default_cwd is None else str(self.config.default_cwd),
-            environment=tuple(sorted(sanitized_child_environment(None).items())),
-            stdin=wrapper.encode(),
-            public_input_preview=source,
+        captured = context.prepared("instance.shell_script")
+        runtime_step, snapshot, secret_path, _ = _build_shell_script_step(
+            config,
+            executable_prefix=self._executable_prefix(),
+            default_cwd=self.config.default_cwd,
+            source=source,
+            argv=argv,
             timeout=timeout,
-            secret_values=secrets,
-            read_only=not commit,
-            mutating=commit,
+            commit=commit,
+            nonce=captured.wrapper_nonce,
         )
+        # Only the target-bound argv is late-bound after reservation.  Every
+        # other field, including the wrapper bytes and nonce, comes from the
+        # immutable preparation snapshot.
+        step = replace(captured, argv=runtime_step.argv)
         secret_created = False
         if secret_path is not None:
             _write_secret_config(snapshot, secret_path)

@@ -22,7 +22,6 @@ from odoo_instance_sdk.exceptions import (
     EnvironmentConflictError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
-    UnplannedStepError,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.git_worktree import (
@@ -323,13 +322,19 @@ def _consume_action_if_planned(step_id: str) -> None:
     context = active_context()
     if context is None:
         return
-    try:
-        context.action(step_id)
-    except UnplannedStepError:
-        # Direct preparation APIs can run beneath another command context in
-        # compatibility tests; only the owning preparation command declares
-        # these action IDs.
+    context.action(step_id)
+
+
+def _skip_preparation_branch(step_ids: Sequence[str]) -> None:
+    """Account explicitly for a branch that was proven unnecessary."""
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    if context is None:
         return
+    for step_id in step_ids:
+        if context.planned(step_id) and not context.consumed(step_id):
+            context.skip(step_id)
 
 
 def _resolve_source_config(project: ProjectConfig, root: Path) -> Path:
@@ -680,6 +685,26 @@ def prepare_restore(
                 )
                 raise
     except _CoalescedRestore as coalesced:
+        _skip_preparation_branch(
+            (
+                "database.prepare.remote-backup",
+                "database.prepare.local-restore",
+                "database.prepare.odoo-reset",
+                "database.prepare.default-switch",
+                "database.prepare.rollback",
+                "postgres.ensure.image.pull",
+                "postgres.ensure.image.inspect",
+                "postgres.ensure.status.ps",
+                "postgres.ensure.status.health",
+                "postgres.ensure.config",
+                "postgres.ensure.up",
+                "postgres.ensure.final.ps",
+                "postgres.ensure.final.health",
+                "database.restore.exists-before",
+                "database.restore.exists-after",
+                "instance.shell_script",
+            )
+        )
         return coalesced.result
 
 
@@ -775,100 +800,24 @@ def _preparation_process_steps(
     if not options.restore:
         return tuple(steps)
 
-    from odoo_instance_sdk.resources.database import _database_psql_step
+    from odoo_instance_sdk.resources.database import (
+        _RESET_ADMIN_PASSWORD_SCRIPT,
+        _database_psql_step,
+    )
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
 
-    postgres = initial.postgres
-    if postgres is not None and postgres.mode == "compose":
-        from odoo_instance_sdk.internal.paths import get_project_postgres_dir
-        from odoo_instance_sdk.internal.postgres_compose import compose_project_name
-
-        compose_file = get_project_postgres_dir("<runtime>") / "compose.yaml"
-        prefix = (
-            "docker",
-            "compose",
-            "--project-name",
-            compose_project_name("<runtime>"),
-            "-f",
-            str(compose_file),
-        )
-        user = postgres.user or "odoo"
-        steps.extend(
-            (
-                PreparedStep(
-                    step_id="postgres.ensure.image.pull",
-                    argv=("docker", "image", "pull", postgres.image or ""),
-                    timeout=60.0,
-                    read_only=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.image.inspect",
-                    argv=(
-                        "docker",
-                        "image",
-                        "inspect",
-                        "--format",
-                        "{{index .RepoDigests 0}}",
-                        postgres.image or "",
-                    ),
-                    timeout=60.0,
-                    read_only=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.status.ps",
-                    argv=(*prefix, "ps", "--format", "json"),
-                    read_only=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.status.health",
-                    argv=(
-                        *prefix,
-                        "exec",
-                        "-T",
-                        "postgres",
-                        "pg_isready",
-                        "-U",
-                        user,
-                        "-d",
-                        "postgres",
-                    ),
-                    cwd=str(compose_file.parent),
-                    read_only=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.config",
-                    argv=(*prefix, "config", "--quiet"),
-                    cwd=str(compose_file.parent),
-                    mutating=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.up",
-                    argv=(*prefix, "up", "--detach", "--wait"),
-                    cwd=str(compose_file.parent),
-                    mutating=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.final.ps",
-                    argv=(*prefix, "ps", "--format", "json"),
-                    read_only=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.final.health",
-                    argv=(
-                        *prefix,
-                        "exec",
-                        "-T",
-                        "postgres",
-                        "pg_isready",
-                        "-U",
-                        user,
-                        "-d",
-                        "postgres",
-                    ),
-                    cwd=str(compose_file.parent),
-                    read_only=True,
-                ),
-            )
-        )
+    # The same lifecycle builder is used by ``ensure_running``.  A placeholder
+    # identity is deliberate: it is an explicitly late-bound repository ID,
+    # not a second planner or a probe performed while constructing the command.
+    cluster = PostgresCluster._from_config(
+        initial,
+        repository_root=root,
+        compose_runner=None,
+        project_id="<runtime>",
+    )
+    steps.extend(
+        step for step in cluster._ensure_running_steps(60.0) if isinstance(step, PreparedStep)
+    )
 
     source_config = _resolve_source_config(initial, root)
     parsed = parse_odoo_config(source_config)
@@ -884,7 +833,7 @@ def _preparation_process_steps(
         steps.extend(
             (
                 _database_psql_step(
-                    step_id="database.prepare.restore.exists-before",
+                    step_id="database.restore.exists-before",
                     host=db_host,
                     port=db_port,
                     user=db_user,
@@ -892,7 +841,7 @@ def _preparation_process_steps(
                     database_name="<runtime>",
                 ),
                 _database_psql_step(
-                    step_id="database.prepare.restore.exists-after",
+                    step_id="database.restore.exists-after",
                     host=db_host,
                     port=db_port,
                     user=db_user,
@@ -903,26 +852,21 @@ def _preparation_process_steps(
         )
 
     if options.reset_admin_password:
-        from odoo_instance_sdk.internal.server import _build_cli_args
+        from odoo_instance_sdk.resources.instance import _build_shell_script_step
 
         runtime = resolve_runtime_binding(initial, root)
         start_config = StartConfig.from_odoo_config(source_config)
         start_config.config_path = "<runtime>"
+        start_config.dbfilter = "<runtime>"
         start_config.db_name = "<runtime>"
-        steps.append(
-            PreparedStep(
-                step_id="database.prepare.odoo.reset-admin",
-                argv=(
-                    *runtime.command_prefix,
-                    *_build_cli_args(start_config),
-                    "shell",
-                ),
-                public_input_preview="administrator password reset",
-                read_only=False,
-                mutating=True,
-                text=False,
-            )
+        shell_step, _, _, _ = _build_shell_script_step(
+            start_config,
+            executable_prefix=runtime.command_prefix,
+            default_cwd=runtime.runtime_cwd,
+            source=_RESET_ADMIN_PASSWORD_SCRIPT,
+            commit=True,
         )
+        steps.append(shell_step)
     return tuple(steps)
 
 
@@ -1014,6 +958,16 @@ class DatabasePreparationCoordinator:
             lambda: self._prepare_impl(project, options=options, coalesce=coalesce),
             executor=executor,
             steps=steps,
+            optional_steps=tuple(
+                step.step_id
+                for step in steps
+                if step.step_id
+                in {
+                    "database.restore.exists-before",
+                    "database.restore.exists-after",
+                    "database.prepare.rollback",
+                }
+            ),
         )
 
     def _prepare_impl(
@@ -1052,6 +1006,16 @@ class DatabasePreparationCoordinator:
             lambda: self._prepare_impl(project, options=options, coalesce=False),
             executor=executor,
             steps=steps,
+            optional_steps=tuple(
+                step.step_id
+                for step in steps
+                if step.step_id
+                in {
+                    "database.restore.exists-before",
+                    "database.restore.exists-after",
+                    "database.prepare.rollback",
+                }
+            ),
         )
 
     def _action_command(
@@ -1062,11 +1026,11 @@ class DatabasePreparationCoordinator:
         *,
         executor: ProcessExecutor | None,
         steps: Sequence[PreparedStep | PreparedAction] = (),
+        optional_steps: Sequence[str] = (),
     ) -> Command[T]:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
         from odoo_instance_sdk.internal.proc import (
             PreparedAction,
-            PreparedStep,
             SubprocessExecutor,
             prepared_command,
         )
@@ -1078,11 +1042,9 @@ class DatabasePreparationCoordinator:
         def run(context: RunContext[T]) -> T:
             context.action(step_id)
             result = callback()
-            for prepared in steps:
-                if isinstance(prepared, (PreparedStep, PreparedAction)) and not context.consumed(
-                    prepared.step_id
-                ):
-                    context.skip(prepared.step_id)
+            for optional_step_id in optional_steps:
+                if not context.consumed(optional_step_id):
+                    context.skip(optional_step_id)
             return result
 
         prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (step, *steps)

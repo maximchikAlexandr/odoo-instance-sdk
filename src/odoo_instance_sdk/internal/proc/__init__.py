@@ -76,6 +76,7 @@ class PreparedStep:
     environment: tuple[tuple[str, str], ...] = ()
     environment_policy: str = "sanitized-inherit"
     stdin: bytes | None = None
+    wrapper_nonce: str | None = None
     public_input_preview: str | None = None
     timeout: float | None = None
     mode: str = "captured"
@@ -222,6 +223,17 @@ class RunContext(Generic[T]):
     def consumed(self, step_id: str) -> bool:
         """Return whether this invocation accounted for a captured step."""
         return step_id in self._consumed
+
+    def prepared(self, step_id: str) -> PreparedStep:
+        """Return an immutable captured process step for an active adapter."""
+        step = self._steps.get(step_id)
+        if not isinstance(step, PreparedStep):
+            raise UnplannedStepError(step_id, reason="requested step is not a process")
+        return step
+
+    def planned(self, step_id: str) -> bool:
+        """Return whether this invocation captured a step with this identity."""
+        return step_id in self._steps
 
     def skip_remaining(self) -> None:
         """Account for optional captured probes that a collector did not need."""

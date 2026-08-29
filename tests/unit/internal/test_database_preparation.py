@@ -6,6 +6,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,13 +16,18 @@ from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     LockConflictError,
     MasterPasswordRequiredError,
+    OmittedStepError,
+    UnplannedStepError,
 )
+from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.internal.proc import RecordingExecutor
 from odoo_instance_sdk.models import (
     Backup,
     BackupBranchOrigin,
     BackupFormat,
     BackupFreshness,
     BackupProvenanceStatus,
+    DatabasePreparationResult,
     DatabaseRefreshOptions,
 )
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
@@ -109,9 +115,332 @@ def test_preparation_command_captures_restore_process_manifest_before_run(
         "postgres.ensure.final.health",
     )
     assert process_ids[-2:] == (
-        "database.prepare.restore.exists-before",
-        "database.prepare.restore.exists-after",
+        "database.restore.exists-before",
+        "database.restore.exists-after",
     )
+
+
+def test_preparation_command_runs_captured_git_steps_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real preparation command consumes the exact inspected process inputs."""
+    from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
+    from odoo_instance_sdk.internal.proc import PreparedProcess, ProcessResult, RecordingExecutor
+
+    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    remote = MagicMock()
+    remote.databases.backup.return_value = backup
+    client = MagicMock()
+    client.instance.return_value = remote
+
+    def result_for(prepared: PreparedProcess) -> ProcessResult:
+        argv = prepared.argv
+        return ProcessResult(
+            argv=argv,
+            returncode=0,
+            stdout=str(tmp_path),
+            stderr="",
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+
+    executor = RecordingExecutor(result_factory=result_for)
+    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
+    command = DatabasePreparationCoordinator(client).prepare_command(
+        _project(tmp_path), executor=executor
+    )
+
+    result = command.run()
+
+    assert result.backup == backup
+    planned = command.plan.process_steps
+    assert tuple(step.step_id for step in executor.executed) == tuple(
+        step.step_id for step in planned
+    )
+    assert len(executor.executed) == len({step.step_id for step in executor.executed})
+
+
+def _production_restore_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    odoo_returncode: int = 0,
+) -> tuple[
+    Command[DatabasePreparationResult],
+    RecordingExecutor,
+    ProjectConfig,
+    Backup,
+    MagicMock,
+]:
+    """Build the public preparation command with real active adapters."""
+    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.database_preparation import (
+        ProjectRuntimeBinding,
+        RestorePreflight,
+        resolve_test_source,
+    )
+    from odoo_instance_sdk.internal.proc import (
+        PreparedProcess,
+        PreparedStep,
+        ProcessResult,
+        RecordingExecutor,
+        active_context,
+    )
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    source = tmp_path / "odoo.conf"
+    source.write_text(
+        "[options]\n"
+        "http_interface = 127.0.0.1\n"
+        "http_port = 8069\n"
+        "db_name = source\n"
+        "admin_passwd = local-secret\n"
+        "db_host = 127.0.0.1\n"
+        "db_port = 5432\n"
+        "db_user = odoo\n"
+        "db_password = db-secret\n"
+    )
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    odoo = tmp_path / "odoo-bin"
+    odoo.write_text("#!/bin/sh\n")
+    odoo.chmod(0o755)
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        python=python,
+        odoo_bin=odoo,
+        source_config=source,
+        postgres=PostgresProjectConfig(
+            mode="compose", image="postgres:16", port=55432, user="odoo"
+        ),
+        default_source_database="old",
+        test_instance=ConfigTestInstance(base_url="https://example.test", database="remote"),
+    )
+    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    remote = MagicMock()
+    remote.databases.backup.return_value = backup
+    client = MagicMock()
+    client.instance.return_value = remote
+    local = MagicMock()
+    local.databases.restore.side_effect = _consume_restore_probes
+    cluster = PostgresCluster._from_config(
+        project,
+        repository_root=tmp_path,
+        compose_runner=None,
+        project_id="<runtime>",
+    )
+    options = DatabaseRefreshOptions(restore=True, reset_admin_password=True)
+    source_resolution = resolve_test_source(project, options)
+    runtime = ProjectRuntimeBinding(str(python), str(odoo), tmp_path)
+
+    @contextlib.contextmanager
+    def fake_preflight(
+        _client: object,
+        _project: object,
+        *,
+        options: DatabaseRefreshOptions,
+        wait_for_lock: bool = True,
+        coalesce: bool = False,
+    ) -> Iterator[RestorePreflight]:
+        del _client, _project, wait_for_lock, coalesce
+        context = active_context()
+        assert context is not None
+        context.action("database.prepare.lock")
+        context.process("database.prepare.git.toplevel")
+        context.process("database.prepare.git.common-dir")
+        for step in cluster._ensure_running_steps(60.0):
+            if isinstance(step, PreparedStep):
+                context.process(step.step_id)
+        yield RestorePreflight(
+            project=project,
+            project_id="<runtime>",
+            source=source_resolution,
+            source_config=source,
+            local_instance=local,
+            runtime=runtime,
+            postgres_cluster=cluster,
+            target_database="remote_refresh_test",
+        )
+
+    def result_for(prepared: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", prepared)
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=odoo_returncode if prepared.step_id == "instance.shell_script" else 0,
+            stdout="",
+            stderr="odoo failed" if prepared.step_id == "instance.shell_script" else "",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    write = MagicMock()
+    executor = RecordingExecutor(result_factory=result_for)
+    monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
+    monkeypatch.setattr(ProjectConfig, "load", MagicMock(return_value=project))
+    monkeypatch.setattr("odoo_instance_sdk.internal.project_manifest.write_manifest", write)
+    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
+    command = preparation.DatabasePreparationCoordinator(client).prepare_command(
+        project, options=options, executor=executor
+    )
+    return command, executor, project, backup, write
+
+
+def _consume_restore_probes(*_args: object, **_kwargs: object) -> MagicMock:
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    assert context is not None
+    context.process("database.restore.exists-before")
+    context.process("database.restore.exists-after")
+    return MagicMock()
+
+
+def test_production_restore_command_consumes_compose_psql_and_odoo_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command, executor, _project_config, backup, write = _production_restore_command(
+        tmp_path, monkeypatch
+    )
+
+    result = command.run()
+
+    assert result.backup == backup
+    planned = command.plan.process_steps
+    assert tuple(step.step_id for step in executor.executed) == tuple(
+        step.step_id for step in planned
+    )
+    from odoo_instance_sdk.internal.proc.redaction import project_process_step
+
+    recorded_shell = project_process_step(executor.executed[-1])
+    planned_shell = planned[-1]
+    assert recorded_shell.input_preview == planned_shell.input_preview
+    assert recorded_shell.cwd == planned_shell.cwd
+    assert recorded_shell.environment_policy == planned_shell.environment_policy
+    assert recorded_shell.environment_overrides == planned_shell.environment_overrides
+    assert recorded_shell.timeout == planned_shell.timeout
+    assert recorded_shell.mutating == planned_shell.mutating
+    assert executor.executed[-1].wrapper_nonce is not None
+    assert executor.executed[-1].wrapper_nonce.encode() in (executor.executed[-1].stdin or b"")
+    assert len(executor.executed) == len({step.step_id for step in executor.executed})
+    assert write.called
+
+
+def test_production_restore_command_rolls_back_after_odoo_child_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command, executor, project, backup, write = _production_restore_command(
+        tmp_path, monkeypatch, odoo_returncode=1
+    )
+
+    with pytest.raises(Exception, match="Administrator password reset failed") as failure:
+        command.run()
+
+    assert getattr(failure.value, "failure_context").retained_backup_id == backup.id
+    assert getattr(failure.value, "failure_context").retained_database == "remote_refresh_test"
+    assert project.default_source_database == "old"
+    write.assert_not_called()
+    assert tuple(step.step_id for step in executor.executed) == tuple(
+        step.step_id for step in command.plan.process_steps
+    )
+
+
+def test_preparation_command_rejects_omitted_captured_child() -> None:
+    """A successful callback cannot blanket-skip a required prepared child."""
+    from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
+    from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
+
+    child = PreparedStep(step_id="database.prepare.restore", argv=("restore",))
+    command = DatabasePreparationCoordinator(MagicMock())._action_command(
+        "database.prepare",
+        "Prepare a database",
+        lambda: "done",
+        executor=RecordingExecutor(),
+        steps=(child,),
+    )
+
+    with pytest.raises(OmittedStepError, match=r"database\.prepare\.restore"):
+        command.run()
+
+
+def test_preparation_command_rejects_substituted_child_before_launch() -> None:
+    """A callback cannot replace an inspected child with an unplanned argv."""
+    from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
+    from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor, active_context
+
+    executor = RecordingExecutor()
+    planned = PreparedStep(step_id="database.prepare.restore", argv=("restore",))
+
+    def substitute() -> str:
+        context = active_context()
+        assert context is not None
+        context.process_prepared(PreparedStep(step_id="substituted", argv=("other",)))
+        return "never"
+
+    command = DatabasePreparationCoordinator(MagicMock())._action_command(
+        "database.prepare",
+        "Prepare a database",
+        substitute,
+        executor=executor,
+        steps=(planned,),
+    )
+
+    with pytest.raises(UnplannedStepError, match="substituted"):
+        command.run()
+    assert executor.executed == []
+
+
+def test_preparation_command_failure_consumes_restore_and_rollback_steps() -> None:
+    """A restore failure records compensation without replaying its child."""
+    from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        ProcessResult,
+        RecordingExecutor,
+        active_context,
+    )
+
+    restore = PreparedStep(step_id="database.prepare.restore", argv=("restore",))
+    rollback = PreparedAction(
+        step_id="database.prepare.rollback",
+        action="compensate-preparation-failure",
+        read_only=True,
+    )
+    executor = RecordingExecutor(
+        default_result=ProcessResult(
+            argv=restore.argv,
+            returncode=1,
+            stdout="",
+            stderr="restore failed",
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+    )
+
+    def fail_restore() -> str:
+        context = active_context()
+        assert context is not None
+        result = context.process(restore.step_id)
+        assert isinstance(result, ProcessResult)
+        context.action(rollback.step_id)
+        raise RuntimeError("restore failed")
+
+    command = DatabasePreparationCoordinator(MagicMock())._action_command(
+        "database.prepare",
+        "Prepare a database",
+        fail_restore,
+        executor=executor,
+        steps=(restore, rollback),
+        optional_steps=(rollback.step_id,),
+    )
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        command.run()
+    assert [step.step_id for step in executor.executed] == [restore.step_id]
 
 
 def test_lock_paths_are_project_and_target_scoped(
