@@ -44,7 +44,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 169),
         ("src/odoo_instance_sdk/commands/output.py", 200),
         ("src/odoo_instance_sdk/commands/test.py", 175),
-        ("src/odoo_instance_sdk/resources/instance.py", 622),
+        ("src/odoo_instance_sdk/resources/instance.py", 625),
     }
 )
 
@@ -61,7 +61,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/cli.py", 568): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/cli.py", 686): "legacy exec native diagnostic transport",
     ("src/odoo_instance_sdk/cli.py", 881): "legacy module-test diagnostic transport",
-    ("src/odoo_instance_sdk/resources/instance.py", 622): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/resources/instance.py", 625): "lifecycle cleanup diagnostic transport",
 }
 
 
@@ -262,13 +262,14 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {
     "resources/environment.py:EnvironmentResource.remove": 1433,
     "resources/instance.py:OdooInstance.run": 411,
     "resources/instance.py:OdooInstance.start": 454,
-    "resources/instance.py:OdooInstance.run_foreground": 521,
-    "resources/instance.py:OdooInstance.run_foreground_command": 530,
-    "resources/instance.py:OdooInstance.shell": 641,
-    "resources/instance.py:OdooInstance.shell_command": 644,
-    "resources/instance.py:OdooInstance.run_shell_script": 691,
-    "resources/instance.py:OdooInstance.run_shell_script_command": 703,
-    "resources/instance.py:OdooInstance.stop": 842,
+    "resources/instance.py:OdooInstance.start_command": 463,
+    "resources/instance.py:OdooInstance.run_foreground": 522,
+    "resources/instance.py:OdooInstance.run_foreground_command": 531,
+    "resources/instance.py:OdooInstance.shell": 644,
+    "resources/instance.py:OdooInstance.shell_command": 647,
+    "resources/instance.py:OdooInstance.run_shell_script": 694,
+    "resources/instance.py:OdooInstance.run_shell_script_command": 706,
+    "resources/instance.py:OdooInstance.stop": 845,
     "resources/monitor.py:EnvironmentMonitor.snapshot": 216,
     "resources/monitor.py:EnvironmentMonitor.watch": 360,
     "resources/postgres.py:PostgresCluster.resolve_image_digest": 212,

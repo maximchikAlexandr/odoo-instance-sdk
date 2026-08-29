@@ -489,6 +489,7 @@ class OdooInstance:
         )
 
         def execute(context: RunContext[OdooProcess]) -> OdooProcess:
+            self._ensure_dependencies_ready()
             secret_created = False
             try:
                 if secret_path is not None:
@@ -562,18 +563,20 @@ class OdooInstance:
                 if secret_path is not None:
                     _write_secret_config(snapshot, secret_path)
                     secret_created = True
+                handle: ProcessHandle | None = None
                 try:
                     handle = context.spawn(step.step_id)
                     if self._environment_id is not None:
                         self._persist_runtime_identity(handle.pid, snapshot, resolved_cwd)
                     return wait_foreground(handle)
                 except BaseException:
-                    with contextlib.suppress(BaseException):
-                        terminate(
-                            handle,
-                            process_group_id=handle.process_group_id,
-                            timeout=5.0,
-                        )
+                    if handle is not None:
+                        with contextlib.suppress(BaseException):
+                            terminate(
+                                handle,
+                                process_group_id=handle.process_group_id,
+                                timeout=5.0,
+                            )
                     raise
                 finally:
                     self._clear_runtime_identity()

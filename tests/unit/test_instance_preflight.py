@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
-from odoo_instance_sdk.internal.proc import ProcessHandle, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    PreparedProcess,
+    PreparedStep,
+    ProcessHandle,
+    ProcessSpawnError,
+    RecordingExecutor,
+)
 from odoo_instance_sdk.models import PostgresClusterState, StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
@@ -146,10 +153,54 @@ def test_preflight_propagates_cluster_error() -> None:
 
 
 @pytest.mark.unit
+def test_start_readiness_failure_precedes_secret_write_and_spawn() -> None:
+    from odoo_instance_sdk.exceptions import PostgresClusterUnreachableError
+
+    cluster = _FakeCluster(raise_on_ensure=PostgresClusterUnreachableError("not ready"))
+    instance = _make_instance(cluster=cluster)
+    executor = _executor("instance.start")
+
+    with (
+        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
+        patch("odoo_instance_sdk.resources.instance._write_secret_config") as write_secret,
+        pytest.raises(PostgresClusterUnreachableError, match="not ready"),
+    ):
+        instance.start(StartConfig(db_password="private"))
+
+    assert executor.spawned == []
+    assert write_secret.call_count == 0
+    assert instance._client._processes == {}
+
+
+@pytest.mark.unit
+def test_foreground_spawn_failure_preserves_typed_error_and_cleans_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingExecutor(RecordingExecutor):
+        def spawn(self, step: PreparedProcess) -> ProcessHandle:
+            self.spawned.append(cast("PreparedStep", step))
+            raise ProcessSpawnError(step.argv, "spawn denied", duration=0.0)
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.tempfile.gettempdir", lambda: str(tmp_path)
+    )
+    executor = FailingExecutor()
+    instance = _make_instance()
+
+    with (
+        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
+        pytest.raises(ProcessSpawnError, match="spawn denied"),
+    ):
+        instance.run_foreground(StartConfig(db_password="private"))
+
+    assert len(executor.spawned) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.unit
 def test_preflight_event_precedes_foreground_shell_and_script_spawn() -> None:
     events: list[str] = []
     instance = _make_instance(cluster=_EventCluster(events))
-    from odoo_instance_sdk.internal.proc import PreparedProcess
 
     class EventExecutor(RecordingExecutor):
         def spawn(self, step: PreparedProcess) -> ProcessHandle:
