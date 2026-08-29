@@ -64,6 +64,9 @@ if TYPE_CHECKING:
         ExecutionPlan,
         JsonValue,
         ProcessStep,
+        canonical_plan_bytes,
+        canonical_plan_projection,
+        fingerprint_plan,
     )
     from odoo_instance_sdk.models import (
         AdminPasswordResetResult,
@@ -339,6 +342,12 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "ProcessStep": ("odoo_instance_sdk.execution", "ProcessStep"),
     "StalePlanError": ("odoo_instance_sdk.exceptions", "StalePlanError"),
     "UnplannedStepError": ("odoo_instance_sdk.exceptions", "UnplannedStepError"),
+    "canonical_plan_bytes": ("odoo_instance_sdk.execution", "canonical_plan_bytes"),
+    "canonical_plan_projection": (
+        "odoo_instance_sdk.execution",
+        "canonical_plan_projection",
+    ),
+    "fingerprint_plan": ("odoo_instance_sdk.execution", "fingerprint_plan"),
 }
 
 
@@ -483,6 +492,9 @@ __all__ = [
     "TestInstanceProjectConfig",
     "UnplannedStepError",
     "VscodeImportError",
+    "canonical_plan_bytes",
+    "canonical_plan_projection",
+    "fingerprint_plan",
 ]
 
 # Keep the export surface mechanically aligned with the lazy map as execution

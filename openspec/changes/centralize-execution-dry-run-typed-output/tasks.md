@@ -12,9 +12,9 @@
 - [x] 2.3 Extend the package-root lazy export map and compatibility tests for all new public execution names while preserving existing `__all__`, canonical object identity, caching, and unknown-attribute behavior.
 - [x] 2.4 Implement the private frozen executable-step/prepared-command representation with step identifiers, exact argv/cwd/env/stdin/timeout/mode values, operation runner callback, and a fresh per-run all/only-once consumption ledger so repeat and concurrent runs share no mutable consumption state.
 - [x] 2.5 Implement one field-aware redaction/projection function for argv, environment, stdin/scripts, observations, warnings, errors, and repr; test secrets in every field and argument-boundary preservation.
-- [ ] 2.6 Implement deterministic canonical plan serialization and fingerprinting over the redacted projection, excluding the fingerprint field; test stable ordering and prove private secret values never enter digest input.
-- [ ] 2.7 Add focused `Command[T]` tests proving configuration/ambient-input changes after construction cannot change preview or executor input; repeated and concurrent `.run()` calls use independent ledgers; unplanned, duplicated, or substituted requests fail before that requested child launches; and omitted steps fail at callback completion without asserting that earlier effects never ran.
-- [ ] 2.8 Extend MYL-67 fresh-interpreter tests so bare package import, `odcli --help`, and `odcli --version` do not load Expression, the execution implementation, or `internal.proc`, in addition to the existing forbidden modules.
+- [x] 2.6 Implement deterministic canonical plan serialization and fingerprinting over the redacted projection, excluding the fingerprint field; test stable ordering and prove private secret values never enter digest input.
+- [x] 2.7 Add focused `Command[T]` tests proving configuration/ambient-input changes after construction cannot change preview or executor input; repeated and concurrent `.run()` calls use independent ledgers; unplanned, duplicated, or substituted requests fail before that requested child launches; and omitted steps fail at callback completion without asserting that earlier effects never ran.
+- [x] 2.8 Extend MYL-67 fresh-interpreter tests so bare package import, `odcli --help`, and `odcli --version` do not load Expression, the execution implementation, or `internal.proc`, in addition to the existing forbidden modules.
 
 ## 3. Shared Process Boundary
 

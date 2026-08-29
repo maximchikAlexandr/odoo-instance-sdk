@@ -7,6 +7,8 @@ never become part of a public model or representation.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Sequence
 from typing import Generic, Protocol, TypeVar, cast
 
@@ -105,6 +107,39 @@ class ExecutionPlan(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_
     def process_steps(self) -> tuple[ProcessStep, ...]:
         return tuple(step for step in self.steps if isinstance(step, ProcessStep))
 
+    def with_fingerprint(self, *, secrets: Sequence[str] = ()) -> ExecutionPlan:
+        """Return this plan with its canonical redacted fingerprint attached."""
+
+        return msgspec.structs.replace(self, fingerprint=fingerprint_plan(self, secrets=secrets))
+
+
+def canonical_plan_projection(plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> JsonValue:
+    """Return the redacted plan value used as the digest's sole input."""
+
+    builtins = cast("dict[str, JsonValue]", msgspec.to_builtins(plan))
+    without_fingerprint = {key: value for key, value in builtins.items() if key != "fingerprint"}
+    from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
+    return redacted_projection(without_fingerprint, secrets=secrets, field="plan")
+
+
+def canonical_plan_bytes(plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> bytes:
+    """Serialize a redacted plan deterministically for hashing or comparison."""
+
+    projection = canonical_plan_projection(plan, secrets=secrets)
+    return json.dumps(
+        projection,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def fingerprint_plan(plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> str:
+    """Hash only canonical redacted plan data, excluding ``fingerprint`` itself."""
+
+    return hashlib.sha256(canonical_plan_bytes(plan, secrets=secrets)).hexdigest()
+
 
 T = TypeVar("T")
 
@@ -178,4 +213,7 @@ __all__ = [
     "ProcessStep",
     "StalePlanError",
     "UnplannedStepError",
+    "canonical_plan_bytes",
+    "canonical_plan_projection",
+    "fingerprint_plan",
 ]

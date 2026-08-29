@@ -79,7 +79,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # object expression while this snapshot remains stable if one annotation has
 # both forms (for example dict[str, Any] and an object-valued parameter).
 EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
-    "src/odoo_instance_sdk/__init__.py": frozenset({345}),
+    "src/odoo_instance_sdk/__init__.py": frozenset({354}),
     "src/odoo_instance_sdk/cli.py": frozenset(
         {62, 95, 99, 103, 328, 448, 449, 458, 519, 780, 781, 783}
     ),
@@ -251,7 +251,7 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
 
 
 PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {
-    "execution.py:Command.run": 156,
+    "execution.py:Command.run": 191,
     "internal/database_preparation.py:DatabasePreparationCoordinator.prepare": 703,
     "internal/database_preparation.py:DatabasePreparationCoordinator.refresh_database": 714,
     "internal/postgres_compose.py:SubprocessComposeRunner.run": 64,

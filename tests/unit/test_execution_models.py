@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import Barrier, Thread
 from typing import cast
 
 import msgspec
 import pytest
 
-from odoo_instance_sdk import ActionStep, Command, ExecutionPlan, JsonValue, ProcessStep
+from odoo_instance_sdk import (
+    ActionStep,
+    Command,
+    ExecutionPlan,
+    JsonValue,
+    ProcessStep,
+    canonical_plan_bytes,
+    canonical_plan_projection,
+    fingerprint_plan,
+)
 from odoo_instance_sdk.exceptions import (
     DuplicateStepError,
     OmittedStepError,
@@ -85,6 +95,45 @@ def test_stale_plan_error_has_typed_json_fields() -> None:
     assert error.details == {"expected": {"head": "abc"}, "actual": {"head": "def"}}
 
 
+def test_canonical_fingerprint_sorts_mapping_keys_but_preserves_step_order() -> None:
+    process = ProcessStep(
+        step_id="one", argv=("tool", "value"), display="tool value", executable="tool"
+    )
+    first = ExecutionPlan(
+        steps=(process, ActionStep(step_id="two", action="write", description="Write")),
+        observations=({"b": 2, "a": [True, None]},),
+    )
+    reordered_mapping = ExecutionPlan(
+        steps=(process, ActionStep(step_id="two", action="write", description="Write")),
+        observations=({"a": [True, None], "b": 2},),
+    )
+    reordered_steps = ExecutionPlan(
+        steps=(ActionStep(step_id="two", action="write", description="Write"), process),
+        observations=({"a": [True, None], "b": 2},),
+    )
+
+    assert fingerprint_plan(first) == fingerprint_plan(reordered_mapping)
+    assert fingerprint_plan(first) != fingerprint_plan(reordered_steps)
+    assert b"fingerprint" not in canonical_plan_bytes(first)
+    projection = canonical_plan_projection(first)
+    assert isinstance(projection, dict)
+    assert "fingerprint" not in projection
+
+
+def test_fingerprint_uses_redacted_projection_and_ignores_private_secret_values() -> None:
+    first_private = PreparedStep(step_id="secret", argv=("tool", "alpha"), secret_values=("alpha",))
+    second_private = PreparedStep(step_id="secret", argv=("tool", "beta"), secret_values=("beta",))
+    first_plan = ExecutionPlan(steps=(first_private.public_projection(),))
+    second_plan = ExecutionPlan(steps=(second_private.public_projection(),))
+
+    assert first_plan.steps == second_plan.steps
+    assert fingerprint_plan(first_plan, secrets=("alpha",)) == fingerprint_plan(
+        second_plan, secrets=("beta",)
+    )
+    assert "alpha" not in canonical_plan_bytes(first_plan, secrets=("alpha",)).decode()
+    assert "beta" not in canonical_plan_bytes(second_plan, secrets=("beta",)).decode()
+
+
 def test_command_repeat_runs_use_independent_ledgers_and_safe_repr() -> None:
     executor = RecordingExecutor()
     private = _prepared(executor)
@@ -105,6 +154,84 @@ def test_command_repeat_runs_use_independent_ledgers_and_safe_repr() -> None:
     encoded = msgspec.to_builtins(command)
     assert encoded == {"plan": msgspec.to_builtins(command.plan)}
     assert "_prepared" not in repr(encoded)
+
+
+def test_concurrent_command_runs_use_independent_ledgers() -> None:
+    executor = RecordingExecutor()
+    private = _prepared(executor)
+    barrier = Barrier(2)
+
+    def callback(context: RunContext[str]) -> str:
+        barrier.wait(timeout=2)
+        return context.process("child")
+
+    command: Command[str] = Command.create(
+        ExecutionPlan(steps=(private.public_projection(),)),
+        callback,
+        (private,),
+        executor=executor,
+    )
+    results: list[str] = []
+    threads = [Thread(target=lambda: results.append(command.run())) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert results == ["quoted value", "quoted value"]
+    assert len(executor.argvs) == 2
+
+
+def test_command_snapshot_does_not_follow_mutated_inputs_after_construction() -> None:
+    executor = RecordingExecutor()
+    argv = ["tool", "before"]
+    private = PreparedStep(step_id="child", argv=tuple(argv))
+    public = private.public_projection()
+    command: Command[str] = Command.create(
+        ExecutionPlan(steps=(public,)),
+        lambda context: context.process("child"),
+        (private,),
+        executor=executor,
+    )
+    argv[1] = "after"
+
+    assert command.plan.steps == (public,)
+    assert command.run() == "before"
+    assert executor.argvs == [("tool", "before")]
+
+
+def test_unplanned_or_duplicate_requests_do_not_launch_requested_child() -> None:
+    executor = RecordingExecutor()
+    private = PreparedStep(step_id="child", argv=("tool", "value"))
+    plan = ExecutionPlan(
+        steps=(
+            ProcessStep(
+                step_id="child", argv=("tool", "value"), display="tool value", executable="tool"
+            ),
+        )
+    )
+    unplanned: Command[str] = Command.create(
+        plan,
+        cast("Callable[[RunContext[str]], str]", lambda context: context.process("substituted")),
+        (private,),
+        executor=executor,
+    )
+    with pytest.raises(UnplannedStepError):
+        unplanned.run()
+    assert executor.argvs == []
+
+    duplicate: Command[str] = Command.create(
+        plan,
+        cast(
+            "Callable[[RunContext[str]], str]",
+            lambda context: (context.process("child"), context.process("child")),
+        ),
+        (private,),
+        executor=executor,
+    )
+    with pytest.raises(DuplicateStepError):
+        duplicate.run()
+    assert executor.argvs == [("tool", "value")]
 
 
 @pytest.mark.parametrize(
