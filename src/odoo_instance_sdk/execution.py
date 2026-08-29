@@ -28,6 +28,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResult,
     RunContext,
     Step,
+    _PrivateCommandProjection,
     prepared_command,
 )
 
@@ -147,6 +148,9 @@ T = TypeVar("T")
 class _StoredCommand(Protocol):
     def run(self) -> ProcessResult: ...
 
+    @property
+    def private_projection(self) -> _PrivateCommandProjection | None: ...
+
 
 _COMMANDS: dict[int, _StoredCommand] = {}
 
@@ -170,6 +174,7 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
         steps: Sequence[Step] = (),
         *,
         executor: ProcessExecutor | None = None,
+        private_projection: _PrivateCommandProjection | None = None,
     ) -> Command[T]:
         """Create a command for resource implementations and focused tests.
 
@@ -179,7 +184,12 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
 
         return cls.from_prepared(
             plan,
-            prepared_command(callback, steps, executor=executor),
+            prepared_command(
+                callback,
+                steps,
+                executor=executor,
+                private_projection=private_projection,
+            ),
         )
 
     @property
@@ -195,6 +205,11 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
         if prepared is None:
             raise PlanError("command has no prepared executable snapshot")
         return cast("T", prepared.run())
+
+    def _private_projection(self) -> _PrivateCommandProjection | None:
+        """Read resource compatibility data without exposing it publicly."""
+        prepared = _COMMANDS.get(id(self))
+        return prepared.private_projection if prepared is not None else None
 
     def __del__(self) -> None:
         _COMMANDS.pop(id(self), None)

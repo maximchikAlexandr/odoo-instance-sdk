@@ -198,19 +198,12 @@ class _PlanningOutcome:
     error: _PlanningError | None = None
 
 
-# ``Command`` deliberately serializes only its execution plan.  Checkout also
-# has a long-standing domain-plan projection, so keep that projection beside
-# the private prepared command without adding it (or the callback) to the
-# public command model.
-_CHECKOUT_PUBLIC_PLANS: dict[int, EnvironmentCheckoutPlan] = {}
-
-
 def _checkout_public_plan(command: Command[DevelopmentEnvironment]) -> EnvironmentCheckoutPlan:
-    """Read the domain projection captured alongside one command."""
-    plan = _CHECKOUT_PUBLIC_PLANS.get(id(command))
-    if plan is None:
+    """Read the domain projection captured inside one private command."""
+    projection = command._private_projection()
+    if not isinstance(projection, EnvironmentCheckoutPlan):
         raise PlanError("checkout command has no captured domain plan")
-    return plan
+    return projection
 
 
 class _ExpressionResult(Protocol):
@@ -631,6 +624,7 @@ class EnvironmentResource:
             lambda context: self._run_checkout_snapshot(context, snapshot),
             _checkout_steps(snapshot.private),
             executor=executor or SubprocessExecutor(),
+            private_projection=snapshot.public,
         )
         return Command.from_prepared(snapshot.execution_plan, prepared)
 
@@ -737,9 +731,7 @@ class EnvironmentResource:
     ) -> Command[DevelopmentEnvironment]:
         """Capture checkout inputs once and return the inspectable command."""
         snapshot = self._build_checkout_snapshot(project, branch, options=options)
-        command = self._command_from_snapshot(snapshot)
-        _CHECKOUT_PUBLIC_PLANS[id(command)] = snapshot.public
-        return command
+        return self._command_from_snapshot(snapshot)
 
     def checkout_with_plan(
         self,
@@ -751,7 +743,6 @@ class EnvironmentResource:
         """Execute checkout and return its final secret-free typed plan."""
         snapshot = self._build_checkout_execution_snapshot(project, branch, options=options)
         command = self._command_from_snapshot(snapshot)
-        _CHECKOUT_PUBLIC_PLANS[id(command)] = snapshot.public
         environment = command.run()
         return EnvironmentCheckoutResult(
             environment=environment,
@@ -767,7 +758,6 @@ class EnvironmentResource:
     ) -> DevelopmentEnvironment:
         snapshot = self._build_checkout_execution_snapshot(project, branch, options=options)
         command = self._command_from_snapshot(snapshot)
-        _CHECKOUT_PUBLIC_PLANS[id(command)] = snapshot.public
         return command.run()
 
     def _revalidate_checkout_locked(self, catalog: object, plan: _CheckoutPlan) -> None:

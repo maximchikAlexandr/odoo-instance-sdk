@@ -32,6 +32,10 @@ class ProcessResultLike(Protocol):
     def __repr__(self) -> str: ...
 
 
+class _PrivateCommandProjection(Protocol):
+    """Typed marker for resource compatibility data kept off public commands."""
+
+
 class ProcessExecutor(Protocol):
     def execute(self, step: PreparedProcess) -> ProcessResultLike:
         """Execute one already-captured step."""
@@ -121,6 +125,7 @@ class PreparedCommand(Generic[T]):
     callback: Callback[T]
     steps: tuple[Step, ...]
     executor: ProcessExecutor
+    private_projection: _PrivateCommandProjection | None = None
 
     def run(self) -> T:
         context: RunContext[T] = RunContext(self.steps, self.executor)
@@ -134,6 +139,7 @@ def prepared_command(
     steps: Sequence[Step] = (),
     *,
     executor: ProcessExecutor | None = None,
+    private_projection: _PrivateCommandProjection | None = None,
 ) -> PreparedCommand[T]:
     frozen_steps = tuple(steps)
     identifiers = [step.step_id for step in frozen_steps]
@@ -142,7 +148,12 @@ def prepared_command(
             identifier for identifier in identifiers if identifiers.count(identifier) > 1
         )
         raise DuplicateStepError(duplicate)
-    return PreparedCommand(callback, frozen_steps, executor or _NullExecutor())
+    return PreparedCommand(
+        callback,
+        frozen_steps,
+        executor or _NullExecutor(),
+        private_projection,
+    )
 
 
 __all__ = [

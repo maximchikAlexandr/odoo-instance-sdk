@@ -128,7 +128,7 @@ def env_checkout(
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     try:
-        from odoo_instance_sdk.execution import Command
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
         from odoo_instance_sdk.resources.environment import (
             EnvironmentCheckoutOptions,
             _checkout_public_plan,
@@ -151,8 +151,10 @@ def env_checkout(
         command = client.environments.checkout_command(project_path, branch, options=options)
         if isinstance(command, Command):
             plan = _checkout_public_plan(command)
-            result = (
-                plan if dry_run else EnvironmentCheckoutResult(environment=command.run(), plan=plan)
+            result: ExecutionPlan | EnvironmentCheckoutResult = (
+                command.plan
+                if dry_run
+                else EnvironmentCheckoutResult(environment=command.run(), plan=plan)
             )
         else:
             # Keep compatibility with lightweight third-party resource doubles
@@ -187,17 +189,18 @@ def env_checkout(
             mode=output_mode,
         )
     else:
-        if dry_run:
+        checkout_db_mode: EnvironmentDatabaseMode | None = None
+        if isinstance(result, ExecutionPlan):
             _print_plan("Checkout plan", model_to_dict(result))
+        elif isinstance(result, EnvironmentCheckoutPlan):
+            _print_plan("Checkout plan", model_to_dict(result))
+            checkout_db_mode = result.db_mode
         else:
             assert isinstance(result, EnvironmentCheckoutResult)
             rendered = result.environment
             rich_print(f"Environment {rendered.name} ({rendered.id}) state={rendered.state}")
             _print_plan("Checkout plan", model_to_dict(result.plan))
-        db_mode = (
-            result.db_mode if isinstance(result, EnvironmentCheckoutPlan) else result.plan.db_mode
-        )
-        if db_mode == EnvironmentDatabaseMode.SHARED:
+        if checkout_db_mode == EnvironmentDatabaseMode.SHARED:
             rich_print("Warning: code/process isolated, DB and filestore are NOT.")
 
 
