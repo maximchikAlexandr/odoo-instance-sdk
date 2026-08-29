@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
@@ -117,21 +118,53 @@ class PreparedAction:
 
 Step = PreparedStep | PreparedAction
 T = TypeVar("T")
+_ACTIVE_CONTEXT: ContextVar[RunContext[PrivateJsonValue] | None] = ContextVar(
+    "odoo_sdk_active_run_context", default=None
+)
 
 
 class RunContext(Generic[T]):
     """Mutable only for one invocation of a command."""
 
-    def __init__(self, steps: tuple[Step, ...], executor: ProcessExecutor) -> None:
+    def __init__(
+        self, steps: tuple[Step, ...], executor: ProcessExecutor, *, strict: bool = False
+    ) -> None:
         self._steps = {step.step_id: step for step in steps}
         self._executor = executor
+        self._strict = strict
         self._consumed: set[str] = set()
+        self._results: dict[str, ProcessResultLike] = {}
 
     def process(self, step_id: str) -> T:
         step = self._consume(step_id)
         if not isinstance(step, PreparedStep):
             raise UnplannedStepError(step_id, reason="requested step is not a process")
-        return cast("T", self._executor.execute(step))
+        result = self._executor.execute(step)
+        self._results[step_id] = result
+        return cast("T", result)
+
+    def process_prepared(self, requested: PreparedStep) -> ProcessResultLike:
+        """Consume the captured step matching a collector's exact argv."""
+        for step_id, step in self._steps.items():
+            if (
+                isinstance(step, PreparedStep)
+                and step.argv == requested.argv
+                and step_id not in self._consumed
+            ):
+                self._consumed.add(step_id)
+                result = self._executor.execute(step)
+                self._results[step_id] = result
+                return result
+        if any(
+            isinstance(step, PreparedStep) and step.argv == requested.argv
+            for step in self._steps.values()
+        ):
+            raise DuplicateStepError(requested.step_id)
+        if not self._strict:
+            from .executor import SubprocessExecutor
+
+            return SubprocessExecutor().execute(requested)
+        raise UnplannedStepError(requested.step_id)
 
     def spawn(self, step_id: str) -> ProcessHandle:
         step = self._consume(step_id)
@@ -169,6 +202,23 @@ class RunContext(Generic[T]):
         if omitted:
             raise OmittedStepError(omitted)
 
+    def skip_remaining(self) -> None:
+        """Account for optional captured probes that a collector did not need."""
+        self._consumed.update(
+            step_id for step_id, step in self._steps.items() if isinstance(step, PreparedStep)
+        )
+
+    @property
+    def results(self) -> Mapping[str, ProcessResultLike]:
+        """Results captured by this invocation, keyed by private step ID."""
+        return self._results
+
+
+def active_context() -> RunContext[PrivateJsonValue] | None:
+    """Return the command context active on this execution thread."""
+
+    return _ACTIVE_CONTEXT.get()
+
 
 Callback = Callable[[RunContext[T]], T]
 
@@ -179,12 +229,17 @@ class PreparedCommand(Generic[T]):
     steps: tuple[Step, ...]
     executor: ProcessExecutor
     private_projection: _PrivateCommandProjection | None = None
+    strict: bool = False
 
     def run(self) -> T:
-        context: RunContext[T] = RunContext(self.steps, self.executor)
-        result = self.callback(context)
-        context.complete()
-        return result
+        context: RunContext[T] = RunContext(self.steps, self.executor, strict=self.strict)
+        token = _ACTIVE_CONTEXT.set(cast("RunContext[PrivateJsonValue]", context))
+        try:
+            result = self.callback(context)
+            context.complete()
+            return result
+        finally:
+            _ACTIVE_CONTEXT.reset(token)
 
 
 def prepared_command(
@@ -193,6 +248,7 @@ def prepared_command(
     *,
     executor: ProcessExecutor | None = None,
     private_projection: _PrivateCommandProjection | None = None,
+    strict: bool = False,
 ) -> PreparedCommand[T]:
     frozen_steps = tuple(steps)
     identifiers = [step.step_id for step in frozen_steps]
@@ -206,6 +262,7 @@ def prepared_command(
         frozen_steps,
         executor or _NullExecutor(),
         private_projection,
+        strict,
     )
 
 
@@ -224,6 +281,7 @@ __all__ = [
     "RecordingExecutor",
     "RunContext",
     "SubprocessExecutor",
+    "active_context",
     "owned_handle",
     "prepared_command",
     "prepared_step",

@@ -241,6 +241,11 @@ def run_captured(
         timeout=timeout,
         text=text,
     )
+    from . import active_context
+
+    context = active_context()
+    if context is not None:
+        return cast("ProcessResult", context.process_prepared(step))
     return SubprocessExecutor().execute(step)
 
 
@@ -269,6 +274,11 @@ def run_captured_limited(  # noqa: C901
         timeout=timeout,
         text=False,
     )
+    from . import active_context
+
+    context = active_context()
+    if context is not None:
+        return cast("ProcessResult", context.process_prepared(step))
     started = time.perf_counter()
     try:
         process = subprocess.Popen(

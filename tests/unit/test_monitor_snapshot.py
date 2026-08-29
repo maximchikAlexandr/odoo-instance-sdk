@@ -14,6 +14,7 @@ import pytest
 
 from odoo_instance_sdk.exceptions import MonitorError
 from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.process_metrics import ProcessTreeResult
 from odoo_instance_sdk.models import (
     ClusterContainer,
@@ -21,6 +22,7 @@ from odoo_instance_sdk.models import (
     ClusterResourceSnapshot,
     GitActivity,
     GitActivityState,
+    GitDiff,
     PidScope,
     PostgresClusterState,
     RuntimeState,
@@ -672,6 +674,120 @@ def test_snapshot_command_is_immutable_and_snapshot_delegates_once(
     assert monitor.snapshot("project-1", include_removed=True) == expected
     assert command.plan == original_plan
     assert calls == [("project-1", True), ("project-1", True)]
+
+
+def test_snapshot_command_records_each_catalog_process_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (tmp_path / "cache").mkdir()
+    (tmp_path / "artifacts").mkdir()
+    config = tmp_path / "odoo.conf"
+    config.write_text("", encoding="utf-8")
+    lock = tmp_path / "requirements.lock"
+    lock.write_text("", encoding="utf-8")
+    _seed_env(
+        catalog,
+        _make_env(
+            env_id,
+            worktree_path=str(worktree),
+            generated_config_path=str(config),
+            dependency_lock_path=str(lock),
+        ),
+    )
+    catalog.close()
+
+    executor = RecordingExecutor(
+        result_factory=lambda step: ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout=(
+                "abcdef0123456789"
+                if step.step_id.endswith("git.head")
+                else "feature"
+                if step.step_id.endswith("git.branch")
+                else "fedcba9876543210"
+                if step.step_id.endswith("git.upstream")
+                else "fedcba9876543210"
+                if step.step_id.endswith("git.local_main")
+                else "base123"
+                if step.step_id.endswith("git.upstream_merge_base")
+                else "2"
+                if step.step_id.endswith("git.upstream_ahead")
+                else "1"
+                if step.step_id.endswith("git.upstream_behind")
+                else "3\t4\tfile.py\n"
+                if step.step_id.endswith("git.upstream_diff")
+                else "42\t/tmp/worktree"
+                if step.step_id.endswith("storage.worktree")
+                else "5\t/tmp/cache"
+                if step.step_id.endswith("storage.cache")
+                else "7\t/tmp/artifacts"
+                if step.step_id.endswith("storage.artifacts")
+                else "17"
+                if step.step_id.endswith("postgres.identity")
+                else "[]"
+            ),
+            stderr="",
+            duration=0.0,
+            cwd=cast("PreparedStep", step).cwd,
+            environment=cast("PreparedStep", step).environment,
+        )
+    )
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3", _executor=executor)
+
+    command = monitor.snapshot_command()
+    process_ids = tuple(step.step_id for step in command.plan.process_steps)
+    assert process_ids[:3] == (
+        f"monitor.{env_id}.git.head",
+        f"monitor.{env_id}.storage.worktree",
+        f"monitor.{env_id}.postgres.identity",
+    )
+    assert any(step_id.startswith("monitor.project_") for step_id in process_ids)
+    snapshot = command.run()
+    assert snapshot.environments[0].git.head_sha == "abcdef0123456789"
+    assert snapshot.environments[0].git.branch == "feature"
+    assert snapshot.environments[0].git.ahead == 2
+    assert snapshot.environments[0].git.behind == 1
+    assert snapshot.environments[0].git.diff == GitDiff(added=3, deleted=4)
+    assert snapshot.environments[0].storage.worktree_bytes == 42
+    assert snapshot.environments[0].storage.total_bytes == 54
+    assert snapshot.environments[0].storage.other_files_bytes == 12
+    assert tuple(step.step_id for step in executor.executed) == process_ids
+
+
+def test_snapshot_command_failed_git_and_docker_probes_are_not_retried(
+    tmp_path: Path,
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _seed_env(catalog, _make_env(env_id, worktree_path=str(worktree)))
+    catalog.close()
+
+    executor = RecordingExecutor(
+        result_factory=lambda step: ProcessResult(
+            argv=step.argv,
+            returncode=127 if ".git." in step.step_id or ".docker." in step.step_id else 0,
+            stdout="",
+            stderr="probe failed",
+            duration=0.0,
+            cwd=cast("PreparedStep", step).cwd,
+            environment=cast("PreparedStep", step).environment,
+        )
+    )
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3", _executor=executor)
+    command = monitor.snapshot_command()
+    process_ids = tuple(step.step_id for step in command.plan.process_steps)
+
+    snapshot = command.run()
+
+    assert snapshot.environments[0].git.state is GitActivityState.ORPHAN
+    assert tuple(step.step_id for step in executor.executed) == process_ids
 
 
 def test_watch_builds_a_fresh_snapshot_command_per_tick(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -18,8 +18,8 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/backup_validation.py", 85),
         ("src/odoo_instance_sdk/internal/pgadmin_files.py", 432),
         ("src/odoo_instance_sdk/internal/pgadmin_files.py", 462),
-        ("src/odoo_instance_sdk/internal/postgres_compose.py", 71),
-        ("src/odoo_instance_sdk/internal/postgres_transport.py", 64),
+        ("src/odoo_instance_sdk/internal/postgres_compose.py", 85),
+        ("src/odoo_instance_sdk/internal/postgres_transport.py", 79),
     }
 )
 
@@ -36,7 +36,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 167),
         ("src/odoo_instance_sdk/commands/output.py", 169),
         ("src/odoo_instance_sdk/commands/output.py", 200),
-        ("src/odoo_instance_sdk/commands/test.py", 176),
+        ("src/odoo_instance_sdk/commands/test.py", 180),
         ("src/odoo_instance_sdk/resources/instance.py", 627),
     }
 )
@@ -48,7 +48,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 169): "shared JSON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 200): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/commands/env.py", 345): "existing Rich live inventory transport",
-    ("src/odoo_instance_sdk/commands/test.py", 176): "operation diagnostic transport",
+    ("src/odoo_instance_sdk/commands/test.py", 180): "operation diagnostic transport",
     ("src/odoo_instance_sdk/cli.py", 539): "native run port-conflict diagnostic",
     ("src/odoo_instance_sdk/cli.py", 567): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/cli.py", 568): "documented logs JSONL transport",
@@ -95,7 +95,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
         }
     ),
     "src/odoo_instance_sdk/commands/test.py": frozenset(
-        {58, 59, 83, 84, 86, 100, 116, 117, 118, 142, 146, 179, 186, 187, 188, 354, 355}
+        {62, 63, 87, 88, 90, 104, 120, 121, 122, 146, 150, 183, 190, 191, 192, 374, 375}
     ),
     "src/odoo_instance_sdk/exceptions.py": frozenset({250, 251}),
     "src/odoo_instance_sdk/http/app.py": frozenset({52, 68, 86}),
@@ -103,7 +103,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
         {33, 39, 49, 51, 66, 74, 82, 119, 143, 157, 188, 224, 228, 231}
     ),
     "src/odoo_instance_sdk/internal/automation.py": frozenset(
-        {35, 85, 225, 229, 413, 422, 524, 527, 583}
+        {36, 192, 332, 336, 619, 628, 730, 733, 789}
     ),
     "src/odoo_instance_sdk/internal/cluster_resources.py": frozenset(
         {92, 93, 106, 124, 125, 143, 193, 205, 396, 422, 423}
@@ -151,7 +151,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
     "src/odoo_instance_sdk/internal/pgadmin_files.py": frozenset({158, 312}),
     "src/odoo_instance_sdk/internal/pgadmin_readiness.py": frozenset({14}),
     "src/odoo_instance_sdk/internal/port_allocation.py": frozenset({118}),
-    "src/odoo_instance_sdk/internal/postgres_compose.py": frozenset({99, 336, 355}),
+    "src/odoo_instance_sdk/internal/postgres_compose.py": frozenset({113, 350, 369}),
     "src/odoo_instance_sdk/internal/process_metrics.py": frozenset({24, 39}),
     "src/odoo_instance_sdk/internal/server.py": frozenset({318}),
     "src/odoo_instance_sdk/internal/vscode_generate.py": frozenset({20, 92}),
@@ -236,7 +236,7 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {
     "execution.py:Command.run": 201,
     "internal/database_preparation.py:DatabasePreparationCoordinator.prepare": 703,
     "internal/database_preparation.py:DatabasePreparationCoordinator.refresh_database": 714,
-    "internal/postgres_compose.py:SubprocessComposeRunner.run": 64,
+    "internal/postgres_compose.py:SubprocessComposeRunner.run": 67,
     "resources/backup.py:BackupResource.delete": 83,
     "resources/backup.py:BackupResource.validate": 118,
     "resources/database.py:DatabaseResource.exists": 227,
@@ -262,10 +262,10 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {
     "resources/instance.py:OdooInstance.shell_command": 649,
     "resources/instance.py:OdooInstance.run_shell_script": 696,
     "resources/instance.py:OdooInstance.run_shell_script_command": 708,
-    "resources/instance.py:OdooInstance.stop": 853,
-    "resources/monitor.py:EnvironmentMonitor.snapshot": 220,
-    "resources/monitor.py:EnvironmentMonitor.snapshot_command": 224,
-    "resources/monitor.py:EnvironmentMonitor.watch": 417,
+    "resources/instance.py:OdooInstance.stop": 864,
+    "resources/monitor.py:EnvironmentMonitor.snapshot": 317,
+    "resources/monitor.py:EnvironmentMonitor.snapshot_command": 321,
+    "resources/monitor.py:EnvironmentMonitor.watch": 818,
     "resources/postgres.py:PostgresCluster.resolve_image_digest": 212,
     "resources/postgres.py:PostgresCluster.approve_image": 218,
     "resources/postgres.py:PostgresCluster.status": 296,

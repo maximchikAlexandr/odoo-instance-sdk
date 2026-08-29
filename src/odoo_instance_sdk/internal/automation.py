@@ -10,9 +10,9 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
-from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.exceptions import ConfigError, StalePlanError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
@@ -20,11 +20,12 @@ from odoo_instance_sdk.models import CommandResult, OdooTestResult, OdooTestSpec
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command
-    from odoo_instance_sdk.internal.proc import RunContext
+    from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 _MODULE_MANIFEST_RE = re.compile(r"^\s*(?:\{|['\"]info['\"]\s*[:=]\s*\{)", re.MULTILINE)
 _SUBPROCESS_COMPAT = subprocess
+_PreflightT = TypeVar("_PreflightT")
 
 
 @dataclass(slots=True)
@@ -33,6 +34,112 @@ class ShellOutcome:
     stdout: str
     stderr: str
     payload: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class TestCommandSnapshot:
+    """Immutable selection/provenance facts captured before test execution."""
+
+    worktree: Path | None
+    git_head: str | None
+    git_base: str | None
+    changed_files: tuple[str, ...]
+    modules: tuple[str, ...]
+    database_names: tuple[str, ...]
+    database_identity: tuple[str | None, int | None, str | None]
+    interface: str
+    port: int
+
+
+def _test_command_preflight(  # noqa: C901
+    snapshot: TestCommandSnapshot,
+    instance: OdooInstance,
+    spec: OdooTestSpec,
+) -> Callable[[RunContext[_PreflightT]], None]:
+    """Return the no-mutation validation for a captured Odoo test command."""
+
+    def validate(context: RunContext[_PreflightT]) -> None:  # noqa: C901
+        config = instance.config
+        current_start = config.start_config
+        current_interface = (
+            current_start.http_interface if current_start is not None else snapshot.interface
+        )
+        current_port = current_start.http_port if current_start is not None else snapshot.port
+        if current_interface != snapshot.interface or current_port != snapshot.port:
+            raise StalePlanError(
+                "captured test port/interface changed",
+                expected=f"{snapshot.interface}:{snapshot.port}",
+                actual=f"{current_interface}:{current_port}",
+            )
+        address_state = probe_address(snapshot.interface, snapshot.port)
+        if address_state is not AddressState.FREE:
+            raise StalePlanError(
+                "captured test port state changed",
+                expected="free",
+                actual=str(address_state),
+            )
+        current_databases = tuple(config.configured_database_names)
+        if current_databases != snapshot.database_names:
+            raise StalePlanError(
+                "captured test database identity changed",
+                expected=list(snapshot.database_names),
+                actual=list(current_databases),
+            )
+        current_identity = (config.db_host, config.db_port, config.db_user)
+        if current_identity != snapshot.database_identity:
+            raise StalePlanError(
+                "captured test database connection identity changed",
+                expected=list(snapshot.database_identity),
+                actual=list(current_identity),
+            )
+        if tuple(spec.modules) != snapshot.modules:
+            raise StalePlanError(
+                "captured test module selection changed",
+                expected=list(snapshot.modules),
+                actual=list(spec.modules),
+            )
+
+        if snapshot.worktree is not None and snapshot.git_head is not None:
+            captured = cast("ProcessResult", context.process("odoo.tests.provenance.git"))
+            actual = "" if captured.stdout is None else str(captured.stdout).strip()
+            if captured.returncode != 0 or actual != snapshot.git_head:
+                raise StalePlanError(
+                    "captured test Git revision changed",
+                    expected=snapshot.git_head,
+                    actual=actual,
+                )
+            if snapshot.changed_files and snapshot.git_base is not None:
+                selection_result = cast(
+                    "ProcessResult", context.process("odoo.tests.provenance.selection")
+                )
+                selected = tuple(
+                    sorted(
+                        line.strip()
+                        for line in str(selection_result.stdout or "").splitlines()
+                        if line.strip()
+                    )
+                )
+                expected = tuple(sorted(snapshot.changed_files))
+                if selection_result.returncode != 0 or selected != expected:
+                    raise StalePlanError(
+                        "captured changed-file selection changed",
+                        expected=list(expected),
+                        actual=list(selected),
+                    )
+        if snapshot.database_names and len(snapshot.database_names) == 1:
+            modules_result = cast("ProcessResult", context.process("odoo.tests.provenance.modules"))
+            module_output = "" if modules_result.stdout is None else str(modules_result.stdout)
+            installed = tuple(
+                sorted(line.strip() for line in module_output.splitlines() if line.strip())
+            )
+            if modules_result.returncode != 0 or installed != tuple(sorted(snapshot.modules)):
+                raise StalePlanError(
+                    "captured installed-module selection changed",
+                    expected=list(snapshot.modules),
+                    actual=list(installed),
+                )
+
+    return validate
 
 
 def _safe_stderr(value: str) -> str:
@@ -286,12 +393,13 @@ def run_odoo_tests(
     )
 
 
-def run_odoo_tests_command(
+def run_odoo_tests_command(  # noqa: C901
     instance: OdooInstance,
     spec: OdooTestSpec,
     *,
     http_interface: str | None = None,
     http_port: int | None = None,
+    selection_snapshot: TestCommandSnapshot | None = None,
     compatibility_runner: Callable[..., tuple[OdooTestResult, str | None]] | None = None,
 ) -> Command[tuple[OdooTestResult, str | None]]:
     """Capture the native Odoo test shell as one inspectable command."""
@@ -349,11 +457,109 @@ def run_odoo_tests_command(
 
         return Command.create(ExecutionPlan(), compatibility_callback)
 
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    captured_snapshot = selection_snapshot or TestCommandSnapshot(
+        worktree=None,
+        git_head=None,
+        git_base=None,
+        changed_files=(),
+        modules=tuple(spec.modules),
+        database_names=tuple(instance.config.configured_database_names),
+        database_identity=(
+            instance.config.db_host,
+            instance.config.db_port,
+            instance.config.db_user,
+        ),
+        interface=resolved_interface,
+        port=resolved_port,
+    )
+    provenance_steps: list[PreparedStep] = []
+    if captured_snapshot.worktree is not None and captured_snapshot.git_head is not None:
+        provenance_steps.append(
+            PreparedStep(
+                step_id="odoo.tests.provenance.git",
+                argv=(
+                    "git",
+                    "-C",
+                    str(captured_snapshot.worktree),
+                    "rev-parse",
+                    "--verify",
+                    "HEAD",
+                ),
+                cwd=str(captured_snapshot.worktree),
+                read_only=True,
+                text=True,
+            )
+        )
+        if captured_snapshot.changed_files and captured_snapshot.git_base is not None:
+            provenance_steps.append(
+                PreparedStep(
+                    step_id="odoo.tests.provenance.selection",
+                    argv=(
+                        "git",
+                        "-C",
+                        str(captured_snapshot.worktree),
+                        "diff",
+                        "--name-only",
+                        f"{captured_snapshot.git_base}..HEAD",
+                        "--",
+                    ),
+                    cwd=str(captured_snapshot.worktree),
+                    read_only=True,
+                    text=True,
+                )
+            )
+    if captured_snapshot.database_names and len(captured_snapshot.database_names) == 1:
+        database = captured_snapshot.database_names[0]
+        query = (
+            "SELECT name FROM ir_module_module WHERE state = 'installed' AND name IN ("
+            + ", ".join(
+                f"'{module.replace(chr(39), chr(39) + chr(39))}'" for module in spec.modules
+            )
+            + ") ORDER BY name"
+        )
+        instance_config = instance.config
+        module_environment: tuple[tuple[str, str], ...] = ()
+        if instance_config.db_password is not None:
+            module_environment = (("PGPASSWORD", instance_config.db_password),)
+        module_argv = ["psql", "-X", "-w"]
+        if instance_config.db_host is not None:
+            module_argv.extend(("-h", instance_config.db_host))
+        module_argv.extend(
+            [
+                "-p",
+                str(instance_config.db_port or 5432),
+                "-U",
+                instance_config.db_user or "",
+                "-d",
+                database,
+                "-t",
+                "-A",
+                "-c",
+                query,
+            ]
+        )
+        provenance_steps.append(
+            PreparedStep(
+                step_id="odoo.tests.provenance.modules",
+                argv=tuple(module_argv),
+                environment=module_environment,
+                secret_values=(instance_config.db_password,)
+                if instance_config.db_password is not None
+                else (),
+                read_only=True,
+                text=True,
+            )
+        )
+
     return instance._shell_script_command(
         _test_runner_source(spec.modules, spec.test_tags, spec.reload_tests),
         commit=False,
         exclusive=True,
         result_converter=convert,
+        preflight=_test_command_preflight(captured_snapshot, instance, spec),
+        extra_steps=tuple(provenance_steps),
     )
 
 

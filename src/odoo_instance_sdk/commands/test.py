@@ -20,7 +20,11 @@ from odoo_instance_sdk.commands.output import (
     sanitize_diagnostic,
 )
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.internal.automation import run_odoo_tests, run_odoo_tests_command
+from odoo_instance_sdk.internal.automation import (
+    TestCommandSnapshot,
+    run_odoo_tests,
+    run_odoo_tests_command,
+)
 from odoo_instance_sdk.internal.test_selection import (
     _ChangedSelectionError,
     _TestSelection,
@@ -297,6 +301,21 @@ def test_command(
                 spec,
                 http_interface=env_obj.http_interface,
                 http_port=env_obj.http_port,
+                selection_snapshot=TestCommandSnapshot(
+                    worktree=Path(env_obj.worktree_path),
+                    git_head=getattr(plan, "head", None),
+                    git_base=getattr(plan, "resolved_base", None),
+                    changed_files=tuple(plan.changed_files),
+                    modules=tuple(plan.modules),
+                    database_names=tuple(getattr(instance.config, "configured_database_names", ())),
+                    database_identity=(
+                        getattr(instance.config, "db_host", None),
+                        getattr(instance.config, "db_port", None),
+                        getattr(instance.config, "db_user", None),
+                    ),
+                    interface=env_obj.http_interface,
+                    port=env_obj.http_port,
+                ),
                 compatibility_runner=run_odoo_tests,
             )
             if dry_run:
@@ -304,7 +323,8 @@ def test_command(
                 result["dry_run"] = True
                 _emit_result(mode=mode, command="test", result=result, dry_run=True)
                 raise click.exceptions.Exit(0)  # noqa: TRY301
-            preflight_installed_modules(instance, spec.modules)
+            if not hasattr(instance, "_shell_script_command"):
+                preflight_installed_modules(instance, spec.modules)
             typed, diagnostic = command.run()
             result = project_execution_result(
                 env_obj,

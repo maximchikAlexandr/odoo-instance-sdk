@@ -726,6 +726,8 @@ class OdooInstance:
         commit: bool = False,
         exclusive: bool,
         result_converter: Callable[[CommandResult], T] | None = None,
+        preflight: Callable[[RunContext[T]], None] | None = None,
+        extra_steps: Sequence[PreparedStep | PreparedAction] = (),
     ) -> Command[T]:
         config = self.config.start_config
         if config is None:
@@ -758,7 +760,16 @@ class OdooInstance:
             mutating=commit,
         )
 
+        captured_steps = (*extra_steps, step, action)
+
         def execute(context: RunContext[T]) -> T:
+            # Stale-plan validation is deliberately the first operation.  In
+            # particular it must precede readiness, lock acquisition, and
+            # secret-config creation so a preview cannot turn into a partial
+            # execution when its provenance has changed.
+            if preflight is not None:
+                preflight(context)
+
             def run_inside_lock() -> T:
                 secret_created = False
                 if secret_path is not None:
@@ -788,9 +799,9 @@ class OdooInstance:
         from odoo_instance_sdk.execution import Command
 
         return Command.create(
-            _command_plan((step, action), secrets=secrets),
+            _command_plan(captured_steps, secrets=secrets),
             execute,
-            (step, action),
+            captured_steps,
             executor=SubprocessExecutor(),
         )
 

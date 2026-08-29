@@ -12,7 +12,7 @@ import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.exceptions import (
     PostgresClusterStartError,
@@ -24,6 +24,9 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.models import PostgresClusterState
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.internal.proc import ProcessResult
 
 _PROJECT_NAME_PREFIX = "odcli_pg_"
 
@@ -68,6 +71,17 @@ class SubprocessComposeRunner(ComposeRunner):
         cwd: Path | None = None,
         timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        from odoo_instance_sdk.internal.proc import active_context, prepared_step
+
+        context = active_context()
+        if context is not None:
+            captured = cast(
+                "ProcessResult",
+                context.process_prepared(prepared_step(args, cwd=cwd, timeout=timeout, text=True)),
+            )
+            stdout = captured.stdout if isinstance(captured.stdout, str) else ""
+            stderr = captured.stderr if isinstance(captured.stderr, str) else ""
+            return subprocess.CompletedProcess(args, captured.returncode, stdout, stderr)
         return subprocess.run(
             list(args),
             cwd=str(cwd) if cwd is not None else None,
