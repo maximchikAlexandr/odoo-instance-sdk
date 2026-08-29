@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib
 import re
 import shutil
 import sqlite3
 import subprocess
 import uuid
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, Union, cast
+from typing import TYPE_CHECKING, Literal, Protocol, Union, cast
 
 import msgspec
 
@@ -30,6 +31,8 @@ from odoo_instance_sdk.exceptions import (
     PgAdminError,
     PgAdminNotEligibleError,
     PgAdminUnavailableError,
+    PlanError,
+    PlanValidationError,
     PostgresClusterError,
     StalePlanError,
 )
@@ -40,9 +43,6 @@ from odoo_instance_sdk.internal.database_preparation import (
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
 from odoo_instance_sdk.internal.generated_config import generate_config
-from odoo_instance_sdk.internal.git_worktree import (
-    worktree_add,
-)
 from odoo_instance_sdk.internal.locks import (
     environment_lock_path,
     exclusive_lock,
@@ -91,12 +91,13 @@ from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
-    from odoo_instance_sdk.internal.proc import RunContext
+    from odoo_instance_sdk.internal.proc import ProcessResult, RunContext, Step
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 EnvironmentSelector = Union[str, "DevelopmentEnvironment"]
+type _PlanningError = PlanError | ConfigError | EnvironmentConflictError
 
 # Re-export the dependency-neutral contract for backwards-compatible imports.
 EnvironmentState = _EnvironmentState
@@ -178,6 +179,39 @@ class _CheckoutSnapshot:
     private: _CheckoutPlan
     public: EnvironmentCheckoutPlan
     execution_plan: ExecutionPlan
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckoutPlanningState:
+    private: _CheckoutPlan
+    provenance: BackupProvenanceComparison
+    freshness: BackupFreshness
+    warnings: tuple[str, ...]
+    public: EnvironmentCheckoutPlan | None = None
+    execution_plan: ExecutionPlan | None = None
+    snapshot: _CheckoutSnapshot | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PlanningOutcome:
+    state: _CheckoutPlanningState | None = None
+    error: _PlanningError | None = None
+
+
+class _ExpressionResult(Protocol):
+    def bind(
+        self, mapper: Callable[[_CheckoutPlanningState], _ExpressionResult]
+    ) -> _ExpressionResult: ...
+
+    def default_with(
+        self, getter: Callable[[_PlanningError], _PlanningOutcome]
+    ) -> _CheckoutPlanningState | _PlanningOutcome: ...
+
+
+class _ExpressionApi(Protocol):
+    def Ok(self, value: _CheckoutPlanningState) -> _ExpressionResult: ...
+
+    def Error(self, error: _PlanningError) -> _ExpressionResult: ...
 
 
 _StrList = list[str]
@@ -307,9 +341,11 @@ class EnvironmentResource:
         now = datetime.now(UTC).isoformat()
         odoo_bin = self._resolve_odoo_bin(options, project_cfg, repo_root)
         runtime_cwd = self._resolve_runtime_cwd(project_cfg, repo_root, worktree)
-        dependency_inputs = tuple(
-            _rebase_requirement_paths(list(project_cfg.requirements), repo_root, worktree)
-        )
+        dependency_paths = list(project_cfg.requirements)
+        odoo_requirements = _find_odoo_requirements(repo_root)
+        if odoo_requirements is not None and str(odoo_requirements) not in dependency_paths:
+            dependency_paths.append(str(odoo_requirements))
+        dependency_inputs = tuple(_rebase_requirement_paths(dependency_paths, repo_root, worktree))
 
         return _CheckoutPlan(
             project=project_cfg,
@@ -489,15 +525,71 @@ class EnvironmentResource:
         *,
         options: EnvironmentCheckoutOptions,
     ) -> _CheckoutSnapshot:
-        """Capture domain, process, and stale-validation inputs exactly once."""
-        provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
-        private = self._prepare_checkout(project, branch, options=options, dry_run_paths=True)
-        public = _public_checkout_plan(private, provenance, freshness, warnings)
-        return _CheckoutSnapshot(
-            private=private,
-            public=public,
-            execution_plan=_execution_plan(private, provenance, freshness, warnings),
-        )
+        """Compose pure checkout stages around one read-only input capture."""
+        captured = self._collect_checkout_inputs(project, branch, options=options)
+        expression_api = cast("_ExpressionApi", importlib.import_module("expression"))
+        if captured.error is not None:
+            result = expression_api.Error(captured.error)
+        elif captured.state is None:
+            result = expression_api.Error(
+                PlanValidationError("checkout planning captured no resolved inputs")
+            )
+        else:
+            result = expression_api.Ok(captured.state)
+        for stage in (
+            self._resolve_checkout_snapshot,
+            _validate_checkout_stage,
+            _normalize_checkout_stage,
+            _capture_checkout_stage,
+        ):
+
+            def apply_stage(
+                state: _CheckoutPlanningState,
+                stage: Callable[[_CheckoutPlanningState], _PlanningOutcome] = stage,
+            ) -> _ExpressionResult:
+                return _planning_result(expression_api, stage(state))
+
+            result = result.bind(apply_stage)
+        resolved = result.default_with(_planning_error_outcome)
+        if isinstance(resolved, _PlanningOutcome):
+            if resolved.error is not None:
+                raise resolved.error
+            resolved_state = resolved.state
+        else:
+            resolved_state = cast("_CheckoutPlanningState | None", resolved)
+        if resolved_state is None or resolved_state.snapshot is None:
+            raise PlanValidationError("checkout planning produced no snapshot")
+        return resolved_state.snapshot
+
+    def _collect_checkout_inputs(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions,
+    ) -> _PlanningOutcome:
+        """Collect read-only inputs outside Expression; no durable state is mutated."""
+        try:
+            provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
+            private = self._prepare_checkout(project, branch, options=options, dry_run_paths=True)
+            return _PlanningOutcome(
+                state=_CheckoutPlanningState(
+                    private=private,
+                    provenance=provenance,
+                    freshness=freshness,
+                    warnings=warnings,
+                )
+            )
+        except (PlanError, ConfigError, EnvironmentConflictError) as exc:
+            return _PlanningOutcome(error=exc)
+
+    def _resolve_checkout_snapshot(self, state: _CheckoutPlanningState) -> _PlanningOutcome:
+        """Resolve the immutable private plan into the typed stage state."""
+        if state.private.project.repository_root != state.private.repo_root:
+            return _PlanningOutcome(
+                error=PlanValidationError("checkout repository identity is inconsistent")
+            )
+        return _PlanningOutcome(state=state)
 
     def _build_checkout_execution_snapshot(
         self,
@@ -515,26 +607,27 @@ class EnvironmentResource:
         self, snapshot: _CheckoutSnapshot
     ) -> Command[DevelopmentEnvironment]:
         from odoo_instance_sdk.execution import Command
-        from odoo_instance_sdk.internal.proc import PreparedAction, prepared_command
+        from odoo_instance_sdk.internal.proc import SubprocessExecutor, prepared_command
 
         prepared = prepared_command(
             lambda context: self._run_checkout_snapshot(context, snapshot),
-            (PreparedAction("checkout"),),
+            _checkout_steps(snapshot.private),
+            executor=SubprocessExecutor(),
         )
         return Command.from_prepared(snapshot.execution_plan, prepared)
 
     def _run_checkout_snapshot(
         self, context: RunContext[DevelopmentEnvironment], snapshot: _CheckoutSnapshot
     ) -> DevelopmentEnvironment:
-        context.action("checkout")
         plan = snapshot.private
         if plan.db_mode is EnvironmentDatabaseMode.COPY:
             self._preflight_copy_checkout(plan)
         with exclusive_lock(provisioning_lock_path()):
             self._validate_checkout_snapshot(snapshot)
+            context.action("checkout.catalog")
             catalog = self._client.get_catalog()
             self._revalidate_checkout_locked(catalog, plan)
-            return self._do_checkout(catalog, plan)
+            return self._do_checkout(catalog, plan, context=context)
 
     def _validate_checkout_snapshot(self, snapshot: _CheckoutSnapshot) -> None:
         """Reject changed read-only inputs before the catalog or artifacts mutate."""
@@ -675,7 +768,13 @@ class EnvironmentResource:
                 "port_in_use", f"Port {plan.http_port} is no longer available"
             )
 
-    def _do_checkout(self, catalog: object, plan: _CheckoutPlan) -> DevelopmentEnvironment:
+    def _do_checkout(  # noqa: C901
+        self,
+        catalog: object,
+        plan: _CheckoutPlan,
+        *,
+        context: RunContext[DevelopmentEnvironment],
+    ) -> DevelopmentEnvironment:
         runtime_json = _encode_runtime_json(plan.odoo_bin, plan.runtime_cwd)
         env_row = {
             "id": str(plan.env_id),
@@ -708,16 +807,19 @@ class EnvironmentResource:
         created_paths: list[Path] = []
         backup_id: uuid.UUID | None = None
         try:
-            worktree_add(
-                plan.repo_root,
-                plan.worktree,
-                plan.branch,
-                base_ref=plan.base_ref,
-                prepared_argv=plan.worktree_argv,
-            )
+            plan.worktree.parent.mkdir(parents=True, exist_ok=True)
+            worktree_result = cast("ProcessResult", context.process("checkout.worktree"))
+            if worktree_result.returncode != 0:
+                stderr = str(worktree_result.stderr or "").strip()
+                if "is already checked out at" in stderr or "already used by worktree" in stderr:
+                    raise EnvironmentConflictError(  # noqa: TRY301
+                        "branch_in_use", f"Branch {plan.branch!r} is already checked out"
+                    )
+                raise ConfigError(f"git worktree add failed: {stderr}")  # noqa: TRY301
             created_paths.append(plan.worktree)
 
             if plan.source_config is not None:
+                context.action("checkout.generated_config")
                 db_name_for_config = (
                     plan.target_database
                     if plan.db_mode == EnvironmentDatabaseMode.COPY
@@ -737,13 +839,34 @@ class EnvironmentResource:
                 created_paths.append(plan.generated_config)
 
             if plan.options.create_venv and plan.python_selector is not None:
-                self._run_uv_venv(plan.venv, str(plan.python_selector))
+                venv_result = cast("ProcessResult", context.process("checkout.venv"))
+                if venv_result.returncode != 0:
+                    raise ConfigError(  # noqa: TRY301
+                        f"uv venv failed: {_process_stderr(venv_result)}".strip()
+                    )
                 created_paths.append(plan.venv)
 
             env_obj = self._get_env_row(cat, plan.env_id)
             with exclusive_lock(python_env_lock_path(env_obj.python_environment_path)):
-                self._compile_and_install(env_obj, plan.project, upgrade=False)
-                created_paths.append(plan.dependency_lock)
+                if plan.dependency_inputs:
+                    compile_result = cast(
+                        "ProcessResult", context.process("checkout.dependencies.compile")
+                    )
+                    if compile_result.returncode != 0 and not plan.dependency_lock.is_file():
+                        raise ConfigError(  # noqa: TRY301
+                            "uv pip compile failed and no prior lock: "
+                            f"{_process_stderr(compile_result)}"
+                        )
+                    install_result = cast(
+                        "ProcessResult", context.process("checkout.dependencies.install")
+                    )
+                    if install_result.returncode != 0:
+                        raise ConfigError(  # noqa: TRY301
+                            f"uv pip install failed: {_process_stderr(install_result)}".strip()
+                        )
+                    created_paths.append(plan.dependency_lock)
+
+            context.action("checkout.database")
 
             if (
                 plan.db_mode == EnvironmentDatabaseMode.COPY
@@ -761,9 +884,11 @@ class EnvironmentResource:
 
             cat.update_environment_state(str(plan.env_id), EnvironmentState.READY)
             cat.add_environment_event(str(plan.env_id), "checkout", "succeeded")
+            context.action("checkout.cleanup")
             return self._get_env_row(cat, plan.env_id)
 
         except BaseException as exc:
+            context.action("checkout.cleanup")
             self._cleanup_on_failure(
                 cat=cat,
                 env_id=plan.env_id,
@@ -2181,6 +2306,145 @@ def _restore_audit_backup_from_sqlite(
     )
 
 
+def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
+    """Return the private steps that are projected and consumed by checkout."""
+    from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
+
+    steps: list[Step] = [
+        PreparedAction("checkout.catalog"),
+        PreparedStep(
+            step_id="checkout.worktree",
+            argv=plan.worktree_argv,
+            cwd=str(plan.repo_root),
+            mode="captured",
+            mutating=True,
+        ),
+    ]
+    if plan.source_config is not None:
+        steps.append(PreparedAction("checkout.generated_config"))
+    if plan.options.create_venv and plan.python_selector is not None:
+        steps.append(
+            PreparedStep(
+                step_id="checkout.venv",
+                argv=("uv", "venv", str(plan.venv), "--python", str(plan.python_selector)),
+                cwd=str(plan.repo_root),
+                mode="captured",
+                mutating=True,
+            )
+        )
+    if plan.dependency_inputs:
+        steps.append(
+            PreparedStep(
+                step_id="checkout.dependencies.compile",
+                argv=(
+                    "uv",
+                    "pip",
+                    "compile",
+                    *plan.dependency_inputs,
+                    "-o",
+                    str(plan.dependency_lock),
+                ),
+                cwd=str(plan.worktree),
+                mode="captured",
+                mutating=True,
+            )
+        )
+        install_argv = (
+            (
+                "uv",
+                "pip",
+                "sync",
+                "--python",
+                str(Path(plan.python_path) / "bin" / "python"),
+                str(plan.dependency_lock),
+            )
+            if plan.python_owned
+            else (
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                plan.python_path,
+                "-r",
+                str(plan.dependency_lock),
+            )
+        )
+        steps.append(
+            PreparedStep(
+                step_id="checkout.dependencies.install",
+                argv=install_argv,
+                cwd=str(plan.worktree),
+                mode="captured",
+                mutating=True,
+            )
+        )
+    steps.extend(
+        (
+            PreparedAction("checkout.database"),
+            PreparedAction("checkout.cleanup"),
+        )
+    )
+    return tuple(steps)
+
+
+def _planning_result(
+    expression_api: _ExpressionApi, outcome: _PlanningOutcome
+) -> _ExpressionResult:
+    """Adapt one concrete pure stage outcome to the bounded Result type."""
+    if outcome.error is not None:
+        return expression_api.Error(outcome.error)
+    if outcome.state is None:
+        return expression_api.Error(PlanValidationError("checkout stage produced no state"))
+    return expression_api.Ok(outcome.state)
+
+
+def _planning_error_outcome(error: _PlanningError) -> _PlanningOutcome:
+    """Keep an expected planning failure typed while leaving the Result boundary."""
+    return _PlanningOutcome(error=error)
+
+
+def _validate_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
+    """Validate captured checkout invariants without touching external state."""
+    plan = state.private
+    if not plan.branch.strip():
+        return _PlanningOutcome(error=PlanValidationError("checkout branch must not be empty"))
+    if not plan.worktree_argv:
+        return _PlanningOutcome(error=PlanValidationError("checkout planning produced no command"))
+    if plan.db_mode is EnvironmentDatabaseMode.COPY and plan.target_database is None:
+        return _PlanningOutcome(
+            error=PlanValidationError("copy checkout requires a target database")
+        )
+    return _PlanningOutcome(state=state)
+
+
+def _normalize_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
+    """Build immutable public projections from already captured values."""
+    public = _public_checkout_plan(state.private, state.provenance, state.freshness, state.warnings)
+    execution_plan = _execution_plan(
+        state.private, state.provenance, state.freshness, state.warnings
+    )
+    return _PlanningOutcome(state=replace(state, public=public, execution_plan=execution_plan))
+
+
+def _capture_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
+    """Capture the final private/public pair without adding effects or locks."""
+    if state.public is None or state.execution_plan is None:
+        return _PlanningOutcome(error=PlanValidationError("checkout projections are incomplete"))
+    snapshot = _CheckoutSnapshot(
+        private=state.private,
+        public=state.public,
+        execution_plan=state.execution_plan,
+    )
+    return _PlanningOutcome(state=replace(state, snapshot=snapshot))
+
+
+def _process_stderr(result: ProcessResult) -> str:
+    stderr = result.stderr
+    if isinstance(stderr, bytes):
+        return stderr.decode(errors="replace")
+    return stderr or ""
+
+
 def _execution_plan(
     plan: _CheckoutPlan,
     provenance: BackupProvenanceComparison,
@@ -2215,105 +2479,41 @@ def _execution_plan(
         )
 
     steps: list[ExecutionStep] = []
-    steps.append(
-        PreparedStep(
-            step_id="checkout.worktree",
-            argv=plan.worktree_argv,
-            cwd=str(plan.repo_root),
-            mode="captured",
-            read_only=False,
-            mutating=True,
-        ).public_projection()
-    )
-    steps.append(
-        ActionStep(
-            step_id="checkout.generated_config",
-            action="write_generated_config",
-            description="Generate the checkout Odoo configuration",
-            details={"path": str(plan.generated_config)},
-            mutating=True,
-        )
-    )
-    if plan.options.create_venv and plan.python_selector is not None:
-        steps.append(
-            PreparedStep(
-                step_id="checkout.venv",
-                argv=("uv", "venv", str(plan.venv), "--python", str(plan.python_selector)),
-                cwd=str(plan.repo_root),
-                mode="captured",
-                mutating=True,
-            ).public_projection()
-        )
-    requirement_inputs = _rebase_requirement_paths(
-        list(plan.project.requirements), plan.repo_root, plan.worktree
-    )
-    if requirement_inputs:
-        steps.append(
-            PreparedStep(
-                step_id="checkout.dependencies.compile",
-                argv=("uv", "pip", "compile", *requirement_inputs, "-o", str(plan.dependency_lock)),
-                cwd=str(plan.worktree),
-                mode="captured",
-                mutating=True,
-            ).public_projection()
-        )
-        install_argv = (
-            (
-                "uv",
-                "pip",
-                "sync",
-                "--python",
-                str(Path(plan.python_path) / "bin" / "python"),
-                str(plan.dependency_lock),
-            )
-            if plan.python_owned
-            else (
-                "uv",
-                "pip",
-                "install",
-                "--python",
-                plan.python_path,
-                "-r",
-                str(plan.dependency_lock),
-            )
-        )
-        steps.append(
-            PreparedStep(
-                step_id="checkout.dependencies.install",
-                argv=install_argv,
-                cwd=str(plan.worktree),
-                mode="captured",
-                mutating=True,
-            ).public_projection()
-        )
-    steps.extend(
-        (
-            ActionStep(
-                step_id="checkout.database",
-                action="prepare_database",
-                description="Prepare the selected checkout database",
-                details={
+    for step in _checkout_steps(plan):
+        if isinstance(step, PreparedStep):
+            steps.append(step.public_projection())
+        else:
+            action_details: JsonValue = None
+            action = step.step_id.removeprefix("checkout.")
+            description = "Execute checkout action"
+            if action == "catalog":
+                action = "record_environment"
+                description = "Record the environment in the catalog"
+                action_details = {"environment_id": str(plan.env_id)}
+            elif action == "generated_config":
+                action = "write_generated_config"
+                description = "Generate the checkout Odoo configuration"
+                action_details = {"path": str(plan.generated_config)}
+            elif action == "database":
+                action = "prepare_database"
+                description = "Prepare the selected checkout database"
+                action_details = {
                     "mode": plan.db_mode.value,
                     "database": plan.target_database or plan.source_database,
-                },
-                mutating=True,
-            ),
-            ActionStep(
-                step_id="checkout.catalog",
-                action="record_environment",
-                description="Record the environment in the catalog",
-                details={"environment_id": str(plan.env_id)},
-                mutating=True,
-            ),
-            ActionStep(
-                step_id="checkout.cleanup",
-                action="cleanup_on_failure",
-                description="Remove owned checkout artifacts if execution fails",
-                details={"root": str(plan.env_root)},
-                mutating=True,
-            ),
-        )
-    )
+                }
+            elif action == "cleanup":
+                action = "cleanup_on_failure"
+                description = "Remove owned checkout artifacts if execution fails"
+                action_details = {"root": str(plan.env_root)}
+            steps.append(
+                ActionStep(
+                    step_id=step.step_id,
+                    action=action,
+                    description=description,
+                    details=action_details,
+                    mutating=True,
+                )
+            )
     execution = ExecutionPlan(
         steps=tuple(steps),
         observations=tuple(observations),
