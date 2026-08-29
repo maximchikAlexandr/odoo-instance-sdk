@@ -219,6 +219,18 @@ wheels = [
 ]
 
 [[package]]
+name = "expression"
+version = "5.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/da/0a12e324567a068745284d7247ffe53547399bae633ead3f6ec5d2f7a030/expression-5.7.0.tar.gz", hash = "sha256:4c5ea4247f871b8724ad580911ad73c1550fc653bb669daf2d49e4b645cc4770", size = 213081, upload-time = "2026-08-15T17:14:56.507Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/9d/790e25dcba0b299f9a756ae2dcc52a705be07bd1c3fd54267ade0521bea6/expression-5.7.0-py3-none-any.whl", hash = "sha256:d8d903cb9ddcb252dbd64612e329bd86f09d770c7812eaf8f9cc0b9f8e6480bd", size = 79404, upload-time = "2026-08-15T17:14:55.354Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.141.1"
 source = { registry = "https://pypi.org/simple" }
@@ -620,6 +632,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
+    { name = "expression" },
     { name = "httpx" },
     { name = "json5" },
     { name = "msgspec" },
@@ -670,6 +683,7 @@ type-check = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.2,<9" },
+    { name = "expression", specifier = ">=5,<6" },
     { name = "fastapi", marker = "extra == 'dashboard'", specifier = ">=0.141,<1.0" },
     { name = "httpx", specifier = ">=0.27,<1.0" },
     { name = "json5", specifier = ">=0.15,<1" },

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import click
@@ -46,71 +47,135 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
-BOUNDED_LEAVES = (
-    ("init",),
-    ("doctor",),
-    ("env", "checkout"),
-    ("env", "list"),
-    ("env", "remove"),
-    ("env", "sync"),
-    ("db", "refresh"),
-    ("db", "reset-admin-password"),
-    ("eval",),
-    ("exec",),
-    ("test",),
-    ("module", "list"),
-    ("module", "update"),
-    ("module", "test"),
-    ("translations", "export"),
-    ("deps", "verify"),
-    ("vscode", "generate"),
-    ("postgres", "approve-image"),
-    ("postgres", "status"),
-    ("postgres", "up"),
-    ("postgres", "stop"),
-)
+CliLeafClass = Literal[
+    "bounded-read-only",
+    "process-previewable-read-only",
+    "mutating-or-spawning",
+    "native-passthrough",
+    "rich-live",
+    "jsonl-stream",
+]
 
 
 @dataclass(frozen=True)
 class PublicLeafCase:
     path: tuple[str, ...]
     args: tuple[str, ...]
+    classification: CliLeafClass
+    requires_dry_run: bool
+    exception_reason: str | None = None
+    variants: tuple[CliLeafClass, ...] = ()
+
+    @property
+    def is_bounded(self) -> bool:
+        return self.classification in {
+            "bounded-read-only",
+            "process-previewable-read-only",
+            "mutating-or-spawning",
+        }
 
 
-PUBLIC_LEAF_CASES = tuple(
-    PublicLeafCase(path, args)
-    for path, args in zip(
-        BOUNDED_LEAVES,
+# This is the one CLI leaf inventory.  The output parity matrix below filters
+# this data by ``is_bounded``; native, Rich-live, and JSONL leaves remain here
+# with their explicit policy so a new leaf cannot avoid classification.
+_PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
+    PublicLeafCase(
+        ("init",),
+        ("init", "--no-input", "--odoo-bin", "/opt/odoo/odoo-bin", "--dry-run", "--project"),
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(("doctor",), ("doctor",), "bounded-read-only", False),
+    PublicLeafCase(
+        ("env", "checkout"), ("env", "checkout", "main", "--dry-run"), "mutating-or-spawning", True
+    ),
+    PublicLeafCase(
+        ("env", "list"),
+        ("env", "list", "--all-projects"),
+        "bounded-read-only",
+        False,
+        variants=("rich-live",),
+    ),
+    PublicLeafCase(
+        ("env", "remove"), ("env", "remove", "env-1", "--yes"), "mutating-or-spawning", True
+    ),
+    PublicLeafCase(("env", "sync"), ("env", "sync", "env-1"), "mutating-or-spawning", True),
+    PublicLeafCase(("db", "refresh"), ("db", "refresh"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("db", "reset-admin-password"), ("db", "reset-admin-password"), "mutating-or-spawning", True
+    ),
+    PublicLeafCase(("eval",), ("eval", "1"), "process-previewable-read-only", True),
+    PublicLeafCase(("exec",), ("exec", "-"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("test",), ("test", "--changed", "--dry-run"), "process-previewable-read-only", True
+    ),
+    PublicLeafCase(
+        ("module", "list"), ("module", "list", "sale"), "process-previewable-read-only", True
+    ),
+    PublicLeafCase(
+        ("module", "update"), ("module", "update", "sale", "--yes"), "mutating-or-spawning", True
+    ),
+    PublicLeafCase(
+        ("module", "test"),
+        ("module", "test", "sale", "--test-tags", "/sale"),
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(
+        ("translations", "export"),
+        ("translations", "export", "--module", "sale", "--language", "fr_FR"),
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(("deps", "verify"), ("deps", "verify"), "process-previewable-read-only", True),
+    PublicLeafCase(("vscode", "generate"), ("vscode", "generate"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("postgres", "approve-image"),
         (
-            ("init", "--no-input", "--odoo-bin", "/opt/odoo/odoo-bin", "--dry-run", "--project"),
-            ("doctor",),
-            ("env", "checkout", "main", "--dry-run"),
-            ("env", "list", "--all-projects"),
-            ("env", "remove", "env-1", "--yes"),
-            ("env", "sync", "env-1"),
-            ("db", "refresh"),
-            ("db", "reset-admin-password"),
-            ("eval", "1"),
-            ("exec", "-"),
-            ("test", "--changed", "--dry-run"),
-            ("module", "list", "sale"),
-            ("module", "update", "sale", "--yes"),
-            ("module", "test", "sale", "--test-tags", "/sale"),
-            ("translations", "export", "--module", "sale", "--language", "fr_FR"),
-            ("deps", "verify"),
-            ("vscode", "generate"),
-            (
-                "postgres",
-                "approve-image",
-                "--image-digest",
-                "docker.io/library/postgres@sha256:" + "a" * 64,
-            ),
-            ("postgres", "status"),
-            ("postgres", "up"),
-            ("postgres", "stop"),
+            "postgres",
+            "approve-image",
+            "--image-digest",
+            "docker.io/library/postgres@sha256:" + "a" * 64,
         ),
-    )
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(
+        ("postgres", "status"), ("postgres", "status"), "process-previewable-read-only", True
+    ),
+    PublicLeafCase(("postgres", "up"), ("postgres", "up"), "mutating-or-spawning", True),
+    PublicLeafCase(("postgres", "stop"), ("postgres", "stop"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("run",),
+        ("run",),
+        "native-passthrough",
+        True,
+        "normal execution owns inherited Odoo TTY streams; dry-run is still required",
+    ),
+    PublicLeafCase(
+        ("logs",),
+        ("logs", "--follow"),
+        "jsonl-stream",
+        False,
+        "read-only logfile subscription has no finite child-process or mutation plan",
+    ),
+    PublicLeafCase(
+        ("shell",),
+        ("shell",),
+        "native-passthrough",
+        True,
+        "normal execution owns interactive Odoo streams; dry-run is still required",
+    ),
+    PublicLeafCase(
+        ("monitor",),
+        ("monitor",),
+        "native-passthrough",
+        False,
+        "long-running monitor server has no finite bounded output plan",
+    ),
 )
+
+PUBLIC_LEAF_CASES = tuple(_PUBLIC_LEAF_DATA)
 
 
 def _matrix_environment() -> SimpleNamespace:
@@ -129,6 +194,42 @@ def _matrix_environment() -> SimpleNamespace:
         backup_id=None,
         source_db_name=None,
         target_db_name="demo",
+    )
+
+
+def _cli_leaf_paths(command: click.Command, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+    if not isinstance(command, click.Group):
+        return {prefix}
+    return {
+        leaf_path
+        for name, child in command.commands.items()
+        for leaf_path in _cli_leaf_paths(child, (*prefix, name))
+    }
+
+
+def test_public_leaf_inventory_is_complete_and_classified() -> None:
+    paths = [case.path for case in PUBLIC_LEAF_CASES]
+    assert len(paths) == len(set(paths))
+    assert set(paths) == _cli_leaf_paths(cli)
+    valid_classes = {
+        "bounded-read-only",
+        "process-previewable-read-only",
+        "mutating-or-spawning",
+        "native-passthrough",
+        "rich-live",
+        "jsonl-stream",
+    }
+    assert all(case.classification in valid_classes for case in PUBLIC_LEAF_CASES)
+    assert all(variant in valid_classes for case in PUBLIC_LEAF_CASES for variant in case.variants)
+    assert all(
+        case.exception_reason is not None
+        for case in PUBLIC_LEAF_CASES
+        if not case.is_bounded and not case.requires_dry_run
+    )
+    assert all(
+        case.requires_dry_run or case.exception_reason is not None
+        for case in PUBLIC_LEAF_CASES
+        if case.classification in {"mutating-or-spawning", "process-previewable-read-only"}
     )
 
 
@@ -467,7 +568,11 @@ def _decode_document(document: str, mode: str) -> object:
     return decode(document, DecodeOptions(indent=2, strict=True))
 
 
-@pytest.mark.parametrize("case", PUBLIC_LEAF_CASES, ids=lambda case: ".".join(case.path))
+@pytest.mark.parametrize(
+    "case",
+    [case for case in PUBLIC_LEAF_CASES if case.is_bounded],
+    ids=lambda case: ".".join(case.path),
+)
 def test_public_cli_leaf_matrix_has_json_toon_parity(
     case: PublicLeafCase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -551,7 +656,10 @@ def _option_names(command: click.Command) -> set[str]:
 
 
 def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
-    for path in BOUNDED_LEAVES:
+    for case in PUBLIC_LEAF_CASES:
+        if not case.is_bounded:
+            continue
+        path = case.path
         command = _command(path)
         options = _option_names(command)
         assert "--format" in options, path

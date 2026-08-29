@@ -22,30 +22,7 @@ from odoo_instance_sdk.models import Snapshot
 from odoo_instance_sdk.resources.environment import EnvironmentResource
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-
-BOUNDED_LEAVES = (
-    ("init",),
-    ("doctor",),
-    ("env", "checkout"),
-    ("env", "list"),
-    ("env", "remove"),
-    ("env", "sync"),
-    ("db", "refresh"),
-    ("db", "reset-admin-password"),
-    ("eval",),
-    ("exec",),
-    ("test",),
-    ("module", "list"),
-    ("module", "update"),
-    ("module", "test"),
-    ("translations", "export"),
-    ("deps", "verify"),
-    ("vscode", "generate"),
-    ("postgres", "approve-image"),
-    ("postgres", "status"),
-    ("postgres", "up"),
-    ("postgres", "stop"),
-)
+from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
 
 ROOT_HELP_SNAPSHOT = """Usage: cli [OPTIONS] COMMAND [ARGS]...
 
@@ -197,7 +174,10 @@ def test_prechange_root_and_module_help_snapshots_are_stable() -> None:
 
 
 def test_command_local_json_placement_is_stable() -> None:
-    for path in BOUNDED_LEAVES:
+    for case in PUBLIC_LEAF_CASES:
+        if not case.is_bounded:
+            continue
+        path = case.path
         command = _command(path)
         assert "--json" in _option_names(command), path
         help_result = CliRunner().invoke(cli, [*path, "--help"])

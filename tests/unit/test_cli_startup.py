@@ -40,6 +40,9 @@ import odoo_instance_sdk
 print(json.dumps({name: name in sys.modules for name in (
     'odoo_instance_sdk.client',
     'odoo_instance_sdk.resources.monitor',
+    'odoo_instance_sdk.execution',
+    'odoo_instance_sdk.internal.proc',
+    'expression',
     'httpx',
 )}))
 """,
@@ -50,6 +53,9 @@ print(json.dumps({name: name in sys.modules for name in (
     assert json.loads(result.stdout) == {
         "odoo_instance_sdk.client": False,
         "odoo_instance_sdk.resources.monitor": False,
+        "odoo_instance_sdk.execution": False,
+        "odoo_instance_sdk.internal.proc": False,
+        "expression": False,
         "httpx": False,
     }
 
@@ -78,6 +84,9 @@ else:
 print('BOUNDARY=' + json.dumps({name: name in sys.modules for name in (
     'httpx',
     'odoo_instance_sdk.resources.monitor',
+    'odoo_instance_sdk.execution',
+    'odoo_instance_sdk.internal.proc',
+    'expression',
 )}))
 raise SystemExit(exit_code)
 """,
@@ -91,6 +100,9 @@ raise SystemExit(exit_code)
     assert boundary == {
         "httpx": False,
         "odoo_instance_sdk.resources.monitor": False,
+        "odoo_instance_sdk.execution": False,
+        "odoo_instance_sdk.internal.proc": False,
+        "expression": False,
     }
 
 
@@ -98,7 +110,7 @@ def test_lazy_exports_preserve_order_identity_import_syntax_and_errors() -> None
     sdk = importlib.import_module("odoo_instance_sdk")
     expected_order = tuple(sdk._LAZY_EXPORTS)
     assert sdk.__all__ == list(expected_order)
-    assert len(expected_order) == 118
+    assert len(expected_order) == len(sdk.__all__)
 
     direct = {name: getattr(sdk, name) for name in sdk.__all__}
     star_namespace: dict[str, object] = {}
