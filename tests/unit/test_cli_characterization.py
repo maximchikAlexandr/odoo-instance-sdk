@@ -208,8 +208,9 @@ def test_discovered_public_methods() -> None:
             "refresh_database",
             "remove",
             "sync_python",
+            "sync_python_command",
         ),
-        EnvironmentMonitor: ("snapshot", "watch"),
+        EnvironmentMonitor: ("snapshot", "snapshot_command", "watch"),
         OdooInstance: (
             "iter_logs",
             "run",

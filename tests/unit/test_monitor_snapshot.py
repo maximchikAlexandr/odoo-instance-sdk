@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +13,7 @@ import msgspec
 import pytest
 
 from odoo_instance_sdk.exceptions import MonitorError
+from odoo_instance_sdk.execution import Command
 from odoo_instance_sdk.internal.process_metrics import ProcessTreeResult
 from odoo_instance_sdk.models import (
     ClusterContainer,
@@ -640,6 +642,77 @@ def test_watch_yields_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     snaps = asyncio.run(_take(2))
     assert len(snaps) == 2
     assert all(isinstance(s, Snapshot) for s in snaps)
+
+
+def test_snapshot_command_is_immutable_and_snapshot_delegates_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = Snapshot(
+        schema_version=3,
+        generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+        projects=(),
+        environments=(),
+    )
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
+    calls: list[tuple[str | None, bool]] = []
+
+    def collect(*, project_id: str | None = None, include_removed: bool = False) -> Snapshot:
+        calls.append((project_id, include_removed))
+        return expected
+
+    monkeypatch.setattr(
+        EnvironmentMonitor,
+        "_snapshot_impl",
+        lambda _self, **kwargs: collect(**kwargs),
+    )
+    command = monitor.snapshot_command("project-1", include_removed=True)
+    original_plan = command.plan
+
+    assert command.run() == expected
+    assert monitor.snapshot("project-1", include_removed=True) == expected
+    assert command.plan == original_plan
+    assert calls == [("project-1", True), ("project-1", True)]
+
+
+def test_watch_builds_a_fresh_snapshot_command_per_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = Snapshot(
+        schema_version=3,
+        generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+        projects=(),
+        environments=(),
+    )
+    monitor = EnvironmentMonitor()
+    commands: list[Command[Snapshot]] = []
+
+    original = EnvironmentMonitor.snapshot_command
+
+    def fresh(
+        self: EnvironmentMonitor,
+        project_id: str | None = None,
+        *,
+        include_removed: bool = False,
+    ) -> Command[Snapshot]:
+        command = original(self, project_id, include_removed=include_removed)
+        commands.append(command)
+        return command
+
+    monkeypatch.setattr(
+        EnvironmentMonitor,
+        "_snapshot_impl",
+        lambda _self, **_kwargs: expected,
+    )
+    monkeypatch.setattr(EnvironmentMonitor, "snapshot_command", fresh)
+
+    async def take_two() -> None:
+        generator = cast("AsyncGenerator[Snapshot, None]", monitor.watch(interval=0.1))
+        await generator.__anext__()
+        await generator.__anext__()
+        await generator.aclose()
+
+    asyncio.run(take_two())
+    assert len(commands) == 2
+    assert commands[0] is not commands[1]
+    assert commands[0].plan == commands[1].plan
 
 
 def test_watch_cancellation_cleans_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

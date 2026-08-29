@@ -9,11 +9,11 @@ import tempfile
 import time
 import uuid
 from collections import deque
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO, cast
+from typing import TYPE_CHECKING, TextIO, TypeVar, cast
 
 import psutil
 
@@ -54,6 +54,8 @@ from odoo_instance_sdk.models import (
     StartConfig,
 )
 from odoo_instance_sdk.resources.database import DatabaseResource
+
+T = TypeVar("T")
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -723,7 +725,8 @@ class OdooInstance:
         timeout: float | None = None,
         commit: bool = False,
         exclusive: bool,
-    ) -> Command[CommandResult]:
+        result_converter: Callable[[CommandResult], T] | None = None,
+    ) -> Command[T]:
         config = self.config.start_config
         if config is None:
             raise InstanceConfigurationError(
@@ -755,8 +758,8 @@ class OdooInstance:
             mutating=commit,
         )
 
-        def execute(context: RunContext[CommandResult]) -> CommandResult:
-            def run_inside_lock() -> CommandResult:
+        def execute(context: RunContext[T]) -> T:
+            def run_inside_lock() -> T:
                 secret_created = False
                 if secret_path is not None:
                     _write_secret_config(snapshot, secret_path)
@@ -764,7 +767,12 @@ class OdooInstance:
                 try:
                     result = cast("ProcessResult", context.process(step.step_id))
                     context.action(action.step_id)
-                    return _command_result(result, timeout)
+                    converted = _command_result(result, timeout)
+                    return (
+                        result_converter(converted)
+                        if result_converter is not None
+                        else cast("T", converted)
+                    )
                 finally:
                     if secret_created:
                         cleanup_secret_config(secret_path)

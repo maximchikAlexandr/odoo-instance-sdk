@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -243,6 +244,118 @@ def run_captured(
     return SubprocessExecutor().execute(step)
 
 
+def run_captured_limited(  # noqa: C901
+    executable: str | Sequence[str],
+    args: Sequence[str] = (),
+    *,
+    cwd: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    max_output_bytes: int,
+) -> ProcessResult:
+    """Run a captured process while bounding both output streams.
+
+    This is the one bounded exception to ``subprocess.run`` in the executor:
+    callers that consume untrusted command output can terminate a child as soon
+    as its output budget is exceeded, rather than buffering an unbounded stream.
+    """
+    if max_output_bytes < 0:
+        raise ValueError("max_output_bytes must not be negative")
+    step = prepared_step(
+        executable,
+        args,
+        cwd=cwd,
+        env=env,
+        timeout=timeout,
+        text=False,
+    )
+    started = time.perf_counter()
+    try:
+        process = subprocess.Popen(
+            list(step.argv),
+            cwd=step.cwd,
+            env=_environment(step.environment),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+    except OSError as error:
+        raise ProcessSpawnError(
+            step.argv, str(error), duration=time.perf_counter() - started
+        ) from error
+
+    stdout = process.stdout
+    stderr = process.stderr
+    assert stdout is not None
+    assert stderr is not None
+    streams = {stdout: bytearray(), stderr: bytearray()}
+    selector = selectors.DefaultSelector()
+
+    def terminate_and_reap() -> None:
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
+                process.terminate()
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                process.kill()
+            process.wait()
+
+    try:
+        selector.register(stdout, selectors.EVENT_READ)
+        selector.register(stderr, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = None if timeout is None else timeout - (time.perf_counter() - started)
+            if remaining is not None and remaining <= 0:
+                terminate_and_reap()
+                assert timeout is not None
+                raise ProcessTimeoutError(
+                    step.argv, timeout, duration=time.perf_counter() - started
+                )
+            ready = selector.select(remaining)
+            if not ready:
+                terminate_and_reap()
+                raise ProcessTimeoutError(
+                    step.argv,
+                    timeout if timeout is not None else 0.0,
+                    duration=time.perf_counter() - started,
+                )
+            for key, _ in ready:
+                stream = cast("IO[bytes]", key.fileobj)
+                chunk = os.read(stream.fileno(), 64 * 1024)
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                buffer = streams[stream]
+                if len(buffer) + len(chunk) > max_output_bytes:
+                    terminate_and_reap()
+                    raise ProcessExecutionError(
+                        step.argv,
+                        "output exceeded configured limit",
+                        duration=time.perf_counter() - started,
+                    )
+                buffer.extend(chunk)
+        process.wait()
+    finally:
+        selector.close()
+        for stream in (stdout, stderr):
+            if not stream.closed:
+                stream.close()
+
+    return ProcessResult(
+        argv=step.argv,
+        returncode=process.returncode,
+        stdout=bytes(streams[stdout]),
+        stderr=bytes(streams[stderr]),
+        duration=time.perf_counter() - started,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+
+
 def spawn(
     executable: str | Sequence[str],
     args: Sequence[str] = (),
@@ -381,6 +494,7 @@ __all__ = [
     "owned_handle",
     "prepared_step",
     "run_captured",
+    "run_captured_limited",
     "spawn",
     "terminate",
     "wait",

@@ -145,6 +145,16 @@ class RunContext(Generic[T]):
             raise UnplannedStepError(step_id, reason="requested step is not an action")
         return step
 
+    def skip(self, step_id: str) -> None:
+        """Consume a captured step when its guarded effect is intentionally omitted.
+
+        A prepared command must account for every step even when a preceding
+        result makes a later operation unnecessary.  This keeps the ledger
+        honest without launching a process that the callback has decided not
+        to perform.
+        """
+        self._consume(step_id)
+
     def _consume(self, step_id: str) -> Step:
         step = self._steps.get(step_id)
         if step is None:
@@ -218,6 +228,7 @@ __all__ = [
     "prepared_command",
     "prepared_step",
     "run_captured",
+    "run_captured_limited",
     "spawn",
     "terminate",
     "wait",
@@ -239,6 +250,7 @@ from .executor import (  # noqa: E402
     owned_handle,
     prepared_step,
     run_captured,
+    run_captured_limited,
     spawn,
     terminate,
     wait,

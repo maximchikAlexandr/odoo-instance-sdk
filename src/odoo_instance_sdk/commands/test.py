@@ -13,13 +13,14 @@ from odoo_instance_sdk.commands.output import (
     OutputMode,
     emit_json_envelope,
     fail,
+    model_to_dict,
     output_options,
     resolve_output_mode,
     rich_print,
     sanitize_diagnostic,
 )
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.internal.automation import run_odoo_tests
+from odoo_instance_sdk.internal.automation import run_odoo_tests, run_odoo_tests_command
 from odoo_instance_sdk.internal.test_selection import (
     _ChangedSelectionError,
     _TestSelection,
@@ -284,23 +285,27 @@ def test_command(
                     result["dry_run"] = True
                 _emit_result(mode=mode, command="test", result=result, dry_run=dry_run)
                 raise click.exceptions.Exit(0)  # noqa: TRY301
-            if dry_run:
-                result["dry_run"] = True
-                _emit_result(mode=mode, command="test", result=result, dry_run=True)
-                raise click.exceptions.Exit(0)  # noqa: TRY301
             spec = OdooTestSpec(
                 modules=plan.modules,
-                test_tags=plan.test_tags or "",
+                test_tags=getattr(plan, "test_tags", None)
+                or ",".join(f"/{module}" for module in plan.modules),
                 reload_tests=reload_tests,
                 allow_empty=allow_empty,
             )
-            preflight_installed_modules(instance, spec.modules)
-            typed, diagnostic = run_odoo_tests(
+            command = run_odoo_tests_command(
                 instance,
                 spec,
                 http_interface=env_obj.http_interface,
                 http_port=env_obj.http_port,
+                compatibility_runner=run_odoo_tests,
             )
+            if dry_run:
+                result["plan"] = model_to_dict(command.plan)
+                result["dry_run"] = True
+                _emit_result(mode=mode, command="test", result=result, dry_run=True)
+                raise click.exceptions.Exit(0)  # noqa: TRY301
+            preflight_installed_modules(instance, spec.modules)
+            typed, diagnostic = command.run()
             result = project_execution_result(
                 env_obj,
                 {"kind": "changed", "value": None},

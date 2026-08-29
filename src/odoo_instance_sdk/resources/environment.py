@@ -1163,18 +1163,136 @@ class EnvironmentResource:
         *,
         upgrade: bool = False,
     ) -> DevelopmentEnvironment:
+        return self.sync_python_command(selector, upgrade=upgrade).run()
+
+    def sync_python_command(
+        self,
+        selector: EnvironmentSelector,
+        *,
+        upgrade: bool = False,
+    ) -> Command[DevelopmentEnvironment]:
+        """Capture one immutable uv synchronization operation."""
+        from odoo_instance_sdk.execution import Command
+        from odoo_instance_sdk.internal.proc import (
+            PreparedAction,
+            PreparedStep,
+            SubprocessExecutor,
+            prepared_command,
+        )
+
         env = (
             self._resolve_selector(selector, include_removed=False)
             if isinstance(selector, str)
             else selector
         )
-        catalog = self._client.get_catalog()
-        catalog.add_environment_event(str(env.id), "sync", "started")
-        with (
-            exclusive_lock(environment_lock_path(str(env.id))),
-            exclusive_lock(python_env_lock_path(env.python_environment_path)),
-        ):
-            return self._do_sync_python(catalog, env, upgrade=upgrade)
+        project = _load_project(env)
+        worktree = Path(env.worktree_path)
+        repo_root = Path(env.repository_root)
+        inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
+        odoo_req = _find_odoo_requirements(worktree)
+        if odoo_req is not None and str(odoo_req) not in inputs:
+            inputs.append(str(odoo_req))
+        steps: list[Step] = []
+        if inputs:
+            compile_argv = ["uv", "pip", "compile", *inputs]
+            if upgrade:
+                compile_argv.append("--upgrade")
+            compile_argv.extend(("-o", env.dependency_lock_path))
+            steps.append(
+                PreparedStep(
+                    step_id="environment.sync.compile",
+                    argv=tuple(compile_argv),
+                    cwd=str(worktree),
+                    mutating=True,
+                )
+            )
+            if env.python_environment_owned:
+                install_argv: tuple[str, ...] = (
+                    "uv",
+                    "pip",
+                    "sync",
+                    "--python",
+                    str(Path(env.python_environment_path) / "bin" / "python"),
+                    env.dependency_lock_path,
+                )
+            else:
+                install_argv = (
+                    "uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    env.python_environment_path,
+                    "-r",
+                    env.dependency_lock_path,
+                )
+            steps.append(
+                PreparedStep(
+                    step_id="environment.sync.install",
+                    argv=install_argv,
+                    cwd=str(worktree),
+                    mutating=True,
+                )
+            )
+        steps.append(
+            PreparedAction(
+                step_id="environment.sync",
+                action="sync_python",
+                description="Record Python dependency synchronization",
+                mutating=bool(inputs),
+            )
+        )
+        prepared_steps = tuple(steps)
+
+        def execute(context: RunContext[DevelopmentEnvironment]) -> DevelopmentEnvironment:
+            catalog = self._client.get_catalog()
+            catalog.add_environment_event(str(env.id), "sync", "started")
+            try:
+                with (
+                    exclusive_lock(environment_lock_path(str(env.id))),
+                    exclusive_lock(python_env_lock_path(env.python_environment_path)),
+                ):
+                    if inputs:
+                        compile_result = cast(
+                            "ProcessResult", context.process("environment.sync.compile")
+                        )
+                        if compile_result.returncode != 0:
+                            context.skip("environment.sync.install")
+                            if not Path(env.dependency_lock_path).is_file():
+                                raise ConfigError(
+                                    "uv pip compile failed and no prior lock: "
+                                    f"{_process_stderr(compile_result)}"
+                                )
+                            catalog.add_environment_event(
+                                str(env.id),
+                                "sync",
+                                "failed",
+                                message="uv pip compile failed; kept existing lock",
+                            )
+                            return self._get_env_row(catalog, env.id)
+                        install_result = cast(
+                            "ProcessResult", context.process("environment.sync.install")
+                        )
+                        if install_result.returncode != 0:
+                            raise ConfigError(
+                                f"uv pip install failed: {_process_stderr(install_result)}".strip()
+                            )
+                    catalog.add_environment_event(str(env.id), "sync", "succeeded")
+                    return self._get_env_row(catalog, env.id)
+            finally:
+                context.action("environment.sync")
+
+        from odoo_instance_sdk.execution import ExecutionPlan
+
+        return Command.from_prepared(
+            ExecutionPlan(
+                steps=tuple(step.public_projection() for step in prepared_steps)
+            ).with_fingerprint(),
+            prepared_command(
+                execute,
+                prepared_steps,
+                executor=SubprocessExecutor(),
+            ),
+        )
 
     def record_use(self, env: DevelopmentEnvironment) -> None:
         catalog = self._client.get_catalog()
@@ -1228,16 +1346,17 @@ class EnvironmentResource:
 
     def _run_uv_venv(self, venv: Path, selector: str) -> None:
         venv.parent.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.run(
-            ["uv", "venv", str(venv), "--python", selector],
+        from odoo_instance_sdk.internal.proc import run_captured
+
+        proc = run_captured(
+            ("uv", "venv"),
+            (str(venv), "--python", selector),
             env=sanitized_child_environment(),
-            shell=False,
-            capture_output=True,
             text=True,
-            check=False,
         )
         if proc.returncode != 0:
-            raise ConfigError(f"uv venv failed: {proc.stderr.strip()}")
+            stderr = proc.stderr if isinstance(proc.stderr, str) else ""
+            raise ConfigError(f"uv venv failed: {stderr.strip()}")
 
     def _compile_requirements(
         self, env: DevelopmentEnvironment, project: ProjectConfig, *, upgrade: bool
@@ -1255,18 +1374,18 @@ class EnvironmentResource:
         if upgrade:
             cmd.append("--upgrade")
         cmd.extend(["-o", str(lock_file)])
-        proc = subprocess.run(
+        from odoo_instance_sdk.internal.proc import run_captured
+
+        proc = run_captured(
             cmd,
             env=sanitized_child_environment(),
-            shell=False,
-            capture_output=True,
             text=True,
-            check=False,
         )
         if proc.returncode != 0:
+            stderr = proc.stderr if isinstance(proc.stderr, str) else ""
             if lock_file.is_file():
-                raise _CompileFailed(proc.stderr.strip() or "uv pip compile failed")
-            raise ConfigError(f"uv pip compile failed and no prior lock: {proc.stderr.strip()}")
+                raise _CompileFailed(stderr.strip() or "uv pip compile failed")
+            raise ConfigError(f"uv pip compile failed and no prior lock: {stderr.strip()}")
         return lock_file
 
     def _install_requirements(self, env: DevelopmentEnvironment) -> None:
@@ -1287,18 +1406,18 @@ class EnvironmentResource:
                 "-r",
                 str(lock_file),
             ]
-        proc = subprocess.run(
+        from odoo_instance_sdk.internal.proc import run_captured
+
+        proc = run_captured(
             cmd,
             env=sanitized_child_environment(),
-            shell=False,
-            capture_output=True,
             text=True,
-            check=False,
         )
         if proc.returncode != 0:
+            stderr = proc.stderr if isinstance(proc.stderr, str) else ""
             raise ConfigError(
                 f"uv pip {'sync' if env.python_environment_owned else 'install'} failed: "
-                f"{proc.stderr.strip()}"
+                f"{stderr.strip()}"
             )
 
     def get(self, selector: EnvironmentSelector) -> DevelopmentEnvironment:

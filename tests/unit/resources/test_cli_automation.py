@@ -191,7 +191,7 @@ class TestModuleUpdate:
         )
         with (
             patch.object(type(inst), "run_shell_script", _stub_run_shell_script(list_payload)),
-            patch("odoo_instance_sdk.internal.server._run_captured_shell", return_value=captured),
+            patch.object(type(inst), "_run_shell_script_exclusive", return_value=captured),
         ):
             assert update_modules(inst, ("comerta_base",), env_id="update-no-self-conflict").payload
 

@@ -7,21 +7,24 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
-from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec
+from odoo_instance_sdk.models import CommandResult, OdooTestResult, OdooTestSpec
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.proc import RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 _MODULE_MANIFEST_RE = re.compile(r"^\s*(?:\{|['\"]info['\"]\s*[:=]\s*\{)", re.MULTILINE)
+_SUBPROCESS_COMPAT = subprocess
 
 
 @dataclass(slots=True)
@@ -283,6 +286,77 @@ def run_odoo_tests(
     )
 
 
+def run_odoo_tests_command(
+    instance: OdooInstance,
+    spec: OdooTestSpec,
+    *,
+    http_interface: str | None = None,
+    http_port: int | None = None,
+    compatibility_runner: Callable[..., tuple[OdooTestResult, str | None]] | None = None,
+) -> Command[tuple[OdooTestResult, str | None]]:
+    """Capture the native Odoo test shell as one inspectable command."""
+    if not isinstance(spec, OdooTestSpec):
+        raise ConfigError("run_odoo_tests requires an OdooTestSpec")
+    config = instance.config.start_config
+    resolved_interface = http_interface or (
+        config.http_interface if config is not None else "127.0.0.1"
+    )
+    resolved_port = http_port or (config.http_port if config is not None else 8069)
+    from odoo_instance_sdk.resources.instance import OdooInstance as _OdooInstance
+
+    has_shell_command = isinstance(instance, _OdooInstance)
+    if has_shell_command:
+        address_state = probe_address(resolved_interface, resolved_port)
+        if address_state is not AddressState.FREE:
+            raise ConfigError(
+                f"port {address_state}: {resolved_interface}:{resolved_port} cannot be reserved for module tests"
+            )
+
+    def convert(result: CommandResult) -> tuple[OdooTestResult, str | None]:
+        payload = parse_payload(result.stdout)
+        counts = _test_counts(payload or {})
+        failures = counts["failed"] > 0 or counts["errors"] > 0
+        zero_tests = counts["tests"] == 0
+        exit_code = (
+            1 if result.returncode != 0 or failures or (zero_tests and not spec.allow_empty) else 0
+        )
+        diagnostic = _safe_stderr(result.stderr) if result.returncode != 0 else None
+        if result.returncode == 0 and failures and result.stderr:
+            diagnostic = _safe_stderr(result.stderr)
+        return (
+            OdooTestResult(
+                counts=counts,
+                failures=failures,
+                zero_tests=zero_tests,
+                exit_code=exit_code,
+            ),
+            diagnostic,
+        )
+
+    if not has_shell_command:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+
+        def compatibility_callback(
+            _context: RunContext[tuple[OdooTestResult, str | None]],
+        ) -> tuple[OdooTestResult, str | None]:
+            runner = compatibility_runner or run_odoo_tests
+            return runner(
+                instance,
+                spec,
+                http_interface=resolved_interface,
+                http_port=resolved_port,
+            )
+
+        return Command.create(ExecutionPlan(), compatibility_callback)
+
+    return instance._shell_script_command(
+        _test_runner_source(spec.modules, spec.test_tags, spec.reload_tests),
+        commit=False,
+        exclusive=True,
+        result_converter=convert,
+    )
+
+
 @dataclass(slots=True)
 class TranslationExportResult:
     module: str
@@ -520,15 +594,16 @@ def verify_deps(
 ) -> DepsVerifyResult:
     result = DepsVerifyResult()
     pip_cmd = [uv_executable, "pip", "check", "--python", str(recorded_python)]
-    proc = subprocess.run(
+    from odoo_instance_sdk.internal.proc import run_captured
+
+    proc = run_captured(
         pip_cmd,
-        env=sanitized_child_environment(),
-        shell=False,
-        capture_output=True,
+        env=None,
         text=True,
-        check=False,
     )
-    result.pip_check_output = (proc.stdout + proc.stderr).strip()
+    stdout = proc.stdout if isinstance(proc.stdout, str) else ""
+    stderr = proc.stderr if isinstance(proc.stderr, str) else ""
+    result.pip_check_output = (stdout + stderr).strip()
     result.pip_check_ok = proc.returncode == 0
     for raw_line in result.pip_check_output.splitlines():
         stripped = raw_line.strip()
@@ -537,14 +612,10 @@ def verify_deps(
         result.distributions.append({"detail": stripped})
     declared = _scan_external_python_deps(worktree_root)
     for module_name, import_name in declared:
-        check = subprocess.run(
-            [str(recorded_python), "-c", f"import {import_name}"],
-            env=sanitized_child_environment(),
-            shell=False,
-            capture_output=True,
+        check = run_captured(
+            (str(recorded_python), "-c", f"import {import_name}"),
+            cwd=worktree_root,
             text=True,
-            check=False,
-            cwd=str(worktree_root),
         )
         if check.returncode != 0:
             result.missing_imports.append({"module": module_name, "import": import_name})

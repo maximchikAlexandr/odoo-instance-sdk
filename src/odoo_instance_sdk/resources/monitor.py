@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import httpx
 
@@ -68,6 +68,10 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
 _SCHEMA_VERSION = 3
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.proc import RunContext
 
 
 class _ProcessProvider(Protocol):
@@ -214,7 +218,60 @@ class EnvironmentMonitor:
     )
 
     def snapshot(self, project_id: str | None = None, *, include_removed: bool = False) -> Snapshot:
-        """Perform one coherent collection pass and return an immutable ``Snapshot``."""
+        """Build one immutable snapshot command and execute it."""
+        return self.snapshot_command(project_id, include_removed=include_removed).run()
+
+    def snapshot_command(
+        self, project_id: str | None = None, *, include_removed: bool = False
+    ) -> Command[Snapshot]:
+        """Capture one finite monitor collection operation.
+
+        The monitor's catalog/cache reads and bounded probes remain in the
+        operation callback.  The action is deliberately consumed after the
+        collection so the command ledger still records a complete finite run;
+        ``watch`` constructs a fresh command for every tick.
+        """
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import (
+            PreparedAction,
+            SubprocessExecutor,
+            prepared_command,
+        )
+
+        action = PreparedAction(
+            step_id="monitor.snapshot",
+            action="collect_snapshot",
+            description="Collect one finite environment monitor snapshot",
+            details={
+                "project_id": project_id,
+                "include_removed": include_removed,
+            },
+            read_only=True,
+        )
+
+        def execute(context: RunContext[Snapshot]) -> Snapshot:
+            try:
+                return self._snapshot_impl(
+                    project_id=project_id,
+                    include_removed=include_removed,
+                )
+            finally:
+                context.action(action.step_id)
+
+        plan = ExecutionPlan(steps=(action.public_projection(),)).with_fingerprint()
+        return Command.from_prepared(
+            plan,
+            prepared_command(
+                execute,
+                (action,),
+                executor=SubprocessExecutor(),
+            ),
+        )
+
+    def _snapshot_impl(
+        self, project_id: str | None = None, *, include_removed: bool = False
+    ) -> Snapshot:
+        """Perform one coherent collection pass and return an immutable snapshot."""
         generated_at = datetime.now(UTC)
         db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
         try:
