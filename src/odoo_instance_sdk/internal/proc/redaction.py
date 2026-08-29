@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from shlex import join
 from typing import TYPE_CHECKING, cast
 
@@ -14,6 +14,20 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.internal.proc import PreparedStep
 
 REDACTION_MARKER = "<redacted>"
+type RedactionValue = (
+    None
+    | bool
+    | int
+    | float
+    | str
+    | bytes
+    | BaseException
+    | Mapping[str, RedactionValue]
+    | Sequence[RedactionValue]
+)
+type RedactedValue = (
+    None | bool | int | float | str | list[RedactedValue] | dict[str, RedactedValue]
+)
 _SECRET_KEY = re.compile(
     r"(?:password|passwd|secret|token|api[_-]?key|master_pwd|admin_passwd|db_password)",
     re.IGNORECASE,
@@ -36,11 +50,11 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
 
 
 def redacted_projection(
-    value: object,
+    value: RedactionValue,
     *,
     secrets: Iterable[str] = (),
     field: str = "",
-) -> object:
+) -> RedactedValue:
     """Return a JSON-safe, secret-free projection without joining argv fields.
 
     ``argv`` values are projected one list element at a time.  Consequently a
@@ -52,8 +66,12 @@ def redacted_projection(
         return _redact_text(value, known_secrets, field=field)
     if value is None or isinstance(value, (bool, int, float)):
         return value
+    if isinstance(value, bytes):
+        return _redact_text(value.decode("utf-8", errors="replace"), known_secrets, field=field)
+    if isinstance(value, BaseException):
+        return _redact_text(repr(value), known_secrets, field=field)
     if isinstance(value, Mapping):
-        projected: dict[str, object] = {}
+        projected: dict[str, RedactedValue] = {}
         for key, item in value.items():
             name = str(key)
             projected[name] = (
@@ -67,7 +85,7 @@ def redacted_projection(
     return _redact_text(repr(value), known_secrets, field=field)
 
 
-def redact(value: object, *, secrets: Iterable[str] = (), field: str = "") -> object:
+def redact(value: RedactionValue, *, secrets: Iterable[str] = (), field: str = "") -> RedactedValue:
     """Short compatibility alias for the canonical projection function."""
 
     return redacted_projection(value, secrets=secrets, field=field)

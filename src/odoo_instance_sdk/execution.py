@@ -8,7 +8,7 @@ never become part of a public model or representation.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Generic, TypeVar, cast
+from typing import Generic, Protocol, TypeVar, cast
 
 import msgspec
 
@@ -23,6 +23,7 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.proc import (
     PreparedCommand,
     ProcessExecutor,
+    ProcessResult,
     RunContext,
     Step,
     prepared_command,
@@ -108,7 +109,11 @@ class ExecutionPlan(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_
 T = TypeVar("T")
 
 
-_COMMANDS: dict[int, PreparedCommand[object]] = {}
+class _StoredCommand(Protocol):
+    def run(self) -> ProcessResult: ...
+
+
+_COMMANDS: dict[int, _StoredCommand] = {}
 
 
 class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=True):
@@ -119,7 +124,7 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
     @classmethod
     def from_prepared(cls, plan: ExecutionPlan, prepared: PreparedCommand[T]) -> Command[T]:
         command = cls(plan=plan)
-        _COMMANDS[id(command)] = cast("PreparedCommand[object]", prepared)
+        _COMMANDS[id(command)] = cast("_StoredCommand", prepared)
         return command
 
     @classmethod
@@ -127,7 +132,7 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
         cls,
         plan: ExecutionPlan,
         callback: Callable[[RunContext[T]], T],
-        steps: Sequence[object] = (),
+        steps: Sequence[Step] = (),
         *,
         executor: ProcessExecutor | None = None,
     ) -> Command[T]:
@@ -139,7 +144,7 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
 
         return cls.from_prepared(
             plan,
-            prepared_command(callback, cast("Sequence[Step]", steps), executor=executor),
+            prepared_command(callback, steps, executor=executor),
         )
 
     @property

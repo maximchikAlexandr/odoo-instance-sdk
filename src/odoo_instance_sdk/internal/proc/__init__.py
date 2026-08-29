@@ -26,14 +26,20 @@ class PreparedProcess(Protocol):
     def argv(self) -> tuple[str, ...]: ...
 
 
+class ProcessResult(Protocol):
+    """Private executor result marker; concrete executors may refine it."""
+
+    def __repr__(self) -> str: ...
+
+
 class ProcessExecutor(Protocol):
-    def execute(self, step: PreparedProcess) -> object:
+    def execute(self, step: PreparedProcess) -> ProcessResult:
         """Execute one already-captured step."""
 
 
 class _NullExecutor:
-    def execute(self, step: PreparedProcess) -> object:
-        return step
+    def execute(self, step: PreparedProcess) -> ProcessResult:
+        return cast("ProcessResult", None)
 
 
 @dataclass(frozen=True, slots=True)
