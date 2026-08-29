@@ -34,6 +34,10 @@ def _location(path: Path, line: int) -> tuple[str, int]:
     return path.relative_to(_REPO_ROOT).as_posix(), line
 
 
+def _format_locations(locations: set[tuple[str, int]]) -> str:
+    return ", ".join(f"{path}:{line}" for path, line in sorted(locations))
+
+
 def _source_modules() -> list[tuple[Path, ast.Module]]:
     return [
         (path, ast.parse(path.read_text(encoding="utf-8")))
@@ -44,6 +48,8 @@ def _source_modules() -> list[tuple[Path, ast.Module]]:
 def _discover_subprocess_launches() -> set[tuple[str, int]]:
     locations: set[tuple[str, int]] = set()
     for path, module in _source_modules():
+        if path.is_relative_to(_SOURCE_ROOT / "internal" / "proc"):
+            continue
         for node in ast.walk(module):
             if not isinstance(node, ast.Call):
                 continue
@@ -151,12 +157,14 @@ def _discover_local_subprocess_patches() -> set[tuple[str, int]]:
     return locations
 
 
-def _discover_public_process_methods() -> dict[str, int]:
+def _discover_public_process_methods() -> dict[str, int]:  # noqa: C901
     functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
     calls: dict[str, set[str]] = {}
     direct: set[str] = set()
 
     for path, module in _source_modules():
+        if path.is_relative_to(_SOURCE_ROOT / "internal" / "proc"):
+            continue
 
         def visit(body: list[ast.stmt], prefix: str = "") -> None:
             for node in body:
@@ -205,7 +213,11 @@ def _discover_public_process_methods() -> dict[str, int]:
 
 
 def test_direct_subprocess_launch_inventory_is_exact() -> None:
-    assert _discover_subprocess_launches() == DIRECT_SUBPROCESS_LAUNCHES
+    discovered = _discover_subprocess_launches()
+    assert discovered == DIRECT_SUBPROCESS_LAUNCHES, (
+        "subprocess launch inventory changed at "
+        + _format_locations(discovered ^ DIRECT_SUBPROCESS_LAUNCHES)
+    )
 
 
 def test_direct_output_inventory_is_exact() -> None:

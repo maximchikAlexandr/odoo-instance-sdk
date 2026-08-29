@@ -23,20 +23,11 @@ from odoo_instance_sdk.exceptions import (
     StalePlanError,
     UnplannedStepError,
 )
-from odoo_instance_sdk.internal.proc import PreparedProcess, PreparedStep, RunContext
+from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor, RunContext
 from odoo_instance_sdk.internal.proc.redaction import REDACTION_MARKER, redacted_projection
 
 
-class RecordingExecutor:
-    def __init__(self) -> None:
-        self.argvs: list[tuple[str, ...]] = []
-
-    def execute(self, step: PreparedProcess) -> str:
-        self.argvs.append(step.argv)
-        return step.argv[-1]
-
-
-def _prepared(executor: RecordingExecutor) -> PreparedStep:
+def _prepared() -> PreparedStep:
     return PreparedStep(
         step_id="child",
         argv=("tool", "--password=super secret", "quoted value"),
@@ -51,7 +42,7 @@ def _prepared(executor: RecordingExecutor) -> PreparedStep:
 
 
 def test_public_projection_is_frozen_json_safe_and_keeps_argv_boundaries() -> None:
-    step = _prepared(RecordingExecutor())
+    step = _prepared()
     public = step.public_projection()
 
     assert isinstance(public, ProcessStep)
@@ -65,7 +56,7 @@ def test_public_projection_is_frozen_json_safe_and_keeps_argv_boundaries() -> No
 
 
 def test_plan_serializes_action_and_process_values_without_private_snapshot() -> None:
-    step = _prepared(RecordingExecutor())
+    step = _prepared()
     nested: JsonValue = {"probe": [True, {"revision": "abc"}, None]}
     plan = ExecutionPlan(
         steps=(
@@ -135,8 +126,8 @@ def test_fingerprint_uses_redacted_projection_and_ignores_private_secret_values(
 
 
 def test_command_repeat_runs_use_independent_ledgers_and_safe_repr() -> None:
-    executor = RecordingExecutor()
-    private = _prepared(executor)
+    executor = RecordingExecutor(result_factory=lambda step: step.argv[-1])
+    private = _prepared()
     public = private.public_projection()
 
     command: Command[str] = Command.create(
@@ -149,7 +140,7 @@ def test_command_repeat_runs_use_independent_ledgers_and_safe_repr() -> None:
     assert command.commands == (public,)
     assert command.run() == "quoted value"
     assert command.run() == "quoted value"
-    assert len(executor.argvs) == 2
+    assert len(executor.executed) == 2
     assert "super secret" not in repr(command)
     encoded = msgspec.to_builtins(command)
     assert encoded == {"plan": msgspec.to_builtins(command.plan)}
@@ -157,8 +148,8 @@ def test_command_repeat_runs_use_independent_ledgers_and_safe_repr() -> None:
 
 
 def test_concurrent_command_runs_use_independent_ledgers() -> None:
-    executor = RecordingExecutor()
-    private = _prepared(executor)
+    executor = RecordingExecutor(result_factory=lambda step: step.argv[-1])
+    private = _prepared()
     barrier = Barrier(2)
 
     def callback(context: RunContext[str]) -> str:
@@ -179,11 +170,11 @@ def test_concurrent_command_runs_use_independent_ledgers() -> None:
         thread.join(timeout=2)
 
     assert results == ["quoted value", "quoted value"]
-    assert len(executor.argvs) == 2
+    assert len(executor.executed) == 2
 
 
 def test_command_snapshot_does_not_follow_mutated_inputs_after_construction() -> None:
-    executor = RecordingExecutor()
+    executor = RecordingExecutor(result_factory=lambda step: step.argv[-1])
     argv = ["tool", "before"]
     private = PreparedStep(step_id="child", argv=tuple(argv))
     public = private.public_projection()
@@ -197,11 +188,11 @@ def test_command_snapshot_does_not_follow_mutated_inputs_after_construction() ->
 
     assert command.plan.steps == (public,)
     assert command.run() == "before"
-    assert executor.argvs == [("tool", "before")]
+    assert [step.argv for step in executor.executed] == [("tool", "before")]
 
 
 def test_unplanned_or_duplicate_requests_do_not_launch_requested_child() -> None:
-    executor = RecordingExecutor()
+    executor = RecordingExecutor(result_factory=lambda step: step.argv[-1])
     private = PreparedStep(step_id="child", argv=("tool", "value"))
     plan = ExecutionPlan(
         steps=(
@@ -218,7 +209,7 @@ def test_unplanned_or_duplicate_requests_do_not_launch_requested_child() -> None
     )
     with pytest.raises(UnplannedStepError):
         unplanned.run()
-    assert executor.argvs == []
+    assert executor.executed == []
 
     duplicate: Command[str] = Command.create(
         plan,
@@ -231,7 +222,7 @@ def test_unplanned_or_duplicate_requests_do_not_launch_requested_child() -> None
     )
     with pytest.raises(DuplicateStepError):
         duplicate.run()
-    assert executor.argvs == [("tool", "value")]
+    assert [step.argv for step in executor.executed] == [("tool", "value")]
 
 
 @pytest.mark.parametrize(

@@ -18,11 +18,11 @@
 
 ## 3. Shared Process Boundary
 
-- [ ] 3.1 Implement the minimal `internal/proc` real executor for captured text/bytes output, stdin bytes, cwd, sanitized environment overrides, timeouts, durations, return codes, and `shell=False`; cover success, non-zero exit, timeout, and spawn failure.
-- [ ] 3.2 Implement inherited-stdio and foreground/long-running spawn modes with owned process handles, session/process-group capture, wait, and existing exit semantics; cover actual inherited descriptor behavior with a focused integration test.
-- [ ] 3.3 Move bounded TERM/KILL/reap and exceptional foreground cleanup into `internal/proc`, including a captured Windows `taskkill` step; retain POSIX descendant-group and Ctrl+C regression tests.
-- [ ] 3.4 Add one recording/fake executor seam that returns configured typed results/handles and records exact private inputs; migrate foundation parity tests to use it without a second runner interface.
-- [ ] 3.5 Add the AST subprocess-launch scanner and a checked, line-specific baseline of existing launch sites outside `internal/proc`; make failures report file and line, reject baseline growth, and permit `Popen` handle annotations that do not launch. Shrink the baseline as sections 4-6 migrate families; do not require it to be empty yet.
+- [x] 3.1 Implement the minimal `internal/proc` real executor for captured text/bytes output, stdin bytes, cwd, sanitized environment overrides, timeouts, durations, return codes, and `shell=False`; cover success, non-zero exit, timeout, and spawn failure.
+- [x] 3.2 Implement inherited-stdio and foreground/long-running spawn modes with owned process handles, session/process-group capture, wait, and existing exit semantics; cover actual inherited descriptor behavior with a focused integration test.
+- [x] 3.3 Move bounded TERM/KILL/reap and exceptional foreground cleanup into `internal/proc`, including a captured Windows `taskkill` step; retain POSIX descendant-group and Ctrl+C regression tests.
+- [x] 3.4 Add one recording/fake executor seam that returns configured typed results/handles and records exact private inputs; migrate foundation parity tests to use it without a second runner interface.
+- [x] 3.5 Add the AST subprocess-launch scanner and a checked, line-specific baseline of existing launch sites outside `internal/proc`; make failures report file and line, reject baseline growth, and permit `Popen` handle annotations that do not launch. Shrink the baseline as sections 4-6 migrate families; do not require it to be empty yet.
 
 ## 4. Checkout Compatibility Proof and Expression Gate
 

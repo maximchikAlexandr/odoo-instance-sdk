@@ -24,11 +24,6 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/pgadmin_files.py", 462),
         ("src/odoo_instance_sdk/internal/postgres_compose.py", 71),
         ("src/odoo_instance_sdk/internal/postgres_transport.py", 64),
-        ("src/odoo_instance_sdk/internal/server.py", 83),
-        ("src/odoo_instance_sdk/internal/server.py", 147),
-        ("src/odoo_instance_sdk/internal/server.py", 208),
-        ("src/odoo_instance_sdk/internal/server.py", 241),
-        ("src/odoo_instance_sdk/internal/server.py", 485),
         ("src/odoo_instance_sdk/internal/storage_footprint.py", 38),
         ("src/odoo_instance_sdk/internal/test_selection.py", 430),
         ("src/odoo_instance_sdk/resources/environment.py", 906),
@@ -170,7 +165,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
     "src/odoo_instance_sdk/internal/port_allocation.py": frozenset({118}),
     "src/odoo_instance_sdk/internal/postgres_compose.py": frozenset({99, 336, 355}),
     "src/odoo_instance_sdk/internal/process_metrics.py": frozenset({24, 39}),
-    "src/odoo_instance_sdk/internal/server.py": frozenset({329, 433}),
+    "src/odoo_instance_sdk/internal/server.py": frozenset({309}),
     "src/odoo_instance_sdk/internal/vscode_generate.py": frozenset({20, 92}),
     "src/odoo_instance_sdk/internal/vscode_import.py": frozenset(
         {36, 73, 88, 89, 111, 112, 138, 139, 284, 301, 318}
@@ -277,7 +272,6 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {
     "resources/instance.py:OdooInstance.run_foreground": 390,
     "resources/instance.py:OdooInstance.shell": 501,
     "resources/instance.py:OdooInstance.run_shell_script": 521,
-    "resources/instance.py:OdooInstance.stop": 595,
     "resources/monitor.py:EnvironmentMonitor.snapshot": 216,
     "resources/monitor.py:EnvironmentMonitor.watch": 360,
     "resources/postgres.py:PostgresCluster.from_project": 92,

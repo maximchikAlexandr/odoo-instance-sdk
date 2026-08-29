@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-import signal
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
@@ -14,7 +12,6 @@ from typing import Any, cast
 
 from msgspec import structs
 
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.models import (
     CommandResult,
     OdooProcess,
@@ -69,67 +66,6 @@ def _write_secret_config(config: StartConfig) -> str | None:
     return path
 
 
-def _kill_pg(
-    proc: subprocess.Popen[bytes],
-    *,
-    force: bool,
-    process_group_id: int | None = None,
-) -> None:
-    if sys.platform == "win32":
-        args = ["taskkill", "/T", "/PID", str(proc.pid)]
-        if force:
-            args.append("/F")
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(
-                args,
-                env=sanitized_child_environment(),
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-        return
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        # A foreground child is spawned with ``start_new_session=True``.  Its
-        # PID is therefore the session/process-group ID at spawn time.  Keep
-        # using that known value during exceptional cleanup: the leader may
-        # already have exited while descendants of its group are still alive,
-        # in which case ``os.getpgid(proc.pid)`` cannot recover the group.
-        pgid = process_group_id if process_group_id is not None else os.getpgid(proc.pid)
-        os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
-
-
-def _process_group_is_alive(process_group_id: int) -> bool:
-    """Return whether a POSIX process group still exists.
-
-    ``killpg(..., 0)`` observes the group without signalling it.  A permission
-    error still proves that the group exists; only ``ProcessLookupError`` means
-    it is gone.
-    """
-    try:
-        os.killpg(process_group_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def _wait_for_process_group_exit(
-    proc: subprocess.Popen[bytes], process_group_id: int, *, timeout: float
-) -> bool:
-    """Wait a bounded period for the captured POSIX process group to vanish."""
-    deadline = time.monotonic() + timeout
-    while True:
-        # ``Popen.poll`` reaps an exited leader.  Without it a zombie leader
-        # keeps its PGID observable even after the actual process group ended.
-        proc.poll()
-        if not _process_group_is_alive(process_group_id):
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-
-
 def start_process(
     executable: str | Sequence[str],
     config: StartConfig,
@@ -144,12 +80,16 @@ def start_process(
     prefix = [executable] if isinstance(executable, str) else list(executable)
     full_args = [*prefix, *cli_args]
 
-    proc = subprocess.Popen(
+    from odoo_instance_sdk.internal.proc import spawn
+
+    handle = spawn(
         full_args,
         cwd=cwd,
-        env=sanitized_child_environment(env),
-        start_new_session=True,
+        env=env,
+        mode="long-running",
+        inherit_stdio=True,
     )
+    proc = handle.process
 
     odoo_proc = OdooProcess(
         id=uuid.uuid4().hex,
@@ -167,13 +107,10 @@ def stop_process(
     timeout: float = 10.0,
     secret_config_path: str | None = None,
 ) -> None:
+    from odoo_instance_sdk.internal.proc import owned_handle, terminate
+
     if handle.poll() is None:
-        _kill_pg(handle, force=False)
-        try:
-            handle.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_pg(handle, force=True)
-            handle.wait()
+        terminate(owned_handle(handle), timeout=timeout)
     cleanup_secret_config(secret_config_path)
 
 
@@ -202,24 +139,17 @@ def run_command(
     env: dict[str, str] | None = None,
     timeout: float | None = None,
 ) -> CommandResult:
+    from odoo_instance_sdk.internal.proc import run_captured
+
     prefix = [executable] if isinstance(executable, str) else list(executable)
     full_args = [*prefix, *args]
-    start = time.perf_counter()
-    proc = subprocess.run(
-        full_args,
-        cwd=cwd,
-        env=sanitized_child_environment(env),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    proc = run_captured(full_args, cwd=cwd, env=env, timeout=timeout, text=True)
     return CommandResult(
         args=full_args,
         returncode=proc.returncode,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
-        duration=time.perf_counter() - start,
+        stdout=proc.stdout if isinstance(proc.stdout, str) else "",
+        stderr=proc.stderr if isinstance(proc.stderr, str) else "",
+        duration=proc.duration,
     )
 
 
@@ -236,17 +166,17 @@ def spawn_foreground_process(
     The returned process is in its own session (``start_new_session=True``)
     so a Ctrl+C forwarded via ``os.killpg`` reaches the whole tree.
     """
+    from odoo_instance_sdk.internal.proc import spawn
+
     prefix = [executable] if isinstance(executable, str) else list(executable)
     full_args = [*prefix, *args]
-    return subprocess.Popen(
+    return spawn(
         full_args,
         cwd=cwd,
-        env=sanitized_child_environment(env),
-        start_new_session=True,
-        stdin=None if inherit_stdio else subprocess.PIPE,
-        stdout=None if inherit_stdio else subprocess.PIPE,
-        stderr=None if inherit_stdio else subprocess.PIPE,
-    )
+        env=env,
+        mode="foreground",
+        inherit_stdio=inherit_stdio,
+    ).process
 
 
 def terminate_foreground_process(
@@ -257,40 +187,13 @@ def terminate_foreground_process(
     ``process_group_id`` is captured at spawn for cleanup after a leader has
     exited.  On POSIX it remains valid for a surviving descendant group.
     """
-    if sys.platform == "win32":
-        _kill_pg(proc, force=False, process_group_id=process_group_id)
-        try:
-            proc.wait(timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            _kill_pg(proc, force=True, process_group_id=process_group_id)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
-        return
+    from odoo_instance_sdk.internal.proc import owned_handle, terminate
 
-    # Do not use leader liveness as a proxy for group liveness: a wrapper can
-    # exit while an owned descendant ignores SIGTERM.  The saved PGID is the
-    # session created at spawn, and this immediate, bounded cleanup avoids
-    # discovering a group through a potentially exited/reused leader PID.
-    if process_group_id is None:
-        try:
-            group_id = os.getpgid(proc.pid)
-        except ProcessLookupError:
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
-            return
-    else:
-        group_id = process_group_id
-    _kill_pg(proc, force=False, process_group_id=group_id)
-    if not _wait_for_process_group_exit(
-        proc, group_id, timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT
-    ):
-        _kill_pg(proc, force=True, process_group_id=group_id)
-        _wait_for_process_group_exit(proc, group_id, timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
-
-    # Reap independently after addressing the entire owned group.  The caller
-    # is already handling an original exception, so cleanup remains best effort.
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        proc.wait(timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT)
+    terminate(
+        owned_handle(proc, process_group_id=process_group_id),
+        process_group_id=process_group_id,
+        timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT,
+    )
 
 
 def wait_foreground_process_with_cleanup(proc: subprocess.Popen[bytes]) -> int:
@@ -315,36 +218,9 @@ def wait_foreground_process(proc: subprocess.Popen[bytes]) -> int:
     Ctrl+C uses the same bounded TERM/KILL/reap cleanup as exceptional wait
     failures, then returns 130. Restores the previous SIGINT handler on return.
     """
-    interrupted = False
-    # start_new_session=True makes the leader PID the PGID at spawn.  Retain it
-    # before a signal can make the leader disappear; descendants can survive
-    # that exit and must still receive the bounded TERM/KILL/reap sequence.
-    process_group_id = proc.pid
-    prev_handler = signal.getsignal(signal.SIGINT)
+    from odoo_instance_sdk.internal.proc import owned_handle, wait_foreground
 
-    def _terminate_after_interrupt() -> None:
-        with contextlib.suppress(BaseException):
-            terminate_foreground_process(proc, process_group_id=process_group_id)
-
-    def _on_sigint(signum: int, frame: object) -> None:
-        nonlocal interrupted
-        interrupted = True
-        _terminate_after_interrupt()
-
-    if sys.platform != "win32":
-        signal.signal(signal.SIGINT, _on_sigint)
-    try:
-        exit_code = proc.wait()
-    except KeyboardInterrupt:
-        interrupted = True
-        _terminate_after_interrupt()
-        exit_code = 130
-    finally:
-        if sys.platform != "win32":
-            signal.signal(signal.SIGINT, prev_handler)
-    if interrupted:
-        exit_code = 130
-    return exit_code
+    return wait_foreground(owned_handle(proc, process_group_id=proc.pid))
 
 
 def run_foreground_process(
@@ -477,25 +353,24 @@ def _run_captured_shell(
 ) -> CommandResult:
     import secrets as _secrets
 
+    from odoo_instance_sdk.internal.proc import run_captured
+
     nonce = _secrets.token_hex(8)
     wrapper = _build_shell_wrapper(source, argv, commit=commit, nonce=nonce)
     prefix = [executable] if isinstance(executable, str) else list(executable)
     full_args = [*prefix, *cli_args]
-    start = time.perf_counter()
-    proc = subprocess.run(
+    proc = run_captured(
         full_args,
         cwd=cwd,
-        env=sanitized_child_environment(env),
-        input=wrapper,
-        capture_output=True,
-        text=True,
+        env=env,
+        stdin=wrapper.encode(),
         timeout=timeout,
-        check=False,
+        text=True,
     )
     return CommandResult(
         args=full_args,
         returncode=proc.returncode,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
-        duration=time.perf_counter() - start,
+        stdout=proc.stdout if isinstance(proc.stdout, str) else "",
+        stderr=proc.stderr if isinstance(proc.stderr, str) else "",
+        duration=proc.duration,
     )

@@ -26,20 +26,20 @@ class PreparedProcess(Protocol):
     def argv(self) -> tuple[str, ...]: ...
 
 
-class ProcessResult(Protocol):
+class ProcessResultLike(Protocol):
     """Private executor result marker; concrete executors may refine it."""
 
     def __repr__(self) -> str: ...
 
 
 class ProcessExecutor(Protocol):
-    def execute(self, step: PreparedProcess) -> ProcessResult:
+    def execute(self, step: PreparedProcess) -> ProcessResultLike:
         """Execute one already-captured step."""
 
 
 class _NullExecutor:
-    def execute(self, step: PreparedProcess) -> ProcessResult:
-        return cast("ProcessResult", None)
+    def execute(self, step: PreparedProcess) -> ProcessResultLike:
+        return cast("ProcessResultLike", None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +59,9 @@ class PreparedStep:
     mutating: bool = False
     interactive: bool = False
     long_running: bool = False
+    text: bool = True
+    start_new_session: bool = False
+    inherit_stdio: bool = False
 
     def public_projection(self) -> ProcessStep:
         from odoo_instance_sdk.internal.proc.redaction import project_process_step
@@ -147,7 +150,45 @@ __all__ = [
     "PreparedCommand",
     "PreparedProcess",
     "PreparedStep",
+    "ProcessExecutionError",
     "ProcessExecutor",
+    "ProcessHandle",
+    "ProcessResult",
+    "ProcessResultLike",
+    "ProcessSpawnError",
+    "ProcessTimeoutError",
+    "RecordingExecutor",
     "RunContext",
+    "SubprocessExecutor",
+    "owned_handle",
     "prepared_command",
+    "prepared_step",
+    "run_captured",
+    "spawn",
+    "terminate",
+    "wait",
+    "wait_foreground",
+    "wait_with_cleanup",
 ]
+
+
+# Imported at the end to keep the private snapshot definitions independent of
+# the real subprocess implementation.  The package remains one seam for
+# callers while the implementation stays split by responsibility.
+from .executor import (  # noqa: E402
+    ProcessExecutionError,
+    ProcessHandle,
+    ProcessResult,
+    ProcessSpawnError,
+    ProcessTimeoutError,
+    SubprocessExecutor,
+    owned_handle,
+    prepared_step,
+    run_captured,
+    spawn,
+    terminate,
+    wait,
+    wait_foreground,
+    wait_with_cleanup,
+)
+from .testing import RecordingExecutor  # noqa: E402
