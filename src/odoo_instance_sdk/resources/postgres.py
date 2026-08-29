@@ -116,8 +116,9 @@ class PostgresCluster:
         *,
         repository_root: Path,
         compose_runner: ComposeRunner | None,
+        project_id: str | None = None,
     ) -> PostgresCluster:
-        project_id = _resolve_project_id(repository_root)
+        project_id = project_id or _resolve_project_id(repository_root)
         postgres = cfg.postgres
         mode: Literal["external", "compose"] = (
             "compose" if postgres is not None and postgres.mode == "compose" else "external"
@@ -506,16 +507,25 @@ class PostgresCluster:
         )
 
     def ensure_running(self, timeout: float = _DEFAULT_TIMEOUT) -> None:
+        # Preparation and lifecycle commands may already own a strict ledger.
+        # Re-entering ``ensure_running_command`` here would create a second
+        # executor and make the inspected outer plan decorative.
+        from odoo_instance_sdk.internal.proc import active_context
+
+        context = active_context()
+        if context is not None:
+            self._ensure_running_impl(timeout)
+            if self._mode != "external":
+                self._account_optional_steps(context, self._ensure_running_steps(timeout))
+            return None
         return self.ensure_running_command(timeout).run()
 
-    def ensure_running_command(
-        self, timeout: float = _DEFAULT_TIMEOUT, *, executor: ProcessExecutor | None = None
-    ) -> Command[None]:
-        from odoo_instance_sdk.execution import ExecutionPlan
-        from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
+    def _ensure_running_steps(self, timeout: float) -> tuple[PreparedStep | PreparedAction, ...]:
+        """Return the exact process/action manifest used by ensure-running."""
+        from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
 
         if self._mode == "external":
-            steps: tuple[PreparedStep | PreparedAction, ...] = (
+            return (
                 PreparedAction(
                     step_id="postgres.ensure.external",
                     action="ensure-external",
@@ -523,91 +533,98 @@ class PostgresCluster:
                     read_only=True,
                 ),
             )
-        else:
-            compose_file = self._compose_file()
-            prefix = (
-                "docker",
-                "compose",
-                "--project-name",
-                self.compose_project_name,
-                "-f",
-                str(compose_file),
-            )
-            steps = (
-                PreparedStep(
-                    step_id="postgres.ensure.image.pull",
-                    argv=("docker", "image", "pull", self._image or ""),
-                    timeout=timeout,
-                    read_only=True,
+        compose_file = self._compose_file()
+        prefix = (
+            "docker",
+            "compose",
+            "--project-name",
+            self.compose_project_name,
+            "-f",
+            str(compose_file),
+        )
+        return (
+            PreparedStep(
+                step_id="postgres.ensure.image.pull",
+                argv=("docker", "image", "pull", self._image or ""),
+                timeout=timeout,
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="postgres.ensure.image.inspect",
+                argv=(
+                    "docker",
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{index .RepoDigests 0}}",
+                    self._image or "",
                 ),
-                PreparedStep(
-                    step_id="postgres.ensure.image.inspect",
-                    argv=(
-                        "docker",
-                        "image",
-                        "inspect",
-                        "--format",
-                        "{{index .RepoDigests 0}}",
-                        self._image or "",
-                    ),
-                    timeout=timeout,
-                    read_only=True,
+                timeout=timeout,
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="postgres.ensure.status.ps",
+                argv=(*prefix, "ps", "--format", "json"),
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="postgres.ensure.status.health",
+                argv=(
+                    *prefix,
+                    "exec",
+                    "-T",
+                    "postgres",
+                    "pg_isready",
+                    "-U",
+                    self._user or "",
+                    "-d",
+                    "postgres",
                 ),
-                PreparedStep(
-                    step_id="postgres.ensure.status.ps",
-                    argv=(*prefix, "ps", "--format", "json"),
-                    read_only=True,
+                cwd=str(compose_file.parent),
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="postgres.ensure.config",
+                argv=(*prefix, "config", "--quiet"),
+                cwd=str(compose_file.parent),
+                mutating=True,
+            ),
+            PreparedStep(
+                step_id="postgres.ensure.up",
+                argv=(*prefix, "up", "--detach", "--wait"),
+                cwd=str(compose_file.parent),
+                mutating=True,
+            ),
+            PreparedStep(
+                step_id="postgres.ensure.final.ps",
+                argv=(*prefix, "ps", "--format", "json"),
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="postgres.ensure.final.health",
+                argv=(
+                    *prefix,
+                    "exec",
+                    "-T",
+                    "postgres",
+                    "pg_isready",
+                    "-U",
+                    self._user or "",
+                    "-d",
+                    "postgres",
                 ),
-                PreparedStep(
-                    step_id="postgres.ensure.status.health",
-                    argv=(
-                        *prefix,
-                        "exec",
-                        "-T",
-                        "postgres",
-                        "pg_isready",
-                        "-U",
-                        self._user or "",
-                        "-d",
-                        "postgres",
-                    ),
-                    cwd=str(compose_file.parent),
-                    read_only=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.config",
-                    argv=(*prefix, "config", "--quiet"),
-                    cwd=str(compose_file.parent),
-                    mutating=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.up",
-                    argv=(*prefix, "up", "--detach", "--wait"),
-                    cwd=str(compose_file.parent),
-                    mutating=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.final.ps",
-                    argv=(*prefix, "ps", "--format", "json"),
-                    read_only=True,
-                ),
-                PreparedStep(
-                    step_id="postgres.ensure.final.health",
-                    argv=(
-                        *prefix,
-                        "exec",
-                        "-T",
-                        "postgres",
-                        "pg_isready",
-                        "-U",
-                        self._user or "",
-                        "-d",
-                        "postgres",
-                    ),
-                    cwd=str(compose_file.parent),
-                    read_only=True,
-                ),
-            )
+                cwd=str(compose_file.parent),
+                read_only=True,
+            ),
+        )
+
+    def ensure_running_command(
+        self, timeout: float = _DEFAULT_TIMEOUT, *, executor: ProcessExecutor | None = None
+    ) -> Command[None]:
+        from odoo_instance_sdk.execution import ExecutionPlan
+        from odoo_instance_sdk.internal.proc import SubprocessExecutor
+
+        steps = self._ensure_running_steps(timeout)
 
         def run(context: RunContext[None]) -> None:
             if self._mode == "external":

@@ -40,7 +40,6 @@ from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     Backup,
     BackupFormat,
-    CommandResult,
     Database,
     DropResult,
     NoBackup,
@@ -588,6 +587,35 @@ class DatabaseResource:
         return server_filename, size_bytes, sha256_hex
 
     def reset_admin_password(self) -> AdminPasswordResetResult:
+        from odoo_instance_sdk.internal.proc import active_context
+
+        if active_context() is not None and self._instance.config.start_config is not None:
+            configured = self._instance.config.configured_database_names
+            if len(configured) != 1 or not configured[0].strip():
+                raise InstanceConfigurationError(
+                    "Administrator password reset requires exactly one configured database"
+                )
+            try:
+                result = self._instance._run_shell_script_exclusive(
+                    _RESET_ADMIN_PASSWORD_SCRIPT,
+                    commit=True,
+                )
+            except Exception:
+                raise DatabaseManagerUnavailableError(
+                    "Administrator password reset failed"
+                ) from None
+            if result.returncode != 0:
+                raise DatabaseManagerUnavailableError("Administrator password reset failed")
+            environment_id: uuid.UUID | None = None
+            if self._instance._environment_id is not None:
+                with contextlib.suppress(ValueError):
+                    environment_id = uuid.UUID(self._instance._environment_id)
+            return AdminPasswordResetResult(
+                database=configured[0],
+                completed=True,
+                xml_id="base.user_admin",
+                environment_id=environment_id,
+            )
         return self.reset_admin_password_command().run()
 
     def reset_admin_password_command(
@@ -599,8 +627,6 @@ class DatabaseResource:
             raise InstanceConfigurationError(
                 "Administrator password reset requires exactly one configured database"
             )
-        database = configured[0]
-
         # Keep the legacy diagnostic seam for synthetic instances that cannot
         # construct a shell command.  Real instances use the captured shell
         # command below, so the child argv/stdin/env remain inspectable.
@@ -613,25 +639,11 @@ class DatabaseResource:
                 mutating=True,
             )
 
-        def convert(result: CommandResult) -> AdminPasswordResetResult:
-            if result.returncode != 0:
-                raise DatabaseManagerUnavailableError("Administrator password reset failed")
-            environment_id: uuid.UUID | None = None
-            if self._instance._environment_id is not None:
-                with contextlib.suppress(ValueError):
-                    environment_id = uuid.UUID(self._instance._environment_id)
-            return AdminPasswordResetResult(
-                database=database,
-                completed=True,
-                xml_id="base.user_admin",
-                environment_id=environment_id,
-            )
-
         return self._instance._shell_script_command(
             _RESET_ADMIN_PASSWORD_SCRIPT,
             commit=True,
             exclusive=True,
-            result_converter=convert,
+            callback_override=self._reset_admin_password_impl,
             executor=executor,
         )
 
@@ -677,6 +689,16 @@ class DatabaseResource:
         neutralize_database: bool = False,
         timeout: float | None = None,
     ) -> RestoreResult:
+        from odoo_instance_sdk.internal.proc import active_context
+
+        if active_context() is not None:
+            return self._restore_impl(
+                backup,
+                target_database_name,
+                copy=copy,
+                neutralize_database=neutralize_database,
+                timeout=timeout,
+            )
         return self.restore_command(
             backup,
             target_database_name,

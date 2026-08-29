@@ -187,7 +187,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
             2450,
         }
     ),
-    "src/odoo_instance_sdk/resources/postgres.py": frozenset({788}),
+    "src/odoo_instance_sdk/resources/postgres.py": frozenset({805}),
     "src/odoo_instance_sdk/storage/backup_catalog.py": frozenset({713, 781}),
 }
 

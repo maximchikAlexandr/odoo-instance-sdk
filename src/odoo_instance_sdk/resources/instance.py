@@ -61,7 +61,7 @@ T = TypeVar("T")
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, ExecutionPlan
-    from odoo_instance_sdk.internal.proc import RunContext
+    from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -727,6 +727,7 @@ class OdooInstance:
         commit: bool = False,
         exclusive: bool,
         result_converter: Callable[[CommandResult], T] | None = None,
+        callback_override: Callable[[], T] | None = None,
         preflight: Callable[[RunContext[T]], None] | None = None,
         extra_steps: Sequence[PreparedStep | PreparedAction] = (),
         executor: ProcessExecutor | None = None,
@@ -778,6 +779,10 @@ class OdooInstance:
                     _write_secret_config(snapshot, secret_path)
                     secret_created = True
                 try:
+                    if callback_override is not None:
+                        converted_result = callback_override()
+                        context.action(action.step_id)
+                        return converted_result
                     result = cast("ProcessResult", context.process(step.step_id))
                     context.action(action.step_id)
                     converted = _command_result(result, timeout)
@@ -807,6 +812,55 @@ class OdooInstance:
             executor=executor or SubprocessExecutor(),
         )
 
+    def _run_shell_script_in_context(
+        self,
+        context: RunContext[PrivateJsonValue],
+        source: str,
+        *,
+        argv: Sequence[str] = (),
+        timeout: float | None = None,
+        commit: bool = False,
+    ) -> CommandResult:
+        """Consume a shell step from an already-owned command ledger.
+
+        Database preparation owns the lock and the command snapshot.  Calling
+        ``run_shell_script_command().run()`` from that callback would silently
+        create a second ledger, so this small adapter deliberately mirrors the
+        captured step construction and consumes it on the active context.
+        """
+        config = self.config.start_config
+        if config is None:
+            raise InstanceConfigurationError(
+                "No StartConfig — create instance via from_config() or from_environment()"
+            )
+        snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
+        nonce = uuid.uuid4().hex
+        from odoo_instance_sdk.internal.server import _build_shell_wrapper
+
+        wrapper = _build_shell_wrapper(source, list(argv), commit=commit, nonce=nonce)
+        step = PreparedStep(
+            step_id="instance.shell_script",
+            argv=(*self._executable_prefix(), *cli_args, "shell"),
+            cwd=None if self.config.default_cwd is None else str(self.config.default_cwd),
+            environment=tuple(sorted(sanitized_child_environment(None).items())),
+            stdin=wrapper.encode(),
+            public_input_preview=source,
+            timeout=timeout,
+            secret_values=secrets,
+            read_only=not commit,
+            mutating=commit,
+        )
+        secret_created = False
+        if secret_path is not None:
+            _write_secret_config(snapshot, secret_path)
+            secret_created = True
+        try:
+            result = cast("ProcessResult", context.process_prepared(step))
+            return _command_result(result, timeout)
+        finally:
+            if secret_created:
+                cleanup_secret_config(secret_path)
+
     def _run_shell_script_exclusive(
         self,
         source: str,
@@ -816,6 +870,17 @@ class OdooInstance:
         commit: bool = False,
     ) -> CommandResult:
         """Internal mutator entrypoint; lock choice belongs to this instance only."""
+        from odoo_instance_sdk.internal.proc import active_context
+
+        context = active_context()
+        if context is not None:
+            return self._run_shell_script_in_context(
+                context,
+                source,
+                argv=argv,
+                timeout=timeout,
+                commit=commit,
+            )
         return self._shell_script_command(
             source, argv=argv, timeout=timeout, commit=commit, exclusive=True
         ).run()

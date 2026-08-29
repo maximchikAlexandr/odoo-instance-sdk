@@ -24,7 +24,7 @@ from odoo_instance_sdk.models import (
     BackupProvenanceStatus,
     DatabaseRefreshOptions,
 )
-from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
 
 
@@ -60,6 +60,57 @@ def _backup(tmp_path: Path, *, downloaded_at: datetime) -> Backup:
         sha256="a" * 64,
         downloaded_at=downloaded_at,
         source_git_branch="develop",
+    )
+
+
+def test_preparation_command_captures_restore_process_manifest_before_run(
+    tmp_path: Path,
+) -> None:
+    """Restore planning exposes Git, compose, and psql children in one snapshot."""
+    from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
+
+    source = tmp_path / "odoo.conf"
+    source.write_text(
+        "[options]\n"
+        "http_interface = 127.0.0.1\n"
+        "http_port = 8069\n"
+        "db_host = 127.0.0.1\n"
+        "db_port = 5432\n"
+        "db_user = odoo\n"
+        "db_password = private\n"
+    )
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        source_config=source,
+        postgres=PostgresProjectConfig(
+            mode="compose", image="postgres:16", port=55432, user="odoo"
+        ),
+        test_instance=ConfigTestInstance(base_url="https://example.test", database="remote"),
+    )
+
+    command = DatabasePreparationCoordinator(MagicMock()).prepare_command(
+        project,
+        options=DatabaseRefreshOptions(restore=True),
+    )
+
+    process_ids = tuple(step.step_id for step in command.plan.process_steps)
+    assert process_ids[:2] == (
+        "database.prepare.git.toplevel",
+        "database.prepare.git.common-dir",
+    )
+    assert process_ids[2:10] == (
+        "postgres.ensure.image.pull",
+        "postgres.ensure.image.inspect",
+        "postgres.ensure.status.ps",
+        "postgres.ensure.status.health",
+        "postgres.ensure.config",
+        "postgres.ensure.up",
+        "postgres.ensure.final.ps",
+        "postgres.ensure.final.health",
+    )
+    assert process_ids[-2:] == (
+        "database.prepare.restore.exists-before",
+        "database.prepare.restore.exists-after",
     )
 
 

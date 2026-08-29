@@ -8,7 +8,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,6 +22,7 @@ from odoo_instance_sdk.exceptions import (
     EnvironmentConflictError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
+    UnplannedStepError,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.git_worktree import (
@@ -48,13 +49,19 @@ from odoo_instance_sdk.models import (
     DatabasePreparationResult,
     DatabaseRefreshOptions,
     NoBackup,
+    StartConfig,
 )
 from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
-    from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        ProcessExecutor,
+        RunContext,
+    )
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -309,6 +316,22 @@ def _remote_password(environ: Mapping[str, str] | None = None) -> str:
     return value
 
 
+def _consume_action_if_planned(step_id: str) -> None:
+    """Consume an optional domain action when preparation is command-bound."""
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    if context is None:
+        return
+    try:
+        context.action(step_id)
+    except UnplannedStepError:
+        # Direct preparation APIs can run beneath another command context in
+        # compatibility tests; only the owning preparation command declares
+        # these action IDs.
+        return
+
+
 def _resolve_source_config(project: ProjectConfig, root: Path) -> Path:
     configured = project.source_config
     path = (
@@ -513,6 +536,7 @@ def _restore_preflight(
     lock_context = (
         _wait_for_preparation_lock(project_id) if wait_for_lock else preparation_lock(project_id)
     )
+    _consume_action_if_planned("database.prepare.lock")
     with lock_context:
         current = _reload_project(project, root)
         source = resolve_test_source(current, options)
@@ -549,9 +573,19 @@ def _restore_preflight(
                 "local source config must bind a local Odoo endpoint"
             ) from exc
         runtime = resolve_runtime_binding(current, root)
+        from odoo_instance_sdk.internal.proc import active_context
         from odoo_instance_sdk.resources.postgres import PostgresCluster
 
-        cluster = PostgresCluster.from_project(root)
+        context = active_context()
+        if context is None:
+            cluster = PostgresCluster.from_project(root)
+        else:
+            cluster = PostgresCluster._from_config(
+                current,
+                repository_root=root,
+                compose_runner=None,
+                project_id=project_id,
+            )
         cluster.ensure_running(timeout=60.0)
         local = client.instance.from_config(
             source_config,
@@ -592,10 +626,12 @@ def prepare_restore(
             remote = client.instance(source.config.base_url, master_password=remote_password)
             backup: Backup | None = None
             try:
+                _consume_action_if_planned("database.prepare.remote-backup")
                 backup = remote.databases.backup(
                     source.config.database,
                     source_git_branch=source.branch,
                 )
+                _consume_action_if_planned("database.prepare.local-restore")
                 preflight.local_instance.databases.restore(
                     backup,
                     preflight.target_database,
@@ -604,6 +640,7 @@ def prepare_restore(
                 )
                 reset_completed = False
                 if options.reset_admin_password:
+                    _consume_action_if_planned("database.prepare.odoo-reset")
                     with build_target_instance(
                         client,
                         source_config=preflight.source_config,
@@ -621,6 +658,7 @@ def prepare_restore(
                 )
                 from odoo_instance_sdk.internal.project_manifest import write_manifest
 
+                _consume_action_if_planned("database.prepare.default-switch")
                 write_manifest(root, switched)
                 return DatabasePreparationResult(
                     mode=DatabasePreparationAction.RESTORE,
@@ -634,6 +672,7 @@ def prepare_restore(
                     effective_default=preflight.target_database,
                 )
             except BaseException as exc:
+                _consume_action_if_planned("database.prepare.rollback")
                 _annotate_retained_failure(
                     error=exc,
                     backup=backup,
@@ -661,11 +700,13 @@ def prepare_download(
     lock_context = (
         _wait_for_preparation_lock(project_id) if wait_for_lock else preparation_lock(project_id)
     )
+    _consume_action_if_planned("database.prepare.lock")
     with lock_context:
         current = _reload_project(project, root)
         source = resolve_test_source(current, options)
         require_test_instance_origin_approval(source.config.base_url)
         remote = client.instance(source.config.base_url, master_password=password)
+        _consume_action_if_planned("database.prepare.remote-backup")
         backup = remote.databases.backup(
             source.config.database,
             source_git_branch=source.branch,
@@ -700,6 +741,248 @@ def locked_restore_preflight(
     return _restore_preflight(client, project, options=options, wait_for_lock=False)
 
 
+def _preparation_process_steps(
+    project: ProjectConfig | str | Path,
+    *,
+    options: DatabaseRefreshOptions,
+) -> tuple[PreparedStep, ...]:
+    """Build the child-process part of a preparation command before effects.
+
+    The preparation implementation deliberately keeps catalog, filesystem,
+    HTTP, and lock work in its domain callback.  Its Git, PostgreSQL, compose,
+    and optional Odoo-shell launches, however, must be visible in the same
+    private snapshot so the active ledger can reject substitutions.
+    """
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    initial, root = _load_project(project)
+    steps: list[PreparedStep] = [
+        PreparedStep(
+            step_id="database.prepare.git.toplevel",
+            argv=("git", "-C", str(root), "rev-parse", "--show-toplevel"),
+            timeout=30.0,
+            read_only=True,
+            text=True,
+        ),
+        PreparedStep(
+            step_id="database.prepare.git.common-dir",
+            argv=("git", "-C", str(root), "rev-parse", "--git-common-dir"),
+            timeout=30.0,
+            read_only=True,
+            text=True,
+        ),
+    ]
+    if not options.restore:
+        return tuple(steps)
+
+    from odoo_instance_sdk.resources.database import _database_psql_step
+
+    postgres = initial.postgres
+    if postgres is not None and postgres.mode == "compose":
+        from odoo_instance_sdk.internal.paths import get_project_postgres_dir
+        from odoo_instance_sdk.internal.postgres_compose import compose_project_name
+
+        compose_file = get_project_postgres_dir("<runtime>") / "compose.yaml"
+        prefix = (
+            "docker",
+            "compose",
+            "--project-name",
+            compose_project_name("<runtime>"),
+            "-f",
+            str(compose_file),
+        )
+        user = postgres.user or "odoo"
+        steps.extend(
+            (
+                PreparedStep(
+                    step_id="postgres.ensure.image.pull",
+                    argv=("docker", "image", "pull", postgres.image or ""),
+                    timeout=60.0,
+                    read_only=True,
+                ),
+                PreparedStep(
+                    step_id="postgres.ensure.image.inspect",
+                    argv=(
+                        "docker",
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{index .RepoDigests 0}}",
+                        postgres.image or "",
+                    ),
+                    timeout=60.0,
+                    read_only=True,
+                ),
+                PreparedStep(
+                    step_id="postgres.ensure.status.ps",
+                    argv=(*prefix, "ps", "--format", "json"),
+                    read_only=True,
+                ),
+                PreparedStep(
+                    step_id="postgres.ensure.status.health",
+                    argv=(
+                        *prefix,
+                        "exec",
+                        "-T",
+                        "postgres",
+                        "pg_isready",
+                        "-U",
+                        user,
+                        "-d",
+                        "postgres",
+                    ),
+                    cwd=str(compose_file.parent),
+                    read_only=True,
+                ),
+                PreparedStep(
+                    step_id="postgres.ensure.config",
+                    argv=(*prefix, "config", "--quiet"),
+                    cwd=str(compose_file.parent),
+                    mutating=True,
+                ),
+                PreparedStep(
+                    step_id="postgres.ensure.up",
+                    argv=(*prefix, "up", "--detach", "--wait"),
+                    cwd=str(compose_file.parent),
+                    mutating=True,
+                ),
+                PreparedStep(
+                    step_id="postgres.ensure.final.ps",
+                    argv=(*prefix, "ps", "--format", "json"),
+                    read_only=True,
+                ),
+                PreparedStep(
+                    step_id="postgres.ensure.final.health",
+                    argv=(
+                        *prefix,
+                        "exec",
+                        "-T",
+                        "postgres",
+                        "pg_isready",
+                        "-U",
+                        user,
+                        "-d",
+                        "postgres",
+                    ),
+                    cwd=str(compose_file.parent),
+                    read_only=True,
+                ),
+            )
+        )
+
+    source_config = _resolve_source_config(initial, root)
+    parsed = parse_odoo_config(source_config)
+    db_user = parsed.get("db_user")
+    if db_user:
+        db_host = parsed.get("db_host")
+        raw_port = parsed.get("db_port")
+        try:
+            db_port = int(raw_port) if raw_port else 5432
+        except ValueError:
+            db_port = 5432
+        password = parsed.get("db_password")
+        steps.extend(
+            (
+                _database_psql_step(
+                    step_id="database.prepare.restore.exists-before",
+                    host=db_host,
+                    port=db_port,
+                    user=db_user,
+                    password=password,
+                    database_name="<runtime>",
+                ),
+                _database_psql_step(
+                    step_id="database.prepare.restore.exists-after",
+                    host=db_host,
+                    port=db_port,
+                    user=db_user,
+                    password=password,
+                    database_name="<runtime>",
+                ),
+            )
+        )
+
+    if options.reset_admin_password:
+        from odoo_instance_sdk.internal.server import _build_cli_args
+
+        runtime = resolve_runtime_binding(initial, root)
+        start_config = StartConfig.from_odoo_config(source_config)
+        start_config.config_path = "<runtime>"
+        start_config.db_name = "<runtime>"
+        steps.append(
+            PreparedStep(
+                step_id="database.prepare.odoo.reset-admin",
+                argv=(
+                    *runtime.command_prefix,
+                    *_build_cli_args(start_config),
+                    "shell",
+                ),
+                public_input_preview="administrator password reset",
+                read_only=False,
+                mutating=True,
+                text=False,
+            )
+        )
+    return tuple(steps)
+
+
+def _preparation_action_steps(
+    *, operation: str, options: DatabaseRefreshOptions
+) -> tuple[PreparedAction, ...]:
+    """Return honest in-process boundaries for the preparation coordinator."""
+    from odoo_instance_sdk.internal.proc import PreparedAction
+
+    action_steps = [
+        PreparedAction(
+            step_id="database.prepare.lock",
+            action="acquire-preparation-lock",
+            description="Serialize project database preparation",
+            mutating=True,
+        ),
+        PreparedAction(
+            step_id="database.prepare.remote-backup",
+            action="download-remote-backup",
+            description="Request the selected remote database backup",
+            mutating=True,
+        ),
+    ]
+    if options.restore:
+        action_steps.append(
+            PreparedAction(
+                step_id="database.prepare.local-restore",
+                action="restore-local-database",
+                description="Restore the captured backup into the reserved database",
+                mutating=True,
+            )
+        )
+        if options.reset_admin_password:
+            action_steps.append(
+                PreparedAction(
+                    step_id="database.prepare.odoo-reset",
+                    action="reset-odoo-admin-password",
+                    description="Reset the administrator password in the target database",
+                    mutating=True,
+                )
+            )
+        action_steps.extend(
+            (
+                PreparedAction(
+                    step_id="database.prepare.default-switch",
+                    action="switch-default-database",
+                    description="Publish the prepared database as the project default",
+                    mutating=True,
+                ),
+                PreparedAction(
+                    step_id="database.prepare.rollback",
+                    action="compensate-preparation-failure",
+                    description="Retain artifacts and record preparation compensation",
+                    read_only=True,
+                ),
+            )
+        )
+    return tuple(action_steps)
+
+
 @dataclass(slots=True)
 class DatabasePreparationCoordinator:
     client: OdooClient
@@ -721,11 +1004,16 @@ class DatabasePreparationCoordinator:
         coalesce: bool = False,
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
+        steps: tuple[PreparedStep | PreparedAction, ...] = (
+            *_preparation_action_steps(operation="prepare", options=options),
+            *_preparation_process_steps(project, options=options),
+        )
         return self._action_command(
             "database.prepare",
             "Prepare a project database",
             lambda: self._prepare_impl(project, options=options, coalesce=coalesce),
             executor=executor,
+            steps=steps,
         )
 
     def _prepare_impl(
@@ -754,11 +1042,16 @@ class DatabasePreparationCoordinator:
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
+        steps: tuple[PreparedStep | PreparedAction, ...] = (
+            *_preparation_action_steps(operation="refresh", options=options),
+            *_preparation_process_steps(project, options=options),
+        )
         return self._action_command(
             "database.refresh",
             "Refresh a project database",
             lambda: self._prepare_impl(project, options=options, coalesce=False),
             executor=executor,
+            steps=steps,
         )
 
     def _action_command(
@@ -768,9 +1061,15 @@ class DatabasePreparationCoordinator:
         callback: Callable[[], T],
         *,
         executor: ProcessExecutor | None,
+        steps: Sequence[PreparedStep | PreparedAction] = (),
     ) -> Command[T]:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
-        from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
+        from odoo_instance_sdk.internal.proc import (
+            PreparedAction,
+            PreparedStep,
+            SubprocessExecutor,
+            prepared_command,
+        )
 
         step = PreparedAction(
             step_id=step_id, action=step_id, description=description, mutating=True
@@ -778,11 +1077,24 @@ class DatabasePreparationCoordinator:
 
         def run(context: RunContext[T]) -> T:
             context.action(step_id)
-            return callback()
+            result = callback()
+            for prepared in steps:
+                if isinstance(prepared, (PreparedStep, PreparedAction)) and not context.consumed(
+                    prepared.step_id
+                ):
+                    context.skip(prepared.step_id)
+            return result
 
-        return Command.create(
-            ExecutionPlan(steps=(step.public_projection(),)),
-            run,
-            (step,),
-            executor=executor or SubprocessExecutor(),
+        prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (step, *steps)
+
+        return Command.from_prepared(
+            ExecutionPlan(
+                steps=tuple(item.public_projection() for item in prepared_steps),
+            ),
+            prepared_command(
+                run,
+                prepared_steps,
+                executor=executor or SubprocessExecutor(),
+                strict=bool(steps),
+            ),
         )
