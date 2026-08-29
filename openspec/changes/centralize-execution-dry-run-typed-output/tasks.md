@@ -37,11 +37,11 @@
 
 ## 5. Odoo Process and Lifecycle Migration
 
-- [ ] 5.1 Move captured Odoo command execution from `internal/server.py` to captured proc steps while preserving `CommandResult` argv, stdout, stderr, return code, duration, cwd, environment, and timeout behavior.
-- [ ] 5.2 Move background start and foreground/inherited-stdio execution to proc steps while preserving process registration, runtime identity persistence/clearing, readiness dependencies, process-group ownership, and secret-config cleanup.
-- [ ] 5.3 Capture Odoo interactive shell and shell-script argv plus exact wrapper/source stdin before execution; expose redacted multiline source, script argv, and commit/rollback intent in the public plan.
-- [ ] 5.4 Add `run_command()`, `start_command()`, `run_foreground_command()`, `shell_command()`, `run_shell_script_command()`, and `stop_command()` siblings on every supported platform, then make the existing `OdooInstance` methods delegate without changing results or lock semantics. Keep one cross-platform `stop_command()` signature/return contract, projecting Windows `taskkill` as a `ProcessStep` and POSIX signal/no-child termination as an `ActionStep`; update the intentional `OdooInstance` method delta in `tests/unit/test_cli_characterization.py::test_discovered_public_methods` in the same change and keep its no-accidental-public-method assertion green.
-- [ ] 5.5 Update Odoo lifecycle, shell payload, signal, foreground cleanup, native TTY, runtime identity, and secret-redaction tests to assert recorded step parity instead of patching `internal.server` subprocess calls.
+- [x] 5.1 Move captured Odoo command execution from `internal/server.py` to captured proc steps while preserving `CommandResult` argv, stdout, stderr, return code, duration, cwd, environment, and timeout behavior.
+- [x] 5.2 Move background start and foreground/inherited-stdio execution to proc steps while preserving process registration, runtime identity persistence/clearing, readiness dependencies, process-group ownership, and secret-config cleanup.
+- [x] 5.3 Capture Odoo interactive shell and shell-script argv plus exact wrapper/source stdin before execution; expose redacted multiline source, script argv, and commit/rollback intent in the public plan.
+- [x] 5.4 Add `run_command()`, `start_command()`, `run_foreground_command()`, `shell_command()`, `run_shell_script_command()`, and `stop_command()` siblings on every supported platform, then make the existing `OdooInstance` methods delegate without changing results or lock semantics. Keep one cross-platform `stop_command()` signature/return contract, projecting Windows `taskkill` as a `ProcessStep` and POSIX signal/no-child termination as an `ActionStep`; update the intentional `OdooInstance` method delta in `tests/unit/test_cli_characterization.py::test_discovered_public_methods` in the same change and keep its no-accidental-public-method assertion green.
+- [x] 5.5 Update Odoo lifecycle, shell payload, signal, foreground cleanup, native TTY, runtime identity, and secret-redaction tests to assert recorded step parity instead of patching `internal.server` subprocess calls.
 
 ## 6. Remaining Process Families and Public Command Audit
 

@@ -49,11 +49,17 @@ def _build_cli_args(config: StartConfig, *, secret_config_path: str | None = Non
     return args
 
 
-def _write_secret_config(config: StartConfig) -> str | None:
+def _write_secret_config(
+    config: StartConfig, secret_config_path: str | Path | None = None
+) -> str | None:
     db_password = getattr(config, "db_password", None)
     if db_password is None:
         return None
-    fd, path = tempfile.mkstemp(suffix=".conf", prefix="odoo-sdk-")
+    if secret_config_path is None:
+        fd, path = tempfile.mkstemp(suffix=".conf", prefix="odoo-sdk-")
+    else:
+        path = str(secret_config_path)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
             f.write("[options]\n")
@@ -150,6 +156,9 @@ def run_command(
         stdout=proc.stdout if isinstance(proc.stdout, str) else "",
         stderr=proc.stderr if isinstance(proc.stderr, str) else "",
         duration=proc.duration,
+        cwd=proc.cwd,
+        environment=proc.environment,
+        timeout=timeout,
     )
 
 
@@ -373,4 +382,7 @@ def _run_captured_shell(
         stdout=proc.stdout if isinstance(proc.stdout, str) else "",
         stderr=proc.stderr if isinstance(proc.stderr, str) else "",
         duration=proc.duration,
+        cwd=None if cwd is None else str(cwd),
+        environment=proc.environment,
+        timeout=timeout,
     )

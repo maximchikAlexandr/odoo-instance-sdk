@@ -3,13 +3,14 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
-from odoo_instance_sdk.models import CommandResult, PostgresClusterState, StartConfig
+from odoo_instance_sdk.internal.proc import ProcessHandle, RecordingExecutor
+from odoo_instance_sdk.models import PostgresClusterState, StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -24,6 +25,14 @@ def _make_instance(cluster: Any = None) -> OdooInstance:
         _client=client,
         _postgres_cluster=cluster,
     )
+
+
+def _executor(step_id: str) -> RecordingExecutor:
+    process = MagicMock()
+    process.pid = 4242
+    process.poll.return_value = 0
+    process.wait.return_value = 0
+    return RecordingExecutor(handles={step_id: ProcessHandle(process, (), 4242, 4242, True)})
 
 
 class _FakeCluster:
@@ -68,7 +77,10 @@ class _EventCluster(_FakeCluster):
 @pytest.mark.unit
 def test_manual_instance_no_preflight() -> None:
     instance = _make_instance(cluster=None)
-    with patch("odoo_instance_sdk.resources.instance.run_foreground_process", return_value=0):
+    with patch(
+        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        return_value=_executor("instance.foreground"),
+    ):
         exit_code = instance.run_foreground()
     assert exit_code == 0
 
@@ -77,7 +89,10 @@ def test_manual_instance_no_preflight() -> None:
 def test_preflight_runs_before_run_foreground() -> None:
     cluster = _FakeCluster()
     instance = _make_instance(cluster=cluster)
-    with patch("odoo_instance_sdk.resources.instance.run_foreground_process", return_value=0):
+    with patch(
+        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        return_value=_executor("instance.foreground"),
+    ):
         instance.run_foreground()
     assert cluster.ensure_calls == 1
 
@@ -86,7 +101,10 @@ def test_preflight_runs_before_run_foreground() -> None:
 def test_preflight_runs_before_shell() -> None:
     cluster = _FakeCluster()
     instance = _make_instance(cluster=cluster)
-    with patch("odoo_instance_sdk.resources.instance.run_foreground_process", return_value=0):
+    with patch(
+        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        return_value=_executor("instance.shell"),
+    ):
         instance.shell(args=())
     assert cluster.ensure_calls == 1
 
@@ -95,12 +113,9 @@ def test_preflight_runs_before_shell() -> None:
 def test_preflight_runs_before_run_shell_script() -> None:
     cluster = _FakeCluster()
     instance = _make_instance(cluster=cluster)
-    from odoo_instance_sdk.models import CommandResult
-
-    fake_result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
     with patch(
-        "odoo_instance_sdk.internal.server._run_captured_shell",
-        return_value=fake_result,
+        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        return_value=_executor("instance.shell_script"),
     ):
         instance.run_shell_script("print(1)")
     assert cluster.ensure_calls == 1
@@ -110,7 +125,10 @@ def test_preflight_runs_before_run_shell_script() -> None:
 def test_preflight_runs_once_per_call() -> None:
     cluster = _FakeCluster()
     instance = _make_instance(cluster=cluster)
-    with patch("odoo_instance_sdk.resources.instance.run_foreground_process", return_value=0):
+    with patch(
+        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        return_value=_executor("instance.foreground"),
+    ):
         instance.run_foreground()
         instance.run_foreground()
     assert cluster.ensure_calls == 2  # one per call
@@ -129,30 +147,23 @@ def test_preflight_propagates_cluster_error() -> None:
 
 @pytest.mark.unit
 def test_preflight_event_precedes_foreground_shell_and_script_spawn() -> None:
-    from odoo_instance_sdk.models import CommandResult
-
     events: list[str] = []
     instance = _make_instance(cluster=_EventCluster(events))
-    result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
+    from odoo_instance_sdk.internal.proc import PreparedProcess
 
-    def spawn(*args: object, **kwargs: object) -> int:
-        events.append("spawn")
-        return 0
+    class EventExecutor(RecordingExecutor):
+        def spawn(self, step: PreparedProcess) -> ProcessHandle:
+            events.append("spawn")
+            return super().spawn(step)
 
-    def shell_spawn(*args: object, **kwargs: object) -> CommandResult:
-        events.append("shell-spawn")
-        return result
+        def execute(self, step: PreparedProcess) -> object:
+            events.append("shell-spawn")
+            return super().execute(step)
 
-    with (
-        patch(
-            "odoo_instance_sdk.resources.instance.run_foreground_process",
-            side_effect=spawn,
-        ),
-        patch(
-            "odoo_instance_sdk.internal.server._run_captured_shell",
-            side_effect=shell_spawn,
-        ),
-    ):
+    handle = _executor("instance.foreground").handles["instance.foreground"]
+    executor = EventExecutor(handles={"instance.foreground": handle, "instance.shell": handle})
+
+    with patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor):
         instance.run_foreground()
         assert events[:2] == ["ensure", "spawn"]
         events.clear()
@@ -165,19 +176,17 @@ def test_preflight_event_precedes_foreground_shell_and_script_spawn() -> None:
 
 @pytest.mark.unit
 def test_preflight_event_precedes_exclusive_script_operation() -> None:
-    from odoo_instance_sdk.models import CommandResult
-
     events: list[str] = []
     instance = _make_instance(cluster=_EventCluster(events))
-    result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
 
-    def exclusive_spawn(*args: object, **kwargs: object) -> CommandResult:
-        events.append("exclusive-spawn")
-        return result
+    class EventExecutor(RecordingExecutor):
+        def execute(self, step: object) -> object:
+            events.append("exclusive-spawn")
+            return super().execute(step)  # type: ignore[arg-type]
 
     with patch(
-        "odoo_instance_sdk.internal.server._run_captured_shell",
-        side_effect=exclusive_spawn,
+        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        return_value=EventExecutor(),
     ):
         instance._run_shell_script_exclusive("print(1)")
     assert events[:2] == ["ensure", "exclusive-spawn"]
@@ -189,7 +198,6 @@ def test_exclusive_script_rechecks_cluster_after_claiming_artifact_lock(
 ) -> None:
     events: list[str] = []
     instance = _make_instance(cluster=_EventCluster(events))
-    result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
 
     @contextlib.contextmanager
     def claimed_operation(_self: OdooInstance, *, exclusive: bool) -> Iterator[None]:
@@ -199,7 +207,10 @@ def test_exclusive_script_rechecks_cluster_after_claiming_artifact_lock(
         events.append("lock-released")
 
     monkeypatch.setattr(OdooInstance, "_artifact_operation", claimed_operation)
-    with patch("odoo_instance_sdk.internal.server._run_captured_shell", return_value=result):
+    with patch(
+        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        return_value=RecordingExecutor(),
+    ):
         instance._run_shell_script_exclusive("print(1)", commit=True)
 
     assert events == ["lock-claimed", "ensure", "lock-released"]

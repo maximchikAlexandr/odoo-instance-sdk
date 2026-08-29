@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
@@ -13,7 +13,9 @@ from odoo_instance_sdk.exceptions import (
 )
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import ProcessStep
+    from odoo_instance_sdk.execution import ActionStep, JsonValue, ProcessStep
+
+    from .executor import ProcessHandle
 
 
 class PreparedProcess(Protocol):
@@ -36,14 +38,31 @@ class _PrivateCommandProjection(Protocol):
     """Typed marker for resource compatibility data kept off public commands."""
 
 
+type PrivateJsonValue = (
+    None
+    | bool
+    | int
+    | float
+    | str
+    | tuple["PrivateJsonValue", ...]
+    | Mapping[str, "PrivateJsonValue"]
+)
+
+
 class ProcessExecutor(Protocol):
-    def execute(self, step: PreparedProcess) -> ProcessResultLike:
+    def execute(self, step: PreparedStep) -> ProcessResultLike:
         """Execute one already-captured step."""
+
+    def spawn(self, step: PreparedStep) -> ProcessHandle:
+        """Spawn one already-captured long-running step."""
 
 
 class _NullExecutor:
-    def execute(self, step: PreparedProcess) -> ProcessResultLike:
+    def execute(self, step: PreparedStep) -> ProcessResultLike:
         return cast("ProcessResultLike", None)
+
+    def spawn(self, step: PreparedStep) -> ProcessHandle:
+        return cast("ProcessHandle", None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +75,7 @@ class PreparedStep:
     environment: tuple[tuple[str, str], ...] = ()
     environment_policy: str = "sanitized-inherit"
     stdin: bytes | None = None
+    public_input_preview: str | None = None
     timeout: float | None = None
     mode: str = "captured"
     secret_values: tuple[str, ...] = ()
@@ -76,6 +96,23 @@ class PreparedStep:
 @dataclass(frozen=True, slots=True)
 class PreparedAction:
     step_id: str
+    action: str = ""
+    description: str = ""
+    details: PrivateJsonValue = None
+    read_only: bool = False
+    mutating: bool = False
+
+    def public_projection(self) -> ActionStep:
+        from odoo_instance_sdk.execution import ActionStep
+
+        return ActionStep(
+            step_id=self.step_id,
+            action=self.action or self.step_id,
+            description=self.description or self.action or self.step_id,
+            details=cast("JsonValue", self.details),
+            read_only=self.read_only,
+            mutating=self.mutating,
+        )
 
 
 Step = PreparedStep | PreparedAction
@@ -95,6 +132,12 @@ class RunContext(Generic[T]):
         if not isinstance(step, PreparedStep):
             raise UnplannedStepError(step_id, reason="requested step is not a process")
         return cast("T", self._executor.execute(step))
+
+    def spawn(self, step_id: str) -> ProcessHandle:
+        step = self._consume(step_id)
+        if not isinstance(step, PreparedStep):
+            raise UnplannedStepError(step_id, reason="requested step is not a process")
+        return self._executor.spawn(step)
 
     def action(self, step_id: str) -> PreparedAction:
         step = self._consume(step_id)

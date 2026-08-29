@@ -370,6 +370,21 @@ class CommandResult(msgspec.Struct):
     stdout: str
     stderr: str
     duration: float
+    cwd: str | None = None
+    environment: tuple[tuple[str, str], ...] = ()
+    timeout: float | None = None
+
+    @property
+    def argv(self) -> list[str]:
+        """Canonical spelling for the exact argument vector."""
+
+        return self.args
+
+    @property
+    def env(self) -> tuple[tuple[str, str], ...]:
+        """Compatibility spelling for the captured child environment."""
+
+        return self.environment
 
 
 class OdooTestSpec(msgspec.Struct, frozen=True, forbid_unknown_fields=True):

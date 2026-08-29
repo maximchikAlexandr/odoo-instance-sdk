@@ -27,8 +27,6 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/resources/environment.py", 1231),
         ("src/odoo_instance_sdk/resources/environment.py", 1258),
         ("src/odoo_instance_sdk/resources/environment.py", 1290),
-        ("src/odoo_instance_sdk/resources/instance.py", 280),
-        ("src/odoo_instance_sdk/resources/instance.py", 288),
     }
 )
 
@@ -46,7 +44,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 169),
         ("src/odoo_instance_sdk/commands/output.py", 200),
         ("src/odoo_instance_sdk/commands/test.py", 175),
-        ("src/odoo_instance_sdk/resources/instance.py", 482),
+        ("src/odoo_instance_sdk/resources/instance.py", 622),
     }
 )
 
@@ -63,7 +61,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/cli.py", 568): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/cli.py", 686): "legacy exec native diagnostic transport",
     ("src/odoo_instance_sdk/cli.py", 881): "legacy module-test diagnostic transport",
-    ("src/odoo_instance_sdk/resources/instance.py", 482): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/resources/instance.py", 622): "lifecycle cleanup diagnostic transport",
 }
 
 
@@ -162,7 +160,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
     "src/odoo_instance_sdk/internal/port_allocation.py": frozenset({118}),
     "src/odoo_instance_sdk/internal/postgres_compose.py": frozenset({99, 336, 355}),
     "src/odoo_instance_sdk/internal/process_metrics.py": frozenset({24, 39}),
-    "src/odoo_instance_sdk/internal/server.py": frozenset({309}),
+    "src/odoo_instance_sdk/internal/server.py": frozenset({318}),
     "src/odoo_instance_sdk/internal/vscode_generate.py": frozenset({20, 92}),
     "src/odoo_instance_sdk/internal/vscode_import.py": frozenset(
         {36, 73, 88, 89, 111, 112, 138, 139, 284, 301, 318}
@@ -236,7 +234,6 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/resources/test_environment_python.py", 42),
         ("tests/unit/resources/test_environment_python.py", 233),
         ("tests/unit/resources/test_environment_python.py", 271),
-        ("tests/unit/resources/test_instance_runtime.py", 246),
         ("tests/unit/test_monitor_cache_and_docker.py", 128),
     }
 )
@@ -263,9 +260,15 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {
     "resources/environment.py:EnvironmentResource.sync_python": 1160,
     "resources/environment.py:EnvironmentResource.open_pgadmin": 1309,
     "resources/environment.py:EnvironmentResource.remove": 1433,
-    "resources/instance.py:OdooInstance.run_foreground": 390,
-    "resources/instance.py:OdooInstance.shell": 501,
-    "resources/instance.py:OdooInstance.run_shell_script": 521,
+    "resources/instance.py:OdooInstance.run": 411,
+    "resources/instance.py:OdooInstance.start": 454,
+    "resources/instance.py:OdooInstance.run_foreground": 521,
+    "resources/instance.py:OdooInstance.run_foreground_command": 530,
+    "resources/instance.py:OdooInstance.shell": 641,
+    "resources/instance.py:OdooInstance.shell_command": 644,
+    "resources/instance.py:OdooInstance.run_shell_script": 691,
+    "resources/instance.py:OdooInstance.run_shell_script_command": 703,
+    "resources/instance.py:OdooInstance.stop": 842,
     "resources/monitor.py:EnvironmentMonitor.snapshot": 216,
     "resources/monitor.py:EnvironmentMonitor.watch": 360,
     "resources/postgres.py:PostgresCluster.resolve_image_digest": 212,

@@ -20,6 +20,7 @@ from odoo_instance_sdk.commands.output import OutputMode, build_envelope
 from odoo_instance_sdk.internal.context import resolve_environment, resolve_project
 from odoo_instance_sdk.models import Snapshot
 from odoo_instance_sdk.resources.environment import EnvironmentResource
+from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
@@ -209,6 +210,23 @@ def test_discovered_public_methods() -> None:
             "sync_python",
         ),
         EnvironmentMonitor: ("snapshot", "watch"),
+        OdooInstance: (
+            "iter_logs",
+            "run",
+            "run_command",
+            "run_foreground",
+            "run_foreground_command",
+            "run_shell_script",
+            "run_shell_script_command",
+            "shell",
+            "shell_command",
+            "start",
+            "start_command",
+            "status",
+            "stop",
+            "stop_command",
+            "wait_ready",
+        ),
         BackupCatalog: (
             "active_environment_for",
             "add_environment_event",

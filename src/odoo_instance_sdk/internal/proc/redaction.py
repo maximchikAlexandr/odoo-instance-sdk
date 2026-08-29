@@ -111,14 +111,19 @@ def project_process_step(step: PreparedStep) -> ProcessStep:
         for key, value in environment
     )
     stdin = step.stdin
+    raw_preview = step.public_input_preview
+    if raw_preview is None and stdin is not None:
+        raw_preview = stdin.decode("utf-8", errors="replace")
     input_preview = (
         cast(
             "str",
             redacted_projection(
-                stdin.decode("utf-8", errors="replace"), secrets=secrets, field="stdin"
+                raw_preview,
+                secrets=secrets,
+                field="script" if step.public_input_preview is not None else "stdin",
             ),
         )
-        if stdin is not None
+        if raw_preview is not None
         else None
     )
     return ProcessStep(
