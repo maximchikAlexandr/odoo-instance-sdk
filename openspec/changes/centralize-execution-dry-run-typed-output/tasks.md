@@ -31,9 +31,9 @@
 - [x] 4.3 Implement `EnvironmentResource.checkout_command()` so it captures all Git, uv, generated-config, database, catalog, and cleanup process/action steps before mutation and returns `Command[DevelopmentEnvironment]`.
 - [x] 4.4 Add locked stale validators for checkout base revision, Git identity, target paths, selected port, database/provenance identity, and deterministic future files; prove each changed precondition fails before the first mutation without replanning.
 - [x] 4.5 Make `checkout()` delegate to `checkout_command().run()` and make `plan_checkout()`/`checkout_with_plan()` derive the unchanged `EnvironmentCheckoutPlan`/result from that same command; delete duplicate executable reconstruction.
-- [ ] 4.6 Migrate `odcli env checkout` to the shared command-local dry-run decorator and typed plan emitter; verify valid dry-run is non-mutating/non-prompting and normal execution consumes the inspected snapshot.
-- [ ] 4.7 Record the preliminary checkout planning before/after branch and adapter/unwrap counts; remove Expression and preserve typed stage signatures if its stop condition is met, otherwise document the bounded preliminary result while retaining the repository-local mandatory post-#35 vertical-slice recheck. Add a contract test that the rule names #35, uses the same metric, and states that checkout cannot waive the later stop condition.
-- [ ] 4.8 Run and update checkout unit/integration/CLI compatibility tests for shared/copy database modes, provenance/freshness, cleanup, parity, redaction, and stale behavior using the recording executor seam.
+- [x] 4.6 Migrate `odcli env checkout` to the shared command-local dry-run decorator and typed plan emitter; verify valid dry-run is non-mutating/non-prompting and normal execution consumes the inspected snapshot.
+- [x] 4.7 Record the preliminary checkout planning before/after branch and adapter/unwrap counts; remove Expression and preserve typed stage signatures if its stop condition is met, otherwise document the bounded preliminary result while retaining the repository-local mandatory post-#35 vertical-slice recheck. Add a contract test that the rule names #35, uses the same metric, and states that checkout cannot waive the later stop condition.
+- [x] 4.8 Run and update checkout unit/integration/CLI compatibility tests for shared/copy database modes, provenance/freshness, cleanup, parity, redaction, and stale behavior using the recording executor seam.
 
 ## 5. Odoo Process and Lifecycle Migration
 

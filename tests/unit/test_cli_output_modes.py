@@ -1020,6 +1020,63 @@ def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) 
         assert f"{private_field}:" not in result.output
 
 
+def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+
+    plan = _matrix_checkout_plan()
+    callback_calls: list[str] = []
+
+    def dry_callback(_context: object) -> DevelopmentEnvironment:
+        callback_calls.append("dry")
+        return _matrix_public_environment()
+
+    dry_command = Command.create(
+        ExecutionPlan(),
+        dry_callback,
+    )
+    client = MagicMock()
+    client.environments.checkout_command.return_value = dry_command
+
+    with (
+        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.resources.environment._checkout_public_plan", return_value=plan),
+    ):
+        dry_result = CliRunner().invoke(cli, ["env", "checkout", "feature", "--dry-run", "--json"])
+
+    assert dry_result.exit_code == 0, dry_result.output
+    assert json.loads(dry_result.stdout)["result"]["branch"] == "main"
+    assert callback_calls == []
+    client.environments.checkout_command.assert_called_once()
+    client.environments.checkout_with_plan.assert_not_called()
+
+    callback_calls.clear()
+
+    def run_callback(_context: object) -> DevelopmentEnvironment:
+        callback_calls.append("run")
+        return _matrix_public_environment()
+
+    run_command = Command.create(
+        ExecutionPlan(),
+        run_callback,
+    )
+    client.environments.checkout_command.reset_mock()
+    client.environments.checkout_command.return_value = run_command
+    with (
+        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.resources.environment._checkout_public_plan", return_value=plan),
+    ):
+        run_result = CliRunner().invoke(cli, ["env", "checkout", "feature"])
+
+    assert run_result.exit_code == 0, run_result.output
+    assert callback_calls == ["run"]
+    client.environments.checkout_command.assert_called_once()
+    client.environments.checkout_with_plan.assert_not_called()
+
+
 def test_rich_print_sanitizes_by_default_and_preserves_document_line_feeds(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

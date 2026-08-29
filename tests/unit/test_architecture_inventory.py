@@ -299,7 +299,20 @@ def test_expression_assessment_records_both_checkpoints() -> None:
         "planning branches",
         "expression adapters/unwraps",
         "checkout before the expression slice",
+        "bounded checkout pipeline after the preliminary slice",
         "positive checkout result",
         "mandatory post-#35 recheck",
     ):
         assert required in record
+
+    before = re.search(r"\| checkout before the expression slice \| (\d+) \| (\d+) \|", record)
+    after = re.search(
+        r"\| bounded checkout pipeline after the preliminary slice \| (\d+) \| (\d+) \|",
+        record,
+    )
+    assert before is not None and after is not None
+    before_branches, before_adapters = (int(value) for value in before.groups())
+    after_branches, after_adapters = (int(value) for value in after.groups())
+    assert (before_branches, before_adapters) == (12, 0)
+    assert (after_branches, after_adapters) == (5, 6)
+    assert after_adapters <= before_branches - after_branches

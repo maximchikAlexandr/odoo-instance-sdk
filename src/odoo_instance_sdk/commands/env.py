@@ -128,7 +128,11 @@ def env_checkout(
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     try:
-        from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
+        from odoo_instance_sdk.execution import Command
+        from odoo_instance_sdk.resources.environment import (
+            EnvironmentCheckoutOptions,
+            _checkout_public_plan,
+        )
 
         project_path = resolve_project_path(cli_ctx)
         client = _client_class()(config=_client_config_class()(executable="odoo"))
@@ -144,11 +148,20 @@ def env_checkout(
             create_venv=create_venv,
             http_port=http_port,
         )
-        result: EnvironmentCheckoutPlan | EnvironmentCheckoutResult = (
-            client.environments.plan_checkout(project_path, branch, options=options)
-            if dry_run
-            else client.environments.checkout_with_plan(project_path, branch, options=options)
-        )
+        command = client.environments.checkout_command(project_path, branch, options=options)
+        if isinstance(command, Command):
+            plan = _checkout_public_plan(command)
+            result = (
+                plan if dry_run else EnvironmentCheckoutResult(environment=command.run(), plan=plan)
+            )
+        else:
+            # Keep compatibility with lightweight third-party resource doubles
+            # that predate the additive command sibling.
+            result = (
+                client.environments.plan_checkout(project_path, branch, options=options)
+                if dry_run
+                else client.environments.checkout_with_plan(project_path, branch, options=options)
+            )
     except Exception as e:
         fail(output_mode, "env.checkout", e)
     if json_output:

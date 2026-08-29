@@ -33,6 +33,14 @@ The preliminary pre-slice snapshot is:
 | checkpoint | planning branches | Expression adapters/unwraps | outcome |
 | --- | ---: | ---: | --- |
 | checkout before the Expression slice | 12 | 0 | baseline only; no payoff claimed |
+| bounded checkout pipeline after the preliminary slice | 5 | 6 | 7 branches removed versus 6 boundary operations; retain Expression provisionally |
+
+The after-slice count is reproducible from the four concrete stage functions:
+the stage bodies contain five conditional nodes, while the bounded Result has
+one initial input conversion, one conversion per stage (four total), and one
+terminal `default_with` extraction.  Thus the stop-condition comparison is
+`6 <= (12 - 5)`, rather than a subjective comparison of line counts.  This is
+still only a preliminary checkout result.
 
 After #35 implements its vertical planning slice, contributors must append the
 same before/after measurement and outcome here. A positive checkout result
