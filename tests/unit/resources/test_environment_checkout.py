@@ -16,7 +16,9 @@ from odoo_instance_sdk.exceptions import (
     EnvironmentConflictError,
     EnvironmentNotFoundError,
     InstanceConfigurationError,
+    StalePlanError,
 )
+from odoo_instance_sdk.execution import Command
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
@@ -1025,6 +1027,44 @@ class TestCheckoutCopy:
 
 
 class TestCheckoutDryRun:
+    def test_checkout_command_captures_secret_free_snapshot(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/command",
+            options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+        )
+
+        assert isinstance(command, Command)
+        assert command.commands
+        assert any(step.argv[:2] == ("git", "-C") for step in command.commands)
+        for observation in command.plan.observations:
+            assert isinstance(observation, dict)
+            assert observation["read_only"] is True
+            assert observation["executed_during_planning"] is True
+        assert not any(token in repr(command).lower() for token in ("admin_passwd", "password"))
+        assert not (project_manifest / ".odcli-refresh").exists()
+
+    def test_checkout_command_rejects_changed_base_before_catalog_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/stale-command",
+            options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+        )
+        (project_manifest / "stale.txt").write_text("changed")
+        subprocess.run(["git", "add", "stale.txt"], cwd=project_manifest, check=True)
+        subprocess.run(["git", "commit", "-m", "stale command"], cwd=project_manifest, check=True)
+
+        with pytest.raises(StalePlanError):
+            command.run()
+        assert env_client.environments.list(project=project_manifest) == []
+
     def test_dry_run_nothing_created(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:

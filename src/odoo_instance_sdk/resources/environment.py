@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -31,6 +31,7 @@ from odoo_instance_sdk.exceptions import (
     PgAdminNotEligibleError,
     PgAdminUnavailableError,
     PostgresClusterError,
+    StalePlanError,
 )
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.database_preparation import (
@@ -89,6 +90,8 @@ from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+    from odoo_instance_sdk.internal.proc import RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -117,6 +120,12 @@ class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
 
 
 @dataclass(frozen=True, slots=True)
+class _PythonMode:
+    mode: Literal["create", "reuse"]
+    interpreter: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class CopyCleanupPlan:
     """Validated COPY ownership retained for one destructive cleanup operation."""
 
@@ -138,6 +147,7 @@ class _CheckoutPlan:
     git_common_dir: str
     branch: str
     base_ref: str
+    base_revision: str
     worktree: Path
     venv: Path
     generated_config: Path
@@ -159,6 +169,15 @@ class _CheckoutPlan:
     worktree_argv: tuple[str, ...]
     created_at: str
     options: EnvironmentCheckoutOptions
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckoutSnapshot:
+    """One resolved checkout input set shared by preview and execution."""
+
+    private: _CheckoutPlan
+    public: EnvironmentCheckoutPlan
+    execution_plan: ExecutionPlan
 
 
 _StrList = list[str]
@@ -191,6 +210,8 @@ class EnvironmentResource:
         catalog = None
 
         from odoo_instance_sdk.internal.git_worktree import (
+            local_branch_exists,
+            remote_branches,
             rev_parse_git_common_dir,
             rev_parse_toplevel,
         )
@@ -204,7 +225,14 @@ class EnvironmentResource:
         base_ref = options.base_ref or project_cfg.default_base_ref or "HEAD"
         from odoo_instance_sdk.internal.git_worktree import rev_parse_verify
 
-        rev_parse_verify(repo_root, base_ref)
+        base_revision = rev_parse_verify(repo_root, base_ref)
+
+        if local_branch_exists(repo_root, branch):
+            worktree_mode: Literal["local", "remote", "new"] = "local"
+        elif remote_branches(repo_root, branch):
+            worktree_mode = "remote"
+        else:
+            worktree_mode = "new"
 
         source_config = self._resolve_source_config(options, project_cfg, repo_root)
         if source_config is not None and not source_config.is_file():
@@ -231,12 +259,47 @@ class EnvironmentResource:
         venv = env_root / "venv"
         generated_cfg = env_root / "odoo.conf"
         lock_file = env_root / "requirements.lock"
+        if worktree_mode == "local":
+            worktree_argv: tuple[str, ...] = (
+                "git",
+                "-C",
+                str(repo_root),
+                "worktree",
+                "add",
+                str(worktree),
+                branch,
+            )
+        elif worktree_mode == "remote":
+            worktree_argv = (
+                "git",
+                "-C",
+                str(repo_root),
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                str(worktree),
+                f"refs/remotes/origin/{branch}",
+            )
+        else:
+            worktree_argv = (
+                "git",
+                "-C",
+                str(repo_root),
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                str(worktree),
+                base_ref,
+            )
 
         if options.create_venv:
             python_path = str(venv)
             python_owned = True
         else:
-            python_path = str(python_mode["interpreter"])
+            assert python_mode.interpreter is not None
+            python_path = python_mode.interpreter
             python_owned = False
 
         name = options.name or f"{repo_root.name}:{branch}"
@@ -274,7 +337,8 @@ class EnvironmentResource:
             odoo_bin=odoo_bin,
             runtime_cwd=runtime_cwd,
             dependency_inputs=dependency_inputs,
-            worktree_argv=("git", "worktree", "add", str(worktree), branch, base_ref),
+            base_revision=base_revision,
+            worktree_argv=worktree_argv,
             created_at=now,
             options=options,
         )
@@ -418,6 +482,130 @@ class EnvironmentResource:
             )
         return comparison, freshness, warnings
 
+    def _build_checkout_snapshot(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions,
+    ) -> _CheckoutSnapshot:
+        """Capture domain, process, and stale-validation inputs exactly once."""
+        provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
+        private = self._prepare_checkout(project, branch, options=options, dry_run_paths=True)
+        public = _public_checkout_plan(private, provenance, freshness, warnings)
+        return _CheckoutSnapshot(
+            private=private,
+            public=public,
+            execution_plan=_execution_plan(private, provenance, freshness, warnings),
+        )
+
+    def _build_checkout_execution_snapshot(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions,
+    ) -> _CheckoutSnapshot:
+        """Refresh a stale configured source, then capture one execution snapshot."""
+        _, freshness, _ = self._audit_checkout_plan(project, branch, options)
+        refreshed_project = self._refresh_checkout_if_stale(project, options, freshness=freshness)
+        return self._build_checkout_snapshot(refreshed_project, branch, options=options)
+
+    def _command_from_snapshot(
+        self, snapshot: _CheckoutSnapshot
+    ) -> Command[DevelopmentEnvironment]:
+        from odoo_instance_sdk.execution import Command
+        from odoo_instance_sdk.internal.proc import PreparedAction, prepared_command
+
+        prepared = prepared_command(
+            lambda context: self._run_checkout_snapshot(context, snapshot),
+            (PreparedAction("checkout"),),
+        )
+        return Command.from_prepared(snapshot.execution_plan, prepared)
+
+    def _run_checkout_snapshot(
+        self, context: RunContext[DevelopmentEnvironment], snapshot: _CheckoutSnapshot
+    ) -> DevelopmentEnvironment:
+        context.action("checkout")
+        plan = snapshot.private
+        if plan.db_mode is EnvironmentDatabaseMode.COPY:
+            self._preflight_copy_checkout(plan)
+        with exclusive_lock(provisioning_lock_path()):
+            self._validate_checkout_snapshot(snapshot)
+            catalog = self._client.get_catalog()
+            self._revalidate_checkout_locked(catalog, plan)
+            return self._do_checkout(catalog, plan)
+
+    def _validate_checkout_snapshot(self, snapshot: _CheckoutSnapshot) -> None:
+        """Reject changed read-only inputs before the catalog or artifacts mutate."""
+        plan = snapshot.private
+        from odoo_instance_sdk.internal.git_worktree import (
+            rev_parse_git_common_dir,
+            rev_parse_toplevel,
+            rev_parse_verify,
+        )
+
+        actual_identity = (
+            str(rev_parse_toplevel(plan.repo_root)),
+            str(rev_parse_git_common_dir(plan.repo_root)),
+            rev_parse_verify(plan.repo_root, plan.base_ref),
+        )
+        expected_identity = (str(plan.repo_root), plan.git_common_dir, plan.base_revision)
+        if actual_identity != expected_identity:
+            raise StalePlanError(
+                "checkout Git identity changed after planning",
+                expected=list(expected_identity),
+                actual=list(actual_identity),
+            )
+
+        current_project = ProjectConfig.load(plan.repo_root)
+        current_source_config = self._resolve_source_config(
+            plan.options, current_project, plan.repo_root
+        )
+        current_config_values = (
+            parse_odoo_config(current_source_config) if current_source_config is not None else {}
+        )
+        current_source, current_target = self._resolve_dbs(
+            plan.options,
+            current_project,
+            current_config_values,
+            plan.db_mode,
+            plan.branch,
+            plan.repo_root,
+        )
+        current_base_ref = plan.options.base_ref or current_project.default_base_ref or "HEAD"
+        if (
+            current_base_ref != plan.base_ref
+            or current_source != plan.source_database
+            or current_target != plan.target_database
+            or dict(current_config_values) != dict(plan.config_values)
+        ):
+            raise StalePlanError("checkout resolved inputs changed after planning")
+
+        current_provenance, current_freshness, current_warnings = self._audit_checkout_plan(
+            plan.repo_root, plan.branch, plan.options
+        )
+        if (
+            current_provenance != snapshot.public.provenance
+            or current_freshness != snapshot.public.freshness
+            or current_warnings != snapshot.public.warnings
+        ):
+            raise StalePlanError("checkout database or provenance identity changed after planning")
+
+        for path in (
+            plan.env_root,
+            plan.worktree,
+            plan.venv,
+            plan.generated_config,
+            plan.dependency_lock,
+        ):
+            if path.exists():
+                raise StalePlanError(
+                    "checkout deterministic future path is no longer available",
+                    expected=str(path),
+                    actual="exists",
+                )
+
     def plan_checkout(
         self,
         project: ProjectConfig | Path,
@@ -426,9 +614,19 @@ class EnvironmentResource:
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
     ) -> EnvironmentCheckoutPlan:
         """Return a secret-free checkout plan without performing mutations."""
-        provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
-        plan = self._prepare_checkout(project, branch, options=options, dry_run_paths=True)
-        return _public_checkout_plan(plan, provenance, freshness, warnings)
+        return self._build_checkout_snapshot(project, branch, options=options).public
+
+    def checkout_command(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
+    ) -> Command[DevelopmentEnvironment]:
+        """Capture checkout inputs once and return the inspectable command."""
+        return self._command_from_snapshot(
+            self._build_checkout_snapshot(project, branch, options=options)
+        )
 
     def checkout_with_plan(
         self,
@@ -438,30 +636,11 @@ class EnvironmentResource:
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
     ) -> EnvironmentCheckoutResult:
         """Execute checkout and return its final secret-free typed plan."""
-        # Apply the same provenance/freshness rejection policy before any
-        # stale refresh can acquire locks, contact the test instance, or edit
-        # the project manifest. The final audit below rechecks after refresh.
-        provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
-        project = self._refresh_checkout_if_stale(project, options, freshness=freshness)
-        provenance, freshness, warnings = self._audit_checkout_plan(project, branch, options)
-        plan = self._prepare_checkout(project, branch, options=options, dry_run_paths=False)
-        if plan.db_mode is EnvironmentDatabaseMode.COPY:
-            self._preflight_copy_checkout(plan)
-        catalog = self._client.get_catalog()
-        lock_path = provisioning_lock_path()
-        with exclusive_lock(lock_path):
-            if plan.options.http_port is None:
-                plan = replace(
-                    plan,
-                    http_port=self._allocate_port(
-                        None, plan.project, catalog, plan.http_interface, plan.repo_root
-                    ),
-                )
-            self._revalidate_checkout_locked(catalog, plan)
-            environment = self._do_checkout(catalog, plan)
+        snapshot = self._build_checkout_execution_snapshot(project, branch, options=options)
+        environment = self._command_from_snapshot(snapshot).run()
         return EnvironmentCheckoutResult(
             environment=environment,
-            plan=_public_checkout_plan(plan, provenance, freshness, warnings),
+            plan=snapshot.public,
         )
 
     def checkout(
@@ -471,7 +650,8 @@ class EnvironmentResource:
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
     ) -> DevelopmentEnvironment:
-        return self.checkout_with_plan(project, branch, options=options).environment
+        snapshot = self._build_checkout_execution_snapshot(project, branch, options=options)
+        return self._command_from_snapshot(snapshot).run()
 
     def _revalidate_checkout_locked(self, catalog: object, plan: _CheckoutPlan) -> None:
         cat = cast("BackupCatalog", catalog)
@@ -528,7 +708,13 @@ class EnvironmentResource:
         created_paths: list[Path] = []
         backup_id: uuid.UUID | None = None
         try:
-            worktree_add(plan.repo_root, plan.worktree, plan.branch, base_ref=plan.base_ref)
+            worktree_add(
+                plan.repo_root,
+                plan.worktree,
+                plan.branch,
+                base_ref=plan.base_ref,
+                prepared_argv=plan.worktree_argv,
+            )
             created_paths.append(plan.worktree)
 
             if plan.source_config is not None:
@@ -1595,10 +1781,17 @@ class EnvironmentResource:
         return cleanup_failed
 
     def _verify_tools(self) -> None:
-        if shutil.which("git") is None:
-            raise ConfigError("git not found in PATH")
-        if shutil.which("uv") is None:
-            raise ConfigError("uv not found in PATH")
+        from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+
+        for executable in ("git", "uv"):
+            if shutil.which(executable) is None:
+                raise ConfigError(f"{executable} not found in PATH")
+            try:
+                result = run_captured([executable, "--version"], timeout=10.0, text=True)
+            except ProcessExecutionError as error:
+                raise ConfigError(f"{executable} probe failed: {error}") from error
+            if result.returncode != 0:
+                raise ConfigError(f"{executable} probe failed")
 
     def _resolve_odoo_bin(
         self, options: EnvironmentCheckoutOptions, project: ProjectConfig, repo_root: Path
@@ -1639,9 +1832,9 @@ class EnvironmentResource:
 
     def _resolve_python_mode(
         self, options: EnvironmentCheckoutOptions, project: ProjectConfig, repo_root: Path
-    ) -> dict[str, object]:
+    ) -> _PythonMode:
         if options.create_venv:
-            return {"mode": "create", "interpreter": None}
+            return _PythonMode("create", None)
         py = options.python or project.python
         if py is None:
             raise ConfigError(
@@ -1656,7 +1849,7 @@ class EnvironmentResource:
             raise InstanceConfigurationError(
                 f"Python interpreter {pybin} is not a virtual-env; use --create-venv"
             )
-        return {"mode": "reuse", "interpreter": pybin}
+        return _PythonMode("reuse", pybin)
 
     def _resolve_dbs(
         self,
@@ -1863,19 +2056,17 @@ def _resolve_python_bin(py: str | Path, repo_root: Path) -> str:
 
 def _is_venv(pybin: str) -> bool:
     try:
-        proc = subprocess.run(
+        from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+
+        proc = run_captured(
             [pybin, "-c", "import sys; print(sys.prefix != sys.base_prefix)"],
-            env=sanitized_child_environment(),
-            shell=False,
-            capture_output=True,
             text=True,
             timeout=10,
-            check=False,
         )
         if proc.returncode != 0:
             return False
-        return proc.stdout.strip().lower() == "true"
-    except (OSError, subprocess.TimeoutExpired):
+        return isinstance(proc.stdout, str) and proc.stdout.strip().lower() == "true"
+    except (OSError, subprocess.TimeoutExpired, ProcessExecutionError):
         return False
 
 
@@ -1988,6 +2179,147 @@ def _restore_audit_backup_from_sqlite(
             str(row["source_git_branch"]) if row["source_git_branch"] is not None else None
         ),
     )
+
+
+def _execution_plan(
+    plan: _CheckoutPlan,
+    provenance: BackupProvenanceComparison,
+    freshness: BackupFreshness,
+    warnings: tuple[str, ...],
+) -> ExecutionPlan:
+    """Build the public process/action projection from one private snapshot."""
+    from odoo_instance_sdk.execution import ActionStep, ExecutionPlan, ExecutionStep
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    probe_argvs = (
+        ("git", "-C", str(plan.repo_root), "rev-parse", "--show-toplevel"),
+        ("git", "-C", str(plan.repo_root), "rev-parse", "--git-common-dir"),
+        ("git", "-C", str(plan.repo_root), "rev-parse", "--verify", plan.base_ref),
+        ("git", "-C", str(plan.repo_root), "rev-parse", "--verify", f"refs/heads/{plan.branch}"),
+        ("git", "-C", str(plan.repo_root), "ls-remote", "--heads", "origin", plan.branch),
+        ("git", "--version"),
+        ("uv", "--version"),
+    )
+    observations: list[JsonValue] = []
+    for argv in probe_argvs:
+        observations.append(
+            cast(
+                "JsonValue",
+                {
+                    "argv": list(argv),
+                    "returncode": 0,
+                    "read_only": True,
+                    "executed_during_planning": True,
+                },
+            )
+        )
+
+    steps: list[ExecutionStep] = []
+    steps.append(
+        PreparedStep(
+            step_id="checkout.worktree",
+            argv=plan.worktree_argv,
+            cwd=str(plan.repo_root),
+            mode="captured",
+            read_only=False,
+            mutating=True,
+        ).public_projection()
+    )
+    steps.append(
+        ActionStep(
+            step_id="checkout.generated_config",
+            action="write_generated_config",
+            description="Generate the checkout Odoo configuration",
+            details={"path": str(plan.generated_config)},
+            mutating=True,
+        )
+    )
+    if plan.options.create_venv and plan.python_selector is not None:
+        steps.append(
+            PreparedStep(
+                step_id="checkout.venv",
+                argv=("uv", "venv", str(plan.venv), "--python", str(plan.python_selector)),
+                cwd=str(plan.repo_root),
+                mode="captured",
+                mutating=True,
+            ).public_projection()
+        )
+    requirement_inputs = _rebase_requirement_paths(
+        list(plan.project.requirements), plan.repo_root, plan.worktree
+    )
+    if requirement_inputs:
+        steps.append(
+            PreparedStep(
+                step_id="checkout.dependencies.compile",
+                argv=("uv", "pip", "compile", *requirement_inputs, "-o", str(plan.dependency_lock)),
+                cwd=str(plan.worktree),
+                mode="captured",
+                mutating=True,
+            ).public_projection()
+        )
+        install_argv = (
+            (
+                "uv",
+                "pip",
+                "sync",
+                "--python",
+                str(Path(plan.python_path) / "bin" / "python"),
+                str(plan.dependency_lock),
+            )
+            if plan.python_owned
+            else (
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                plan.python_path,
+                "-r",
+                str(plan.dependency_lock),
+            )
+        )
+        steps.append(
+            PreparedStep(
+                step_id="checkout.dependencies.install",
+                argv=install_argv,
+                cwd=str(plan.worktree),
+                mode="captured",
+                mutating=True,
+            ).public_projection()
+        )
+    steps.extend(
+        (
+            ActionStep(
+                step_id="checkout.database",
+                action="prepare_database",
+                description="Prepare the selected checkout database",
+                details={
+                    "mode": plan.db_mode.value,
+                    "database": plan.target_database or plan.source_database,
+                },
+                mutating=True,
+            ),
+            ActionStep(
+                step_id="checkout.catalog",
+                action="record_environment",
+                description="Record the environment in the catalog",
+                details={"environment_id": str(plan.env_id)},
+                mutating=True,
+            ),
+            ActionStep(
+                step_id="checkout.cleanup",
+                action="cleanup_on_failure",
+                description="Remove owned checkout artifacts if execution fails",
+                details={"root": str(plan.env_root)},
+                mutating=True,
+            ),
+        )
+    )
+    execution = ExecutionPlan(
+        steps=tuple(steps),
+        observations=tuple(observations),
+        warnings=warnings,
+    )
+    return execution.with_fingerprint(secrets=tuple(plan.config_values.values()))
 
 
 def _public_checkout_plan(

@@ -197,6 +197,7 @@ def test_discovered_public_methods() -> None:
     expected = {
         EnvironmentResource: (
             "checkout",
+            "checkout_command",
             "checkout_with_plan",
             "get",
             "list",

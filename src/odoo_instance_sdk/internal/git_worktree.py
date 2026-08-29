@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 
 
 class GitError(Exception):
@@ -25,14 +25,31 @@ class WorktreeInfo:
 def _run(
     args: list[str], *, cwd: str | Path | None = None, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+
+    try:
+        result = run_captured(
+            args,
+            cwd=cwd,
+            timeout=30.0,
+            text=True,
+        )
+    except ProcessExecutionError as error:
+        if check:
+            raise subprocess.CalledProcessError(1, args, stderr=str(error)) from error
+        return subprocess.CompletedProcess(args, -1, "", str(error))
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            args,
+            output=result.stdout if isinstance(result.stdout, str) else "",
+            stderr=result.stderr if isinstance(result.stderr, str) else "",
+        )
+    return subprocess.CompletedProcess(
         args,
-        cwd=str(cwd) if cwd is not None else None,
-        env=sanitized_child_environment(),
-        shell=False,
-        capture_output=True,
-        text=True,
-        check=check,
+        result.returncode,
+        result.stdout if isinstance(result.stdout, str) else "",
+        result.stderr if isinstance(result.stderr, str) else "",
     )
 
 
@@ -84,10 +101,17 @@ def remote_branches(repo_root: Path, branch: str) -> list[str]:
 
 
 def worktree_add(
-    repo_root: Path, worktree: Path, branch: str, *, base_ref: str | None = None
+    repo_root: Path,
+    worktree: Path,
+    branch: str,
+    *,
+    base_ref: str | None = None,
+    prepared_argv: Sequence[str] | None = None,
 ) -> None:
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    if local_branch_exists(repo_root, branch):
+    if prepared_argv is not None:
+        proc = _run(list(prepared_argv), check=False)
+    elif local_branch_exists(repo_root, branch):
         proc = _run(
             ["git", "-C", str(repo_root), "worktree", "add", str(worktree), branch], check=False
         )
