@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from odoo_instance_sdk.commands.context import CliContext, resolve_project_path
-from odoo_instance_sdk.commands.output import OutputMode, emit_json_envelope, fail, rich_print
+from odoo_instance_sdk.commands.output import (
+    JsonObject,
+    OutputMode,
+    emit_json_envelope,
+    fail,
+    rich_print,
+)
 from odoo_instance_sdk.internal.cli_format import human_bytes
 from odoo_instance_sdk.models import (
     ClusterContainer,
@@ -40,7 +46,7 @@ def run_postgres_command(
 def emit_postgres_result(
     *, cluster: PostgresCluster, state: PostgresClusterState, command: str, output_mode: OutputMode
 ) -> None:
-    diag = dict(cluster.to_diagnostic_dict())
+    diag = cast("JsonObject", dict(cluster.to_diagnostic_dict()))
     diag["state"] = state.value
     if output_mode is not OutputMode.RICH:
         emit_json_envelope(ok=True, command=command, result=diag, mode=output_mode)

@@ -66,7 +66,7 @@ def test_nested_worktree_infers_remove_selector(
 
     assert result.exit_code == 0, result.output
     envelope = json.loads(result.output)
-    assert envelope["result"]["id"] == str(env.id)
+    assert envelope["result"]["steps"][0]["step_id"] == "environment.remove"
     assert envelope["dry_run"] is True
     assert Path(env.worktree_path).is_dir()
 

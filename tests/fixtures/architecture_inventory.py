@@ -18,34 +18,32 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 539),
-        ("src/odoo_instance_sdk/cli.py", 567),
-        ("src/odoo_instance_sdk/cli.py", 568),
-        ("src/odoo_instance_sdk/cli.py", 686),
-        ("src/odoo_instance_sdk/cli.py", 881),
-        ("src/odoo_instance_sdk/commands/env.py", 345),
-        ("src/odoo_instance_sdk/commands/output.py", 89),
-        ("src/odoo_instance_sdk/commands/output.py", 167),
-        ("src/odoo_instance_sdk/commands/output.py", 169),
-        ("src/odoo_instance_sdk/commands/output.py", 200),
-        ("src/odoo_instance_sdk/commands/test.py", 180),
+        ("src/odoo_instance_sdk/cli.py", 588),
+        ("src/odoo_instance_sdk/cli.py", 589),
+        ("src/odoo_instance_sdk/cli.py", 724),
+        ("src/odoo_instance_sdk/cli.py", 921),
+        ("src/odoo_instance_sdk/commands/env.py", 350),
+        ("src/odoo_instance_sdk/commands/output.py", 172),
+        ("src/odoo_instance_sdk/commands/output.py", 270),
+        ("src/odoo_instance_sdk/commands/output.py", 272),
+        ("src/odoo_instance_sdk/commands/output.py", 279),
+        ("src/odoo_instance_sdk/commands/output.py", 281),
         ("src/odoo_instance_sdk/resources/instance.py", 661),
     }
 )
 
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
-    ("src/odoo_instance_sdk/commands/output.py", 89): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 167): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 169): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 200): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/env.py", 345): "existing Rich live inventory transport",
-    ("src/odoo_instance_sdk/commands/test.py", 180): "operation diagnostic transport",
-    ("src/odoo_instance_sdk/cli.py", 539): "native run port-conflict diagnostic",
-    ("src/odoo_instance_sdk/cli.py", 567): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 568): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 686): "legacy exec native diagnostic transport",
-    ("src/odoo_instance_sdk/cli.py", 881): "legacy module-test diagnostic transport",
+    ("src/odoo_instance_sdk/commands/env.py", 350): "existing Rich live inventory transport",
+    ("src/odoo_instance_sdk/commands/output.py", 172): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 270): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 272): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 279): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 281): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/cli.py", 588): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 589): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 724): "legacy exec native diagnostic transport",
+    ("src/odoo_instance_sdk/cli.py", 921): "legacy module-test diagnostic transport",
     ("src/odoo_instance_sdk/resources/instance.py", 661): "lifecycle cleanup diagnostic transport",
 }
 
@@ -56,38 +54,13 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
     "src/odoo_instance_sdk/__init__.py": frozenset({354}),
     "src/odoo_instance_sdk/cli.py": frozenset(
-        {62, 95, 99, 103, 328, 448, 449, 458, 519, 780, 781, 783}
+        {66, 99, 103, 107, 332, 452, 453, 462, 523, 820, 821, 823}
     ),
     "src/odoo_instance_sdk/commands/context.py": frozenset({61, 62, 113, 117, 121}),
-    "src/odoo_instance_sdk/commands/db.py": frozenset({121, 133, 137, 141}),
-    "src/odoo_instance_sdk/commands/env.py": frozenset({543, 547, 551, 555, 724, 737, 749}),
-    "src/odoo_instance_sdk/commands/output.py": frozenset(
-        {
-            27,
-            50,
-            55,
-            63,
-            71,
-            81,
-            82,
-            92,
-            108,
-            112,
-            113,
-            114,
-            117,
-            120,
-            143,
-            147,
-            148,
-            149,
-            152,
-            174,
-            177,
-        }
-    ),
+    "src/odoo_instance_sdk/commands/db.py": frozenset({193, 205, 209, 213}),
+    "src/odoo_instance_sdk/commands/env.py": frozenset({548, 552, 556, 560, 812, 825, 837, 848}),
     "src/odoo_instance_sdk/commands/test.py": frozenset(
-        {62, 63, 87, 88, 90, 104, 120, 121, 122, 146, 150, 183, 190, 191, 192, 374, 375}
+        {63, 64, 88, 89, 91, 105, 121, 122, 123, 147, 151, 188, 195, 196, 197, 379, 380}
     ),
     "src/odoo_instance_sdk/exceptions.py": frozenset({250, 251}),
     "src/odoo_instance_sdk/http/app.py": frozenset({52, 68, 86}),

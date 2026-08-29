@@ -16,12 +16,15 @@ from odoo_instance_sdk.commands.context import (
 )
 from odoo_instance_sdk.commands.output import (
     OutputMode,
+    emit,
+    emit_command_plan,
     emit_json_envelope,
     fail,
     model_to_dict,
     output_options,
     resolve_output_mode,
     rich_print,
+    success_document,
 )
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.models import (
@@ -45,6 +48,7 @@ def db_group() -> None:
     help="Reset base.user_admin after restoring.",
 )
 @click.option("--source-branch", default=None, help="Source Git branch provenance.")
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def db_refresh(
@@ -52,6 +56,7 @@ def db_refresh(
     restore: bool,
     reset_admin_password: bool,
     source_branch: str | None,
+    dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
@@ -62,6 +67,39 @@ def db_refresh(
     try:
         project_path = resolve_project_path(ctx)
         client = _client_class()(config=_client_config_class()(executable="odoo"))
+        from odoo_instance_sdk.execution import Command
+
+        candidate = client.environments.refresh_database_command(
+            project_path,
+            options=DatabaseRefreshOptions(
+                restore=restore,
+                source_branch=source_branch,
+                reset_admin_password=reset_admin_password,
+            ),
+        )
+        command = candidate if isinstance(candidate, Command) else None
+    except Exception as exc:
+        fail(output_mode, "db.refresh", exc)
+
+    if command is not None:
+        if dry_run:
+            emit_command_plan(command, command_name="db.refresh", mode=output_mode)
+            return
+        result = command.run()
+        data = model_to_dict(result)
+        emit(
+            success_document(
+                command="db.refresh",
+                result=data,
+                provenance={"project_source": ctx.project_source},
+            ),
+            output_mode,
+            rich=lambda _document: json.dumps(data, indent=2, sort_keys=True),
+        )
+        return
+    if dry_run:
+        fail(output_mode, "db.refresh", "environment does not provide an inspectable command")
+    try:
         result = client.environments.refresh_database(
             project_path,
             options=DatabaseRefreshOptions(
@@ -87,10 +125,12 @@ def db_refresh(
 
 
 @db_group.command("reset-admin-password")
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def db_reset_admin_password(
     ctx: CliContext,
+    dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
@@ -99,6 +139,38 @@ def db_reset_admin_password(
     try:
         _client, environment, instance = ready_instance(ctx)
         _validate_recorded_database_binding(instance, environment)
+        from odoo_instance_sdk.execution import Command
+
+        candidate = instance.databases.reset_admin_password_command()
+        command = candidate if isinstance(candidate, Command) else None
+        result = command.run() if command is not None and not dry_run else None
+    except Exception as exc:
+        fail(output_mode, "db.reset-admin-password", exc)
+
+    if command is not None:
+        if dry_run:
+            emit_command_plan(command, command_name="db.reset-admin-password", mode=output_mode)
+            return
+        assert isinstance(result, AdminPasswordResetResult)
+        data = model_to_dict(result)
+        emit(
+            success_document(
+                command="db.reset-admin-password",
+                result=data,
+                context={"environment_id": str(environment.id)},
+                provenance={"environment_source": ctx.environment_source},
+            ),
+            output_mode,
+            rich=lambda _document: json.dumps(data, indent=2, sort_keys=True),
+        )
+        return
+    if dry_run:
+        fail(
+            output_mode,
+            "db.reset-admin-password",
+            "database does not provide an inspectable command",
+        )
+    try:
         result = instance.databases.reset_admin_password()
     except Exception as exc:
         fail(output_mode, "db.reset-admin-password", exc)

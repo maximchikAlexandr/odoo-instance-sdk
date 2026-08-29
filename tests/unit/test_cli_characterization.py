@@ -189,13 +189,84 @@ def test_command_local_json_placement_is_stable() -> None:
         assert help_result.exit_code == 0
         assert "--json" in help_result.output
 
-    for path in (("run",), ("shell",), ("logs",), ("monitor",)):
+    for path in (("logs",), ("monitor",)):
         assert "--json" not in _option_names(_command(path)), path
+    for path in (("run",), ("shell",)):
+        assert "--dry-run" in _option_names(_command(path)), path
+        assert "--json" in _option_names(_command(path)), path
 
     root_json = CliRunner().invoke(cli, ["--json", "env", "list"])
     assert root_json.exit_code == 2
     assert root_json.stdout == ""
     assert "No such option" in root_json.stderr
+
+
+@pytest.mark.parametrize("leaf", ["run", "shell"])
+def test_raw_stream_output_options_require_dry_run_before_sdk_resolution(
+    leaf: str,
+) -> None:
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=AssertionError("raw option validation must precede SDK resolution"),
+    ):
+        result = CliRunner().invoke(cli, [leaf, "--json"])
+    assert result.exit_code == 2
+    assert "require --dry-run" in result.stderr
+
+
+@pytest.mark.parametrize("leaf", ["run", "shell"])
+def test_raw_stream_dry_run_emits_one_captured_command_without_running(
+    leaf: str,
+) -> None:
+    from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
+    from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
+
+    executor = RecordingExecutor()
+    effects: list[str] = []
+    prepared = PreparedStep(
+        step_id=f"instance.{leaf}",
+        argv=("odoo", "--stop-after-init"),
+        mutating=False,
+    )
+
+    def callback(_context: object) -> int:
+        effects.append("run")
+        return 0
+
+    command = Command.create(
+        ExecutionPlan(
+            steps=(
+                ProcessStep(
+                    step_id=f"instance.{leaf}",
+                    argv=prepared.argv,
+                    display="odoo --stop-after-init",
+                    executable="odoo",
+                ),
+            )
+        ),
+        callback,
+        (prepared,),
+        executor=executor,
+    )
+    instance = MagicMock()
+    if leaf == "run":
+        instance.run_foreground_command.return_value = command
+    else:
+        instance.shell_command.return_value = command
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=(MagicMock(), SimpleNamespace(), instance),
+        ),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, [leaf, "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["dry_run"] is True
+    assert payload["result"]["steps"][0]["step_id"] == f"instance.{leaf}"
+    assert effects == []
+    assert executor.executed == []
 
 
 def test_discovered_public_methods() -> None:

@@ -14,10 +14,14 @@ from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.env import env_group
 from odoo_instance_sdk.commands.output import (
+    JsonValue,
     OutputMode,
+    command_options,
+    emit_command_plan,
     emit_json_envelope,
     fail,
     output_options,
+    resolve_command_options,
     resolve_output_mode,
     rich_print,
     sanitize_diagnostic,
@@ -263,7 +267,7 @@ def init(
                 ok=True,
                 command="init",
                 result=_manifest_dict(config, postgres_allocated=postgres_allocated),
-                provenance=provenance,
+                provenance=cast("dict[str, JsonValue]", provenance),
                 dry_run=True,
                 mode=output_mode,
             )
@@ -278,7 +282,7 @@ def init(
             ok=True,
             command="init",
             result=_manifest_dict(config, postgres_allocated=postgres_allocated),
-            provenance=provenance,
+            provenance=cast("dict[str, JsonValue]", provenance),
             dry_run=False,
             mode=output_mode,
         )
@@ -531,28 +535,45 @@ def _print_doctor(report: object) -> None:
 
 
 @cli.command()
+@command_options
 @pass_cli_context
-def run(ctx: CliContext) -> None:
+def run(
+    ctx: CliContext,
+    dry_run: bool,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
     try:
         client, env_obj, instance = cli_context.ready_instance(ctx)
         if not cli_context._check_port_free(env_obj):
-            click.echo(
+            fail(
+                output_mode,
+                "run",
                 f"port-conflict: {env_obj.http_interface}:{env_obj.http_port} is occupied "
                 "(ownership unknown)",
-                err=True,
             )
-            sys.exit(1)
-        client.environments.record_use(env_obj)
+        candidate = instance.run_foreground_command()
+        from odoo_instance_sdk.execution import Command
+
+        command = candidate if isinstance(candidate, Command) else None
+        if not dry_run:
+            client.environments.record_use(env_obj)
     except SystemExit:
         raise
     except Exception as e:
-        fail(False, "run", str(e))
+        fail(output_mode, "run", e)
+    if dry_run:
+        if command is None:
+            raise click.UsageError("run instance does not provide an inspectable command")
+        emit_command_plan(command, command_name="run", mode=output_mode)
+        return
     try:
-        exit_code = instance.run_foreground()
+        exit_code = command.run() if command is not None else instance.run_foreground()
     except KeyboardInterrupt:
         exit_code = 130
     except Exception as e:
-        fail(False, "run", str(e))
+        fail(output_mode, "run", e)
     sys.exit(exit_code)
 
 
@@ -578,20 +599,37 @@ def logs(ctx: CliContext, tail: int, follow: bool) -> None:
 
 @cli.command()
 @click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
+@command_options
 @pass_cli_context
-def shell(ctx: CliContext, odoo_args: tuple[str, ...]) -> None:
+def shell(
+    ctx: CliContext,
+    odoo_args: tuple[str, ...],
+    dry_run: bool,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    output_mode = resolve_command_options(output_format, json_output, dry_run, command="shell")
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
+        candidate = instance.shell_command(args=list(odoo_args))
+        from odoo_instance_sdk.execution import Command
+
+        command = candidate if isinstance(candidate, Command) else None
     except SystemExit:
         raise
     except Exception as e:
-        fail(False, "shell", str(e))
+        fail(output_mode, "shell", e)
+    if dry_run:
+        if command is None:
+            raise click.UsageError("shell instance does not provide an inspectable command")
+        emit_command_plan(command, command_name="shell", mode=output_mode)
+        return
     try:
-        exit_code = instance.shell(args=list(odoo_args))
+        exit_code = command.run() if command is not None else instance.shell(args=list(odoo_args))
     except KeyboardInterrupt:
         exit_code = 130
     except Exception as e:
-        fail(False, "shell", str(e))
+        fail(output_mode, "shell", e)
     sys.exit(exit_code)
 
 
@@ -763,7 +801,9 @@ def module_update(
             emit_json_envelope(
                 ok=True,
                 command="module.update",
-                result={"modules": plan.modules, "dry_run": True},
+                result=cast(
+                    "dict[str, JsonValue]", {"modules": list(plan.modules), "dry_run": True}
+                ),
                 mode=output_mode,
             )
         else:
@@ -970,8 +1010,8 @@ def deps_verify(ctx: CliContext, output_format: str | None, json_output: bool) -
             ok=True,
             command="deps.verify",
             result={
-                "distributions": result.distributions,
-                "missing_imports": result.missing_imports,
+                "distributions": cast("list[JsonValue]", list(result.distributions)),
+                "missing_imports": cast("list[JsonValue]", list(result.missing_imports)),
                 "pip_check_ok": result.pip_check_ok,
                 "pip_check_output": result.pip_check_output,
             },

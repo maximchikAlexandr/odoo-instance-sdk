@@ -10,14 +10,15 @@ import click
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
+    JsonValue,
+    OutputDocument,
     OutputMode,
-    emit_json_envelope,
+    emit,
     fail,
     model_to_dict,
     output_options,
     resolve_output_mode,
-    rich_print,
-    sanitize_diagnostic,
+    success_document,
 )
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.automation import (
@@ -151,20 +152,14 @@ def _emit_result(
     dry_run: bool,
     diagnostic: str | None = None,
 ) -> None:
-    if mode is not OutputMode.RICH:
-        emit_json_envelope(
-            ok=True,
-            command=command,
-            result=result,
-            dry_run=dry_run,
-            mode=mode,
-        )
-    else:
-        rich_print(f"environment={result['environment_name']} ({result['environment_id']})")
-        rich_print(f"selection={result['selection']['kind']}")
-        rich_print(f"modules={', '.join(result['modules']) or 'none'}")
+    def rich_projection(_document: OutputDocument) -> str:
+        lines = [
+            f"environment={result['environment_name']} ({result['environment_id']})",
+            f"selection={result['selection']['kind']}",
+            f"modules={', '.join(result['modules']) or 'none'}",
+        ]
         if "test_tags" in result:
-            rich_print(
+            lines.append(
                 f"tests={result['counts']['tests']} "
                 f"ok={result['counts']['successful']} "
                 f"failed={result['counts']['failed']} "
@@ -172,12 +167,22 @@ def _emit_result(
                 f"skipped={result['counts']['skipped']}"
             )
         elif result.get("reason") == "no_addon_changes":
-            rich_print("reason=no_addon_changes")
+            lines.append("reason=no_addon_changes")
         elif result.get("dry_run"):
-            rich_print("dry_run=true")
-        rich_print(f"exit_code={result['exit_code']}")
-    if diagnostic:
-        click.echo(sanitize_diagnostic(diagnostic), err=True)
+            lines.append("dry_run=true")
+        lines.append(f"exit_code={result['exit_code']}")
+        return "\n".join(lines)
+
+    emit(
+        success_document(
+            command=command,
+            result=cast("dict[str, JsonValue]", result),
+            dry_run=dry_run,
+        ),
+        mode,
+        rich=rich_projection,
+        diagnostic=diagnostic,
+    )
 
 
 def _start_config(instance: Any) -> StartConfig:

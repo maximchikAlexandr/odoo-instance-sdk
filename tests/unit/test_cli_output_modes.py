@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal
+from typing import Literal, cast
 from unittest.mock import MagicMock, patch
 
 import click
@@ -16,13 +16,19 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.output import (
+    JsonValue,
+    OutputDocument,
+    OutputError,
     OutputMode,
     build_envelope,
     emit_json_envelope,
+    failure_document,
     model_to_dict,
     output_options,
     resolve_output_mode,
     rich_print,
+    run_or_preview,
+    success_document,
 )
 from odoo_instance_sdk.internal.automation import (
     DepsVerifyResult,
@@ -667,10 +673,15 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         assert "--format" in options, path
         assert "--json" in options, path
 
-    for path in (("run",), ("shell",), ("logs",), ("monitor",)):
+    for path in (("logs",), ("monitor",)):
         options = _option_names(_command(path))
         assert "--format" not in options, path
         assert "--json" not in options, path
+    for path in (("run",), ("shell",)):
+        options = _option_names(_command(path))
+        assert "--dry-run" in options, path
+        assert "--format" in options, path
+        assert "--json" in options, path
 
     root_result = CliRunner().invoke(cli, ["--format", "json", "env", "list"])
     assert root_result.exit_code == 2
@@ -693,7 +704,12 @@ def test_invalid_format_uses_native_click_parse_failure() -> None:
 
 
 def test_json_and_toon_emit_the_same_sanitized_envelope(capsys: pytest.CaptureFixture[str]) -> None:
-    result = {"message": "secret=***", "items": [], "enabled": True, "value": None}
+    result: dict[str, JsonValue] = {
+        "message": "secret=***",
+        "items": [],
+        "enabled": True,
+        "value": None,
+    }
     emit_json_envelope(ok=True, command="test", result=result, mode=OutputMode.JSON)
     json_document = capsys.readouterr().out
     emit_json_envelope(ok=True, command="test", result=result, mode=OutputMode.TOON)
@@ -705,10 +721,88 @@ def test_json_and_toon_emit_the_same_sanitized_envelope(capsys: pytest.CaptureFi
     toon_value = decode(toon_document, DecodeOptions(indent=2, strict=True))
     assert toon_value == json_value
     assert "\033[" not in json_document + toon_document
-    assert (
-        build_envelope(ok=False, command="test", error_message="token=hidden")["error"]["message"]
-        == "<redacted>"
+    failure = cast(
+        "dict[str, dict[str, JsonValue]]",
+        build_envelope(ok=False, command="test", error_message="token=hidden"),
     )
+    assert failure["error"]["message"] == "<redacted>"
+
+
+def test_typed_output_documents_are_frozen_and_keep_v1_shape() -> None:
+    success = success_document(
+        command="typed",
+        result={"secret": "password=hidden\x00", "items": [1, True]},
+        dry_run=True,
+    )
+    failure = failure_document(
+        command="typed",
+        error_code="stale_plan",
+        error_message="token=hidden",
+    )
+    assert isinstance(success, OutputDocument)
+    assert isinstance(failure.error, OutputError)
+    success_builtins = cast("dict[str, dict[str, JsonValue]]", msgspec.to_builtins(success))
+    failure_builtins = cast("dict[str, dict[str, JsonValue]]", msgspec.to_builtins(failure))
+    assert success_builtins["result"]["secret"] == r"password=hidden\x00"
+    assert failure_builtins["error"]["code"] == "stale_plan"
+    with pytest.raises(AttributeError):
+        success.ok = False  # type: ignore[misc]
+
+
+def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PreparedAction, RecordingExecutor, RunContext
+
+    executor = RecordingExecutor()
+    builds = 0
+    confirmations: list[str] = []
+
+    def build() -> Command[str]:
+        nonlocal builds
+        builds += 1
+        action = PreparedAction("typed.action")
+
+        def callback(context: RunContext[str]) -> str:
+            context.action("typed.action")
+            return "done"
+
+        return Command.create(
+            ExecutionPlan(
+                steps=(ActionStep(step_id="typed.action", action="inspect", description="inspect"),)
+            ),
+            callback,
+            (action,),
+            executor=executor,
+        )
+
+    def result_payload(item: str | None) -> dict[str, JsonValue]:
+        return {"value": item}
+
+    status, value = run_or_preview(
+        build,
+        command_name="typed",
+        mode=OutputMode.JSON,
+        dry_run=True,
+        result=result_payload,
+        confirm=lambda: confirmations.append("confirmed"),
+    )
+    assert (status, value, builds, confirmations, executor.executed) == (0, None, 1, [], [])
+    assert json.loads(capsys.readouterr().out)["dry_run"] is True
+
+    status, value = run_or_preview(
+        build,
+        command_name="typed",
+        mode=OutputMode.JSON,
+        dry_run=False,
+        result=lambda item: {"value": item},
+        confirm=lambda: confirmations.append("confirmed"),
+    )
+    assert status == 0
+    assert value == "done"
+    assert builds == 2
+    assert confirmations == ["confirmed"]
 
 
 @pytest.mark.parametrize("source", ["direct", "imported", "catalog"])
