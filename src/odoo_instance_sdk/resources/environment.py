@@ -8,7 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -91,7 +91,14 @@ from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
-    from odoo_instance_sdk.internal.proc import ProcessExecutor, ProcessResult, RunContext, Step
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        ProcessExecutor,
+        ProcessResult,
+        RunContext,
+        Step,
+    )
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -1457,15 +1464,28 @@ class EnvironmentResource:
         *,
         executor: ProcessExecutor | None = None,
     ) -> Command[PgAdminOpenResult]:
+        captured_selector: EnvironmentSelector = selector
+        if isinstance(selector, str):
+            try:
+                captured_selector = self.get(selector)
+            except Exception:
+                # Preserve the existing typed selector error in the callback.
+                captured_selector = selector
+        planned_cluster = _pgadmin_cluster_snapshot(captured_selector)
+        steps = _pgadmin_command_steps(captured_selector, cluster=planned_cluster)
         return self._action_command(
             "environment.open-pgadmin",
             "Open the environment's owned pgAdmin container",
-            lambda: self._open_pgadmin_impl(selector),
+            lambda: self._open_pgadmin_impl(captured_selector, cluster=planned_cluster),
             executor=executor,
             mutating=True,
+            steps=steps,
+            optional_steps=tuple(step.step_id for step in steps),
         )
 
-    def _open_pgadmin_impl(self, selector: EnvironmentSelector) -> PgAdminOpenResult:
+    def _open_pgadmin_impl(
+        self, selector: EnvironmentSelector, *, cluster: PostgresCluster | None = None
+    ) -> PgAdminOpenResult:
         """Open the selected environment through the private pgAdmin lifecycle seam.
 
         Resolution and all security-critical preconditions live here so callers
@@ -1480,7 +1500,11 @@ class EnvironmentResource:
             raise PgAdminUnavailableError() from None
         self._require_pgadmin_environment(env)
         database = self._pgadmin_database(env)
-        cluster = self._healthy_owned_compose(env)
+        cluster = (
+            self._healthy_owned_compose(env)
+            if cluster is None
+            else self._validate_healthy_owned_compose(cluster)
+        )
         instance = self._configured_pgadmin_instance(env)
         self._require_pgadmin_database(instance, database)
 
@@ -1519,10 +1543,18 @@ class EnvironmentResource:
             raise PgAdminNotEligibleError() from None
         except Exception:
             raise PgAdminUnavailableError() from None
+        return self._validate_healthy_owned_compose(cluster)
+
+    def _validate_healthy_owned_compose(self, cluster: PostgresCluster) -> PostgresCluster:
         if cluster.mode != "compose" or not cluster.owned:
             raise PgAdminNotEligibleError()
         try:
-            state = cluster.status()
+            from odoo_instance_sdk.internal.proc import active_context
+
+            if active_context() is not None and callable(getattr(cluster, "_status_compose", None)):
+                state = cluster._status_compose(health_step_id="pgadmin.postgres.status.health")
+            else:
+                state = cluster.status()
         except Exception:
             raise PgAdminUnavailableError() from None
         if state is PostgresClusterState.HEALTHY:
@@ -1598,12 +1630,41 @@ class EnvironmentResource:
         *,
         executor: ProcessExecutor | None = None,
     ) -> Command[None]:
+        from odoo_instance_sdk.internal.proc import PreparedStep
+
+        steps: tuple[PreparedStep, ...] = ()
+        if isinstance(selector, DevelopmentEnvironment):
+            worktree = Path(selector.worktree_path)
+            if worktree.is_dir():
+                steps = (
+                    PreparedStep(
+                        step_id="environment.remove.worktree-dirty",
+                        argv=("git", "-C", str(worktree), "status", "--porcelain"),
+                        timeout=30.0,
+                        read_only=True,
+                    ),
+                    PreparedStep(
+                        step_id="environment.remove.worktree",
+                        argv=(
+                            "git",
+                            "-C",
+                            str(Path(selector.repository_root)),
+                            "worktree",
+                            "remove",
+                            str(worktree),
+                        ),
+                        timeout=30.0,
+                        mutating=True,
+                    ),
+                )
         return self._action_command(
             "environment.remove",
             "Remove the selected development environment",
             lambda: self._remove_impl(selector),
             executor=executor,
             mutating=True,
+            steps=steps,
+            optional_steps=tuple(step.step_id for step in steps),
         )
 
     def _remove_impl(self, selector: EnvironmentSelector) -> None:
@@ -1624,6 +1685,8 @@ class EnvironmentResource:
         *,
         executor: ProcessExecutor | None,
         mutating: bool,
+        steps: Sequence[PreparedStep] = (),
+        optional_steps: Sequence[str] = (),
     ) -> Command[T]:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
@@ -1637,13 +1700,23 @@ class EnvironmentResource:
 
         def run(context: RunContext[T]) -> T:
             context.action(step_id)
-            return callback()
+            result = callback()
+            for optional_step_id in optional_steps:
+                if not context.consumed(optional_step_id):
+                    context.skip(optional_step_id)
+            return result
 
-        return Command.create(
-            ExecutionPlan(steps=(step.public_projection(),)),
-            run,
-            (step,),
-            executor=executor or SubprocessExecutor(),
+        prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (step, *steps)
+        from odoo_instance_sdk.internal.proc import prepared_command
+
+        return Command.from_prepared(
+            ExecutionPlan(steps=tuple(item.public_projection() for item in prepared_steps)),
+            prepared_command(
+                run,
+                prepared_steps,
+                executor=executor or SubprocessExecutor(),
+                strict=bool(steps),
+            ),
         )
 
     def _do_remove(self, catalog: object, env: DevelopmentEnvironment) -> None:
@@ -1735,7 +1808,15 @@ class EnvironmentResource:
         cleanup_failed = self._remove_files(generated_cfg, lock_file, failures) or cleanup_failed
         cleanup_failed = self._remove_venv(env_root, venv, failures) or cleanup_failed
         cleanup_failed = (
-            self._remove_worktree(cat, env, repo_root, worktree, failures) or cleanup_failed
+            self._remove_worktree(
+                cat,
+                env,
+                repo_root,
+                worktree,
+                failures,
+                dirty_checked=worktree.is_dir(),
+            )
+            or cleanup_failed
         )
 
         if cleanup_failed:
@@ -2013,6 +2094,8 @@ class EnvironmentResource:
         repo_root: Path,
         worktree: Path,
         failures: _StrList,
+        *,
+        dirty_checked: bool = False,
     ) -> bool:
 
         catalog = cast("BackupCatalog", cat)
@@ -2023,7 +2106,7 @@ class EnvironmentResource:
             return False
         from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty, worktree_remove
 
-        if worktree_is_dirty(worktree):
+        if not dirty_checked and worktree_is_dirty(worktree):
             msg = f"worktree {worktree} is dirty; refusing to remove"
             catalog.update_environment_state(
                 str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
@@ -2604,6 +2687,235 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
             PreparedAction("checkout.cleanup"),
         )
     )
+    return tuple(steps)
+
+
+def _pgadmin_cluster_snapshot(selector: EnvironmentSelector) -> PostgresCluster | None:
+    """Capture the selected compose object once for command construction."""
+    if not isinstance(selector, DevelopmentEnvironment):
+        return None
+    selected_database = (
+        selector.target_db_name
+        if selector.db_mode is EnvironmentDatabaseMode.COPY
+        else selector.source_db_name
+    )
+    if selected_database is None:
+        return None
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    try:
+        return PostgresCluster.from_project(Path(selector.repository_root))
+    except Exception:
+        return None
+
+
+def _pgadmin_command_steps(
+    selector: EnvironmentSelector, *, cluster: PostgresCluster | None = None
+) -> tuple[PreparedStep, ...]:
+    """Describe the pgAdmin child-process boundary before lifecycle effects.
+
+    Container IDs and atomic-file names are intentionally late-bound.  The
+    proc ledger accepts those positions only when the declared token is
+    ``<runtime>``/``<secret>``; the executor still receives the exact private
+    argv assembled by the lifecycle.  This keeps the public plan useful while
+    avoiding a probe or secret-file mutation merely to construct a command.
+    """
+    if not isinstance(selector, DevelopmentEnvironment):
+        return ()
+    from odoo_instance_sdk.internal import pgadmin_container, pgadmin_files
+    from odoo_instance_sdk.internal.pgadmin_files import (
+        PGADMIN_CONTAINER_NAME,
+        PGADMIN_DEFAULT_EMAIL,
+        PGADMIN_IMAGE,
+        PGADMIN_LABEL_FINGERPRINT,
+        PGADMIN_LABEL_MANAGED,
+        PGADMIN_LABEL_NETWORK,
+        PGADMIN_PASSWORD_DESTINATION,
+        PGADMIN_PGPASS_DESTINATION,
+        PGADMIN_RUNTIME_UID,
+    )
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    try:
+        cluster = cluster or _pgadmin_cluster_snapshot(selector)
+        if cluster is None:
+            return ()
+        if cluster.mode != "compose":
+            return ()
+        compose_file = cluster.compose_file
+        prefix = (
+            "docker",
+            "compose",
+            "--project-name",
+            cluster.compose_project_name,
+            "-f",
+            str(compose_file),
+        )
+        paths = pgadmin_files.PgAdminPaths.from_defaults()
+        port = pgadmin_files.select_port(paths)
+    except Exception:
+        # The regular typed preflight remains authoritative for unresolved
+        # selectors/configuration.  A command with no process manifest keeps
+        # that error path observable rather than inventing a partial plan.
+        return ()
+
+    steps: list[PreparedStep] = [
+        PreparedStep(
+            step_id="pgadmin.postgres.status.ps",
+            argv=(*prefix, "ps", "--format", "json"),
+            cwd=str(compose_file.parent),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.postgres.status.health",
+            argv=(
+                *prefix,
+                "exec",
+                "-T",
+                "postgres",
+                "pg_isready",
+                "-U",
+                str(getattr(cluster, "_user", "") or ""),
+                "-d",
+                "postgres",
+            ),
+            cwd=str(compose_file.parent),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.identity.ps",
+            argv=(*prefix, "ps", "--format", "json"),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.identity.inspect",
+            argv=("docker", "inspect", "--format", "json", "<runtime>"),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.identity.network",
+            argv=("docker", "network", "inspect", "--format", "json", "<runtime>"),
+            read_only=True,
+        ),
+    ]
+    for index in range(4):
+        steps.append(
+            PreparedStep(
+                step_id=f"pgadmin.container.inspect.{index}",
+                argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
+                read_only=True,
+            )
+        )
+    steps.extend(
+        (
+            PreparedStep(
+                step_id="pgadmin.container.remove",
+                argv=("docker", "rm", "--force", "<runtime>"),
+                mutating=True,
+            ),
+            PreparedStep(
+                step_id="pgadmin.container.run",
+                argv=(
+                    "docker",
+                    "run",
+                    "--detach",
+                    "--name",
+                    PGADMIN_CONTAINER_NAME,
+                    "--user",
+                    str(PGADMIN_RUNTIME_UID),
+                    "--publish",
+                    f"127.0.0.1:{port}:80",
+                    "--network",
+                    "<runtime>",
+                    "--label",
+                    f"{PGADMIN_LABEL_MANAGED}=true",
+                    "--label",
+                    f"{PGADMIN_LABEL_FINGERPRINT}=<secret>",
+                    "--label",
+                    f"{PGADMIN_LABEL_NETWORK}=<runtime>",
+                    "--env",
+                    "PGADMIN_CONFIG_SERVER_MODE=False",
+                    "--env",
+                    "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
+                    "--env",
+                    f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
+                    "--env",
+                    f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
+                    "--env",
+                    f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
+                    "--mount",
+                    f"type=bind,source={paths.admin_password},destination={PGADMIN_PASSWORD_DESTINATION},readonly",
+                    "--mount",
+                    f"type=bind,source={paths.pgpass},destination={PGADMIN_PGPASS_DESTINATION},readonly",
+                    "--mount",
+                    f"type=bind,source={paths.servers_json},destination={pgadmin_files.PGADMIN_SERVERS_DESTINATION},readonly",
+                    "--mount",
+                    f"type=bind,source={paths.data_dir},destination={pgadmin_files.PGADMIN_DATA_DESTINATION}",
+                    PGADMIN_IMAGE,
+                ),
+                mutating=True,
+                secret_values=("<secret>",),
+            ),
+            PreparedStep(
+                step_id="pgadmin.container.refresh.inspect",
+                argv=("docker", "inspect", "--format", "json", "<runtime>"),
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="pgadmin.container.refresh",
+                argv=(
+                    "docker",
+                    "exec",
+                    "--user",
+                    str(PGADMIN_RUNTIME_UID),
+                    "<runtime>",
+                    "/bin/sh",
+                    "-c",
+                    pgadmin_container._ACTIVE_PGPASS_REFRESH,
+                ),
+                mutating=True,
+            ),
+            PreparedStep(
+                step_id="pgadmin.container.verify",
+                argv=(
+                    "docker",
+                    "exec",
+                    "<runtime>",
+                    "/venv/bin/python3",
+                    "-c",
+                    pgadmin_container._PGADMIN_EFFECTIVE_SERVER_QUERY,
+                ),
+                read_only=True,
+            ),
+        )
+    )
+    if pgadmin_files._linux():
+        # Directory/file creation and atomic replacement determine the exact
+        # temporary path at runtime.  Reserve enough explicit ACL slots for
+        # the bounded preparation lifecycle; unused slots are accounted for
+        # as intentionally omitted optional probes by the command callback.
+        for index in range(32):
+            steps.append(
+                PreparedStep(
+                    step_id=f"pgadmin.acl.get.{index}",
+                    argv=("getfacl", "-cp", "<runtime>"),
+                    read_only=True,
+                )
+            )
+            steps.append(
+                PreparedStep(
+                    step_id=f"pgadmin.acl.set.{index}",
+                    argv=("setfacl", "--set", "<runtime>", "<runtime>"),
+                    mutating=True,
+                )
+            )
+            steps.append(
+                PreparedStep(
+                    step_id=f"pgadmin.acl.default-set.{index}",
+                    argv=("setfacl", "--default", "--set", "<runtime>", "<runtime>"),
+                    mutating=True,
+                )
+            )
     return tuple(steps)
 
 

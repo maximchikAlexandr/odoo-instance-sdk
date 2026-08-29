@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
@@ -18,6 +19,8 @@ from odoo_instance_sdk import (
     PgAdminUnavailableError,
 )
 from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
+from odoo_instance_sdk.execution import ProcessStep
+from odoo_instance_sdk.internal.proc import RecordingExecutor, active_context
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
@@ -295,3 +298,52 @@ def test_pgadmin_errors_are_public_sdk_errors() -> None:
     assert issubclass(PgAdminNotEligibleError, OdooInstanceSdkError)
     assert issubclass(PgAdminDatabaseNotFoundError, OdooInstanceSdkError)
     assert issubclass(PgAdminUnavailableError, OdooInstanceSdkError)
+
+
+def test_open_pgadmin_command_manifest_is_consumed_by_one_recording_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    resource, _client = _resource()
+    env = _environment()
+    compose = SimpleNamespace(
+        mode="compose",
+        compose_file=tmp_path / "compose.yaml",
+        compose_project_name="odcli_pg_project",
+        _user="odoo",
+    )
+    monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(lambda _path: compose))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pgadmin_files.PgAdminPaths.from_defaults",
+        classmethod(
+            lambda cls: SimpleNamespace(
+                admin_password=tmp_path / "admin-password",
+                pgpass=tmp_path / "pgpass",
+                servers_json=tmp_path / "servers.json",
+                data_dir=tmp_path / "data",
+            )
+        ),
+    )
+    executor = RecordingExecutor()
+
+    def consume_manifest(_self: object, _selector: object, **_kwargs: object) -> PgAdminOpenResult:
+        context = active_context()
+        assert context is not None
+        context.process("pgadmin.postgres.status.ps")
+        context.process("pgadmin.postgres.status.health")
+        return PgAdminOpenResult(state=PgAdminOpenState.STARTED, url="http://127.0.0.1:5050")
+
+    monkeypatch.setattr(EnvironmentResource, "_open_pgadmin_impl", consume_manifest)
+    command = resource.open_pgadmin_command(env, executor=executor)
+
+    assert command.plan.steps
+    assert any(isinstance(step, ProcessStep) for step in command.plan.steps)
+    assert [step.step_id for step in command.plan.process_steps[:2]] == [
+        "pgadmin.postgres.status.ps",
+        "pgadmin.postgres.status.health",
+    ]
+    command.run()
+    assert [step.step_id for step in executor.executed] == [
+        "pgadmin.postgres.status.ps",
+        "pgadmin.postgres.status.health",
+    ]

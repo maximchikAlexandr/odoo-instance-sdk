@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import (
@@ -155,6 +155,21 @@ class RunContext(Generic[T]):
                 result = self._executor.execute(step)
                 self._results[step_id] = result
                 return result
+        for step_id, step in self._steps.items():
+            if (
+                isinstance(step, PreparedStep)
+                and step_id not in self._consumed
+                and _matches_runtime_arguments(step.argv, requested.argv)
+            ):
+                self._consumed.add(step_id)
+                # Runtime identifiers (container IDs and temporary ACL paths)
+                # are discovered by an earlier captured probe.  Keep the
+                # declared step identity/metadata while executing the exact
+                # argv supplied by the callback.
+                runtime_step = replace(requested, step_id=step_id)
+                result = self._executor.execute(runtime_step)
+                self._results[step_id] = result
+                return result
         if any(
             isinstance(step, PreparedStep) and step.argv == requested.argv
             for step in self._steps.values()
@@ -204,6 +219,10 @@ class RunContext(Generic[T]):
         if omitted:
             raise OmittedStepError(omitted)
 
+    def consumed(self, step_id: str) -> bool:
+        """Return whether this invocation accounted for a captured step."""
+        return step_id in self._consumed
+
     def skip_remaining(self) -> None:
         """Account for optional captured probes that a collector did not need."""
         self._consumed.update(
@@ -214,6 +233,27 @@ class RunContext(Generic[T]):
     def results(self) -> Mapping[str, ProcessResultLike]:
         """Results captured by this invocation, keyed by private step ID."""
         return self._results
+
+
+def _matches_runtime_arguments(declared: tuple[str, ...], requested: tuple[str, ...]) -> bool:
+    """Match only explicitly marked late-bound argument positions."""
+    if len(declared) != len(requested):
+        return False
+    return all(
+        expected == actual
+        or expected in {"<runtime>", "<secret>"}
+        or (
+            "<runtime>" in expected
+            and actual.startswith(expected.split("<runtime>", 1)[0])
+            and actual.endswith(expected.split("<runtime>", 1)[1])
+        )
+        or (
+            "<secret>" in expected
+            and actual.startswith(expected.split("<secret>", 1)[0])
+            and actual.endswith(expected.split("<secret>", 1)[1])
+        )
+        for expected, actual in zip(declared, requested, strict=True)
+    )
 
 
 def active_context() -> RunContext[PrivateJsonValue] | None:

@@ -21,6 +21,7 @@ from odoo_instance_sdk.exceptions import (
     NonLocalInstanceError,
     RestoreFailedError,
 )
+from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     Backup,
@@ -188,6 +189,39 @@ class TestList:
 
 
 class TestExists:
+    def test_command_records_psql_fallback_step(self, client: OdooClient) -> None:
+        inst = _make_instance_with_cluster_key(client, db_user="odoo")
+        result = ProcessResult(
+            argv=(),
+            returncode=0,
+            stdout="1\n",
+            stderr="",
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+        executor = RecordingExecutor(results={"database.exists.psql": result})
+        with (
+            patch(
+                "odoo_instance_sdk.resources.database.DatabaseResource.list",
+                side_effect=DatabaseManagerUnavailableError("down"),
+            ),
+            patch(
+                "odoo_instance_sdk.resources.database.shutil.which", return_value="/usr/bin/psql"
+            ),
+            patch(
+                "odoo_instance_sdk.internal.postgres_transport.shutil.which",
+                return_value="/usr/bin/psql",
+            ),
+        ):
+            command = inst.databases.exists_command("mydb", executor=executor)
+            assert command.run() is True
+
+        assert tuple(step.step_id for step in command.plan.process_steps) == (
+            "database.exists.psql",
+        )
+        assert tuple(step.step_id for step in executor.executed) == ("database.exists.psql",)
+
     def test_true(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["mydb", "other"]})
         with patch("httpx.Client", return_value=mock_cm):

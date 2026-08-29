@@ -52,14 +52,16 @@ class _ContainerCreateFailure(PgAdminUnavailableError):
         super().__init__()
 
 
-def resolve_postgres_identity(cluster: object, *, deadline: float) -> PostgresIdentity:
+def resolve_postgres_identity(
+    cluster: object, *, deadline: float, planned: bool = False
+) -> PostgresIdentity:
     runner = getattr(cluster, "compose_runner", None)
     compose_file = getattr(cluster, "compose_file", None)
     project_name = getattr(cluster, "compose_project_name", None)
     if runner is None or not isinstance(compose_file, Path) or not isinstance(project_name, str):
         raise PgAdminUnavailableError()
     container_id = _resolve_postgres_container_id(
-        runner, compose_file, project_name, deadline=deadline
+        runner, compose_file, project_name, deadline=deadline, planned=planned
     )
     inspected = inspect_container(runner, container_id, deadline=deadline)
     if inspected is None:
@@ -81,7 +83,12 @@ def resolve_postgres_identity(cluster: object, *, deadline: float) -> PostgresId
 
 
 def _resolve_postgres_container_id(
-    runner: object, compose_file: object, project_name: str, *, deadline: float
+    runner: object,
+    compose_file: object,
+    project_name: str,
+    *,
+    deadline: float,
+    planned: bool = False,
 ) -> str:
     ps = run_docker(
         runner,
@@ -113,6 +120,12 @@ def _resolve_postgres_container_id(
                 break
     if container_id is None:
         raise PgAdminUnavailableError()
+    if planned:
+        # Compose's stable service container name avoids putting the runtime
+        # ID returned by ``ps`` into the frozen command.  The ID remains in
+        # the captured result for diagnostics, while inspect is still bound
+        # to the selected project/service.
+        return f"{project_name}-postgres-1"
     return container_id
 
 
@@ -162,6 +175,7 @@ def reconcile_container(
     network: str,
     database: str,
     deadline: float,
+    planned: bool = False,
 ) -> PgAdminOpenResult:
     current = inspect_container(runner, PGADMIN_CONTAINER_NAME, deadline=deadline, missing_ok=True)
     state = PgAdminOpenState.STARTED
@@ -169,19 +183,24 @@ def reconcile_container(
         assert_owned_container(current)
         if container_matches(current, preparation, network=network):
             _wait_ready(preparation.port, deadline=deadline)
-            verify_server(preparation, database, runner=runner, deadline=deadline)
+            verify_server(preparation, database, runner=runner, deadline=deadline, planned=planned)
             return PgAdminOpenResult(
                 state=PgAdminOpenState.REUSED,
                 url=f"http://127.0.0.1:{preparation.port}",
             )
         current_id = get_container_id(current)
         current_fingerprint = container_fingerprint(current)
-        latest = inspect_container(runner, current_id, deadline=deadline, missing_ok=True)
+        inspect_target = PGADMIN_CONTAINER_NAME if planned else current_id
+        latest = inspect_container(runner, inspect_target, deadline=deadline, missing_ok=True)
         if latest is not None:
-            if get_container_id(latest) != current_id:
+            if not planned and get_container_id(latest) != current_id:
                 raise PgAdminUnavailableError()
             assert_owned_container(latest, fingerprint=current_fingerprint)
-            remove_container(runner, current_id, deadline=deadline)
+            remove_container(
+                runner,
+                PGADMIN_CONTAINER_NAME if planned else current_id,
+                deadline=deadline,
+            )
         state = PgAdminOpenState.RECONFIGURED
     created_id: str | None = None
     try:
@@ -192,14 +211,16 @@ def reconcile_container(
             container_id=created_id,
             fingerprint=preparation.fingerprint,
             deadline=deadline,
+            planned=planned,
         )
-        verify_server(preparation, database, runner=runner, deadline=deadline)
+        verify_server(preparation, database, runner=runner, deadline=deadline, planned=planned)
     except _ContainerCreateFailure as exc:
         remove_partial_container(
             runner,
             container_id=exc.created_id,
             fingerprint=preparation.fingerprint,
             deadline=deadline,
+            planned=planned,
         )
         raise PgAdminUnavailableError() from None
     except PgAdminUnavailableError:
@@ -208,6 +229,7 @@ def reconcile_container(
             container_id=created_id,
             fingerprint=preparation.fingerprint,
             deadline=deadline,
+            planned=planned,
         )
         raise
     return PgAdminOpenResult(
@@ -445,17 +467,23 @@ def remove_partial_container(
     container_id: str | None,
     fingerprint: str,
     deadline: float,
+    planned: bool = False,
 ) -> None:
     if not container_id:
         return
     try:
-        inspected = inspect_container(runner, container_id, deadline=deadline, missing_ok=True)
+        inspect_target = PGADMIN_CONTAINER_NAME if planned else container_id
+        inspected = inspect_container(runner, inspect_target, deadline=deadline, missing_ok=True)
         if inspected is None:
             return
-        if get_container_id(inspected) != container_id:
+        if not planned and get_container_id(inspected) != container_id:
             return
         assert_owned_container(inspected, fingerprint=fingerprint)
-        remove_container(runner, container_id, deadline=deadline)
+        remove_container(
+            runner,
+            PGADMIN_CONTAINER_NAME if planned else container_id,
+            deadline=deadline,
+        )
     except PgAdminUnavailableError:
         return
 
@@ -466,10 +494,12 @@ def refresh_active_pgpass(
     container_id: str,
     fingerprint: str,
     deadline: float,
+    planned: bool = False,
 ) -> None:
     """Refresh pgAdmin's persistent passfile using an ownership-checked ID."""
-    inspected = inspect_container(runner, container_id, deadline=deadline, missing_ok=True)
-    if inspected is None or get_container_id(inspected) != container_id:
+    inspect_target = PGADMIN_CONTAINER_NAME if planned else container_id
+    inspected = inspect_container(runner, inspect_target, deadline=deadline, missing_ok=True)
+    if inspected is None or (not planned and get_container_id(inspected) != container_id):
         raise PgAdminUnavailableError()
     assert_owned_container(inspected, fingerprint=fingerprint)
     result = run_docker(
@@ -479,7 +509,7 @@ def refresh_active_pgpass(
             "exec",
             "--user",
             str(PGADMIN_RUNTIME_UID),
-            container_id,
+            PGADMIN_CONTAINER_NAME if planned else container_id,
             "/bin/sh",
             "-c",
             _ACTIVE_PGPASS_REFRESH,
@@ -496,6 +526,7 @@ def verify_server(
     *,
     runner: object,
     deadline: float,
+    planned: bool = False,
 ) -> None:
     try:
         payload = json.loads(preparation.paths.servers_json.read_text(encoding="utf-8"))
@@ -510,7 +541,7 @@ def verify_server(
         [
             "docker",
             "exec",
-            preparation.container_name,
+            PGADMIN_CONTAINER_NAME if planned else preparation.container_name,
             "/venv/bin/python3",
             "-c",
             _PGADMIN_EFFECTIVE_SERVER_QUERY,

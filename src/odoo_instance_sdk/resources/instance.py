@@ -32,6 +32,7 @@ from odoo_instance_sdk.internal.odoo_config import (
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
+    ProcessExecutor,
     ProcessHandle,
     ProcessResult,
     SubprocessExecutor,
@@ -728,6 +729,7 @@ class OdooInstance:
         result_converter: Callable[[CommandResult], T] | None = None,
         preflight: Callable[[RunContext[T]], None] | None = None,
         extra_steps: Sequence[PreparedStep | PreparedAction] = (),
+        executor: ProcessExecutor | None = None,
     ) -> Command[T]:
         config = self.config.start_config
         if config is None:
@@ -802,7 +804,7 @@ class OdooInstance:
             _command_plan(captured_steps, secrets=secrets),
             execute,
             captured_steps,
-            executor=SubprocessExecutor(),
+            executor=executor or SubprocessExecutor(),
         )
 
     def _run_shell_script_exclusive(

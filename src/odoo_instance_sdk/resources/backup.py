@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable
+import shutil
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from odoo_instance_sdk.exceptions import (
     BackupValidationUnavailableError,
 )
 from odoo_instance_sdk.internal.backup_validation import validate_dump, validate_zip
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import (
     Backup,
@@ -28,7 +30,12 @@ from odoo_instance_sdk.models import (
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
-    from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        ProcessExecutor,
+        RunContext,
+    )
 
 T = TypeVar("T")
 
@@ -155,6 +162,23 @@ class BackupResource:
         timeout: float = 60.0,
         executor: ProcessExecutor | None = None,
     ) -> Command[BackupValidationResult]:
+        from odoo_instance_sdk.internal.proc import PreparedStep
+
+        steps: tuple[PreparedStep, ...] = ()
+        if backup.format == BackupFormat.DUMP:
+            executable = shutil.which("pg_restore")
+            if executable is not None:
+                steps = (
+                    PreparedStep(
+                        step_id="backup.validate.pg-restore",
+                        argv=(executable, "--list", str(Path(backup.path))),
+                        environment=tuple(sorted(sanitized_child_environment().items())),
+                        environment_policy="explicit",
+                        timeout=timeout,
+                        read_only=True,
+                        text=True,
+                    ),
+                )
         return self._command(
             "backup.validate",
             "Validate a backup artifact",
@@ -165,6 +189,7 @@ class BackupResource:
             ),
             executor=executor,
             read_only=True,
+            steps=steps,
         )
 
     def _validate_impl(
@@ -203,6 +228,7 @@ class BackupResource:
         executor: ProcessExecutor | None,
         read_only: bool = False,
         mutating: bool = False,
+        steps: Sequence[PreparedStep] = (),
     ) -> Command[T]:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
@@ -219,11 +245,17 @@ class BackupResource:
             context.action(step_id)
             return callback()
 
-        return Command.create(
-            ExecutionPlan(steps=(step.public_projection(),)),
-            run,
-            (step,),
-            executor=executor or SubprocessExecutor(),
+        prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (step, *steps)
+        from odoo_instance_sdk.internal.proc import prepared_command
+
+        return Command.from_prepared(
+            ExecutionPlan(steps=tuple(item.public_projection() for item in prepared_steps)),
+            prepared_command(
+                run,
+                prepared_steps,
+                executor=executor or SubprocessExecutor(),
+                strict=bool(steps),
+            ),
         )
 
     def _validate_dump(

@@ -23,10 +23,15 @@ def open_pgadmin_lifecycle(
     if runner is None:
         raise PgAdminUnavailableError()
     try:
+        from odoo_instance_sdk.internal.proc import active_context
+
+        planned = active_context() is not None
         deadline = time.monotonic() + max(0.1, timeout)
         paths = pgadmin_files.PgAdminPaths.from_defaults()
         with pgadmin_files.pgadmin_lock(path=paths.lock, timeout=timeout):
-            identity = pgadmin_container.resolve_postgres_identity(cluster, deadline=deadline)
+            identity = pgadmin_container.resolve_postgres_identity(
+                cluster, deadline=deadline, planned=planned
+            )
             existing = pgadmin_container.inspect_container(
                 runner, pgadmin_files.PGADMIN_CONTAINER_NAME, deadline=deadline, missing_ok=True
             )
@@ -46,6 +51,7 @@ def open_pgadmin_lifecycle(
                 network=identity.network,
                 database=database,
                 deadline=deadline,
+                planned=planned,
             )
     except PgAdminUnavailableError:
         raise

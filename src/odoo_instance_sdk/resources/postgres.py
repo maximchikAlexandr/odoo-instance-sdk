@@ -5,10 +5,10 @@ import json
 import os
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 from odoo_instance_sdk.exceptions import (
     LockConflictError,
@@ -46,8 +46,14 @@ from odoo_instance_sdk.models import ClusterResourceSnapshot, PostgresClusterSta
 from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command
-    from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        ProcessExecutor,
+        RunContext,
+    )
+T = TypeVar("T")
 
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_STOP_TIMEOUT = 30.0
@@ -223,7 +229,7 @@ class PostgresCluster:
         if not self.owned:
             raise PostgresClusterNotOwnedError("external postgres clusters have no image digest")
         assert self._image is not None
-        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
 
         steps = (
@@ -250,17 +256,11 @@ class PostgresCluster:
 
         def run(context: RunContext[str]) -> str:
             result = self._resolve_image_digest(timeout)
-            context.skip_remaining()
+            self._account_legacy_steps(context, steps)
             return result
 
         plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-        return Command.create(
-            plan,
-            run,
-            steps,
-            executor=executor or SubprocessExecutor(),
-            private_projection=None,
-        )
+        return self._make_command(plan, run, steps, executor=executor or SubprocessExecutor())
 
     def approve_image(self, image_digest: str, *, timeout: float | None = None) -> None:
         """Approve the exact OCI digest currently resolved for the manifest reference."""
@@ -278,7 +278,7 @@ class PostgresCluster:
                 "external postgres clusters have no image to approve"
             )
         assert self._image is not None
-        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
 
         steps = (
@@ -317,15 +317,10 @@ class PostgresCluster:
                 )
             context.action("postgres.image.approve")
             self._approve_image(resolved)
-            context.skip_remaining()
+            self._account_legacy_steps(context, steps)
 
         plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-        return Command.create(
-            plan,
-            run,
-            steps,
-            executor=executor or SubprocessExecutor(),
-        )
+        return self._make_command(plan, run, steps, executor=executor or SubprocessExecutor())
 
     def _approve_image(self, resolved: str) -> None:
         trust_file = self._trust_file()
@@ -401,7 +396,7 @@ class PostgresCluster:
     def status_command(
         self, *, executor: ProcessExecutor | None = None
     ) -> Command[PostgresClusterState]:
-        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
 
         steps: tuple[PreparedStep | PreparedAction, ...]
@@ -473,16 +468,11 @@ class PostgresCluster:
                 context.action(steps[0].step_id)
                 return unavailable_state
             result = self._status_compose(health_step_id="postgres.status.health")
-            context.skip_remaining()
+            self._account_legacy_steps(context, steps)
             return result
 
         plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-        return Command.create(
-            plan,
-            run,
-            steps,
-            executor=executor or SubprocessExecutor(),
-        )
+        return self._make_command(plan, run, steps, executor=executor or SubprocessExecutor())
 
     def _status_impl(self) -> PostgresClusterState:
         if self._mode == "external":
@@ -521,7 +511,7 @@ class PostgresCluster:
     def ensure_running_command(
         self, timeout: float = _DEFAULT_TIMEOUT, *, executor: ProcessExecutor | None = None
     ) -> Command[None]:
-        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
 
         if self._mode == "external":
@@ -625,15 +615,10 @@ class PostgresCluster:
                 self._ensure_running_external()
             else:
                 self._ensure_running_compose(timeout)
-            context.skip_remaining()
+            self._account_optional_steps(context, steps)
 
         plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-        return Command.create(
-            plan,
-            run,
-            steps,
-            executor=executor or SubprocessExecutor(),
-        )
+        return self._make_command(plan, run, steps, executor=executor or SubprocessExecutor())
 
     def _ensure_running_impl(self, timeout: float = _DEFAULT_TIMEOUT) -> None:
         if self._mode == "external":
@@ -697,7 +682,7 @@ class PostgresCluster:
     def stop_command(
         self, timeout: float = _DEFAULT_STOP_TIMEOUT, *, executor: ProcessExecutor | None = None
     ) -> Command[None]:
-        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
 
         compose_file = self._compose_file()
@@ -767,10 +752,10 @@ class PostgresCluster:
                 context.action("postgres.stop.missing")
             else:
                 self._stop_impl(timeout)
-            context.skip_remaining()
+            self._account_optional_steps(context, steps)
 
         plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-        return Command.create(plan, run, steps, executor=executor or SubprocessExecutor())
+        return self._make_command(plan, run, steps, executor=executor or SubprocessExecutor())
 
     def _stop_impl(self, timeout: float = _DEFAULT_STOP_TIMEOUT) -> None:
         if self._mode == "external":
@@ -823,7 +808,7 @@ class PostgresCluster:
     def resource_snapshot_command(
         self, *, executor: ProcessExecutor | None = None
     ) -> Command[ClusterResourceSnapshot | None]:
-        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
 
         step = PreparedAction(
@@ -837,17 +822,60 @@ class PostgresCluster:
             context: RunContext[ClusterResourceSnapshot | None],
         ) -> ClusterResourceSnapshot | None:
             context.action(step.step_id)
-            result = self._resource_snapshot_impl()
-            context.skip_remaining()
-            return result
+            return self._resource_snapshot_impl()
 
         plan = ExecutionPlan(steps=(step.public_projection(),))
-        return Command.create(
-            plan,
-            run,
-            (step,),
-            executor=executor or SubprocessExecutor(),
+        return self._make_command(plan, run, (step,), executor=executor or SubprocessExecutor())
+
+    def _make_command(
+        self,
+        plan: ExecutionPlan,
+        callback: Callable[[RunContext[T]], T],
+        steps: Sequence[PreparedStep | PreparedAction],
+        *,
+        executor: ProcessExecutor,
+    ) -> Command[T]:
+        """Bind a lifecycle callback to one strict shared-process snapshot.
+
+        The legacy ``ComposeRunner`` remains supported for callers that inject a
+        runner in compatibility tests.  Real subprocess runners use strict
+        matching, so a callback cannot silently replace an inspected process
+        step with another child invocation.
+        """
+        from odoo_instance_sdk.execution import Command
+        from odoo_instance_sdk.internal.proc import prepared_command
+
+        prepared = prepared_command(
+            callback,
+            steps,
+            executor=executor,
+            strict=isinstance(self._compose_runner, SubprocessComposeRunner),
         )
+        return Command.from_prepared(plan, prepared)
+
+    def _account_legacy_steps(
+        self, context: RunContext[T], steps: Sequence[PreparedStep | PreparedAction]
+    ) -> None:
+        """Account for steps owned by an injected legacy runner.
+
+        A real ``SubprocessComposeRunner`` consumes each step through the active
+        context.  An injected test/compatibility runner owns its own execution;
+        only that path may explicitly account for steps it already performed.
+        """
+        if isinstance(self._compose_runner, SubprocessComposeRunner):
+            return
+        for step in steps:
+            if not context.consumed(step.step_id):
+                context.skip(step.step_id)
+
+    @staticmethod
+    def _account_optional_steps(
+        context: RunContext[T], steps: Sequence[PreparedStep | PreparedAction]
+    ) -> None:
+        """Account for a declared branch that the lifecycle made unnecessary."""
+        for step in steps:
+            if not context.consumed(step.step_id):
+                context.skip(step.step_id)
 
     def _resource_snapshot_impl(self) -> ClusterResourceSnapshot | None:
         if self._mode == "external":
