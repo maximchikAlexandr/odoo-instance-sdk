@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import msgspec
 
@@ -53,8 +53,12 @@ from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+T = TypeVar("T")
 
 _BRANCH_PREFIX = "refs/heads/"
 _MAX_TARGET_BYTES = 63
@@ -707,6 +711,30 @@ class DatabasePreparationCoordinator:
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         coalesce: bool = False,
     ) -> DatabasePreparationResult:
+        return self.prepare_command(project, options=options, coalesce=coalesce).run()
+
+    def prepare_command(
+        self,
+        project: ProjectConfig | str | Path,
+        *,
+        options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
+        coalesce: bool = False,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[DatabasePreparationResult]:
+        return self._action_command(
+            "database.prepare",
+            "Prepare a project database",
+            lambda: self._prepare_impl(project, options=options, coalesce=coalesce),
+            executor=executor,
+        )
+
+    def _prepare_impl(
+        self,
+        project: ProjectConfig | str | Path,
+        *,
+        options: DatabaseRefreshOptions,
+        coalesce: bool,
+    ) -> DatabasePreparationResult:
         if options.restore:
             return prepare_restore(self.client, project, options=options, coalesce=coalesce)
         return prepare_download(self.client, project, options=options, wait_for_lock=True)
@@ -717,4 +745,44 @@ class DatabasePreparationCoordinator:
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
     ) -> DatabasePreparationResult:
-        return self.prepare(project, options=options)
+        return self.refresh_database_command(project, options=options).run()
+
+    def refresh_database_command(
+        self,
+        project: ProjectConfig | str | Path,
+        *,
+        options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
+        executor: ProcessExecutor | None = None,
+    ) -> Command[DatabasePreparationResult]:
+        return self._action_command(
+            "database.refresh",
+            "Refresh a project database",
+            lambda: self._prepare_impl(project, options=options, coalesce=False),
+            executor=executor,
+        )
+
+    def _action_command(
+        self,
+        step_id: str,
+        description: str,
+        callback: Callable[[], T],
+        *,
+        executor: ProcessExecutor | None,
+    ) -> Command[T]:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
+
+        step = PreparedAction(
+            step_id=step_id, action=step_id, description=description, mutating=True
+        )
+
+        def run(context: RunContext[T]) -> T:
+            context.action(step_id)
+            return callback()
+
+        return Command.create(
+            ExecutionPlan(steps=(step.public_projection(),)),
+            run,
+            (step,),
+            executor=executor or SubprocessExecutor(),
+        )

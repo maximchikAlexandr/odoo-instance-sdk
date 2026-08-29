@@ -119,7 +119,11 @@ def owned_handle(
     )
 
 
-def _environment(overrides: tuple[tuple[str, str], ...]) -> dict[str, str]:
+def _environment(
+    overrides: tuple[tuple[str, str], ...], *, policy: str = "sanitized-inherit"
+) -> dict[str, str]:
+    if policy == "explicit":
+        return sanitized_child_environment(dict(overrides))
     child = sanitized_child_environment()
     child.update(dict(overrides))
     return sanitized_child_environment(child)
@@ -136,7 +140,7 @@ class SubprocessExecutor:
             completed = subprocess.run(
                 list(prepared.argv),
                 cwd=prepared.cwd,
-                env=_environment(prepared.environment),
+                env=_environment(prepared.environment, policy=prepared.environment_policy),
                 input=prepared.stdin,
                 capture_output=prepared.mode == "captured",
                 text=text_mode,
@@ -154,8 +158,8 @@ class SubprocessExecutor:
             raise ProcessSpawnError(
                 prepared.argv, str(error), duration=time.perf_counter() - started
             ) from error
-        stdout = completed.stdout
-        stderr = completed.stderr
+        stdout = getattr(completed, "stdout", "")
+        stderr = getattr(completed, "stderr", "")
         if prepared.text:
             if isinstance(stdout, bytes):
                 stdout = stdout.decode()
@@ -163,7 +167,7 @@ class SubprocessExecutor:
                 stderr = stderr.decode()
         return ProcessResult(
             argv=prepared.argv,
-            returncode=completed.returncode,
+            returncode=getattr(completed, "returncode", 0),
             stdout=stdout,
             stderr=stderr,
             duration=time.perf_counter() - started,
@@ -176,7 +180,7 @@ class SubprocessExecutor:
         process = subprocess.Popen(
             list(step.argv),
             cwd=step.cwd,
-            env=_environment(step.environment),
+            env=_environment(step.environment, policy=step.environment_policy),
             stdin=None if inherited else subprocess.PIPE,
             stdout=None if inherited else subprocess.PIPE,
             stderr=None if inherited else subprocess.PIPE,
@@ -200,6 +204,7 @@ def prepared_step(
     step_id: str = "process",
     cwd: str | Path | None = None,
     env: Mapping[str, str] | None = None,
+    environment_policy: str = "sanitized-inherit",
     stdin: bytes | None = None,
     timeout: float | None = None,
     mode: str = "captured",
@@ -213,6 +218,7 @@ def prepared_step(
         argv=(*prefix, *args),
         cwd=None if cwd is None else str(cwd),
         environment=tuple(sorted((env or {}).items())),
+        environment_policy=environment_policy,
         stdin=stdin,
         timeout=timeout,
         mode=mode,
@@ -284,7 +290,7 @@ def run_captured_limited(  # noqa: C901
         process = subprocess.Popen(
             list(step.argv),
             cwd=step.cwd,
-            env=_environment(step.environment),
+            env=_environment(step.environment, policy=step.environment_policy),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

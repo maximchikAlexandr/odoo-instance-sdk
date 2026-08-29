@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -26,6 +27,10 @@ from odoo_instance_sdk.models import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
+
+T = TypeVar("T")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -81,6 +86,20 @@ class BackupResource:
         return tuple(events)
 
     def delete(self, backup: Backup) -> BackupDeletionResult:
+        return self.delete_command(backup).run()
+
+    def delete_command(
+        self, backup: Backup, *, executor: ProcessExecutor | None = None
+    ) -> Command[BackupDeletionResult]:
+        return self._command(
+            "backup.delete",
+            "Delete a backup artifact and record its deletion",
+            lambda: self._delete_impl(backup),
+            executor=executor,
+            mutating=True,
+        )
+
+    def _delete_impl(self, backup: Backup) -> BackupDeletionResult:
         catalog = self._client.get_catalog()
         existing = catalog.get_by_id(str(backup.id))
 
@@ -122,6 +141,39 @@ class BackupResource:
         raise_if_unavailable: bool = False,
         timeout: float = 60.0,
     ) -> BackupValidationResult:
+        return self.validate_command(
+            backup,
+            raise_if_unavailable=raise_if_unavailable,
+            timeout=timeout,
+        ).run()
+
+    def validate_command(
+        self,
+        backup: Backup,
+        *,
+        raise_if_unavailable: bool = False,
+        timeout: float = 60.0,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[BackupValidationResult]:
+        return self._command(
+            "backup.validate",
+            "Validate a backup artifact",
+            lambda: self._validate_impl(
+                backup,
+                raise_if_unavailable=raise_if_unavailable,
+                timeout=timeout,
+            ),
+            executor=executor,
+            read_only=True,
+        )
+
+    def _validate_impl(
+        self,
+        backup: Backup,
+        *,
+        raise_if_unavailable: bool,
+        timeout: float,
+    ) -> BackupValidationResult:
         catalog = self._client.get_catalog()
         catalog.verify_identity(backup, verify_content=True)
 
@@ -140,6 +192,38 @@ class BackupResource:
             errors=zip_result.errors,
             db_name=zip_result.db_name,
             db_version=zip_result.db_version,
+        )
+
+    def _command(
+        self,
+        step_id: str,
+        description: str,
+        callback: Callable[[], T],
+        *,
+        executor: ProcessExecutor | None,
+        read_only: bool = False,
+        mutating: bool = False,
+    ) -> Command[T]:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
+
+        step = PreparedAction(
+            step_id=step_id,
+            action=step_id,
+            description=description,
+            read_only=read_only,
+            mutating=mutating,
+        )
+
+        def run(context: RunContext[T]) -> T:
+            context.action(step_id)
+            return callback()
+
+        return Command.create(
+            ExecutionPlan(steps=(step.public_projection(),)),
+            run,
+            (step,),
+            executor=executor or SubprocessExecutor(),
         )
 
     def _validate_dump(

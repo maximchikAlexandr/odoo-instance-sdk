@@ -18,10 +18,14 @@ from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.context import CliContext
 from odoo_instance_sdk.commands.output import OutputMode, build_envelope
 from odoo_instance_sdk.internal.context import resolve_environment, resolve_project
+from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
 from odoo_instance_sdk.models import Snapshot
+from odoo_instance_sdk.resources.backup import BackupResource
+from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.environment import EnvironmentResource
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
 
@@ -203,14 +207,64 @@ def test_discovered_public_methods() -> None:
             "get",
             "list",
             "open_pgadmin",
+            "open_pgadmin_command",
             "plan_checkout",
             "record_use",
             "refresh_database",
+            "refresh_database_command",
             "remove",
+            "remove_command",
             "sync_python",
             "sync_python_command",
         ),
         EnvironmentMonitor: ("snapshot", "snapshot_command", "watch"),
+        PostgresCluster: (
+            "approve_image",
+            "approve_image_command",
+            "ensure_running",
+            "ensure_running_command",
+            "from_project",
+            "resolve_image_digest",
+            "resolve_image_digest_command",
+            "resource_snapshot",
+            "resource_snapshot_command",
+            "status",
+            "status_command",
+            "stop",
+            "stop_command",
+            "to_diagnostic_dict",
+        ),
+        DatabaseResource: (
+            "backup",
+            "backup_command",
+            "current",
+            "current_command",
+            "drop",
+            "drop_command",
+            "exists",
+            "exists_command",
+            "list",
+            "names",
+            "reset_admin_password",
+            "reset_admin_password_command",
+            "restore",
+            "restore_command",
+        ),
+        BackupResource: (
+            "delete",
+            "delete_command",
+            "history",
+            "latest",
+            "list",
+            "validate",
+            "validate_command",
+        ),
+        DatabasePreparationCoordinator: (
+            "prepare",
+            "prepare_command",
+            "refresh_database",
+            "refresh_database_command",
+        ),
         OdooInstance: (
             "iter_logs",
             "run",

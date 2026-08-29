@@ -65,19 +65,31 @@ def run_psql(
     if host is not None:
         cmd[2:2] = ["-h", host]
     try:
-        from odoo_instance_sdk.internal.proc import active_context, prepared_step
+        from odoo_instance_sdk.internal.proc import (
+            ProcessExecutionError,
+            SubprocessExecutor,
+            active_context,
+            prepared_step,
+        )
 
         context = active_context()
         if context is not None:
             captured = cast(
                 "ProcessResult",
-                context.process_prepared(prepared_step(cmd, env=env, timeout=timeout, text=True)),
+                context.process_prepared(
+                    prepared_step(
+                        cmd, env=env, environment_policy="explicit", timeout=timeout, text=True
+                    )
+                ),
             )
             stdout = captured.stdout if isinstance(captured.stdout, str) else ""
             stderr = captured.stderr if isinstance(captured.stderr, str) else ""
             return subprocess.CompletedProcess(cmd, captured.returncode, stdout, stderr)
-        return subprocess.run(
-            cmd, env=env, capture_output=True, text=True, timeout=timeout, shell=False, check=False
+        captured = SubprocessExecutor().execute(
+            prepared_step(cmd, env=env, environment_policy="explicit", timeout=timeout, text=True)
         )
-    except (subprocess.TimeoutExpired, OSError):
+        stdout = captured.stdout if isinstance(captured.stdout, str) else ""
+        stderr = captured.stderr if isinstance(captured.stderr, str) else ""
+        return subprocess.CompletedProcess(cmd, captured.returncode, stdout, stderr)
+    except (ProcessExecutionError, OSError):
         return None

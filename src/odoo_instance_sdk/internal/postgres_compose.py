@@ -71,7 +71,12 @@ class SubprocessComposeRunner(ComposeRunner):
         cwd: Path | None = None,
         timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        from odoo_instance_sdk.internal.proc import active_context, prepared_step
+        from odoo_instance_sdk.internal.proc import (
+            ProcessTimeoutError,
+            SubprocessExecutor,
+            active_context,
+            prepared_step,
+        )
 
         context = active_context()
         if context is not None:
@@ -82,15 +87,22 @@ class SubprocessComposeRunner(ComposeRunner):
             stdout = captured.stdout if isinstance(captured.stdout, str) else ""
             stderr = captured.stderr if isinstance(captured.stderr, str) else ""
             return subprocess.CompletedProcess(args, captured.returncode, stdout, stderr)
-        return subprocess.run(
-            list(args),
-            cwd=str(cwd) if cwd is not None else None,
-            env=sanitized_child_environment(),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        try:
+            result = SubprocessExecutor().execute(
+                prepared_step(
+                    args,
+                    cwd=cwd,
+                    env=sanitized_child_environment(),
+                    environment_policy="explicit",
+                    timeout=timeout,
+                    text=True,
+                )
+            )
+        except ProcessTimeoutError as exc:
+            raise subprocess.TimeoutExpired(list(args), timeout or 0.0) from exc
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        stderr = result.stderr if isinstance(result.stderr, str) else ""
+        return subprocess.CompletedProcess(list(args), result.returncode, stdout, stderr)
 
 
 def docker_available() -> bool:
@@ -408,13 +420,14 @@ def compose_health(
     return res.returncode, (res.stdout + res.stderr).strip()
 
 
-def derive_state(
+def derive_state(  # noqa: C901
     runner: ComposeRunner,
     compose_file: Path,
     project_name: str,
     *,
     user: str,
     timeout: float | None = None,
+    health_step_id: str | None = None,
 ) -> PostgresClusterState:
     deadline = time.monotonic() + timeout if timeout is not None else None
 
@@ -428,8 +441,20 @@ def derive_state(
     except (OSError, subprocess.SubprocessError):
         return PostgresClusterState.UNKNOWN
     if rows is None:
+        if health_step_id is not None:
+            from odoo_instance_sdk.internal.proc import active_context
+
+            context = active_context()
+            if context is not None:
+                context.skip(health_step_id)
         return PostgresClusterState.UNKNOWN
     if not rows:
+        if health_step_id is not None:
+            from odoo_instance_sdk.internal.proc import active_context
+
+            context = active_context()
+            if context is not None:
+                context.skip(health_step_id)
         return PostgresClusterState.STOPPED
     stopped_states = {"created", "dead", "exited"}
     reported_states = {str(row.get("State", "")).lower() for row in rows}

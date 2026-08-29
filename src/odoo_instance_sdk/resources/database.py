@@ -5,11 +5,11 @@ import hashlib
 import os
 import unicodedata
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import httpx
 
@@ -45,7 +45,11 @@ from odoo_instance_sdk.models import (
 )
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
+
+T = TypeVar("T")
 
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
 _RESET_ADMIN_PASSWORD_SCRIPT = """
@@ -225,6 +229,20 @@ class DatabaseResource:
         return tuple(databases)
 
     def exists(self, name: str) -> bool:
+        return self.exists_command(name).run()
+
+    def exists_command(
+        self, name: str, *, executor: ProcessExecutor | None = None
+    ) -> Command[bool]:
+        return self._action_command(
+            "database.exists",
+            "Check whether a database exists",
+            lambda: self._exists_impl(name),
+            executor=executor,
+            read_only=True,
+        )
+
+    def _exists_impl(self, name: str) -> bool:
         try:
             databases = self.list()
         except DatabaseManagerUnavailableError:
@@ -263,6 +281,18 @@ class DatabaseResource:
         return self.list()[index]
 
     def current(self) -> Database:
+        return self.current_command().run()
+
+    def current_command(self, *, executor: ProcessExecutor | None = None) -> Command[Database]:
+        return self._action_command(
+            "database.current",
+            "Resolve the configured current database",
+            self._current_impl,
+            executor=executor,
+            read_only=True,
+        )
+
+    def _current_impl(self) -> Database:
         configured = self._instance.config.configured_database_names
         if not configured:
             return Database(name="", backup=NoBackup())
@@ -320,6 +350,51 @@ class DatabaseResource:
         destination: str | Path | None = None,
         timeout: float | None = None,
         source_git_branch: str | None = None,
+    ) -> Backup:
+        return self.backup_command(
+            database_name,
+            format=format,
+            filestore=filestore,
+            destination=destination,
+            timeout=timeout,
+            source_git_branch=source_git_branch,
+        ).run()
+
+    def backup_command(
+        self,
+        database_name: str,
+        *,
+        format: BackupFormat = BackupFormat.ZIP,
+        filestore: bool = True,
+        destination: str | Path | None = None,
+        timeout: float | None = None,
+        source_git_branch: str | None = None,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[Backup]:
+        return self._action_command(
+            "database.backup",
+            "Create a database backup",
+            lambda: self._backup_impl(
+                database_name,
+                format=format,
+                filestore=filestore,
+                destination=destination,
+                timeout=timeout,
+                source_git_branch=source_git_branch,
+            ),
+            executor=executor,
+            mutating=True,
+        )
+
+    def _backup_impl(
+        self,
+        database_name: str,
+        *,
+        format: BackupFormat,
+        filestore: bool,
+        destination: str | Path | None,
+        timeout: float | None,
+        source_git_branch: str | None,
     ) -> Backup:
         source_git_branch = _normalize_source_git_branch(source_git_branch)
         pwd = self._require_password()
@@ -432,6 +507,20 @@ class DatabaseResource:
         return server_filename, size_bytes, sha256_hex
 
     def reset_admin_password(self) -> AdminPasswordResetResult:
+        return self.reset_admin_password_command().run()
+
+    def reset_admin_password_command(
+        self, *, executor: ProcessExecutor | None = None
+    ) -> Command[AdminPasswordResetResult]:
+        return self._action_command(
+            "database.reset-admin-password",
+            "Reset the Odoo administrator password",
+            self._reset_admin_password_impl,
+            executor=executor,
+            mutating=True,
+        )
+
+    def _reset_admin_password_impl(self) -> AdminPasswordResetResult:
         """Reset ``base.user_admin`` on this instance's one bound database."""
         self._assert_local()
         configured = self._instance.config.configured_database_names
@@ -472,6 +561,47 @@ class DatabaseResource:
         copy: bool = False,
         neutralize_database: bool = False,
         timeout: float | None = None,
+    ) -> RestoreResult:
+        return self.restore_command(
+            backup,
+            target_database_name,
+            copy=copy,
+            neutralize_database=neutralize_database,
+            timeout=timeout,
+        ).run()
+
+    def restore_command(
+        self,
+        backup: Backup,
+        target_database_name: str,
+        *,
+        copy: bool = False,
+        neutralize_database: bool = False,
+        timeout: float | None = None,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[RestoreResult]:
+        return self._action_command(
+            "database.restore",
+            "Restore a database backup",
+            lambda: self._restore_impl(
+                backup,
+                target_database_name,
+                copy=copy,
+                neutralize_database=neutralize_database,
+                timeout=timeout,
+            ),
+            executor=executor,
+            mutating=True,
+        )
+
+    def _restore_impl(
+        self,
+        backup: Backup,
+        target_database_name: str,
+        *,
+        copy: bool,
+        neutralize_database: bool,
+        timeout: float | None,
     ) -> RestoreResult:
         self._assert_local()
         pwd = self._require_password()
@@ -542,6 +672,24 @@ class DatabaseResource:
         *,
         timeout: float | None = None,
     ) -> DropResult:
+        return self.drop_command(database_name, timeout=timeout).run()
+
+    def drop_command(
+        self,
+        database_name: str,
+        *,
+        timeout: float | None = None,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[DropResult]:
+        return self._action_command(
+            "database.drop",
+            "Drop a database",
+            lambda: self._drop_impl(database_name, timeout=timeout),
+            executor=executor,
+            mutating=True,
+        )
+
+    def _drop_impl(self, database_name: str, *, timeout: float | None) -> DropResult:
         pwd = self._require_password()
         self._assert_local()
 
@@ -577,3 +725,35 @@ class DatabaseResource:
             )
 
         return DropResult(db=database_name)
+
+    def _action_command(
+        self,
+        step_id: str,
+        description: str,
+        callback: Callable[[], T],
+        *,
+        executor: ProcessExecutor | None,
+        read_only: bool = False,
+        mutating: bool = False,
+    ) -> Command[T]:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
+
+        step = PreparedAction(
+            step_id=step_id,
+            action=step_id,
+            description=description,
+            read_only=read_only,
+            mutating=mutating,
+        )
+
+        def run(context: RunContext[T]) -> T:
+            context.action(step_id)
+            return callback()
+
+        return Command.create(
+            ExecutionPlan(steps=(step.public_projection(),)),
+            run,
+            (step,),
+            executor=executor or SubprocessExecutor(),
+        )

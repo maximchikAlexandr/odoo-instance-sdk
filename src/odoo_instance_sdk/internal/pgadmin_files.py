@@ -429,18 +429,18 @@ def _validate_acl(path: Path, expected: frozenset[str], *, default: bool = False
     if not _linux():
         return
     try:
-        result = subprocess.run(
-            ["getfacl", "-cp", str(path)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.SubprocessError):
+        from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+
+        result = run_captured(["getfacl", "-cp", str(path)], text=True)
+        if result.returncode != 0:
+            raise PgAdminUnavailableError()
+    except (OSError, ProcessExecutionError, subprocess.SubprocessError):
         raise PgAdminUnavailableError() from None
     prefix = "default:" if default else ""
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
     actual = frozenset(
         line.removeprefix(prefix)
-        for line in result.stdout.splitlines()
+        for line in stdout.splitlines()
         if line
         and not line.startswith("#")
         and (line.startswith(prefix) if default else not line.startswith("default:"))
@@ -455,12 +455,16 @@ def _set_acl(path: Path, entries: frozenset[str], *, default: bool = False) -> N
     if not all(shutil.which(tool) for tool in _ACL_TOOLS):
         raise PgAdminUnavailableError()
     try:
+        from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+
         command = ["setfacl"]
         if default:
             command.append("--default")
         command.extend(["--set", ",".join(sorted(entries)), str(path)])
-        subprocess.run(command, check=True, capture_output=True, text=True)
-    except (OSError, subprocess.SubprocessError):
+        result = run_captured(command, text=True)
+        if result.returncode != 0:
+            raise PgAdminUnavailableError()
+    except (OSError, ProcessExecutionError, subprocess.SubprocessError):
         raise PgAdminUnavailableError() from None
 
 

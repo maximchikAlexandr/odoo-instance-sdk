@@ -82,22 +82,27 @@ def validate_dump(
         return DumpValidationResult(valid=False, unavailable=True)
 
     try:
-        result = subprocess.run(
+        from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+
+        result = run_captured(
             [exe, "--list", str(path)],
             env=sanitized_child_environment(),
-            capture_output=True,
-            text=True,
             timeout=timeout,
-            check=False,
+            text=True,
         )
         if result.returncode != 0:
+            stderr = result.stderr if isinstance(result.stderr, str) else ""
             return DumpValidationResult(
                 valid=False,
-                errors=(result.stderr.strip() or "pg_restore exited with non-zero status",),
+                errors=(stderr.strip() or "pg_restore exited with non-zero status",),
             )
         return DumpValidationResult(valid=True)
     except subprocess.TimeoutExpired:
         return DumpValidationResult(valid=False, errors=("pg_restore timed out",))
+    except ProcessExecutionError as exc:
+        if exc.__class__.__name__ == "ProcessTimeoutError":
+            return DumpValidationResult(valid=False, errors=("pg_restore timed out",))
+        return DumpValidationResult(valid=False, unavailable=True)
     except FileNotFoundError:
         if raise_if_unavailable:
             raise BackupValidationUnavailableError(f"pg_restore not found at {exe}")

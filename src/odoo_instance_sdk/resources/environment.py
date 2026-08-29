@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, Protocol, Union, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, Union, cast
 
 import msgspec
 
@@ -98,6 +98,7 @@ if TYPE_CHECKING:
 
 EnvironmentSelector = Union[str, "DevelopmentEnvironment"]
 type _PlanningError = PlanError | ConfigError | EnvironmentConflictError
+T = TypeVar("T")
 
 # Re-export the dependency-neutral contract for backwards-compatible imports.
 EnvironmentState = _EnvironmentState
@@ -402,14 +403,36 @@ class EnvironmentResource:
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
     ) -> DatabasePreparationResult:
+        return self.refresh_database_command(project, options=options).run()
+
+    def refresh_database_command(
+        self,
+        project: ProjectConfig | Path,
+        *,
+        options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
+        executor: ProcessExecutor | None = None,
+    ) -> Command[DatabasePreparationResult]:
+        return self._action_command(
+            "environment.refresh-database",
+            "Prepare the environment database",
+            lambda: self._refresh_database_impl(project, options=options),
+            executor=executor,
+            mutating=True,
+        )
+
+    def _refresh_database_impl(
+        self,
+        project: ProjectConfig | Path,
+        *,
+        options: DatabaseRefreshOptions,
+    ) -> DatabasePreparationResult:
         """Prepare the configured project database through the shared coordinator."""
         from odoo_instance_sdk.internal.database_preparation import (
             DatabasePreparationCoordinator,
         )
 
-        return DatabasePreparationCoordinator(self._client).refresh_database(
-            project, options=options
-        )
+        coordinator = DatabasePreparationCoordinator(self._client)
+        return coordinator._prepare_impl(project, options=options, coalesce=False)
 
     def _refresh_checkout_if_stale(
         self,
@@ -1426,6 +1449,23 @@ class EnvironmentResource:
         return self._resolve_selector(selector, include_removed=True)
 
     def open_pgadmin(self, selector: EnvironmentSelector) -> PgAdminOpenResult:
+        return self.open_pgadmin_command(selector).run()
+
+    def open_pgadmin_command(
+        self,
+        selector: EnvironmentSelector,
+        *,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[PgAdminOpenResult]:
+        return self._action_command(
+            "environment.open-pgadmin",
+            "Open the environment's owned pgAdmin container",
+            lambda: self._open_pgadmin_impl(selector),
+            executor=executor,
+            mutating=True,
+        )
+
+    def _open_pgadmin_impl(self, selector: EnvironmentSelector) -> PgAdminOpenResult:
         """Open the selected environment through the private pgAdmin lifecycle seam.
 
         Resolution and all security-critical preconditions live here so callers
@@ -1550,6 +1590,23 @@ class EnvironmentResource:
         return [_row_to_env(r) for r in rows]
 
     def remove(self, selector: EnvironmentSelector) -> None:
+        return self.remove_command(selector).run()
+
+    def remove_command(
+        self,
+        selector: EnvironmentSelector,
+        *,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[None]:
+        return self._action_command(
+            "environment.remove",
+            "Remove the selected development environment",
+            lambda: self._remove_impl(selector),
+            executor=executor,
+            mutating=True,
+        )
+
+    def _remove_impl(self, selector: EnvironmentSelector) -> None:
         env = (
             self._resolve_selector(selector, include_removed=True)
             if isinstance(selector, str)
@@ -1558,6 +1615,36 @@ class EnvironmentResource:
         catalog = self._client.get_catalog()
         with exclusive_lock(environment_lock_path(str(env.id))):
             self._do_remove(catalog, env)
+
+    def _action_command(
+        self,
+        step_id: str,
+        description: str,
+        callback: Callable[[], T],
+        *,
+        executor: ProcessExecutor | None,
+        mutating: bool,
+    ) -> Command[T]:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
+
+        step = PreparedAction(
+            step_id=step_id,
+            action=step_id,
+            description=description,
+            mutating=mutating,
+        )
+
+        def run(context: RunContext[T]) -> T:
+            context.action(step_id)
+            return callback()
+
+        return Command.create(
+            ExecutionPlan(steps=(step.public_projection(),)),
+            run,
+            (step,),
+            executor=executor or SubprocessExecutor(),
+        )
 
     def _do_remove(self, catalog: object, env: DevelopmentEnvironment) -> None:
         cat = cast("BackupCatalog", catalog)

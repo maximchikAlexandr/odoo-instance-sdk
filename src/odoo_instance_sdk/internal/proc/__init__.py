@@ -161,9 +161,11 @@ class RunContext(Generic[T]):
         ):
             raise DuplicateStepError(requested.step_id)
         if not self._strict:
-            from .executor import SubprocessExecutor
-
-            return SubprocessExecutor().execute(requested)
+            # Compatibility operations may discover an optional process only
+            # after a domain preflight.  Keep that process on the command's
+            # executor seam (including RecordingExecutor); strict commands
+            # still reject every request absent from their frozen plan.
+            return self._executor.execute(requested)
         raise UnplannedStepError(requested.step_id)
 
     def spawn(self, step_id: str) -> ProcessHandle:
