@@ -79,8 +79,8 @@
 
 ## 9. Documentation and Final Verification
 
-- [ ] 9.1 Update README and Python SDK documentation with inspect-then-run examples, command sibling naming (including `EnvironmentMonitor.snapshot_command()` and cross-platform `OdooInstance.stop_command()`), CLI dry-run examples for normally native `run`/`shell`, redaction, planning observations, stale-plan behavior, ActionStep semantics, and reasoned non-previewable native-stream exceptions.
-- [ ] 9.2 Document the final eligible CLI dry-run inventory and the remaining direct-process/output/type allowlists; require each remaining entry to state why the common boundary cannot represent it and its removal condition.
+- [x] 9.1 Update README and Python SDK documentation with inspect-then-run examples, command sibling naming (including `EnvironmentMonitor.snapshot_command()` and cross-platform `OdooInstance.stop_command()`), CLI dry-run examples for normally native `run`/`shell`, redaction, planning observations, stale-plan behavior, ActionStep semantics, and reasoned non-previewable native-stream exceptions.
+- [x] 9.2 Document the final eligible CLI dry-run inventory and the remaining direct-process/output/type allowlists; require each remaining entry to state why the common boundary cannot represent it and its removal condition.
 - [ ] 9.3 Run focused command-model, redaction, fingerprint, parity, non-mutation, stale-plan, fake-executor, Odoo stdin, foreground/TTY, PostgreSQL, database-preparation, and output parity suites.
 - [ ] 9.4 Run MYL-67 package/help/version startup boundary tests and record final importtime evidence without adding a timing threshold.
 - [ ] 9.5 Run all repository verification gates required by `make pr`, including Ruff, strict mypy, architecture contracts, offline/integration tests, coverage/mutation checks configured by the target, and packaging tests; record exact commands and results.
