@@ -41,7 +41,6 @@ from odoo_instance_sdk.internal.proc import (
 )
 from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.server import (
-    _build_cli_args,
     _write_secret_config,
     cleanup_secret_config,
     get_process_status,
@@ -57,6 +56,16 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.resources.database import DatabaseResource
 
 T = TypeVar("T")
+
+
+def _build_cli_args(config: StartConfig, *, secret_config_path: str | None = None) -> list[str]:
+    """Resolve the shared non-launching CLI argument builder at the boundary."""
+    from odoo_instance_sdk.internal.server import _build_cli_args as build_args
+
+    if secret_config_path is None:
+        return build_args(config)
+    return build_args(config, secret_config_path=secret_config_path)
+
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -369,7 +378,11 @@ def _snapshot_start_inputs(
     secret_path: str | None = None
     if snapshot.config_path is None and snapshot.db_password is not None:
         secret_path = str(Path(tempfile.gettempdir()) / f"odoo-sdk-{uuid.uuid4().hex}.conf")
-    args = tuple(_build_cli_args(snapshot, secret_config_path=secret_path))
+    args = tuple(
+        _build_cli_args(snapshot)
+        if secret_path is None
+        else _build_cli_args(snapshot, secret_config_path=secret_path)
+    )
     secrets = tuple(value for value in (snapshot.db_password, secret_path) if value is not None)
     return snapshot, args, secret_path, secrets
 
@@ -604,7 +617,9 @@ class OdooInstance:
                     handle = context.spawn(step.step_id)
                     if self._environment_id is not None:
                         self._persist_runtime_identity(handle.pid, snapshot, resolved_cwd)
-                    return wait_foreground(handle)
+                    from odoo_instance_sdk.internal.server import wait_foreground_process
+
+                    return wait_foreground_process(handle.process)
                 except BaseException:
                     if handle is not None:
                         with contextlib.suppress(BaseException):

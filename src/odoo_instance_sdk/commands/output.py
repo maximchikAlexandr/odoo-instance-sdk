@@ -195,24 +195,28 @@ def rich_print(
     Console().print(rendered, markup=False, soft_wrap=True, end=end)
 
 
-def _sanitize_envelope_value(value: JsonValue) -> JsonValue:
+def _sanitize_envelope_value(value: JsonValue, *, preserve_newlines: bool = True) -> JsonValue:
     """Recursively make machine-envelope values inert for terminal transports."""
     if isinstance(value, str):
         # Keep line feeds as data.  JSON/TOON escape them at serialization time,
         # while the Rich plan projection must be able to render captured stdin
         # and scripts as actual multiline blocks.
-        return sanitize_terminal_text(value, preserve_newlines=True)
+        return sanitize_terminal_text(value, preserve_newlines=preserve_newlines)
     if isinstance(value, dict):
         return {
-            sanitize_terminal_text(key): _sanitize_envelope_value(item)
+            sanitize_terminal_text(key): _sanitize_envelope_value(
+                item, preserve_newlines=preserve_newlines
+            )
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
-        return [_sanitize_envelope_value(item) for item in value]
+        return [
+            _sanitize_envelope_value(item, preserve_newlines=preserve_newlines) for item in value
+        ]
     return value
 
 
-def _document_payload(document: OutputDocument) -> JsonObject:
+def _document_payload(document: OutputDocument, *, preserve_newlines: bool = True) -> JsonObject:
     """Build the exact v1 envelope projection for one immutable document."""
     payload: JsonObject = {
         "schema_version": document.schema_version,
@@ -233,7 +237,10 @@ def _document_payload(document: OutputDocument) -> JsonObject:
             "code": document.error.code,
             "message": document.error.message,
         }
-    return cast("JsonObject", _sanitize_envelope_value(payload))
+    return cast(
+        "JsonObject",
+        _sanitize_envelope_value(payload, preserve_newlines=preserve_newlines),
+    )
 
 
 def _document(
@@ -293,7 +300,7 @@ def emit(
     diagnostic: str | None = None,
 ) -> int:
     """Emit one immutable document and return its normal CLI exit status."""
-    payload = _document_payload(document)
+    payload = _document_payload(document, preserve_newlines=mode is OutputMode.RICH)
     if mode is OutputMode.JSON:
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     elif mode is OutputMode.TOON:
@@ -487,7 +494,7 @@ def build_envelope(
     error_message: DiagnosticValue | None = None,
 ) -> JsonObject:
     """Build the existing v1 envelope without selecting an output transport."""
-    return _document_payload(
+    document = (
         success_document(
             command=command,
             result=result,
@@ -504,6 +511,10 @@ def build_envelope(
             error_code=error_code,
             error_message=error_message,
         )
+    )
+    return _document_payload(
+        document,
+        preserve_newlines=False,
     )
 
 

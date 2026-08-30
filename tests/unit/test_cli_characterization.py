@@ -539,7 +539,7 @@ def test_discovered_public_methods() -> None:
             for name, value in inspect.getmembers(cls, inspect.isroutine)
             if not name.startswith("_")
         )
-        assert discovered == names
+        assert discovered == names, (cls.__name__, names, discovered)
 
 
 def _assert_envelope_keys(envelope: dict[str, object], *, success: bool) -> None:

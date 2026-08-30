@@ -95,15 +95,15 @@ documented by `OUTPUT_WRITE_REASONS`:
   adapter rather than the live command callback.
 - `src/odoo_instance_sdk/commands/output.py:195` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:298` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:305` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:300` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:307` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:307` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:314` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:309` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:316` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:661` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance.py:674` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
@@ -132,3 +132,24 @@ locations while the production launch inventory is empty:
 These are not production launches or public behavior exceptions. Their removal
 condition is migration of each fixture to the shared recording executor; the
 architecture test rejects both additions and unexplained line changes.
+
+## Startup evidence (MYL-67)
+
+The final fresh-interpreter boundary was checked on the verification tree with
+Python 3.12.13 on Darwin arm64. The exact import-time command was run three
+times:
+
+```console
+$ uv run python -X importtime -c 'import odoo_instance_sdk.cli'
+import time:      5887 |     352511 | odoo_instance_sdk.cli
+$ uv run python -X importtime -c 'import odoo_instance_sdk.cli'
+import time:      8778 |     215221 | odoo_instance_sdk.cli
+$ uv run python -X importtime -c 'import odoo_instance_sdk.cli'
+import time:      5942 |     211052 | odoo_instance_sdk.cli
+```
+
+These values are evidence only; no timing threshold is part of the gate. The
+fresh-process module-presence check reported `execution`, `internal.proc`,
+Expression, and `httpx` all absent after importing the package. The checked
+startup tests separately cover `odcli --help` and `odcli --version` with the
+same forbidden-module boundary.

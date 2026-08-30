@@ -585,7 +585,17 @@ class PostgresCluster:
             ),
             PreparedStep(
                 step_id="postgres.ensure.config",
-                argv=(*prefix, "config", "--quiet"),
+                # ``write_compose_file_atomic`` validates a deterministic
+                # temporary sibling before publishing compose.yaml.  Capture
+                # the path shape here; the proc boundary permits only this
+                # explicitly late-bound temporary suffix.
+                argv=(
+                    *prefix[:-2],
+                    "-f",
+                    str(compose_file.parent / ".compose-<runtime>.yaml.tmp"),
+                    "config",
+                    "--quiet",
+                ),
                 cwd=str(compose_file.parent),
                 mutating=True,
             ),
@@ -754,7 +764,11 @@ class PostgresCluster:
                 ),
                 PreparedStep(
                     step_id="postgres.stop",
-                    argv=(*prefix, "stop", "--timeout", str(int(max(1, timeout)))),
+                    # The lifecycle spends part of the deadline acquiring its
+                    # lock and probing status.  Capture the command shape,
+                    # while allowing the adapter to pass the bounded
+                    # remaining timeout to the same prepared step.
+                    argv=(*prefix, "stop", "--timeout", "<runtime>"),
                     cwd=str(compose_file.parent),
                     mutating=True,
                     timeout=timeout,
@@ -891,7 +905,11 @@ class PostgresCluster:
     ) -> None:
         """Account for a declared branch that the lifecycle made unnecessary."""
         for step in steps:
-            if not context.consumed(step.step_id):
+            # A dependency preflight can run inside a different strict
+            # command (for example an Odoo foreground command).  Its private
+            # manifest is not part of that outer command, so it must not try
+            # to consume or skip steps that were never captured there.
+            if context.planned(step.step_id) and not context.consumed(step.step_id):
                 context.skip(step.step_id)
 
     def _resource_snapshot_impl(self) -> ClusterResourceSnapshot | None:

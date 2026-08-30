@@ -7,10 +7,10 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from odoo_instance_sdk.http.app import create_app
-from odoo_instance_sdk.models import PgAdminOpenResult
+from odoo_instance_sdk.models import PgAdminOpenResult, Snapshot
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 OPENAPI_PATH = REPOSITORY_ROOT / "openapi.json"
@@ -39,7 +39,7 @@ _MACHINE_ENV_MARKERS = (
 class _SchemaMonitor:
     """Typed stub: schema construction must never call a live monitor."""
 
-    def snapshot(self, project_id: str | None = None) -> object:
+    def snapshot(self, project_id: str | None = None) -> Snapshot:
         raise AssertionError("schema export must not collect a monitor snapshot")
 
 
@@ -49,15 +49,12 @@ def _schema_pgadmin_opener(environment_id: str) -> PgAdminOpenResult:
 
 def build_openapi() -> dict[str, Any]:
     """Build OpenAPI exclusively through the static-free production app."""
-    return cast(
-        "dict[str, Any]",
-        create_app(
-            headless=False,
-            static_assets=False,
-            monitor=_SchemaMonitor(),
-            pgadmin_opener=_schema_pgadmin_opener,
-        ).openapi(),
-    )
+    return create_app(
+        headless=False,
+        static_assets=False,
+        monitor=_SchemaMonitor(),
+        pgadmin_opener=_schema_pgadmin_opener,
+    ).openapi()
 
 
 def _reject_unsafe(value: object, *, key: str = "") -> None:  # noqa: C901

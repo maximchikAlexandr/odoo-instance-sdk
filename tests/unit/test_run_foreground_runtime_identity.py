@@ -12,6 +12,7 @@ import pytest
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
+from odoo_instance_sdk.internal.proc import SubprocessExecutor
 from odoo_instance_sdk.internal.process_metrics import collect_process_tree
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
@@ -351,15 +352,15 @@ def test_persist_failure_aborts_run_but_still_clears_runtime(env_id: str, tmp_pa
     )
 
     spawned: list[object] = []
-    from odoo_instance_sdk.internal.server import spawn_foreground_process as spawn
+    original_spawn = SubprocessExecutor.spawn
 
-    def record_spawn(*args: Any, **kwargs: Any) -> Any:
-        proc = spawn(*args, **kwargs)
-        spawned.append(proc)
-        return proc
+    def record_spawn(executor: SubprocessExecutor, step: Any) -> Any:
+        handle = original_spawn(executor, step)
+        spawned.append(handle.process)
+        return handle
 
     with (
-        patch("odoo_instance_sdk.resources.instance.spawn_foreground_process", record_spawn),
+        patch.object(SubprocessExecutor, "spawn", record_spawn),
         pytest.raises(RuntimeError, match="catalog down"),
     ):
         inst.run_foreground()
@@ -387,7 +388,7 @@ def test_persist_failure_preserves_original_error_when_cleanup_fails(
     )
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.terminate_foreground_process",
+            "odoo_instance_sdk.resources.instance.terminate",
             side_effect=OSError("cleanup failed"),
         ),
         pytest.raises(RuntimeError, match="catalog down"),

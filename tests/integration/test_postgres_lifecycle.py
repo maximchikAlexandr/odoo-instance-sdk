@@ -8,6 +8,7 @@ Run with: ``pytest -m integration tests/integration/test_postgres_lifecycle.py``
 
 from __future__ import annotations
 
+import shutil
 import socket
 import subprocess
 from pathlib import Path
@@ -90,14 +91,12 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         # instance preflight: build an OdooInstance bound to the cluster and
         # call run_foreground with a stubbed binary that exits 0 immediately,
         # proving the dependency preflight fires against the running cluster.
-        from unittest.mock import patch
-
         from odoo_instance_sdk.client import OdooClient
         from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
         from odoo_instance_sdk.models import StartConfig
         from odoo_instance_sdk.resources.instance import OdooInstance
 
-        client = OdooClient(config=OdooClientConfig(executable="/bin/true"))
+        client = OdooClient(config=OdooClientConfig(executable=shutil.which("true") or "true"))
         instance = OdooInstance(
             config=InstanceConfig(
                 base_url="http://127.0.0.1:8069",
@@ -106,11 +105,7 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
             _client=client,
             _postgres_cluster=cluster,
         )
-        with patch(
-            "odoo_instance_sdk.resources.instance.run_foreground_process",
-            return_value=0,
-        ):
-            exit_code = instance.run_foreground()
+        exit_code = instance.run_foreground()
         assert exit_code == 0  # preflight passed (cluster already healthy)
 
         # stop — preserves the volume.

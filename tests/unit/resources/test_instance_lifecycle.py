@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,6 +13,7 @@ from odoo_instance_sdk.exceptions import (
     ProcessNotFoundError,
     ReadinessTimeoutError,
 )
+from odoo_instance_sdk.internal.proc import ProcessHandle, RecordingExecutor
 from odoo_instance_sdk.models import CommandResult, OdooProcess, ReadinessResult, StartConfig
 
 
@@ -23,19 +24,19 @@ def _make_client() -> OdooClient:
 def test_instance_start_stop() -> None:
     client = _make_client()
     inst = client.instance(base_url="http://localhost:8069")
-    mock_handle = object()
-
-    with patch("odoo_instance_sdk.resources.instance.start_process") as mock_start:
-        fake_proc = OdooProcess(id="test-start", pid=12345, args=[], started_at=0.0)
-        mock_start.return_value = (fake_proc, mock_handle, None)
-
+    process = MagicMock()
+    process.pid = 12345
+    process.poll.return_value = None
+    mock_handle = ProcessHandle(process, (), 12345, 12345, True)
+    executor = RecordingExecutor(handles={"instance.start": mock_handle})
+    with patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor):
         proc = inst.start(StartConfig(http_port=9999))
 
         assert proc.id in client._processes
         assert proc.id in client._handles
-        assert client._handles[proc.id] is mock_handle
+        assert client._handles[proc.id] is process
 
-    with patch("odoo_instance_sdk.resources.instance.stop_process") as mock_stop:
+    with patch("odoo_instance_sdk.resources.instance.terminate") as mock_stop:
         inst.stop(proc)
 
         assert proc.id not in client._processes
@@ -116,15 +117,17 @@ def test_shared_registry() -> None:
 
     assert inst_a._client is inst_b._client
 
-    mock_handle = object()
-    fake_proc = OdooProcess(id="shared", pid=12345, args=[], started_at=0.0)
+    process = MagicMock()
+    process.pid = 12345
+    process.poll.return_value = None
+    mock_handle = ProcessHandle(process, (), 12345, 12345, True)
 
-    with patch("odoo_instance_sdk.resources.instance.start_process") as mock_start:
-        mock_start.return_value = (fake_proc, mock_handle, None)
-        inst_a.start(StartConfig(http_port=9999))
+    executor = RecordingExecutor(handles={"instance.start": mock_handle})
+    with patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor):
+        proc = inst_a.start(StartConfig(http_port=9999))
 
-    assert inst_b._client.get_process("shared") is fake_proc
-    assert inst_b._client._handles["shared"] is mock_handle
+    assert inst_b._client.get_process(proc.id) is proc
+    assert inst_b._client._handles[proc.id] is process
 
 
 def test_instance_repr() -> None:
