@@ -203,21 +203,40 @@ def test_command_local_json_placement_is_stable() -> None:
 
 
 @pytest.mark.parametrize("leaf", ["run", "shell"])
+@pytest.mark.parametrize(
+    "option",
+    [
+        ("--json",),
+        ("--format", "rich"),
+        ("--format", "json"),
+        ("--format", "toon"),
+    ],
+)
 def test_raw_stream_output_options_require_dry_run_before_sdk_resolution(
-    leaf: str,
+    leaf: str, option: tuple[str, ...]
 ) -> None:
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
         side_effect=AssertionError("raw option validation must precede SDK resolution"),
     ):
-        result = CliRunner().invoke(cli, [leaf, "--json"])
+        result = CliRunner().invoke(cli, [leaf, *option])
     assert result.exit_code == 2
     assert "require --dry-run" in result.stderr
 
 
 @pytest.mark.parametrize("leaf", ["run", "shell"])
+@pytest.mark.parametrize(
+    "option",
+    [
+        (),
+        ("--format", "rich"),
+        ("--format", "json"),
+        ("--format", "toon"),
+        ("--json",),
+    ],
+)
 def test_raw_stream_dry_run_emits_one_captured_command_without_running(
-    leaf: str,
+    leaf: str, option: tuple[str, ...]
 ) -> None:
     from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
     from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
@@ -261,11 +280,20 @@ def test_raw_stream_dry_run_emits_one_captured_command_without_running(
         ),
         patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
     ):
-        result = CliRunner().invoke(cli, [leaf, "--dry-run", "--json"])
+        result = CliRunner().invoke(cli, [leaf, "--dry-run", *option])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["dry_run"] is True
-    assert payload["result"]["steps"][0]["step_id"] == f"instance.{leaf}"
+    if option in {(), ("--format", "rich")}:
+        assert "Plan: " + leaf in result.stdout
+        assert "instance." + leaf in result.stdout
+    else:
+        if option == ("--format", "json") or option == ("--json",):
+            payload = json.loads(result.stdout)
+        else:
+            from toon import DecodeOptions, decode
+
+            payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+        assert payload["dry_run"] is True
+        assert payload["result"]["steps"][0]["step_id"] == f"instance.{leaf}"
     assert effects == []
     assert executor.executed == []
 

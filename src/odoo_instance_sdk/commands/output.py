@@ -187,7 +187,10 @@ def rich_print(
 def _sanitize_envelope_value(value: JsonValue) -> JsonValue:
     """Recursively make machine-envelope values inert for terminal transports."""
     if isinstance(value, str):
-        return sanitize_terminal_text(value)
+        # Keep line feeds as data.  JSON/TOON escape them at serialization time,
+        # while the Rich plan projection must be able to render captured stdin
+        # and scripts as actual multiline blocks.
+        return sanitize_terminal_text(value, preserve_newlines=True)
     if isinstance(value, dict):
         return {
             sanitize_terminal_text(key): _sanitize_envelope_value(item)
@@ -266,6 +269,8 @@ def _default_rich_projection(document: OutputDocument) -> str:
         return document.error.message
     if document.result in (None, {}):
         return ""
+    if isinstance(document.result, dict) and "steps" in document.result:
+        return _rich_plan_projection(document)
     return json.dumps(document.result, ensure_ascii=False, default=str, indent=2)
 
 
@@ -584,3 +589,102 @@ __all__ = [
     "sanitize_terminal_text",
     "success_document",
 ]
+
+
+def _rich_plan_projection(document: OutputDocument) -> str:
+    """Render one captured plan as readable, fully redacted human text.
+
+    This is intentionally a pure projection.  It receives the same immutable
+    document as JSON and TOON, and therefore cannot launch a process, prompt,
+    or rebuild any command input.
+    """
+    result = document.result
+    if not isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False, default=str, indent=2)
+
+    lines = [f"Plan: {document.command}"]
+    steps = result.get("steps")
+    if isinstance(steps, list):
+        lines.extend(
+            line
+            for number, item in enumerate(steps, 1)
+            if isinstance(item, dict)
+            for line in _rich_step_lines(number, item)
+        )
+    lines.extend(_rich_plan_metadata(result, document.warnings))
+    return "\n".join(lines)
+
+
+def _rich_step_lines(number: int, item: dict[str, JsonValue]) -> list[str]:
+    kind = str(item.get("kind", "step"))
+    step_id = str(item.get("step_id", "<unnamed>"))
+    flags = tuple(
+        name
+        for name, enabled in (
+            ("mutating", item.get("mutating")),
+            ("interactive", item.get("interactive")),
+            ("long-running", item.get("long_running")),
+            ("read-only", item.get("read_only")),
+        )
+        if enabled is True
+    )
+    classification = ", ".join(flags) or "bounded"
+    lines = [f"{number}. {kind} {step_id} [{classification}]"]
+    lines.append(f"   classification: {classification}")
+    if kind == "process":
+        return lines + _rich_process_lines(item)
+    if "description" in item:
+        lines.append(f"   action: {item.get('description')}")
+    return lines
+
+
+def _rich_process_lines(item: dict[str, JsonValue]) -> list[str]:
+    lines: list[str] = []
+    argv = item.get("argv")
+    if isinstance(argv, list):
+        lines.append("   argv: " + json.dumps(argv, ensure_ascii=False, separators=(", ", ": ")))
+    for field, label in (
+        ("executable", "executable"),
+        ("cwd", "cwd"),
+        ("mode", "mode"),
+        ("timeout", "timeout"),
+    ):
+        value = item.get(field)
+        if value is not None:
+            lines.append(f"   {label}: {value}")
+    environment = item.get("environment_overrides")
+    if isinstance(environment, list) and environment:
+        lines.append(
+            "   environment: "
+            + json.dumps(environment, ensure_ascii=False, separators=(", ", ": "))
+        )
+    stdin = item.get("input_preview")
+    if isinstance(stdin, str):
+        lines.append("   stdin: |")
+        lines.extend(f"     {line}" for line in (stdin.splitlines() or [""]))
+    return lines
+
+
+def _rich_plan_metadata(
+    result: dict[str, JsonValue], document_warnings: tuple[str, ...]
+) -> list[str]:
+    lines: list[str] = []
+    observations = result.get("observations")
+    if isinstance(observations, list) and observations:
+        lines.append("observations:")
+        lines.extend(
+            "  - " + json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+            for item in observations
+        )
+    warnings = result.get("warnings")
+    warning_values = list(warnings) if isinstance(warnings, list) else []
+    for warning in document_warnings:
+        if warning not in warning_values:
+            warning_values.append(warning)
+    if warning_values:
+        lines.append("warnings:")
+        lines.extend(f"  - {warning}" for warning in warning_values)
+    fingerprint = result.get("fingerprint")
+    if isinstance(fingerprint, str) and fingerprint:
+        lines.append(f"fingerprint: {fingerprint}")
+    return lines

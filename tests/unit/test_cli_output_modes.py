@@ -22,6 +22,7 @@ from odoo_instance_sdk.commands.output import (
     OutputError,
     OutputMode,
     build_envelope,
+    emit_command_plan,
     emit_json_envelope,
     failure_document,
     model_to_dict,
@@ -815,6 +816,73 @@ def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
     assert value == "done"
     assert builds == 2
     assert confirmations == ["confirmed"]
+
+
+def test_rich_plan_projection_preserves_ordered_steps_and_multiline_input(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rich is a pure, readable projection of the same redacted plan."""
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, RunContext
+
+    private_process = PreparedStep(
+        step_id="instance.shell_script",
+        argv=("odoo", "--config", "password=top secret"),
+        stdin=b"password=top secret\nprint('ready')\n",
+        public_input_preview="password=top secret\nprint('ready')\n",
+        secret_values=("top secret",),
+        cwd="/private/worktree",
+        environment=(("DB_PASSWORD", "top secret"),),
+        mutating=True,
+    )
+    private_action = PreparedAction(
+        "instance.commit",
+        action="commit",
+        description="Commit transaction",
+        mutating=True,
+    )
+    plan = ExecutionPlan(
+        steps=(private_process.public_projection(), private_action.public_projection()),
+        observations=({"probe": "git", "read_only": True, "executed_during_planning": True},),
+        warnings=("rollback remains available",),
+    ).with_fingerprint(secrets=("top secret",))
+
+    def callback(context: RunContext[None]) -> None:
+        context.process("instance.shell_script")
+        context.action("instance.commit")
+
+    command = Command.create(plan, callback, steps=(private_process, private_action))
+    assert emit_command_plan(command, command_name="instance.shell", mode=OutputMode.RICH) == 0
+    rendered = capsys.readouterr().out
+    assert "1. process instance.shell_script [mutating]" in rendered
+    assert "2. action instance.commit [mutating]" in rendered
+    assert "stdin: |" in rendered
+    assert "print('ready')" in rendered
+    assert "classification: mutating" in rendered
+    assert "top secret" not in rendered
+    assert "observations:" in rendered
+    assert "warnings:" in rendered
+    assert plan.fingerprint in rendered
+
+
+def test_plan_machine_transports_are_equal_for_one_frozen_redacted_plan(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+
+    plan = ExecutionPlan(
+        observations=({"token": "<redacted>", "read_only": True},),
+        warnings=("secret remains redacted",),
+    ).with_fingerprint(secrets=("token-value",))
+    command = Command.create(plan, lambda _context: None)
+
+    emit_command_plan(command, command_name="probe", mode=OutputMode.JSON)
+    json_document = capsys.readouterr().out
+    emit_command_plan(command, command_name="probe", mode=OutputMode.TOON)
+    toon_document = capsys.readouterr().out
+    from toon import DecodeOptions, decode
+
+    assert decode(toon_document, DecodeOptions(indent=2, strict=True)) == json.loads(json_document)
 
 
 @pytest.mark.parametrize("source", ["direct", "imported", "catalog"])
