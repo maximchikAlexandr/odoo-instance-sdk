@@ -103,6 +103,12 @@ def _discover_output_writes() -> set[tuple[str, int]]:
 
 
 def _annotation_contains_imprecise_type(annotation: ast.expr) -> bool:
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            parsed = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return annotation.value.strip() in {"Any", "object", "typing.Any"}
+        return _annotation_contains_imprecise_type(parsed)
     for node in ast.walk(annotation):
         if isinstance(node, ast.Name) and node.id in {"Any", "object"}:
             return True
@@ -146,6 +152,80 @@ def _discover_imprecise_annotations() -> dict[str, frozenset[int]]:
                     getattr(node, "lineno", 0)
                 )
     return {path: frozenset(lines) for path, lines in locations.items()}
+
+
+def _is_protocol_base(base: ast.expr) -> bool:
+    return (isinstance(base, ast.Name) and base.id == "Protocol") or (
+        isinstance(base, ast.Attribute) and base.attr == "Protocol"
+    )
+
+
+def _is_docstring(node: ast.stmt) -> bool:
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    )
+
+
+def _contains_callable_ellipsis(annotation: ast.expr) -> bool:
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            return _contains_callable_ellipsis(ast.parse(annotation.value, mode="eval").body)
+        except SyntaxError:
+            return False
+    for node in ast.walk(annotation):
+        if not isinstance(node, ast.Subscript):
+            continue
+        value = node.value
+        is_callable = (isinstance(value, ast.Name) and value.id == "Callable") or (
+            isinstance(value, ast.Attribute) and value.attr == "Callable"
+        )
+        if is_callable and any(
+            isinstance(child, ast.Constant) and child.value is Ellipsis
+            for child in ast.walk(node.slice)
+        ):
+            return True
+    return False
+
+
+def _is_empty_protocol(node: ast.ClassDef) -> bool:
+    if not any(_is_protocol_base(base) for base in node.bases):
+        return False
+    members = [member for member in node.body if not _is_docstring(member)]
+    return not members or all(isinstance(member, ast.Pass) for member in members)
+
+
+def _is_opaque_alias(node: ast.AST) -> bool:
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    elif isinstance(node, ast.TypeAlias):
+        targets = [node.name]
+    else:
+        return False
+    return any(
+        isinstance(target, ast.Name) and "opaque" in target.id.casefold() for target in targets
+    )
+
+
+def _discover_type_escape_hatches() -> set[tuple[str, int]]:
+    """Reject renamed top types and marker protocols in production annotations."""
+
+    locations: set[tuple[str, int]] = set()
+    for path, module in _source_modules():
+        for node in ast.walk(module):
+            if isinstance(node, ast.ClassDef) and _is_empty_protocol(node):
+                locations.add(_location(path, node.lineno))
+
+            if _is_opaque_alias(node):
+                locations.add(_location(path, getattr(node, "lineno", 0)))
+
+            for annotation in _annotations(node):
+                if _contains_callable_ellipsis(annotation):
+                    locations.add(_location(path, getattr(node, "lineno", 0)))
+    return locations
 
 
 def _discover_local_subprocess_patches() -> set[tuple[str, int]]:
@@ -227,7 +307,15 @@ def test_direct_output_inventory_is_exact() -> None:
 
 
 def test_production_imprecise_annotation_inventory_is_exact() -> None:
-    assert _discover_imprecise_annotations() == EXPLICIT_IMPRECISE_ANNOTATIONS
+    discovered = _discover_imprecise_annotations()
+    assert discovered == EXPLICIT_IMPRECISE_ANNOTATIONS, (
+        "imprecise production annotations at "
+        + _format_locations({(path, line) for path, lines in discovered.items() for line in lines})
+    )
+    escape_hatches = _discover_type_escape_hatches()
+    assert not escape_hatches, "universal production type escape hatches at " + _format_locations(
+        escape_hatches
+    )
 
 
 def test_module_local_subprocess_patch_inventory_is_exact() -> None:

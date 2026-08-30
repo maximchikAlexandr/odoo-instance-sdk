@@ -4,7 +4,7 @@ import logging
 import secrets
 import threading
 from collections.abc import Callable
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import msgspec
 
@@ -24,19 +24,25 @@ from odoo_instance_sdk.models import (
     Snapshot,
 )
 
+if TYPE_CHECKING:
+    from fastapi import APIRouter, FastAPI, Request
+    from fastapi.responses import Response
+
+    from odoo_instance_sdk.execution import JsonValue
+
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = ["build_monitor_router", "build_pgadmin_router", "install_openapi_schema"]
 
 
 class SnapshotProvider(Protocol):
-    def snapshot(self, project_id: str | None = None) -> object: ...
+    def snapshot(self, project_id: str | None = None) -> Snapshot: ...
 
 
 PgAdminOpener = Callable[[str], PgAdminOpenResult]
 
 
-def _replace_refs(value: object) -> object:
+def _replace_refs(value: JsonValue) -> JsonValue:
     if isinstance(value, dict):
         return {key: _replace_refs(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -46,9 +52,9 @@ def _replace_refs(value: object) -> object:
     return value
 
 
-def _msgspec_components(*models: type[Any]) -> dict[str, dict[str, Any]]:
+def _msgspec_components(*models: type[msgspec.Struct]) -> dict[str, dict[str, JsonValue]]:
     """Return one stable OpenAPI component set for the supplied msgspec models."""
-    components: dict[str, dict[str, Any]] = {}
+    components: dict[str, dict[str, JsonValue]] = {}
     for model in models:
         document = msgspec.json.schema(model)
         definitions = document.get("$defs", {})
@@ -63,7 +69,7 @@ def _msgspec_components(*models: type[Any]) -> dict[str, dict[str, Any]]:
     return components
 
 
-def _typed_response(model: type[Any]) -> dict[str, Any]:
+def _typed_response(model: type[msgspec.Struct]) -> dict[str, JsonValue]:
     return {
         "content": {
             "application/json": {"schema": {"$ref": f"#/components/schemas/{model.__name__}"}}
@@ -71,15 +77,19 @@ def _typed_response(model: type[Any]) -> dict[str, Any]:
     }
 
 
-def build_monitor_router(monitor: SnapshotProvider) -> Any:
+def build_monitor_router(monitor: SnapshotProvider) -> APIRouter:
     """Build the read-only monitor router without importing FastAPI eagerly."""
     from fastapi import APIRouter, Query
     from fastapi.responses import Response
 
+    # Nested route annotations are postponed to keep FastAPI optional.  Make
+    # the concrete adapter type visible to FastAPI's resolver only after the
+    # optional dependency has been imported.
+    globals()["Response"] = Response
     router = APIRouter()
     snapshot_lock = threading.Lock()
 
-    def snapshot(project_id: str | None = Query(default=None)) -> Any:
+    def snapshot(project_id: str | None = Query(default=None)) -> Response:
         try:
             with snapshot_lock:
                 snap = monitor.snapshot(project_id=project_id)
@@ -116,7 +126,7 @@ def build_monitor_router(monitor: SnapshotProvider) -> Any:
     return router
 
 
-def build_pgadmin_router(opener: PgAdminOpener) -> Any:  # noqa: C901
+def build_pgadmin_router(opener: PgAdminOpener) -> APIRouter:  # noqa: C901
     """Build the UI-only state-changing route around one typed opener."""
     from fastapi import APIRouter, Request
     from fastapi.responses import Response
@@ -124,6 +134,7 @@ def build_pgadmin_router(opener: PgAdminOpener) -> Any:  # noqa: C901
     # FastAPI resolves postponed annotations against this module's globals;
     # keep the import lazy while making the request sentinel visible to it.
     globals()["Request"] = Request
+    globals()["Response"] = Response
     router = APIRouter()
 
     def error(code: HttpErrorCode, status_code: int) -> Response:
@@ -140,7 +151,7 @@ def build_pgadmin_router(opener: PgAdminOpener) -> Any:  # noqa: C901
             status_code=status_code,
         )
 
-    def request_is_safe(request: Any) -> bool:
+    def request_is_safe(request: Request) -> bool:
         """Apply browser request-boundary checks before decoding or delegation."""
         content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if content_type != "application/json":
@@ -154,7 +165,7 @@ def build_pgadmin_router(opener: PgAdminOpener) -> Any:  # noqa: C901
         cookie = request.cookies.get("odoo_instance_sdk_csrf")
         return bool(token and cookie and secrets.compare_digest(token, cookie))
 
-    async def open_pgadmin(request: Request) -> Any:
+    async def open_pgadmin(request: Request) -> Response:
         if not request_is_safe(request):
             return error(HttpErrorCode.invalid_request, 422)
         try:
@@ -185,7 +196,7 @@ def build_pgadmin_router(opener: PgAdminOpener) -> Any:  # noqa: C901
     return router
 
 
-def _same_origin(request: Any) -> bool:
+def _same_origin(request: Request) -> bool:
     """Require an explicit Origin that exactly matches the request origin."""
     from urllib.parse import urlsplit
 
@@ -221,33 +232,42 @@ def _same_origin(request: Any) -> bool:
     )
 
 
-def install_openapi_schema(app: Any) -> None:
+def install_openapi_schema(app: FastAPI) -> None:
     """Install deterministic schemas and typed snapshot response metadata."""
     from fastapi.openapi.utils import get_openapi
 
-    def custom_openapi() -> dict[str, Any]:
+    def custom_openapi() -> dict[str, JsonValue]:
         if app.openapi_schema:
-            return cast("dict[str, Any]", app.openapi_schema)
-        schema: dict[str, Any] = get_openapi(
-            title="odoo-instance-sdk monitor",
-            version="0.1.0",
-            routes=app.routes,
+            return cast("dict[str, JsonValue]", app.openapi_schema)
+        schema = cast(
+            "dict[str, dict[str, JsonValue]]",
+            get_openapi(
+                title="odoo-instance-sdk monitor",
+                version="0.1.0",
+                routes=app.routes,
+            ),
         )
-        schema.setdefault("components", {}).setdefault("schemas", {}).update(
+        components = schema.setdefault("components", {})
+        schemas = cast("dict[str, dict[str, JsonValue]]", components.setdefault("schemas", {}))
+        schemas.update(
             _msgspec_components(Snapshot, HttpError, PgAdminOpenRequest, PgAdminOpenResult)
         )
-        operation = schema["paths"]["/api/v1/snapshot"]["get"]
+        paths = schema["paths"]
+        snapshot_path = cast("dict[str, JsonValue]", paths["/api/v1/snapshot"])
+        operation = cast("dict[str, JsonValue]", snapshot_path["get"])
         operation["operationId"] = "getMonitorSnapshot"
-        operation["responses"]["200"] = {
+        responses = cast("dict[str, JsonValue]", operation["responses"])
+        responses["200"] = {
             "description": "Successful Response",
             **_typed_response(Snapshot),
         }
-        operation["responses"]["500"] = {
+        responses["500"] = {
             "description": "Monitor snapshot failed",
             **_typed_response(HttpError),
         }
-        pgadmin_operation = schema["paths"].get("/api/v1/pgadmin/open", {}).get("post")
-        if pgadmin_operation is not None:
+        pgadmin_path = paths.get("/api/v1/pgadmin/open")
+        pgadmin_operation = pgadmin_path.get("post") if isinstance(pgadmin_path, dict) else None
+        if isinstance(pgadmin_operation, dict):
             pgadmin_operation["requestBody"] = {
                 "required": True,
                 "content": {
@@ -276,6 +296,6 @@ def install_openapi_schema(app: Any) -> None:
                 },
             }
         app.openapi_schema = schema
-        return schema
+        return cast("dict[str, JsonValue]", schema)
 
-    app.openapi = custom_openapi
+    setattr(app, "openapi", custom_openapi)

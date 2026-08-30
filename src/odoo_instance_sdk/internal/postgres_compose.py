@@ -26,6 +26,7 @@ from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.models import PostgresClusterState
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.proc import ProcessResult
 
 _PROJECT_NAME_PREFIX = "odcli_pg_"
@@ -122,8 +123,8 @@ def assert_image_safe(image: str) -> None:
         raise PostgresComposeInvalidError(f"invalid postgres image: {image!r}")
 
 
-def is_oci_digest(reference: object) -> bool:
-    return isinstance(reference, str) and _DIGEST_RE.fullmatch(reference) is not None
+def is_oci_digest(reference: str) -> bool:
+    return _DIGEST_RE.fullmatch(reference) is not None
 
 
 def assert_user_safe(user: str) -> None:
@@ -365,7 +366,7 @@ def compose_ps(
     project_name: str,
     *,
     timeout: float | None = None,
-) -> list[dict[str, object]] | None:
+) -> list[dict[str, JsonValue]] | None:
     """Return parsed ``docker compose ps --format json`` rows, or None on CLI failure."""
     _require_timeout_budget(timeout)
     args = [*_compose_base_args(compose_file, project_name), "ps", "--format", "json"]
@@ -378,7 +379,7 @@ def compose_ps(
         return None
     if res.returncode != 0:
         return None
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, JsonValue]] = []
     for raw in res.stdout.splitlines():
         line = raw.strip()
         if not line:

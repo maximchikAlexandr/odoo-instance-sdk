@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
 import click
 
@@ -29,6 +30,13 @@ from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     DatabaseRefreshOptions,
 )
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.config import OdooClientConfig
+    from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
+    from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 @click.group()
@@ -85,7 +93,9 @@ def db_refresh(
             command_name="db.refresh",
             mode=output_mode,
             dry_run=dry_run,
-            result=cast("Any", model_to_dict),
+            result=cast(
+                "Callable[[DatabasePreparationResult | None], dict[str, JsonValue]]", model_to_dict
+            ),
             provenance={"project_source": ctx.project_source},
             rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
         )
@@ -146,7 +156,9 @@ def db_reset_admin_password(
             command_name="db.reset-admin-password",
             mode=output_mode,
             dry_run=dry_run,
-            result=cast("Any", model_to_dict),
+            result=cast(
+                "Callable[[AdminPasswordResetResult | None], dict[str, JsonValue]]", model_to_dict
+            ),
             context={"environment_id": str(environment.id)},
             provenance={"environment_source": ctx.environment_source},
             rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
@@ -181,7 +193,9 @@ def db_reset_admin_password(
     rich_print(json.dumps(data, indent=2, sort_keys=True))
 
 
-def _validate_recorded_database_binding(instance: object, environment: object) -> None:
+def _validate_recorded_database_binding(
+    instance: OdooInstance, environment: DevelopmentEnvironment
+) -> None:
     config = getattr(instance, "config")
     configured = tuple(config.configured_database_names)
     target = getattr(environment, "target_db_name")
@@ -193,15 +207,15 @@ def _validate_recorded_database_binding(instance: object, environment: object) -
         )
 
 
-def _client_class() -> Any:
-    return getattr(sys.modules[__name__], "OdooClient")
+def _client_class() -> type[OdooClient]:
+    return cast("type[OdooClient]", getattr(sys.modules[__name__], "OdooClient"))
 
 
-def _client_config_class() -> Any:
-    return getattr(sys.modules[__name__], "OdooClientConfig")
+def _client_config_class() -> type[OdooClientConfig]:
+    return cast("type[OdooClientConfig]", getattr(sys.modules[__name__], "OdooClientConfig"))
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> type[OdooClient | OdooClientConfig]:
     """Keep operation dependencies out of command discovery while preserving patch points."""
     if name == "OdooClient":
         from odoo_instance_sdk.client import OdooClient

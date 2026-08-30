@@ -10,7 +10,7 @@ import pytest
 
 from odoo_instance_sdk.exceptions import BackupCatalogError, MonitorError
 from odoo_instance_sdk.internal.process_metrics import CpuPoint, ProcessTreeResult
-from odoo_instance_sdk.models import RuntimeState
+from odoo_instance_sdk.models import RuntimeState, Snapshot
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.monitor_support import (
@@ -131,7 +131,7 @@ def test_catalog_path_is_redacted_from_api_error() -> None:
     from odoo_instance_sdk.internal.serve import create_app
 
     class FailingMonitor:
-        def snapshot(self, project_id: str | None = None) -> object:
+        def snapshot(self, project_id: str | None = None) -> Snapshot:
             raise MonitorError("cannot open /secret/catalog.sqlite3")
 
     response = TestClient(create_app(headless=True, monitor=FailingMonitor())).get(

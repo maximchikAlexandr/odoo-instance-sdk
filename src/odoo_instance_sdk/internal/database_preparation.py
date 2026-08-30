@@ -12,7 +12,10 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 
 import msgspec
 
@@ -498,7 +501,7 @@ def _manifest_after_preparation(root: Path, baseline: ProjectConfig) -> ProjectC
         raise EnvironmentConflictError(
             "preparation_manifest_conflict",
             "project preparation settings changed during refresh",
-            details={"fields": conflicts},
+            details={"fields": cast("JsonValue", list(conflicts))},
         )
     return current
 

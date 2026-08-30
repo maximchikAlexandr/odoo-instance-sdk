@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Sequence
+from pathlib import Path
+from typing import cast
 
 import pytest
 
 from odoo_instance_sdk.exceptions import PgAdminUnavailableError
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal import pgadmin_container, pgadmin_files
 from odoo_instance_sdk.models import PgAdminOpenState
 
@@ -60,9 +64,22 @@ def test_reconcile_reuses_matching_owned_container_without_recreate(
     monkeypatch.setattr(
         pgadmin_container, "create_container", lambda *args, **kwargs: pytest.fail("recreated")
     )
+
+    class Runner:
+        requires_docker = False
+
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
     result = pgadmin_container.reconcile_container(
         preparation,
-        runner=object(),
+        runner=Runner(),
         network=network,
         database="demo",
         deadline=1e12,
@@ -111,7 +128,9 @@ def test_matching_container_rejects_conflicting_duplicate_sdk_environment(
         ],
         "HostConfig": {"PortBindings": {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5050"}]}},
     }
-    assert not pgadmin_container.container_matches(inspected, preparation, network=network)
+    assert not pgadmin_container.container_matches(
+        cast("dict[str, JsonValue]", inspected), preparation, network=network
+    )
 
 
 def test_reconcile_reconfigures_owned_container_when_fingerprint_changes(
@@ -157,7 +176,15 @@ def test_reconcile_reconfigures_owned_container_when_fingerprint_changes(
     monkeypatch.setattr(pgadmin_container, "_wait_ready", lambda port, *, deadline: None)
 
     class Runner:
-        def run(self, args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        requires_docker = False
+
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
             assert args[1:2] in (["rm"], ["exec"])
             if args[1:2] == ["exec"]:
                 return subprocess.CompletedProcess(
@@ -191,7 +218,15 @@ def test_reconcile_reconfigures_owned_container_when_fingerprint_changes(
 
 def test_inspect_missing_ok_does_not_hide_daemon_errors() -> None:
     class Runner:
-        def run(self, args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        requires_docker = False
+
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(args, 1, "", "permission denied")
 
     with pytest.raises(PgAdminUnavailableError):
@@ -222,8 +257,16 @@ def test_failed_create_cleanup_reinspects_created_id_and_never_removes_by_name(
     }
 
     class Runner:
-        def run(self, args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            calls.append(args)
+        requires_docker = False
+
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(list(args))
             if args[1:3] == ["inspect", "--format"]:
                 if args[-1] == pgadmin_files.PGADMIN_CONTAINER_NAME:
                     return subprocess.CompletedProcess(args, 1, "", "No such object")
@@ -258,7 +301,7 @@ def test_reconfiguration_race_leaves_replaced_foreign_container_untouched(
         fingerprint="new" * 16,
         port=5050,
     )
-    own: dict[str, object] = {
+    own: dict[str, JsonValue] = {
         "Id": "old-id",
         "Config": {
             "Labels": {
@@ -267,11 +310,11 @@ def test_reconfiguration_race_leaves_replaced_foreign_container_untouched(
             }
         },
     }
-    foreign: dict[str, object] = {"Id": "foreign-id", "Config": {"Labels": {}}}
+    foreign: dict[str, JsonValue] = {"Id": "foreign-id", "Config": {"Labels": {}}}
     inspect_count = 0
     calls: list[list[str]] = []
 
-    def inspect(*_args: object, **_kwargs: object) -> dict[str, object]:
+    def inspect(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
         nonlocal inspect_count
         inspect_count += 1
         return own if inspect_count == 1 else foreign
@@ -279,8 +322,16 @@ def test_reconfiguration_race_leaves_replaced_foreign_container_untouched(
     monkeypatch.setattr(pgadmin_container, "inspect_container", inspect)
 
     class Runner:
-        def run(self, args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            calls.append(args)
+        requires_docker = False
+
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(list(args))
             pytest.fail(f"unexpected docker argv: {args}")
 
     with pytest.raises(PgAdminUnavailableError):
@@ -352,8 +403,16 @@ def test_same_backend_password_rotation_recreates_and_refreshes_active_passfile(
     calls: list[list[str]] = []
 
     class Runner:
-        def run(self, args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            calls.append(args)
+        requires_docker = False
+
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(list(args))
             return subprocess.CompletedProcess(args, 0, "", "")
 
     result = pgadmin_container.reconcile_container(
@@ -390,8 +449,16 @@ def test_refresh_active_pgpass_is_id_scoped_and_secret_free(
     calls: list[list[str]] = []
 
     class Runner:
-        def run(self, args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            calls.append(args)
+        requires_docker = False
+
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            calls.append(list(args))
             return subprocess.CompletedProcess(args, 0, "", "")
 
     pgadmin_container.refresh_active_pgpass(
@@ -422,10 +489,18 @@ def test_verify_server_requires_effective_persistent_import(
     )
 
     class Runner:
+        requires_docker = False
+
         def __init__(self, state: str) -> None:
             self.state = state
 
-        def run(self, args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
             assert args[1:2] == ["exec"]
             return subprocess.CompletedProcess(
                 args,

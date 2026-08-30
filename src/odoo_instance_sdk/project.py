@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import math
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import msgspec
 
 from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError
 from odoo_instance_sdk.internal.sanitize import sanitize_terminal_text
 from odoo_instance_sdk.internal.urls import normalize_base_url
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 
 
 class PostgresProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
@@ -94,7 +98,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         if not isinstance(section, dict):
             raise ProjectManifestNotFoundError(str(root))
         # ``[postgres]`` is a top-level table, not under ``[project]``.
-        postgres_data: object = None
+        postgres_data: JsonValue = None
         if isinstance(data, dict) and "postgres" in data:
             postgres_data = data["postgres"]
         return cls._from_mapping(
@@ -107,15 +111,18 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     @classmethod
     def _from_mapping(
         cls,
-        data: dict[str, object],
+        data: dict[str, JsonValue],
         *,
         repository_root: Path,
-        postgres_data: object = None,
-        test_instance_data: object = None,
+        postgres_data: JsonValue | Mapping[str, JsonValue] = None,
+        test_instance_data: JsonValue | Mapping[str, JsonValue] = None,
     ) -> ProjectConfig:
-        postgres = _postgres_from_mapping(postgres_data)
+        postgres = _postgres_from_mapping(cast("JsonValue", postgres_data))
         test_instance = _test_instance_from_mapping(
-            test_instance_data if test_instance_data is not None else data.get("test_instance")
+            cast(
+                "JsonValue",
+                test_instance_data if test_instance_data is not None else data.get("test_instance"),
+            )
         )
         return cls(
             repository_root=repository_root,
@@ -189,7 +196,7 @@ def _test_instance_to_manifest(config: TestInstanceProjectConfig | None) -> str 
     return "\n".join(lines)
 
 
-def _test_instance_from_mapping(value: object) -> TestInstanceProjectConfig | None:
+def _test_instance_from_mapping(value: JsonValue) -> TestInstanceProjectConfig | None:
     if value is None:
         return None
     if not isinstance(value, dict) or set(value) - {"base_url", "database", "git_branch"}:
@@ -212,7 +219,7 @@ def _test_instance_from_mapping(value: object) -> TestInstanceProjectConfig | No
     )
 
 
-def _postgres_from_mapping(value: object) -> PostgresProjectConfig | None:
+def _postgres_from_mapping(value: JsonValue) -> PostgresProjectConfig | None:
     if value is None:
         return None
     if not isinstance(value, dict) or set(value) - {"mode", "image", "port", "user"}:
@@ -249,13 +256,13 @@ def _postgres_to_manifest(postgres: PostgresProjectConfig | None) -> str | None:
     return "\n".join(lines)
 
 
-def _path_or_none(value: object) -> Path | None:
+def _path_or_none(value: JsonValue) -> Path | None:
     if value is None:
         return None
     return Path(str(value))
 
 
-def _python_field(value: object) -> str | Path | None:
+def _python_field(value: JsonValue) -> str | Path | None:
     if value is None:
         return None
     s = str(value)
@@ -264,13 +271,13 @@ def _python_field(value: object) -> str | Path | None:
     return s
 
 
-def _str_or_none(value: object) -> str | None:
+def _str_or_none(value: JsonValue) -> str | None:
     if value is None:
         return None
     return str(value)
 
 
-def _int_or_none(value: object) -> int | None:
+def _int_or_none(value: JsonValue) -> int | None:
     if value is None:
         return None
     if isinstance(value, int):
@@ -278,7 +285,7 @@ def _int_or_none(value: object) -> int | None:
     return int(str(value))
 
 
-def _float_or_none(value: object) -> float | None:
+def _float_or_none(value: JsonValue) -> float | None:
     if value is None:
         return None
     if isinstance(value, bool):
@@ -289,7 +296,7 @@ def _float_or_none(value: object) -> float | None:
         raise ConfigError("project.refresh_after_hours must be a number") from exc
 
 
-def _str_list(value: object) -> list[str]:
+def _str_list(value: JsonValue) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):

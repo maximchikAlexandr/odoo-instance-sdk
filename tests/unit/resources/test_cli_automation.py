@@ -5,7 +5,7 @@ import base64
 import json
 import textwrap
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -245,7 +245,8 @@ class TestModuleUpdate:
         ):
             outcome = update_modules(inst, ("comerta_base",), env_id="env-1")
         assert outcome.payload is not None
-        assert outcome.payload["result"]["updated"] == ["comerta_base"]
+        payload = cast("dict[str, dict[str, list[str]]]", outcome.payload)
+        assert payload["result"]["updated"] == ["comerta_base"]
 
     def test_not_installed_errors(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)

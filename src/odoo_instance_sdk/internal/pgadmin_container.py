@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.exceptions import PgAdminUnavailableError
 from odoo_instance_sdk.internal import pgadmin_readiness
@@ -24,7 +26,26 @@ from odoo_instance_sdk.internal.pgadmin_files import (
     PgAdminPreparation,
     PostgresIdentity,
 )
+from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
 from odoo_instance_sdk.models import PgAdminOpenResult, PgAdminOpenState
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
+
+
+class PostgresIdentityCluster(Protocol):
+    @property
+    def compose_runner(self) -> ComposeRunner: ...
+
+    @property
+    def compose_file(self) -> Path: ...
+
+    @property
+    def compose_project_name(self) -> str: ...
+
+    @property
+    def _user(self) -> str | None: ...
+
 
 _wait_ready = pgadmin_readiness.wait_ready
 _ACTIVE_PGPASS_REFRESH = (
@@ -53,12 +74,12 @@ class _ContainerCreateFailure(PgAdminUnavailableError):
 
 
 def resolve_postgres_identity(
-    cluster: object, *, deadline: float, planned: bool = False
+    cluster: PostgresIdentityCluster, *, deadline: float, planned: bool = False
 ) -> PostgresIdentity:
-    runner = getattr(cluster, "compose_runner", None)
-    compose_file = getattr(cluster, "compose_file", None)
-    project_name = getattr(cluster, "compose_project_name", None)
-    if runner is None or not isinstance(compose_file, Path) or not isinstance(project_name, str):
+    runner = cluster.compose_runner
+    compose_file = cluster.compose_file
+    project_name = cluster.compose_project_name
+    if runner is None:
         raise PgAdminUnavailableError()
     container_id = _resolve_postgres_container_id(
         runner, compose_file, project_name, deadline=deadline, planned=planned
@@ -66,7 +87,7 @@ def resolve_postgres_identity(
     inspected = inspect_container(runner, container_id, deadline=deadline)
     if inspected is None:
         raise PgAdminUnavailableError()
-    configured_user = getattr(cluster, "_user", None)
+    configured_user = cluster._user
     identity = _identity_from_inspect(
         inspected,
         project_name,
@@ -83,8 +104,8 @@ def resolve_postgres_identity(
 
 
 def _resolve_postgres_container_id(
-    runner: object,
-    compose_file: object,
+    runner: ComposeRunner,
+    compose_file: Path,
     project_name: str,
     *,
     deadline: float,
@@ -130,7 +151,7 @@ def _resolve_postgres_container_id(
 
 
 def _identity_from_inspect(
-    inspected: dict[str, object], project_name: str, *, user: str | None = None
+    inspected: dict[str, JsonValue], project_name: str, *, user: str | None = None
 ) -> PostgresIdentity:
     labels = _string_mapping(_mapping(inspected.get("Config"), "Labels"))
     if labels.get("com.docker.compose.project") not in {None, project_name}:
@@ -160,7 +181,7 @@ def _identity_from_inspect(
 
 
 def _validate_postgres_network(
-    runner: object, network: str, project_name: str, *, deadline: float
+    runner: ComposeRunner, network: str, project_name: str, *, deadline: float
 ) -> None:
     network_info = inspect_network(runner, network, deadline=deadline)
     network_labels = _string_mapping(_mapping(network_info, "Labels"))
@@ -171,7 +192,7 @@ def _validate_postgres_network(
 def reconcile_container(
     preparation: PgAdminPreparation,
     *,
-    runner: object,
+    runner: ComposeRunner,
     network: str,
     database: str,
     deadline: float,
@@ -238,14 +259,14 @@ def reconcile_container(
     )
 
 
-def get_container_id(inspected: dict[str, object]) -> str:
+def get_container_id(inspected: dict[str, JsonValue]) -> str:
     value = inspected.get("Id") or inspected.get("ID")
     if not isinstance(value, str) or not value:
         raise PgAdminUnavailableError()
     return value
 
 
-def container_fingerprint(inspected: dict[str, object]) -> str:
+def container_fingerprint(inspected: dict[str, JsonValue]) -> str:
     labels = _string_mapping(_mapping(inspected.get("Config"), "Labels"))
     fingerprint = labels.get(PGADMIN_LABEL_FINGERPRINT)
     if not fingerprint:
@@ -253,7 +274,9 @@ def container_fingerprint(inspected: dict[str, object]) -> str:
     return fingerprint
 
 
-def assert_owned_container(inspected: dict[str, object], *, fingerprint: str | None = None) -> None:
+def assert_owned_container(
+    inspected: dict[str, JsonValue], *, fingerprint: str | None = None
+) -> None:
     labels = _string_mapping(_mapping(inspected.get("Config"), "Labels"))
     if labels.get(PGADMIN_LABEL_MANAGED) != "true" or not labels.get(PGADMIN_LABEL_FINGERPRINT):
         raise PgAdminUnavailableError()
@@ -261,23 +284,20 @@ def assert_owned_container(inspected: dict[str, object], *, fingerprint: str | N
         raise PgAdminUnavailableError()
 
 
-def remove_container(runner: object, container_id: str, *, deadline: float) -> None:
+def remove_container(runner: ComposeRunner, container_id: str, *, deadline: float) -> None:
     result = run_docker(runner, ["docker", "rm", "--force", container_id], deadline=deadline)
     if result.returncode != 0:
         raise PgAdminUnavailableError()
 
 
 def run_docker(
-    runner: object, args: list[str], *, deadline: float
+    runner: ComposeRunner, args: list[str], *, deadline: float
 ) -> subprocess.CompletedProcess[str]:
-    run = getattr(runner, "run", None)
-    if not callable(run):
-        raise PgAdminUnavailableError()
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise PgAdminUnavailableError()
     try:
-        result = run(args, timeout=remaining)
+        result = runner.run(args, timeout=remaining)
     except (OSError, subprocess.SubprocessError, TypeError):
         raise PgAdminUnavailableError() from None
     if not isinstance(result, subprocess.CompletedProcess):
@@ -286,12 +306,12 @@ def run_docker(
 
 
 def inspect_container(
-    runner: object,
+    runner: ComposeRunner,
     name: str,
     *,
     deadline: float,
     missing_ok: bool = False,
-) -> dict[str, object] | None:
+) -> dict[str, JsonValue] | None:
     result = run_docker(runner, ["docker", "inspect", "--format", "json", name], deadline=deadline)
     if result.returncode != 0:
         detail = f"{result.stdout}\n{result.stderr}".lower()
@@ -311,7 +331,7 @@ def inspect_container(
     raise PgAdminUnavailableError()
 
 
-def inspect_network(runner: object, name: str, *, deadline: float) -> dict[str, object]:
+def inspect_network(runner: ComposeRunner, name: str, *, deadline: float) -> dict[str, JsonValue]:
     result = run_docker(
         runner, ["docker", "network", "inspect", "--format", "json", name], deadline=deadline
     )
@@ -328,19 +348,19 @@ def inspect_network(runner: object, name: str, *, deadline: float) -> dict[str, 
     raise PgAdminUnavailableError()
 
 
-def _mapping(value: object, key: str) -> dict[str, object]:
-    if isinstance(value, dict):
+def _mapping(value: JsonValue | Mapping[str, JsonValue] | None, key: str) -> dict[str, JsonValue]:
+    if isinstance(value, Mapping):
         nested = value.get(key)
         return nested if isinstance(nested, dict) else {}
     return {}
 
 
-def _string_mapping(value: dict[str, object]) -> dict[str, str]:
+def _string_mapping(value: dict[str, JsonValue]) -> dict[str, str]:
     return {key: item for key, item in value.items() if isinstance(item, str)}
 
 
 def container_matches(
-    inspected: dict[str, object], preparation: PgAdminPreparation, *, network: str
+    inspected: Mapping[str, JsonValue], preparation: PgAdminPreparation, *, network: str
 ) -> bool:
     config = _mapping(inspected, "Config")
     if config.get("Image") != PGADMIN_IMAGE or str(config.get("User", "")) != str(
@@ -365,7 +385,7 @@ def container_matches(
     expected_by_key = dict(item.split("=", 1) for item in expected_env)
     observed: dict[str, list[str]] = {key: [] for key in expected_by_key}
     for item in env:
-        key, separator, value = item.partition("=")
+        key, separator, value = str(item).partition("=")
         if separator and key in observed:
             observed[key].append(value)
     if any(
@@ -379,10 +399,12 @@ def container_matches(
     networks = _mapping(inspected.get("NetworkSettings"), "Networks")
     if set(networks) != {network}:
         return False
-    return _mounts_match(inspected, preparation) and _ports_match(inspected, preparation.port)
+    return _mounts_match(
+        cast("dict[str, JsonValue]", dict(inspected)), preparation
+    ) and _ports_match(cast("dict[str, JsonValue]", dict(inspected)), preparation.port)
 
 
-def _mounts_match(inspected: dict[str, object], preparation: PgAdminPreparation) -> bool:
+def _mounts_match(inspected: dict[str, JsonValue], preparation: PgAdminPreparation) -> bool:
     mounts = _mapping_list(inspected.get("Mounts"))
     actual = {
         (item.get("Source"), item.get("Destination"), item.get("RW") is not True) for item in mounts
@@ -391,7 +413,7 @@ def _mounts_match(inspected: dict[str, object], preparation: PgAdminPreparation)
     return actual == expected
 
 
-def _ports_match(inspected: dict[str, object], port: int) -> bool:
+def _ports_match(inspected: dict[str, JsonValue], port: int) -> bool:
     bindings = _mapping(inspected.get("HostConfig"), "PortBindings")
     values = bindings.get("80/tcp")
     if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
@@ -401,14 +423,14 @@ def _ports_match(inspected: dict[str, object], port: int) -> bool:
     ) == str(port)
 
 
-def _mapping_list(value: object) -> list[dict[str, object]]:
+def _mapping_list(value: JsonValue | None) -> list[dict[str, JsonValue]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
 
 
 def create_container(
-    runner: object,
+    runner: ComposeRunner,
     preparation: PgAdminPreparation,
     *,
     network: str,
@@ -462,7 +484,7 @@ def create_container(
 
 
 def remove_partial_container(
-    runner: object,
+    runner: ComposeRunner,
     *,
     container_id: str | None,
     fingerprint: str,
@@ -489,7 +511,7 @@ def remove_partial_container(
 
 
 def refresh_active_pgpass(
-    runner: object,
+    runner: ComposeRunner,
     *,
     container_id: str,
     fingerprint: str,
@@ -524,7 +546,7 @@ def verify_server(
     preparation: PgAdminPreparation,
     database: str,
     *,
-    runner: object,
+    runner: ComposeRunner,
     deadline: float,
     planned: bool = False,
 ) -> None:

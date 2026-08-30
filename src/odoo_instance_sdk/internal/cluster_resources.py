@@ -8,7 +8,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner, compose_ps, docker_available
 from odoo_instance_sdk.models import (
     ClusterContainer,
@@ -89,8 +92,8 @@ def resolve_container_id(
     return None
 
 
-def _parse_inspect_payload(stdout: str, candidates: list[str]) -> dict[str, dict[str, object]]:
-    parsed: dict[str, dict[str, object]] = {}
+def _parse_inspect_payload(stdout: str, candidates: list[str]) -> dict[str, dict[str, JsonValue]]:
+    parsed: dict[str, dict[str, JsonValue]] = {}
     try:
         payload = json.loads(stdout)
     except (json.JSONDecodeError, ValueError):
@@ -108,7 +111,7 @@ def inspect_containers(
     *,
     runner: ComposeRunner,
     timeout: float | None = None,
-) -> dict[str, dict[str, object] | None]:
+) -> dict[str, dict[str, JsonValue] | None]:
     """Batch `docker inspect <id1> <id2> ...` in one read-only CLI call."""
     res = _safe_run(
         runner, ["docker", "inspect", "--format", "json", *container_ids], timeout=timeout
@@ -121,8 +124,8 @@ def inspect_containers(
     return {cid: parsed.get(cid) for cid in container_ids}
 
 
-def _parse_stats_payload(stdout: str) -> dict[str, dict[str, object]]:
-    by_id: dict[str, dict[str, object]] = {}
+def _parse_stats_payload(stdout: str) -> dict[str, dict[str, JsonValue]]:
+    by_id: dict[str, dict[str, JsonValue]] = {}
     for raw in stdout.splitlines():
         stripped = raw.strip()
         if not stripped:
@@ -145,7 +148,7 @@ def stats_containers(
     *,
     runner: ComposeRunner,
     timeout: float | None = None,
-) -> dict[str, dict[str, object] | None]:
+) -> dict[str, dict[str, JsonValue] | None]:
     """Batch `docker stats --no-stream --format json <id1> <id2> ...`.
 
     One JSON object per line, identified by its `container`/`Container` field.
@@ -190,7 +193,7 @@ def volume_sizes(*, runner: ComposeRunner, timeout: float | None = None) -> dict
     return sizes
 
 
-def _volume_name(inspect_entry: dict[str, object]) -> str | None:
+def _volume_name(inspect_entry: dict[str, JsonValue]) -> str | None:
     mounts = inspect_entry.get("Mounts")
     if not isinstance(mounts, list):
         return None
@@ -202,7 +205,7 @@ def _volume_name(inspect_entry: dict[str, object]) -> str | None:
     return None
 
 
-def _lookup_id(entry: dict[str, object], candidates: list[str]) -> str:
+def _lookup_id(entry: dict[str, JsonValue], candidates: list[str]) -> str:
     """Match an inspect entry back to one of the requested container IDs."""
     ident = entry.get("Id")
     if isinstance(ident, str):
@@ -393,7 +396,7 @@ def collect_cluster_resource_batch(
     return BatchClusterResult(resources=resources, container_ids=container_ids)
 
 
-def build_container(inspect_entry: dict[str, object]) -> ClusterContainer:
+def build_container(inspect_entry: dict[str, JsonValue]) -> ClusterContainer:
     name_raw = inspect_entry.get("Name")
     name = name_raw[1:] if isinstance(name_raw, str) and name_raw.startswith("/") else name_raw
     config = inspect_entry.get("Config")
@@ -420,7 +423,7 @@ def build_container(inspect_entry: dict[str, object]) -> ClusterContainer:
 
 
 def build_metrics(
-    stats_entry: dict[str, object], sampled_at: datetime, volume_usage_bytes: int | None = None
+    stats_entry: dict[str, JsonValue], sampled_at: datetime, volume_usage_bytes: int | None = None
 ) -> ClusterMetrics:
     cpu_raw = stats_entry.get("CPUPerc")
     cpu_percent: float | None = None

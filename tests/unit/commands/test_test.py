@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -16,6 +16,7 @@ from odoo_instance_sdk.commands.test import (
 )
 from odoo_instance_sdk.internal.test_selection import _ChangedSelection, _ChangedSelectionError
 from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec, StartConfig
+from odoo_instance_sdk.resources.instance import OdooInstance
 
 if TYPE_CHECKING:
     import pytest
@@ -326,7 +327,7 @@ def test_module_alias_deduplicates_and_sorts_before_typed_preflight(tmp_path: Pa
         ) as runner,
     ):
         result, diagnostic = run_module_tests(
-            instance,
+            cast("OdooInstance", instance),
             selection,
             executed_spec,
             http_interface="127.0.0.1",

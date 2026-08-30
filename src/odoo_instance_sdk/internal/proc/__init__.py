@@ -12,6 +12,7 @@ from odoo_instance_sdk.exceptions import (
     OmittedStepError,
     UnplannedStepError,
 )
+from odoo_instance_sdk.models import EnvironmentCheckoutPlan
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import ActionStep, JsonValue, ProcessStep
@@ -35,10 +36,6 @@ class ProcessResultLike(Protocol):
     def __repr__(self) -> str: ...
 
 
-class _PrivateCommandProjection(Protocol):
-    """Typed marker for resource compatibility data kept off public commands."""
-
-
 type PrivateJsonValue = (
     None
     | bool
@@ -48,6 +45,11 @@ type PrivateJsonValue = (
     | tuple["PrivateJsonValue", ...]
     | Mapping[str, "PrivateJsonValue"]
 )
+
+# The only private compatibility projection currently stored with a command is
+# the captured checkout domain plan.  Keeping this alias concrete prevents the
+# command boundary from becoming an untyped side channel.
+type PrivateProjection = EnvironmentCheckoutPlan
 
 
 class ProcessExecutor(Protocol):
@@ -282,7 +284,7 @@ class PreparedCommand(Generic[T]):
     callback: Callback[T]
     steps: tuple[Step, ...]
     executor: ProcessExecutor
-    private_projection: _PrivateCommandProjection | None = None
+    private_projection: PrivateProjection | None = None
     strict: bool = False
 
     def run(self) -> T:
@@ -301,7 +303,7 @@ def prepared_command(
     steps: Sequence[Step] = (),
     *,
     executor: ProcessExecutor | None = None,
-    private_projection: _PrivateCommandProjection | None = None,
+    private_projection: PrivateProjection | None = None,
     strict: bool = False,
 ) -> PreparedCommand[T]:
     frozen_steps = tuple(steps)

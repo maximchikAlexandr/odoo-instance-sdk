@@ -5,11 +5,15 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import json5
 
 from odoo_instance_sdk.exceptions import VscodeImportError
 from odoo_instance_sdk.project import ProjectConfig
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 
 _WORKSPACE_FOLDER_RE = re.compile(r"\$\{workspaceFolder(:[^}]*)?\}")
 _VAR_RE = re.compile(r"\$\{[^}]*\}")
@@ -33,7 +37,7 @@ class VscodeImportReport:
 @dataclass(slots=True, kw_only=True)
 class VscodeImportResult:
     config: ProjectConfig
-    provenance: dict[str, object]
+    provenance: dict[str, JsonValue]
     report: VscodeImportReport
 
 
@@ -70,7 +74,7 @@ def import_vscode_launch(
     report = VscodeImportReport(source_file=str(path), source_profile=str(chosen["name"]))
     config = _map_profile(chosen, workspace_dir=workspace_dir, report=report)
 
-    provenance: dict[str, object] = {
+    provenance: dict[str, JsonValue] = {
         "vscode": {
             "file": str(path),
             "profile": chosen["name"],
@@ -85,8 +89,8 @@ def import_vscode_launch(
     return VscodeImportResult(config=config, provenance=provenance, report=report)
 
 
-def _collect_odoo_candidates(configurations: list[object]) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
+def _collect_odoo_candidates(configurations: list[JsonValue]) -> list[dict[str, JsonValue]]:
+    out: list[dict[str, JsonValue]] = []
     for cfg in configurations:
         if not isinstance(cfg, dict):
             continue
@@ -109,11 +113,11 @@ def _is_odoo_program(program: str) -> bool:
 
 
 def _choose_candidate(
-    candidates: list[dict[str, object]],
+    candidates: list[dict[str, JsonValue]],
     *,
     launch_name: str | None,
     no_input: bool,
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     if launch_name is not None:
         for c in candidates:
             if c.get("name") == launch_name:
@@ -136,7 +140,7 @@ def _choose_candidate(
 
 
 def _map_profile(
-    profile: dict[str, object],
+    profile: dict[str, JsonValue],
     *,
     workspace_dir: Path,
     report: VscodeImportReport,
@@ -281,7 +285,7 @@ def _handle_overlay(arg: str, next_val: str | None, parsed: _ParsedArgs, *, i: i
     return None
 
 
-def _ensure_list(value: object) -> list[str]:
+def _ensure_list(value: JsonValue) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
@@ -298,7 +302,7 @@ def _resolve_program(program: str, *, workspace_dir: Path) -> Path | None:
     return Path(expanded)
 
 
-def _resolve_python(value: object, *, workspace_dir: Path) -> str | Path | None:
+def _resolve_python(value: JsonValue, *, workspace_dir: Path) -> str | Path | None:
     if value is None:
         return None
     s = str(value)
@@ -315,7 +319,9 @@ def _resolve_path_arg(value: str, *, workspace_dir: Path) -> Path | None:
     return Path(expanded)
 
 
-def _resolve_cwd(value: object, *, workspace_dir: Path, report: VscodeImportReport) -> Path | None:
+def _resolve_cwd(
+    value: JsonValue, *, workspace_dir: Path, report: VscodeImportReport
+) -> Path | None:
     if value is None:
         return None
     s = str(value)

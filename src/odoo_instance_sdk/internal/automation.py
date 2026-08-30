@@ -10,7 +10,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import ConfigError, StalePlanError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
@@ -19,9 +19,21 @@ from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.models import CommandResult, OdooTestResult, OdooTestSpec
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
+
+
+class OdooTestRunner(Protocol):
+    def __call__(
+        self,
+        instance: OdooInstance,
+        spec: OdooTestSpec,
+        *,
+        http_interface: str | None = None,
+        http_port: int | None = None,
+    ) -> tuple[OdooTestResult, str | None]: ...
+
 
 _MODULE_MANIFEST_RE = re.compile(r"^\s*(?:\{|['\"]info['\"]\s*[:=]\s*\{)", re.MULTILINE)
 _SUBPROCESS_COMPAT = subprocess
@@ -33,7 +45,7 @@ class ShellOutcome:
     returncode: int
     stdout: str
     stderr: str
-    payload: dict[str, Any] | None
+    payload: dict[str, JsonValue] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,7 +243,7 @@ class ModuleRecord:
     license: str | None = None
     summary: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JsonValue]:
         return {
             "name": self.name,
             "state": self.state,
@@ -241,6 +253,10 @@ class ModuleRecord:
             "license": self.license,
             "summary": self.summary,
         }
+
+
+def _optional_text(value: JsonValue) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def list_modules(
@@ -272,11 +288,11 @@ def list_modules(
             ModuleRecord(
                 name=str(item.get("name", "")),
                 state=str(item.get("state", "")),
-                technical_name=item.get("technical_name"),
-                installed_version=item.get("installed_version"),
-                latest_version=item.get("latest_version"),
-                license=item.get("license"),
-                summary=item.get("summary"),
+                technical_name=_optional_text(item.get("technical_name")),
+                installed_version=_optional_text(item.get("installed_version")),
+                latest_version=_optional_text(item.get("latest_version")),
+                license=_optional_text(item.get("license")),
+                summary=_optional_text(item.get("summary")),
             )
         )
     return out
@@ -326,11 +342,11 @@ def module_records_from_result(result: CommandResult) -> list[ModuleRecord]:
             ModuleRecord(
                 name=str(item.get("name", "")),
                 state=str(item.get("state", "")),
-                technical_name=item.get("technical_name"),
-                installed_version=item.get("installed_version"),
-                latest_version=item.get("latest_version"),
-                license=item.get("license"),
-                summary=item.get("summary"),
+                technical_name=_optional_text(item.get("technical_name")),
+                installed_version=_optional_text(item.get("installed_version")),
+                latest_version=_optional_text(item.get("latest_version")),
+                license=_optional_text(item.get("license")),
+                summary=_optional_text(item.get("summary")),
             )
         )
     return records
@@ -426,11 +442,11 @@ def _test_runner_source(modules: tuple[str, ...], test_tags: str, reload_tests: 
     )
 
 
-def _nonnegative_count(value: object) -> int:
+def _nonnegative_count(value: JsonValue) -> int:
     return value if type(value) is int and value >= 0 else 0
 
 
-def _test_counts(payload: dict[str, Any]) -> dict[str, int]:
+def _test_counts(payload: dict[str, JsonValue]) -> dict[str, int]:
     raw = payload.get("result", {})
     if not isinstance(raw, dict):
         raw = {}
@@ -514,7 +530,7 @@ def run_odoo_tests_command(  # noqa: C901
     http_interface: str | None = None,
     http_port: int | None = None,
     selection_snapshot: TestCommandSnapshot | None = None,
-    compatibility_runner: Callable[..., tuple[OdooTestResult, str | None]] | None = None,
+    compatibility_runner: OdooTestRunner | None = None,
 ) -> Command[tuple[OdooTestResult, str | None]]:
     """Capture the native Odoo test shell as one inspectable command."""
     if not isinstance(spec, OdooTestSpec):
@@ -730,7 +746,7 @@ def _addons_paths(worktree_root: Path, configured: list[str] | None) -> tuple[Pa
     return tuple(roots)
 
 
-def _expected_translation_filename(module: str, lang: str, raw: dict[str, Any]) -> str:
+def _expected_translation_filename(module: str, lang: str, raw: dict[str, JsonValue]) -> str:
     if lang in ("pot", "__new__", ""):
         return f"{module}.pot"
     iso = raw.get("iso")
@@ -739,8 +755,8 @@ def _expected_translation_filename(module: str, lang: str, raw: dict[str, Any]) 
     return f"{iso}.po"
 
 
-def _decode_translation_payload(data_b64: object, module: str, lang: str) -> bytes:
-    if not isinstance(data_b64, str) or not data_b64:
+def _decode_translation_payload(data_b64: str, module: str, lang: str) -> bytes:
+    if not data_b64:
         raise ConfigError(f"translations export produced empty payload for {module}/{lang}")
     try:
         content = base64.b64decode(data_b64, validate=True)
@@ -893,7 +909,7 @@ def _build_export_source(module: str, lang: str) -> str:
 def _finalize_export(
     module: str,
     lang: str,
-    raw: dict[str, Any],
+    raw: dict[str, JsonValue],
     *,
     worktree_root: Path,
     addons_paths: list[str] | None,
@@ -914,7 +930,10 @@ def _finalize_export(
     target = target_dir / filename
     if not _is_path_within(target, worktree_root) or target_dir.is_symlink():
         raise ConfigError(f"target path {target} escapes worktree root {worktree_root}")
-    content = _decode_translation_payload(raw.get("data"), module, lang)
+    data = raw.get("data")
+    if not isinstance(data, str):
+        raise ConfigError(f"translations export produced empty payload for {module}/{lang}")
+    content = _decode_translation_payload(data, module, lang)
     target_dir.mkdir(parents=True, exist_ok=True)
     if target_dir.is_symlink() or not _is_path_within(target, worktree_root):
         raise ConfigError(f"target path {target} escapes worktree root {worktree_root}")
@@ -949,7 +968,7 @@ def _finalize_export(
 
 @dataclass(slots=True)
 class DepsVerifyResult:
-    distributions: list[dict[str, Any]] = field(default_factory=list)
+    distributions: list[dict[str, JsonValue]] = field(default_factory=list)
     missing_imports: list[dict[str, str]] = field(default_factory=list)
     pip_check_ok: bool = True
     pip_check_output: str = ""

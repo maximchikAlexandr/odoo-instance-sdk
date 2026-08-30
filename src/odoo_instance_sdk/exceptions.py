@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 
 type PlanJsonValue = (
     None | bool | int | float | str | list[PlanJsonValue] | dict[str, PlanJsonValue]
@@ -248,7 +252,7 @@ class EnvironmentConflictError(OdooInstanceSdkError):
     """Environment conflict (duplicate active env, port, ambiguous selector)."""
 
     def __init__(
-        self, code: str, message: str, *, details: dict[str, object] | None = None
+        self, code: str, message: str, *, details: dict[str, JsonValue] | None = None
     ) -> None:
         self.code = code
         self.details = details or {}
@@ -260,7 +264,11 @@ class EnvironmentResolutionError(EnvironmentConflictError):
 
     def __init__(self, message: str, *, candidates: list[str] | None = None) -> None:
         self.candidates = candidates or []
-        super().__init__("environment_resolution", message, details={"candidates": self.candidates})
+        super().__init__(
+            "environment_resolution",
+            message,
+            details={"candidates": cast("JsonValue", list(self.candidates))},
+        )
 
 
 class LockConflictError(OdooInstanceSdkError):

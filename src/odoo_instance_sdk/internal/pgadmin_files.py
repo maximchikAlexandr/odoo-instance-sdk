@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -155,7 +155,7 @@ def server_fingerprint(
     return hmac.new(key, identity_bytes, hashlib.sha256).hexdigest()
 
 
-def escape_pgpass_field(value: object) -> str:
+def escape_pgpass_field(value: str | int) -> str:
     """Escape a libpq passfile field without exposing its value elsewhere."""
     return (
         str(value)
@@ -309,7 +309,7 @@ def _validate_directory(path: Path, *, mode: int, root: Path, default_acl: bool)
             _validate_acl(path, _default_directory_acl(), default=True)
 
 
-def _ensure_secret_file(path: Path, producer: object) -> None:
+def _ensure_secret_file(path: Path, producer: Callable[[], bytes]) -> None:
     if path.exists() or path.is_symlink():
         _validate_file(path, mode=_PRIVATE_FILE_MODE, root=path.parent)
         return

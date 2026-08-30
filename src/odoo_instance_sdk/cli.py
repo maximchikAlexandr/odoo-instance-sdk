@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import click
 import msgspec
@@ -43,6 +44,7 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.automation import (
     ModuleRecord,
+    ShellOutcome,
     TranslationExportResult,
     _captured_shell_supported,
     eval_expression,
@@ -78,12 +80,26 @@ from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 plan_module_update = _plan_module_update
 
 if TYPE_CHECKING:
+    from collections.abc import Callable as TypeCallback
+
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.doctor import DoctorReport
+    from odoo_instance_sdk.models import ClusterSnapshot, DevelopmentEnvironment
+    from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    type CliLazyExport = (
+        type[OdooClient | PostgresCluster | DoctorReport]
+        | TypeCallback[[OdooClient, Path | None], DoctorReport]
+        | TypeCallback[[PostgresCluster, PostgresClusterState], ClusterSnapshot]
+        | TypeCallback[[ClusterSnapshot], int]
+        | TypeCallback[[ClusterSnapshot], None]
+    )
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> CliLazyExport:
     """Resolve operation-only imports when a command callback actually needs them."""
     if name == "OdooClient":
         from odoo_instance_sdk.client import OdooClient
@@ -95,7 +111,7 @@ def __getattr__(name: str) -> Any:
 
         value = getattr(doctor, name)
         globals()[name] = value
-        return value
+        return cast("CliLazyExport", value)
     if name in {
         "cluster_snapshot",
         "emit_postgres_result",
@@ -107,7 +123,7 @@ def __getattr__(name: str) -> Any:
 
         value = getattr(postgres_cli, name)
         globals()[name] = value
-        return value
+        return cast("CliLazyExport", value)
     if name == "PostgresCluster":
         from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -116,16 +132,15 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def _client_class() -> Any:
-    return getattr(sys.modules[__name__], "OdooClient")
+def _client_class() -> type[OdooClient]:
+    return cast("type[OdooClient]", getattr(sys.modules[__name__], "OdooClient"))
 
 
-def _run_doctor() -> Any:
-    return getattr(sys.modules[__name__], "run_doctor")
-
-
-def _postgres_operation(name: str) -> Any:
-    return getattr(sys.modules[__name__], name)
+def _run_doctor() -> Callable[[OdooClient, Path | None], DoctorReport]:
+    return cast(
+        "Callable[[OdooClient, Path | None], DoctorReport]",
+        getattr(sys.modules[__name__], "run_doctor"),
+    )
 
 
 def _postgres_cluster(ctx: CliContext) -> PostgresCluster:
@@ -167,16 +182,16 @@ def _cluster_rich(document: OutputDocument) -> str:
     return " ".join(parts)
 
 
-def _updated_modules(value: object) -> JsonValue:
-    payload = getattr(value, "payload", None)
-    if payload is None:
-        payload = parse_payload(getattr(value, "stdout", ""))
+def _updated_modules(value: CommandResult | ShellOutcome | None) -> JsonValue:
+    if value is None:
+        return []
+    payload = value.payload if isinstance(value, ShellOutcome) else parse_payload(value.stdout)
     if not isinstance(payload, dict):
         return []
     nested = payload.get("result")
     if not isinstance(nested, dict):
         return []
-    return cast("JsonValue", nested.get("updated", []))
+    return nested.get("updated", [])
 
 
 def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject:
@@ -353,10 +368,7 @@ def init(
         result=lambda value: cast("dict[str, JsonValue]", value),
         provenance=cast("dict[str, JsonValue]", provenance),
         preview=lambda command: {
-            **cast(
-                "dict[str, JsonValue]",
-                _manifest_dict(config, postgres_allocated=postgres_allocated),
-            ),
+            **_manifest_dict(config, postgres_allocated=postgres_allocated),
             "plan": model_to_dict(command.plan),
         },
         rich=lambda _document: (
@@ -407,7 +419,7 @@ def _resolve_postgres_state(
     return cfg, allocated
 
 
-def _open_catalog_optional() -> Any:
+def _open_catalog_optional() -> BackupCatalog | None:
     """Open the catalog read-only; return None if missing/unreadable."""
     from odoo_instance_sdk.internal.paths import get_catalog_path
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -527,8 +539,10 @@ def _handle_existing_manifest(
     return False
 
 
-def _manifest_dict(config: ProjectConfig, *, postgres_allocated: bool = False) -> dict[str, Any]:
-    postgres: dict[str, Any] | None = None
+def _manifest_dict(
+    config: ProjectConfig, *, postgres_allocated: bool = False
+) -> dict[str, JsonValue]:
+    postgres: dict[str, JsonValue] | None = None
     if config.postgres is not None:
         postgres = {
             "mode": config.postgres.mode,
@@ -537,7 +551,7 @@ def _manifest_dict(config: ProjectConfig, *, postgres_allocated: bool = False) -
             "user": config.postgres.user,
             "allocated_port": postgres_allocated,
         }
-    test_instance: dict[str, Any] | None = None
+    test_instance: dict[str, JsonValue] | None = None
     if config.test_instance is not None:
         test_instance = {
             "base_url": config.test_instance.base_url,
@@ -576,7 +590,7 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
         emit_json_envelope(
             ok=report.ok,
             command="doctor",
-            context=report.context,
+            context=cast("JsonObject", report.context),
             result={
                 "checks": [
                     {
@@ -598,10 +612,9 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
     sys.exit(0 if report.ok else 1)
 
 
-def _print_doctor(report: object) -> None:
-    rep = cast("DoctorReport", report)
+def _print_doctor(report: DoctorReport) -> None:
     current_env: str | None = None
-    for c in rep.checks:
+    for c in report.checks:
         if c.environment_id and c.environment_id != current_env:
             current_env = c.environment_id
             rich_print("")
@@ -749,25 +762,39 @@ def eval_cmd(
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
 
-        def checked_result(value: object) -> dict[str, JsonValue]:
-            returncode = getattr(value, "returncode", 0)
+        def checked_result(
+            value: CommandResult | ShellOutcome | None,
+        ) -> dict[str, JsonValue]:
+            if value is None:
+                return {}
+            returncode = value.returncode
             if returncode != 0:
                 raise RuntimeError(  # noqa: TRY301
-                    f"shell exited {returncode}: {getattr(value, 'stderr', '').strip()}"
+                    f"shell exited {returncode}: {value.stderr.strip()}"
                 )
-            payload = parse_payload(getattr(value, "stdout", "")) or {}
+            payload = (
+                value.payload if isinstance(value, ShellOutcome) else parse_payload(value.stdout)
+            )
+            payload = payload or {}
             return {"result": payload.get("result"), "commit": commit}
 
-        status, _outcome = run_or_preview(
-            lambda: (
-                eval_expression_command(instance, expression, commit=commit)
-                if _captured_shell_supported(instance)
-                else action_command(
+        def build_command() -> Command[CommandResult | ShellOutcome]:
+            if _captured_shell_supported(instance):
+                return cast(
+                    "Command[CommandResult | ShellOutcome]",
+                    eval_expression_command(instance, expression, commit=commit),
+                )
+            return cast(
+                "Command[CommandResult | ShellOutcome]",
+                action_command(
                     "eval",
                     lambda: eval_expression(instance, expression, commit=commit),
                     description="Evaluate Odoo expression",
-                )
-            ),
+                ),
+            )
+
+        status, _outcome = run_or_preview(
+            build_command,
             command_name="eval",
             mode=output_mode,
             dry_run=dry_run,
@@ -790,7 +817,7 @@ def eval_cmd(
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
-def exec_cmd(
+def exec_cmd(  # noqa: C901
     ctx: CliContext,
     script: str,
     script_args: tuple[str, ...],
@@ -813,31 +840,40 @@ def exec_cmd(
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
 
-        def checked_result(value: object) -> dict[str, JsonValue]:
-            returncode = getattr(value, "returncode", 0)
+        def checked_result(
+            value: CommandResult | ShellOutcome | None,
+        ) -> dict[str, JsonValue]:
+            if value is None:
+                return {}
+            returncode = value.returncode
             if returncode != 0:
                 raise RuntimeError(  # noqa: TRY301
-                    f"shell exited {returncode}: {getattr(value, 'stderr', '').strip()}"
+                    f"shell exited {returncode}: {value.stderr.strip()}"
                 )
             return {
                 "returncode": returncode,
-                "stdout": getattr(value, "stdout", ""),
-                "stderr": sanitize_diagnostic(getattr(value, "stderr", ""))
-                if getattr(value, "stderr", "")
-                else "",
+                "stdout": value.stdout,
+                "stderr": sanitize_diagnostic(value.stderr) if value.stderr else "",
                 "commit": commit,
             }
 
-        status, _outcome = run_or_preview(
-            lambda: (
-                exec_script_command(instance, source, argv=tuple(script_args), commit=commit)
-                if _captured_shell_supported(instance)
-                else action_command(
+        def build_command() -> Command[CommandResult | ShellOutcome]:
+            if _captured_shell_supported(instance):
+                return cast(
+                    "Command[CommandResult | ShellOutcome]",
+                    exec_script_command(instance, source, argv=tuple(script_args), commit=commit),
+                )
+            return cast(
+                "Command[CommandResult | ShellOutcome]",
+                action_command(
                     "exec",
                     lambda: exec_script(instance, source, argv=tuple(script_args), commit=commit),
                     description="Execute Odoo shell script",
-                )
-            ),
+                ),
+            )
+
+        status, _outcome = run_or_preview(
+            build_command,
             command_name="exec",
             mode=output_mode,
             dry_run=dry_run,
@@ -953,17 +989,25 @@ def module_update(
         selected_modules = tuple(selected_plan.modules)
 
     try:
-        status, _outcome = run_or_preview(
-            lambda: (
-                update_modules_command(instance, selected_modules, env_id=str(env_obj.id))
-                if _captured_shell_supported(instance)
-                else action_command(
+
+        def build_command() -> Command[CommandResult | ShellOutcome]:
+            if _captured_shell_supported(instance):
+                return cast(
+                    "Command[CommandResult | ShellOutcome]",
+                    update_modules_command(instance, selected_modules, env_id=str(env_obj.id)),
+                )
+            return cast(
+                "Command[CommandResult | ShellOutcome]",
+                action_command(
                     "module.update",
                     lambda: update_modules(instance, selected_modules, env_id=str(env_obj.id)),
                     description="Update selected Odoo modules",
                     mutating=True,
-                )
-            ),
+                ),
+            )
+
+        status, _outcome = run_or_preview(
+            build_command,
             command_name="module.update",
             mode=output_mode,
             dry_run=dry_run,
@@ -1006,9 +1050,9 @@ def module_update(
 
 
 def _module_update_execute(
-    instance: Any,
+    instance: OdooInstance,
     modules: list[str],
-    env_obj: Any,
+    env_obj: DevelopmentEnvironment,
     *,
     output_mode: OutputMode,
 ) -> None:
@@ -1024,12 +1068,14 @@ def _module_update_execute(
             "module.update",
             f"shell exited {outcome.returncode}: {outcome.stderr.strip()}",
         )
-    updated = outcome.payload.get("result", {}).get("updated", []) if outcome.payload else []
+    raw_result = outcome.payload.get("result") if outcome.payload else None
+    raw_updated = raw_result.get("updated") if isinstance(raw_result, dict) else None
+    updated = [str(item) for item in raw_updated] if isinstance(raw_updated, list) else []
     if output_mode is not OutputMode.RICH:
         emit_json_envelope(
             ok=True,
             command="module.update",
-            result={"updated": updated, "dry_run": False},
+            result={"updated": cast("JsonValue", updated), "dry_run": False},
             mode=output_mode,
         )
     else:
@@ -1273,7 +1319,7 @@ def vscode_generate(
     try:
         client, env_obj, _instance = cli_context.ready_instance(ctx)
 
-        def operation() -> dict[str, Any]:
+        def operation() -> dict[str, JsonValue]:
             profile = build_launch_profile(client, env_obj)
             if write_file:
                 project_path = cli_context.resolve_project_path(ctx)
@@ -1295,7 +1341,7 @@ def vscode_generate(
             rich=lambda document: (
                 f"Wrote {document.result['written']}"
                 if isinstance(document.result, dict) and "written" in document.result
-                else launch_json(cast("dict[str, Any]", document.result.get("profile", {})))
+                else launch_json(cast("dict[str, JsonValue]", document.result.get("profile", {})))
                 if isinstance(document.result, dict)
                 else ""
             ),
@@ -1384,7 +1430,7 @@ def postgres_status(
     ctx: CliContext, dry_run: bool, output_format: str | None, json_output: bool
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    snapshot: object | None = None
+    snapshot: ClusterSnapshot | None = None
     cluster_holder: dict[str, PostgresCluster] = {}
 
     def project_status(
@@ -1394,7 +1440,9 @@ def postgres_status(
         if result is None:
             return {}
         cluster = cluster_holder["cluster"]
-        snapshot = _postgres_operation("cluster_snapshot")(cluster, result)
+        from odoo_instance_sdk.internal.postgres_cli import cluster_snapshot
+
+        snapshot = cluster_snapshot(cluster, result)
         return cast("dict[str, JsonValue]", msgspec.to_builtins(snapshot))
 
     def build_command() -> Command[PostgresClusterState]:
@@ -1424,7 +1472,9 @@ def postgres_status(
     except Exception as exc:
         fail(output_mode, "postgres.status", exc)
     if value is not None and not dry_run and snapshot is not None:
-        sys.exit(_postgres_operation("status_exit_code")(snapshot))
+        from odoo_instance_sdk.internal.postgres_cli import status_exit_code
+
+        sys.exit(status_exit_code(snapshot))
     sys.exit(status)
 
 

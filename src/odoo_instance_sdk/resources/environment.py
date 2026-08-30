@@ -101,7 +101,7 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
-    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
 
 EnvironmentSelector = Union[str, "DevelopmentEnvironment"]
 type _PlanningError = PlanError | ConfigError | EnvironmentConflictError
@@ -140,7 +140,7 @@ class CopyCleanupPlan:
 
     target_database: str
     backup_id: uuid.UUID | None
-    instance: object | None
+    instance: OdooInstance | None
     backup: Backup | None
     stage: CopyJournalStage
 
@@ -790,8 +790,8 @@ class EnvironmentResource:
         command = self._command_from_snapshot(snapshot)
         return command.run()
 
-    def _revalidate_checkout_locked(self, catalog: object, plan: _CheckoutPlan) -> None:
-        cat = cast("BackupCatalog", catalog)
+    def _revalidate_checkout_locked(self, catalog: BackupCatalog, plan: _CheckoutPlan) -> None:
+        cat = catalog
         existing = cat.active_environment_for(plan.git_common_dir, plan.branch)
         if existing is not None:
             raise EnvironmentConflictError(
@@ -814,13 +814,13 @@ class EnvironmentResource:
 
     def _do_checkout(  # noqa: C901
         self,
-        catalog: object,
+        catalog: BackupCatalog,
         plan: _CheckoutPlan,
         *,
         context: RunContext[DevelopmentEnvironment],
     ) -> DevelopmentEnvironment:
         runtime_json = _encode_runtime_json(plan.odoo_bin, plan.runtime_cwd)
-        env_row = {
+        env_row: dict[str, CatalogValue] = {
             "id": str(plan.env_id),
             "name": plan.name,
             "repository_root": str(plan.repo_root),
@@ -844,7 +844,7 @@ class EnvironmentResource:
             "last_error": None,
         }
 
-        cat = cast("BackupCatalog", catalog)
+        cat = catalog
         cat.create_environment(env_row)
         cat.add_environment_event(str(plan.env_id), "checkout", "started")
 
@@ -944,9 +944,9 @@ class EnvironmentResource:
             )
             raise
 
-    def _get_env_row(self, cat: object, env_id: uuid.UUID) -> DevelopmentEnvironment:
+    def _get_env_row(self, cat: BackupCatalog, env_id: uuid.UUID) -> DevelopmentEnvironment:
 
-        catalog = cast("BackupCatalog", cat)
+        catalog = cat
         row = catalog.get_environment(str(env_id))
         if row is None:
             raise RuntimeError("environment row disappeared after checkout")
@@ -955,7 +955,7 @@ class EnvironmentResource:
     def _do_copy_restore(
         self,
         *,
-        cat: object,
+        cat: BackupCatalog,
         env_id: uuid.UUID,
         source_config: Path | None,
         cfg_dict: Mapping[str, str],
@@ -963,7 +963,7 @@ class EnvironmentResource:
         target_db: str,
     ) -> uuid.UUID:
 
-        catalog = cast("BackupCatalog", cat)
+        catalog = cat
         if source_config is None:
             raise ConfigError("copy mode requires a source config")
         base_url = infer_base_url(cfg_dict)
@@ -1058,7 +1058,7 @@ class EnvironmentResource:
     def _cleanup_on_failure(
         self,
         *,
-        cat: object,
+        cat: BackupCatalog,
         env_id: uuid.UUID,
         repo_root: Path,
         created_paths: list[Path],
@@ -1067,7 +1067,7 @@ class EnvironmentResource:
         error: BaseException,
     ) -> None:
 
-        catalog = cast("BackupCatalog", cat)
+        catalog = cat
         if backup_id is None:
             row = catalog.get_environment(str(env_id))
             if row is not None and row["backup_id"] is not None:
@@ -1174,9 +1174,9 @@ class EnvironmentResource:
                     cleanup_failed = True
         return cleanup_failed
 
-    def _cleanup_backup(self, catalog: object, backup_id: uuid.UUID) -> bool:
+    def _cleanup_backup(self, catalog: BackupCatalog, backup_id: uuid.UUID) -> bool:
 
-        cat = cast("BackupCatalog", catalog)
+        cat = catalog
         try:
             row = cat.get_by_id(str(backup_id))
             if row is not None:
@@ -1582,7 +1582,7 @@ class EnvironmentResource:
         *,
         environment: DevelopmentEnvironment,
         instance: OdooInstance,
-        cluster: object,
+        cluster: PostgresCluster,
         database: str,
     ) -> PgAdminOpenResult:
         """Delegate file/container mechanics to the private pgAdmin helper."""
@@ -1719,8 +1719,8 @@ class EnvironmentResource:
             ),
         )
 
-    def _do_remove(self, catalog: object, env: DevelopmentEnvironment) -> None:
-        cat = cast("BackupCatalog", catalog)
+    def _do_remove(self, catalog: BackupCatalog, env: DevelopmentEnvironment) -> None:
+        cat = catalog
         copy_plan = self._preflight_remove(cat, env)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
         cat.add_environment_event(str(env.id), "remove", "started")
@@ -1778,7 +1778,7 @@ class EnvironmentResource:
             if not cleanup_failed:
                 journal = cat.get_copy_journal(str(env.id))
                 assert journal is not None
-                cleanup_instance = cast("OdooInstance | None", copy_plan.instance)
+                cleanup_instance = copy_plan.instance
                 cat.upsert_copy_journal(
                     str(env.id),
                     target_database=copy_plan.target_database,
@@ -2089,7 +2089,7 @@ class EnvironmentResource:
 
     def _remove_worktree(
         self,
-        cat: object,
+        cat: BackupCatalog,
         env: DevelopmentEnvironment,
         repo_root: Path,
         worktree: Path,
@@ -2098,7 +2098,7 @@ class EnvironmentResource:
         dirty_checked: bool = False,
     ) -> bool:
 
-        catalog = cast("BackupCatalog", cat)
+        catalog = cat
         if not worktree.is_dir():
             catalog.add_environment_event(
                 str(env.id), "remove", "succeeded", message="worktree already absent"
@@ -2150,12 +2150,12 @@ class EnvironmentResource:
 
     def _remove_backup(
         self,
-        cat: object,
+        cat: BackupCatalog,
         env: DevelopmentEnvironment,
         failures: _StrList,
     ) -> bool:
 
-        catalog = cast("BackupCatalog", cat)
+        catalog = cat
         try:
             row = catalog.get_by_id(str(env.backup_id))
             if row is not None:
@@ -2169,13 +2169,13 @@ class EnvironmentResource:
 
     def _drop_target_db(
         self,
-        cat: object,
+        cat: BackupCatalog,
         env: DevelopmentEnvironment,
         cleanup_failed: bool,
         failures: _StrList,
     ) -> bool:
 
-        catalog = cast("BackupCatalog", cat)
+        catalog = cat
         target = env.target_db_name
         if target is None:
             return cleanup_failed
@@ -2321,11 +2321,11 @@ class EnvironmentResource:
         self,
         requested: int | None,
         project: ProjectConfig,
-        catalog: object | None,
+        catalog: BackupCatalog | None,
         http_interface: str,
         exclude_project: Path | None = None,
     ) -> int:
-        cat = cast("BackupCatalog | None", catalog)
+        cat = catalog
         return find_free_port(
             "http",
             cat,
@@ -2389,24 +2389,24 @@ def _http_fields_from_generated_config(generated_config_path: str) -> tuple[str,
     return http_interface, http_port
 
 
-def _row_to_env(row: object) -> DevelopmentEnvironment:
-    def _get(key: str) -> object:
-        r = cast("sqlite3.Row", row)
-        return r[key]
+def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
+    def _get(key: str) -> JsonValue:
+        r = row
+        return cast("JsonValue", r[key])
 
     def _opt(key: str) -> str | None:
-        r = cast("sqlite3.Row", row)
+        r = row
         try:
-            v: object = r[key]
+            v = cast("JsonValue", r[key])
         except (KeyError, IndexError):
             return None
         if v is None:
             return None
         return str(v)
 
-    backup_raw: object = None
+    backup_raw: JsonValue = None
     with contextlib.suppress(KeyError, IndexError):
-        backup_raw = cast("sqlite3.Row", row)["backup_id"]
+        backup_raw = cast("JsonValue", row["backup_id"])
     http_interface, http_port = _http_fields_from_generated_config(
         str(_get("generated_config_path"))
     )
@@ -2439,17 +2439,17 @@ def _row_to_env(row: object) -> DevelopmentEnvironment:
     )
 
 
-def _row_to_backup(row: object) -> Backup | None:
-    r = cast("sqlite3.Row", row)
+def _row_to_backup(row: sqlite3.Row) -> Backup | None:
+    r = row
     try:
-        path: object = r["path"]
+        path = cast("JsonValue", r["path"])
     except (KeyError, IndexError):
         return None
     if path is None or not Path(str(path)).is_file():
         return None
-    size_raw: object = None
+        size_raw: JsonValue = None
     with contextlib.suppress(KeyError, IndexError):
-        size_raw = r["size_bytes"]
+        size_raw = cast("JsonValue", r["size_bytes"])
     return Backup(
         id=uuid.UUID(str(r["id"])),
         source_base_url=str(r["source_base_url"]),

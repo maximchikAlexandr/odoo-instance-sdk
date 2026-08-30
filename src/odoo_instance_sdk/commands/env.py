@@ -4,7 +4,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import click
 import msgspec
@@ -62,6 +62,10 @@ from odoo_instance_sdk.models import (
 )
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.config import OdooClientConfig
+    from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
 _ENV_LIST_COLUMNS = (
@@ -187,9 +191,7 @@ def env_checkout(  # noqa: C901
             if dry_run:
                 return
             assert captured is not None
-            result = EnvironmentCheckoutResult(
-                environment=cast("DevelopmentEnvironment", captured), plan=plan
-            )
+            result = EnvironmentCheckoutResult(environment=captured, plan=plan)
         else:
             # Keep compatibility with lightweight third-party resource doubles
             # that predate the additive command sibling.
@@ -576,19 +578,21 @@ def _artifacts_str(artifacts: EnvironmentArtifacts) -> str:
     )
 
 
-def _client_class() -> Any:
-    return getattr(sys.modules[__name__], "OdooClient")
+def _client_class() -> type[OdooClient]:
+    return cast("type[OdooClient]", getattr(sys.modules[__name__], "OdooClient"))
 
 
-def _client_config_class() -> Any:
-    return getattr(sys.modules[__name__], "OdooClientConfig")
+def _client_config_class() -> type[OdooClientConfig]:
+    return cast("type[OdooClientConfig]", getattr(sys.modules[__name__], "OdooClientConfig"))
 
 
-def _monitor_class() -> Any:
-    return getattr(sys.modules[__name__], "EnvironmentMonitor")
+def _monitor_class() -> type[EnvironmentMonitor]:
+    return cast("type[EnvironmentMonitor]", getattr(sys.modules[__name__], "EnvironmentMonitor"))
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(
+    name: str,
+) -> type[OdooClient | OdooClientConfig | EnvironmentMonitor | EnvironmentCheckoutOptions]:
     """Resolve operation dependencies only when a command or test requests them."""
     if name == "OdooClient":
         from odoo_instance_sdk.client import OdooClient
@@ -832,8 +836,10 @@ def env_sync(
         rich_print(f"Synced environment {result.name} ({result.id}) state={result.state}")
 
 
-def _env_dict(e: object) -> dict[str, Any]:
-    env = cast("Any", e)
+def _env_dict(e: DevelopmentEnvironment | None) -> dict[str, JsonValue]:
+    if e is None:
+        return {}
+    env = e
     return {
         "id": str(env.id),
         "name": env.name,
@@ -845,19 +851,20 @@ def _env_dict(e: object) -> dict[str, Any]:
     }
 
 
-def _remove_plan_dict(e: object) -> dict[str, Any]:
+def _remove_plan_dict(e: DevelopmentEnvironment) -> dict[str, JsonValue]:
     plan = _env_dict(e)
     plan["ownership"] = {"worktree": True, "generated_config": True, "backup": False}
     plan["commands"] = (
         ["drop target database", "delete owned backup", "git worktree remove"]
-        if str(cast("Any", e).db_mode) == "copy"
+        if str(e.db_mode) == "copy"
         else ["git worktree remove"]
     )
-    plan["ownership"]["backup"] = cast("Any", e).backup_id is not None
+    ownership = cast("dict[str, JsonValue]", plan["ownership"])
+    ownership["backup"] = e.backup_id is not None
     return plan
 
 
-def _plan_lines(title: str, plan: dict[str, Any]) -> list[str]:
+def _plan_lines(title: str, plan: dict[str, JsonValue]) -> list[str]:
     """Pure Rich projection for a structured domain/command plan."""
     return [
         title,
@@ -868,6 +875,6 @@ def _plan_lines(title: str, plan: dict[str, Any]) -> list[str]:
     ]
 
 
-def _print_plan(title: str, plan: dict[str, Any]) -> None:
+def _print_plan(title: str, plan: dict[str, JsonValue]) -> None:
     """Compatibility renderer for the legacy watch/list paths."""
     rich_print("\n".join(_plan_lines(title, plan)), preserve_newlines=True)

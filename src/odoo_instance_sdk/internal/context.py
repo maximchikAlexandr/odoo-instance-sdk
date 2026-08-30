@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.exceptions import (
     EnvironmentNotFoundError,
@@ -14,6 +15,9 @@ from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
 
 
 def _find_nearest_manifest(start: Path, boundary: Path | None) -> Path | None:
@@ -97,7 +101,7 @@ def _project_from_registered_worktree(cwd: Path) -> Path | None:
 
 
 def resolve_environment(
-    client: object,
+    client: OdooClient,
     explicit: str | None,
     *,
     cwd: Path | None = None,
@@ -138,12 +142,9 @@ def _resolve_explicit(
     )
 
 
-def _list_environments(client: object) -> list[DevelopmentEnvironment]:
-    list_method = getattr(client, "environments", None)
-    if list_method is None:
-        return []
+def _list_environments(client: OdooClient) -> list[DevelopmentEnvironment]:
     try:
-        return list_method.list()  # type: ignore[no-any-return]
+        return client.environments.list()
     except NotImplementedError:
         return []
 

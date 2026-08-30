@@ -4,9 +4,12 @@ import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 
 
 class GitError(Exception):
@@ -161,7 +164,7 @@ def worktree_list_porcelain(repo_root: Path) -> list[WorktreeInfo]:
     if proc.returncode != 0:
         return []
     result: list[WorktreeInfo] = []
-    current: dict[str, object] = {}
+    current: dict[str, JsonValue] = {}
     for raw in proc.stdout.split("\x00"):
         if not raw:
             if current:

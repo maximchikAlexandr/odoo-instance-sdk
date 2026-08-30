@@ -71,11 +71,11 @@
 
 ## 8. Production Typing Migration and Static Gates
 
-- [ ] 8.1 Replace explicit `Any`/bare `object` annotations in package-root/CLI lazy helpers and command modules with exhaustive unions, protocols, concrete callbacks, and `JsonValue`; retain lazy import behavior and strict mypy.
-- [ ] 8.2 Replace explicit `Any`/bare `object` annotations in project/config/resource/internal parsing boundaries with validated JSON/config value unions, concrete catalog/resource protocols, and typed models.
-- [ ] 8.3 Replace explicit `Any`/bare `object` annotations in FastAPI/Starlette/OpenAPI adapters with concrete request, response, ASGI callable, schema, and router types; narrow third-party data once at each adapter.
-- [ ] 8.4 Add the AST annotation gate covering direct, qualified, and quoted `Any`/bare `object` forms under `src/odoo_instance_sdk`; keep tests/scripts out of scope and report file/line.
-- [ ] 8.5 Run strict mypy without new plugins or weakened overrides, Ruff, and focused adapter tests; resolve every gate finding rather than adding a broad allowlist.
+- [x] 8.1 Replace explicit `Any`/bare `object` annotations in package-root/CLI lazy helpers and command modules with exhaustive unions, protocols, concrete callbacks, and `JsonValue`; retain lazy import behavior and strict mypy.
+- [x] 8.2 Replace explicit `Any`/bare `object` annotations in project/config/resource/internal parsing boundaries with validated JSON/config value unions, concrete catalog/resource protocols, and typed models.
+- [x] 8.3 Replace explicit `Any`/bare `object` annotations in FastAPI/Starlette/OpenAPI adapters with concrete request, response, ASGI callable, schema, and router types; narrow third-party data once at each adapter.
+- [x] 8.4 Add the AST annotation gate covering direct, qualified, and quoted `Any`/bare `object` forms under `src/odoo_instance_sdk`; keep tests/scripts out of scope and report file/line.
+- [x] 8.5 Run strict mypy without new plugins or weakened overrides, Ruff, and focused adapter tests; resolve every gate finding rather than adding a broad allowlist.
 
 ## 9. Documentation and Final Verification
 

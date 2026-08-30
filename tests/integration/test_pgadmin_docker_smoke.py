@@ -16,13 +16,14 @@ import socket
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.internal import pgadmin, pgadmin_files
 from odoo_instance_sdk.internal.postgres_compose import SubprocessComposeRunner, docker_available
-from odoo_instance_sdk.models import PgAdminOpenState
+from odoo_instance_sdk.models import DevelopmentEnvironment, PgAdminOpenState
 
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
 
@@ -308,7 +309,10 @@ def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
             assert created.returncode == 0, created.stderr
 
         started = pgadmin.open_pgadmin_lifecycle(
-            environment=object(), instance=instances[0], cluster=clusters[0], database="smoke_old"
+            environment=cast("DevelopmentEnvironment", object()),
+            instance=instances[0],
+            cluster=clusters[0],
+            database="smoke_old",
         )
         assert started.state is PgAdminOpenState.STARTED
         assert started.url.startswith("http://127.0.0.1:")
@@ -322,11 +326,17 @@ def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
         assert authenticated_old.returncode == 0, authenticated_old.stderr
         assert authenticated_old.stdout.strip() == "1"
         reused = pgadmin.open_pgadmin_lifecycle(
-            environment=object(), instance=instances[0], cluster=clusters[0], database="smoke_old"
+            environment=cast("DevelopmentEnvironment", object()),
+            instance=instances[0],
+            cluster=clusters[0],
+            database="smoke_old",
         )
         assert reused.state is PgAdminOpenState.REUSED
         reconfigured = pgadmin.open_pgadmin_lifecycle(
-            environment=object(), instance=instances[1], cluster=clusters[1], database="smoke_new"
+            environment=cast("DevelopmentEnvironment", object()),
+            instance=instances[1],
+            cluster=clusters[1],
+            database="smoke_new",
         )
         assert reconfigured.state is PgAdminOpenState.RECONFIGURED
         assert reconfigured.url == started.url == reused.url
@@ -362,7 +372,7 @@ def test_shared_pgadmin_fresh_reuse_and_cross_project_reconfigure(  # noqa: C901
             config=InstanceConfig(base_url="http://127.0.0.1", db_password=rotation_password)
         )
         rotated_result = pgadmin.open_pgadmin_lifecycle(
-            environment=object(),
+            environment=cast("DevelopmentEnvironment", object()),
             instance=rotated_instance,
             cluster=clusters[1],
             database="smoke_new",

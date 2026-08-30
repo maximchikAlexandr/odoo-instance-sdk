@@ -5,19 +5,20 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import StartConfig
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
 _MUTATING_FLAGS = {"-u", "-i", "--update", "--init", "--stop-after-init"}
 
 
-def build_launch_profile(client: OdooClient, env: DevelopmentEnvironment) -> dict[str, Any]:
+def build_launch_profile(client: OdooClient, env: DevelopmentEnvironment) -> dict[str, JsonValue]:
     from odoo_instance_sdk.resources.environment import (
         EnvironmentDatabaseMode,
     )
@@ -34,7 +35,7 @@ def build_launch_profile(client: OdooClient, env: DevelopmentEnvironment) -> dic
         "python": python_bin,
         "program": odoo_bin,
         "cwd": env.worktree_path,
-        "args": args,
+        "args": list(args),
         "justMyCode": False,
         "console": "integratedTerminal",
     }
@@ -89,7 +90,7 @@ def _build_profile_args(start_cfg: StartConfig, bound_db: str) -> list[str]:
     return args
 
 
-def launch_json(profile: dict[str, Any]) -> str:
+def launch_json(profile: dict[str, JsonValue]) -> str:
     envelope = {"version": "0.2.0", "configurations": [profile]}
     return json.dumps(envelope, indent=2) + "\n"
 

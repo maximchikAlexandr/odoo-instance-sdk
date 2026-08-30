@@ -6,7 +6,17 @@ import json
 import sys
 from collections.abc import Callable
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Generic, Never, Protocol, TypeVar, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Generic,
+    Never,
+    ParamSpec,
+    Protocol,
+    TypeAliasType,
+    TypeVar,
+    cast,
+    overload,
+)
 
 import click
 import msgspec
@@ -20,7 +30,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> TypeAliasType:
     """Resolve the canonical JSON alias only when a caller explicitly imports it."""
     if name == "JsonValue":
         from odoo_instance_sdk.execution import JsonValue
@@ -75,6 +85,7 @@ class OutputDocument(
 
 _ResultT = TypeVar("_ResultT")
 _ResultT_co = TypeVar("_ResultT_co", covariant=True)
+_P = ParamSpec("_P")
 
 
 class _PlannedCommand(Protocol):
@@ -94,12 +105,12 @@ def output_options(command: click.Command) -> click.Command: ...
 
 
 @overload
-def output_options(command: Callable[..., None]) -> Callable[..., None]: ...
+def output_options(command: Callable[_P, None]) -> Callable[_P, None]: ...
 
 
 def output_options(
-    command: click.Command | Callable[..., None],
-) -> click.Command | Callable[..., None]:
+    command: click.Command | Callable[_P, None],
+) -> click.Command | Callable[_P, None]:
     """Add the bounded command's local document-format options."""
     decorated = click.option(
         "--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope."
@@ -113,7 +124,7 @@ def output_options(
     )(decorated)
 
 
-def command_options(command: Callable[..., None]) -> Callable[..., None]:
+def command_options(command: Callable[_P, None]) -> Callable[_P, None]:
     """Add format aliases and the local preview switch to a spawning leaf."""
     return click.option(
         "--dry-run", "dry_run", is_flag=True, default=False, help="Inspect without starting."

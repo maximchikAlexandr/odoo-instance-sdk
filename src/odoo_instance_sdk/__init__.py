@@ -1,9 +1,17 @@
 """Odoo Instance SDK — typed Python API for managing local Odoo 19.0 instances."""
 
+from __future__ import annotations
+
 from importlib import import_module
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from enum import Enum
+    from typing import Protocol
+
+    import msgspec
+
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
     from odoo_instance_sdk.exceptions import (
@@ -143,6 +151,36 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    class _CanonicalBytes(Protocol):
+        def __call__(self, plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> bytes: ...
+
+    class _CanonicalProjection(Protocol):
+        def __call__(self, plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> JsonValue: ...
+
+    class _Fingerprint(Protocol):
+        def __call__(self, plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> str: ...
+
+    type LazyExport = (
+        type[
+            BaseException
+            | Enum
+            | msgspec.Struct
+            | OdooClient
+            | OdooClientConfig
+            | InstanceConfig
+            | BackupResource
+            | DatabaseResource
+            | EnvironmentResource
+            | EnvironmentMonitor
+            | InstanceFactory
+            | OdooInstance
+            | PostgresCluster
+        ]
+        | _CanonicalBytes
+        | _CanonicalProjection
+        | _Fingerprint
+    )
 
 __version__ = "0.1.0"
 
@@ -351,7 +389,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
 }
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> LazyExport:
     """Resolve one public export on first access and cache its canonical object."""
     target = _LAZY_EXPORTS.get(name)
     if target is None:
@@ -359,7 +397,7 @@ def __getattr__(name: str) -> Any:
     module_name, attribute_name = target
     value = getattr(import_module(module_name), attribute_name)
     globals()[name] = value
-    return value
+    return cast("LazyExport", value)
 
 
 __all__ = [

@@ -4,12 +4,12 @@ import functools
 import hashlib
 import sqlite3
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -25,6 +25,11 @@ from odoo_instance_sdk.models import (
     BackupState,
     BackupValidationStatus,
 )
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
+
+type CatalogValue = JsonValue | Path | datetime | uuid.UUID | tuple[str, ...]
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -710,7 +715,7 @@ class BackupCatalog:
         return row is not None
 
     @_translate_sqlite_error
-    def create_environment(self, env: dict[str, object]) -> None:
+    def create_environment(self, env: Mapping[str, CatalogValue]) -> None:
         self._conn.execute(
             """INSERT INTO environments (
                 id, name, repository_root, git_common_dir, branch, base_ref,
@@ -778,13 +783,16 @@ class BackupCatalog:
         self._conn.commit()
 
     @_translate_sqlite_error
-    def update_environment(self, environment_id: str, fields_map: dict[str, object]) -> None:
+    def update_environment(
+        self, environment_id: str, fields_map: Mapping[str, CatalogValue]
+    ) -> None:
         if not fields_map:
             return
-        if "last_error" in fields_map and fields_map["last_error"] is not None:
-            fields_map["last_error"] = sanitize_last_error(str(fields_map["last_error"]))
-        cols = ", ".join(f"{c} = :{c}" for c in fields_map)
-        params = dict(fields_map, id=environment_id)
+        mutable_fields = dict(fields_map)
+        if "last_error" in mutable_fields and mutable_fields["last_error"] is not None:
+            mutable_fields["last_error"] = sanitize_last_error(str(mutable_fields["last_error"]))
+        cols = ", ".join(f"{c} = :{c}" for c in mutable_fields)
+        params = dict(mutable_fields, id=environment_id)
         self._conn.execute(
             f"UPDATE environments SET {cols} WHERE id = :id",
             params,

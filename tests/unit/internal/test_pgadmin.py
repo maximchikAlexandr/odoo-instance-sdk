@@ -5,11 +5,12 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from odoo_instance_sdk.internal import pgadmin, pgadmin_container, pgadmin_files
-from odoo_instance_sdk.models import PgAdminOpenResult, PgAdminOpenState
+from odoo_instance_sdk.models import DevelopmentEnvironment, PgAdminOpenResult, PgAdminOpenState
 
 from .pgadmin_test_support import _paths
 
@@ -41,7 +42,7 @@ def test_open_pgadmin_lifecycle_uses_backend_identity_and_secret_free_docker_arg
             self.pgadmin_inspect: dict[str, object] | None = None
 
         def run(self, args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            self.calls.append(args)
+            self.calls.append(list(args))
             if "ps" in args:
                 return subprocess.CompletedProcess(
                     args, 0, '{"Service":"postgres","ID":"pgid"}\n', ""
@@ -101,6 +102,7 @@ def test_open_pgadmin_lifecycle_uses_backend_identity_and_secret_free_docker_arg
             "compose_runner": runner,
             "compose_file": tmp_path / "compose.yaml",
             "compose_project_name": "odcli_pg_project",
+            "_user": None,
         },
     )()
     instance = type(
@@ -108,7 +110,10 @@ def test_open_pgadmin_lifecycle_uses_backend_identity_and_secret_free_docker_arg
     )()
 
     result = pgadmin.open_pgadmin_lifecycle(
-        environment=object(), instance=instance, cluster=cluster, database="demo"
+        environment=cast("DevelopmentEnvironment", object()),
+        instance=instance,
+        cluster=cluster,
+        database="demo",
     )
 
     assert result.state.value == "started"
@@ -149,6 +154,8 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
     }
 
     class Runner:
+        requires_docker = False
+
         def __init__(self) -> None:
             self.calls: list[list[str]] = []
             self.create_count = 0
@@ -157,7 +164,7 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
 
         def run(self, args: list[str], **_: object) -> subprocess.CompletedProcess[str]:  # noqa: C901
             with self._lock:
-                self.calls.append(args)
+                self.calls.append(list(args))
                 if "ps" in args:
                     return subprocess.CompletedProcess(
                         args, 0, '{"Service":"postgres","ID":"pgid"}\n', ""
@@ -253,6 +260,7 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
             "compose_runner": runner,
             "compose_file": tmp_path / "compose.yaml",
             "compose_project_name": "odcli_pg_project",
+            "_user": None,
         },
     )()
     instance = type("Instance", (), {"config": type("Config", (), {"db_password": "secret"})()})()
@@ -261,7 +269,10 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
     def invoke() -> PgAdminOpenResult:
         start.wait()
         return pgadmin.open_pgadmin_lifecycle(
-            environment=object(), instance=instance, cluster=cluster, database="demo"
+            environment=cast("DevelopmentEnvironment", object()),
+            instance=instance,
+            cluster=cluster,
+            database="demo",
         )
 
     with ThreadPoolExecutor(max_workers=2) as pool:

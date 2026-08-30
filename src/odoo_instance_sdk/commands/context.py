@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 import click
 
@@ -14,6 +14,7 @@ from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentState
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -59,7 +60,7 @@ def resolve_project_path(cli_context: CliContext) -> Path:
 
 
 def resolve_environment(
-    client: object,
+    client: OdooClient,
     explicit: str | None,
     *,
     cwd: Path | None = None,
@@ -110,15 +111,15 @@ def ready_instance(
     return client, env_obj, instance
 
 
-def _client_class() -> Any:
-    return getattr(sys.modules[__name__], "OdooClient")
+def _client_class() -> type[OdooClient]:
+    return cast("type[OdooClient]", getattr(sys.modules[__name__], "OdooClient"))
 
 
-def _client_config_class() -> Any:
-    return getattr(sys.modules[__name__], "OdooClientConfig")
+def _client_config_class() -> type[OdooClientConfig]:
+    return cast("type[OdooClientConfig]", getattr(sys.modules[__name__], "OdooClientConfig"))
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> type[OdooClient | OdooClientConfig]:
     """Keep legacy patch points lazy for operation-only dependencies."""
     if name == "OdooClient":
         from odoo_instance_sdk.client import OdooClient

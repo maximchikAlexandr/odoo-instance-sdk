@@ -3,8 +3,9 @@ from __future__ import annotations
 import secrets
 import socket
 import webbrowser
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.http.monitor import (
     PgAdminOpener,
@@ -13,6 +14,10 @@ from odoo_instance_sdk.http.monitor import (
     build_pgadmin_router,
     install_openapi_schema,
 )
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI, Request
+    from fastapi.responses import Response
 
 __all__ = ["create_app", "run_server"]
 
@@ -55,9 +60,9 @@ def create_app(  # noqa: C901
     monitor: SnapshotProvider | None = None,
     static_assets: bool = True,
     pgadmin_opener: PgAdminOpener | None = None,
-) -> Any:
+) -> FastAPI:
     """Build the FastAPI app while keeping dashboard dependencies optional."""
-    from fastapi import FastAPI, Request
+    from fastapi import FastAPI
     from fastapi.responses import Response
 
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
@@ -65,7 +70,9 @@ def create_app(  # noqa: C901
     app_monitor = monitor if monitor is not None else EnvironmentMonitor()
     app = FastAPI(title="odoo-instance-sdk monitor")
 
-    async def loopback_host_only(request: Request, call_next: Any) -> Any:
+    async def loopback_host_only(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         # TrustedHostMiddleware cannot accept the standards-compliant
         # ``[::1]:port`` form, so parse IPv6 brackets explicitly.
         raw = request.headers.get("host", "").lower()
@@ -83,7 +90,9 @@ def create_app(  # noqa: C901
 
     app.middleware("http")(loopback_host_only)
 
-    async def issue_csrf_session_cookie(request: Request, call_next: Any) -> Any:
+    async def issue_csrf_session_cookie(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         response = await call_next(request)
         # The browser reads this non-HttpOnly double-submit token and sends it
         # in X-CSRF-Token for the one state-changing dashboard operation.

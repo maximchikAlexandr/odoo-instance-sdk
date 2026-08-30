@@ -15,7 +15,7 @@ from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.internal.process_metrics import collect_process_tree
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
 
 
 class _FakeCatalog:
@@ -38,7 +38,7 @@ class _FakeCatalog:
         return None
 
 
-def _make_env(env_id: str) -> dict[str, object]:
+def _make_env(env_id: str) -> dict[str, CatalogValue]:
     return {
         "id": env_id,
         "name": "test",

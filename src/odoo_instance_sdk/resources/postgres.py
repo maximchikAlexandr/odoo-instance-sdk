@@ -46,7 +46,7 @@ from odoo_instance_sdk.models import ClusterResourceSnapshot, PostgresClusterSta
 from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
@@ -356,7 +356,7 @@ class PostgresCluster:
         expected = approved.get(self._image) if isinstance(approved, dict) else None
         # Do not permit a repository-controlled selector to trigger a pull before
         # an already persisted, syntactically immutable approval is established.
-        if not is_oci_digest(expected):
+        if not isinstance(expected, str) or not is_oci_digest(expected):
             raise PostgresImageNotTrustedError(
                 "postgres image digest is not approved for this user; run 'odcli postgres approve-image --image-digest <resolved-digest>'"
             )
@@ -802,7 +802,7 @@ class PostgresCluster:
         except LockConflictError as exc:
             raise PostgresClusterTimeoutError(timeout) from exc
 
-    def to_diagnostic_dict(self) -> Mapping[str, object]:
+    def to_diagnostic_dict(self) -> Mapping[str, JsonValue]:
         """Read-only redacted diagnostic payload (no secrets)."""
         return {
             "mode": self._mode,

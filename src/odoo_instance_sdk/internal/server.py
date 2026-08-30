@@ -8,10 +8,12 @@ import time
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, cast
 
 from msgspec import structs
 
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.models import (
     CommandResult,
     OdooProcess,
@@ -315,7 +317,7 @@ def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: s
     )
 
 
-def parse_payload(stdout: str, nonce: str | None = None) -> dict[str, Any] | None:
+def parse_payload(stdout: str, nonce: str | None = None) -> dict[str, JsonValue] | None:
     import json as _json
     import re as _re
 
@@ -344,7 +346,7 @@ def parse_payload(stdout: str, nonce: str | None = None) -> dict[str, Any] | Non
     if not body:
         return None
     try:
-        return cast("dict[str, Any]", _json.loads(body))
+        return cast("dict[str, JsonValue]", _json.loads(body))
     except ValueError:
         return None
 
