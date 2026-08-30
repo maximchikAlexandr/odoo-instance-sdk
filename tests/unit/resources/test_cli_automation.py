@@ -754,8 +754,8 @@ class TestCliModuleUpdate:
             )
         assert result.exit_code == 0
         env_json = json.loads(result.output)
-        assert env_json["data"]["modules"] == ["base"]
-        assert env_json["data"]["dry_run"] is True
+        assert env_json["data"]["plan"]["steps"][0]["step_id"] == "module.update"
+        assert env_json["dry_run"] is True
 
 
 class TestCliExecStdin:

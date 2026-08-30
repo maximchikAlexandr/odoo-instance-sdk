@@ -14,16 +14,19 @@ from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.env import env_group
 from odoo_instance_sdk.commands.output import (
-    JsonValue,
+    JsonObject,
+    OutputDocument,
     OutputMode,
+    action_command,
     command_options,
-    emit_command_plan,
     emit_json_envelope,
     fail,
+    model_to_dict,
     output_options,
     resolve_command_options,
     resolve_output_mode,
     rich_print,
+    run_or_preview,
     sanitize_diagnostic,
 )
 from odoo_instance_sdk.commands.test import (
@@ -39,26 +42,43 @@ from odoo_instance_sdk.exceptions import (
     VscodeImportError,
 )
 from odoo_instance_sdk.internal.automation import (
+    ModuleRecord,
+    TranslationExportResult,
+    _captured_shell_supported,
     eval_expression,
+    eval_expression_command,
     exec_script,
+    exec_script_command,
     export_translations,
+    export_translations_command,
     list_modules,
-    plan_module_update,
+    list_modules_command,
+    module_records_from_result,
+    module_tests_command,
     update_modules,
+    update_modules_command,
     verify_deps,
+    verify_deps_command,
+)
+from odoo_instance_sdk.internal.automation import (
+    plan_module_update as _plan_module_update,
 )
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
+from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.internal.vscode_generate import (
     build_launch_profile,
     launch_json,
     write_launch_json,
 )
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
-from odoo_instance_sdk.models import OdooTestSpec, PostgresClusterState, StartConfig
+from odoo_instance_sdk.models import CommandResult, OdooTestSpec, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 
+plan_module_update = _plan_module_update
+
 if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.doctor import DoctorReport
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -106,6 +126,62 @@ def _run_doctor() -> Any:
 
 def _postgres_operation(name: str) -> Any:
     return getattr(sys.modules[__name__], name)
+
+
+def _postgres_cluster(ctx: CliContext) -> PostgresCluster:
+    """Resolve the cluster once while composing a CLI command."""
+    cluster_type = getattr(sys.modules[__name__], "PostgresCluster")
+    from odoo_instance_sdk.internal import postgres_cli
+
+    return cast(
+        "PostgresCluster",
+        cluster_type.from_project(getattr(postgres_cli, "resolve_project_path")(ctx)),
+    )
+
+
+def _cluster_rich(document: OutputDocument) -> str:
+    payload = document.result if isinstance(document.result, dict) else {}
+    endpoint = payload.get("endpoint", "—")
+    parts = [
+        f"mode={payload.get('mode', 'unknown')} owned={payload.get('owned', False)} "
+        f"state={payload.get('state', 'unknown')} endpoint={endpoint}"
+    ]
+    container = payload.get("container")
+    if isinstance(container, dict):
+        if container.get("id"):
+            parts.append(f"container={str(container['id'])[:12]}")
+        if container.get("pid") is not None:
+            scope = "vm" if container.get("pid_scope") == "docker_vm" else "host"
+            parts.append(f"pid={scope}:{container['pid']}")
+    metrics = payload.get("metrics")
+    if isinstance(metrics, dict):
+        cpu = metrics.get("cpu_percent")
+        memory = metrics.get("memory_usage_bytes")
+        volume = metrics.get("volume_usage_bytes")
+        if isinstance(cpu, (int, float)):
+            parts.append(f"cpu={float(cpu):.1f}%")
+        if isinstance(memory, (int, float)):
+            parts.append(f"ram={int(memory) / 1024**2:.1f} MiB")
+        if isinstance(volume, (int, float)):
+            parts.append(f"disk={int(volume) / 1024**3:.1f} GiB")
+    return " ".join(parts)
+
+
+def _updated_modules(value: object) -> JsonValue:
+    payload = getattr(value, "payload", None)
+    if payload is None:
+        payload = parse_payload(getattr(value, "stdout", ""))
+    if not isinstance(payload, dict):
+        return []
+    nested = payload.get("result")
+    if not isinstance(nested, dict):
+        return []
+    return cast("JsonValue", nested.get("updated", []))
+
+
+def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject:
+    records = value if isinstance(value, list) else module_records_from_result(value)
+    return {"modules": [record.to_dict() for record in records]}
 
 
 @click.group()
@@ -261,33 +337,35 @@ def init(
     ):
         return
 
-    if dry_run:
-        if json_output:
-            emit_json_envelope(
-                ok=True,
-                command="init",
-                result=_manifest_dict(config, postgres_allocated=postgres_allocated),
-                provenance=cast("dict[str, JsonValue]", provenance),
-                dry_run=True,
-                mode=output_mode,
-            )
-        else:
-            rich_print("Dry run — no files written.")
-            rich_print(config.to_manifest(), preserve_newlines=True)
-        return
-
-    write_manifest(resolved_project, config)
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="init",
-            result=_manifest_dict(config, postgres_allocated=postgres_allocated),
-            provenance=cast("dict[str, JsonValue]", provenance),
-            dry_run=False,
-            mode=output_mode,
-        )
-    else:
-        rich_print(f"Wrote {existing}")
+    status, _ = run_or_preview(
+        lambda: action_command(
+            "init",
+            lambda: (
+                write_manifest(resolved_project, config),
+                _manifest_dict(config, postgres_allocated=postgres_allocated),
+            )[1],
+            description="Write project manifest",
+            mutating=True,
+        ),
+        command_name="init",
+        mode=output_mode,
+        dry_run=dry_run,
+        result=lambda value: cast("dict[str, JsonValue]", value),
+        provenance=cast("dict[str, JsonValue]", provenance),
+        preview=lambda command: {
+            **cast(
+                "dict[str, JsonValue]",
+                _manifest_dict(config, postgres_allocated=postgres_allocated),
+            ),
+            "plan": model_to_dict(command.plan),
+        },
+        rich=lambda _document: (
+            f"Dry run — no files written.\n{config.to_manifest()}"
+            if dry_run
+            else f"Wrote {existing}"
+        ),
+    )
+    sys.exit(status)
 
 
 def _resolve_postgres_state(
@@ -557,24 +635,33 @@ def run(
         from odoo_instance_sdk.execution import Command
 
         command = candidate if isinstance(candidate, Command) else None
-        if not dry_run:
-            client.environments.record_use(env_obj)
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "run", e)
-    if dry_run:
-        if command is None:
-            raise click.UsageError("run instance does not provide an inspectable command")
-        emit_command_plan(command, command_name="run", mode=output_mode)
-        return
+    if command is None:
+        command = action_command(
+            "run",
+            instance.run_foreground,
+            description="Run the Odoo foreground process",
+        )
+    if not dry_run:
+        client.environments.record_use(env_obj)
     try:
-        exit_code = command.run() if command is not None else instance.run_foreground()
+        _status, value = run_or_preview(
+            lambda: command,
+            command_name="run",
+            mode=output_mode,
+            dry_run=dry_run,
+            emit_normal=False,
+        )
     except KeyboardInterrupt:
-        exit_code = 130
+        value = 130
     except Exception as e:
         fail(output_mode, "run", e)
-    sys.exit(exit_code)
+    if not dry_run:
+        sys.exit(int(value or 0))
+    return
 
 
 @cli.command()
@@ -619,18 +706,27 @@ def shell(
         raise
     except Exception as e:
         fail(output_mode, "shell", e)
-    if dry_run:
-        if command is None:
-            raise click.UsageError("shell instance does not provide an inspectable command")
-        emit_command_plan(command, command_name="shell", mode=output_mode)
-        return
+    if command is None:
+        command = action_command(
+            "shell",
+            lambda: instance.shell(args=list(odoo_args)),
+            description="Run the Odoo interactive shell",
+        )
     try:
-        exit_code = command.run() if command is not None else instance.shell(args=list(odoo_args))
+        _status, value = run_or_preview(
+            lambda: command,
+            command_name="shell",
+            mode=output_mode,
+            dry_run=dry_run,
+            emit_normal=False,
+        )
     except KeyboardInterrupt:
-        exit_code = 130
+        value = 130
     except Exception as e:
         fail(output_mode, "shell", e)
-    sys.exit(exit_code)
+    if not dry_run:
+        sys.exit(int(value or 0))
+    return
 
 
 @cli.command("eval")
@@ -638,37 +734,51 @@ def shell(
 @click.option(
     "--commit", "commit", is_flag=True, default=False, help="Commit after eval (best-effort)."
 )
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def eval_cmd(
     ctx: CliContext,
     expression: str,
     commit: bool,
+    dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
-        outcome = eval_expression(instance, expression, commit=commit)
+
+        def checked_result(value: object) -> dict[str, JsonValue]:
+            returncode = getattr(value, "returncode", 0)
+            if returncode != 0:
+                raise RuntimeError(  # noqa: TRY301
+                    f"shell exited {returncode}: {getattr(value, 'stderr', '').strip()}"
+                )
+            payload = parse_payload(getattr(value, "stdout", "")) or {}
+            return {"result": payload.get("result"), "commit": commit}
+
+        status, _outcome = run_or_preview(
+            lambda: (
+                eval_expression_command(instance, expression, commit=commit)
+                if _captured_shell_supported(instance)
+                else action_command(
+                    "eval",
+                    lambda: eval_expression(instance, expression, commit=commit),
+                    description="Evaluate Odoo expression",
+                )
+            ),
+            command_name="eval",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=checked_result,
+            rich=lambda document: json.dumps(document.result, default=str, indent=2),
+        )
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "eval", str(e))
-    if outcome.returncode != 0:
-        fail(output_mode, "eval", f"shell exited {outcome.returncode}: {outcome.stderr.strip()}")
-    result = outcome.payload.get("result") if outcome.payload else None
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="eval",
-            result={"result": result, "commit": commit},
-            mode=output_mode,
-        )
-    else:
-        rich_print(json.dumps(result, default=str, indent=2), preserve_newlines=True)
-    sys.exit(0)
+        fail(output_mode, "eval", e)
+    sys.exit(status)
 
 
 @cli.command("exec")
@@ -677,6 +787,7 @@ def eval_cmd(
 @click.option(
     "--commit", "commit", is_flag=True, default=False, help="Commit after exec (best-effort)."
 )
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def exec_cmd(
@@ -684,11 +795,11 @@ def exec_cmd(
     script: str,
     script_args: tuple[str, ...],
     commit: bool,
+    dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     if script == "-":
         source = sys.stdin.read()
     else:
@@ -701,28 +812,45 @@ def exec_cmd(
             fail(output_mode, "exec", f"cannot read script: {e}")
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
-        outcome = exec_script(instance, source, argv=tuple(script_args), commit=commit)
+
+        def checked_result(value: object) -> dict[str, JsonValue]:
+            returncode = getattr(value, "returncode", 0)
+            if returncode != 0:
+                raise RuntimeError(  # noqa: TRY301
+                    f"shell exited {returncode}: {getattr(value, 'stderr', '').strip()}"
+                )
+            return {
+                "returncode": returncode,
+                "stdout": getattr(value, "stdout", ""),
+                "stderr": sanitize_diagnostic(getattr(value, "stderr", ""))
+                if getattr(value, "stderr", "")
+                else "",
+                "commit": commit,
+            }
+
+        status, _outcome = run_or_preview(
+            lambda: (
+                exec_script_command(instance, source, argv=tuple(script_args), commit=commit)
+                if _captured_shell_supported(instance)
+                else action_command(
+                    "exec",
+                    lambda: exec_script(instance, source, argv=tuple(script_args), commit=commit),
+                    description="Execute Odoo shell script",
+                )
+            ),
+            command_name="exec",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=checked_result,
+            rich=lambda document: (
+                str(document.result.get("stdout", "")) if isinstance(document.result, dict) else ""
+            ),
+        )
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "exec", str(e))
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="exec",
-            result={
-                "returncode": outcome.returncode,
-                "stdout": outcome.stdout,
-                "stderr": sanitize_diagnostic(outcome.stderr) if outcome.stderr else "",
-                "commit": commit,
-            },
-            mode=output_mode,
-        )
-    else:
-        rich_print(outcome.stdout, end="", preserve_newlines=True)
-        if outcome.stderr:
-            click.echo(sanitize_diagnostic(outcome.stderr), err=True, nl=False)
-    sys.exit(outcome.returncode)
+        fail(output_mode, "exec", e)
+    sys.exit(status)
 
 
 @cli.group("module")
@@ -733,38 +861,57 @@ def module_group() -> None:
 @module_group.command("list")
 @click.argument("modules", nargs=-1)
 @click.option("--state", "state", default=None, help="Filter by state.")
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def module_list(
     ctx: CliContext,
     modules: tuple[str, ...],
     state: str | None,
+    dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
-        records = list_modules(instance, names=tuple(modules), state=state)
+        status, _records = run_or_preview(
+            lambda: (
+                list_modules_command(instance, names=tuple(modules), state=state)
+                if _captured_shell_supported(instance)
+                else action_command(
+                    "module.list",
+                    lambda: list_modules(instance, names=tuple(modules), state=state),
+                    description="Inspect installed Odoo modules",
+                )
+            ),
+            command_name="module.list",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda value: (
+                _module_list_result(cast("CommandResult | list[ModuleRecord]", value))
+                if value is not None
+                else {"modules": []}
+            ),
+            rich=lambda document: "\n".join(
+                ["NAME                            STATE           VERSION"]
+                + [
+                    f"{record['name']:<30} {record['state']:<15} "
+                    f"{record.get('installed_version') or record.get('latest_version') or ''}"
+                    for record in cast(
+                        "list[dict[str, JsonValue]]",
+                        document.result.get("modules", [])
+                        if isinstance(document.result, dict)
+                        else [],
+                    )
+                ]
+            ),
+        )
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "module.list", str(e))
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="module.list",
-            result={"modules": [r.to_dict() for r in records]},
-            mode=output_mode,
-        )
-    else:
-        rich_print(f"{'NAME':<30} {'STATE':<15} {'VERSION'}")
-        for r in records:
-            rich_print(
-                f"{r.name:<30} {r.state:<15} {r.installed_version or r.latest_version or ''}"
-            )
-    sys.exit(0)
+        fail(output_mode, "module.list", e)
+    sys.exit(status)
 
 
 @module_group.command("update")
@@ -782,39 +929,80 @@ def module_update(
     json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     try:
         _client, env_obj, instance = cli_context.ready_instance(ctx)
-        plan = plan_module_update(instance, tuple(modules))
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "module.update", str(e))
-    if plan.not_installed:
-        fail(
-            output_mode,
-            "module.update",
-            f"modules not installed: {', '.join(plan.not_installed)}",
-        )
-    if dry_run:
-        if json_output:
-            emit_json_envelope(
-                ok=True,
-                command="module.update",
-                result=cast(
-                    "dict[str, JsonValue]", {"modules": list(plan.modules), "dry_run": True}
-                ),
-                mode=output_mode,
+    selected_modules = tuple(modules)
+    # Preserve the legacy seam for downstream adapters that explicitly replace
+    # the selector; the production command never performs selection before
+    # composition, which keeps dry-run effect-free.
+    if plan_module_update is not _plan_module_update:
+        try:
+            selected_plan = plan_module_update(instance, selected_modules)
+        except Exception as exc:
+            fail(output_mode, "module.update", exc)
+        if selected_plan.not_installed:
+            fail(
+                output_mode,
+                "module.update",
+                f"modules not installed: {', '.join(selected_plan.not_installed)}",
             )
-        else:
-            rich_print("Dry run — modules to update:")
-            for m in plan.modules:
-                rich_print(f"  {m}")
-        sys.exit(0)
-        return
-    if not yes:
-        fail(output_mode, "module.update", "module update requires --yes")
-    _module_update_execute(instance, plan.modules, env_obj, output_mode=output_mode)
+        selected_modules = tuple(selected_plan.modules)
+
+    try:
+        status, _outcome = run_or_preview(
+            lambda: (
+                update_modules_command(instance, selected_modules, env_id=str(env_obj.id))
+                if _captured_shell_supported(instance)
+                else action_command(
+                    "module.update",
+                    lambda: update_modules(instance, selected_modules, env_id=str(env_obj.id)),
+                    description="Update selected Odoo modules",
+                    mutating=True,
+                )
+            ),
+            command_name="module.update",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda value: {
+                "modules": list(selected_modules),
+                "updated": _updated_modules(value),
+            },
+            confirm=(
+                (lambda: fail(output_mode, "module.update", "module update requires --yes"))
+                if not yes
+                else None
+            ),
+            preview=lambda command: {
+                "modules": list(selected_modules),
+                "plan": model_to_dict(command.plan),
+                "dry_run": True,
+            },
+            rich=lambda document: "\n".join(
+                [
+                    "Dry run — modules to update:" if dry_run else "Updated modules:",
+                    *[
+                        f"  {module}"
+                        for module in (
+                            selected_modules
+                            if dry_run
+                            else cast(
+                                "list[str]",
+                                document.result.get("updated", [])
+                                if isinstance(document.result, dict)
+                                else [],
+                            )
+                        )
+                    ],
+                ]
+            ),
+        )
+    except Exception as exc:
+        fail(output_mode, "module.update", exc)
+    sys.exit(status)
 
 
 def _module_update_execute(
@@ -856,6 +1044,7 @@ def _module_update_execute(
 @click.option("--test-tags", "test_tags", required=True, help="Test tags.")
 @click.option("--reload-tests", "reload_tests", is_flag=True, default=False)
 @click.option("--allow-empty", "allow_empty", is_flag=True, default=False)
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def module_test(
@@ -864,11 +1053,11 @@ def module_test(
     test_tags: str,
     reload_tests: bool,
     allow_empty: bool,
+    dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     try:
         _client, env_obj, instance = cli_context.ready_instance(ctx)
         start_config = instance.config.start_config
@@ -888,38 +1077,43 @@ def module_test(
             reload_tests=reload_tests,
             allow_empty=allow_empty,
         )
-        typed, diagnostic = run_module_tests(
-            instance,
-            selection,
-            spec,
-            http_interface=env_obj.http_interface,
-            http_port=env_obj.http_port,
+        status, outcome = run_or_preview(
+            lambda: (
+                module_tests_command(
+                    instance,
+                    spec,
+                    http_interface=env_obj.http_interface,
+                    http_port=env_obj.http_port,
+                )
+                if _captured_shell_supported(instance)
+                else action_command(
+                    "module.test",
+                    lambda: run_module_tests(
+                        instance,
+                        selection,
+                        spec,
+                        http_interface=env_obj.http_interface,
+                        http_port=env_obj.http_port,
+                    ),
+                    description="Run Odoo module tests",
+                    mutating=True,
+                )
+            ),
+            command_name="module.test",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda value: (
+                project_execution_result(env_obj, selection, spec, value[0])
+                if value is not None
+                else {}
+            ),
+            rich=lambda document: json.dumps(document.result, default=str, indent=2),
         )
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "module.test", str(e))
-    result = project_execution_result(env_obj, selection, spec, typed)
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="module.test",
-            result=result,
-            mode=output_mode,
-        )
-    else:
-        rich_print(f"environment={env_obj.name} ({env_obj.id})")
-        rich_print("selection=module")
-        rich_print(f"modules={', '.join(sorted(set(modules)))}")
-        rich_print(
-            f"tests={typed.counts['tests']} ok={typed.counts['successful']} "
-            f"failed={typed.counts['failed']} errors={typed.counts['errors']} "
-            f"skipped={typed.counts['skipped']}"
-        )
-        rich_print(f"exit_code={typed.exit_code}")
-    if diagnostic:
-        click.echo(sanitize_diagnostic(diagnostic), err=True)
-    sys.exit(typed.exit_code)
+        fail(output_mode, "module.test", e)
+    sys.exit(outcome[0].exit_code if outcome is not None and not dry_run else status)
 
 
 @cli.group("translations")
@@ -930,54 +1124,70 @@ def translations_group() -> None:
 @translations_group.command("export")
 @click.option("--module", "modules", multiple=True, required=True, help="Module name.")
 @click.option("--language", "languages", multiple=True, required=True, help="Language code.")
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def translations_export(
     ctx: CliContext,
     modules: tuple[str, ...],
     languages: tuple[str, ...],
+    dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     try:
         _client, env_obj, instance = cli_context.ready_instance(ctx)
-        results = export_translations(
-            instance,
-            tuple(modules),
-            tuple(languages),
-            worktree_root=Path(env_obj.worktree_path),
+        status, _results = run_or_preview(
+            lambda: (
+                export_translations_command(
+                    instance,
+                    tuple(modules),
+                    tuple(languages),
+                    worktree_root=Path(env_obj.worktree_path),
+                )
+                if _captured_shell_supported(instance)
+                else action_command(
+                    "translations.export",
+                    lambda: export_translations(
+                        instance,
+                        tuple(modules),
+                        tuple(languages),
+                        worktree_root=Path(env_obj.worktree_path),
+                    ),
+                    description="Export Odoo translations",
+                    mutating=True,
+                )
+            ),
+            command_name="translations.export",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda value: {
+                "exports": [
+                    {
+                        "module": item.module,
+                        "requested_lang": item.requested_lang,
+                        "actual_filename": item.actual_filename,
+                        "path": str(item.path),
+                        "bytes_written": item.bytes_written,
+                    }
+                    for item in cast("list[TranslationExportResult]", value or [])
+                ]
+            },
+            rich=lambda document: "\n".join(
+                f"{item['module']} {item['requested_lang']} -> {item['actual_filename']} "
+                f"({item['bytes_written']} bytes at {item['path']})"
+                for item in cast(
+                    "list[dict[str, JsonValue]]",
+                    document.result.get("exports", []) if isinstance(document.result, dict) else [],
+                )
+            ),
         )
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "translations.export", str(e))
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="translations.export",
-            result={
-                "exports": [
-                    {
-                        "module": r.module,
-                        "requested_lang": r.requested_lang,
-                        "actual_filename": r.actual_filename,
-                        "path": str(r.path),
-                        "bytes_written": r.bytes_written,
-                    }
-                    for r in results
-                ]
-            },
-            mode=output_mode,
-        )
-    else:
-        for r in results:
-            rich_print(
-                f"{r.module} {r.requested_lang} -> {r.actual_filename} "
-                f"({r.bytes_written} bytes at {r.path})"
-            )
-    sys.exit(0)
+        fail(output_mode, "translations.export", e)
+    sys.exit(status)
 
 
 @cli.group("deps")
@@ -986,51 +1196,58 @@ def deps_group() -> None:
 
 
 @deps_group.command("verify")
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
-def deps_verify(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
+def deps_verify(
+    ctx: CliContext, dry_run: bool, output_format: str | None, json_output: bool
+) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     try:
-        _client, env_obj, _instance = cli_context.ready_instance(ctx)
+        _client, env_obj, instance = cli_context.ready_instance(ctx)
         recorded_python = Path(env_obj.python_environment_path)
         if recorded_python.is_dir():
             recorded_python = recorded_python / "bin" / "python"
-        result = verify_deps(
-            recorded_python=recorded_python,
-            worktree_root=Path(env_obj.worktree_path),
+        status, _result = run_or_preview(
+            lambda: (
+                verify_deps_command(
+                    recorded_python=recorded_python,
+                    worktree_root=Path(env_obj.worktree_path),
+                )
+                if _captured_shell_supported(instance)
+                else action_command(
+                    "deps.verify",
+                    lambda: verify_deps(
+                        recorded_python=recorded_python,
+                        worktree_root=Path(env_obj.worktree_path),
+                    ),
+                    description="Verify environment dependencies",
+                )
+            ),
+            command_name="deps.verify",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda value: {
+                "distributions": cast("list[JsonValue]", list(value.distributions))
+                if value is not None
+                else [],
+                "missing_imports": cast("list[JsonValue]", list(value.missing_imports))
+                if value is not None
+                else [],
+                "pip_check_ok": value.pip_check_ok if value is not None else True,
+                "pip_check_output": value.pip_check_output if value is not None else "",
+            },
+            rich=lambda document: (
+                "pip check: ok"
+                if isinstance(document.result, dict) and document.result.get("pip_check_ok")
+                else "pip check: issues"
+            ),
         )
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "deps.verify", str(e))
-    exit_code = 1 if result.missing_imports else 0
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="deps.verify",
-            result={
-                "distributions": cast("list[JsonValue]", list(result.distributions)),
-                "missing_imports": cast("list[JsonValue]", list(result.missing_imports)),
-                "pip_check_ok": result.pip_check_ok,
-                "pip_check_output": result.pip_check_output,
-            },
-            mode=output_mode,
-        )
-    else:
-        if result.pip_check_ok:
-            rich_print("pip check: ok")
-        else:
-            rich_print("pip check: issues")
-            for d in result.distributions:
-                rich_print(f"  {d['detail']}")
-        if result.missing_imports:
-            rich_print("missing imports:")
-            for m in result.missing_imports:
-                rich_print(f"  {m['module']}: {m['import']}")
-        else:
-            rich_print("imports: ok")
-    sys.exit(exit_code)
+        fail(output_mode, "deps.verify", e)
+    sys.exit(1 if _result is not None and getattr(_result, "missing_imports", []) else status)
 
 
 @cli.group("vscode")
@@ -1042,48 +1259,52 @@ def vscode_group() -> None:
 @click.option(
     "--write", "write_file", is_flag=True, default=False, help="Write .vscode/launch.json."
 )
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def vscode_generate(
-    ctx: CliContext, write_file: bool, output_format: str | None, json_output: bool
+    ctx: CliContext,
+    write_file: bool,
+    dry_run: bool,
+    output_format: str | None,
+    json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     try:
         client, env_obj, _instance = cli_context.ready_instance(ctx)
-        profile = build_launch_profile(client, env_obj)
+
+        def operation() -> dict[str, Any]:
+            profile = build_launch_profile(client, env_obj)
+            if write_file:
+                project_path = cli_context.resolve_project_path(ctx)
+                written = write_launch_json(project_path, launch_json(profile))
+                return {"profile": profile, "written": str(written)}
+            return {"profile": profile}
+
+        status, _result = run_or_preview(
+            lambda: action_command(
+                "vscode.generate",
+                operation,
+                description="Generate VS Code launch configuration",
+                mutating=write_file,
+            ),
+            command_name="vscode.generate",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda value: cast("dict[str, JsonValue]", value or {}),
+            rich=lambda document: (
+                f"Wrote {document.result['written']}"
+                if isinstance(document.result, dict) and "written" in document.result
+                else launch_json(cast("dict[str, Any]", document.result.get("profile", {})))
+                if isinstance(document.result, dict)
+                else ""
+            ),
+        )
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "vscode.generate", str(e))
-    if write_file:
-        try:
-            project_path = cli_context.resolve_project_path(ctx)
-            content = launch_json(profile)
-            written = write_launch_json(project_path, content)
-        except Exception as e:
-            fail(output_mode, "vscode.generate", str(e))
-        if json_output:
-            emit_json_envelope(
-                ok=True,
-                command="vscode.generate",
-                result={"profile": profile, "written": str(written), "dry_run": False},
-                mode=output_mode,
-            )
-        else:
-            rich_print(f"Wrote {written}")
-        sys.exit(0)
-        return
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="vscode.generate",
-            result={"profile": profile, "dry_run": True},
-            mode=output_mode,
-        )
-    else:
-        rich_print(launch_json(profile), end="", preserve_newlines=True)
-    sys.exit(0)
+        fail(output_mode, "vscode.generate", e)
+    sys.exit(status)
 
 
 @cli.group("postgres")
@@ -1100,62 +1321,111 @@ def postgres_group() -> None:
     show_default=True,
     help="Seconds allowed for Docker pull and inspect.",
 )
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def postgres_approve_image(
     ctx: CliContext,
     image_digest: str,
     timeout: float,
+    dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     """Approve the current compose image in the local, non-repository trust store."""
-    cluster, _ = _postgres_operation("run_postgres_command")(
-        ctx,
-        command="postgres.approve-image",
-        output_mode=output_mode,
-        operation=lambda candidate: candidate.approve_image(image_digest, timeout=timeout),
-    )
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="postgres.approve-image",
-            result={
+    try:
+        cluster_holder: dict[str, PostgresCluster] = {}
+
+        def build_command() -> Command[None]:
+            cluster = _postgres_cluster(ctx)
+            cluster_holder["cluster"] = cluster
+            factory = getattr(cluster, "approve_image_command", None)
+            if callable(factory):
+                return cast("Command[None]", factory(image_digest, timeout=timeout))
+            return cast(
+                "Command[None]",
+                action_command(
+                    "postgres.approve-image",
+                    lambda: cluster.approve_image(image_digest, timeout=timeout),
+                    description="Approve the PostgreSQL image",
+                    mutating=True,
+                ),
+            )
+
+        status, _value = run_or_preview(
+            build_command,
+            command_name="postgres.approve-image",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda result: {
                 "approved": True,
-                "image": cluster.to_diagnostic_dict()["image"],
+                "image": cast("JsonValue", cluster_holder["cluster"].to_diagnostic_dict()["image"])
+                if result is not None
+                else None,
                 "digest": image_digest,
             },
-            mode=output_mode,
+            rich=lambda document: (
+                f"approved image={document.result.get('image')} digest={image_digest}"
+                if isinstance(document.result, dict)
+                else ""
+            ),
         )
-    else:
-        rich_print(f"approved image={cluster.to_diagnostic_dict()['image']} digest={image_digest}")
+    except Exception as exc:
+        fail(output_mode, "postgres.approve-image", exc)
+    sys.exit(status)
 
 
 @postgres_group.command("status")
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
-def postgres_status(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
+def postgres_status(
+    ctx: CliContext, dry_run: bool, output_format: str | None, json_output: bool
+) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
-    cluster, state = _postgres_operation("run_postgres_command")(
-        ctx,
-        command="postgres.status",
-        output_mode=output_mode,
-        operation=lambda candidate: candidate.status(),
-    )
-    snapshot = _postgres_operation("cluster_snapshot")(cluster, state)
-    if json_output:
-        emit_json_envelope(
-            ok=True,
-            command="postgres.status",
-            result=msgspec.to_builtins(snapshot),
-            mode=output_mode,
+    snapshot: object | None = None
+    cluster_holder: dict[str, PostgresCluster] = {}
+
+    def project_status(
+        result: PostgresClusterState | None,
+    ) -> dict[str, JsonValue]:
+        nonlocal snapshot
+        if result is None:
+            return {}
+        cluster = cluster_holder["cluster"]
+        snapshot = _postgres_operation("cluster_snapshot")(cluster, result)
+        return cast("dict[str, JsonValue]", msgspec.to_builtins(snapshot))
+
+    def build_command() -> Command[PostgresClusterState]:
+        cluster = _postgres_cluster(ctx)
+        cluster_holder["cluster"] = cluster
+        factory = getattr(cluster, "status_command", None)
+        if callable(factory):
+            return cast("Command[PostgresClusterState]", factory())
+        return cast(
+            "Command[PostgresClusterState]",
+            action_command(
+                "postgres.status",
+                cluster.status,
+                description="Inspect PostgreSQL cluster status",
+            ),
         )
-    else:
-        _postgres_operation("print_status")(snapshot)
-    sys.exit(_postgres_operation("status_exit_code")(snapshot))
+
+    try:
+        status, value = run_or_preview(
+            build_command,
+            command_name="postgres.status",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=project_status,
+            rich=_cluster_rich,
+        )
+    except Exception as exc:
+        fail(output_mode, "postgres.status", exc)
+    if value is not None and not dry_run and snapshot is not None:
+        sys.exit(_postgres_operation("status_exit_code")(snapshot))
+    sys.exit(status)
 
 
 @postgres_group.command("up")
@@ -1166,25 +1436,51 @@ def postgres_status(ctx: CliContext, output_format: str | None, json_output: boo
     default=60.0,
     help="Seconds to wait for the cluster to become healthy.",
 )
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def postgres_up(
-    ctx: CliContext, wait_timeout: float, output_format: str | None, json_output: bool
+    ctx: CliContext,
+    wait_timeout: float,
+    dry_run: bool,
+    output_format: str | None,
+    json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
 
-    def ensure(candidate: PostgresCluster) -> PostgresClusterState:
-        candidate.ensure_running(timeout=wait_timeout)
-        return candidate.status()
+    cluster_holder: dict[str, PostgresCluster] = {}
 
-    cluster, state = _postgres_operation("run_postgres_command")(
-        ctx, command="postgres.up", output_mode=output_mode, operation=ensure
-    )
-    _postgres_operation("emit_postgres_result")(
-        cluster=cluster, state=state, command="postgres.up", output_mode=output_mode
-    )
-    sys.exit(0)
+    def build_command() -> Command[None]:
+        cluster = _postgres_cluster(ctx)
+        cluster_holder["cluster"] = cluster
+        factory = getattr(cluster, "ensure_running_command", None)
+        if callable(factory):
+            return cast("Command[None]", factory(timeout=wait_timeout))
+        return cast(
+            "Command[None]",
+            action_command(
+                "postgres.up",
+                lambda: cluster.ensure_running(timeout=wait_timeout),
+                description="Ensure the PostgreSQL cluster is running",
+                mutating=True,
+            ),
+        )
+
+    try:
+        status, _value = run_or_preview(
+            build_command,
+            command_name="postgres.up",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda result: cast(
+                "dict[str, JsonValue]",
+                cluster_holder["cluster"].to_diagnostic_dict() if result is not None else {},
+            ),
+            rich=_cluster_rich,
+        )
+    except Exception as exc:
+        fail(output_mode, "postgres.up", exc)
+    sys.exit(status)
 
 
 @postgres_group.command("stop")
@@ -1195,25 +1491,51 @@ def postgres_up(
     default=30.0,
     help="Seconds to wait for graceful stop.",
 )
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
 def postgres_stop(
-    ctx: CliContext, timeout: float, output_format: str | None, json_output: bool
+    ctx: CliContext,
+    timeout: float,
+    dry_run: bool,
+    output_format: str | None,
+    json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
 
-    def stop(candidate: PostgresCluster) -> PostgresClusterState:
-        candidate.stop(timeout=timeout)
-        return candidate.status()
+    cluster_holder: dict[str, PostgresCluster] = {}
 
-    cluster, state = _postgres_operation("run_postgres_command")(
-        ctx, command="postgres.stop", output_mode=output_mode, operation=stop
-    )
-    _postgres_operation("emit_postgres_result")(
-        cluster=cluster, state=state, command="postgres.stop", output_mode=output_mode
-    )
-    sys.exit(0)
+    def build_command() -> Command[None]:
+        cluster = _postgres_cluster(ctx)
+        cluster_holder["cluster"] = cluster
+        factory = getattr(cluster, "stop_command", None)
+        if callable(factory):
+            return cast("Command[None]", factory(timeout=timeout))
+        return cast(
+            "Command[None]",
+            action_command(
+                "postgres.stop",
+                lambda: cluster.stop(timeout=timeout),
+                description="Stop the PostgreSQL cluster",
+                mutating=True,
+            ),
+        )
+
+    try:
+        status, _value = run_or_preview(
+            build_command,
+            command_name="postgres.stop",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda result: cast(
+                "dict[str, JsonValue]",
+                cluster_holder["cluster"].to_diagnostic_dict() if result is not None else {},
+            ),
+            rich=_cluster_rich,
+        )
+    except Exception as exc:
+        fail(output_mode, "postgres.stop", exc)
+    sys.exit(status)
 
 
 @cli.command("monitor")

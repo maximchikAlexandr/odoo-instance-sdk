@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any
+from typing import Any, cast
 
 import click
 
@@ -16,15 +16,13 @@ from odoo_instance_sdk.commands.context import (
 )
 from odoo_instance_sdk.commands.output import (
     OutputMode,
-    emit,
-    emit_command_plan,
     emit_json_envelope,
     fail,
     model_to_dict,
     output_options,
     resolve_output_mode,
     rich_print,
-    success_document,
+    run_or_preview,
 )
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.models import (
@@ -82,20 +80,16 @@ def db_refresh(
         fail(output_mode, "db.refresh", exc)
 
     if command is not None:
-        if dry_run:
-            emit_command_plan(command, command_name="db.refresh", mode=output_mode)
-            return
-        result = command.run()
-        data = model_to_dict(result)
-        emit(
-            success_document(
-                command="db.refresh",
-                result=data,
-                provenance={"project_source": ctx.project_source},
-            ),
-            output_mode,
-            rich=lambda _document: json.dumps(data, indent=2, sort_keys=True),
+        status, _result = run_or_preview(
+            lambda: command,
+            command_name="db.refresh",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=cast("Any", model_to_dict),
+            provenance={"project_source": ctx.project_source},
+            rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
         )
+        sys.exit(status)
         return
     if dry_run:
         fail(output_mode, "db.refresh", "environment does not provide an inspectable command")
@@ -143,26 +137,23 @@ def db_reset_admin_password(
 
         candidate = instance.databases.reset_admin_password_command()
         command = candidate if isinstance(candidate, Command) else None
-        result = command.run() if command is not None and not dry_run else None
     except Exception as exc:
         fail(output_mode, "db.reset-admin-password", exc)
 
     if command is not None:
-        if dry_run:
-            emit_command_plan(command, command_name="db.reset-admin-password", mode=output_mode)
-            return
-        assert isinstance(result, AdminPasswordResetResult)
-        data = model_to_dict(result)
-        emit(
-            success_document(
-                command="db.reset-admin-password",
-                result=data,
-                context={"environment_id": str(environment.id)},
-                provenance={"environment_source": ctx.environment_source},
-            ),
-            output_mode,
-            rich=lambda _document: json.dumps(data, indent=2, sort_keys=True),
+        status, result = run_or_preview(
+            lambda: command,
+            command_name="db.reset-admin-password",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=cast("Any", model_to_dict),
+            context={"environment_id": str(environment.id)},
+            provenance={"environment_source": ctx.environment_source},
+            rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
         )
+        if not dry_run:
+            assert isinstance(result, AdminPasswordResetResult)
+        sys.exit(status)
         return
     if dry_run:
         fail(

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import click
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
-    JsonValue,
     OutputDocument,
     OutputMode,
     emit,
@@ -18,8 +17,12 @@ from odoo_instance_sdk.commands.output import (
     model_to_dict,
     output_options,
     resolve_output_mode,
+    run_or_preview,
     success_document,
 )
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.automation import (
     TestCommandSnapshot,
@@ -326,7 +329,13 @@ def test_command(
             if dry_run:
                 result["plan"] = model_to_dict(command.plan)
                 result["dry_run"] = True
-                _emit_result(mode=mode, command="test", result=result, dry_run=True)
+                run_or_preview(
+                    lambda: command,
+                    command_name="test",
+                    mode=mode,
+                    dry_run=True,
+                    preview=lambda _command: cast("dict[str, JsonValue]", result),
+                )
                 raise click.exceptions.Exit(0)  # noqa: TRY301
             if not hasattr(instance, "_shell_script_command"):
                 preflight_installed_modules(instance, spec.modules)

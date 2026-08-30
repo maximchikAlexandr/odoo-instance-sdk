@@ -73,6 +73,7 @@ Options:
   --test-tags TEXT           Test tags.  [required]
   --reload-tests
   --allow-empty
+  --dry-run                  Plan only.
   --format [rich|json|toon]  Output format (default: rich).
   --json                     Emit JSON envelope.
   --help                     Show this message and exit.

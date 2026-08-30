@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
 from dataclasses import dataclass
@@ -239,6 +240,17 @@ def test_public_leaf_inventory_is_complete_and_classified() -> None:
         for case in PUBLIC_LEAF_CASES
         if case.classification in {"mutating-or-spawning", "process-previewable-read-only"}
     )
+
+
+def test_every_eligible_leaf_uses_the_shared_preview_or_run_helper() -> None:
+    """Keep the canonical inventory coupled to the executable composition path."""
+    for case in PUBLIC_LEAF_CASES:
+        if not case.requires_dry_run:
+            continue
+        callback = _command(case.path).callback
+        assert callback is not None
+        callback = inspect.unwrap(callback)
+        assert "run_or_preview" in callback.__code__.co_names, case.path
 
 
 def _matrix_checkout_plan(*, name: str = "demo") -> EnvironmentCheckoutPlan:

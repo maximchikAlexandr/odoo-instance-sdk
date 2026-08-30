@@ -23,13 +23,13 @@ from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputMode,
     emit,
-    emit_command_plan,
     emit_json_envelope,
     fail,
     model_to_dict,
     output_options,
     resolve_output_mode,
     rich_print,
+    run_or_preview,
     sanitize_diagnostic,
     sanitize_terminal_text,
     success_document,
@@ -44,6 +44,7 @@ from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import (
     ClusterMetrics,
     ClusterSnapshot,
+    DevelopmentEnvironment,
     EnvironmentArtifacts,
     EnvironmentCheckoutPlan,
     EnvironmentCheckoutResult,
@@ -112,7 +113,7 @@ def env_group() -> None:
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @output_options
 @pass_cli_context
-def env_checkout(
+def env_checkout(  # noqa: C901
     cli_ctx: CliContext,
     branch: str,
     base_ref: str | None,
@@ -154,10 +155,40 @@ def env_checkout(
         command = client.environments.checkout_command(project_path, branch, options=options)
         if isinstance(command, Command):
             plan = _checkout_public_plan(command)
-            result: ExecutionPlan | EnvironmentCheckoutResult = (
-                command.plan
-                if dry_run
-                else EnvironmentCheckoutResult(environment=command.run(), plan=plan)
+
+            def checkout_rich(document: OutputDocument) -> str:
+                payload = document.result
+                if not isinstance(payload, dict):
+                    return ""
+                lines: list[str] = []
+                environment = payload.get("environment")
+                if isinstance(environment, dict):
+                    lines.append(
+                        f"Environment {environment.get('name')} "
+                        f"({environment.get('id')}) state={environment.get('state')}"
+                    )
+                plan_data = payload.get("plan")
+                if isinstance(plan_data, dict):
+                    lines.extend(_plan_lines("Checkout plan", plan_data))
+                return "\n".join(lines)
+
+            _, captured = run_or_preview(
+                lambda: command,
+                command_name="env.checkout",
+                mode=output_mode,
+                dry_run=dry_run,
+                result=lambda environment: model_to_dict(
+                    EnvironmentCheckoutResult(
+                        environment=cast("DevelopmentEnvironment", environment), plan=plan
+                    )
+                ),
+                rich=checkout_rich,
+            )
+            if dry_run:
+                return
+            assert captured is not None
+            result = EnvironmentCheckoutResult(
+                environment=cast("DevelopmentEnvironment", captured), plan=plan
             )
         else:
             # Keep compatibility with lightweight third-party resource doubles
@@ -638,11 +669,28 @@ def env_remove(  # noqa: C901
     except AttributeError:
         candidate = None
     if isinstance(candidate, Command):
-        if dry_run:
-            emit_command_plan(
-                candidate,
+
+        def confirm_remove() -> None:
+            _require_machine_confirmation(output_mode, yes)
+            if not yes and not click.confirm(
+                sanitize_terminal_text(f"Remove environment {env_obj.name} ({env_obj.id})?"),
+                default=False,
+            ):
+                emit(
+                    success_document(command="env.remove", result={"aborted": True}),
+                    output_mode,
+                    rich=lambda _document: "Aborted.",
+                )
+                raise click.exceptions.Exit(0)
+
+        try:
+            status, _removed = run_or_preview(
+                lambda: candidate,
                 command_name="env.remove",
                 mode=output_mode,
+                dry_run=dry_run,
+                confirm=confirm_remove,
+                result=lambda _value: _env_dict(client.environments.get(str(env_obj.id))),
                 context={
                     "environment_id": str(env_obj.id),
                     "worktree_path": env_obj.worktree_path,
@@ -651,41 +699,13 @@ def env_remove(  # noqa: C901
                     "project_source": ctx.project_source,
                     "environment_source": "explicit" if environment else "cwd",
                 },
+                rich=lambda _document: f"Removed environment {env_obj.name} ({env_obj.id})",
             )
-            return
-        _require_machine_confirmation(output_mode, yes)
-        if not yes and not click.confirm(
-            sanitize_terminal_text(f"Remove environment {env_obj.name} ({env_obj.id})?"),
-            default=False,
-        ):
-            emit(
-                success_document(command="env.remove", result={"aborted": True}),
-                output_mode,
-                rich=lambda _document: "Aborted.",
-            )
-            return
-        try:
-            candidate.run()
-            env_obj = client.environments.get(str(env_obj.id))
+            if dry_run:
+                return
         except Exception as e:
             fail(output_mode, "env.remove", e)
-        data = _env_dict(env_obj)
-        emit(
-            success_document(
-                command="env.remove",
-                result=data,
-                context={
-                    "environment_id": data.get("id"),
-                    "worktree_path": data.get("worktree_path"),
-                },
-                provenance={
-                    "project_source": ctx.project_source,
-                    "environment_source": "explicit" if environment else "cwd",
-                },
-            ),
-            output_mode,
-            rich=lambda _document: f"Removed environment {env_obj.name} ({env_obj.id})",
-        )
+        sys.exit(status)
         return
     if dry_run:
         if json_output:
@@ -771,23 +791,26 @@ def env_sync(
 
         candidate = client.environments.sync_python_command(environment, upgrade=upgrade)
         command = candidate if isinstance(candidate, Command) else None
-        result = command.run() if command is not None and not dry_run else None
     except Exception as e:
         fail(output_mode, "env.sync", str(e))
     if command is not None:
-        if dry_run:
-            emit_command_plan(command, command_name="env.sync", mode=output_mode)
-            return
-        assert result is not None
-        synced = result
-        data = _env_dict(synced)
-        emit(
-            success_document(command="env.sync", result=data),
-            output_mode,
-            rich=lambda _document: (
-                f"Synced environment {synced.name} ({synced.id}) state={synced.state}"
+        status, result = run_or_preview(
+            lambda: command,
+            command_name="env.sync",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=_env_dict,
+            rich=lambda document: (
+                f"Synced environment {document.result.get('name')} "
+                f"({document.result.get('id')}) state={document.result.get('state')}"
+                if isinstance(document.result, dict)
+                else ""
             ),
         )
+        if dry_run:
+            return
+        assert result is not None
+        sys.exit(status)
         return
     if dry_run:
         fail(output_mode, "env.sync", "environment does not provide an inspectable command")

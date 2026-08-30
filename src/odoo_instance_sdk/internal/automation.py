@@ -167,16 +167,58 @@ def _run_with_payload(
 def eval_expression(
     instance: OdooInstance, expression: str, *, commit: bool = False
 ) -> ShellOutcome:
+    if not _captured_shell_supported(instance):
+        return _run_with_payload(instance, f"result = ({expression})\n", commit=commit)
+    return _shell_outcome(eval_expression_command(instance, expression, commit=commit).run())
+
+
+def eval_expression_command(
+    instance: OdooInstance, expression: str, *, commit: bool = False
+) -> Command[CommandResult]:
+    """Capture the exact Odoo shell used by the eval leaf."""
     if not isinstance(expression, str) or not expression.strip():
         raise ConfigError("eval requires a non-empty expression")
-    source = f"result = ({expression})\n"
-    return _run_with_payload(instance, source, commit=commit)
+    return instance.run_shell_script_command(f"result = ({expression})\n", commit=commit)
 
 
 def exec_script(
     instance: OdooInstance, script: str, argv: tuple[str, ...] = (), *, commit: bool = False
 ) -> ShellOutcome:
-    return _run_with_payload(instance, script, argv=argv, commit=commit)
+    if not _captured_shell_supported(instance):
+        return _run_with_payload(instance, script, argv=argv, commit=commit)
+    return _shell_outcome(exec_script_command(instance, script, argv=argv, commit=commit).run())
+
+
+def exec_script_command(
+    instance: OdooInstance,
+    script: str,
+    argv: tuple[str, ...] = (),
+    *,
+    commit: bool = False,
+) -> Command[CommandResult]:
+    """Capture the exact Odoo shell used by the exec leaf."""
+    return instance.run_shell_script_command(script, argv=argv, commit=commit)
+
+
+def _shell_outcome(result: CommandResult) -> ShellOutcome:
+    return ShellOutcome(
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        payload=parse_payload(result.stdout),
+    )
+
+
+def _captured_shell_supported(instance: OdooInstance) -> bool:
+    """Keep legacy test doubles/adapters working without weakening real plans."""
+    from odoo_instance_sdk.resources.instance import OdooInstance as InstanceType
+
+    method = getattr(type(instance), "run_shell_script", None)
+    return (
+        isinstance(instance, InstanceType)
+        and getattr(method, "__module__", None) == InstanceType.run_shell_script.__module__
+        and getattr(method, "__qualname__", "").endswith("OdooInstance.run_shell_script")
+    )
 
 
 @dataclass(slots=True)
@@ -207,27 +249,12 @@ def list_modules(
     *,
     state: str | None = None,
 ) -> list[ModuleRecord]:
-    names_repr = json.dumps(list(names))
-    state_repr = json.dumps(state)
-    source = (
-        "import json as _mjson\n"
-        f"_names = _mjson.loads({names_repr!r})\n"
-        f"_state = _mjson.loads({state_repr!r})\n"
-        "_dom = []\n"
-        "if _names:\n"
-        "    _dom.append(('name', 'in', _names))\n"
-        "if _state:\n"
-        "    _dom.append(('state', '=', _state))\n"
-        "_mods = env['ir.module.module'].search(_dom, order='name')\n"
-        "result = [\n"
-        "    {'name': m.name, 'state': m.state, 'technical_name': m.name,\n"
-        "     'installed_version': m.installed_version,\n"
-        "     'latest_version': m.latest_version, 'license': m.license,\n"
-        "     'summary': m.summary}\n"
-        "    for m in _mods\n"
-        "]\n"
+    source = _module_list_source(names, state)
+    outcome = (
+        _shell_outcome(list_modules_command(instance, names=names, state=state).run())
+        if _captured_shell_supported(instance)
+        else _run_with_payload(instance, source)
     )
-    outcome = _run_with_payload(instance, source)
     if outcome.returncode != 0:
         raise RuntimeError(
             f"module list failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
@@ -253,6 +280,60 @@ def list_modules(
             )
         )
     return out
+
+
+def _module_list_source(names: tuple[str, ...], state: str | None) -> str:
+    names_repr = json.dumps(list(names))
+    state_repr = json.dumps(state)
+    return (
+        "import json as _mjson\n"
+        f"_names = _mjson.loads({names_repr!r})\n"
+        f"_state = _mjson.loads({state_repr!r})\n"
+        "_dom = []\n"
+        "if _names:\n"
+        "    _dom.append(('name', 'in', _names))\n"
+        "if _state:\n"
+        "    _dom.append(('state', '=', _state))\n"
+        "_mods = env['ir.module.module'].search(_dom, order='name')\n"
+        "result = [{'name': m.name, 'state': m.state, 'technical_name': m.name, "
+        "'installed_version': m.installed_version, 'latest_version': m.latest_version, "
+        "'license': m.license, 'summary': m.summary} for m in _mods]\n"
+    )
+
+
+def list_modules_command(
+    instance: OdooInstance,
+    names: tuple[str, ...] = (),
+    *,
+    state: str | None = None,
+) -> Command[CommandResult]:
+    """Capture the read-only module listing as an inspectable child step."""
+    source = _module_list_source(names, state)
+    return instance.run_shell_script_command(source)
+
+
+def module_records_from_result(result: CommandResult) -> list[ModuleRecord]:
+    """Decode one captured module-list result without launching another child."""
+    payload = parse_payload(result.stdout)
+    raw = payload.get("result") if payload is not None else None
+    if not isinstance(raw, list):
+        return []
+    records: list[ModuleRecord] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        records.append(
+            ModuleRecord(
+                name=str(item.get("name", "")),
+                state=str(item.get("state", "")),
+                technical_name=item.get("technical_name"),
+                installed_version=item.get("installed_version"),
+                latest_version=item.get("latest_version"),
+                license=item.get("license"),
+                summary=item.get("summary"),
+            )
+        )
+    return records
 
 
 @dataclass(slots=True)
@@ -281,20 +362,36 @@ def update_modules(
         raise ConfigError(f"modules not installed: {', '.join(plan.not_installed)}")
     if not plan.modules:
         raise ConfigError("no installed modules to update")
-    modules_repr = json.dumps(list(plan.modules))
-    source = (
+    source = _update_modules_source(tuple(plan.modules))
+    if not _captured_shell_supported(instance):
+        return _run_with_payload(instance, source, commit=True)
+    _ = env_id
+    return _shell_outcome(
+        update_modules_command(instance, tuple(plan.modules), env_id=env_id).run()
+    )
+
+
+def update_modules_command(
+    instance: OdooInstance,
+    modules: tuple[str, ...],
+    *,
+    env_id: str,
+) -> Command[CommandResult]:
+    """Capture one exact module-upgrade child after selection is frozen."""
+    if not modules:
+        raise ConfigError("no installed modules to update")
+    source = _update_modules_source(modules)
+    _ = env_id
+    return instance._shell_script_command(source, commit=True, exclusive=True)
+
+
+def _update_modules_source(modules: tuple[str, ...]) -> str:
+    modules_repr = json.dumps(list(modules))
+    return (
         f"_mods = env['ir.module.module'].search([('name', 'in', {modules_repr!r}), "
         "('state', '=', 'installed')])\n"
         "_mods.button_immediate_upgrade()\n"
         "result = {'updated': list(_mods.mapped('name'))}\n"
-    )
-    _ = env_id
-    result = instance._run_shell_script_exclusive(source, commit=True)
-    return ShellOutcome(
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        payload=parse_payload(result.stdout),
     )
 
 
@@ -390,6 +487,23 @@ def run_odoo_tests(
             exit_code=exit_code,
         ),
         diagnostic,
+    )
+
+
+def module_tests_command(
+    instance: OdooInstance,
+    spec: OdooTestSpec,
+    *,
+    http_interface: str,
+    http_port: int,
+) -> Command[tuple[OdooTestResult, str | None]]:
+    """Capture the same native test command used by the module-test leaf."""
+    return run_odoo_tests_command(
+        instance,
+        spec,
+        http_interface=http_interface,
+        http_port=http_port,
+        compatibility_runner=run_odoo_tests,
     )
 
 
@@ -657,6 +771,55 @@ def export_translations(
     return results
 
 
+def export_translations_command(
+    instance: OdooInstance,
+    modules: tuple[str, ...],
+    languages: tuple[str, ...],
+    *,
+    worktree_root: Path,
+) -> Command[list[TranslationExportResult]]:
+    """Capture all translation requests in one Odoo shell invocation."""
+    if not modules or not languages:
+        raise ConfigError("translations export requires --module and --language")
+    chunks = [
+        _build_export_source(module, language) for module in modules for language in languages
+    ]
+    source = "_odcli_exports = []\n"
+    for index, chunk in enumerate(chunks):
+        if index:
+            source += "del result\n"
+        source += chunk
+        source += "_odcli_exports.append(result)\n"
+    source += "result = _odcli_exports\n"
+
+    def convert(result: CommandResult) -> list[TranslationExportResult]:
+        payload = parse_payload(result.stdout)
+        raw_results = payload.get("result") if payload is not None else None
+        if not isinstance(raw_results, list):
+            raise ConfigError("translations export produced no payload")
+        addons_paths = (
+            instance.config.start_config.addons_path
+            if instance.config.start_config is not None
+            else None
+        )
+        return [
+            _finalize_export(
+                module,
+                language,
+                raw if isinstance(raw, dict) else {},
+                worktree_root=worktree_root,
+                addons_paths=addons_paths,
+            )
+            for (module, language), raw in zip(
+                ((m, lang) for m in modules for lang in languages), raw_results, strict=True
+            )
+        ]
+
+    return instance._shell_script_command(
+        source, commit=False, exclusive=False, result_converter=convert
+    )
+
+
 def _export_one(
     instance: OdooInstance,
     module: str,
@@ -826,6 +989,56 @@ def verify_deps(
         if check.returncode != 0:
             result.missing_imports.append({"module": module_name, "import": import_name})
     return result
+
+
+def verify_deps_command(
+    *,
+    recorded_python: Path,
+    worktree_root: Path,
+    uv_executable: str = "uv",
+) -> Command[DepsVerifyResult]:
+    """Capture dependency verification probes in one command ledger."""
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
+
+    imports = _scan_external_python_deps(worktree_root)
+    steps = [
+        PreparedStep(
+            step_id="deps.verify.pip-check",
+            argv=(uv_executable, "pip", "check", "--python", str(recorded_python)),
+            read_only=True,
+            text=True,
+        )
+    ]
+    for index, (_module, import_name) in enumerate(imports):
+        steps.append(
+            PreparedStep(
+                step_id=f"deps.verify.import.{index}",
+                argv=(str(recorded_python), "-c", f"import {import_name}"),
+                cwd=str(worktree_root),
+                read_only=True,
+                text=True,
+            )
+        )
+
+    def run(context: RunContext[DepsVerifyResult]) -> DepsVerifyResult:
+        result = DepsVerifyResult()
+        check = cast("ProcessResult", context.process(steps[0].step_id))
+        stdout = check.stdout if isinstance(check.stdout, str) else ""
+        stderr = check.stderr if isinstance(check.stderr, str) else ""
+        result.pip_check_output = (stdout + stderr).strip()
+        result.pip_check_ok = check.returncode == 0
+        for raw_line in result.pip_check_output.splitlines():
+            if raw_line.strip():
+                result.distributions.append({"detail": raw_line.strip()})
+        for index, (module_name, import_name) in enumerate(imports):
+            probe = cast("ProcessResult", context.process(f"deps.verify.import.{index}"))
+            if probe.returncode != 0:
+                result.missing_imports.append({"module": module_name, "import": import_name})
+        return result
+
+    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
+    return Command.create(plan, run, tuple(steps), executor=SubprocessExecutor())
 
 
 def _scan_external_python_deps(worktree_root: Path) -> list[tuple[str, str]]:

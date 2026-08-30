@@ -6,7 +6,7 @@ import json
 import sys
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Generic, Never, Protocol, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Generic, Never, Protocol, TypeVar, cast, overload
 
 import click
 import msgspec
@@ -15,6 +15,19 @@ from toon import encode
 
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the canonical JSON alias only when a caller explicitly imports it."""
+    if name == "JsonValue":
+        from odoo_instance_sdk.execution import JsonValue
+
+        globals()[name] = JsonValue
+        return JsonValue
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class OutputMode(StrEnum):
@@ -25,7 +38,6 @@ class OutputMode(StrEnum):
     TOON = "toon"
 
 
-type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 type JsonObject = dict[str, JsonValue]
 type DiagnosticValue = str | BaseException
 
@@ -349,6 +361,50 @@ def emit_command_plan(
     )
 
 
+def action_command(
+    step_id: str,
+    operation: Callable[[], _ResultT],
+    *,
+    description: str | None = None,
+    mutating: bool = False,
+) -> _InspectableCommand[_ResultT]:
+    """Capture a bounded domain operation behind one command-local action.
+
+    Process-backed SDK operations provide richer command siblings.  This
+    adapter is for bounded leaves whose domain operation is already the
+    canonical process boundary or a read-only computation; it still gives
+    preview and execution one immutable command object and one ledger entry.
+    """
+    from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
+
+    action = PreparedAction(
+        step_id=step_id,
+        action=step_id,
+        description=description or step_id,
+        mutating=mutating,
+    )
+
+    def callback(context: RunContext[_ResultT]) -> _ResultT:
+        context.action(step_id)
+        return operation()
+
+    return Command.create(
+        ExecutionPlan(
+            steps=(
+                ActionStep(
+                    step_id=step_id,
+                    action=step_id,
+                    description=description or step_id,
+                    mutating=mutating,
+                ),
+            )
+        ),
+        callback,
+        (action,),
+    )
+
+
 def run_or_preview(
     build_command: Callable[[], _InspectableCommand[_ResultT]],
     *,
@@ -360,6 +416,8 @@ def run_or_preview(
     provenance: JsonObject | None = None,
     confirm: Callable[[], None] | None = None,
     rich: Callable[[OutputDocument], str] | None = None,
+    preview: Callable[[_InspectableCommand[_ResultT]], JsonObject] | None = None,
+    emit_normal: bool = True,
 ) -> tuple[int, _ResultT | None]:
     """Build one command, then either inspect it or run that same instance.
 
@@ -369,12 +427,15 @@ def run_or_preview(
     command = build_command()
     if dry_run:
         return (
-            emit_command_plan(
-                command,
-                command_name=command_name,
-                mode=mode,
-                context=context,
-                provenance=provenance,
+            emit(
+                success_document(
+                    command=command_name,
+                    result=preview(command) if preview is not None else model_to_dict(command.plan),
+                    context=context,
+                    provenance=provenance,
+                    dry_run=True,
+                ),
+                mode,
                 rich=rich,
             ),
             None,
@@ -382,6 +443,8 @@ def run_or_preview(
     if confirm is not None:
         confirm()
     value = command.run()
+    if not emit_normal:
+        return 0, value
     payload = result(value) if result is not None else {}
     status = emit(
         success_document(
@@ -503,6 +566,7 @@ __all__ = [
     "OutputDocument",
     "OutputError",
     "OutputMode",
+    "action_command",
     "build_envelope",
     "command_options",
     "emit",
