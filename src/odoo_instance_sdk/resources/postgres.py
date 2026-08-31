@@ -5,10 +5,13 @@ import json
 import os
 import tempfile
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
+
+import msgspec
 
 from odoo_instance_sdk.exceptions import (
     LockConflictError,
@@ -216,9 +219,21 @@ class PostgresCluster:
         """User-owned approval store; it is intentionally outside the repository."""
         return self._compose_dir().parent / "approved-images.json"
 
-    def _resolve_image_digest(self, timeout: float | None = None) -> str:
+    def _resolve_image_digest(
+        self,
+        timeout: float | None = None,
+        *,
+        pull_step_id: str | None = None,
+        inspect_step_id: str | None = None,
+    ) -> str:
         assert self._image is not None
-        return resolve_image_digest(self._compose_runner, self._image, timeout=timeout)
+        return resolve_image_digest(
+            self._compose_runner,
+            self._image,
+            timeout=timeout,
+            pull_step_id=pull_step_id,
+            inspect_step_id=inspect_step_id,
+        )
 
     def resolve_image_digest(self, timeout: float | None = None) -> str:
         """Resolve the manifest image to the OCI RepoDigest to be explicitly approved."""
@@ -256,7 +271,11 @@ class PostgresCluster:
         )
 
         def run(context: RunContext[str]) -> str:
-            result = self._resolve_image_digest(timeout)
+            result = self._resolve_image_digest(
+                timeout,
+                pull_step_id="postgres.image.pull",
+                inspect_step_id="postgres.image.inspect",
+            )
             self._account_legacy_steps(context, steps)
             return result
 
@@ -311,7 +330,11 @@ class PostgresCluster:
         )
 
         def run(context: RunContext[None]) -> None:
-            resolved = self._resolve_image_digest(timeout)
+            resolved = self._resolve_image_digest(
+                timeout,
+                pull_step_id="postgres.image.pull",
+                inspect_step_id="postgres.image.inspect",
+            )
             if image_digest != resolved:
                 raise PostgresImageNotTrustedError(
                     "image digest does not match the resolved OCI RepoDigest"
@@ -346,7 +369,13 @@ class PostgresCluster:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
 
-    def _require_trusted_image(self, timeout: float) -> str:
+    def _require_trusted_image(
+        self,
+        timeout: float,
+        *,
+        pull_step_id: str | None = None,
+        inspect_step_id: str | None = None,
+    ) -> str:
         trust_file = self._trust_file()
         try:
             data = json.loads(trust_file.read_text(encoding="utf-8"))
@@ -360,14 +389,23 @@ class PostgresCluster:
             raise PostgresImageNotTrustedError(
                 "postgres image digest is not approved for this user; run 'odcli postgres approve-image --image-digest <resolved-digest>'"
             )
-        resolved = self._resolve_image_digest(timeout)
+        resolved = self._resolve_image_digest(
+            timeout, pull_step_id=pull_step_id, inspect_step_id=inspect_step_id
+        )
         if expected != resolved:
             raise PostgresImageNotTrustedError(
                 "postgres image digest changed since explicit approval"
             )
         return resolved
 
-    def _ensure_artifacts(self, image: str, *, timeout: float | None = None) -> None:
+    def _ensure_artifacts(
+        self,
+        image: str,
+        *,
+        timeout: float | None = None,
+        temporary_path: Path | None = None,
+        step_id: str | None = None,
+    ) -> None:
         """Lazily create compose artifacts (idempotent)."""
         if not self.owned:
             return
@@ -389,6 +427,8 @@ class PostgresCluster:
             runner=self._compose_runner,
             project_name=compose_project_name(self._project_id),
             timeout=timeout,
+            temporary_path=temporary_path,
+            step_id=step_id,
         )
 
     def status(self) -> PostgresClusterState:
@@ -433,6 +473,7 @@ class PostgresCluster:
                 PreparedStep(
                     step_id="postgres.status.ps",
                     argv=(*prefix, "ps", "--format", "json"),
+                    cwd=str(compose_file.parent),
                     read_only=True,
                     text=True,
                 ),
@@ -468,7 +509,10 @@ class PostgresCluster:
             if len(steps) == 1:
                 context.action(steps[0].step_id)
                 return unavailable_state
-            result = self._status_compose(health_step_id="postgres.status.health")
+            result = self._status_compose(
+                health_step_id="postgres.status.health",
+                ps_step_id="postgres.status.ps",
+            )
             self._account_legacy_steps(context, steps)
             return result
 
@@ -489,7 +533,11 @@ class PostgresCluster:
         return PostgresClusterState.UNREACHABLE
 
     def _status_compose(
-        self, *, timeout: float | None = None, health_step_id: str | None = None
+        self,
+        *,
+        timeout: float | None = None,
+        health_step_id: str | None = None,
+        ps_step_id: str | None = None,
     ) -> PostgresClusterState:
         if self._compose_runner.requires_docker and not docker_available():
             return PostgresClusterState.UNKNOWN
@@ -504,6 +552,7 @@ class PostgresCluster:
             user=self._user,
             timeout=timeout,
             health_step_id=health_step_id,
+            ps_step_id=ps_step_id,
         )
 
     def ensure_running(self, timeout: float = _DEFAULT_TIMEOUT) -> None:
@@ -514,13 +563,44 @@ class PostgresCluster:
 
         context = active_context()
         if context is not None:
-            self._ensure_running_impl(timeout)
+            temporary_path = None
+            if self._mode != "external" and context.planned("postgres.ensure.config"):
+                config_step = context.prepared("postgres.ensure.config")
+                try:
+                    config_index = len(config_step.argv) - 1 - config_step.argv[::-1].index("-f")
+                    temporary_path = Path(config_step.argv[config_index + 1])
+                except (ValueError, IndexError):
+                    raise PostgresClusterError(
+                        "captured postgres ensure config step has no temporary compose path"
+                    ) from None
+            step_ids = {
+                step_id: step_id
+                for step_id in (
+                    "postgres.ensure.image.pull",
+                    "postgres.ensure.image.inspect",
+                    "postgres.ensure.status.ps",
+                    "postgres.ensure.status.health",
+                    "postgres.ensure.config",
+                    "postgres.ensure.up",
+                    "postgres.ensure.final.ps",
+                    "postgres.ensure.final.health",
+                )
+                if context.planned(step_id)
+            }
+            self._ensure_running_impl(timeout, temporary_path=temporary_path, step_ids=step_ids)
             if self._mode != "external":
-                self._account_optional_steps(context, self._ensure_running_steps(timeout))
+                self._account_optional_steps(
+                    context, self._ensure_running_steps(timeout, temporary_path=temporary_path)
+                )
             return None
         return self.ensure_running_command(timeout).run()
 
-    def _ensure_running_steps(self, timeout: float) -> tuple[PreparedStep | PreparedAction, ...]:
+    def _ensure_running_steps(
+        self,
+        timeout: float,
+        *,
+        temporary_path: Path | None = None,
+    ) -> tuple[PreparedStep | PreparedAction, ...]:
         """Return the exact process/action manifest used by ensure-running."""
         from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
 
@@ -541,6 +621,9 @@ class PostgresCluster:
             self.compose_project_name,
             "-f",
             str(compose_file),
+        )
+        config_path = temporary_path or (
+            compose_file.parent / f".compose-{uuid.uuid4().hex}.yaml.tmp"
         )
         return (
             PreparedStep(
@@ -565,6 +648,8 @@ class PostgresCluster:
             PreparedStep(
                 step_id="postgres.ensure.status.ps",
                 argv=(*prefix, "ps", "--format", "json"),
+                cwd=str(compose_file.parent),
+                timeout=timeout,
                 read_only=True,
             ),
             PreparedStep(
@@ -581,33 +666,34 @@ class PostgresCluster:
                     "postgres",
                 ),
                 cwd=str(compose_file.parent),
+                timeout=timeout,
                 read_only=True,
             ),
             PreparedStep(
                 step_id="postgres.ensure.config",
-                # ``write_compose_file_atomic`` validates a deterministic
-                # temporary sibling before publishing compose.yaml.  Capture
-                # the path shape here; the proc boundary permits only this
-                # explicitly late-bound temporary suffix.
                 argv=(
                     *prefix[:-2],
                     "-f",
-                    str(compose_file.parent / ".compose-<runtime>.yaml.tmp"),
+                    str(config_path),
                     "config",
                     "--quiet",
                 ),
                 cwd=str(compose_file.parent),
+                timeout=timeout,
                 mutating=True,
             ),
             PreparedStep(
                 step_id="postgres.ensure.up",
                 argv=(*prefix, "up", "--detach", "--wait"),
                 cwd=str(compose_file.parent),
+                timeout=timeout,
                 mutating=True,
             ),
             PreparedStep(
                 step_id="postgres.ensure.final.ps",
                 argv=(*prefix, "ps", "--format", "json"),
+                cwd=str(compose_file.parent),
+                timeout=timeout,
                 read_only=True,
             ),
             PreparedStep(
@@ -624,6 +710,7 @@ class PostgresCluster:
                     "postgres",
                 ),
                 cwd=str(compose_file.parent),
+                timeout=timeout,
                 read_only=True,
             ),
         )
@@ -634,24 +721,36 @@ class PostgresCluster:
         from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.internal.proc import SubprocessExecutor
 
-        steps = self._ensure_running_steps(timeout)
+        compose_file = self._compose_file()
+        temporary_path = compose_file.parent / f".compose-{uuid.uuid4().hex}.yaml.tmp"
+        steps = self._ensure_running_steps(timeout, temporary_path=temporary_path)
 
         def run(context: RunContext[None]) -> None:
             if self._mode == "external":
                 context.action("postgres.ensure.external")
                 self._ensure_running_external()
             else:
-                self._ensure_running_compose(timeout)
+                self._ensure_running_compose(
+                    timeout,
+                    temporary_path=temporary_path,
+                    step_ids={step.step_id: step.step_id for step in steps},
+                )
             self._account_optional_steps(context, steps)
 
         plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
         return self._make_command(plan, run, steps, executor=executor or SubprocessExecutor())
 
-    def _ensure_running_impl(self, timeout: float = _DEFAULT_TIMEOUT) -> None:
+    def _ensure_running_impl(
+        self,
+        timeout: float = _DEFAULT_TIMEOUT,
+        *,
+        temporary_path: Path | None = None,
+        step_ids: Mapping[str, str] | None = None,
+    ) -> None:
         if self._mode == "external":
             self._ensure_running_external()
             return
-        self._ensure_running_compose(timeout)
+        self._ensure_running_compose(timeout, temporary_path=temporary_path, step_ids=step_ids)
 
     def _ensure_running_external(self) -> None:
         state = self._status_impl()
@@ -662,7 +761,13 @@ class PostgresCluster:
             f"(mode={self._mode}, state={state.value})"
         )
 
-    def _ensure_running_compose(self, timeout: float) -> None:
+    def _ensure_running_compose(
+        self,
+        timeout: float,
+        *,
+        temporary_path: Path | None = None,
+        step_ids: Mapping[str, str] | None = None,
+    ) -> None:
         """Start a managed cluster when status is STOPPED, STARTING, or UNKNOWN."""
         deadline = time.monotonic() + max(0.1, timeout)
         try:
@@ -671,12 +776,25 @@ class PostgresCluster:
                 if self._compose_runner.requires_docker:
                     ensure_docker_or_raise()
                 remaining = max(0.0, deadline - time.monotonic())
-                image = self._require_trusted_image(remaining)
-                state = self._status_compose(timeout=max(0.0, deadline - time.monotonic()))
+                image = self._require_trusted_image(
+                    remaining,
+                    pull_step_id=(step_ids or {}).get("postgres.ensure.image.pull"),
+                    inspect_step_id=(step_ids or {}).get("postgres.ensure.image.inspect"),
+                )
+                state = self._status_compose(
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    ps_step_id=(step_ids or {}).get("postgres.ensure.status.ps"),
+                    health_step_id=(step_ids or {}).get("postgres.ensure.status.health"),
+                )
                 # Do not rewrite secret/config artifacts on a healthy fast path.
                 if state is PostgresClusterState.HEALTHY:
                     return
-                self._ensure_artifacts(image, timeout=max(0.0, deadline - time.monotonic()))
+                self._ensure_artifacts(
+                    image,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    temporary_path=temporary_path,
+                    step_id=(step_ids or {}).get("postgres.ensure.config"),
+                )
                 if state is PostgresClusterState.UNHEALTHY:
                     raise PostgresClusterUnhealthyError(
                         f"compose postgres cluster unhealthy at {self.endpoint} "
@@ -687,19 +805,25 @@ class PostgresCluster:
                     self._compose_file(),
                     compose_project_name(self._project_id),
                     timeout=max(0.0, deadline - time.monotonic()),
+                    step_id=(step_ids or {}).get("postgres.ensure.up"),
                 )
-                while True:
-                    current = self._status_compose(timeout=max(0.0, deadline - time.monotonic()))
-                    if current is PostgresClusterState.HEALTHY:
-                        return
-                    if current is PostgresClusterState.UNHEALTHY:
-                        raise PostgresClusterUnhealthyError(
-                            f"compose postgres cluster unhealthy at {self.endpoint} "
-                            f"(mode={self._mode}, state={current.value})"
-                        )
-                    if time.monotonic() >= deadline:
-                        raise PostgresClusterTimeoutError(timeout)
-                    time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+                # ``compose up --wait`` owns the bounded readiness wait.  The
+                # final pair is consequently a single captured observation;
+                # polling it again would consume the same immutable step IDs a
+                # second time and make the strict ledger report a duplicate.
+                current = self._status_compose(
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    ps_step_id=(step_ids or {}).get("postgres.ensure.final.ps"),
+                    health_step_id=(step_ids or {}).get("postgres.ensure.final.health"),
+                )
+                if current is PostgresClusterState.HEALTHY:
+                    return
+                if current is PostgresClusterState.UNHEALTHY:
+                    raise PostgresClusterUnhealthyError(
+                        f"compose postgres cluster unhealthy at {self.endpoint} "
+                        f"(mode={self._mode}, state={current.value})"
+                    )
+                raise PostgresClusterTimeoutError(timeout)
         except LockConflictError as exc:
             raise PostgresClusterTimeoutError(timeout) from exc
 
@@ -744,6 +868,8 @@ class PostgresCluster:
                 PreparedStep(
                     step_id="postgres.stop.status.ps",
                     argv=(*prefix, "ps", "--format", "json"),
+                    cwd=str(compose_file.parent),
+                    timeout=timeout,
                     read_only=True,
                 ),
                 PreparedStep(
@@ -760,15 +886,12 @@ class PostgresCluster:
                         "postgres",
                     ),
                     cwd=str(compose_file.parent),
+                    timeout=timeout,
                     read_only=True,
                 ),
                 PreparedStep(
                     step_id="postgres.stop",
-                    # The lifecycle spends part of the deadline acquiring its
-                    # lock and probing status.  Capture the command shape,
-                    # while allowing the adapter to pass the bounded
-                    # remaining timeout to the same prepared step.
-                    argv=(*prefix, "stop", "--timeout", "<runtime>"),
+                    argv=(*prefix, "stop", "--timeout", str(int(max(1, timeout)))),
                     cwd=str(compose_file.parent),
                     mutating=True,
                     timeout=timeout,
@@ -778,17 +901,37 @@ class PostgresCluster:
         def run(context: RunContext[None]) -> None:
             if self._mode == "external":
                 context.action("postgres.stop.external")
-                self._stop_impl(timeout)
+                self._stop_impl(
+                    timeout,
+                    command_timeout=int(max(1, timeout)),
+                    status_ps_step_id="postgres.stop.status.ps",
+                    status_health_step_id="postgres.stop.status.health",
+                    stop_step_id="postgres.stop",
+                )
             elif not compose_file.is_file():
                 context.action("postgres.stop.missing")
             else:
-                self._stop_impl(timeout)
+                self._stop_impl(
+                    timeout,
+                    command_timeout=int(max(1, timeout)),
+                    status_ps_step_id="postgres.stop.status.ps",
+                    status_health_step_id="postgres.stop.status.health",
+                    stop_step_id="postgres.stop",
+                )
             self._account_optional_steps(context, steps)
 
         plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
         return self._make_command(plan, run, steps, executor=executor or SubprocessExecutor())
 
-    def _stop_impl(self, timeout: float = _DEFAULT_STOP_TIMEOUT) -> None:
+    def _stop_impl(
+        self,
+        timeout: float = _DEFAULT_STOP_TIMEOUT,
+        *,
+        command_timeout: int | None = None,
+        status_ps_step_id: str | None = None,
+        status_health_step_id: str | None = None,
+        stop_step_id: str | None = None,
+    ) -> None:
         if self._mode == "external":
             raise PostgresClusterNotOwnedError(
                 f"cannot stop externally owned postgres cluster at {self.endpoint}"
@@ -803,7 +946,11 @@ class PostgresCluster:
                 if self._compose_runner.requires_docker:
                     ensure_docker_or_raise()
                 if (
-                    self._status_compose(timeout=max(0.0, deadline - time.monotonic()))
+                    self._status_compose(
+                        timeout=max(0.0, deadline - time.monotonic()),
+                        ps_step_id=status_ps_step_id,
+                        health_step_id=status_health_step_id,
+                    )
                     is PostgresClusterState.STOPPED
                 ):
                     return
@@ -812,6 +959,8 @@ class PostgresCluster:
                     compose_file,
                     compose_project_name(self._project_id),
                     timeout=max(0.0, deadline - time.monotonic()),
+                    command_timeout=command_timeout,
+                    step_id=stop_step_id,
                 )
         except LockConflictError as exc:
             raise PostgresClusterTimeoutError(timeout) from exc
@@ -836,11 +985,19 @@ class PostgresCluster:
         """
         return self.resource_snapshot_command().run()
 
-    def resource_snapshot_command(
+    def resource_snapshot_command(  # noqa: C901
         self, *, executor: ProcessExecutor | None = None
     ) -> Command[ClusterResourceSnapshot | None]:
         from odoo_instance_sdk.execution import ExecutionPlan
-        from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
+        from odoo_instance_sdk.internal.proc import (
+            PreparedAction,
+            PreparedStep,
+            ProcessExecutionError,
+            ProcessResult,
+            SubprocessExecutor,
+        )
+
+        process_executor = executor or SubprocessExecutor()
 
         step = PreparedAction(
             step_id="postgres.resource.snapshot",
@@ -849,14 +1006,182 @@ class PostgresCluster:
             read_only=True,
         )
 
+        steps: list[PreparedStep | PreparedAction] = [step]
+        captured_container_id: str | None = None
+        observations: tuple[dict[str, JsonValue], ...] = ()
+        if self._mode == "compose" and self._compose_file().is_file():
+            from odoo_instance_sdk.internal.cluster_resources import container_id_from_rows
+
+            prefix = (
+                "docker",
+                "compose",
+                "--project-name",
+                self.compose_project_name,
+                "-f",
+                str(self._compose_file()),
+            )
+            resource_ps = (*prefix, "ps", "--format", "json")
+            planning_step = PreparedStep(
+                step_id="postgres.resource.plan.ps",
+                argv=resource_ps,
+                cwd=str(self._compose_file().parent),
+                timeout=5.0,
+                read_only=True,
+            )
+
+            def planning_observation(
+                result: ProcessResult | None = None, *, diagnostic: str | None = None
+            ) -> dict[str, JsonValue]:
+                from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
+                value: dict[str, JsonValue] = {
+                    "step_id": planning_step.step_id,
+                    "process": cast(
+                        "JsonValue", msgspec.to_builtins(planning_step.public_projection())
+                    ),
+                    "read_only": True,
+                    "executed_during_planning": True,
+                }
+                if result is not None:
+                    stdout = (
+                        result.stdout
+                        if isinstance(result.stdout, str)
+                        else (
+                            result.stdout.decode(errors="replace")
+                            if isinstance(result.stdout, bytes)
+                            else ""
+                        )
+                    )
+                    value["result"] = {
+                        "returncode": result.returncode,
+                        "stdout": cast("str", redacted_projection(stdout, field="stdout")),
+                    }
+                if diagnostic is not None:
+                    value["diagnostic"] = diagnostic
+                return value
+
+            if not self._compose_runner.requires_docker or docker_available():
+                try:
+                    planning_result = process_executor.execute(planning_step)
+                except ProcessExecutionError as error:
+                    observations = (planning_observation(diagnostic=error.__class__.__name__),)
+                else:
+                    if isinstance(planning_result, ProcessResult):
+                        stdout = (
+                            planning_result.stdout
+                            if isinstance(planning_result.stdout, str)
+                            else ""
+                        )
+                        rows: list[dict[str, JsonValue]] = []
+                        for line in stdout.splitlines():
+                            try:
+                                parsed = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if isinstance(parsed, dict):
+                                rows.append(parsed)
+                        captured_container_id = container_id_from_rows(rows, "postgres")
+                        observation = planning_observation(planning_result)
+                        observation["container_found"] = captured_container_id is not None
+                        observations = (observation,)
+                    else:
+                        observations = (
+                            planning_observation(diagnostic="planning executor returned no result"),
+                        )
+            else:
+                observations = (planning_observation(diagnostic="docker unavailable"),)
+            steps.extend(
+                (
+                    PreparedStep(
+                        step_id="postgres.resource.status.ps",
+                        argv=resource_ps,
+                        cwd=str(self._compose_file().parent),
+                        timeout=5.0,
+                        read_only=True,
+                    ),
+                    PreparedStep(
+                        step_id="postgres.resource.status.health",
+                        argv=(
+                            *prefix,
+                            "exec",
+                            "-T",
+                            "postgres",
+                            "pg_isready",
+                            "-U",
+                            self._user or "",
+                            "-d",
+                            "postgres",
+                        ),
+                        cwd=str(self._compose_file().parent),
+                        timeout=5.0,
+                        read_only=True,
+                    ),
+                )
+            )
+            if captured_container_id is not None:
+                steps.extend(
+                    (
+                        PreparedStep(
+                            step_id="postgres.resource.inspect",
+                            argv=("docker", "inspect", "--format", "json", captured_container_id),
+                            timeout=5.0,
+                            read_only=True,
+                        ),
+                        PreparedStep(
+                            step_id="postgres.resource.stats",
+                            argv=(
+                                "docker",
+                                "stats",
+                                "--no-stream",
+                                "--format",
+                                "json",
+                                captured_container_id,
+                            ),
+                            timeout=5.0,
+                            read_only=True,
+                        ),
+                    )
+                )
+            steps.append(
+                PreparedStep(
+                    step_id="postgres.resource.volume-df",
+                    argv=("docker", "system", "df", "-v", "--format", "{{json .}}"),
+                    timeout=5.0,
+                    read_only=True,
+                )
+            )
+
+        captured_steps = tuple(steps)
+
         def run(
             context: RunContext[ClusterResourceSnapshot | None],
         ) -> ClusterResourceSnapshot | None:
             context.action(step.step_id)
-            return self._resource_snapshot_impl()
+            if self._mode == "external":
+                self._account_optional_steps(context, captured_steps)
+                return None
+            state = self._status_compose(
+                ps_step_id="postgres.resource.status.ps",
+                health_step_id="postgres.resource.status.health",
+            )
+            result = self._resource_snapshot_impl(
+                state=state,
+                container_id=captured_container_id,
+                step_ids={
+                    "inspect": "postgres.resource.inspect",
+                    "stats": "postgres.resource.stats",
+                    "volume-df": "postgres.resource.volume-df",
+                },
+            )
+            self._account_legacy_steps(context, captured_steps)
+            self._account_optional_steps(context, captured_steps)
+            return result
 
-        plan = ExecutionPlan(steps=(step.public_projection(),))
-        return self._make_command(plan, run, (step,), executor=executor or SubprocessExecutor())
+        plan = ExecutionPlan(
+            steps=tuple(item.public_projection() for item in captured_steps),
+            observations=tuple(observation for observation in observations),
+        )
+        return self._make_command(plan, run, captured_steps, executor=process_executor)
 
     def _make_command(
         self,
@@ -880,7 +1205,6 @@ class PostgresCluster:
             callback,
             steps,
             executor=executor,
-            strict=isinstance(self._compose_runner, SubprocessComposeRunner),
         )
         return Command.from_prepared(plan, prepared)
 
@@ -912,9 +1236,13 @@ class PostgresCluster:
             if context.planned(step.step_id) and not context.consumed(step.step_id):
                 context.skip(step.step_id)
 
-    def _resource_snapshot_impl(self) -> ClusterResourceSnapshot | None:
-        if self._mode == "external":
-            return None
+    def _resource_snapshot_impl(
+        self,
+        *,
+        state: PostgresClusterState,
+        container_id: str | None,
+        step_ids: Mapping[str, str],
+    ) -> ClusterResourceSnapshot:
         from odoo_instance_sdk.internal.cluster_resources import cluster_resource_snapshot
 
         return cluster_resource_snapshot(
@@ -922,7 +1250,14 @@ class PostgresCluster:
             compose_project_name=self.compose_project_name,
             service="postgres",
             runner=self._compose_runner,
-            state=self._status_impl(),
+            state=state,
+            container_id=container_id,
+            # The command's planning observation is the only allowed
+            # ``compose ps`` probe.  A missing planning result is a bounded
+            # unavailable observation, never permission to launch a second
+            # unplanned resolver during execution.
+            resolve_container=False,
+            step_ids=step_ids,
         )
 
 

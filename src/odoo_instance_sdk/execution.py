@@ -60,20 +60,6 @@ class ProcessStep(
     interactive: bool = False
     long_running: bool = False
 
-    @property
-    def stdin_preview(self) -> str | None:
-        """Compatibility spelling for callers describing stdin explicitly."""
-
-        return self.input_preview
-
-    @property
-    def timeout_seconds(self) -> float | None:
-        return self.timeout
-
-    @property
-    def execution_mode(self) -> str:
-        return self.mode
-
 
 class ActionStep(
     msgspec.Struct,
@@ -162,6 +148,8 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
 
     @classmethod
     def from_prepared(cls, plan: ExecutionPlan, prepared: PreparedCommand[T]) -> Command[T]:
+        if not plan.fingerprint:
+            plan = plan.with_fingerprint()
         command = cls(plan=plan)
         _COMMANDS[id(command)] = cast("_StoredCommand", prepared)
         return command
@@ -209,7 +197,9 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
     def _private_projection(self) -> PrivateProjection | None:
         """Read resource compatibility data without exposing it publicly."""
         prepared = _COMMANDS.get(id(self))
-        return prepared.private_projection if prepared is not None else None
+        if prepared is None or prepared.private_projection is None:
+            return None
+        return prepared.private_projection
 
     def __del__(self) -> None:
         _COMMANDS.pop(id(self), None)

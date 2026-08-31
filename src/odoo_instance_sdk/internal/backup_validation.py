@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 
 _REQUIRED_ROOT_MEMBERS = {"manifest.json", "dump.sql"}
 
@@ -74,6 +73,7 @@ def validate_dump(
     *,
     timeout: float = 60.0,
     raise_if_unavailable: bool = False,
+    step_id: str | None = None,
 ) -> DumpValidationResult:
     exe = shutil.which("pg_restore")
     if exe is None:
@@ -86,9 +86,10 @@ def validate_dump(
 
         result = run_captured(
             [exe, "--list", str(path)],
-            env=sanitized_child_environment(),
             timeout=timeout,
             text=True,
+            step_id=step_id or "backup.validate",
+            read_only=True,
         )
         if result.returncode != 0:
             stderr = result.stderr if isinstance(result.stderr, str) else ""

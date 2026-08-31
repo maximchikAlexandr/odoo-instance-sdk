@@ -2,18 +2,26 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import TypeVar
 
 import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.exceptions import PostgresClusterTimeoutError
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+T = TypeVar("T")
+
+
+def _command(callback: Callable[[], T]) -> Command[T]:
+    return Command.create(ExecutionPlan(), lambda _context: callback(), ())
 
 
 class FakeComposeRunner(ComposeRunner):
@@ -160,9 +168,14 @@ def test_postgres_approve_image_forwards_bounded_timeout(
         def __init__(self) -> None:
             self.calls: list[tuple[str, float]] = []
 
-        def approve_image(self, image_digest: str, *, timeout: float | None = None) -> None:
-            assert timeout is not None
-            self.calls.append((image_digest, timeout))
+        def approve_image_command(
+            self, image_digest: str, *, timeout: float | None = None
+        ) -> Command[None]:
+            def approve() -> None:
+                assert timeout is not None
+                self.calls.append((image_digest, timeout))
+
+            return _command(approve)
 
         def to_diagnostic_dict(self) -> dict[str, object]:
             return {"image": "postgres:16"}
@@ -276,14 +289,20 @@ def test_postgres_up_and_stop_forward_timeouts_and_emit_results(
             self.ensure_timeouts: list[float] = []
             self.stop_timeouts: list[float] = []
 
-        def ensure_running(self, *, timeout: float) -> None:
-            self.ensure_timeouts.append(timeout)
+        def ensure_running_command(self, *, timeout: float) -> Command[None]:
+            def ensure() -> None:
+                self.ensure_timeouts.append(timeout)
 
-        def stop(self, *, timeout: float) -> None:
-            self.stop_timeouts.append(timeout)
+            return _command(ensure)
 
-        def status(self) -> PostgresClusterState:
-            return PostgresClusterState.HEALTHY
+        def stop_command(self, *, timeout: float) -> Command[None]:
+            def stop() -> None:
+                self.stop_timeouts.append(timeout)
+
+            return _command(stop)
+
+        def status_command(self) -> Command[PostgresClusterState]:
+            return _command(lambda: PostgresClusterState.HEALTHY)
 
         def to_diagnostic_dict(self) -> dict[str, object]:
             return {"mode": self.mode, "owned": self.owned, "endpoint": self.endpoint}
@@ -314,8 +333,11 @@ def test_postgres_up_failure_uses_command_specific_json_envelope(
     root = _write_project(tmp_path)
 
     class FailingCluster:
-        def ensure_running(self, *, timeout: float) -> None:
-            raise PostgresClusterTimeoutError(timeout)
+        def ensure_running_command(self, *, timeout: float) -> Command[None]:
+            def ensure() -> None:
+                raise PostgresClusterTimeoutError(timeout)
+
+            return _command(ensure)
 
     monkeypatch.setattr(
         PostgresCluster, "from_project", staticmethod(lambda _path: FailingCluster())

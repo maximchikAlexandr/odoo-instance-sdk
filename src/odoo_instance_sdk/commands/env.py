@@ -28,7 +28,6 @@ from odoo_instance_sdk.commands.output import (
     model_to_dict,
     output_options,
     resolve_output_mode,
-    rich_print,
     run_or_preview,
     sanitize_diagnostic,
     sanitize_terminal_text,
@@ -117,7 +116,7 @@ def env_group() -> None:
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @output_options
 @pass_cli_context
-def env_checkout(  # noqa: C901
+def env_checkout(
     cli_ctx: CliContext,
     branch: str,
     base_ref: str | None,
@@ -136,7 +135,7 @@ def env_checkout(  # noqa: C901
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.resources.environment import (
             EnvironmentCheckoutOptions,
             _checkout_public_plan,
@@ -157,49 +156,40 @@ def env_checkout(  # noqa: C901
             http_port=http_port,
         )
         command = client.environments.checkout_command(project_path, branch, options=options)
-        if isinstance(command, Command):
-            plan = _checkout_public_plan(command)
+        plan = _checkout_public_plan(command)
 
-            def checkout_rich(document: OutputDocument) -> str:
-                payload = document.result
-                if not isinstance(payload, dict):
-                    return ""
-                lines: list[str] = []
-                environment = payload.get("environment")
-                if isinstance(environment, dict):
-                    lines.append(
-                        f"Environment {environment.get('name')} "
-                        f"({environment.get('id')}) state={environment.get('state')}"
-                    )
-                plan_data = payload.get("plan")
-                if isinstance(plan_data, dict):
-                    lines.extend(_plan_lines("Checkout plan", plan_data))
-                return "\n".join(lines)
+        def checkout_rich(document: OutputDocument) -> str:
+            payload = document.result
+            if not isinstance(payload, dict):
+                return ""
+            lines: list[str] = []
+            environment = payload.get("environment")
+            if isinstance(environment, dict):
+                lines.append(
+                    f"Environment {environment.get('name')} "
+                    f"({environment.get('id')}) state={environment.get('state')}"
+                )
+            plan_data = payload.get("plan")
+            if isinstance(plan_data, dict):
+                lines.extend(_plan_lines("Checkout plan", plan_data))
+            return "\n".join(lines)
 
-            _, captured = run_or_preview(
-                lambda: command,
-                command_name="env.checkout",
-                mode=output_mode,
-                dry_run=dry_run,
-                result=lambda environment: model_to_dict(
-                    EnvironmentCheckoutResult(
-                        environment=cast("DevelopmentEnvironment", environment), plan=plan
-                    )
-                ),
-                rich=checkout_rich,
-            )
-            if dry_run:
-                return
-            assert captured is not None
-            result = EnvironmentCheckoutResult(environment=captured, plan=plan)
-        else:
-            # Keep compatibility with lightweight third-party resource doubles
-            # that predate the additive command sibling.
-            result = (
-                client.environments.plan_checkout(project_path, branch, options=options)
-                if dry_run
-                else client.environments.checkout_with_plan(project_path, branch, options=options)
-            )
+        _, captured = run_or_preview(
+            lambda: command,
+            command_name="env.checkout",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda environment: model_to_dict(
+                EnvironmentCheckoutResult(
+                    environment=cast("DevelopmentEnvironment", environment), plan=plan
+                )
+            ),
+            rich=checkout_rich,
+        )
+        if dry_run:
+            return
+        assert captured is not None
+        result = EnvironmentCheckoutResult(environment=captured, plan=plan)
     except Exception as e:
         fail(output_mode, "env.checkout", e)
     data = model_to_dict(result)
@@ -269,7 +259,6 @@ def env_list(
     json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
     _validate_watch_options(output_mode, watch=watch, interval=interval)
     try:
         project_id = _resolve_monitor_project_id(ctx, all_projects)
@@ -280,7 +269,8 @@ def env_list(
     # Rich's ``--all`` view includes removed rows.  Machine output keeps the
     # established active-only ``--all`` contract until its format rollout
     # changes that behavior explicitly.
-    include_removed = all_envs and not json_output
+    machine_output = output_mode is not OutputMode.RICH
+    include_removed = all_envs and not machine_output
     if watch:
         try:
             _run_env_list_live(
@@ -297,7 +287,7 @@ def env_list(
     except Exception as e:
         fail(output_mode, "env.list", str(e))
 
-    if json_output:
+    if machine_output:
         # ponytail: --json always wraps the non-removed Snapshot only; --all does
         # NOT change the JSON payload. msgspec round-trips enums/datetimes to
         # plain JSON-safe builtins.
@@ -636,7 +626,7 @@ def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
 @click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation.")
 @output_options
 @pass_cli_context
-def env_remove(  # noqa: C901
+def env_remove(
     ctx: CliContext,
     environment: str | None,
     dry_run: bool,
@@ -666,13 +656,8 @@ def env_remove(  # noqa: C901
             ctx.resolved_environment = env_obj
         except Exception as e:
             fail(output_mode, "env.remove", str(e))
-    from odoo_instance_sdk.execution import Command
-
     try:
-        candidate = client.environments.remove_command(env_obj)
-    except AttributeError:
-        candidate = None
-    if isinstance(candidate, Command):
+        command = client.environments.remove_command(env_obj)
 
         def confirm_remove() -> None:
             _require_machine_confirmation(output_mode, yes)
@@ -685,79 +670,33 @@ def env_remove(  # noqa: C901
                     output_mode,
                     rich=lambda _document: "Aborted.",
                 )
-                raise click.exceptions.Exit(0)
+                raise click.exceptions.Exit(0)  # noqa: TRY301
 
-        try:
-            status, _removed = run_or_preview(
-                lambda: candidate,
-                command_name="env.remove",
-                mode=output_mode,
-                dry_run=dry_run,
-                confirm=confirm_remove,
-                result=lambda _value: _env_dict(client.environments.get(str(env_obj.id))),
-                context={
-                    "environment_id": str(env_obj.id),
-                    "worktree_path": env_obj.worktree_path,
-                },
-                provenance={
-                    "project_source": ctx.project_source,
-                    "environment_source": "explicit" if environment else "cwd",
-                },
-                rich=lambda _document: f"Removed environment {env_obj.name} ({env_obj.id})",
-            )
-            if dry_run:
-                return
-        except Exception as e:
-            fail(output_mode, "env.remove", e)
-        sys.exit(status)
-        return
-    if dry_run:
-        if json_output:
-            data = _remove_plan_dict(env_obj)
-            emit_json_envelope(
-                ok=True,
-                command="env.remove",
-                result=data,
-                context={
-                    "environment_id": data.get("id"),
-                    "worktree_path": data.get("worktree_path"),
-                },
-                provenance={
-                    "project_source": ctx.project_source,
-                    "environment_source": "explicit" if environment else "cwd",
-                },
-                dry_run=True,
-                mode=output_mode,
-            )
-        else:
-            _print_plan("Remove plan", _remove_plan_dict(env_obj))
-        return
-    _require_machine_confirmation(output_mode, yes)
-    if not yes and not click.confirm(
-        sanitize_terminal_text(f"Remove environment {env_obj.name} ({env_obj.id})?"), default=False
-    ):
-        rich_print("Aborted.")
-        return
-    try:
-        client.environments.remove(env_obj)
-        env_obj = client.environments.get(str(env_obj.id))
-    except Exception as e:
-        fail(output_mode, "env.remove", str(e))
-    if json_output:
-        data = _env_dict(env_obj)
-        emit_json_envelope(
-            ok=True,
-            command="env.remove",
-            result=data,
-            context={"environment_id": data.get("id"), "worktree_path": data.get("worktree_path")},
+        status, _removed = run_or_preview(
+            lambda: command,
+            command_name="env.remove",
+            mode=output_mode,
+            dry_run=dry_run,
+            confirm=confirm_remove,
+            result=lambda _value: _env_dict(client.environments.get(str(env_obj.id))),
+            context={
+                "environment_id": str(env_obj.id),
+                "worktree_path": env_obj.worktree_path,
+            },
             provenance={
                 "project_source": ctx.project_source,
                 "environment_source": "explicit" if environment else "cwd",
             },
-            mode=output_mode,
+            rich=lambda _document: f"Removed environment {env_obj.name} ({env_obj.id})",
         )
-    else:
-        rich_print(f"Removed environment {env_obj.name} ({env_obj.id})")
+        if dry_run:
+            return
+    except click.exceptions.Exit:
+        raise
+    except Exception as e:
+        fail(output_mode, "env.remove", e)
+    sys.exit(status)
+    return
 
 
 @env_group.command("sync")
@@ -791,14 +730,11 @@ def env_sync(
             fail(output_mode, "env.sync", str(e))
     try:
         resolve_project_path(ctx)
-        from odoo_instance_sdk.execution import Command
-
-        candidate = client.environments.sync_python_command(environment, upgrade=upgrade)
-        command = candidate if isinstance(candidate, Command) else None
+        command = client.environments.sync_python_command(environment, upgrade=upgrade)
     except Exception as e:
         fail(output_mode, "env.sync", str(e))
-    if command is not None:
-        status, result = run_or_preview(
+    try:
+        status, _result = run_or_preview(
             lambda: command,
             command_name="env.sync",
             mode=output_mode,
@@ -811,29 +747,9 @@ def env_sync(
                 else ""
             ),
         )
-        if dry_run:
-            return
-        assert result is not None
-        sys.exit(status)
-        return
-    if dry_run:
-        fail(output_mode, "env.sync", "environment does not provide an inspectable command")
-    try:
-        result = client.environments.sync_python(environment, upgrade=upgrade)
-    except Exception as e:
-        fail(output_mode, "env.sync", e)
-    if json_output:
-        data = _env_dict(result)
-        emit_json_envelope(
-            ok=True,
-            command="env.sync",
-            result=data,
-            context={"environment_id": data.get("id"), "worktree_path": data.get("worktree_path")},
-            provenance={},
-            mode=output_mode,
-        )
-    else:
-        rich_print(f"Synced environment {result.name} ({result.id}) state={result.state}")
+    except Exception as exc:
+        fail(output_mode, "env.sync", exc)
+    raise click.exceptions.Exit(status)
 
 
 def _env_dict(e: DevelopmentEnvironment | None) -> dict[str, JsonValue]:
@@ -851,19 +767,6 @@ def _env_dict(e: DevelopmentEnvironment | None) -> dict[str, JsonValue]:
     }
 
 
-def _remove_plan_dict(e: DevelopmentEnvironment) -> dict[str, JsonValue]:
-    plan = _env_dict(e)
-    plan["ownership"] = {"worktree": True, "generated_config": True, "backup": False}
-    plan["commands"] = (
-        ["drop target database", "delete owned backup", "git worktree remove"]
-        if str(e.db_mode) == "copy"
-        else ["git worktree remove"]
-    )
-    ownership = cast("dict[str, JsonValue]", plan["ownership"])
-    ownership["backup"] = e.backup_id is not None
-    return plan
-
-
 def _plan_lines(title: str, plan: dict[str, JsonValue]) -> list[str]:
     """Pure Rich projection for a structured domain/command plan."""
     return [
@@ -873,8 +776,3 @@ def _plan_lines(title: str, plan: dict[str, JsonValue]) -> list[str]:
             for key, value in plan.items()
         ],
     ]
-
-
-def _print_plan(title: str, plan: dict[str, JsonValue]) -> None:
-    """Compatibility renderer for the legacy watch/list paths."""
-    rich_print("\n".join(_plan_lines(title, plan)), preserve_newlines=True)

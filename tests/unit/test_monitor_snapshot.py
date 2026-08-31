@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sqlite3
 import uuid
 from collections.abc import AsyncGenerator
@@ -14,7 +15,12 @@ import pytest
 
 from odoo_instance_sdk.exceptions import MonitorError
 from odoo_instance_sdk.execution import Command
-from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    PreparedStep,
+    ProcessResult,
+    RecordingExecutor,
+    SubprocessExecutor,
+)
 from odoo_instance_sdk.internal.process_metrics import ProcessTreeResult
 from odoo_instance_sdk.models import (
     ClusterContainer,
@@ -788,6 +794,49 @@ def test_snapshot_command_failed_git_and_docker_probes_are_not_retried(
 
     assert snapshot.environments[0].git.state is GitActivityState.ORPHAN
     assert tuple(step.step_id for step in executor.executed) == process_ids
+
+
+def test_hanging_storage_probe_is_bounded_and_keeps_sibling_observations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The installed-environment inventory remains useful if one probe hangs."""
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _seed_env(
+        catalog,
+        _make_env(
+            env_id,
+            worktree_path=str(worktree),
+            source_db_name=None,
+        ),
+    )
+    catalog.close()
+
+    hanging = tmp_path / "hanging-du"
+    hanging.write_text("#!/bin/sh\nexec sleep 10\n", encoding="utf-8")
+    hanging.chmod(0o755)
+    real_which = shutil.which
+
+    def which(name: str) -> str | None:
+        return str(hanging) if name == "du" else real_which(name)
+
+    monkeypatch.setattr("odoo_instance_sdk.resources.monitor.shutil.which", which)
+    monkeypatch.setattr("odoo_instance_sdk.resources.monitor._PROBE_TIMEOUT_SECONDS", 0.05)
+
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        git_provider=FakeGitProvider(),
+        docker_provider=FakeDockerProvider(),
+        _executor=SubprocessExecutor(),
+    )
+
+    snapshot = monitor.snapshot()
+
+    assert len(snapshot.environments) == 1
+    assert snapshot.environments[0].git.branch == "main"
+    assert snapshot.environments[0].storage.complete is False
 
 
 def test_watch_builds_a_fresh_snapshot_command_per_tick(monkeypatch: pytest.MonkeyPatch) -> None:

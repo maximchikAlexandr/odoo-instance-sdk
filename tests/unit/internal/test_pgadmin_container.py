@@ -357,18 +357,26 @@ def test_same_backend_password_rotation_recreates_and_refreshes_active_passfile(
     )
     old_password = "old-password"
     new_password = "new-password"
+    old_fingerprint = pgadmin_files.execution_fingerprint_inputs(
+        local_paths, identity, "demo", old_password
+    )
     old_preparation = pgadmin_files.prepare_files(
         paths=local_paths,
         servers_json=pgadmin_files.server_json(identity, "demo"),
         pgpass=pgadmin_files.pgpass_line(identity, old_password),
-        fingerprint=pgadmin_files.server_fingerprint(local_paths, identity, "demo", old_password),
+        fingerprint=old_fingerprint.fingerprint,
+        fingerprint_key=old_fingerprint.key,
         port=5050,
+    )
+    new_fingerprint = pgadmin_files.execution_fingerprint_inputs(
+        local_paths, identity, "demo", new_password
     )
     new_preparation = pgadmin_files.prepare_files(
         paths=local_paths,
         servers_json=pgadmin_files.server_json(identity, "demo"),
         pgpass=pgadmin_files.pgpass_line(identity, new_password),
-        fingerprint=pgadmin_files.server_fingerprint(local_paths, identity, "demo", new_password),
+        fingerprint=new_fingerprint.fingerprint,
+        fingerprint_key=new_fingerprint.key,
         port=5050,
     )
     assert old_preparation.fingerprint != new_preparation.fingerprint

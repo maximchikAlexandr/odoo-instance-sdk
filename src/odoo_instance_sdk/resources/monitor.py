@@ -71,6 +71,7 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
 _SCHEMA_VERSION = 3
+_PROBE_TIMEOUT_SECONDS = 5.0
 
 
 def _default_monitor_executor() -> ProcessExecutor:
@@ -400,7 +401,6 @@ class EnvironmentMonitor:
                 execute,
                 captured_steps,
                 executor=self._executor,
-                strict=True,
             ),
         )
 
@@ -462,6 +462,7 @@ class EnvironmentMonitor:
                         step_id=f"monitor.{env_id}.git.head",
                         argv=("git", "-C", str(worktree), "rev-parse", "--verify", "HEAD"),
                         cwd=str(worktree),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
                         read_only=True,
                         text=True,
                     )
@@ -472,6 +473,7 @@ class EnvironmentMonitor:
                     step_id=f"monitor.{env_id}.storage.worktree",
                     argv=(du, "-sb", str(worktree)),
                     cwd=str(worktree.parent),
+                    timeout=_PROBE_TIMEOUT_SECONDS,
                     read_only=True,
                     text=True,
                 )
@@ -494,6 +496,7 @@ class EnvironmentMonitor:
                             "-c",
                             "SELECT 1",
                         ),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
                         read_only=True,
                         text=True,
                     )
@@ -504,6 +507,7 @@ class EnvironmentMonitor:
                         step_id=f"monitor.{env_id}.storage.python",
                         argv=(du, "-sb", str(row["python_environment_path"])),
                         cwd=str(Path(str(row["python_environment_path"])).parent),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
                         read_only=True,
                         text=True,
                     )
@@ -518,6 +522,7 @@ class EnvironmentMonitor:
                         step_id=f"monitor.{env_id}.storage.{suffix}",
                         argv=(du, "-sb", str(path)),
                         cwd=str(path.parent),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
                         read_only=True,
                         text=True,
                     )
@@ -538,6 +543,7 @@ class EnvironmentMonitor:
                             "-c",
                             f"SELECT pg_database_size('{database_name}')",
                         ),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
                         read_only=True,
                         text=True,
                     )
@@ -560,6 +566,7 @@ class EnvironmentMonitor:
                             step_id=f"monitor.{env_id}.storage.filestore",
                             argv=(du, "-sb", str(filestore)),
                             cwd=str(filestore.parent),
+                            timeout=_PROBE_TIMEOUT_SECONDS,
                             read_only=True,
                             text=True,
                         )
@@ -571,6 +578,7 @@ class EnvironmentMonitor:
                             step_id=f"monitor.{env_id}.git.{suffix}",
                             argv=("git", "-C", str(worktree), *args),
                             cwd=str(worktree),
+                            timeout=_PROBE_TIMEOUT_SECONDS,
                             read_only=True,
                             text=True,
                         )
@@ -619,6 +627,7 @@ class EnvironmentMonitor:
                         "json",
                     ),
                     cwd=str(repository),
+                    timeout=_PROBE_TIMEOUT_SECONDS,
                     read_only=True,
                     text=True,
                 )
@@ -637,6 +646,7 @@ class EnvironmentMonitor:
                         "-z",
                     ),
                     cwd=str(repository),
+                    timeout=_PROBE_TIMEOUT_SECONDS,
                     read_only=True,
                     text=True,
                 )
@@ -733,7 +743,10 @@ class EnvironmentMonitor:
                 cluster, state = None, None
             else:
                 cluster, state = self._project_cluster(
-                    repo_root, statuses, probe_results=probe_results
+                    repo_root,
+                    statuses,
+                    project_id=resolved_project_id,
+                    probe_results=probe_results,
                 )
             plans.append(
                 _ProjectPlan(
@@ -757,10 +770,24 @@ class EnvironmentMonitor:
         repo_root: Path,
         statuses: set[str],
         *,
+        project_id: str,
         probe_results: dict[str, ProcessResult] | None = None,
     ) -> tuple[PostgresCluster | None, PostgresClusterState | None]:
         try:
-            cluster = PostgresCluster.from_project(repo_root)
+            if (
+                probe_results is None
+                or PostgresCluster.from_project.__module__ != "odoo_instance_sdk.resources.postgres"
+            ):
+                cluster = PostgresCluster.from_project(repo_root)
+            else:
+                from odoo_instance_sdk.project import ProjectConfig
+
+                cluster = PostgresCluster._from_config(
+                    ProjectConfig.load(repo_root),
+                    repository_root=repo_root,
+                    compose_runner=self._docker_runner,
+                    project_id=project_id.removeprefix("project_"),
+                )
             statuses.add(str(cluster.compose_file.resolve()))
             return cluster, self._cached_status(cluster, probe_results=probe_results)
         except (ProjectManifestNotFoundError, PostgresClusterError, OSError):

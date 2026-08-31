@@ -5,6 +5,7 @@ import importlib.metadata
 import inspect
 import json
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -105,6 +106,11 @@ def _passthrough_instance(
         return_value=(MagicMock(), SimpleNamespace(), instance),
     ):
         return CliRunner().invoke(cli, args, input=input_text)
+
+
+def _stub_command(callback: Callable[[], int]) -> Command[int]:
+    """Build a valid command-contract double for native passthrough tests."""
+    return Command.create(ExecutionPlan(), lambda _context: callback(), ())
 
 
 def _captured_raw_command(
@@ -420,8 +426,11 @@ def test_discovered_public_methods() -> None:
             "checkout_with_plan",
             "get",
             "list",
+            "list_command",
             "open_pgadmin",
             "open_pgadmin_command",
+            "open_pgadmin_phase",
+            "open_pgadmin_phase_command",
             "plan_checkout",
             "record_use",
             "refresh_database",
@@ -629,8 +638,8 @@ def test_click_parse_failure_remains_native_usage_error() -> None:
 def test_passthrough_commands_forward_child_exit_code(command: str) -> None:
     instance = MagicMock()
     child_exit = 17 if command == "run" else 23
-    method = instance.run_foreground if command == "run" else instance.shell
-    method.return_value = child_exit
+    method = instance.run_foreground_command if command == "run" else instance.shell_command
+    method.return_value = _stub_command(lambda: child_exit)
 
     with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
         result = _passthrough_instance(
@@ -646,8 +655,12 @@ def test_passthrough_commands_forward_child_exit_code(command: str) -> None:
 @pytest.mark.parametrize("command", ["run", "shell"])
 def test_passthrough_commands_map_keyboard_interrupt_to_130(command: str) -> None:
     instance = MagicMock()
-    method = instance.run_foreground if command == "run" else instance.shell
-    method.side_effect = KeyboardInterrupt
+
+    def raise_interrupt() -> int:
+        raise KeyboardInterrupt
+
+    method = instance.run_foreground_command if command == "run" else instance.shell_command
+    method.return_value = _stub_command(raise_interrupt)
 
     with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
         result = _passthrough_instance(instance, [command])
@@ -665,7 +678,7 @@ def test_passthrough_run_and_shell_preserve_native_streams() -> None:
         sys.stderr.write("run stderr")
         return 0
 
-    run_instance.run_foreground.side_effect = run_foreground
+    run_instance.run_foreground_command.return_value = _stub_command(run_foreground)
     with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
         run_result = _passthrough_instance(run_instance, ["run"])
     assert run_result.stdout == "run stdout"
@@ -681,7 +694,11 @@ def test_passthrough_run_and_shell_preserve_native_streams() -> None:
         assert args == ["--dev"]
         return 0
 
-    shell_instance.shell.side_effect = shell
+    def shell_command(*, args: list[str]) -> Command[int]:
+        assert args == ["--dev"]
+        return _stub_command(lambda: shell(args=args))
+
+    shell_instance.shell_command.side_effect = shell_command
     shell_result = _passthrough_instance(
         shell_instance,
         ["shell", "--", "--dev"],

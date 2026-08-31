@@ -310,7 +310,7 @@ class TestCheckoutPreflight:
         coordinator.prepare.assert_not_called()
         assert 'default_source_database = "comerta"' in manifest.read_text()
 
-    def test_stale_checkout_refreshes_before_final_replan(
+    def test_stale_checkout_requires_a_separate_refresh_phase(
         self,
         env_client: OdooClient,
         project_manifest: Path,
@@ -345,31 +345,20 @@ class TestCheckoutPreflight:
 
         coordinator = MagicMock()
 
-        def switch_default(*_args: object, **_kwargs: object) -> None:
-            manifest.write_text(
-                manifest.read_text().replace(
-                    'default_source_database = "comerta"',
-                    'default_source_database = "fresh_db"',
-                )
-            )
-
-        coordinator.prepare.side_effect = switch_default
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.database_preparation.DatabasePreparationCoordinator",
             lambda _client: coordinator,
         )
 
-        result = env_client.environments.checkout_with_plan(
-            project_manifest,
-            "feat/replanned",
-            options=EnvironmentCheckoutOptions(python=str(fake_python)),
-        )
+        with pytest.raises(StalePlanError, match="separate phase"):
+            env_client.environments.checkout_with_plan(
+                project_manifest,
+                "feat/replanned",
+                options=EnvironmentCheckoutOptions(python=str(fake_python)),
+            )
 
-        coordinator.prepare.assert_called_once()
-        assert result.environment.source_db_name == "fresh_db"
-        assert result.plan.source_database == "fresh_db"
-        assert result.plan.freshness.value == "fresh"
-        assert result.plan.preparation_actions == ()
+        coordinator.prepare.assert_not_called()
+        assert env_client.environments.list(project=project_manifest) == []
 
     def test_unpinned_project_refresh_fails_before_preparation_mutation(
         self,
@@ -398,7 +387,7 @@ class TestCheckoutPreflight:
         monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
         before = manifest.read_text()
 
-        with pytest.raises(ConfigError, match="not approved outside the repository"):
+        with pytest.raises(StalePlanError, match="separate phase"):
             env_client.environments.checkout(
                 project_manifest,
                 "feat/unpinned-refresh",
@@ -469,7 +458,7 @@ class TestCheckoutPreflight:
             lambda _client: coordinator,
         )
 
-        with pytest.raises(RuntimeError, match="preparation failed"):
+        with pytest.raises(StalePlanError, match="separate phase"):
             env_client.environments.checkout(
                 project_manifest,
                 "feat/failed-refresh",
@@ -1069,11 +1058,15 @@ class TestCheckoutDryRun:
             step.step_id for step in prepared.steps
         )
         assert tuple(step.step_id for step in command.plan.steps) == (
+            "checkout.validate.git.toplevel",
+            "checkout.validate.git.common-dir",
+            "checkout.validate.git.base",
             "checkout.catalog",
             "checkout.worktree",
             "checkout.generated_config",
             "checkout.venv",
             "checkout.database",
+            "checkout.cleanup.worktree",
             "checkout.cleanup",
         )
 
@@ -1139,22 +1132,35 @@ class TestCheckoutDryRun:
         env_client: OdooClient,
         project_manifest: Path,
         fake_python: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from odoo_instance_sdk.internal import git_worktree
+        from odoo_instance_sdk.internal.proc import (
+            PreparedProcess,
+            PreparedStep,
+            ProcessResult,
+            RecordingExecutor,
+        )
 
         options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         snapshot = env_client.environments._build_checkout_snapshot(
             project_manifest, "feat/stale-identity", options=options
         )
-        monkeypatch.setattr(
-            git_worktree,
-            "rev_parse_toplevel",
-            lambda _root: project_manifest / "another-repository",
-        )
+
+        def result_for(prepared: PreparedProcess) -> ProcessResult:
+            prepared = cast("PreparedStep", prepared)
+            return ProcessResult(
+                argv=prepared.argv,
+                returncode=0,
+                stdout=str(project_manifest / "another-repository"),
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
 
         with pytest.raises(StalePlanError, match="Git identity"):
-            env_client.environments._command_from_snapshot(snapshot).run()
+            env_client.environments._command_from_snapshot(
+                snapshot, executor=RecordingExecutor(result_factory=result_for)
+            ).run()
         assert env_client.environments.list() == []
 
     def test_checkout_command_rejects_changed_target_path_before_catalog_mutation(

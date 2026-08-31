@@ -172,8 +172,7 @@ class BackupResource:
                     PreparedStep(
                         step_id="backup.validate.pg-restore",
                         argv=(executable, "--list", str(Path(backup.path))),
-                        environment=tuple(sorted(sanitized_child_environment().items())),
-                        environment_policy="explicit",
+                        environment_snapshot=tuple(sorted(sanitized_child_environment().items())),
                         timeout=timeout,
                         read_only=True,
                         text=True,
@@ -186,6 +185,7 @@ class BackupResource:
                 backup,
                 raise_if_unavailable=raise_if_unavailable,
                 timeout=timeout,
+                process_step_id=(steps[0].step_id if steps else None),
             ),
             executor=executor,
             read_only=True,
@@ -198,6 +198,7 @@ class BackupResource:
         *,
         raise_if_unavailable: bool,
         timeout: float,
+        process_step_id: str | None = None,
     ) -> BackupValidationResult:
         catalog = self._client.get_catalog()
         catalog.verify_identity(backup, verify_content=True)
@@ -207,7 +208,10 @@ class BackupResource:
 
         if backup.format == BackupFormat.DUMP:
             return self._validate_dump(
-                backup, timeout=timeout, raise_if_unavailable=raise_if_unavailable
+                backup,
+                timeout=timeout,
+                raise_if_unavailable=raise_if_unavailable,
+                process_step_id=process_step_id,
             )
 
         zip_result = validate_zip(Path(backup.path))
@@ -254,7 +258,6 @@ class BackupResource:
                 run,
                 prepared_steps,
                 executor=executor or SubprocessExecutor(),
-                strict=bool(steps),
             ),
         )
 
@@ -264,12 +267,14 @@ class BackupResource:
         *,
         timeout: float,
         raise_if_unavailable: bool,
+        process_step_id: str | None,
     ) -> BackupValidationResult:
         try:
             dump_result = validate_dump(
                 Path(backup.path),
                 timeout=timeout,
                 raise_if_unavailable=raise_if_unavailable,
+                step_id=process_step_id,
             )
         except BackupValidationUnavailableError as e:
             self._record_and_build(

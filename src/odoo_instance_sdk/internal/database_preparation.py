@@ -21,6 +21,7 @@ import msgspec
 
 from odoo_instance_sdk.exceptions import (
     ConfigError,
+    DatabaseAlreadyExistsError,
     DatabaseManagerUnavailableError,
     EnvironmentConflictError,
     InstanceConfigurationError,
@@ -292,9 +293,41 @@ def relevant_manifest_conflicts(before: ProjectConfig, after: ProjectConfig) -> 
 
 
 def canonical_project_identity(project_path: str | Path) -> tuple[Path, Path, str]:
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    if context is not None:
+        top_result = context.process("database.prepare.git.toplevel")
+        common_result = context.process("database.prepare.git.common-dir")
+        top_output = getattr(top_result, "stdout", "")
+        common_output = getattr(common_result, "stdout", "")
+        root = Path(str(top_output).strip()).resolve()
+        common = Path(str(common_output).strip())
+        if not common.is_absolute():
+            common = root / common
+        return root, common.resolve(), repo_key(root, common)
     root = rev_parse_toplevel(Path(project_path))
     common = rev_parse_git_common_dir(root)
     return root, common, repo_key(root, common)
+
+
+def _planned_project_identity(project_path: str | Path) -> tuple[Path, Path, str]:
+    """Resolve the Git identity from local metadata without launching Git."""
+    root = Path(project_path).resolve()
+    git_marker = root / ".git"
+    common = git_marker
+    if git_marker.is_file():
+        try:
+            marker = git_marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            marker = ""
+        if marker.startswith("gitdir:"):
+            git_dir = Path(marker.partition(":")[2].strip())
+            if not git_dir.is_absolute():
+                git_dir = root / git_dir
+            git_dir = git_dir.resolve()
+            common = git_dir.parent.parent if git_dir.parent.name == "worktrees" else git_dir
+    return root, common.resolve(), repo_key(root, common)
 
 
 def _load_project(project: ProjectConfig | str | Path) -> tuple[ProjectConfig, Path]:
@@ -398,12 +431,23 @@ def _wait_for_preparation_lock(project_id: str, *, timeout: float = 300.0) -> It
         yield
 
 
-def _target_config_path(source_config: Path) -> Path:
-    fd, name = tempfile.mkstemp(
-        dir=str(source_config.parent), prefix=".odcli-refresh-", suffix=".conf"
-    )
-    os.close(fd)
-    path = Path(name)
+def _target_config_path(source_config: Path, target_path: Path | None = None) -> Path:
+    if target_path is None:
+        fd, name = tempfile.mkstemp(
+            dir=str(source_config.parent), prefix=".odcli-refresh-", suffix=".conf"
+        )
+        os.close(fd)
+        path = Path(name)
+    else:
+        path = target_path
+        if path.parent != source_config.parent or path.exists():
+            raise ConfigError("target preparation config path is not available")
+        try:
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise ConfigError("target preparation config path is not available") from exc
+        else:
+            os.close(fd)
     os.chmod(path, 0o600)
     return path
 
@@ -432,12 +476,13 @@ def build_target_instance(
     runtime: ProjectRuntimeBinding,
     postgres_cluster: PostgresCluster,
     project_id: str,
+    target_config_path: Path | None = None,
 ) -> Iterator[OdooInstance]:
     """Build a target-only instance and remove its ephemeral config on exit."""
     from odoo_instance_sdk.config import InstanceConfig
     from odoo_instance_sdk.resources.instance import OdooInstance
 
-    target_config = _target_config_path(source_config)
+    target_config = _target_config_path(source_config, target_config_path)
     try:
         _write_target_config(source_config, target_config, target_database)
         parsed = parse_odoo_config(target_config)
@@ -532,6 +577,7 @@ def _restore_preflight(
     options: DatabaseRefreshOptions,
     wait_for_lock: bool = True,
     coalesce: bool = False,
+    target_database: str | None = None,
 ) -> Iterator[RestorePreflight]:
     """Own the complete restore preflight and preparation-lock lifetime."""
     if not options.restore:
@@ -602,7 +648,15 @@ def _restore_preflight(
         )
         if not local.databases.names():
             raise DatabaseManagerUnavailableError("local database manager returned no databases")
-        target = reserve_target_database(source.config.database, local.databases.exists)
+        if target_database is None:
+            target = reserve_target_database(source.config.database, local.databases.exists)
+        else:
+            validate_db_name(target_database)
+            if local.databases.exists(target_database):
+                raise DatabaseAlreadyExistsError(
+                    f"Database {target_database!r} already exists on {local_url}"
+                )
+            target = target_database
         yield RestorePreflight(
             project=current,
             project_id=project_id,
@@ -621,13 +675,20 @@ def prepare_restore(
     *,
     options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
     coalesce: bool = False,
+    restore_inputs: tuple[str, Path] | None = None,
 ) -> DatabasePreparationResult:
     """Run the full restore preparation while retaining the project lock."""
     if not options.restore:
         raise ConfigError("restore preparation requires restore=True")
     remote_password = _remote_password()
     try:
-        with _restore_preflight(client, project, options=options, coalesce=coalesce) as preflight:
+        with _restore_preflight(
+            client,
+            project,
+            options=options,
+            coalesce=coalesce,
+            target_database=restore_inputs[0] if restore_inputs is not None else None,
+        ) as preflight:
             current = preflight.project
             root = current.repository_root
             source = preflight.source
@@ -656,6 +717,9 @@ def prepare_restore(
                         runtime=preflight.runtime,
                         postgres_cluster=preflight.postgres_cluster,
                         project_id=preflight.project_id,
+                        target_config_path=restore_inputs[1]
+                        if restore_inputs is not None
+                        else None,
                     ) as target_instance:
                         target_instance.databases.reset_admin_password()
                     reset_completed = True
@@ -759,20 +823,26 @@ def preflight_restore(
         return preflight
 
 
-def locked_restore_preflight(
-    client: OdooClient,
+def _capture_restore_inputs(
     project: ProjectConfig | str | Path,
-    *,
-    options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
-) -> contextlib.AbstractContextManager[RestorePreflight]:
-    """Yield the shared restore preflight state while retaining its lock."""
-    return _restore_preflight(client, project, options=options, wait_for_lock=False)
+    options: DatabaseRefreshOptions,
+) -> tuple[str, Path] | None:
+    """Capture target-bound paths without creating files or reserving a DB."""
+    if not options.restore:
+        return None
+    initial, root = _load_project(project)
+    source = resolve_test_source(initial, options)
+    source_config = _resolve_source_config(initial, root)
+    target = generate_target_database(source.config.database)
+    target_config = source_config.parent / f".odcli-refresh-{uuid.uuid4().hex}.conf"
+    return target, target_config
 
 
 def _preparation_process_steps(
     project: ProjectConfig | str | Path,
     *,
     options: DatabaseRefreshOptions,
+    restore_inputs: tuple[str, Path] | None = None,
 ) -> tuple[PreparedStep, ...]:
     """Build the child-process part of a preparation command before effects.
 
@@ -809,23 +879,32 @@ def _preparation_process_steps(
     )
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
-    # The same lifecycle builder is used by ``ensure_running``.  A placeholder
-    # identity is deliberate: it is an explicitly late-bound repository ID,
-    # not a second planner or a probe performed while constructing the command.
+    # The real Git identity is captured by the two process steps above and
+    # resolved by the callback under the active ledger.  Planning must not
+    # launch Git or otherwise inspect mutable repository state.
+    _, _, project_id = _planned_project_identity(root)
     cluster = PostgresCluster._from_config(
         initial,
         repository_root=root,
         compose_runner=None,
-        project_id="<runtime>",
+        project_id=project_id,
     )
+    compose_temporary_path = None
+    if cluster.mode == "compose":
+        compose_temporary_path = (
+            cluster.compose_file.parent / f".compose-{uuid.uuid4().hex}.yaml.tmp"
+        )
     steps.extend(
-        step for step in cluster._ensure_running_steps(60.0) if isinstance(step, PreparedStep)
+        step
+        for step in cluster._ensure_running_steps(60.0, temporary_path=compose_temporary_path)
+        if isinstance(step, PreparedStep)
     )
 
     source_config = _resolve_source_config(initial, root)
     parsed = parse_odoo_config(source_config)
     db_user = parsed.get("db_user")
-    if db_user:
+    target_database = restore_inputs[0] if restore_inputs is not None else None
+    if db_user and target_database is not None:
         db_host = parsed.get("db_host")
         raw_port = parsed.get("db_port")
         try:
@@ -836,12 +915,20 @@ def _preparation_process_steps(
         steps.extend(
             (
                 _database_psql_step(
+                    step_id="database.restore.exists-reservation",
+                    host=db_host,
+                    port=db_port,
+                    user=db_user,
+                    password=password,
+                    database_name=target_database,
+                ),
+                _database_psql_step(
                     step_id="database.restore.exists-before",
                     host=db_host,
                     port=db_port,
                     user=db_user,
                     password=password,
-                    database_name="<runtime>",
+                    database_name=target_database,
                 ),
                 _database_psql_step(
                     step_id="database.restore.exists-after",
@@ -849,7 +936,7 @@ def _preparation_process_steps(
                     port=db_port,
                     user=db_user,
                     password=password,
-                    database_name="<runtime>",
+                    database_name=target_database,
                 ),
             )
         )
@@ -859,15 +946,19 @@ def _preparation_process_steps(
 
         runtime = resolve_runtime_binding(initial, root)
         start_config = StartConfig.from_odoo_config(source_config)
-        start_config.config_path = "<runtime>"
-        start_config.dbfilter = "<runtime>"
-        start_config.db_name = "<runtime>"
+        if restore_inputs is None:
+            raise ConfigError("reset admin preparation inputs were not captured")
+        start_config.config_path = str(restore_inputs[1])
+        start_config.dbfilter = restore_inputs[0]
+        start_config.db_name = restore_inputs[0]
+        secret_config_path = str(restore_inputs[1]) + ".secret"
         shell_step, _, _, _ = _build_shell_script_step(
             start_config,
             executable_prefix=runtime.command_prefix,
             default_cwd=runtime.runtime_cwd,
             source=_RESET_ADMIN_PASSWORD_SCRIPT,
             commit=True,
+            secret_config_path=secret_config_path,
         )
         steps.append(shell_step)
     return tuple(steps)
@@ -951,14 +1042,20 @@ class DatabasePreparationCoordinator:
         coalesce: bool = False,
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
+        restore_inputs = _capture_restore_inputs(project, options)
         steps: tuple[PreparedStep | PreparedAction, ...] = (
             *_preparation_action_steps(operation="prepare", options=options),
-            *_preparation_process_steps(project, options=options),
+            *_preparation_process_steps(project, options=options, restore_inputs=restore_inputs),
         )
         return self._action_command(
             "database.prepare",
             "Prepare a project database",
-            lambda: self._prepare_impl(project, options=options, coalesce=coalesce),
+            lambda: self._prepare_impl(
+                project,
+                options=options,
+                coalesce=coalesce,
+                restore_inputs=restore_inputs,
+            ),
             executor=executor,
             steps=steps,
             optional_steps=tuple(
@@ -966,6 +1063,7 @@ class DatabasePreparationCoordinator:
                 for step in steps
                 if step.step_id
                 in {
+                    "database.restore.exists-reservation",
                     "database.restore.exists-before",
                     "database.restore.exists-after",
                     "database.prepare.rollback",
@@ -979,9 +1077,16 @@ class DatabasePreparationCoordinator:
         *,
         options: DatabaseRefreshOptions,
         coalesce: bool,
+        restore_inputs: tuple[str, Path] | None = None,
     ) -> DatabasePreparationResult:
         if options.restore:
-            return prepare_restore(self.client, project, options=options, coalesce=coalesce)
+            return prepare_restore(
+                self.client,
+                project,
+                options=options,
+                coalesce=coalesce,
+                restore_inputs=restore_inputs,
+            )
         return prepare_download(self.client, project, options=options, wait_for_lock=True)
 
     def refresh_database(
@@ -999,14 +1104,20 @@ class DatabasePreparationCoordinator:
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
+        restore_inputs = _capture_restore_inputs(project, options)
         steps: tuple[PreparedStep | PreparedAction, ...] = (
             *_preparation_action_steps(operation="refresh", options=options),
-            *_preparation_process_steps(project, options=options),
+            *_preparation_process_steps(project, options=options, restore_inputs=restore_inputs),
         )
         return self._action_command(
             "database.refresh",
             "Refresh a project database",
-            lambda: self._prepare_impl(project, options=options, coalesce=False),
+            lambda: self._prepare_impl(
+                project,
+                options=options,
+                coalesce=False,
+                restore_inputs=restore_inputs,
+            ),
             executor=executor,
             steps=steps,
             optional_steps=tuple(
@@ -1014,6 +1125,7 @@ class DatabasePreparationCoordinator:
                 for step in steps
                 if step.step_id
                 in {
+                    "database.restore.exists-reservation",
                     "database.restore.exists-before",
                     "database.restore.exists-after",
                     "database.prepare.rollback",
@@ -1060,6 +1172,5 @@ class DatabasePreparationCoordinator:
                 run,
                 prepared_steps,
                 executor=executor or SubprocessExecutor(),
-                strict=bool(steps),
             ),
         )

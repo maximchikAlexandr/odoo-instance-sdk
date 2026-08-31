@@ -28,7 +28,6 @@ if TYPE_CHECKING:
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.automation import (
     TestCommandSnapshot,
-    run_odoo_tests,
     run_odoo_tests_command,
 )
 from odoo_instance_sdk.internal.test_selection import (
@@ -224,12 +223,12 @@ def _execute_selection(
         allow_empty=allow_empty,
     )
     preflight_installed_modules(instance, spec.modules)
-    typed, diagnostic = run_odoo_tests(
+    typed, diagnostic = run_odoo_tests_command(
         instance,
         spec,
         http_interface=env_obj.http_interface,
         http_port=env_obj.http_port,
-    )
+    ).run()
     return project_execution_result(env_obj, selection, spec, typed), diagnostic
 
 
@@ -337,7 +336,6 @@ def test_command(
                     interface=env_obj.http_interface,
                     port=env_obj.http_port,
                 ),
-                compatibility_runner=run_odoo_tests,
             )
             if dry_run:
                 result["plan"] = model_to_dict(command.plan)
@@ -350,8 +348,6 @@ def test_command(
                     preview=lambda _command: result,
                 )
                 raise click.exceptions.Exit(0)  # noqa: TRY301
-            if not hasattr(instance, "_shell_script_command"):
-                preflight_installed_modules(instance, spec.modules)
             typed, diagnostic = command.run()
             result = project_execution_result(
                 env_obj,
@@ -410,12 +406,12 @@ def run_module_tests(
     if tuple(item.modules[0] for item in selection) != spec.modules:
         raise ConfigError("module test selection does not match requested modules")
     preflight_installed_modules(instance, spec.modules)
-    typed, diagnostic = run_odoo_tests(
+    typed, diagnostic = run_odoo_tests_command(
         instance,
         spec,
         http_interface=http_interface,
         http_port=http_port,
-    )
+    ).run()
     return typed, diagnostic
 
 

@@ -454,8 +454,7 @@ class TestInspectableInstanceCommands:
             "instance.shell_script.transaction",
         )
         process = command.plan.process_steps[0]
-        assert process.input_preview is not None
-        assert source in process.input_preview
+        assert process.input_preview == "<redacted>"
         action = command.plan.steps[1]
         assert getattr(action, "action") == "commit"
         assert command.plan.fingerprint
@@ -483,7 +482,7 @@ class TestInspectableInstanceCommands:
 
         assert result.argv == ["python3", "--version"]
         assert result.cwd == "/work"
-        assert result.env == (("SAFE", "yes"),)
+        assert result.env == (("SAFE", "<redacted>"),)
         assert result.timeout == 3.0
         assert executor.executed[0].argv == ("python3", "--version")
 

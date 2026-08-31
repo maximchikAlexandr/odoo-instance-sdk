@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypeVar
 
 import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.cli_format import human_bytes
 from odoo_instance_sdk.models import (
     ClusterContainer,
@@ -19,6 +22,12 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+T = TypeVar("T")
+
+
+def _command(callback: Callable[[], T]) -> Command[T]:
+    return Command.create(ExecutionPlan(), lambda _context: callback(), ())
 
 
 def _write_project(tmp_path: Path, *, mode: str = "compose") -> Path:
@@ -90,6 +99,9 @@ class _ComposeCluster:
     def status(self) -> PostgresClusterState:
         return self._state
 
+    def status_command(self) -> Command[PostgresClusterState]:
+        return _command(self.status)
+
     def resource_snapshot(self) -> ClusterResourceSnapshot:
         self.resource_calls += 1
         return self._resource
@@ -107,6 +119,9 @@ class _ExternalCluster:
 
     def status(self) -> PostgresClusterState:
         return self._state
+
+    def status_command(self) -> Command[PostgresClusterState]:
+        return _command(self.status)
 
     def resource_snapshot(self) -> ClusterResourceSnapshot:
         self.resource_calls += 1

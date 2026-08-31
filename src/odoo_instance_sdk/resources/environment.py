@@ -25,7 +25,6 @@ from odoo_instance_sdk.exceptions import (
     EnvironmentResolutionError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
-    NonLocalInstanceError,
     PgAdminDatabaseNotFoundError,
     PgAdminEnvironmentNotFoundError,
     PgAdminError,
@@ -56,8 +55,8 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_odoo_config,
 )
 from odoo_instance_sdk.internal.paths import get_environments_root
+from odoo_instance_sdk.internal.pgadmin import PgAdminPhaseHandle
 from odoo_instance_sdk.internal.port_allocation import find_free_port
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.urls import assert_local
@@ -91,6 +90,12 @@ from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+    from odoo_instance_sdk.internal.pgadmin import _PgAdminReconciliationCarrier
+    from odoo_instance_sdk.internal.pgadmin_files import (
+        PgAdminFingerprintInputs,
+        PgAdminPaths,
+        PostgresIdentity,
+    )
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
@@ -111,8 +116,10 @@ T = TypeVar("T")
 EnvironmentState = _EnvironmentState
 DevelopmentEnvironment = _DevelopmentEnvironment
 EnvironmentDatabaseMode = _EnvironmentDatabaseMode
+type _EnvironmentList = list[DevelopmentEnvironment]
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_PGADMIN_LIFECYCLE_TIMEOUT = 60.0
 
 
 class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
@@ -198,6 +205,19 @@ class _CheckoutPlanningState:
     public: EnvironmentCheckoutPlan | None = None
     execution_plan: ExecutionPlan | None = None
     snapshot: _CheckoutSnapshot | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PgAdminCommandInputs:
+    """Private values needed by the locked pgAdmin provisioning phase."""
+
+    identity: PostgresIdentity
+    paths: PgAdminPaths
+    port: int
+    password: str
+    database: str
+    database_probe: PreparedStep | None = None
+    fingerprint_inputs: PgAdminFingerprintInputs | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,66 +439,15 @@ class EnvironmentResource:
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
-        return self._action_command(
-            "environment.refresh-database",
-            "Prepare the environment database",
-            lambda: self._refresh_database_impl(project, options=options),
-            executor=executor,
-            mutating=True,
-        )
-
-    def _refresh_database_impl(
-        self,
-        project: ProjectConfig | Path,
-        *,
-        options: DatabaseRefreshOptions,
-    ) -> DatabasePreparationResult:
-        """Prepare the configured project database through the shared coordinator."""
         from odoo_instance_sdk.internal.database_preparation import (
             DatabasePreparationCoordinator,
         )
 
-        coordinator = DatabasePreparationCoordinator(self._client)
-        return coordinator._prepare_impl(project, options=options, coalesce=False)
-
-    def _refresh_checkout_if_stale(
-        self,
-        project: ProjectConfig | Path,
-        options: EnvironmentCheckoutOptions,
-        *,
-        freshness: BackupFreshness,
-    ) -> ProjectConfig | Path:
-        if isinstance(project, ProjectConfig):
-            project_config = project
-            root = project.repository_root
-        else:
-            root = Path(project)
-            project_config = ProjectConfig.load(root)
-        if project_config.refresh_after_hours is None:
-            return project
-
-        if freshness in (
-            BackupFreshness.MISSING,
-            BackupFreshness.UNAVAILABLE,
-            BackupFreshness.STALE,
-        ):
-            if project_config.test_instance is None:
-                raise ConfigError(
-                    "configured database freshness requires [test_instance] preparation settings"
-                )
-            from odoo_instance_sdk.internal.database_preparation import (
-                DatabasePreparationCoordinator,
-            )
-
-            DatabasePreparationCoordinator(self._client).prepare(
-                project_config,
-                options=DatabaseRefreshOptions(restore=True),
-                coalesce=True,
-            )
-            manifest = root / ".odcli" / "project.toml"
-            if manifest.is_file():
-                return ProjectConfig.load(root)
-        return project
+        return DatabasePreparationCoordinator(self._client).refresh_database_command(
+            project,
+            options=options,
+            executor=executor,
+        )
 
     def _audit_checkout_plan(
         self,
@@ -629,18 +598,6 @@ class EnvironmentResource:
             )
         return _PlanningOutcome(state=state)
 
-    def _build_checkout_execution_snapshot(
-        self,
-        project: ProjectConfig | Path,
-        branch: str,
-        *,
-        options: EnvironmentCheckoutOptions,
-    ) -> _CheckoutSnapshot:
-        """Refresh a stale configured source, then capture one execution snapshot."""
-        _, freshness, _ = self._audit_checkout_plan(project, branch, options)
-        refreshed_project = self._refresh_checkout_if_stale(project, options, freshness=freshness)
-        return self._build_checkout_snapshot(refreshed_project, branch, options=options)
-
     def _command_from_snapshot(
         self,
         snapshot: _CheckoutSnapshot,
@@ -648,10 +605,16 @@ class EnvironmentResource:
         executor: ProcessExecutor | None = None,
     ) -> Command[DevelopmentEnvironment]:
         from odoo_instance_sdk.execution import Command
-        from odoo_instance_sdk.internal.proc import SubprocessExecutor, prepared_command
+        from odoo_instance_sdk.internal.proc import (
+            SubprocessExecutor,
+            prepared_command,
+        )
+
+        def run(context: RunContext[DevelopmentEnvironment]) -> DevelopmentEnvironment:
+            return self._run_checkout_snapshot(context, snapshot)
 
         prepared = prepared_command(
-            lambda context: self._run_checkout_snapshot(context, snapshot),
+            run,
             _checkout_steps(snapshot.private),
             executor=executor or SubprocessExecutor(),
             private_projection=snapshot.public,
@@ -662,29 +625,62 @@ class EnvironmentResource:
         self, context: RunContext[DevelopmentEnvironment], snapshot: _CheckoutSnapshot
     ) -> DevelopmentEnvironment:
         plan = snapshot.private
-        if plan.db_mode is EnvironmentDatabaseMode.COPY:
-            self._preflight_copy_checkout(plan)
         with exclusive_lock(provisioning_lock_path()):
-            self._validate_checkout_snapshot(snapshot)
+            self._validate_checkout_snapshot(snapshot, context=context)
+            if plan.db_mode is EnvironmentDatabaseMode.COPY:
+                self._preflight_copy_checkout(plan)
             context.action("checkout.catalog")
             catalog = self._client.get_catalog()
             self._revalidate_checkout_locked(catalog, plan)
             return self._do_checkout(catalog, plan, context=context)
 
-    def _validate_checkout_snapshot(self, snapshot: _CheckoutSnapshot) -> None:
+    def _validate_checkout_snapshot(
+        self,
+        snapshot: _CheckoutSnapshot,
+        *,
+        context: RunContext[DevelopmentEnvironment] | None = None,
+    ) -> None:
         """Reject changed read-only inputs before the catalog or artifacts mutate."""
         plan = snapshot.private
+        if (
+            plan.project.refresh_after_hours is not None
+            and snapshot.public.freshness is not BackupFreshness.FRESH
+        ):
+            raise StalePlanError(
+                "checkout database backup is not fresh; run the refresh database command "
+                "as a separate phase before checkout"
+            )
         from odoo_instance_sdk.internal.git_worktree import (
             rev_parse_git_common_dir,
             rev_parse_toplevel,
             rev_parse_verify,
         )
 
-        actual_identity = (
-            str(rev_parse_toplevel(plan.repo_root)),
-            str(rev_parse_git_common_dir(plan.repo_root)),
-            rev_parse_verify(plan.repo_root, plan.base_ref),
-        )
+        if context is None:
+            actual_identity = (
+                str(rev_parse_toplevel(plan.repo_root)),
+                str(rev_parse_git_common_dir(plan.repo_root)),
+                rev_parse_verify(plan.repo_root, plan.base_ref),
+            )
+        else:
+
+            def output(step_id: str) -> str:
+                result = cast("ProcessResult", context.process(step_id))
+                value = result.stdout
+                return value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
+
+            top_dir = Path(output("checkout.validate.git.toplevel").strip()).resolve()
+            common_dir = Path(output("checkout.validate.git.common-dir").strip())
+            if not common_dir.is_absolute():
+                # Match ``rev_parse_git_common_dir``'s normalization used
+                # while capturing the plan.  Git may emit ``.git`` for a
+                # linked worktree even though its common dir is elsewhere.
+                common_dir = common_dir.resolve()
+            actual_identity = (
+                str(top_dir),
+                str(common_dir.resolve()),
+                output("checkout.validate.git.base").strip(),
+            )
         expected_identity = (str(plan.repo_root), plan.git_common_dir, plan.base_revision)
         if actual_identity != expected_identity:
             raise StalePlanError(
@@ -771,8 +767,7 @@ class EnvironmentResource:
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
     ) -> EnvironmentCheckoutResult:
         """Execute checkout and return its final secret-free typed plan."""
-        snapshot = self._build_checkout_execution_snapshot(project, branch, options=options)
-        command = self._command_from_snapshot(snapshot)
+        command = self.checkout_command(project, branch, options=options)
         environment = command.run()
         return EnvironmentCheckoutResult(
             environment=environment,
@@ -786,9 +781,7 @@ class EnvironmentResource:
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
     ) -> DevelopmentEnvironment:
-        snapshot = self._build_checkout_execution_snapshot(project, branch, options=options)
-        command = self._command_from_snapshot(snapshot)
-        return command.run()
+        return self.checkout_command(project, branch, options=options).run()
 
     def _revalidate_checkout_locked(self, catalog: BackupCatalog, plan: _CheckoutPlan) -> None:
         cat = catalog
@@ -929,6 +922,8 @@ class EnvironmentResource:
             cat.update_environment_state(str(plan.env_id), EnvironmentState.READY)
             cat.add_environment_event(str(plan.env_id), "checkout", "succeeded")
             context.action("checkout.cleanup")
+            if context.planned("checkout.cleanup.worktree"):
+                context.skip("checkout.cleanup.worktree")
             return self._get_env_row(cat, plan.env_id)
 
         except BaseException as exc:
@@ -941,6 +936,7 @@ class EnvironmentResource:
                 env_root=plan.env_root,
                 backup_id=backup_id,
                 error=exc,
+                context=context,
             )
             raise
 
@@ -1065,6 +1061,7 @@ class EnvironmentResource:
         env_root: Path,
         backup_id: uuid.UUID | None,
         error: BaseException,
+        context: RunContext[DevelopmentEnvironment],
     ) -> None:
 
         catalog = cat
@@ -1077,7 +1074,7 @@ class EnvironmentResource:
         # that the target database is gone.  In particular, do not delete the
         # generated config (the cluster identity) or its owned backup first.
         if not cleanup_failed:
-            cleanup_failed = self._cleanup_created_paths(repo_root, created_paths)
+            cleanup_failed = self._cleanup_created_paths(repo_root, created_paths, context=context)
 
         msg = sanitize_last_error(str(error)) or type(error).__name__
         if cleanup_failed:
@@ -1154,14 +1151,25 @@ class EnvironmentResource:
                 )
         return False
 
-    def _cleanup_created_paths(self, repo_root: Path, created_paths: list[Path]) -> bool:
+    def _cleanup_created_paths(
+        self,
+        repo_root: Path,
+        created_paths: list[Path],
+        *,
+        context: RunContext[DevelopmentEnvironment] | None = None,
+    ) -> bool:
         cleanup_failed = False
         for p in created_paths:
             if p.name == "worktree":
                 from odoo_instance_sdk.internal.git_worktree import worktree_remove
 
                 try:
-                    worktree_remove(repo_root, p)
+                    if context is None:
+                        worktree_remove(repo_root, p)
+                    else:
+                        result = cast("ProcessResult", context.process("checkout.cleanup.worktree"))
+                        if result.returncode != 0:
+                            cleanup_failed = True
                 except Exception:
                     cleanup_failed = True
             else:
@@ -1329,127 +1337,6 @@ class EnvironmentResource:
         now = datetime.now(UTC).isoformat()
         catalog.record_environment_use(str(env.id), now)
 
-    def _do_sync_python(
-        self, catalog: BackupCatalog, env: DevelopmentEnvironment, *, upgrade: bool
-    ) -> DevelopmentEnvironment:
-        project = _load_project(env)
-        worktree = Path(env.worktree_path)
-        repo_root = Path(env.repository_root)
-        inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
-        odoo_req = _find_odoo_requirements(worktree)
-        if inputs or odoo_req is not None:
-            try:
-                self._compile_requirements(env, project, upgrade=upgrade)
-                self._install_requirements(env)
-                catalog.add_environment_event(str(env.id), "sync", "succeeded")
-            except _CompileFailed:
-                catalog.add_environment_event(
-                    str(env.id),
-                    "sync",
-                    "failed",
-                    message="uv pip compile failed; kept existing lock",
-                )
-        else:
-            catalog.add_environment_event(
-                str(env.id),
-                "sync",
-                "succeeded",
-                message="no requirements to compile",
-            )
-        return self._get_env_row(catalog, env.id)
-
-    def _compile_and_install(
-        self, env: DevelopmentEnvironment, project: ProjectConfig, *, upgrade: bool
-    ) -> None:
-        worktree = Path(env.worktree_path)
-        repo_root = Path(env.repository_root)
-        inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
-        odoo_req = _find_odoo_requirements(worktree)
-        if not inputs and odoo_req is None:
-            return
-        try:
-            self._compile_requirements(env, project, upgrade=upgrade)
-        except _CompileFailed:
-            if not Path(env.dependency_lock_path).is_file():
-                raise
-        self._install_requirements(env)
-
-    def _run_uv_venv(self, venv: Path, selector: str) -> None:
-        venv.parent.mkdir(parents=True, exist_ok=True)
-        from odoo_instance_sdk.internal.proc import run_captured
-
-        proc = run_captured(
-            ("uv", "venv"),
-            (str(venv), "--python", selector),
-            env=sanitized_child_environment(),
-            text=True,
-        )
-        if proc.returncode != 0:
-            stderr = proc.stderr if isinstance(proc.stderr, str) else ""
-            raise ConfigError(f"uv venv failed: {stderr.strip()}")
-
-    def _compile_requirements(
-        self, env: DevelopmentEnvironment, project: ProjectConfig, *, upgrade: bool
-    ) -> Path:
-        worktree = Path(env.worktree_path)
-        repo_root = Path(env.repository_root)
-        inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
-        odoo_req = _find_odoo_requirements(worktree)
-        if odoo_req is not None:
-            inputs.append(str(odoo_req))
-        if not inputs:
-            raise ConfigError("no requirements to compile; set project.requirements")
-        lock_file = Path(env.dependency_lock_path)
-        cmd: list[str] = ["uv", "pip", "compile", *inputs]
-        if upgrade:
-            cmd.append("--upgrade")
-        cmd.extend(["-o", str(lock_file)])
-        from odoo_instance_sdk.internal.proc import run_captured
-
-        proc = run_captured(
-            cmd,
-            env=sanitized_child_environment(),
-            text=True,
-        )
-        if proc.returncode != 0:
-            stderr = proc.stderr if isinstance(proc.stderr, str) else ""
-            if lock_file.is_file():
-                raise _CompileFailed(stderr.strip() or "uv pip compile failed")
-            raise ConfigError(f"uv pip compile failed and no prior lock: {stderr.strip()}")
-        return lock_file
-
-    def _install_requirements(self, env: DevelopmentEnvironment) -> None:
-        lock_file = Path(env.dependency_lock_path)
-        if not lock_file.is_file():
-            raise ConfigError(f"requirements lock missing: {lock_file}")
-        if env.python_environment_owned:
-            venv = Path(env.python_environment_path)
-            python_bin = str(venv / "bin" / "python")
-            cmd: list[str] = ["uv", "pip", "sync", "--python", python_bin, str(lock_file)]
-        else:
-            cmd = [
-                "uv",
-                "pip",
-                "install",
-                "--python",
-                env.python_environment_path,
-                "-r",
-                str(lock_file),
-            ]
-        from odoo_instance_sdk.internal.proc import run_captured
-
-        proc = run_captured(
-            cmd,
-            env=sanitized_child_environment(),
-            text=True,
-        )
-        if proc.returncode != 0:
-            stderr = proc.stderr if isinstance(proc.stderr, str) else ""
-            raise ConfigError(
-                f"uv pip {'sync' if env.python_environment_owned else 'install'} failed: "
-                f"{stderr.strip()}"
-            )
-
     def get(self, selector: EnvironmentSelector) -> DevelopmentEnvironment:
         if isinstance(selector, DevelopmentEnvironment):
             return selector
@@ -1472,25 +1359,174 @@ class EnvironmentResource:
                 # Preserve the existing typed selector error in the callback.
                 captured_selector = selector
         planned_cluster = _pgadmin_cluster_snapshot(captured_selector)
-        steps = _pgadmin_command_steps(captured_selector, cluster=planned_cluster)
+        captured_inputs = self._capture_pgadmin_command_inputs(captured_selector, planned_cluster)
+        steps = _pgadmin_command_steps(
+            captured_selector,
+            cluster=planned_cluster,
+            inputs=captured_inputs,
+            include_reconciliation=True,
+        )
+
+        def open_pgadmin() -> PgAdminOpenResult:
+            from odoo_instance_sdk.internal import pgadmin_files
+
+            try:
+                paths = (
+                    captured_inputs.paths
+                    if captured_inputs is not None
+                    else pgadmin_files.PgAdminPaths.from_defaults()
+                )
+                # The full finite operation owns one lock-atomic lifecycle:
+                # no other first-run command can observe a key write before
+                # this command has reconciled its container.
+                with pgadmin_files.pgadmin_lock(
+                    path=paths.lock,
+                    timeout=_PGADMIN_LIFECYCLE_TIMEOUT,
+                ):
+                    carrier = self._open_pgadmin_impl(
+                        captured_selector,
+                        cluster=planned_cluster,
+                        captured_inputs=captured_inputs,
+                        lock_held=True,
+                    )
+                    from odoo_instance_sdk.internal.proc import active_context
+
+                    context = cast("RunContext[PgAdminOpenResult] | None", active_context())
+                    if context is None:
+                        raise PgAdminUnavailableError()
+                    return carrier.reconcile(context, lock_held=True)
+            finally:
+                _skip_planned_pgadmin_database_probe()
+
         return self._action_command(
             "environment.open-pgadmin",
             "Open the environment's owned pgAdmin container",
-            lambda: self._open_pgadmin_impl(captured_selector, cluster=planned_cluster),
+            open_pgadmin,
             executor=executor,
             mutating=True,
             steps=steps,
-            optional_steps=tuple(step.step_id for step in steps),
         )
 
+    def open_pgadmin_phase(self, selector: EnvironmentSelector) -> PgAdminPhaseHandle:
+        """Run only provisioning and return the explicit reconciliation phase."""
+        return self.open_pgadmin_phase_command(selector).run()
+
+    def open_pgadmin_phase_command(
+        self,
+        selector: EnvironmentSelector,
+        *,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[PgAdminPhaseHandle]:
+        """Capture the finite provisioning phase without hiding reconciliation."""
+        captured_selector: EnvironmentSelector = selector
+        if isinstance(selector, str):
+            try:
+                captured_selector = self.get(selector)
+            except Exception:
+                captured_selector = selector
+        planned_cluster = _pgadmin_cluster_snapshot(captured_selector)
+        captured_inputs = self._capture_pgadmin_command_inputs(captured_selector, planned_cluster)
+        steps = _pgadmin_command_steps(
+            captured_selector,
+            cluster=planned_cluster,
+            inputs=captured_inputs,
+        )
+
+        def provision() -> PgAdminPhaseHandle:
+            try:
+                carrier = self._open_pgadmin_impl(
+                    captured_selector,
+                    cluster=planned_cluster,
+                    captured_inputs=captured_inputs,
+                )
+                return PgAdminPhaseHandle(reconciliation=carrier.reconciliation_command())
+            finally:
+                _skip_planned_pgadmin_database_probe()
+
+        return self._action_command(
+            "environment.open-pgadmin-phase",
+            "Provision pgAdmin and return its explicit reconciliation command",
+            provision,
+            executor=executor,
+            mutating=True,
+            steps=steps,
+        )
+
+    def _capture_pgadmin_command_inputs(
+        self,
+        selector: EnvironmentSelector,
+        cluster: PostgresCluster | None,
+    ) -> _PgAdminCommandInputs | None:
+        """Capture every immutable input needed by the pgAdmin command.
+
+        Docker identity is derived from the managed Compose project name, not
+        from a runtime container id.  This keeps the later inspect/run argv
+        stable while the identity probe still validates the live object.
+        """
+        from odoo_instance_sdk.resources.postgres import PostgresCluster as _PostgresCluster
+
+        if (
+            not isinstance(cluster, _PostgresCluster)
+            or cluster.mode != "compose"
+            or not cluster.owned
+        ):
+            return None
+        try:
+            env = self.get(selector)
+            self._require_pgadmin_environment(env)
+            database = self._pgadmin_database(env)
+            instance = self._configured_pgadmin_instance(env)
+            password = instance.config.db_password or ""
+            if not isinstance(password, str):
+                return None
+            from odoo_instance_sdk.internal.pgadmin_files import (
+                PgAdminPaths,
+                PostgresIdentity,
+                execution_fingerprint_inputs,
+                select_port,
+            )
+
+            paths = PgAdminPaths.from_defaults()
+            identity = PostgresIdentity(
+                container_name=f"{cluster.compose_project_name}-postgres-1",
+                network=f"{cluster.compose_project_name}_default",
+                user=cluster._user or "odoo",
+                host=f"{cluster.compose_project_name}-postgres-1",
+                # This identity is used from pgAdmin's Docker network.  The
+                # Compose endpoint is the host-published port and is not
+                # reachable as the container-side PostgreSQL service port.
+                port=5432,
+            )
+            database_probe = instance.databases._psql_probe_for(
+                database, "pgadmin.database.exists.psql"
+            )
+            fingerprint_inputs = execution_fingerprint_inputs(paths, identity, database, password)
+            return _PgAdminCommandInputs(
+                identity=identity,
+                paths=paths,
+                port=select_port(paths),
+                password=password,
+                database=database,
+                database_probe=database_probe,
+                fingerprint_inputs=fingerprint_inputs,
+            )
+        except Exception:
+            return None
+
     def _open_pgadmin_impl(
-        self, selector: EnvironmentSelector, *, cluster: PostgresCluster | None = None
-    ) -> PgAdminOpenResult:
-        """Open the selected environment through the private pgAdmin lifecycle seam.
+        self,
+        selector: EnvironmentSelector,
+        *,
+        cluster: PostgresCluster | None = None,
+        captured_inputs: _PgAdminCommandInputs | None = None,
+        lock_held: bool = False,
+    ) -> _PgAdminReconciliationCarrier:
+        """Run preflight and the locked phase, returning its private carrier.
 
         Resolution and all security-critical preconditions live here so callers
         cannot supply browser-controlled database or endpoint values. The
-        lifecycle itself is intentionally supplied by the later pgAdmin task.
+        caller chooses whether the phase owns its lock or participates in the
+        full operation's already-held lifecycle lock.
         """
         try:
             env = self.get(selector)
@@ -1505,17 +1541,44 @@ class EnvironmentResource:
             if cluster is None
             else self._validate_healthy_owned_compose(cluster)
         )
+        from odoo_instance_sdk.internal.proc import active_context
+
+        context = active_context()
+        if (
+            context is not None
+            and context.planned("pgadmin.postgres.status.ps")
+            and not context.consumed("pgadmin.postgres.status.ps")
+        ):
+            # A captured domain double may provide its own health decision;
+            # it still has to account for the exact finite status phase.
+            _pgadmin_captured_cluster_state(context)
         instance = self._configured_pgadmin_instance(env)
         self._require_pgadmin_database(instance, database)
 
+        if captured_inputs is not None and (
+            captured_inputs.database != database
+            or captured_inputs.password != (instance.config.db_password or "")
+        ):
+            raise StalePlanError("captured pgAdmin inputs changed before execution")
+
         try:
-            return self._open_pgadmin_lifecycle(
-                environment=env,
+            from odoo_instance_sdk.internal.pgadmin import PgAdminProvisioningPhase
+            from odoo_instance_sdk.internal.proc import active_context
+
+            context = active_context()
+            return PgAdminProvisioningPhase(
                 instance=instance,
                 cluster=cluster,
                 database=database,
-            )
-        except PgAdminError:
+                captured_identity=(captured_inputs.identity if captured_inputs else None),
+                captured_paths=(captured_inputs.paths if captured_inputs else None),
+                captured_port=(captured_inputs.port if captured_inputs else None),
+                captured_fingerprint=(
+                    captured_inputs.fingerprint_inputs if captured_inputs else None
+                ),
+                executor=context.executor if context is not None else None,
+            )._provision_carrier(lock_held=lock_held)
+        except (PgAdminError, StalePlanError):
             raise
         except Exception:
             raise PgAdminUnavailableError() from None
@@ -1551,8 +1614,14 @@ class EnvironmentResource:
         try:
             from odoo_instance_sdk.internal.proc import active_context
 
-            if active_context() is not None and callable(getattr(cluster, "_status_compose", None)):
-                state = cluster._status_compose(health_step_id="pgadmin.postgres.status.health")
+            context = active_context()
+            if context is not None and context.planned("pgadmin.postgres.status.ps"):
+                state = _pgadmin_captured_cluster_state(context)
+            elif context is not None and callable(getattr(cluster, "_status_compose", None)):
+                state = cluster._status_compose(
+                    ps_step_id="pgadmin.postgres.status.ps",
+                    health_step_id="pgadmin.postgres.status.health",
+                )
             else:
                 state = cluster.status()
         except Exception:
@@ -1577,49 +1646,99 @@ class EnvironmentResource:
         if not exists:
             raise PgAdminDatabaseNotFoundError()
 
-    def _open_pgadmin_lifecycle(
-        self,
-        *,
-        environment: DevelopmentEnvironment,
-        instance: OdooInstance,
-        cluster: PostgresCluster,
-        database: str,
-    ) -> PgAdminOpenResult:
-        """Delegate file/container mechanics to the private pgAdmin helper."""
-        from odoo_instance_sdk.internal.pgadmin import open_pgadmin_lifecycle
-
-        return open_pgadmin_lifecycle(
-            environment=environment,
-            instance=instance,
-            cluster=cluster,
-            database=database,
-        )
-
     def list(
         self,
         *,
         project: ProjectConfig | Path | None = None,
         include_removed: bool = False,
     ) -> list[DevelopmentEnvironment]:
-        catalog = self._client.get_catalog()
-        if project is not None:
-            if isinstance(project, ProjectConfig):
-                project_path = project.repository_root
-            else:
-                project_path = Path(project)
-            from odoo_instance_sdk.internal.git_worktree import (
-                rev_parse_git_common_dir,
-                rev_parse_toplevel,
-            )
+        return self.list_command(
+            project=project,
+            include_removed=include_removed,
+        ).run()
 
-            repo_root = rev_parse_toplevel(project_path)
-            git_common = rev_parse_git_common_dir(repo_root)
-            rows = catalog.list_environments(
-                git_common_dir=str(git_common), include_removed=include_removed
+    def list_command(
+        self,
+        *,
+        project: ProjectConfig | Path | None = None,
+        include_removed: bool = False,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[_EnvironmentList]:
+        """Capture Git identity probes and catalog selection as one command."""
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
+
+        project_path: Path | None = None
+        if project is not None:
+            project_path = (
+                Path(project.repository_root)
+                if isinstance(project, ProjectConfig)
+                else Path(project)
             )
-        else:
-            rows = catalog.list_environments(include_removed=include_removed)
-        return [_row_to_env(r) for r in rows]
+        steps: list[PreparedStep | PreparedAction] = [
+            PreparedAction(
+                step_id="environment.list",
+                action="list-environments",
+                description="List catalog environments",
+                read_only=True,
+            )
+        ]
+        if project_path is not None:
+            steps.extend(
+                (
+                    PreparedStep(
+                        step_id="environment.list.git.toplevel",
+                        argv=("git", "-C", str(project_path), "rev-parse", "--show-toplevel"),
+                        cwd=str(project_path),
+                        timeout=30.0,
+                        read_only=True,
+                    ),
+                    PreparedStep(
+                        step_id="environment.list.git.common-dir",
+                        argv=("git", "-C", str(project_path), "rev-parse", "--git-common-dir"),
+                        cwd=str(project_path),
+                        timeout=30.0,
+                        read_only=True,
+                    ),
+                )
+            )
+        captured_steps = tuple(steps)
+
+        def _text(result: ProcessResult) -> str:
+            value = result.stdout
+            if isinstance(value, bytes):
+                return value.decode(errors="replace")
+            return value if isinstance(value, str) else ""
+
+        def run(context: RunContext[_EnvironmentList]) -> _EnvironmentList:
+            context.action("environment.list")
+            catalog = self._client.get_catalog()
+            if project_path is None:
+                rows = catalog.list_environments(include_removed=include_removed)
+            else:
+                top = cast("ProcessResult", context.process("environment.list.git.toplevel"))
+                if top.returncode != 0:
+                    from odoo_instance_sdk.internal.git_worktree import GitError
+
+                    raise GitError(f"not a git repository: {project_path}")
+                common = cast("ProcessResult", context.process("environment.list.git.common-dir"))
+                if common.returncode != 0 or not _text(common).strip():
+                    from odoo_instance_sdk.internal.git_worktree import GitError
+
+                    raise GitError(f"git common directory unavailable: {project_path}")
+                common_path = Path(_text(common).strip()).resolve()
+                rows = catalog.list_environments(
+                    git_common_dir=str(common_path.resolve()),
+                    include_removed=include_removed,
+                )
+            return [_row_to_env(row) for row in rows]
+
+        return Command.create(
+            ExecutionPlan(steps=tuple(step.public_projection() for step in captured_steps)),
+            run,
+            captured_steps,
+            executor=executor or SubprocessExecutor(),
+        )
 
     def remove(self, selector: EnvironmentSelector) -> None:
         return self.remove_command(selector).run()
@@ -1632,50 +1751,95 @@ class EnvironmentResource:
     ) -> Command[None]:
         from odoo_instance_sdk.internal.proc import PreparedStep
 
-        steps: tuple[PreparedStep, ...] = ()
-        if isinstance(selector, DevelopmentEnvironment):
-            worktree = Path(selector.worktree_path)
-            if worktree.is_dir():
-                steps = (
-                    PreparedStep(
-                        step_id="environment.remove.worktree-dirty",
-                        argv=("git", "-C", str(worktree), "status", "--porcelain"),
-                        timeout=30.0,
-                        read_only=True,
+        env = (
+            self._resolve_selector(selector, include_removed=True)
+            if isinstance(selector, str)
+            else selector
+        )
+        steps: tuple[PreparedStep | PreparedAction, ...] = ()
+        worktree = Path(env.worktree_path)
+        if worktree.is_dir():
+            steps = (
+                PreparedStep(
+                    step_id="environment.remove.worktree-dirty",
+                    argv=("git", "-C", str(worktree), "status", "--porcelain"),
+                    timeout=30.0,
+                    read_only=True,
+                ),
+                PreparedStep(
+                    step_id="environment.remove.worktree",
+                    argv=(
+                        "git",
+                        "-C",
+                        str(Path(env.repository_root)),
+                        "worktree",
+                        "remove",
+                        str(worktree),
                     ),
-                    PreparedStep(
-                        step_id="environment.remove.worktree",
-                        argv=(
-                            "git",
-                            "-C",
-                            str(Path(selector.repository_root)),
-                            "worktree",
-                            "remove",
-                            str(worktree),
-                        ),
-                        timeout=30.0,
-                        mutating=True,
-                    ),
-                )
+                    timeout=30.0,
+                    mutating=True,
+                ),
+            )
+        steps = (*steps, *self._remove_copy_database_steps(env))
         return self._action_command(
             "environment.remove",
             "Remove the selected development environment",
-            lambda: self._remove_impl(selector),
+            lambda: self._remove_impl(env),
             executor=executor,
             mutating=True,
             steps=steps,
             optional_steps=tuple(step.step_id for step in steps),
         )
 
-    def _remove_impl(self, selector: EnvironmentSelector) -> None:
-        env = (
-            self._resolve_selector(selector, include_removed=True)
-            if isinstance(selector, str)
-            else selector
+    def _remove_copy_database_steps(
+        self, env: DevelopmentEnvironment
+    ) -> tuple[PreparedStep | PreparedAction, ...]:
+        """Capture the conditional COPY cleanup probes before removal starts."""
+        if env.db_mode is not EnvironmentDatabaseMode.COPY or env.target_db_name is None:
+            return ()
+        config_path = Path(env.generated_config_path)
+        if not config_path.is_file():
+            return ()
+        try:
+            from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
+
+            cfg = parse_odoo_config(config_path)
+            password = get_admin_passwd(cfg)
+            if password is None:
+                return ()
+            instance = self._client.instance.from_config(config_path, master_password=password)
+            before = instance.databases._psql_probe_for(
+                env.target_db_name, "environment.remove.database.exists-before"
+            )
+            after = instance.databases._psql_probe_for(
+                env.target_db_name, "environment.remove.database.exists-after"
+            )
+            postcondition = instance.databases._psql_probe_for(
+                env.target_db_name, "environment.remove.database.exists-postcondition"
+            )
+        except Exception:
+            return ()
+        probes = tuple(
+            probe for probe in (before, after, postcondition) if isinstance(probe, PreparedStep)
         )
+        if not probes:
+            return ()
+        return (
+            PreparedAction(
+                step_id="environment.remove.database.drop",
+                action="drop-owned-copy-database",
+                description="Drop the owned COPY database between exact existence probes",
+                mutating=True,
+            ),
+            *probes,
+        )
+
+    def _remove_impl(self, env: DevelopmentEnvironment) -> None:
+        from odoo_instance_sdk.internal.proc import active_context
+
         catalog = self._client.get_catalog()
         with exclusive_lock(environment_lock_path(str(env.id))):
-            self._do_remove(catalog, env)
+            self._do_remove(catalog, env, context=cast("RunContext[None] | None", active_context()))
 
     def _action_command(
         self,
@@ -1685,7 +1849,7 @@ class EnvironmentResource:
         *,
         executor: ProcessExecutor | None,
         mutating: bool,
-        steps: Sequence[PreparedStep] = (),
+        steps: Sequence[PreparedStep | PreparedAction] = (),
         optional_steps: Sequence[str] = (),
     ) -> Command[T]:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
@@ -1715,13 +1879,18 @@ class EnvironmentResource:
                 run,
                 prepared_steps,
                 executor=executor or SubprocessExecutor(),
-                strict=bool(steps),
             ),
         )
 
-    def _do_remove(self, catalog: BackupCatalog, env: DevelopmentEnvironment) -> None:
+    def _do_remove(
+        self,
+        catalog: BackupCatalog,
+        env: DevelopmentEnvironment,
+        *,
+        context: RunContext[None] | None = None,
+    ) -> None:
         cat = catalog
-        copy_plan = self._preflight_remove(cat, env)
+        copy_plan = self._preflight_remove(cat, env, context=context)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
         cat.add_environment_event(str(env.id), "remove", "started")
 
@@ -1739,7 +1908,9 @@ class EnvironmentResource:
             CopyJournalStage.RESTORE_PENDING,
             CopyJournalStage.RESTORED,
         ):
-            cleanup_failed = self._drop_copy_target(copy_plan, failures) or cleanup_failed
+            cleanup_failed = (
+                self._drop_copy_target(copy_plan, failures, context=context) or cleanup_failed
+            )
             if cleanup_failed:
                 # Keep the config and owned backup: they are the only durable
                 # evidence and capability required for a safe retry.
@@ -1814,7 +1985,9 @@ class EnvironmentResource:
                 repo_root,
                 worktree,
                 failures,
-                dirty_checked=worktree.is_dir(),
+                dirty_checked=context is not None
+                and context.planned("environment.remove.worktree-dirty"),
+                context=context,
             )
             or cleanup_failed
         )
@@ -1834,7 +2007,11 @@ class EnvironmentResource:
                 env_root.rmdir()
 
     def _preflight_remove(
-        self, catalog: BackupCatalog, env: DevelopmentEnvironment
+        self,
+        catalog: BackupCatalog,
+        env: DevelopmentEnvironment,
+        *,
+        context: RunContext[None] | None = None,
     ) -> CopyCleanupPlan | None:
         """Reject unsafe or stale catalog rows before changing any external state."""
         if not _port_free(env.http_interface, env.http_port):
@@ -1861,13 +2038,30 @@ class EnvironmentResource:
         if env.python_environment_owned:
             _validate_owned_artifact(Path(env.python_environment_path), env_root / "venv", "dir")
         worktree = Path(env.worktree_path)
-        if worktree.is_dir():
+        status_step_id = "environment.remove.worktree-dirty"
+        if context is not None and context.planned(status_step_id):
+            status_result = cast("ProcessResult", context.process(status_step_id))
+            status_output = status_result.stdout
+            status_text = (
+                status_output.decode(errors="replace")
+                if isinstance(status_output, bytes)
+                else str(status_output or "")
+            )
+            if status_result.returncode != 0:
+                raise EnvironmentConflictError(
+                    "worktree_status_failed", "could not inspect the owned worktree"
+                )
+            is_dirty = bool(status_text.strip())
+        elif worktree.is_dir():
             from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty
 
-            if worktree_is_dirty(worktree):
-                raise EnvironmentConflictError(
-                    "dirty_worktree", f"worktree {worktree} is dirty; refusing to remove"
-                )
+            is_dirty = worktree_is_dirty(worktree)
+        else:
+            is_dirty = False
+        if is_dirty:
+            raise EnvironmentConflictError(
+                "dirty_worktree", f"worktree {worktree} is dirty; refusing to remove"
+            )
 
         if env.db_mode == EnvironmentDatabaseMode.COPY:
             return self._preflight_copy_remove(catalog, env)
@@ -2060,13 +2254,40 @@ class EnvironmentResource:
                 "copy journal, environment ownership, and generated config disagree",
             )
 
-    def _drop_copy_target(self, plan: CopyCleanupPlan, failures: _StrList) -> bool:
+    def _drop_copy_target(
+        self,
+        plan: CopyCleanupPlan,
+        failures: _StrList,
+        *,
+        context: RunContext[None] | None = None,
+    ) -> bool:
         instance = cast("OdooInstance", plan.instance)
         try:
             if not instance.databases.exists(plan.target_database):
                 return False
-            instance.databases.drop(plan.target_database)
-            if instance.databases.exists(plan.target_database):
+            if context is not None and context.planned("environment.remove.database.drop"):
+                context.action("environment.remove.database.drop")
+                instance.databases._drop_impl(
+                    plan.target_database,
+                    timeout=None,
+                    psql_step_id=(
+                        "environment.remove.database.exists-after"
+                        if context.planned("environment.remove.database.exists-after")
+                        else None
+                    ),
+                )
+            else:
+                instance.databases.drop(plan.target_database)
+            if context is not None and context.planned(
+                "environment.remove.database.exists-postcondition"
+            ):
+                still_exists = instance.databases._exists_impl(
+                    plan.target_database,
+                    psql_step_id="environment.remove.database.exists-postcondition",
+                )
+            else:
+                still_exists = instance.databases.exists(plan.target_database)
+            if still_exists:
                 failures.append(f"drop postcondition failed: {plan.target_database} still exists")
                 return True
         except Exception as exc:
@@ -2096,16 +2317,21 @@ class EnvironmentResource:
         failures: _StrList,
         *,
         dirty_checked: bool = False,
+        context: RunContext[None] | None = None,
     ) -> bool:
 
         catalog = cat
         if not worktree.is_dir():
+            if context is not None and context.planned("environment.remove.worktree"):
+                context.skip("environment.remove.worktree")
             catalog.add_environment_event(
                 str(env.id), "remove", "succeeded", message="worktree already absent"
             )
             return False
         from odoo_instance_sdk.internal.git_worktree import worktree_is_dirty, worktree_remove
 
+        if context is not None and not context.planned("environment.remove.worktree"):
+            raise StalePlanError("owned worktree appeared after remove command capture")
         if not dirty_checked and worktree_is_dirty(worktree):
             msg = f"worktree {worktree} is dirty; refusing to remove"
             catalog.update_environment_state(
@@ -2114,7 +2340,13 @@ class EnvironmentResource:
             catalog.add_environment_event(str(env.id), "remove", "failed", message=msg)
             raise EnvironmentConflictError("dirty_worktree", msg)
         try:
-            worktree_remove(repo_root, worktree)
+            if context is None:
+                worktree_remove(repo_root, worktree)
+            else:
+                result = cast("ProcessResult", context.process("environment.remove.worktree"))
+                if result.returncode != 0:
+                    failures.append(f"worktree remove: {_process_stderr(result)}")
+                    return True
         except Exception as e:
             failures.append(f"worktree remove: {e}")
             return True
@@ -2166,47 +2398,6 @@ class EnvironmentResource:
             failures.append(f"backup delete: {e}")
             return True
         return False
-
-    def _drop_target_db(
-        self,
-        cat: BackupCatalog,
-        env: DevelopmentEnvironment,
-        cleanup_failed: bool,
-        failures: _StrList,
-    ) -> bool:
-
-        catalog = cat
-        target = env.target_db_name
-        if target is None:
-            return cleanup_failed
-        source_config = Path(env.generated_config_path)
-        if not source_config.is_file():
-            failures.append(f"generated config missing: {source_config}")
-            return True
-        cfg = parse_odoo_config(source_config)
-        master_pwd = get_admin_passwd(cfg)
-        if master_pwd is None:
-            failures.append("master password missing; cannot drop target DB")
-            return True
-        base_url = infer_base_url(cfg)
-        try:
-            assert_local(base_url)
-        except NonLocalInstanceError as e:
-            failures.append(str(e))
-            return True
-        try:
-            instance = self._client.instance.from_config(source_config, master_password=master_pwd)
-            instance.databases.drop(target)
-            if instance.databases.exists(target):
-                failures.append(f"drop postcondition failed: {target} still exists")
-                return True
-            catalog.add_environment_event(
-                str(env.id), "remove", "succeeded", message=f"dropped {target}"
-            )
-        except Exception as e:
-            failures.append(f"drop: {e}")
-            return True
-        return cleanup_failed
 
     def _verify_tools(self) -> None:
         from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
@@ -2523,10 +2714,6 @@ def _validate_owned_artifact(path: Path, expected: Path, kind: Literal["file", "
         raise EnvironmentConflictError("unsafe_environment_path", f"unexpected {kind} type: {path}")
 
 
-class _CompileFailed(Exception):
-    pass
-
-
 def _restore_audit_backup(
     client: OdooClient,
     config: Mapping[str, str],
@@ -2614,6 +2801,28 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
     from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
 
     steps: list[Step] = [
+        PreparedStep(
+            step_id="checkout.validate.git.toplevel",
+            argv=("git", "-C", str(plan.repo_root), "rev-parse", "--show-toplevel"),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="checkout.validate.git.common-dir",
+            argv=("git", "-C", str(plan.repo_root), "rev-parse", "--git-common-dir"),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="checkout.validate.git.base",
+            argv=(
+                "git",
+                "-C",
+                str(plan.repo_root),
+                "rev-parse",
+                "--verify",
+                plan.base_ref,
+            ),
+            read_only=True,
+        ),
         PreparedAction("checkout.catalog"),
         PreparedStep(
             step_id="checkout.worktree",
@@ -2684,6 +2893,19 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
     steps.extend(
         (
             PreparedAction("checkout.database"),
+            PreparedStep(
+                step_id="checkout.cleanup.worktree",
+                argv=(
+                    "git",
+                    "-C",
+                    str(plan.repo_root),
+                    "worktree",
+                    "remove",
+                    str(plan.worktree),
+                ),
+                timeout=30.0,
+                mutating=True,
+            ),
             PreparedAction("checkout.cleanup"),
         )
     )
@@ -2709,32 +2931,50 @@ def _pgadmin_cluster_snapshot(selector: EnvironmentSelector) -> PostgresCluster 
         return None
 
 
-def _pgadmin_command_steps(
-    selector: EnvironmentSelector, *, cluster: PostgresCluster | None = None
-) -> tuple[PreparedStep, ...]:
-    """Describe the pgAdmin child-process boundary before lifecycle effects.
+def _pgadmin_captured_cluster_state(context: RunContext[T]) -> PostgresClusterState:
+    """Consume the captured finite Compose status phase exactly once."""
+    result = cast("ProcessResult", context.process("pgadmin.postgres.status.ps"))
+    if result.returncode != 0:
+        if context.planned("pgadmin.postgres.status.health"):
+            context.skip("pgadmin.postgres.status.health")
+        return PostgresClusterState.UNKNOWN
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    if not any(line.strip() for line in stdout.splitlines()):
+        if context.planned("pgadmin.postgres.status.health"):
+            context.skip("pgadmin.postgres.status.health")
+        return PostgresClusterState.STOPPED
+    health = cast("ProcessResult", context.process("pgadmin.postgres.status.health"))
+    if health.returncode == 0:
+        return PostgresClusterState.HEALTHY
+    return PostgresClusterState.STARTING
 
-    Container IDs and atomic-file names are intentionally late-bound.  The
-    proc ledger accepts those positions only when the declared token is
-    ``<runtime>``/``<secret>``; the executor still receives the exact private
-    argv assembled by the lifecycle.  This keeps the public plan useful while
-    avoiding a probe or secret-file mutation merely to construct a command.
-    """
+
+def _skip_planned_pgadmin_database_probe() -> None:
+    """Account a fallback-only probe when preflight exits before database lookup."""
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    if (
+        context is not None
+        and context.planned("pgadmin.database.exists.psql")
+        and not context.consumed("pgadmin.database.exists.psql")
+    ):
+        context.skip("pgadmin.database.exists.psql")
+
+
+def _pgadmin_command_steps(
+    selector: EnvironmentSelector,
+    *,
+    cluster: PostgresCluster | None = None,
+    inputs: _PgAdminCommandInputs | None = None,
+    include_reconciliation: bool = False,
+) -> tuple[PreparedStep | PreparedAction, ...]:
+    """Describe the pgAdmin child-process boundary from captured inputs."""
     if not isinstance(selector, DevelopmentEnvironment):
         return ()
-    from odoo_instance_sdk.internal import pgadmin_container, pgadmin_files
-    from odoo_instance_sdk.internal.pgadmin_files import (
-        PGADMIN_CONTAINER_NAME,
-        PGADMIN_DEFAULT_EMAIL,
-        PGADMIN_IMAGE,
-        PGADMIN_LABEL_FINGERPRINT,
-        PGADMIN_LABEL_MANAGED,
-        PGADMIN_LABEL_NETWORK,
-        PGADMIN_PASSWORD_DESTINATION,
-        PGADMIN_PGPASS_DESTINATION,
-        PGADMIN_RUNTIME_UID,
-    )
-    from odoo_instance_sdk.internal.proc import PreparedStep
+    from odoo_instance_sdk.internal import pgadmin_files
+    from odoo_instance_sdk.internal.pgadmin_files import PGADMIN_CONTAINER_NAME
+    from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
 
     try:
         cluster = cluster or _pgadmin_cluster_snapshot(selector)
@@ -2751,15 +2991,14 @@ def _pgadmin_command_steps(
             "-f",
             str(compose_file),
         )
-        paths = pgadmin_files.PgAdminPaths.from_defaults()
-        port = pgadmin_files.select_port(paths)
+        paths = inputs.paths if inputs is not None else pgadmin_files.PgAdminPaths.from_defaults()
     except Exception:
         # The regular typed preflight remains authoritative for unresolved
         # selectors/configuration.  A command with no process manifest keeps
         # that error path observable rather than inventing a partial plan.
         return ()
 
-    steps: list[PreparedStep] = [
+    status_steps: list[PreparedStep | PreparedAction] = [
         PreparedStep(
             step_id="pgadmin.postgres.status.ps",
             argv=(*prefix, "ps", "--format", "json"),
@@ -2782,140 +3021,162 @@ def _pgadmin_command_steps(
             cwd=str(compose_file.parent),
             read_only=True,
         ),
-        PreparedStep(
-            step_id="pgadmin.identity.ps",
-            argv=(*prefix, "ps", "--format", "json"),
-            read_only=True,
-        ),
-        PreparedStep(
-            step_id="pgadmin.identity.inspect",
-            argv=("docker", "inspect", "--format", "json", "<runtime>"),
-            read_only=True,
-        ),
-        PreparedStep(
-            step_id="pgadmin.identity.network",
-            argv=("docker", "network", "inspect", "--format", "json", "<runtime>"),
-            read_only=True,
-        ),
     ]
-    for index in range(4):
-        steps.append(
+    if inputs is None:
+        return tuple(status_steps)
+
+    identity = inputs.identity
+
+    steps: list[PreparedStep | PreparedAction] = [*status_steps]
+    if inputs.database_probe is not None:
+        steps.append(inputs.database_probe)
+    steps.extend(
+        [
             PreparedStep(
-                step_id=f"pgadmin.container.inspect.{index}",
+                step_id="pgadmin.identity.ps",
+                argv=(*prefix, "ps", "--format", "json"),
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="pgadmin.identity.inspect",
+                argv=("docker", "inspect", "--format", "json", identity.container_name),
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="pgadmin.identity.network",
+                argv=("docker", "network", "inspect", "--format", "json", identity.network),
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="pgadmin.container.inspect.0",
                 argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
                 read_only=True,
-            )
-        )
-    steps.extend(
-        (
-            PreparedStep(
-                step_id="pgadmin.container.remove",
-                argv=("docker", "rm", "--force", "<runtime>"),
-                mutating=True,
             ),
-            PreparedStep(
-                step_id="pgadmin.container.run",
-                argv=(
-                    "docker",
-                    "run",
-                    "--detach",
-                    "--name",
-                    PGADMIN_CONTAINER_NAME,
-                    "--user",
-                    str(PGADMIN_RUNTIME_UID),
-                    "--publish",
-                    f"127.0.0.1:{port}:80",
-                    "--network",
-                    "<runtime>",
-                    "--label",
-                    f"{PGADMIN_LABEL_MANAGED}=true",
-                    "--label",
-                    f"{PGADMIN_LABEL_FINGERPRINT}=<secret>",
-                    "--label",
-                    f"{PGADMIN_LABEL_NETWORK}=<runtime>",
-                    "--env",
-                    "PGADMIN_CONFIG_SERVER_MODE=False",
-                    "--env",
-                    "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
-                    "--env",
-                    f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
-                    "--env",
-                    f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
-                    "--env",
-                    f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
-                    "--mount",
-                    f"type=bind,source={paths.admin_password},destination={PGADMIN_PASSWORD_DESTINATION},readonly",
-                    "--mount",
-                    f"type=bind,source={paths.pgpass},destination={PGADMIN_PGPASS_DESTINATION},readonly",
-                    "--mount",
-                    f"type=bind,source={paths.servers_json},destination={pgadmin_files.PGADMIN_SERVERS_DESTINATION},readonly",
-                    "--mount",
-                    f"type=bind,source={paths.data_dir},destination={pgadmin_files.PGADMIN_DATA_DESTINATION}",
-                    PGADMIN_IMAGE,
-                ),
-                mutating=True,
-                secret_values=("<secret>",),
-            ),
-            PreparedStep(
-                step_id="pgadmin.container.refresh.inspect",
-                argv=("docker", "inspect", "--format", "json", "<runtime>"),
+            PreparedAction(
+                step_id="pgadmin.port.revalidate",
+                action="revalidate-pgadmin-port",
+                description="Revalidate the captured loopback port under the pgAdmin lifecycle lock",
                 read_only=True,
             ),
-            PreparedStep(
-                step_id="pgadmin.container.refresh",
-                argv=(
-                    "docker",
-                    "exec",
-                    "--user",
-                    str(PGADMIN_RUNTIME_UID),
-                    "<runtime>",
-                    "/bin/sh",
-                    "-c",
-                    pgadmin_container._ACTIVE_PGPASS_REFRESH,
+            PreparedAction(
+                step_id="pgadmin.prepare",
+                action="provision-pgadmin-reconciliation",
+                description=(
+                    "Run the locked pgAdmin provisioning phase and return exact reconciliation inputs"
                 ),
                 mutating=True,
             ),
-            PreparedStep(
-                step_id="pgadmin.container.verify",
-                argv=(
-                    "docker",
-                    "exec",
-                    "<runtime>",
-                    "/venv/bin/python3",
-                    "-c",
-                    pgadmin_container._PGADMIN_EFFECTIVE_SERVER_QUERY,
-                ),
-                read_only=True,
-            ),
-        )
+        ]
     )
-    if pgadmin_files._linux():
-        # Directory/file creation and atomic replacement determine the exact
-        # temporary path at runtime.  Reserve enough explicit ACL slots for
-        # the bounded preparation lifecycle; unused slots are accounted for
-        # as intentionally omitted optional probes by the command callback.
-        for index in range(32):
-            steps.append(
-                PreparedStep(
-                    step_id=f"pgadmin.acl.get.{index}",
-                    argv=("getfacl", "-cp", "<runtime>"),
+    file_acl = ",".join(sorted(pgadmin_files._file_acl()))
+    acl_specs = (
+        (
+            (
+                "pgadmin.acl.root.set",
+                (
+                    "setfacl",
+                    "--set",
+                    ",".join(sorted(pgadmin_files._directory_acl(0o710))),
+                    str(paths.root),
+                ),
+            ),
+            ("pgadmin.acl.root.validate", ("getfacl", "-cp", str(paths.root))),
+            (
+                "pgadmin.acl.private.set",
+                (
+                    "setfacl",
+                    "--set",
+                    ",".join(sorted(pgadmin_files._directory_acl(0o710))),
+                    str(paths.private_dir),
+                ),
+            ),
+            ("pgadmin.acl.private.validate", ("getfacl", "-cp", str(paths.private_dir))),
+            (
+                "pgadmin.acl.data.set",
+                (
+                    "setfacl",
+                    "--set",
+                    ",".join(sorted(pgadmin_files._directory_acl(0o770))),
+                    str(paths.data_dir),
+                ),
+            ),
+            (
+                "pgadmin.acl.data.default.set",
+                (
+                    "setfacl",
+                    "--default",
+                    "--set",
+                    ",".join(sorted(pgadmin_files._default_directory_acl())),
+                    str(paths.data_dir),
+                ),
+            ),
+            ("pgadmin.acl.data.validate", ("getfacl", "-cp", str(paths.data_dir))),
+            ("pgadmin.acl.data.default.validate", ("getfacl", "-cp", str(paths.data_dir))),
+            ("pgadmin.acl.admin.existing", ("getfacl", "-cp", str(paths.admin_password))),
+            (
+                "pgadmin.acl.admin.final.set",
+                ("setfacl", "--set", file_acl, str(paths.admin_password)),
+            ),
+            ("pgadmin.acl.pgpass.existing", ("getfacl", "-cp", str(paths.pgpass))),
+            (
+                "pgadmin.acl.pgpass.final.set",
+                ("setfacl", "--set", file_acl, str(paths.pgpass)),
+            ),
+            ("pgadmin.acl.servers.existing", ("getfacl", "-cp", str(paths.servers_json))),
+            (
+                "pgadmin.acl.servers.final.set",
+                ("setfacl", "--set", file_acl, str(paths.servers_json)),
+            ),
+            ("pgadmin.acl.metadata.existing", ("getfacl", "-cp", str(paths.metadata))),
+            (
+                "pgadmin.acl.metadata.final.set",
+                ("setfacl", "--set", file_acl, str(paths.metadata)),
+            ),
+            ("pgadmin.acl.admin.final", ("getfacl", "-cp", str(paths.admin_password))),
+            ("pgadmin.acl.pgpass.final", ("getfacl", "-cp", str(paths.pgpass))),
+            ("pgadmin.acl.servers.final", ("getfacl", "-cp", str(paths.servers_json))),
+            ("pgadmin.acl.metadata.final", ("getfacl", "-cp", str(paths.metadata))),
+        )
+        if pgadmin_files._linux()
+        else ()
+    )
+    for step_id, argv in acl_specs:
+        steps.append(
+            PreparedStep(
+                step_id=step_id,
+                argv=argv,
+                read_only=argv[0] == "getfacl",
+                mutating=argv[0] == "setfacl",
+            )
+        )
+    if include_reconciliation and inputs.fingerprint_inputs is not None:
+        from odoo_instance_sdk.internal.pgadmin_container import (
+            reconciliation_inspect_step,
+            reconciliation_steps,
+        )
+
+        steps.extend(
+            [
+                *pgadmin_files.preparation_revalidation_steps(paths),
+                reconciliation_inspect_step(),
+                PreparedAction(
+                    step_id="pgadmin.reconciliation.port.revalidate",
+                    action="pgadmin_reconciliation_port_revalidate",
+                    description="Revalidate the captured loopback port under the lifecycle lock",
                     read_only=True,
-                )
-            )
-            steps.append(
-                PreparedStep(
-                    step_id=f"pgadmin.acl.set.{index}",
-                    argv=("setfacl", "--set", "<runtime>", "<runtime>"),
-                    mutating=True,
-                )
-            )
-            steps.append(
-                PreparedStep(
-                    step_id=f"pgadmin.acl.default-set.{index}",
-                    argv=("setfacl", "--default", "--set", "<runtime>", "<runtime>"),
-                    mutating=True,
-                )
-            )
+                ),
+                *reconciliation_steps(
+                    paths=paths,
+                    port=inputs.port,
+                    network=identity.network,
+                    fingerprint=inputs.fingerprint_inputs.fingerprint,
+                    secret_values=(
+                        inputs.fingerprint_inputs.fingerprint,
+                        inputs.password,
+                    ),
+                ),
+            ]
+        )
     return tuple(steps)
 
 

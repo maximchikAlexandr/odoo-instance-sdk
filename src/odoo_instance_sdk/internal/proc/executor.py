@@ -15,7 +15,10 @@ from pathlib import Path
 from types import FrameType
 from typing import IO, cast
 
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
+from odoo_instance_sdk.internal.process_env import (
+    captured_child_environment,
+    sanitized_child_environment,
+)
 
 from . import PreparedProcess, PreparedStep
 
@@ -25,10 +28,26 @@ _CLEANUP_TIMEOUT = 5.0
 class ProcessExecutionError(RuntimeError):
     """Base class for failures at the process boundary."""
 
-    def __init__(self, argv: tuple[str, ...], reason: str, *, duration: float) -> None:
-        self.argv = argv
+    def __init__(
+        self,
+        argv: tuple[str, ...],
+        reason: str,
+        *,
+        duration: float,
+        secrets: Sequence[str] = (),
+        sensitive_indices: Sequence[int] = (),
+    ) -> None:
+        from .redaction import redacted_argv, redacted_projection
+
+        self.argv = redacted_argv(
+            argv, secrets=secrets, sensitive_indices=sensitive_indices or None
+        )
         self.duration = duration
-        super().__init__(f"process {argv!r} failed to execute: {reason}")
+        safe_reason = cast(
+            "str",
+            redacted_projection(reason, secrets=secrets, field="error"),
+        )
+        super().__init__(f"process {self.argv!r} failed to execute: {safe_reason}")
 
 
 class ProcessSpawnError(ProcessExecutionError):
@@ -44,9 +63,17 @@ class ProcessTimeoutError(ProcessExecutionError):
         timeout: float,
         *,
         duration: float,
+        secrets: Sequence[str] = (),
+        sensitive_indices: Sequence[int] = (),
     ) -> None:
         self.timeout = timeout
-        super().__init__(argv, f"timeout after {timeout}s", duration=duration)
+        super().__init__(
+            argv,
+            f"timeout after {timeout}s",
+            duration=duration,
+            secrets=secrets,
+            sensitive_indices=sensitive_indices,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,13 +147,27 @@ def owned_handle(
 
 
 def _environment(
-    overrides: tuple[tuple[str, str], ...], *, policy: str = "sanitized-inherit"
+    overrides: tuple[tuple[str, str], ...],
+    *,
+    policy: str = "sanitized-inherit",
+    snapshot: tuple[tuple[str, str], ...] = (),
 ) -> dict[str, str]:
     if policy == "explicit":
+        # An explicit policy is hermetic even when the caller supplied no
+        # overrides.  Passing ``None`` here would turn an intentionally empty
+        # environment back into a copy of the ambient process environment.
         return sanitized_child_environment(dict(overrides))
-    child = sanitized_child_environment()
-    child.update(dict(overrides))
-    return sanitized_child_environment(child)
+    # A non-empty tuple is an exact environment captured by ``prepared_step``
+    # or a resource command.  Do not silently merge a later ambient
+    # environment into an inspected command.
+    source = snapshot or overrides
+    return sanitized_child_environment(dict(source) if source else None)
+
+
+def _captured_error_secrets(step: PreparedStep) -> tuple[str, ...]:
+    from .redaction import captured_secret_values
+
+    return captured_secret_values(step)
 
 
 class SubprocessExecutor:
@@ -140,7 +181,11 @@ class SubprocessExecutor:
             completed = subprocess.run(
                 list(prepared.argv),
                 cwd=prepared.cwd,
-                env=_environment(prepared.environment, policy=prepared.environment_policy),
+                env=_environment(
+                    prepared.environment,
+                    policy=prepared.environment_policy,
+                    snapshot=prepared.environment_snapshot,
+                ),
                 input=prepared.stdin,
                 capture_output=prepared.mode == "captured",
                 text=text_mode,
@@ -148,15 +193,21 @@ class SubprocessExecutor:
                 check=False,
                 shell=False,
             )
-        except subprocess.TimeoutExpired as error:
+        except subprocess.TimeoutExpired:
             raise ProcessTimeoutError(
                 prepared.argv,
                 prepared.timeout if prepared.timeout is not None else 0.0,
                 duration=time.perf_counter() - started,
-            ) from error
+                secrets=_captured_error_secrets(prepared),
+                sensitive_indices=prepared.sensitive_argv_indices,
+            ) from None
         except OSError as error:
             raise ProcessSpawnError(
-                prepared.argv, str(error), duration=time.perf_counter() - started
+                prepared.argv,
+                str(error),
+                duration=time.perf_counter() - started,
+                secrets=_captured_error_secrets(prepared),
+                sensitive_indices=prepared.sensitive_argv_indices,
             ) from error
         stdout = getattr(completed, "stdout", "")
         stderr = getattr(completed, "stderr", "")
@@ -177,16 +228,30 @@ class SubprocessExecutor:
 
     def spawn(self, step: PreparedStep) -> ProcessHandle:
         inherited = step.inherit_stdio
-        process = subprocess.Popen(
-            list(step.argv),
-            cwd=step.cwd,
-            env=_environment(step.environment, policy=step.environment_policy),
-            stdin=None if inherited else subprocess.PIPE,
-            stdout=None if inherited else subprocess.PIPE,
-            stderr=None if inherited else subprocess.PIPE,
-            start_new_session=step.start_new_session,
-            shell=False,
-        )
+        started = time.perf_counter()
+        try:
+            process = subprocess.Popen(
+                list(step.argv),
+                cwd=step.cwd,
+                env=_environment(
+                    step.environment,
+                    policy=step.environment_policy,
+                    snapshot=step.environment_snapshot,
+                ),
+                stdin=None if inherited else subprocess.PIPE,
+                stdout=None if inherited else subprocess.PIPE,
+                stderr=None if inherited else subprocess.PIPE,
+                start_new_session=step.start_new_session,
+                shell=False,
+            )
+        except OSError as error:
+            raise ProcessSpawnError(
+                step.argv,
+                str(error),
+                duration=time.perf_counter() - started,
+                secrets=_captured_error_secrets(step),
+                sensitive_indices=step.sensitive_argv_indices,
+            ) from error
         group_id = process.pid if step.start_new_session and sys.platform != "win32" else None
         return ProcessHandle(
             process=process,
@@ -209,20 +274,36 @@ def prepared_step(
     timeout: float | None = None,
     mode: str = "captured",
     text: bool = True,
+    read_only: bool = False,
+    mutating: bool = False,
+    interactive: bool = False,
+    long_running: bool = False,
     start_new_session: bool = False,
     inherit_stdio: bool = False,
+    secret_values: Sequence[str] = (),
 ) -> PreparedStep:
     prefix = [executable] if isinstance(executable, str) else list(executable)
+    captured_environment, environment_overrides = captured_child_environment(env)
+    if environment_policy == "explicit":
+        captured_environment = environment_overrides
+    private_overrides = tuple(sorted((env or {}).items()))
     return PreparedStep(
         step_id=step_id,
         argv=(*prefix, *args),
         cwd=None if cwd is None else str(cwd),
-        environment=tuple(sorted((env or {}).items())),
+        environment=private_overrides,
+        environment_snapshot=captured_environment,
+        environment_overrides=environment_overrides,
         environment_policy=environment_policy,
         stdin=stdin,
         timeout=timeout,
         mode=mode,
         text=text,
+        read_only=read_only,
+        mutating=mutating,
+        interactive=interactive,
+        long_running=long_running,
+        secret_values=tuple(secret_values),
         start_new_session=start_new_session,
         inherit_stdio=inherit_stdio,
     )
@@ -237,6 +318,12 @@ def run_captured(
     stdin: bytes | None = None,
     timeout: float | None = None,
     text: bool = True,
+    step_id: str = "process",
+    read_only: bool = False,
+    mutating: bool = False,
+    interactive: bool = False,
+    long_running: bool = False,
+    secret_values: Sequence[str] = (),
 ) -> ProcessResult:
     step = prepared_step(
         executable,
@@ -246,6 +333,12 @@ def run_captured(
         stdin=stdin,
         timeout=timeout,
         text=text,
+        step_id=step_id,
+        read_only=read_only,
+        mutating=mutating,
+        interactive=interactive,
+        long_running=long_running,
+        secret_values=secret_values,
     )
     from . import active_context
 
@@ -263,6 +356,12 @@ def run_captured_limited(  # noqa: C901
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
     max_output_bytes: int,
+    step_id: str = "process",
+    read_only: bool = False,
+    mutating: bool = False,
+    interactive: bool = False,
+    long_running: bool = False,
+    secret_values: Sequence[str] = (),
 ) -> ProcessResult:
     """Run a captured process while bounding both output streams.
 
@@ -279,6 +378,12 @@ def run_captured_limited(  # noqa: C901
         env=env,
         timeout=timeout,
         text=False,
+        step_id=step_id,
+        read_only=read_only,
+        mutating=mutating,
+        interactive=interactive,
+        long_running=long_running,
+        secret_values=secret_values,
     )
     from . import active_context
 
@@ -290,7 +395,11 @@ def run_captured_limited(  # noqa: C901
         process = subprocess.Popen(
             list(step.argv),
             cwd=step.cwd,
-            env=_environment(step.environment, policy=step.environment_policy),
+            env=_environment(
+                step.environment,
+                policy=step.environment_policy,
+                snapshot=step.environment_snapshot,
+            ),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -298,7 +407,11 @@ def run_captured_limited(  # noqa: C901
         )
     except OSError as error:
         raise ProcessSpawnError(
-            step.argv, str(error), duration=time.perf_counter() - started
+            step.argv,
+            str(error),
+            duration=time.perf_counter() - started,
+            secrets=_captured_error_secrets(step),
+            sensitive_indices=step.sensitive_argv_indices,
         ) from error
 
     stdout = process.stdout
@@ -328,8 +441,12 @@ def run_captured_limited(  # noqa: C901
                 terminate_and_reap()
                 assert timeout is not None
                 raise ProcessTimeoutError(
-                    step.argv, timeout, duration=time.perf_counter() - started
-                )
+                    step.argv,
+                    timeout,
+                    duration=time.perf_counter() - started,
+                    secrets=_captured_error_secrets(step),
+                    sensitive_indices=step.sensitive_argv_indices,
+                ) from None
             ready = selector.select(remaining)
             if not ready:
                 terminate_and_reap()
@@ -337,7 +454,9 @@ def run_captured_limited(  # noqa: C901
                     step.argv,
                     timeout if timeout is not None else 0.0,
                     duration=time.perf_counter() - started,
-                )
+                    secrets=_captured_error_secrets(step),
+                    sensitive_indices=step.sensitive_argv_indices,
+                ) from None
             for key, _ in ready:
                 stream = cast("IO[bytes]", key.fileobj)
                 chunk = os.read(stream.fileno(), 64 * 1024)
@@ -352,6 +471,8 @@ def run_captured_limited(  # noqa: C901
                         step.argv,
                         "output exceeded configured limit",
                         duration=time.perf_counter() - started,
+                        secrets=_captured_error_secrets(step),
+                        sensitive_indices=step.sensitive_argv_indices,
                     )
                 buffer.extend(chunk)
         process.wait()
@@ -459,19 +580,6 @@ def terminate(
         handle.wait(timeout=timeout)
 
 
-def wait(handle: ProcessHandle) -> int:
-    return handle.wait()
-
-
-def wait_with_cleanup(handle: ProcessHandle) -> int:
-    try:
-        return wait(handle)
-    except BaseException:
-        with contextlib.suppress(BaseException):
-            terminate(handle)
-        raise
-
-
 def wait_foreground(handle: ProcessHandle) -> int:
     interrupted = False
     process_group_id = handle.process_group_id or handle.pid
@@ -513,7 +621,5 @@ __all__ = [
     "run_captured_limited",
     "spawn",
     "terminate",
-    "wait",
     "wait_foreground",
-    "wait_with_cleanup",
 ]

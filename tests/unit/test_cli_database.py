@@ -10,12 +10,22 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     DatabasePreparationAction,
     DatabasePreparationResult,
 )
+
+
+def _command(value: object = None, *, error: BaseException | None = None) -> Command[object]:
+    def run(_context: object) -> object:
+        if error is not None:
+            raise error
+        return value
+
+    return Command.create(ExecutionPlan(), run)
 
 
 def test_db_help_registers_both_commands_without_password_option() -> None:
@@ -54,10 +64,12 @@ def test_refresh_uses_project_context_options_and_typed_machine_result(
     tmp_path: Path,
 ) -> None:
     client = MagicMock()
-    client.environments.refresh_database.return_value = DatabasePreparationResult(
-        mode=DatabasePreparationAction.RESTORE,
-        restored_database="demo_copy",
-        retained_artifacts=("backup.zip",),
+    client.environments.refresh_database_command.return_value = _command(
+        DatabasePreparationResult(
+            mode=DatabasePreparationAction.RESTORE,
+            restored_database="demo_copy",
+            retained_artifacts=("backup.zip",),
+        )
     )
     monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
@@ -80,8 +92,8 @@ def test_refresh_uses_project_context_options_and_typed_machine_result(
     assert document["ok"] is True
     assert document["result"]["restored_database"] == "demo_copy"
     assert document["result"]["retained_artifacts"] == ["backup.zip"]
-    client.environments.refresh_database.assert_called_once()
-    options = client.environments.refresh_database.call_args.kwargs["options"]
+    client.environments.refresh_database_command.assert_called_once()
+    options = client.environments.refresh_database_command.call_args.kwargs["options"]
     assert options.restore is True
     assert options.reset_admin_password is True
     assert options.source_branch == "release/19"
@@ -92,8 +104,8 @@ def test_reset_delegates_only_for_exact_recorded_local_binding(
 ) -> None:
     instance = MagicMock()
     instance.config.configured_database_names = ("demo_copy",)
-    instance.databases.reset_admin_password.return_value = AdminPasswordResetResult(
-        database="demo_copy", completed=True, xml_id="base.user_admin"
+    instance.databases.reset_admin_password_command.return_value = _command(
+        AdminPasswordResetResult(database="demo_copy", completed=True, xml_id="base.user_admin")
     )
     environment = SimpleNamespace(id="env-1", source_db_name=None, target_db_name="demo_copy")
     monkeypatch.setattr(
@@ -108,7 +120,7 @@ def test_reset_delegates_only_for_exact_recorded_local_binding(
     assert document["context"] == {"environment_id": "env-1"}
     assert document["result"]["database"] == "demo_copy"
     assert "password" not in document["result"]
-    instance.databases.reset_admin_password.assert_called_once_with()
+    instance.databases.reset_admin_password_command.assert_called_once_with()
 
     instance.config.configured_database_names = ("other",)
     rejected = CliRunner().invoke(cli, ["db", "reset-admin-password", "--json"])
@@ -129,7 +141,7 @@ def test_refresh_failure_renders_typed_retained_context_without_secrets(
         retained_backup_id=uuid.UUID("00000000-0000-0000-0000-000000000042"),
         retained_database="demo_refresh_42",
     )
-    client.environments.refresh_database.side_effect = failure
+    client.environments.refresh_database_command.return_value = _command(error=failure)
     monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
 

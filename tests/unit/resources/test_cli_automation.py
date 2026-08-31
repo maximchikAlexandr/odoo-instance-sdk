@@ -12,6 +12,7 @@ import pytest
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.address import AddressState
 from odoo_instance_sdk.internal.automation import (
     eval_expression,
@@ -41,6 +42,10 @@ def _payload_stdout(payload: dict[str, Any], nonce: str = "deadbeefdeadbeef") ->
     return f"noise\n{marker_open} {json.dumps(payload)} {marker_close}\nmore\n"
 
 
+def _command_result(value: CommandResult) -> Command[CommandResult]:
+    return Command.create(ExecutionPlan(), lambda _context: value)
+
+
 def _make_instance(tmp_path: Path) -> OdooInstance:
     from odoo_instance_sdk import OdooClient, OdooClientConfig
 
@@ -62,7 +67,7 @@ def _stub_run_shell_script(
     captured_source: list[str] | None = None,
     captured_argv: list[list[str]] | None = None,
     captured_commit: list[bool] | None = None,
-) -> CommandResult:
+) -> Any:
     def _impl(
         self: Any,
         source: str,
@@ -70,7 +75,8 @@ def _stub_run_shell_script(
         argv: tuple[str, ...] = (),
         timeout: float | None = None,
         commit: bool = False,
-    ) -> CommandResult:
+        **kwargs: Any,
+    ) -> Command[CommandResult | Any]:
         if captured_source is not None:
             captured_source.append(source)
         if captured_argv is not None:
@@ -78,19 +84,29 @@ def _stub_run_shell_script(
         if captured_commit is not None:
             captured_commit.append(commit)
         if stdout_override is not None:
-            return CommandResult(
+            result = CommandResult(
                 args=[],
                 returncode=returncode,
                 stdout=stdout_override,
                 stderr=stderr_override,
                 duration=0.0,
             )
-        out = _payload_stdout(payload or {})
-        return CommandResult(
-            args=[], returncode=returncode, stdout=out, stderr=stderr_override, duration=0.0
-        )
+        else:
+            out = _payload_stdout(payload or {})
+            if (
+                kwargs.get("result_converter") is not None
+                and "_odcli_exports" in source
+                and isinstance((payload or {}).get("result"), dict)
+            ):
+                out = _payload_stdout({"result": [(payload or {})["result"]]})
+            result = CommandResult(
+                args=[], returncode=returncode, stdout=out, stderr=stderr_override, duration=0.0
+            )
+        converter = kwargs.get("result_converter")
+        value = converter(result) if converter is not None else result
+        return Command.create(ExecutionPlan(), lambda _context: value)
 
-    return _impl  # type: ignore[return-value]
+    return _impl
 
 
 class TestEvalScalar:
@@ -98,7 +114,7 @@ class TestEvalScalar:
         inst = _make_instance(tmp_path)
         with patch.object(
             type(inst),
-            "run_shell_script",
+            "run_shell_script_command",
             _stub_run_shell_script({"ok": True, "commit": False, "result": 2}),
         ):
             outcome = eval_expression(inst, "1+1")
@@ -112,7 +128,7 @@ class TestEvalRecordset:
         summary = {"model": "res.users", "ids": [1, 7], "count": 2}
         with patch.object(
             type(inst),
-            "run_shell_script",
+            "run_shell_script_command",
             _stub_run_shell_script({"ok": True, "commit": False, "result": summary}),
         ):
             outcome = eval_expression(inst, "env['res.users'].search([])")
@@ -126,7 +142,7 @@ class TestEvalUnknownObject:
         sanitized = "<SomeObject object at 0x1>"
         with patch.object(
             type(inst),
-            "run_shell_script",
+            "run_shell_script_command",
             _stub_run_shell_script({"ok": True, "commit": False, "result": sanitized}),
         ):
             outcome = eval_expression(inst, "object()")
@@ -142,7 +158,7 @@ class TestExec:
         script.write_text("print('hi')\n")
         with patch.object(
             type(inst),
-            "run_shell_script",
+            "run_shell_script_command",
             _stub_run_shell_script({"ok": True, "commit": False}, captured_argv=captured),
         ):
             outcome = exec_script(inst, script.read_text(), argv=("arg1", "arg2"))
@@ -154,7 +170,7 @@ class TestExec:
         captured: list[str] = []
         with patch.object(
             type(inst),
-            "run_shell_script",
+            "run_shell_script_command",
             _stub_run_shell_script({"ok": True, "commit": False}, captured_source=captured),
         ):
             exec_script(inst, "x = 1\n")
@@ -172,7 +188,7 @@ class TestModuleList:
                 {"name": "sale", "state": "installed", "installed_version": "19.0"},
             ],
         }
-        with patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)):
+        with patch.object(type(inst), "run_shell_script_command", _stub_run_shell_script(payload)):
             records = list_modules(inst, state="installed")
         assert [r.name for r in records] == ["base", "sale"]
         assert all(r.state == "installed" for r in records)
@@ -186,12 +202,13 @@ class TestModuleUpdate:
         inst._artifact_lock_path = environment_lock_path("update-no-self-conflict")
         list_payload = {"result": [{"name": "comerta_base", "state": "installed"}]}
         upgrade_payload = {"result": {"updated": ["comerta_base"]}}
-        captured = CommandResult(
-            args=[], returncode=0, stdout=_payload_stdout(upgrade_payload), stderr="", duration=0.0
-        )
         with (
-            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(list_payload)),
-            patch.object(type(inst), "_run_shell_script_exclusive", return_value=captured),
+            patch.object(
+                type(inst), "run_shell_script_command", _stub_run_shell_script(list_payload)
+            ),
+            patch.object(
+                type(inst), "_shell_script_command", _stub_run_shell_script(upgrade_payload)
+            ),
         ):
             assert update_modules(inst, ("comerta_base",), env_id="update-no-self-conflict").payload
 
@@ -204,7 +221,7 @@ class TestModuleUpdate:
                 {"name": "comerta_base", "state": "installed"},
             ],
         }
-        with patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)):
+        with patch.object(type(inst), "run_shell_script_command", _stub_run_shell_script(payload)):
             plan = plan_module_update(inst, ("comerta_base",))
         assert plan.modules == ["comerta_base"]
         assert plan.not_installed == []
@@ -230,18 +247,21 @@ class TestModuleUpdate:
             argv: tuple[str, ...] = (),
             timeout: float | None = None,
             commit: bool = False,
-        ) -> CommandResult:
-            return CommandResult(
+            **kwargs: Any,
+        ) -> Command[CommandResult]:
+            result = CommandResult(
                 args=[],
                 returncode=0,
                 stdout=_payload_stdout(next(payloads)),
                 stderr="",
                 duration=0.0,
             )
+            converter = kwargs.get("result_converter")
+            value = converter(result) if converter is not None else result
+            return Command.create(ExecutionPlan(), lambda _context: value)
 
         with (
-            patch.object(type(inst), "run_shell_script", _impl),
-            patch.object(type(inst), "_run_shell_script_exclusive", _impl),
+            patch.object(type(inst), "_shell_script_command", _impl),
         ):
             outcome = update_modules(inst, ("comerta_base",), env_id="env-1")
         assert outcome.payload is not None
@@ -252,7 +272,7 @@ class TestModuleUpdate:
         inst = _make_instance(tmp_path)
         payload = {"ok": True, "commit": False, "result": []}
         with (
-            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)),
             pytest.raises(ConfigError, match="not installed"),
         ):
             update_modules(inst, ("missing_mod",), env_id="env-1")
@@ -277,7 +297,7 @@ class TestOdooTestRunner:
         with (
             patch.object(
                 type(inst),
-                "_run_shell_script_exclusive",
+                "_shell_script_command",
                 _stub_run_shell_script(
                     payload,
                     captured_source=captured_source,
@@ -344,9 +364,7 @@ class TestOdooTestRunner:
         inst = _make_instance(tmp_path)
         payload = {"result": {"tests": 0, "successful": 0, "failed": 0, "errors": 0, "skipped": 0}}
         with (
-            patch.object(
-                type(inst), "_run_shell_script_exclusive", _stub_run_shell_script(payload)
-            ),
+            patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)),
             patch(
                 "odoo_instance_sdk.internal.automation.probe_address",
                 return_value=AddressState.FREE,
@@ -367,7 +385,7 @@ class TestOdooTestRunner:
         with (
             patch.object(
                 type(inst),
-                "_run_shell_script_exclusive",
+                "_shell_script_command",
                 _stub_run_shell_script(
                     returncode=2,
                     stderr_override="password='secret' token=hidden /private/runtime/odoo.log",
@@ -396,7 +414,7 @@ class TestOdooTestRunner:
         with (
             patch.object(
                 type(inst),
-                "_run_shell_script_exclusive",
+                "_shell_script_command",
                 _stub_run_shell_script(payload, stderr_override="FAILED error 0 tests"),
             ),
             patch(
@@ -417,7 +435,7 @@ class TestOdooTestRunner:
     def test_port_conflict_does_not_call_shell(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
         with (
-            patch.object(type(inst), "_run_shell_script_exclusive") as runner,
+            patch.object(type(inst), "_shell_script_command") as runner,
             patch(
                 "odoo_instance_sdk.internal.automation.probe_address",
                 return_value=AddressState.OCCUPIED,
@@ -452,7 +470,7 @@ class TestTranslationsExport:
         worktree = tmp_path / "wt"
         (worktree / "comerta_base" / "i18n").mkdir(parents=True)
         (worktree / "comerta_base" / "__manifest__.py").write_text("{}")
-        with patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)):
+        with patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)):
             results = export_translations(
                 inst, ("comerta_base",), ("ru_RU",), worktree_root=worktree
             )
@@ -481,7 +499,7 @@ class TestTranslationsExport:
         (worktree / "comerta_base" / "i18n").mkdir(parents=True)
         (worktree / "comerta_base" / "__manifest__.py").write_text("{}")
         with (
-            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)),
             pytest.raises(ConfigError, match="unexpected filename"),
         ):
             export_translations(inst, ("comerta_base",), ("ru_RU",), worktree_root=worktree)
@@ -508,7 +526,7 @@ class TestTranslationsExport:
         existing = i18n_dir / "ru.po"
         existing.write_bytes(b"OLD")
         existing.chmod(0o640)
-        with patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)):
+        with patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)):
             results = export_translations(
                 inst, ("comerta_base",), ("ru_RU",), worktree_root=worktree
             )
@@ -528,7 +546,7 @@ class TestTranslationsExport:
         worktree = tmp_path / "wt"
         worktree.mkdir()
         with (
-            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)),
             pytest.raises(ConfigError, match="absent"),
         ):
             export_translations(inst, ("not_local",), ("ru_RU",), worktree_root=worktree)
@@ -542,7 +560,7 @@ class TestTranslationsExport:
         (target.parent.parent / "__manifest__.py").write_text("{}")
         target.write_bytes(b"old")
         with (
-            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)),
             pytest.raises(ConfigError, match="invalid base64"),
         ):
             export_translations(inst, ("comerta_base",), ("ru_RU",), worktree_root=tmp_path / "wt")
@@ -563,7 +581,7 @@ class TestTranslationsExport:
         (target.parent.parent / "__manifest__.py").write_text("{}")
         target.write_bytes(b"old")
         with (
-            patch.object(type(inst), "run_shell_script", _stub_run_shell_script(payload)),
+            patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)),
             patch("pathlib.Path.replace", side_effect=OSError("replace denied")),
             pytest.raises(OSError, match="replace denied"),
         ):
@@ -591,20 +609,23 @@ class TestDepsVerify:
         fake_py.write_text("#!/bin/sh\nexit 1\n")
         fake_py.chmod(0o755)
 
-        def fake_run(args: list[str], **_kw: Any) -> Any:
-            class R:
-                def __init__(self, rc: int) -> None:
-                    self.returncode = rc
-                    self.stdout = ""
-                    self.stderr = ""
+        from odoo_instance_sdk.internal.proc import ProcessResult
 
-            if "pip" in args and "check" in args:
-                return R(0)
-            if "-c" in args and "import requests" in " ".join(args):
-                return R(1)
-            return R(0)
+        def fake_execute(_executor: Any, step: Any) -> ProcessResult:
+            rc = 1 if "-c" in step.argv and "import requests" in " ".join(step.argv) else 0
+            return ProcessResult(
+                argv=step.argv,
+                returncode=rc,
+                stdout="",
+                stderr="",
+                duration=0.0,
+                cwd=step.cwd,
+                environment=step.environment,
+            )
 
-        monkeypatch.setattr("odoo_instance_sdk.internal.automation.subprocess.run", fake_run)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.proc.executor.SubprocessExecutor.execute", fake_execute
+        )
         result = verify_deps(recorded_python=fake_py, worktree_root=worktree, uv_executable="uv")
         assert {"module": "myaddon", "import": "requests"} in result.missing_imports
 
@@ -663,14 +684,18 @@ class TestCliEval:
         runner = CliRunner()
         with (
             patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
-            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script_command"
+            ) as mock_run,
         ):
-            mock_run.return_value = CommandResult(
-                args=[],
-                returncode=0,
-                stdout=_payload_stdout({"ok": True, "commit": False, "result": 2}),
-                stderr="",
-                duration=0.0,
+            mock_run.return_value = _command_result(
+                CommandResult(
+                    args=[],
+                    returncode=0,
+                    stdout=_payload_stdout({"ok": True, "commit": False, "result": 2}),
+                    stderr="",
+                    duration=0.0,
+                )
             )
             result = runner.invoke(cli, ["--env", str(env.id), "eval", "1+1", "--json"])
         assert result.exit_code == 0
@@ -698,20 +723,24 @@ class TestCliModuleUpdate:
         runner = CliRunner()
         with (
             patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
-            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script_command"
+            ) as mock_run,
         ):
-            mock_run.return_value = CommandResult(
-                args=[],
-                returncode=0,
-                stdout=_payload_stdout(
-                    {
-                        "ok": True,
-                        "commit": False,
-                        "result": [{"name": "base", "state": "installed"}],
-                    }
-                ),
-                stderr="",
-                duration=0.0,
+            mock_run.return_value = _command_result(
+                CommandResult(
+                    args=[],
+                    returncode=0,
+                    stdout=_payload_stdout(
+                        {
+                            "ok": True,
+                            "commit": False,
+                            "result": [{"name": "base", "state": "installed"}],
+                        }
+                    ),
+                    stderr="",
+                    duration=0.0,
+                )
             )
             result = runner.invoke(cli, ["--env", str(env.id), "module", "update", "base"])
         assert result.exit_code == 1
@@ -735,27 +764,33 @@ class TestCliModuleUpdate:
         runner = CliRunner()
         with (
             patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
-            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script_command"
+            ) as mock_run,
         ):
-            mock_run.return_value = CommandResult(
-                args=[],
-                returncode=0,
-                stdout=_payload_stdout(
-                    {
-                        "ok": True,
-                        "commit": False,
-                        "result": [{"name": "base", "state": "installed"}],
-                    }
-                ),
-                stderr="",
-                duration=0.0,
+            mock_run.return_value = _command_result(
+                CommandResult(
+                    args=[],
+                    returncode=0,
+                    stdout=_payload_stdout(
+                        {
+                            "ok": True,
+                            "commit": False,
+                            "result": [{"name": "base", "state": "installed"}],
+                        }
+                    ),
+                    stderr="",
+                    duration=0.0,
+                )
             )
             result = runner.invoke(
                 cli, ["--env", str(env.id), "module", "update", "base", "--dry-run", "--json"]
             )
         assert result.exit_code == 0
         env_json = json.loads(result.output)
-        assert env_json["data"]["plan"]["steps"][0]["step_id"] == "module.update"
+        assert any(
+            step["step_id"] == "instance.shell_script" for step in env_json["data"]["plan"]["steps"]
+        )
         assert env_json["dry_run"] is True
 
 
@@ -778,14 +813,18 @@ class TestCliExecStdin:
         runner = CliRunner()
         with (
             patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
-            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script_command"
+            ) as mock_run,
         ):
-            mock_run.return_value = CommandResult(
-                args=[],
-                returncode=0,
-                stdout=_payload_stdout({"ok": True, "commit": False}),
-                stderr="",
-                duration=0.0,
+            mock_run.return_value = _command_result(
+                CommandResult(
+                    args=[],
+                    returncode=0,
+                    stdout=_payload_stdout({"ok": True, "commit": False}),
+                    stderr="",
+                    duration=0.0,
+                )
             )
             result = runner.invoke(
                 cli,
@@ -817,20 +856,24 @@ class TestCliModuleList:
         runner = CliRunner()
         with (
             patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
-            patch("odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script") as mock_run,
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script_command"
+            ) as mock_run,
         ):
-            mock_run.return_value = CommandResult(
-                args=[],
-                returncode=0,
-                stdout=_payload_stdout(
-                    {
-                        "ok": True,
-                        "commit": False,
-                        "result": [{"name": "base", "state": "installed"}],
-                    }
-                ),
-                stderr="",
-                duration=0.0,
+            mock_run.return_value = _command_result(
+                CommandResult(
+                    args=[],
+                    returncode=0,
+                    stdout=_payload_stdout(
+                        {
+                            "ok": True,
+                            "commit": False,
+                            "result": [{"name": "base", "state": "installed"}],
+                        }
+                    ),
+                    stderr="",
+                    duration=0.0,
+                )
             )
             result = runner.invoke(
                 cli,

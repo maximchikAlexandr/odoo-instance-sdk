@@ -4,9 +4,11 @@ import json
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal import cluster_resources
 from odoo_instance_sdk.internal.cluster_resources import (
     _parse_cpu_percent,
@@ -14,6 +16,7 @@ from odoo_instance_sdk.internal.cluster_resources import (
     inspect_containers,
     stats_containers,
 )
+from odoo_instance_sdk.internal.postgres_compose import SubprocessComposeRunner
 from odoo_instance_sdk.models import (
     ClusterResourceSnapshot,
     PidScope,
@@ -116,6 +119,111 @@ def test_resource_snapshot_reads_named_volume_usage() -> None:
     )
     assert snap.metrics is not None
     assert snap.metrics.volume_usage_bytes == int(1.5 * 1024**3)
+
+
+@pytest.mark.unit
+def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The standard Compose adapter consumes the same IDs it exposes in preview."""
+    from odoo_instance_sdk.internal import cluster_resources as cluster_resources_module
+    from odoo_instance_sdk.internal.proc import (
+        PreparedProcess,
+        PreparedStep,
+        ProcessResult,
+        RecordingExecutor,
+        active_context,
+    )
+    from odoo_instance_sdk.resources import postgres as postgres_module
+
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("services: {}\n")
+    inspect = _healthy_inspect()
+    inspect["Mounts"] = [{"Type": "volume", "Name": "odcli_pg_x_data"}]
+    rows = [{"Service": "postgres", "ID": FULL_ID, "State": "running"}]
+
+    def output_for(args: Sequence[str]) -> str:
+        if tuple(args[:2]) == ("docker", "compose") and "ps" in args:
+            return "\n".join(json.dumps(row) for row in rows)
+        if tuple(args[:2]) == ("docker", "inspect"):
+            return json.dumps([inspect])
+        if tuple(args[:2]) == ("docker", "stats"):
+            return json.dumps(_healthy_stats())
+        if tuple(args[:3]) == ("docker", "system", "df"):
+            return json.dumps({"Volumes": [{"Name": "odcli_pg_x_data", "Size": "1GiB"}]})
+        return ""
+
+    def result_for(prepared: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", prepared)
+        argv = prepared.argv
+        return ProcessResult(
+            argv=argv,
+            returncode=0,
+            stdout=output_for(argv),
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    def run(
+        _runner: SubprocessComposeRunner,
+        args: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        timeout: float | None = None,
+        step_id: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        context = active_context()
+        if context is None:
+            return _cp(args, 0, output_for(args))
+        assert step_id is not None
+        captured = cast("ProcessResult", context.process(step_id))
+        return _cp(
+            args,
+            captured.returncode,
+            captured.stdout if isinstance(captured.stdout, str) else "",
+            captured.stderr if isinstance(captured.stderr, str) else "",
+        )
+
+    monkeypatch.setattr(SubprocessComposeRunner, "run", run)
+    monkeypatch.setattr(postgres_module, "get_project_postgres_dir", lambda _project_id: tmp_path)
+    monkeypatch.setattr(postgres_module, "docker_available", lambda: True)
+    monkeypatch.setattr(cluster_resources_module, "docker_available", lambda: True)
+    runner = SubprocessComposeRunner()
+    cluster = PostgresCluster(
+        _repository_root=tmp_path,
+        _project_id="x",
+        _mode="compose",
+        _endpoint_host="127.0.0.1",
+        _endpoint_port=5432,
+        _image="postgres:16",
+        _user="odoo",
+        _compose_runner=runner,
+    )
+    executor = RecordingExecutor(result_factory=result_for)
+    command = cluster.resource_snapshot_command(executor=executor)
+
+    assert all(token not in repr(command.plan) for token in ("<runtime>", "<secret>"))
+    assert any(
+        step.step_id == "postgres.resource.inspect" and step.argv[-1] == FULL_ID
+        for step in command.plan.process_steps
+    )
+    planning = cast("dict[str, JsonValue]", command.plan.observations[0])
+    assert planning["read_only"] is True
+    assert planning["executed_during_planning"] is True
+    assert isinstance(planning["process"], dict)
+    result_metadata = cast("dict[str, JsonValue]", planning["result"])
+    assert result_metadata["returncode"] == 0
+    result = command.run()
+
+    assert result is not None
+    assert result.container is not None
+    assert result.container.id == SHORT_ID
+    assert tuple(step.step_id for step in executor.executed[1:]) == tuple(
+        step.step_id for step in command.plan.process_steps
+    )
+    assert executor.executed[0].step_id == "postgres.resource.plan.ps"
 
 
 @pytest.mark.unit

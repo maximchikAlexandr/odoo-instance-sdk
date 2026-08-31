@@ -114,7 +114,8 @@ def test_preparation_command_captures_restore_process_manifest_before_run(
         "postgres.ensure.final.ps",
         "postgres.ensure.final.health",
     )
-    assert process_ids[-2:] == (
+    assert process_ids[-3:] == (
+        "database.restore.exists-reservation",
         "database.restore.exists-before",
         "database.restore.exists-after",
     )
@@ -243,6 +244,7 @@ def _production_restore_command(
         options: DatabaseRefreshOptions,
         wait_for_lock: bool = True,
         coalesce: bool = False,
+        target_database: str | None = None,
     ) -> Iterator[RestorePreflight]:
         del _client, _project, wait_for_lock, coalesce
         context = active_context()
@@ -261,7 +263,7 @@ def _production_restore_command(
             local_instance=local,
             runtime=runtime,
             postgres_cluster=cluster,
-            target_database="remote_refresh_test",
+            target_database=target_database or "remote_refresh_test",
         )
 
     def result_for(prepared: PreparedProcess) -> ProcessResult:
@@ -293,6 +295,7 @@ def _consume_restore_probes(*_args: object, **_kwargs: object) -> MagicMock:
 
     context = active_context()
     assert context is not None
+    context.process("database.restore.exists-reservation")
     context.process("database.restore.exists-before")
     context.process("database.restore.exists-after")
     return MagicMock()
@@ -339,7 +342,12 @@ def test_production_restore_command_rolls_back_after_odoo_child_failure(
         command.run()
 
     assert getattr(failure.value, "failure_context").retained_backup_id == backup.id
-    assert getattr(failure.value, "failure_context").retained_database == "remote_refresh_test"
+    target_step = next(
+        step
+        for step in command.plan.process_steps
+        if step.step_id == "database.restore.exists-before"
+    )
+    assert getattr(failure.value, "failure_context").retained_database in target_step.argv[-1]
     assert project.default_source_database == "old"
     write.assert_not_called()
     assert tuple(step.step_id for step in executor.executed) == tuple(

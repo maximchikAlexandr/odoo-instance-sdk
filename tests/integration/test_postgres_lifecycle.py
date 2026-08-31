@@ -16,15 +16,18 @@ from pathlib import Path
 import pytest
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.internal.postgres_compose import docker_available
+from odoo_instance_sdk.internal.postgres_compose import docker_ready
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 pytestmark = pytest.mark.integration
 
 
 def _skip_if_no_docker() -> None:
-    if not docker_available():
-        pytest.skip("docker not available; skipping postgres lifecycle integration test")
+    ready, diagnostic = docker_ready(timeout=3.0)
+    if not ready:
+        pytest.skip(
+            f"docker is not ready ({diagnostic}); skipping postgres lifecycle integration test"
+        )
 
 
 def _free_loopback_port() -> int:
@@ -73,10 +76,10 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
     assert cluster.owned is True
     primary_failure: BaseException | None = None
     try:
-        digest = cluster.resolve_image_digest(timeout=120.0)
-        cluster.approve_image(digest, timeout=120.0)
+        digest = cluster.resolve_image_digest(timeout=45.0)
+        cluster.approve_image(digest, timeout=45.0)
         # up — should start the cluster and become healthy.
-        cluster.ensure_running(timeout=120.0)
+        cluster.ensure_running(timeout=45.0)
         state = cluster.status()
         assert state.value == "healthy"
 
@@ -127,7 +130,7 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         )
 
         # Restart (idempotent ensure_running).
-        cluster.ensure_running(timeout=60.0)
+        cluster.ensure_running(timeout=45.0)
         assert cluster.status().value == "healthy"
     except BaseException as exc:
         primary_failure = exc

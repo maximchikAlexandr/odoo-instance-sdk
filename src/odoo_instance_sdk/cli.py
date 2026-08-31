@@ -33,7 +33,6 @@ from odoo_instance_sdk.commands.output import (
 from odoo_instance_sdk.commands.test import (
     project_execution_result,
     resolve_module_test_selection,
-    run_module_tests,
     test_command,
 )
 from odoo_instance_sdk.config import OdooClientConfig
@@ -44,26 +43,15 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.automation import (
     ModuleRecord,
-    ShellOutcome,
     TranslationExportResult,
-    _captured_shell_supported,
-    eval_expression,
     eval_expression_command,
-    exec_script,
     exec_script_command,
-    export_translations,
     export_translations_command,
-    list_modules,
     list_modules_command,
     module_records_from_result,
     module_tests_command,
-    update_modules,
     update_modules_command,
-    verify_deps,
     verify_deps_command,
-)
-from odoo_instance_sdk.internal.automation import (
-    plan_module_update as _plan_module_update,
 )
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
@@ -77,16 +65,13 @@ from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
 from odoo_instance_sdk.models import CommandResult, OdooTestSpec, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 
-plan_module_update = _plan_module_update
-
 if TYPE_CHECKING:
     from collections.abc import Callable as TypeCallback
 
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.doctor import DoctorReport
-    from odoo_instance_sdk.models import ClusterSnapshot, DevelopmentEnvironment
-    from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.models import ClusterSnapshot
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -182,10 +167,10 @@ def _cluster_rich(document: OutputDocument) -> str:
     return " ".join(parts)
 
 
-def _updated_modules(value: CommandResult | ShellOutcome | None) -> JsonValue:
+def _updated_modules(value: CommandResult | None) -> JsonValue:
     if value is None:
         return []
-    payload = value.payload if isinstance(value, ShellOutcome) else parse_payload(value.stdout)
+    payload = parse_payload(value.stdout)
     if not isinstance(payload, dict):
         return []
     nested = payload.get("result")
@@ -644,20 +629,11 @@ def run(
                 f"port-conflict: {env_obj.http_interface}:{env_obj.http_port} is occupied "
                 "(ownership unknown)",
             )
-        candidate = instance.run_foreground_command()
-        from odoo_instance_sdk.execution import Command
-
-        command = candidate if isinstance(candidate, Command) else None
+        command = instance.run_foreground_command()
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "run", e)
-    if command is None:
-        command = action_command(
-            "run",
-            instance.run_foreground,
-            description="Run the Odoo foreground process",
-        )
     if not dry_run:
         client.environments.record_use(env_obj)
     try:
@@ -711,20 +687,11 @@ def shell(
     output_mode = resolve_command_options(output_format, json_output, dry_run, command="shell")
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
-        candidate = instance.shell_command(args=list(odoo_args))
-        from odoo_instance_sdk.execution import Command
-
-        command = candidate if isinstance(candidate, Command) else None
+        command = instance.shell_command(args=list(odoo_args))
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "shell", e)
-    if command is None:
-        command = action_command(
-            "shell",
-            lambda: instance.shell(args=list(odoo_args)),
-            description="Run the Odoo interactive shell",
-        )
     try:
         _status, value = run_or_preview(
             lambda: command,
@@ -762,9 +729,7 @@ def eval_cmd(
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
 
-        def checked_result(
-            value: CommandResult | ShellOutcome | None,
-        ) -> dict[str, JsonValue]:
+        def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
             if value is None:
                 return {}
             returncode = value.returncode
@@ -772,26 +737,12 @@ def eval_cmd(
                 raise RuntimeError(  # noqa: TRY301
                     f"shell exited {returncode}: {value.stderr.strip()}"
                 )
-            payload = (
-                value.payload if isinstance(value, ShellOutcome) else parse_payload(value.stdout)
-            )
+            payload = parse_payload(value.stdout)
             payload = payload or {}
             return {"result": payload.get("result"), "commit": commit}
 
-        def build_command() -> Command[CommandResult | ShellOutcome]:
-            if _captured_shell_supported(instance):
-                return cast(
-                    "Command[CommandResult | ShellOutcome]",
-                    eval_expression_command(instance, expression, commit=commit),
-                )
-            return cast(
-                "Command[CommandResult | ShellOutcome]",
-                action_command(
-                    "eval",
-                    lambda: eval_expression(instance, expression, commit=commit),
-                    description="Evaluate Odoo expression",
-                ),
-            )
+        def build_command() -> Command[CommandResult]:
+            return eval_expression_command(instance, expression, commit=commit)
 
         status, _outcome = run_or_preview(
             build_command,
@@ -817,7 +768,7 @@ def eval_cmd(
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
-def exec_cmd(  # noqa: C901
+def exec_cmd(
     ctx: CliContext,
     script: str,
     script_args: tuple[str, ...],
@@ -840,9 +791,7 @@ def exec_cmd(  # noqa: C901
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
 
-        def checked_result(
-            value: CommandResult | ShellOutcome | None,
-        ) -> dict[str, JsonValue]:
+        def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
             if value is None:
                 return {}
             returncode = value.returncode
@@ -857,20 +806,8 @@ def exec_cmd(  # noqa: C901
                 "commit": commit,
             }
 
-        def build_command() -> Command[CommandResult | ShellOutcome]:
-            if _captured_shell_supported(instance):
-                return cast(
-                    "Command[CommandResult | ShellOutcome]",
-                    exec_script_command(instance, source, argv=tuple(script_args), commit=commit),
-                )
-            return cast(
-                "Command[CommandResult | ShellOutcome]",
-                action_command(
-                    "exec",
-                    lambda: exec_script(instance, source, argv=tuple(script_args), commit=commit),
-                    description="Execute Odoo shell script",
-                ),
-            )
+        def build_command() -> Command[CommandResult]:
+            return exec_script_command(instance, source, argv=tuple(script_args), commit=commit)
 
         status, _outcome = run_or_preview(
             build_command,
@@ -912,15 +849,7 @@ def module_list(
     try:
         _client, _env, instance = cli_context.ready_instance(ctx)
         status, _records = run_or_preview(
-            lambda: (
-                list_modules_command(instance, names=tuple(modules), state=state)
-                if _captured_shell_supported(instance)
-                else action_command(
-                    "module.list",
-                    lambda: list_modules(instance, names=tuple(modules), state=state),
-                    description="Inspect installed Odoo modules",
-                )
-            ),
+            lambda: list_modules_command(instance, names=tuple(modules), state=state),
             command_name="module.list",
             mode=output_mode,
             dry_run=dry_run,
@@ -971,40 +900,11 @@ def module_update(
         raise
     except Exception as e:
         fail(output_mode, "module.update", str(e))
-    selected_modules = tuple(modules)
-    # Preserve the legacy seam for downstream adapters that explicitly replace
-    # the selector; the production command never performs selection before
-    # composition, which keeps dry-run effect-free.
-    if plan_module_update is not _plan_module_update:
-        try:
-            selected_plan = plan_module_update(instance, selected_modules)
-        except Exception as exc:
-            fail(output_mode, "module.update", exc)
-        if selected_plan.not_installed:
-            fail(
-                output_mode,
-                "module.update",
-                f"modules not installed: {', '.join(selected_plan.not_installed)}",
-            )
-        selected_modules = tuple(selected_plan.modules)
-
     try:
+        selected_modules = tuple(modules)
 
-        def build_command() -> Command[CommandResult | ShellOutcome]:
-            if _captured_shell_supported(instance):
-                return cast(
-                    "Command[CommandResult | ShellOutcome]",
-                    update_modules_command(instance, selected_modules, env_id=str(env_obj.id)),
-                )
-            return cast(
-                "Command[CommandResult | ShellOutcome]",
-                action_command(
-                    "module.update",
-                    lambda: update_modules(instance, selected_modules, env_id=str(env_obj.id)),
-                    description="Update selected Odoo modules",
-                    mutating=True,
-                ),
-            )
+        def build_command() -> Command[CommandResult]:
+            return update_modules_command(instance, selected_modules, env_id=str(env_obj.id))
 
         status, _outcome = run_or_preview(
             build_command,
@@ -1049,42 +949,6 @@ def module_update(
     sys.exit(status)
 
 
-def _module_update_execute(
-    instance: OdooInstance,
-    modules: list[str],
-    env_obj: DevelopmentEnvironment,
-    *,
-    output_mode: OutputMode,
-) -> None:
-    try:
-        outcome = update_modules(instance, tuple(modules), env_id=str(env_obj.id))
-    except SystemExit:
-        raise
-    except Exception as e:
-        fail(output_mode, "module.update", str(e))
-    if outcome.returncode != 0:
-        fail(
-            output_mode,
-            "module.update",
-            f"shell exited {outcome.returncode}: {outcome.stderr.strip()}",
-        )
-    raw_result = outcome.payload.get("result") if outcome.payload else None
-    raw_updated = raw_result.get("updated") if isinstance(raw_result, dict) else None
-    updated = [str(item) for item in raw_updated] if isinstance(raw_updated, list) else []
-    if output_mode is not OutputMode.RICH:
-        emit_json_envelope(
-            ok=True,
-            command="module.update",
-            result={"updated": cast("JsonValue", updated), "dry_run": False},
-            mode=output_mode,
-        )
-    else:
-        rich_print("Updated modules:")
-        for m in updated:
-            rich_print(f"  {m}")
-    sys.exit(0)
-
-
 @module_group.command("test")
 @click.argument("modules", nargs=-1, required=True)
 @click.option("--test-tags", "test_tags", required=True, help="Test tags.")
@@ -1124,26 +988,11 @@ def module_test(
             allow_empty=allow_empty,
         )
         status, outcome = run_or_preview(
-            lambda: (
-                module_tests_command(
-                    instance,
-                    spec,
-                    http_interface=env_obj.http_interface,
-                    http_port=env_obj.http_port,
-                )
-                if _captured_shell_supported(instance)
-                else action_command(
-                    "module.test",
-                    lambda: run_module_tests(
-                        instance,
-                        selection,
-                        spec,
-                        http_interface=env_obj.http_interface,
-                        http_port=env_obj.http_port,
-                    ),
-                    description="Run Odoo module tests",
-                    mutating=True,
-                )
+            lambda: module_tests_command(
+                instance,
+                spec,
+                http_interface=env_obj.http_interface,
+                http_port=env_obj.http_port,
             ),
             command_name="module.test",
             mode=output_mode,
@@ -1185,25 +1034,11 @@ def translations_export(
     try:
         _client, env_obj, instance = cli_context.ready_instance(ctx)
         status, _results = run_or_preview(
-            lambda: (
-                export_translations_command(
-                    instance,
-                    tuple(modules),
-                    tuple(languages),
-                    worktree_root=Path(env_obj.worktree_path),
-                )
-                if _captured_shell_supported(instance)
-                else action_command(
-                    "translations.export",
-                    lambda: export_translations(
-                        instance,
-                        tuple(modules),
-                        tuple(languages),
-                        worktree_root=Path(env_obj.worktree_path),
-                    ),
-                    description="Export Odoo translations",
-                    mutating=True,
-                )
+            lambda: export_translations_command(
+                instance,
+                tuple(modules),
+                tuple(languages),
+                worktree_root=Path(env_obj.worktree_path),
             ),
             command_name="translations.export",
             mode=output_mode,
@@ -1250,25 +1085,14 @@ def deps_verify(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, env_obj, instance = cli_context.ready_instance(ctx)
+        _client, env_obj, _instance = cli_context.ready_instance(ctx)
         recorded_python = Path(env_obj.python_environment_path)
         if recorded_python.is_dir():
             recorded_python = recorded_python / "bin" / "python"
         status, _result = run_or_preview(
-            lambda: (
-                verify_deps_command(
-                    recorded_python=recorded_python,
-                    worktree_root=Path(env_obj.worktree_path),
-                )
-                if _captured_shell_supported(instance)
-                else action_command(
-                    "deps.verify",
-                    lambda: verify_deps(
-                        recorded_python=recorded_python,
-                        worktree_root=Path(env_obj.worktree_path),
-                    ),
-                    description="Verify environment dependencies",
-                )
+            lambda: verify_deps_command(
+                recorded_python=recorded_python,
+                worktree_root=Path(env_obj.worktree_path),
             ),
             command_name="deps.verify",
             mode=output_mode,
@@ -1386,18 +1210,7 @@ def postgres_approve_image(
         def build_command() -> Command[None]:
             cluster = _postgres_cluster(ctx)
             cluster_holder["cluster"] = cluster
-            factory = getattr(cluster, "approve_image_command", None)
-            if callable(factory):
-                return cast("Command[None]", factory(image_digest, timeout=timeout))
-            return cast(
-                "Command[None]",
-                action_command(
-                    "postgres.approve-image",
-                    lambda: cluster.approve_image(image_digest, timeout=timeout),
-                    description="Approve the PostgreSQL image",
-                    mutating=True,
-                ),
-            )
+            return cluster.approve_image_command(image_digest, timeout=timeout)
 
         status, _value = run_or_preview(
             build_command,
@@ -1448,17 +1261,7 @@ def postgres_status(
     def build_command() -> Command[PostgresClusterState]:
         cluster = _postgres_cluster(ctx)
         cluster_holder["cluster"] = cluster
-        factory = getattr(cluster, "status_command", None)
-        if callable(factory):
-            return cast("Command[PostgresClusterState]", factory())
-        return cast(
-            "Command[PostgresClusterState]",
-            action_command(
-                "postgres.status",
-                cluster.status,
-                description="Inspect PostgreSQL cluster status",
-            ),
-        )
+        return cluster.status_command()
 
     try:
         status, value = run_or_preview(
@@ -1503,18 +1306,7 @@ def postgres_up(
     def build_command() -> Command[None]:
         cluster = _postgres_cluster(ctx)
         cluster_holder["cluster"] = cluster
-        factory = getattr(cluster, "ensure_running_command", None)
-        if callable(factory):
-            return cast("Command[None]", factory(timeout=wait_timeout))
-        return cast(
-            "Command[None]",
-            action_command(
-                "postgres.up",
-                lambda: cluster.ensure_running(timeout=wait_timeout),
-                description="Ensure the PostgreSQL cluster is running",
-                mutating=True,
-            ),
-        )
+        return cluster.ensure_running_command(timeout=wait_timeout)
 
     try:
         status, _value = run_or_preview(
@@ -1558,18 +1350,7 @@ def postgres_stop(
     def build_command() -> Command[None]:
         cluster = _postgres_cluster(ctx)
         cluster_holder["cluster"] = cluster
-        factory = getattr(cluster, "stop_command", None)
-        if callable(factory):
-            return cast("Command[None]", factory(timeout=timeout))
-        return cast(
-            "Command[None]",
-            action_command(
-                "postgres.stop",
-                lambda: cluster.stop(timeout=timeout),
-                description="Stop the PostgreSQL cluster",
-                mutating=True,
-            ),
-        )
+        return cluster.stop_command(timeout=timeout)
 
     try:
         status, _value = run_or_preview(

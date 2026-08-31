@@ -21,6 +21,7 @@ def run_psql(
     query: str,
     timeout: float,
     database: str = "postgres",
+    step_id: str | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     """Run one read-only psql query with explicit connection inputs.
 
@@ -66,27 +67,40 @@ def run_psql(
         cmd[2:2] = ["-h", host]
     try:
         from odoo_instance_sdk.internal.proc import (
+            PreparedStep,
             ProcessExecutionError,
             SubprocessExecutor,
             active_context,
-            prepared_step,
         )
 
         context = active_context()
         if context is not None:
-            captured = cast(
-                "ProcessResult",
-                context.process_prepared(
-                    prepared_step(
-                        cmd, env=env, environment_policy="explicit", timeout=timeout, text=True
-                    )
-                ),
-            )
+            if step_id is None:
+                from odoo_instance_sdk.exceptions import UnplannedStepError
+
+                raise UnplannedStepError("psql process requires captured step_id")
+            captured_step = context.prepared(step_id)
+            if captured_step.argv != tuple(cmd) or captured_step.timeout != timeout:
+                from odoo_instance_sdk.exceptions import UnplannedStepError
+
+                raise UnplannedStepError(step_id)
+            captured = cast("ProcessResult", context.process_prepared(captured_step))
             stdout = captured.stdout if isinstance(captured.stdout, str) else ""
             stderr = captured.stderr if isinstance(captured.stderr, str) else ""
             return subprocess.CompletedProcess(cmd, captured.returncode, stdout, stderr)
         captured = SubprocessExecutor().execute(
-            prepared_step(cmd, env=env, environment_policy="explicit", timeout=timeout, text=True)
+            PreparedStep(
+                step_id=step_id or "psql",
+                argv=tuple(cmd),
+                environment=tuple(sorted(env.items())),
+                environment_snapshot=tuple(sorted(env.items())),
+                environment_overrides=((("PGPASSWORD", password),) if password is not None else ()),
+                environment_policy="sanitized-inherit",
+                timeout=timeout,
+                read_only=True,
+                text=True,
+                secret_values=(password,) if password else (),
+            )
         )
         stdout = captured.stdout if isinstance(captured.stdout, str) else ""
         stderr = captured.stderr if isinstance(captured.stderr, str) else ""

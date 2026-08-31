@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import (
@@ -74,11 +74,23 @@ class PreparedStep:
 
     step_id: str
     argv: tuple[str, ...]
+    # Captured at construction and consumed by every public projection.  This
+    # is intentionally private: callers cannot reconstruct a safe argv by
+    # applying a second, weaker redaction pass later.
+    sensitive_argv_indices: tuple[int, ...] = ()
     cwd: str | None = None
     environment: tuple[tuple[str, str], ...] = ()
+    # Full immutable child environment, private to execution.  ``environment``
+    # remains the historical explicit-overrides payload for ProcessResult.
+    environment_snapshot: tuple[tuple[str, str], ...] = ()
+    # Exact private values above are used for execution.  This separate tuple
+    # contains only caller-supplied overrides that are eligible for public
+    # projection; inherited environment values never need to be serialized.
+    environment_overrides: tuple[tuple[str, str], ...] = ()
     environment_policy: str = "sanitized-inherit"
     stdin: bytes | None = None
     wrapper_nonce: str | None = None
+    secret_config_path: str | None = None
     public_input_preview: str | None = None
     timeout: float | None = None
     mode: str = "captured"
@@ -90,6 +102,25 @@ class PreparedStep:
     text: bool = True
     start_new_session: bool = False
     inherit_stdio: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.environment_snapshot:
+            from odoo_instance_sdk.internal.process_env import captured_child_environment
+
+            snapshot, overrides = captured_child_environment(dict(self.environment) or None)
+            if self.environment_policy == "explicit":
+                snapshot = overrides
+            object.__setattr__(self, "environment_snapshot", snapshot)
+            if not self.environment_overrides:
+                object.__setattr__(self, "environment_overrides", overrides)
+        from .redaction import capture_sensitive_argv_indices
+
+        captured = capture_sensitive_argv_indices(self.argv, secrets=self.secret_values)
+        object.__setattr__(
+            self,
+            "sensitive_argv_indices",
+            tuple(sorted(set(self.sensitive_argv_indices).union(captured))),
+        )
 
     def public_projection(self) -> ProcessStep:
         from odoo_instance_sdk.internal.proc.redaction import project_process_step
@@ -129,62 +160,27 @@ _ACTIVE_CONTEXT: ContextVar[RunContext[PrivateJsonValue] | None] = ContextVar(
 class RunContext(Generic[T]):
     """Mutable only for one invocation of a command."""
 
-    def __init__(
-        self, steps: tuple[Step, ...], executor: ProcessExecutor, *, strict: bool = False
-    ) -> None:
+    def __init__(self, steps: tuple[Step, ...], executor: ProcessExecutor) -> None:
         self._steps = {step.step_id: step for step in steps}
         self._executor = executor
-        self._strict = strict
         self._consumed: set[str] = set()
         self._results: dict[str, ProcessResultLike] = {}
 
     def process(self, step_id: str) -> T:
-        step = self._consume(step_id)
-        if not isinstance(step, PreparedStep):
-            raise UnplannedStepError(step_id, reason="requested step is not a process")
-        result = self._executor.execute(step)
-        self._results[step_id] = result
-        return cast("T", result)
+        """Consume a captured process by identifier through the exact path."""
+        return cast("T", self.process_prepared(self.prepared(step_id)))
 
     def process_prepared(self, requested: PreparedStep) -> ProcessResultLike:
-        """Consume the captured step matching a collector's exact argv."""
-        for step_id, step in self._steps.items():
-            if (
-                isinstance(step, PreparedStep)
-                and step.argv == requested.argv
-                and step_id not in self._consumed
-            ):
-                self._consumed.add(step_id)
-                result = self._executor.execute(step)
-                self._results[step_id] = result
-                return result
-        for step_id, step in self._steps.items():
-            if (
-                isinstance(step, PreparedStep)
-                and step_id not in self._consumed
-                and _matches_runtime_arguments(step.argv, requested.argv)
-            ):
-                self._consumed.add(step_id)
-                # Runtime identifiers (container IDs and temporary ACL paths)
-                # are discovered by an earlier captured probe.  Keep the
-                # declared step identity/metadata while executing the exact
-                # argv supplied by the callback.
-                runtime_step = replace(requested, step_id=step_id)
-                result = self._executor.execute(runtime_step)
-                self._results[step_id] = result
-                return result
-        if any(
-            isinstance(step, PreparedStep) and step.argv == requested.argv
-            for step in self._steps.values()
-        ):
+        """Consume the exact immutable captured step, never a substituted request."""
+        captured = self._steps.get(requested.step_id)
+        if not isinstance(captured, PreparedStep) or captured != requested:
+            raise UnplannedStepError(requested.step_id)
+        if requested.step_id in self._consumed:
             raise DuplicateStepError(requested.step_id)
-        if not self._strict:
-            # Compatibility operations may discover an optional process only
-            # after a domain preflight.  Keep that process on the command's
-            # executor seam (including RecordingExecutor); strict commands
-            # still reject every request absent from their frozen plan.
-            return self._executor.execute(requested)
-        raise UnplannedStepError(requested.step_id)
+        self._consumed.add(requested.step_id)
+        result = self._executor.execute(captured)
+        self._results[requested.step_id] = result
+        return result
 
     def spawn(self, step_id: str) -> ProcessHandle:
         step = self._consume(step_id)
@@ -248,26 +244,10 @@ class RunContext(Generic[T]):
         """Results captured by this invocation, keyed by private step ID."""
         return self._results
 
-
-def _matches_runtime_arguments(declared: tuple[str, ...], requested: tuple[str, ...]) -> bool:
-    """Match only explicitly marked late-bound argument positions."""
-    if len(declared) != len(requested):
-        return False
-    return all(
-        expected == actual
-        or expected in {"<runtime>", "<secret>"}
-        or (
-            "<runtime>" in expected
-            and actual.startswith(expected.split("<runtime>", 1)[0])
-            and actual.endswith(expected.split("<runtime>", 1)[1])
-        )
-        or (
-            "<secret>" in expected
-            and actual.startswith(expected.split("<secret>", 1)[0])
-            and actual.endswith(expected.split("<secret>", 1)[1])
-        )
-        for expected, actual in zip(declared, requested, strict=True)
-    )
+    @property
+    def executor(self) -> ProcessExecutor:
+        """Return the executor for an explicit nested phase command."""
+        return self._executor
 
 
 def active_context() -> RunContext[PrivateJsonValue] | None:
@@ -285,10 +265,9 @@ class PreparedCommand(Generic[T]):
     steps: tuple[Step, ...]
     executor: ProcessExecutor
     private_projection: PrivateProjection | None = None
-    strict: bool = False
 
     def run(self) -> T:
-        context: RunContext[T] = RunContext(self.steps, self.executor, strict=self.strict)
+        context: RunContext[T] = RunContext(self.steps, self.executor)
         token = _ACTIVE_CONTEXT.set(cast("RunContext[PrivateJsonValue]", context))
         try:
             result = self.callback(context)
@@ -304,7 +283,6 @@ def prepared_command(
     *,
     executor: ProcessExecutor | None = None,
     private_projection: PrivateProjection | None = None,
-    strict: bool = False,
 ) -> PreparedCommand[T]:
     frozen_steps = tuple(steps)
     identifiers = [step.step_id for step in frozen_steps]
@@ -318,7 +296,6 @@ def prepared_command(
         frozen_steps,
         executor or _NullExecutor(),
         private_projection,
-        strict,
     )
 
 
@@ -345,9 +322,7 @@ __all__ = [
     "run_captured_limited",
     "spawn",
     "terminate",
-    "wait",
     "wait_foreground",
-    "wait_with_cleanup",
 ]
 
 
@@ -367,8 +342,6 @@ from .executor import (  # noqa: E402
     run_captured_limited,
     spawn,
     terminate,
-    wait,
     wait_foreground,
-    wait_with_cleanup,
 )
 from .testing import RecordingExecutor  # noqa: E402

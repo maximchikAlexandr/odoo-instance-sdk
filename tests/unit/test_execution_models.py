@@ -24,7 +24,11 @@ from odoo_instance_sdk.exceptions import (
     UnplannedStepError,
 )
 from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor, RunContext
-from odoo_instance_sdk.internal.proc.redaction import REDACTION_MARKER, redacted_projection
+from odoo_instance_sdk.internal.proc.redaction import (
+    REDACTION_MARKER,
+    redacted_argv,
+    redacted_projection,
+)
 
 
 def _prepared() -> PreparedStep:
@@ -33,6 +37,7 @@ def _prepared() -> PreparedStep:
         argv=("tool", "--password=super secret", "quoted value"),
         cwd="/work tree",
         environment=(("TOKEN", "super secret"), ("LANG", "C")),
+        environment_overrides=(("TOKEN", "super secret"), ("LANG", "C")),
         stdin=b"password: super secret\nprint('quoted value')",
         timeout=2.5,
         mode="captured",
@@ -53,6 +58,57 @@ def test_public_projection_is_frozen_json_safe_and_keeps_argv_boundaries() -> No
     assert msgspec.json.decode(msgspec.json.encode(public), type=ProcessStep) == public
     with pytest.raises(AttributeError):
         public.argv = ("changed",)  # type: ignore[misc]
+
+
+def test_public_projection_separates_inherited_environment_and_redacts_argv_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("INHERITED_PRIVATE_MARKER", "ambient-secret")
+    step = PreparedStep(
+        step_id="secure",
+        argv=(
+            "tool",
+            "--token",
+            "token-value",
+            "--password=passwd-value",
+            "https://user:uri-password@example.test/path",
+        ),
+        environment=(
+            ("DATABASE_URL", "postgresql://db-user:db-password@example.test/app"),
+            ("INHERITED_PRIVATE_MARKER", "ambient-secret"),
+            ("SAFE_OVERRIDE", "safe"),
+        ),
+        environment_snapshot=(
+            ("DATABASE_URL", "postgresql://db-user:db-password@example.test/app"),
+            ("INHERITED_PRIVATE_MARKER", "ambient-secret"),
+        ),
+        environment_overrides=(
+            ("DATABASE_URL", "postgresql://db-user:db-password@example.test/app"),
+            ("SAFE_OVERRIDE", "safe"),
+        ),
+        secret_values=("token-value", "passwd-value", "uri-password", "db-password"),
+    )
+
+    public = step.public_projection()
+
+    assert public.argv == (
+        "tool",
+        "--token",
+        REDACTION_MARKER,
+        f"--password={REDACTION_MARKER}",
+        f"https://{REDACTION_MARKER}@example.test/path",
+    )
+    assert public.environment_overrides == (
+        ("DATABASE_URL", REDACTION_MARKER),
+        ("SAFE_OVERRIDE", REDACTION_MARKER),
+    )
+    encoded = msgspec.json.encode(public)
+    assert b"ambient-secret" not in encoded
+    assert b"db-password" not in encoded
+    assert redacted_argv(("--password", "passwd-value"), secrets=("passwd-value",)) == (
+        "--password",
+        REDACTION_MARKER,
+    )
 
 
 def test_plan_serializes_action_and_process_values_without_private_snapshot() -> None:

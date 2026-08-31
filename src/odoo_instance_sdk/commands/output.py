@@ -88,11 +88,6 @@ _ResultT_co = TypeVar("_ResultT_co", covariant=True)
 _P = ParamSpec("_P")
 
 
-class _PlannedCommand(Protocol):
-    @property
-    def plan(self) -> msgspec.Struct: ...
-
-
 class _InspectableCommand(Protocol, Generic[_ResultT_co]):
     @property
     def plan(self) -> msgspec.Struct: ...
@@ -361,29 +356,6 @@ def failure_document(
     )
 
 
-def emit_command_plan(
-    command: _PlannedCommand,
-    *,
-    command_name: str,
-    mode: OutputMode,
-    context: JsonObject | None = None,
-    provenance: JsonObject | None = None,
-    rich: Callable[[OutputDocument], str] | None = None,
-) -> int:
-    """Emit the inspected plan of an already-built command without running it."""
-    return emit(
-        success_document(
-            command=command_name,
-            result=model_to_dict(command.plan),
-            context=context,
-            provenance=provenance,
-            dry_run=True,
-        ),
-        mode,
-        rich=rich,
-    )
-
-
 def action_command(
     step_id: str,
     operation: Callable[[], _ResultT],
@@ -597,7 +569,6 @@ __all__ = [
     "build_envelope",
     "command_options",
     "emit",
-    "emit_command_plan",
     "emit_json_envelope",
     "fail",
     "failure_document",

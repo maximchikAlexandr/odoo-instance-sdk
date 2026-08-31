@@ -189,6 +189,61 @@ class TestList:
 
 
 class TestExists:
+    def test_pgadmin_fallback_consumes_captured_probe_after_ambient_change(
+        self, client: OdooClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
+
+        inst = _make_instance_with_cluster_key(client, db_user="odoo")
+        with (
+            patch(
+                "odoo_instance_sdk.resources.database.shutil.which", return_value="/usr/bin/psql"
+            ),
+            patch(
+                "odoo_instance_sdk.internal.postgres_transport.shutil.which",
+                return_value="/usr/bin/psql",
+            ),
+        ):
+            probe = inst.databases._psql_probe_for("mydb", "pgadmin.database.exists.psql")
+        assert probe is not None
+        result = ProcessResult(
+            argv=probe.argv,
+            returncode=0,
+            stdout="1\n",
+            stderr="",
+            duration=0.0,
+            cwd=probe.cwd,
+            environment=probe.environment,
+        )
+        executor = RecordingExecutor(results={probe.step_id: result})
+        action = PreparedAction(step_id="pgadmin.database.fallback", mutating=False)
+
+        def callback(context: RunContext[bool]) -> bool:
+            context.action(action.step_id)
+            with patch.object(
+                inst.databases.__class__,
+                "list",
+                side_effect=DatabaseManagerUnavailableError("down"),
+            ):
+                return inst.databases.exists("mydb")
+
+        command = Command.create(
+            ExecutionPlan(steps=(action.public_projection(), probe.public_projection())),
+            callback,
+            (action, probe),
+            executor=executor,
+        )
+        monkeypatch.setenv("PGHOST", "ambient-substitution")
+        with (
+            patch(
+                "odoo_instance_sdk.internal.postgres_transport.shutil.which",
+                return_value="/usr/bin/psql",
+            ),
+        ):
+            assert command.run() is True
+        assert executor.executed == [probe]
+
     def test_command_records_psql_fallback_step(self, client: OdooClient) -> None:
         inst = _make_instance_with_cluster_key(client, db_user="odoo")
         result = ProcessResult(
@@ -227,6 +282,23 @@ class TestExists:
         with patch("httpx.Client", return_value=mock_cm):
             result = instance.databases.exists("mydb")
         assert result is True
+
+    def test_successful_list_accounts_reserved_psql_probe(
+        self, client: OdooClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        inst = _make_instance_with_cluster_key(client, db_user="odoo")
+        executor = RecordingExecutor()
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.database.shutil.which", lambda _: "/usr/bin/psql"
+        )
+        with patch("httpx.Client", return_value=_mock_http({"result": ["mydb"]})):
+            command = inst.databases.exists_command("mydb", executor=executor)
+            assert command.run() is True
+
+        assert tuple(step.step_id for step in command.plan.process_steps) == (
+            "database.exists.psql",
+        )
+        assert executor.executed == []
 
     def test_false(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["other"]})

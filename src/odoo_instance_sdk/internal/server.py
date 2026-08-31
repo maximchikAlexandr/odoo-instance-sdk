@@ -4,8 +4,6 @@ import contextlib
 import os
 import subprocess
 import tempfile
-import time
-import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -16,13 +14,11 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.models import (
     CommandResult,
-    OdooProcess,
     ProcessStatus,
     StartConfig,
 )
 
 _SENSITIVE_FIELDS = frozenset({"db_password", "admin_passwd", "config_path", "logfile"})
-_FOREGROUND_PROCESS_CLEANUP_TIMEOUT = 5.0
 
 
 def _cli_flag(field_name: str) -> str:
@@ -74,54 +70,6 @@ def _write_secret_config(
     return path
 
 
-def start_process(
-    executable: str | Sequence[str],
-    config: StartConfig,
-    *,
-    cwd: str | Path | None = None,
-    env: dict[str, str] | None = None,
-) -> tuple[OdooProcess, subprocess.Popen[bytes], str | None]:
-    secret_config_path: str | None = None
-    if config.config_path is None:
-        secret_config_path = _write_secret_config(config)
-    cli_args = _build_cli_args(config, secret_config_path=secret_config_path)
-    prefix = [executable] if isinstance(executable, str) else list(executable)
-    full_args = [*prefix, *cli_args]
-
-    from odoo_instance_sdk.internal.proc import spawn
-
-    handle = spawn(
-        full_args,
-        cwd=cwd,
-        env=env,
-        mode="long-running",
-        inherit_stdio=True,
-    )
-    proc = handle.process
-
-    odoo_proc = OdooProcess(
-        id=uuid.uuid4().hex,
-        pid=proc.pid,
-        args=full_args,
-        started_at=time.time(),
-    )
-
-    return odoo_proc, proc, secret_config_path
-
-
-def stop_process(
-    handle: subprocess.Popen[bytes],
-    *,
-    timeout: float = 10.0,
-    secret_config_path: str | None = None,
-) -> None:
-    from odoo_instance_sdk.internal.proc import owned_handle, terminate
-
-    if handle.poll() is None:
-        terminate(owned_handle(handle), timeout=timeout)
-    cleanup_secret_config(secret_config_path)
-
-
 def cleanup_secret_config(secret_config_path: str | None) -> None:
     if secret_config_path is not None:
         with contextlib.suppress(OSError):
@@ -148,79 +96,35 @@ def run_command(
     timeout: float | None = None,
 ) -> CommandResult:
     from odoo_instance_sdk.internal.proc import run_captured
+    from odoo_instance_sdk.internal.proc.redaction import (
+        captured_argv_secret_values,
+        redacted_argv,
+        redacted_environment,
+        redacted_projection,
+    )
 
     prefix = [executable] if isinstance(executable, str) else list(executable)
     full_args = [*prefix, *args]
     proc = run_captured(full_args, cwd=cwd, env=env, timeout=timeout, text=True)
+    secrets = captured_argv_secret_values(full_args, secrets=(env or {}).values())
     return CommandResult(
-        args=full_args,
+        args=list(redacted_argv(full_args, secrets=secrets)),
         returncode=proc.returncode,
-        stdout=proc.stdout if isinstance(proc.stdout, str) else "",
-        stderr=proc.stderr if isinstance(proc.stderr, str) else "",
+        stdout=(
+            cast("str", redacted_projection(proc.stdout, secrets=secrets, field="stdout"))
+            if isinstance(proc.stdout, str)
+            else ""
+        ),
+        stderr=(
+            cast("str", redacted_projection(proc.stderr, secrets=secrets, field="stderr"))
+            if isinstance(proc.stderr, str)
+            else ""
+        ),
         duration=proc.duration,
         cwd=proc.cwd,
-        environment=proc.environment,
+        environment=redacted_environment(proc.environment, secrets=secrets),
         timeout=timeout,
     )
-
-
-def spawn_foreground_process(
-    executable: str | Sequence[str],
-    args: list[str],
-    *,
-    cwd: str | Path | None = None,
-    env: dict[str, str] | None = None,
-    inherit_stdio: bool = True,
-) -> subprocess.Popen[bytes]:
-    """Spawn a foreground process without waiting. Caller owns ``proc.wait()``.
-
-    The returned process is in its own session (``start_new_session=True``)
-    so a Ctrl+C forwarded via ``os.killpg`` reaches the whole tree.
-    """
-    from odoo_instance_sdk.internal.proc import spawn
-
-    prefix = [executable] if isinstance(executable, str) else list(executable)
-    full_args = [*prefix, *args]
-    return spawn(
-        full_args,
-        cwd=cwd,
-        env=env,
-        mode="foreground",
-        inherit_stdio=inherit_stdio,
-    ).process
-
-
-def terminate_foreground_process(
-    proc: subprocess.Popen[bytes], *, process_group_id: int | None = None
-) -> None:
-    """Terminate an owned foreground process group and reap its leader.
-
-    ``process_group_id`` is captured at spawn for cleanup after a leader has
-    exited.  On POSIX it remains valid for a surviving descendant group.
-    """
-    from odoo_instance_sdk.internal.proc import owned_handle, terminate
-
-    terminate(
-        owned_handle(proc, process_group_id=process_group_id),
-        process_group_id=process_group_id,
-        timeout=_FOREGROUND_PROCESS_CLEANUP_TIMEOUT,
-    )
-
-
-def wait_foreground_process_with_cleanup(proc: subprocess.Popen[bytes]) -> int:
-    """Wait for an owned foreground process, reaping its group on failure.
-
-    This is the single exceptional-wait boundary for manual and
-    environment-tracked ``run_foreground`` calls. Cleanup is best-effort: it
-    must not replace the original wait exception.
-    """
-    process_group_id = proc.pid
-    try:
-        return wait_foreground_process(proc)
-    except BaseException:
-        with contextlib.suppress(BaseException):
-            terminate_foreground_process(proc, process_group_id=process_group_id)
-        raise
 
 
 def wait_foreground_process(proc: subprocess.Popen[bytes]) -> int:
@@ -232,18 +136,6 @@ def wait_foreground_process(proc: subprocess.Popen[bytes]) -> int:
     from odoo_instance_sdk.internal.proc import owned_handle, wait_foreground
 
     return wait_foreground(owned_handle(proc, process_group_id=proc.pid))
-
-
-def run_foreground_process(
-    executable: str | Sequence[str],
-    args: list[str],
-    *,
-    cwd: str | Path | None = None,
-    env: dict[str, str] | None = None,
-    inherit_stdio: bool = True,
-) -> int:
-    proc = spawn_foreground_process(executable, args, cwd=cwd, env=env, inherit_stdio=inherit_stdio)
-    return wait_foreground_process_with_cleanup(proc)
 
 
 _RESULT_SNIPPET = (
@@ -349,42 +241,3 @@ def parse_payload(stdout: str, nonce: str | None = None) -> dict[str, JsonValue]
         return cast("dict[str, JsonValue]", _json.loads(body))
     except ValueError:
         return None
-
-
-def _run_captured_shell(
-    executable: str | Sequence[str],
-    cli_args: list[str],
-    *,
-    source: str,
-    argv: list[str],
-    timeout: float | None,
-    commit: bool,
-    cwd: str | Path | None = None,
-    env: dict[str, str] | None = None,
-) -> CommandResult:
-    import secrets as _secrets
-
-    from odoo_instance_sdk.internal.proc import run_captured
-
-    nonce = _secrets.token_hex(8)
-    wrapper = _build_shell_wrapper(source, argv, commit=commit, nonce=nonce)
-    prefix = [executable] if isinstance(executable, str) else list(executable)
-    full_args = [*prefix, *cli_args]
-    proc = run_captured(
-        full_args,
-        cwd=cwd,
-        env=env,
-        stdin=wrapper.encode(),
-        timeout=timeout,
-        text=True,
-    )
-    return CommandResult(
-        args=full_args,
-        returncode=proc.returncode,
-        stdout=proc.stdout if isinstance(proc.stdout, str) else "",
-        stderr=proc.stderr if isinstance(proc.stderr, str) else "",
-        duration=proc.duration,
-        cwd=None if cwd is None else str(cwd),
-        environment=proc.environment,
-        timeout=timeout,
-    )

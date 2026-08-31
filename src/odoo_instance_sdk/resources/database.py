@@ -93,11 +93,15 @@ def _database_psql_step(
         environment.pop(key, None)
     if password is not None:
         environment["PGPASSWORD"] = password
+    environment_snapshot = tuple(sorted(environment.items()))
+    environment_overrides = (("PGPASSWORD", password),) if password is not None else ()
     return PreparedStep(
         step_id=step_id,
         argv=tuple(argv),
-        environment=tuple(sorted(environment.items())),
-        environment_policy="explicit",
+        environment=environment_snapshot,
+        environment_snapshot=environment_snapshot,
+        environment_overrides=environment_overrides,
+        environment_policy="sanitized-inherit",
         timeout=30.0,
         read_only=True,
         text=True,
@@ -157,6 +161,7 @@ def _verify_database_via_psql(
     db_user: str | None,
     db_password: str | None,
     database_name: str,
+    step_id: str | None = None,
 ) -> bool | None:
     """Probe whether a PostgreSQL database exists via the ``psql`` CLI.
 
@@ -180,6 +185,7 @@ def _verify_database_via_psql(
         password=db_password,
         query=f"SELECT 1 FROM pg_database WHERE datname='{escaped}'",
         timeout=30,
+        step_id=step_id,
     )
     if proc is None or proc.returncode != 0:
         return None
@@ -285,7 +291,24 @@ class DatabaseResource:
     def exists(self, name: str) -> bool:
         from odoo_instance_sdk.internal.proc import active_context
 
-        if active_context() is not None:
+        context = active_context()
+        if context is not None:
+            # The refresh coordinator reserves a separate probe for its
+            # construction-time target check.  Selecting only a planned,
+            # unconsumed identifier keeps this nested domain query on the
+            # coordinator's exact immutable ledger.
+            for step_id in (
+                "database.restore.exists-reservation",
+                "database.restore.exists-before",
+                "database.restore.exists-after",
+                "database.drop.exists-after",
+                "environment.remove.database.exists-before",
+                "environment.remove.database.exists-after",
+                "environment.remove.database.exists-postcondition",
+                "pgadmin.database.exists.psql",
+            ):
+                if context.planned(step_id) and not context.consumed(step_id):
+                    return self._exists_impl(name, psql_step_id=step_id)
             return self._exists_impl(name)
         return self.exists_command(name).run()
 
@@ -296,14 +319,16 @@ class DatabaseResource:
         return self._action_command(
             "database.exists",
             "Check whether a database exists",
-            lambda: self._exists_impl(name),
+            lambda: self._exists_impl(name, psql_step_id=probe.step_id if probe else None),
             executor=executor,
             read_only=True,
             steps=(probe,) if probe is not None else (),
             optional_steps=(probe.step_id,) if probe is not None else (),
         )
 
-    def _exists_impl(self, name: str) -> bool:
+    def _exists_impl(self, name: str, *, psql_step_id: str | None = None) -> bool:
+        from odoo_instance_sdk.internal.proc import active_context
+
         try:
             databases = self.list()
         except DatabaseManagerUnavailableError:
@@ -316,6 +341,7 @@ class DatabaseResource:
                     self._instance.config.db_user,
                     self._instance.config.db_password,
                     name,
+                    step_id=psql_step_id,
                 )
                 if result is True:
                     return True
@@ -327,6 +353,10 @@ class DatabaseResource:
 
         ck = self._cluster
         found = any(db.name == name for db in databases)
+        if psql_step_id is not None:
+            context = active_context()
+            if context is not None and context.planned(psql_step_id):
+                context.skip(psql_step_id)
         if not found and ck is not None:
             db_host, db_port = ck
             catalog = self._instance._client.get_catalog()
@@ -350,7 +380,7 @@ class DatabaseResource:
         return self._action_command(
             "database.current",
             "Resolve the configured current database",
-            self._current_impl,
+            lambda: self._current_impl(psql_step_id=probe.step_id if probe else None),
             executor=executor,
             read_only=True,
             steps=(probe,) if probe is not None else (),
@@ -372,7 +402,7 @@ class DatabaseResource:
             database_name=name,
         )
 
-    def _current_impl(self) -> Database:
+    def _current_impl(self, *, psql_step_id: str | None = None) -> Database:
         configured = self._instance.config.configured_database_names
         if not configured:
             return Database(name="", backup=NoBackup())
@@ -391,6 +421,7 @@ class DatabaseResource:
                     self._instance.config.db_user,
                     self._instance.config.db_password,
                     name,
+                    step_id=psql_step_id,
                 )
                 catalog = self._instance._client.get_catalog()
                 if exists_result is True:
@@ -729,6 +760,8 @@ class DatabaseResource:
                 copy=copy,
                 neutralize_database=neutralize_database,
                 timeout=timeout,
+                before_step_id=before_probe.step_id if before_probe else None,
+                after_step_id=after_probe.step_id if after_probe else None,
             ),
             executor=executor,
             mutating=True,
@@ -744,6 +777,8 @@ class DatabaseResource:
         copy: bool,
         neutralize_database: bool,
         timeout: float | None,
+        before_step_id: str | None = None,
+        after_step_id: str | None = None,
     ) -> RestoreResult:
         self._assert_local()
         pwd = self._require_password()
@@ -827,14 +862,24 @@ class DatabaseResource:
         return self._action_command(
             "database.drop",
             "Drop a database",
-            lambda: self._drop_impl(database_name, timeout=timeout),
+            lambda: self._drop_impl(
+                database_name,
+                timeout=timeout,
+                psql_step_id=probe.step_id if probe else None,
+            ),
             executor=executor,
             mutating=True,
             steps=(probe,) if probe is not None else (),
             optional_steps=(probe.step_id,) if probe is not None else (),
         )
 
-    def _drop_impl(self, database_name: str, *, timeout: float | None) -> DropResult:
+    def _drop_impl(
+        self,
+        database_name: str,
+        *,
+        timeout: float | None,
+        psql_step_id: str | None = None,
+    ) -> DropResult:
         pwd = self._require_password()
         self._assert_local()
 
@@ -911,6 +956,5 @@ class DatabaseResource:
                 run,
                 prepared_steps,
                 executor=executor or SubprocessExecutor(),
-                strict=bool(steps),
             ),
         )

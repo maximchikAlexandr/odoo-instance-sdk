@@ -88,22 +88,22 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:688-689` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:664-665` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
-- `src/odoo_instance_sdk/commands/env.py:383` — existing Rich-live inventory
+- `src/odoo_instance_sdk/commands/env.py:373` — existing Rich-live inventory
   transport; remove when Rich live output is supplied by a distinct transport
   adapter rather than the live command callback.
-- `src/odoo_instance_sdk/commands/output.py:195` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:190` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:305` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:300` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:307` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:302` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:314` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:309` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:316` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:311` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:676` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance.py:812` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
@@ -121,7 +121,7 @@ protocol—not to add an exception.
 `MODULE_LOCAL_SUBPROCESS_PATCHES` records the remaining legacy test patch
 locations while the production launch inventory is empty:
 
-- `tests/unit/internal/test_pgadmin_files.py:333,392`
+- `tests/unit/internal/test_pgadmin_files.py:421,480`
 - `tests/unit/internal/test_postgres_size.py:28,55,78,109`
 - `tests/unit/internal/test_postgres_transport.py:25,72,89,110,132,175`
 - `tests/unit/resources/test_cli_automation.py:607`

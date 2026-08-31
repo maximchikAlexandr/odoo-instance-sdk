@@ -23,14 +23,17 @@ from odoo_instance_sdk.internal.pgadmin_files import (
     PGADMIN_PASSWORD_DESTINATION,
     PGADMIN_PGPASS_DESTINATION,
     PGADMIN_RUNTIME_UID,
+    PgAdminPaths,
     PgAdminPreparation,
     PostgresIdentity,
+    pgadmin_mounts,
 )
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
 from odoo_instance_sdk.models import PgAdminOpenResult, PgAdminOpenState
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.proc import PreparedStep
 
 
 class PostgresIdentityCluster(Protocol):
@@ -65,6 +68,166 @@ _PGADMIN_EFFECTIVE_SERVER_QUERY = (
 )
 
 
+def reconciliation_steps(
+    *,
+    paths: PgAdminPaths,
+    port: int,
+    network: str,
+    fingerprint: str,
+    secret_values: tuple[str, ...] = (),
+) -> tuple[PreparedStep, ...]:
+    """Capture the post-preparation Docker phase for one exact command.
+
+    The phase creates this second immutable instance with the real HMAC only
+    after it has acquired the user-global lock and prepared the private key.
+    Keeping this manifest in one place prevents the phase boundary from
+    drifting between preview and execution.
+    """
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    return (
+        PreparedStep(
+            step_id="pgadmin.container.inspect.1",
+            argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.container.remove",
+            argv=("docker", "rm", "--force", PGADMIN_CONTAINER_NAME),
+            mutating=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.container.run",
+            argv=_docker_run_argv(
+                PgAdminPreparation(
+                    paths=paths,
+                    fingerprint=fingerprint,
+                    port=port,
+                    container_name=PGADMIN_CONTAINER_NAME,
+                    mounts=pgadmin_mounts(paths),
+                ),
+                network=network,
+            ),
+            mutating=True,
+            secret_values=secret_values,
+        ),
+        PreparedStep(
+            step_id="pgadmin.container.refresh.inspect",
+            argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.container.refresh",
+            argv=_docker_refresh_argv(PGADMIN_CONTAINER_NAME),
+            mutating=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.container.verify",
+            argv=_docker_verify_argv(PGADMIN_CONTAINER_NAME),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.container.inspect.2",
+            argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
+            read_only=True,
+        ),
+        PreparedStep(
+            step_id="pgadmin.container.cleanup.remove",
+            argv=("docker", "rm", "--force", PGADMIN_CONTAINER_NAME),
+            mutating=True,
+        ),
+    )
+
+
+def reconciliation_inspect_step() -> PreparedStep:
+    """Capture the lock-adjacent inspection that starts reconciliation."""
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    return PreparedStep(
+        step_id="pgadmin.reconciliation.inspect.0",
+        argv=("docker", "inspect", "--format", "json", PGADMIN_CONTAINER_NAME),
+        read_only=True,
+    )
+
+
+def _docker_run_argv(preparation: PgAdminPreparation, *, network: str) -> tuple[str, ...]:
+    args: list[str] = [
+        "docker",
+        "run",
+        "--detach",
+        "--name",
+        PGADMIN_CONTAINER_NAME,
+        "--user",
+        str(PGADMIN_RUNTIME_UID),
+        "--publish",
+        f"127.0.0.1:{preparation.port}:{PGADMIN_CONTAINER_PORT}",
+        "--network",
+        network,
+        "--label",
+        f"{PGADMIN_LABEL_MANAGED}=true",
+        "--label",
+        f"{PGADMIN_LABEL_FINGERPRINT}={preparation.fingerprint}",
+        "--label",
+        f"{PGADMIN_LABEL_NETWORK}={network}",
+        "--env",
+        "PGADMIN_CONFIG_SERVER_MODE=False",
+        "--env",
+        "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
+        "--env",
+        f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
+        "--env",
+        f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
+        "--env",
+        f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
+    ]
+    for mount in preparation.mounts:
+        args.extend(
+            (
+                "--mount",
+                f"type=bind,source={mount.host_path},destination={mount.container_path}"
+                + (",readonly" if mount.read_only else ""),
+            )
+        )
+    args.append(PGADMIN_IMAGE)
+    return tuple(args)
+
+
+def _docker_refresh_argv(container: str) -> tuple[str, ...]:
+    return (
+        "docker",
+        "exec",
+        "--user",
+        str(PGADMIN_RUNTIME_UID),
+        container,
+        "/bin/sh",
+        "-c",
+        _ACTIVE_PGPASS_REFRESH,
+    )
+
+
+def _docker_verify_argv(container: str) -> tuple[str, ...]:
+    return (
+        "docker",
+        "exec",
+        container,
+        "/venv/bin/python3",
+        "-c",
+        _PGADMIN_EFFECTIVE_SERVER_QUERY,
+    )
+
+
+def _skip_reconciliation_steps(*step_ids: str) -> None:
+    """Record an explicit branch omission in the active phase ledger."""
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    if context is None:
+        return
+    for step_id in step_ids:
+        if context.planned(step_id) and not context.consumed(step_id):
+            context.skip(step_id)
+
+
 class _ContainerCreateFailure(PgAdminUnavailableError):
     """A failed ``docker run`` that may still have created a container."""
 
@@ -73,8 +236,18 @@ class _ContainerCreateFailure(PgAdminUnavailableError):
         super().__init__()
 
 
+class _NoCapturedContainer:
+    __slots__ = ()
+
+
+_UNSET = _NoCapturedContainer()
+
+
 def resolve_postgres_identity(
-    cluster: PostgresIdentityCluster, *, deadline: float, planned: bool = False
+    cluster: PostgresIdentityCluster,
+    *,
+    deadline: float,
+    planned: bool = False,
 ) -> PostgresIdentity:
     runner = cluster.compose_runner
     compose_file = cluster.compose_file
@@ -82,9 +255,19 @@ def resolve_postgres_identity(
     if runner is None:
         raise PgAdminUnavailableError()
     container_id = _resolve_postgres_container_id(
-        runner, compose_file, project_name, deadline=deadline, planned=planned
+        runner,
+        compose_file,
+        project_name,
+        deadline=deadline,
+        planned=planned,
+        step_id="pgadmin.identity.ps",
     )
-    inspected = inspect_container(runner, container_id, deadline=deadline)
+    inspected = inspect_container(
+        runner,
+        container_id,
+        deadline=deadline,
+        step_id="pgadmin.identity.inspect",
+    )
     if inspected is None:
         raise PgAdminUnavailableError()
     configured_user = cluster._user
@@ -93,7 +276,13 @@ def resolve_postgres_identity(
         project_name,
         user=configured_user if isinstance(configured_user, str) else None,
     )
-    _validate_postgres_network(runner, identity.network, project_name, deadline=deadline)
+    _validate_postgres_network(
+        runner,
+        identity.network,
+        project_name,
+        deadline=deadline,
+        step_id="pgadmin.identity.network",
+    )
     return PostgresIdentity(
         container_name=identity.container_name,
         network=identity.network,
@@ -110,6 +299,7 @@ def _resolve_postgres_container_id(
     *,
     deadline: float,
     planned: bool = False,
+    step_id: str | None = None,
 ) -> str:
     ps = run_docker(
         runner,
@@ -125,6 +315,7 @@ def _resolve_postgres_container_id(
             "json",
         ],
         deadline=deadline,
+        step_id=step_id,
     )
     if ps.returncode != 0:
         raise PgAdminUnavailableError()
@@ -181,9 +372,14 @@ def _identity_from_inspect(
 
 
 def _validate_postgres_network(
-    runner: ComposeRunner, network: str, project_name: str, *, deadline: float
+    runner: ComposeRunner,
+    network: str,
+    project_name: str,
+    *,
+    deadline: float,
+    step_id: str | None = None,
 ) -> None:
-    network_info = inspect_network(runner, network, deadline=deadline)
+    network_info = inspect_network(runner, network, deadline=deadline, step_id=step_id)
     network_labels = _string_mapping(_mapping(network_info, "Labels"))
     if network_labels.get("com.docker.compose.project") != project_name:
         raise PgAdminUnavailableError()
@@ -197,14 +393,42 @@ def reconcile_container(
     database: str,
     deadline: float,
     planned: bool = False,
+    current_container: dict[str, JsonValue] | None | _NoCapturedContainer = _UNSET,
 ) -> PgAdminOpenResult:
-    current = inspect_container(runner, PGADMIN_CONTAINER_NAME, deadline=deadline, missing_ok=True)
+    if current_container is _UNSET:
+        current = inspect_container(
+            runner,
+            PGADMIN_CONTAINER_NAME,
+            deadline=deadline,
+            missing_ok=True,
+            step_id="pgadmin.container.inspect.0",
+        )
+    else:
+        current = cast("dict[str, JsonValue] | None", current_container)
     state = PgAdminOpenState.STARTED
     if current is not None:
         assert_owned_container(current)
         if container_matches(current, preparation, network=network):
+            _skip_reconciliation_steps(
+                "pgadmin.container.inspect.1",
+                "pgadmin.container.remove",
+                "pgadmin.container.run",
+                "pgadmin.container.refresh.inspect",
+                "pgadmin.container.refresh",
+            )
             _wait_ready(preparation.port, deadline=deadline)
-            verify_server(preparation, database, runner=runner, deadline=deadline, planned=planned)
+            verify_server(
+                preparation,
+                database,
+                runner=runner,
+                deadline=deadline,
+                planned=planned,
+                step_id="pgadmin.container.verify",
+            )
+            _skip_reconciliation_steps(
+                "pgadmin.container.inspect.2",
+                "pgadmin.container.cleanup.remove",
+            )
             return PgAdminOpenResult(
                 state=PgAdminOpenState.REUSED,
                 url=f"http://127.0.0.1:{preparation.port}",
@@ -212,7 +436,13 @@ def reconcile_container(
         current_id = get_container_id(current)
         current_fingerprint = container_fingerprint(current)
         inspect_target = PGADMIN_CONTAINER_NAME if planned else current_id
-        latest = inspect_container(runner, inspect_target, deadline=deadline, missing_ok=True)
+        latest = inspect_container(
+            runner,
+            inspect_target,
+            deadline=deadline,
+            missing_ok=True,
+            step_id="pgadmin.container.inspect.1",
+        )
         if latest is not None:
             if not planned and get_container_id(latest) != current_id:
                 raise PgAdminUnavailableError()
@@ -221,11 +451,25 @@ def reconcile_container(
                 runner,
                 PGADMIN_CONTAINER_NAME if planned else current_id,
                 deadline=deadline,
+                step_id="pgadmin.container.remove",
             )
+        else:
+            _skip_reconciliation_steps("pgadmin.container.remove")
         state = PgAdminOpenState.RECONFIGURED
+    else:
+        _skip_reconciliation_steps(
+            "pgadmin.container.inspect.1",
+            "pgadmin.container.remove",
+        )
     created_id: str | None = None
     try:
-        created_id = create_container(runner, preparation, network=network, deadline=deadline)
+        created_id = create_container(
+            runner,
+            preparation,
+            network=network,
+            deadline=deadline,
+            step_id="pgadmin.container.run",
+        )
         _wait_ready(preparation.port, deadline=deadline)
         refresh_active_pgpass(
             runner,
@@ -233,8 +477,20 @@ def reconcile_container(
             fingerprint=preparation.fingerprint,
             deadline=deadline,
             planned=planned,
+            step_id="pgadmin.container.refresh",
+            inspect_step_id="pgadmin.container.refresh.inspect",
         )
-        verify_server(preparation, database, runner=runner, deadline=deadline, planned=planned)
+        verify_server(
+            preparation,
+            database,
+            runner=runner,
+            deadline=deadline,
+            planned=planned,
+            step_id="pgadmin.container.verify",
+        )
+        _skip_reconciliation_steps(
+            "pgadmin.container.inspect.2", "pgadmin.container.cleanup.remove"
+        )
     except _ContainerCreateFailure as exc:
         remove_partial_container(
             runner,
@@ -242,6 +498,11 @@ def reconcile_container(
             fingerprint=preparation.fingerprint,
             deadline=deadline,
             planned=planned,
+            inspect_step_id="pgadmin.container.inspect.2",
+            remove_step_id="pgadmin.container.cleanup.remove",
+        )
+        _skip_reconciliation_steps(
+            "pgadmin.container.inspect.2", "pgadmin.container.cleanup.remove"
         )
         raise PgAdminUnavailableError() from None
     except PgAdminUnavailableError:
@@ -251,6 +512,11 @@ def reconcile_container(
             fingerprint=preparation.fingerprint,
             deadline=deadline,
             planned=planned,
+            inspect_step_id="pgadmin.container.inspect.2",
+            remove_step_id="pgadmin.container.cleanup.remove",
+        )
+        _skip_reconciliation_steps(
+            "pgadmin.container.inspect.2", "pgadmin.container.cleanup.remove"
         )
         raise
     return PgAdminOpenResult(
@@ -284,18 +550,58 @@ def assert_owned_container(
         raise PgAdminUnavailableError()
 
 
-def remove_container(runner: ComposeRunner, container_id: str, *, deadline: float) -> None:
-    result = run_docker(runner, ["docker", "rm", "--force", container_id], deadline=deadline)
+def owned_container_uses_port(inspected: dict[str, JsonValue], port: int) -> bool:
+    """Return whether an occupied port belongs to an SDK-owned pgAdmin container."""
+    try:
+        assert_owned_container(inspected)
+    except PgAdminUnavailableError:
+        return False
+    return _ports_match(inspected, port)
+
+
+def remove_container(
+    runner: ComposeRunner,
+    container_id: str,
+    *,
+    deadline: float,
+    step_id: str | None = None,
+) -> None:
+    result = run_docker(
+        runner,
+        ["docker", "rm", "--force", container_id],
+        deadline=deadline,
+        step_id=step_id,
+    )
     if result.returncode != 0:
         raise PgAdminUnavailableError()
 
 
 def run_docker(
-    runner: ComposeRunner, args: list[str], *, deadline: float
+    runner: ComposeRunner,
+    args: list[str],
+    *,
+    deadline: float,
+    step_id: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise PgAdminUnavailableError()
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    if context is not None and step_id is not None:
+        from odoo_instance_sdk.exceptions import UnplannedStepError
+        from odoo_instance_sdk.internal.proc import ProcessResult
+
+        captured = context.prepared(step_id)
+        if captured.argv != tuple(args):
+            raise UnplannedStepError(step_id)
+        result = context.process_prepared(captured)
+        if not isinstance(result, ProcessResult):
+            raise PgAdminUnavailableError()
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        stderr = result.stderr if isinstance(result.stderr, str) else ""
+        return subprocess.CompletedProcess(list(args), result.returncode, stdout, stderr)
     try:
         result = runner.run(args, timeout=remaining)
     except (OSError, subprocess.SubprocessError, TypeError):
@@ -311,8 +617,14 @@ def inspect_container(
     *,
     deadline: float,
     missing_ok: bool = False,
+    step_id: str | None = None,
 ) -> dict[str, JsonValue] | None:
-    result = run_docker(runner, ["docker", "inspect", "--format", "json", name], deadline=deadline)
+    result = run_docker(
+        runner,
+        ["docker", "inspect", "--format", "json", name],
+        deadline=deadline,
+        step_id=step_id,
+    )
     if result.returncode != 0:
         detail = f"{result.stdout}\n{result.stderr}".lower()
         if missing_ok and any(
@@ -331,9 +643,18 @@ def inspect_container(
     raise PgAdminUnavailableError()
 
 
-def inspect_network(runner: ComposeRunner, name: str, *, deadline: float) -> dict[str, JsonValue]:
+def inspect_network(
+    runner: ComposeRunner,
+    name: str,
+    *,
+    deadline: float,
+    step_id: str | None = None,
+) -> dict[str, JsonValue]:
     result = run_docker(
-        runner, ["docker", "network", "inspect", "--format", "json", name], deadline=deadline
+        runner,
+        ["docker", "network", "inspect", "--format", "json", name],
+        deadline=deadline,
+        step_id=step_id,
     )
     if result.returncode != 0:
         raise PgAdminUnavailableError()
@@ -435,46 +756,14 @@ def create_container(
     *,
     network: str,
     deadline: float,
+    step_id: str | None = None,
 ) -> str:
-    args = [
-        "docker",
-        "run",
-        "--detach",
-        "--name",
-        PGADMIN_CONTAINER_NAME,
-        "--user",
-        str(PGADMIN_RUNTIME_UID),
-        "--publish",
-        f"127.0.0.1:{preparation.port}:{PGADMIN_CONTAINER_PORT}",
-        "--network",
-        network,
-        "--label",
-        f"{PGADMIN_LABEL_MANAGED}=true",
-        "--label",
-        f"{PGADMIN_LABEL_FINGERPRINT}={preparation.fingerprint}",
-        "--label",
-        f"{PGADMIN_LABEL_NETWORK}={network}",
-        "--env",
-        "PGADMIN_CONFIG_SERVER_MODE=False",
-        "--env",
-        "PGADMIN_REPLACE_SERVERS_ON_STARTUP=True",
-        "--env",
-        f"PGADMIN_DEFAULT_EMAIL={PGADMIN_DEFAULT_EMAIL}",
-        "--env",
-        f"PGADMIN_DEFAULT_PASSWORD_FILE={PGADMIN_PASSWORD_DESTINATION}",
-        "--env",
-        f"PGPASS_FILE={PGADMIN_PGPASS_DESTINATION}",
-    ]
-    for mount in preparation.mounts:
-        args.extend(
-            [
-                "--mount",
-                f"type=bind,source={mount.host_path},destination={mount.container_path}"
-                + (",readonly" if mount.read_only else ""),
-            ]
-        )
-    args.append(PGADMIN_IMAGE)
-    result = run_docker(runner, args, deadline=deadline)
+    result = run_docker(
+        runner,
+        list(_docker_run_argv(preparation, network=network)),
+        deadline=deadline,
+        step_id=step_id,
+    )
     created_id = result.stdout.strip().splitlines()[0].strip() if result.stdout.strip() else None
     if result.returncode != 0:
         raise _ContainerCreateFailure(created_id)
@@ -490,12 +779,20 @@ def remove_partial_container(
     fingerprint: str,
     deadline: float,
     planned: bool = False,
+    inspect_step_id: str | None = None,
+    remove_step_id: str | None = None,
 ) -> None:
     if not container_id:
         return
     try:
         inspect_target = PGADMIN_CONTAINER_NAME if planned else container_id
-        inspected = inspect_container(runner, inspect_target, deadline=deadline, missing_ok=True)
+        inspected = inspect_container(
+            runner,
+            inspect_target,
+            deadline=deadline,
+            missing_ok=True,
+            step_id=inspect_step_id,
+        )
         if inspected is None:
             return
         if not planned and get_container_id(inspected) != container_id:
@@ -505,6 +802,7 @@ def remove_partial_container(
             runner,
             PGADMIN_CONTAINER_NAME if planned else container_id,
             deadline=deadline,
+            step_id=remove_step_id,
         )
     except PgAdminUnavailableError:
         return
@@ -517,26 +815,26 @@ def refresh_active_pgpass(
     fingerprint: str,
     deadline: float,
     planned: bool = False,
+    step_id: str | None = None,
+    inspect_step_id: str | None = None,
 ) -> None:
     """Refresh pgAdmin's persistent passfile using an ownership-checked ID."""
     inspect_target = PGADMIN_CONTAINER_NAME if planned else container_id
-    inspected = inspect_container(runner, inspect_target, deadline=deadline, missing_ok=True)
+    inspected = inspect_container(
+        runner,
+        inspect_target,
+        deadline=deadline,
+        missing_ok=True,
+        step_id=inspect_step_id,
+    )
     if inspected is None or (not planned and get_container_id(inspected) != container_id):
         raise PgAdminUnavailableError()
     assert_owned_container(inspected, fingerprint=fingerprint)
     result = run_docker(
         runner,
-        [
-            "docker",
-            "exec",
-            "--user",
-            str(PGADMIN_RUNTIME_UID),
-            PGADMIN_CONTAINER_NAME if planned else container_id,
-            "/bin/sh",
-            "-c",
-            _ACTIVE_PGPASS_REFRESH,
-        ],
+        list(_docker_refresh_argv(PGADMIN_CONTAINER_NAME if planned else container_id)),
         deadline=deadline,
+        step_id=step_id,
     )
     if result.returncode != 0:
         raise PgAdminUnavailableError()
@@ -549,6 +847,7 @@ def verify_server(
     runner: ComposeRunner,
     deadline: float,
     planned: bool = False,
+    step_id: str | None = None,
 ) -> None:
     try:
         payload = json.loads(preparation.paths.servers_json.read_text(encoding="utf-8"))
@@ -560,15 +859,11 @@ def verify_server(
         raise PgAdminUnavailableError()
     result = run_docker(
         runner,
-        [
-            "docker",
-            "exec",
-            PGADMIN_CONTAINER_NAME if planned else preparation.container_name,
-            "/venv/bin/python3",
-            "-c",
-            _PGADMIN_EFFECTIVE_SERVER_QUERY,
-        ],
+        list(
+            _docker_verify_argv(PGADMIN_CONTAINER_NAME if planned else preparation.container_name)
+        ),
         deadline=deadline,
+        step_id=step_id,
     )
     if result.returncode != 0:
         raise PgAdminUnavailableError()

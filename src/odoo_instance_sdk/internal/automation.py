@@ -5,15 +5,15 @@ import contextlib
 import json
 import os
 import re
-import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import ConfigError, StalePlanError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.internal.process_env import captured_child_environment
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.models import CommandResult, OdooTestResult, OdooTestSpec
@@ -24,19 +24,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
-class OdooTestRunner(Protocol):
-    def __call__(
-        self,
-        instance: OdooInstance,
-        spec: OdooTestSpec,
-        *,
-        http_interface: str | None = None,
-        http_port: int | None = None,
-    ) -> tuple[OdooTestResult, str | None]: ...
-
-
 _MODULE_MANIFEST_RE = re.compile(r"^\s*(?:\{|['\"]info['\"]\s*[:=]\s*\{)", re.MULTILINE)
-_SUBPROCESS_COMPAT = subprocess
 _PreflightT = TypeVar("_PreflightT")
 
 
@@ -158,29 +146,9 @@ def _safe_stderr(value: str) -> str:
     return sanitize_last_error(value) or "<no diagnostic>"
 
 
-def _run_with_payload(
-    instance: OdooInstance,
-    source: str,
-    *,
-    argv: tuple[str, ...] = (),
-    commit: bool = False,
-    timeout: float | None = None,
-) -> ShellOutcome:
-    result = instance.run_shell_script(source, argv=argv, timeout=timeout, commit=commit)
-    payload = parse_payload(result.stdout)
-    return ShellOutcome(
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        payload=payload,
-    )
-
-
 def eval_expression(
     instance: OdooInstance, expression: str, *, commit: bool = False
 ) -> ShellOutcome:
-    if not _captured_shell_supported(instance):
-        return _run_with_payload(instance, f"result = ({expression})\n", commit=commit)
     return _shell_outcome(eval_expression_command(instance, expression, commit=commit).run())
 
 
@@ -196,8 +164,6 @@ def eval_expression_command(
 def exec_script(
     instance: OdooInstance, script: str, argv: tuple[str, ...] = (), *, commit: bool = False
 ) -> ShellOutcome:
-    if not _captured_shell_supported(instance):
-        return _run_with_payload(instance, script, argv=argv, commit=commit)
     return _shell_outcome(exec_script_command(instance, script, argv=argv, commit=commit).run())
 
 
@@ -218,18 +184,6 @@ def _shell_outcome(result: CommandResult) -> ShellOutcome:
         stdout=result.stdout,
         stderr=result.stderr,
         payload=parse_payload(result.stdout),
-    )
-
-
-def _captured_shell_supported(instance: OdooInstance) -> bool:
-    """Keep legacy test doubles/adapters working without weakening real plans."""
-    from odoo_instance_sdk.resources.instance import OdooInstance as InstanceType
-
-    method = getattr(type(instance), "run_shell_script", None)
-    return (
-        isinstance(instance, InstanceType)
-        and getattr(method, "__module__", None) == InstanceType.run_shell_script.__module__
-        and getattr(method, "__qualname__", "").endswith("OdooInstance.run_shell_script")
     )
 
 
@@ -265,12 +219,7 @@ def list_modules(
     *,
     state: str | None = None,
 ) -> list[ModuleRecord]:
-    source = _module_list_source(names, state)
-    outcome = (
-        _shell_outcome(list_modules_command(instance, names=names, state=state).run())
-        if _captured_shell_supported(instance)
-        else _run_with_payload(instance, source)
-    )
+    outcome = _shell_outcome(list_modules_command(instance, names=names, state=state).run())
     if outcome.returncode != 0:
         raise RuntimeError(
             f"module list failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
@@ -378,9 +327,6 @@ def update_modules(
         raise ConfigError(f"modules not installed: {', '.join(plan.not_installed)}")
     if not plan.modules:
         raise ConfigError("no installed modules to update")
-    source = _update_modules_source(tuple(plan.modules))
-    if not _captured_shell_supported(instance):
-        return _run_with_payload(instance, source, commit=True)
     _ = env_id
     return _shell_outcome(
         update_modules_command(instance, tuple(plan.modules), env_id=env_id).run()
@@ -464,46 +410,12 @@ def run_odoo_tests(
     http_port: int | None = None,
 ) -> tuple[OdooTestResult, str | None]:
     """Execute one validated native Odoo test plan under the bound lock."""
-    if not isinstance(spec, OdooTestSpec):
-        raise ConfigError("run_odoo_tests requires an OdooTestSpec")
-    config = instance.config.start_config
-    if http_interface is None:
-        http_interface = config.http_interface if config is not None else "127.0.0.1"
-    if http_port is None:
-        http_port = config.http_port if config is not None else 8069
-
-    address_state = probe_address(http_interface, http_port)
-    if address_state is not AddressState.FREE:
-        raise ConfigError(
-            f"port {address_state}: {http_interface}:{http_port} cannot be reserved for module tests"
-        )
-    result = instance._run_shell_script_exclusive(
-        _test_runner_source(spec.modules, spec.test_tags, spec.reload_tests), commit=False
-    )
-    outcome = ShellOutcome(
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        payload=parse_payload(result.stdout),
-    )
-    counts = _test_counts(outcome.payload or {})
-    failures = counts["failed"] > 0 or counts["errors"] > 0
-    zero_tests = counts["tests"] == 0
-    exit_code = (
-        1 if outcome.returncode != 0 or failures or (zero_tests and not spec.allow_empty) else 0
-    )
-    diagnostic = _safe_stderr(outcome.stderr) if outcome.returncode != 0 else None
-    if outcome.returncode == 0 and failures and outcome.stderr:
-        diagnostic = _safe_stderr(outcome.stderr)
-    return (
-        OdooTestResult(
-            counts=counts,
-            failures=failures,
-            zero_tests=zero_tests,
-            exit_code=exit_code,
-        ),
-        diagnostic,
-    )
+    return run_odoo_tests_command(
+        instance,
+        spec,
+        http_interface=http_interface,
+        http_port=http_port,
+    ).run()
 
 
 def module_tests_command(
@@ -519,18 +431,16 @@ def module_tests_command(
         spec,
         http_interface=http_interface,
         http_port=http_port,
-        compatibility_runner=run_odoo_tests,
     )
 
 
-def run_odoo_tests_command(  # noqa: C901
+def run_odoo_tests_command(
     instance: OdooInstance,
     spec: OdooTestSpec,
     *,
     http_interface: str | None = None,
     http_port: int | None = None,
     selection_snapshot: TestCommandSnapshot | None = None,
-    compatibility_runner: OdooTestRunner | None = None,
 ) -> Command[tuple[OdooTestResult, str | None]]:
     """Capture the native Odoo test shell as one inspectable command."""
     if not isinstance(spec, OdooTestSpec):
@@ -540,15 +450,11 @@ def run_odoo_tests_command(  # noqa: C901
         config.http_interface if config is not None else "127.0.0.1"
     )
     resolved_port = http_port or (config.http_port if config is not None else 8069)
-    from odoo_instance_sdk.resources.instance import OdooInstance as _OdooInstance
-
-    has_shell_command = isinstance(instance, _OdooInstance)
-    if has_shell_command:
-        address_state = probe_address(resolved_interface, resolved_port)
-        if address_state is not AddressState.FREE:
-            raise ConfigError(
-                f"port {address_state}: {resolved_interface}:{resolved_port} cannot be reserved for module tests"
-            )
+    address_state = probe_address(resolved_interface, resolved_port)
+    if address_state is not AddressState.FREE:
+        raise ConfigError(
+            f"port {address_state}: {resolved_interface}:{resolved_port} cannot be reserved for module tests"
+        )
 
     def convert(result: CommandResult) -> tuple[OdooTestResult, str | None]:
         payload = parse_payload(result.stdout)
@@ -570,22 +476,6 @@ def run_odoo_tests_command(  # noqa: C901
             ),
             diagnostic,
         )
-
-    if not has_shell_command:
-        from odoo_instance_sdk.execution import Command, ExecutionPlan
-
-        def compatibility_callback(
-            _context: RunContext[tuple[OdooTestResult, str | None]],
-        ) -> tuple[OdooTestResult, str | None]:
-            runner = compatibility_runner or run_odoo_tests
-            return runner(
-                instance,
-                spec,
-                http_interface=resolved_interface,
-                http_port=resolved_port,
-            )
-
-        return Command.create(ExecutionPlan(), compatibility_callback)
 
     from odoo_instance_sdk.internal.proc import PreparedStep
 
@@ -653,6 +543,9 @@ def run_odoo_tests_command(  # noqa: C901
         module_environment: tuple[tuple[str, str], ...] = ()
         if instance_config.db_password is not None:
             module_environment = (("PGPASSWORD", instance_config.db_password),)
+        module_environment_snapshot, module_environment_overrides = captured_child_environment(
+            dict(module_environment)
+        )
         module_argv = ["psql", "-X", "-w"]
         if instance_config.db_host is not None:
             module_argv.extend(("-h", instance_config.db_host))
@@ -674,7 +567,9 @@ def run_odoo_tests_command(  # noqa: C901
             PreparedStep(
                 step_id="odoo.tests.provenance.modules",
                 argv=tuple(module_argv),
-                environment=module_environment,
+                environment=module_environment_overrides,
+                environment_snapshot=module_environment_snapshot,
+                environment_overrides=module_environment_overrides,
                 secret_values=(instance_config.db_password,)
                 if instance_config.db_password is not None
                 else (),
@@ -776,15 +671,12 @@ def export_translations(
     *,
     worktree_root: Path,
 ) -> list[TranslationExportResult]:
-    if not modules:
-        raise ConfigError("translations export requires --module")
-    if not languages:
-        raise ConfigError("translations export requires --language")
-    results: list[TranslationExportResult] = []
-    for module in modules:
-        for lang in languages:
-            results.append(_export_one(instance, module, lang, worktree_root=worktree_root))
-    return results
+    return export_translations_command(
+        instance,
+        modules,
+        languages,
+        worktree_root=worktree_root,
+    ).run()
 
 
 def export_translations_command(
@@ -833,38 +725,6 @@ def export_translations_command(
 
     return instance._shell_script_command(
         source, commit=False, exclusive=False, result_converter=convert
-    )
-
-
-def _export_one(
-    instance: OdooInstance,
-    module: str,
-    lang: str,
-    *,
-    worktree_root: Path,
-) -> TranslationExportResult:
-    if not module:
-        raise ConfigError("translations export requires a module name")
-    source = _build_export_source(module, lang)
-    outcome = _run_with_payload(instance, source)
-    if outcome.returncode != 0:
-        raise RuntimeError(
-            f"translations export failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
-        )
-    if outcome.payload is None or "result" not in outcome.payload:
-        raise RuntimeError("translations export produced no payload")
-    raw = outcome.payload.get("result")
-    if not isinstance(raw, dict):
-        raise TypeError("translations export produced malformed payload")
-    if raw.get("error"):
-        raise ConfigError(f"translations export error: {raw.get('error')}")
-    addons_paths = (
-        instance.config.start_config.addons_path
-        if instance.config.start_config is not None
-        else None
-    )
-    return _finalize_export(
-        module, lang, raw, worktree_root=worktree_root, addons_paths=addons_paths
     )
 
 
@@ -980,34 +840,11 @@ def verify_deps(
     worktree_root: Path,
     uv_executable: str = "uv",
 ) -> DepsVerifyResult:
-    result = DepsVerifyResult()
-    pip_cmd = [uv_executable, "pip", "check", "--python", str(recorded_python)]
-    from odoo_instance_sdk.internal.proc import run_captured
-
-    proc = run_captured(
-        pip_cmd,
-        env=None,
-        text=True,
-    )
-    stdout = proc.stdout if isinstance(proc.stdout, str) else ""
-    stderr = proc.stderr if isinstance(proc.stderr, str) else ""
-    result.pip_check_output = (stdout + stderr).strip()
-    result.pip_check_ok = proc.returncode == 0
-    for raw_line in result.pip_check_output.splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        result.distributions.append({"detail": stripped})
-    declared = _scan_external_python_deps(worktree_root)
-    for module_name, import_name in declared:
-        check = run_captured(
-            (str(recorded_python), "-c", f"import {import_name}"),
-            cwd=worktree_root,
-            text=True,
-        )
-        if check.returncode != 0:
-            result.missing_imports.append({"module": module_name, "import": import_name})
-    return result
+    return verify_deps_command(
+        recorded_python=recorded_python,
+        worktree_root=worktree_root,
+        uv_executable=uv_executable,
+    ).run()
 
 
 def verify_deps_command(

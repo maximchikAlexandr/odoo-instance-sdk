@@ -66,11 +66,9 @@ def test_wait_error_kills_sigterm_ignoring_descendant_after_leader_exit(
         _client=OdooClient(config=OdooClientConfig(executable="odoo")),
         _environment_id="owned-environment",
     )
-    monkeypatch.setattr(OdooInstance, "_persist_runtime_identity", lambda *args: None)
+    monkeypatch.setattr(OdooInstance, "_persist_runtime_identity", lambda *args, **kwargs: None)
     monkeypatch.setattr(OdooInstance, "_clear_runtime_identity", lambda *args: None)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.server._FOREGROUND_PROCESS_CLEANUP_TIMEOUT", 0.2
-    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._CLEANUP_TIMEOUT", 0.2)
 
     child_pid: int | None = None
     process_group_id: int | None = None
@@ -145,9 +143,7 @@ def test_manual_wait_error_kills_ready_sigterm_ignoring_descendant(
         ),
         _client=OdooClient(config=OdooClientConfig(executable="odoo")),
     )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.server._FOREGROUND_PROCESS_CLEANUP_TIMEOUT", 0.2
-    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._CLEANUP_TIMEOUT", 0.2)
     child_pid: int | None = None
     process_group_id: int | None = None
 

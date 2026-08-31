@@ -18,29 +18,29 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 688),
-        ("src/odoo_instance_sdk/cli.py", 689),
-        ("src/odoo_instance_sdk/commands/env.py", 383),
-        ("src/odoo_instance_sdk/commands/output.py", 195),
-        ("src/odoo_instance_sdk/commands/output.py", 305),
-        ("src/odoo_instance_sdk/commands/output.py", 307),
-        ("src/odoo_instance_sdk/commands/output.py", 314),
-        ("src/odoo_instance_sdk/commands/output.py", 316),
-        ("src/odoo_instance_sdk/resources/instance.py", 676),
+        ("src/odoo_instance_sdk/cli.py", 664),
+        ("src/odoo_instance_sdk/cli.py", 665),
+        ("src/odoo_instance_sdk/commands/env.py", 373),
+        ("src/odoo_instance_sdk/commands/output.py", 190),
+        ("src/odoo_instance_sdk/commands/output.py", 300),
+        ("src/odoo_instance_sdk/commands/output.py", 302),
+        ("src/odoo_instance_sdk/commands/output.py", 309),
+        ("src/odoo_instance_sdk/commands/output.py", 311),
+        ("src/odoo_instance_sdk/resources/instance.py", 812),
     }
 )
 
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
-    ("src/odoo_instance_sdk/commands/env.py", 383): "existing Rich live inventory transport",
-    ("src/odoo_instance_sdk/commands/output.py", 195): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 305): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 307): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 314): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 316): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/cli.py", 688): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 689): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/resources/instance.py", 676): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/commands/env.py", 373): "existing Rich live inventory transport",
+    ("src/odoo_instance_sdk/commands/output.py", 190): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 300): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 302): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 309): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 311): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/cli.py", 664): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 665): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/resources/instance.py", 812): "lifecycle cleanup diagnostic transport",
 }
 
 
@@ -52,8 +52,9 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("tests/unit/internal/test_pgadmin_files.py", 333),
-        ("tests/unit/internal/test_pgadmin_files.py", 392),
+        ("tests/unit/internal/test_pgadmin_files.py", 442),
+        ("tests/unit/internal/test_pgadmin_files.py", 501),
+        ("tests/unit/internal/test_pgadmin.py", 340),
         ("tests/unit/internal/test_postgres_size.py", 28),
         ("tests/unit/internal/test_postgres_size.py", 55),
         ("tests/unit/internal/test_postgres_size.py", 78),
@@ -64,22 +65,22 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/internal/test_postgres_transport.py", 110),
         ("tests/unit/internal/test_postgres_transport.py", 132),
         ("tests/unit/internal/test_postgres_transport.py", 175),
-        ("tests/unit/resources/test_cli_automation.py", 607),
-        ("tests/unit/resources/test_database_resource.py", 395),
-        ("tests/unit/resources/test_database_resource.py", 421),
-        ("tests/unit/resources/test_database_resource.py", 448),
-        ("tests/unit/resources/test_database_resource.py", 473),
-        ("tests/unit/resources/test_database_resource.py", 518),
-        ("tests/unit/resources/test_database_resource.py", 539),
-        ("tests/unit/resources/test_database_resource.py", 558),
-        ("tests/unit/resources/test_database_resource.py", 573),
-        ("tests/unit/resources/test_database_resource.py", 585),
-        ("tests/unit/resources/test_database_resource.py", 599),
-        ("tests/unit/resources/test_database_resource.py", 617),
+        ("tests/unit/resources/test_database_resource.py", 467),
+        ("tests/unit/resources/test_database_resource.py", 493),
+        ("tests/unit/resources/test_database_resource.py", 520),
+        ("tests/unit/resources/test_database_resource.py", 545),
+        ("tests/unit/resources/test_database_resource.py", 590),
+        ("tests/unit/resources/test_database_resource.py", 611),
+        ("tests/unit/resources/test_database_resource.py", 630),
+        ("tests/unit/resources/test_database_resource.py", 645),
+        ("tests/unit/resources/test_database_resource.py", 657),
+        ("tests/unit/resources/test_database_resource.py", 671),
+        ("tests/unit/resources/test_database_resource.py", 689),
         ("tests/unit/resources/test_environment_python.py", 42),
         ("tests/unit/resources/test_environment_python.py", 233),
         ("tests/unit/resources/test_environment_python.py", 271),
         ("tests/unit/test_monitor_cache_and_docker.py", 128),
+        ("tests/unit/test_cluster_resources.py", 189),
     }
 )
 
