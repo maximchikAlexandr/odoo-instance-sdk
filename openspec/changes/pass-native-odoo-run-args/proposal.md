@@ -8,7 +8,7 @@
 - Add the same optional native argv to `OdooInstance.run_foreground_command()` and `run_foreground()`, with the convenience method delegating to the command exactly once.
 - Extend the existing shell/runtime validation boundary to reject configuration, database/credentials, addons/data paths, HTTP bind/port, and logfile overrides—including protected long-option abbreviations that Odoo's `optparse` could resolve—before command construction or process launch while allowing ordinary runtime flags.
 - Append validated native arguments after generated config arguments in the one captured foreground `ProcessStep`; dry-run and execution consume that same immutable snapshot.
-- Preserve the existing run ordering: an occupied port constructs no command, a free port captures the command first, dry-run previews it without use-metadata writes, and normal execution records use after capture and before execution.
+- Preserve the existing run ordering: shared `ready_instance()` resolves the SDK/environment and creates the instance first; an occupied port then constructs no foreground command, while a free port captures the command, dry-run previews it without use-metadata writes, and normal execution records use after capture and before execution. Do not change the shared `ready_instance()` contract for this slice.
 - Preserve inherited stdin/stdout/stderr, process-group signals, PID identity tracking, artifact locking, cleanup, and the native Odoo exit code.
 - Document delimiter passthrough and dry-run usage, add unit/integration coverage, and record the mandatory post-#35 Expression branch-versus-adapter/unwrap assessment.
 
