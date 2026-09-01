@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import sys
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
-from odoo_instance_sdk.internal.proc import SubprocessExecutor
+from odoo_instance_sdk.internal.proc import ProcessHandle, RecordingExecutor, SubprocessExecutor
 from odoo_instance_sdk.internal.process_metrics import collect_process_tree
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
@@ -163,7 +165,7 @@ def test_persist_after_spawn_and_clear_on_normal_exit(
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
     )
-    exit_code = inst.run_foreground()
+    exit_code = inst.run_foreground(args=("--stop-after-init",))
     assert exit_code == 0
     # cleared in finally
     assert real_catalog.get_environment_runtime(env_id) is None
@@ -185,7 +187,7 @@ def test_persist_called_with_expected_fields(
     )
     monkeypatch.setattr("odoo_instance_sdk.resources.instance._process_create_time", lambda _: 1.0)
 
-    exit_code = inst.run_foreground()
+    exit_code = inst.run_foreground(args=("--stop-after-init",))
 
     assert exit_code == 0
     assert len(fake.upsert_calls) == 1
@@ -262,9 +264,107 @@ def test_clear_on_keyboard_interrupt(env_id: str, tmp_path: Path) -> None:
         ),
         pytest.raises(KeyboardInterrupt),
     ):
-        inst.run_foreground()
+        inst.run_foreground(args=("--dev=reload",))
 
     assert fake.clear_calls == [env_id]
+
+
+@pytest.mark.unit
+def test_foreground_keyboard_interrupt_cleans_up_the_owned_process_group(
+    tmp_path: Path,
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    client = _client_with_catalog(_FakeCatalog())
+    inst = _make_manual_instance(client, wt)
+    process = MagicMock()
+    process.pid = 4242
+    handle = ProcessHandle(process, (), 4242, 9898, True)
+    executor = RecordingExecutor(handles={"instance.foreground": handle})
+
+    with (
+        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
+        patch(
+            "odoo_instance_sdk.internal.server.wait_foreground_process",
+            side_effect=KeyboardInterrupt,
+        ),
+        patch("odoo_instance_sdk.resources.instance.terminate") as terminate,
+        pytest.raises(KeyboardInterrupt),
+    ):
+        inst.run_foreground(args=("--dev=reload",))
+
+    terminate.assert_called_once_with(handle, process_group_id=9898, timeout=5.0)
+
+
+@pytest.mark.unit
+def test_foreground_artifact_lock_wraps_secret_write_spawn_wait_and_cleanup(
+    tmp_path: Path,
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    client = _client_with_catalog(_FakeCatalog())
+    inst = _make_manual_instance(client, wt)
+    config = StartConfig(
+        http_port=8069,
+        http_interface="127.0.0.1",
+        config_path=None,
+        db_password="secret",
+    )
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def artifact_lock(_self: OdooInstance) -> Iterator[None]:
+        events.append("lock-enter")
+        try:
+            yield
+        finally:
+            events.append("lock-exit")
+
+    process = MagicMock()
+    process.pid = 4242
+    handle = ProcessHandle(process, (), 4242, 4242, True)
+
+    class EventRecordingExecutor(RecordingExecutor):
+        def spawn(self, step: object) -> ProcessHandle:
+            events.append("spawn")
+            return super().spawn(step)  # type: ignore[arg-type]
+
+    executor = EventRecordingExecutor(handles={"instance.foreground": handle})
+
+    def write_secret(*_args: object, **_kwargs: object) -> None:
+        events.append("secret-write")
+
+    def cleanup_secret(*_args: object, **_kwargs: object) -> None:
+        events.append("secret-cleanup")
+
+    def wait_process(_process: object) -> int:
+        events.append("wait")
+        return 0
+
+    with (
+        patch.object(OdooInstance, "_artifact_lock", artifact_lock),
+        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
+        patch(
+            "odoo_instance_sdk.resources.instance._write_secret_config", side_effect=write_secret
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.cleanup_secret_config",
+            side_effect=cleanup_secret,
+        ),
+        patch(
+            "odoo_instance_sdk.internal.server.wait_foreground_process", side_effect=wait_process
+        ),
+    ):
+        assert inst.run_foreground(config, args=("--stop-after-init",)) == 0
+
+    assert events == [
+        "lock-enter",
+        "secret-write",
+        "spawn",
+        "wait",
+        "secret-cleanup",
+        "lock-exit",
+    ]
 
 
 @pytest.mark.unit

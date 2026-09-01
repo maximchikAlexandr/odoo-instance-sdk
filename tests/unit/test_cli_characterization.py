@@ -82,6 +82,15 @@ Options:
   --help                     Show this message and exit.
 """
 
+RUN_HELP_SNAPSHOT = """Usage: cli run [OPTIONS] [ODOO_ARGS]...
+
+Options:
+  --dry-run                  Inspect without starting.
+  --format [rich|json|toon]  Output format (default: rich).
+  --json                     Emit JSON envelope.
+  --help                     Show this message and exit.
+"""
+
 
 def _command(path: tuple[str, ...]) -> click.Command:
     command: click.Command = cli
@@ -225,6 +234,13 @@ def test_prechange_root_and_module_help_snapshots_are_stable() -> None:
     assert runner.invoke(cli, ["module", "test", "--help"]).output == MODULE_TEST_HELP_SNAPSHOT
 
 
+def test_run_help_snapshot_documents_delimiter_passthrough() -> None:
+    result = CliRunner().invoke(cli, ["run", "--help"])
+
+    assert result.exit_code == 0
+    assert result.output == RUN_HELP_SNAPSHOT
+
+
 def test_command_local_json_placement_is_stable() -> None:
     for case in PUBLIC_LEAF_CASES:
         if not case.is_bounded:
@@ -349,7 +365,7 @@ def test_raw_stream_dry_run_emits_one_captured_command_without_running(
 @pytest.mark.parametrize("leaf", ["run", "shell"])
 def test_raw_stream_json_alias_matches_format_json_on_one_captured_command(leaf: str) -> None:
     _command, executor, effects, instance = _captured_raw_command(leaf)
-    suffix = ["--", "--dev"] if leaf == "shell" else []
+    suffix = ["--", "--dev"]
 
     def invoke(options: list[str]) -> Result:
         with (
@@ -371,8 +387,8 @@ def test_raw_stream_json_alias_matches_format_json_on_one_captured_command(leaf:
     assert executor.executed == []
     method = instance.run_foreground_command if leaf == "run" else instance.shell_command
     assert method.call_count == 2
-    if leaf == "shell":
-        assert all(call.kwargs == {"args": ["--dev"]} for call in method.call_args_list)
+    expected_args: tuple[str, ...] | list[str] = ("--dev",) if leaf == "run" else ["--dev"]
+    assert all(call.kwargs == {"args": expected_args} for call in method.call_args_list)
 
 
 @pytest.mark.parametrize("leaf", ["run", "shell"])
@@ -634,6 +650,30 @@ def test_click_parse_failure_remains_native_usage_error() -> None:
     assert "Usage:" in result.stderr
 
 
+def test_run_delimiter_preserves_native_values_repetition_and_order() -> None:
+    instance = MagicMock()
+    instance.run_foreground_command.return_value = _stub_command(lambda: 0)
+    native_args = ("--dev=reload", "--log-level", "debug", "--dev=xml")
+
+    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+        result = _passthrough_instance(instance, ["run", "--", *native_args])
+
+    assert result.exit_code == 0, result.output
+    instance.run_foreground_command.assert_called_once_with(args=native_args)
+
+
+@pytest.mark.parametrize("argv", [("run", "--dev=reload"), ("run", "sale")])
+def test_run_requires_delimiter_before_sdk_resolution(argv: tuple[str, ...]) -> None:
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=AssertionError("SDK resolution must not run on delimiter errors"),
+    ):
+        result = CliRunner().invoke(cli, list(argv))
+
+    assert result.exit_code == 2
+    assert "Usage:" in result.stderr
+
+
 @pytest.mark.parametrize("command", ["run", "shell"])
 def test_passthrough_commands_forward_child_exit_code(command: str) -> None:
     instance = MagicMock()
@@ -647,7 +687,8 @@ def test_passthrough_commands_forward_child_exit_code(command: str) -> None:
         )
 
     assert result.exit_code == child_exit
-    method.assert_called_once_with(**({"args": ["--dev"]} if command == "shell" else {}))
+    expected_args: tuple[str, ...] | list[str] = () if command == "run" else ["--dev"]
+    method.assert_called_once_with(args=expected_args)
     assert result.stdout == ""
     assert result.stderr == ""
 
@@ -668,6 +709,98 @@ def test_passthrough_commands_map_keyboard_interrupt_to_130(command: str) -> Non
     assert result.exit_code == 130
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+def test_run_native_interrupt_maps_to_130_after_delimiter() -> None:
+    instance = MagicMock()
+
+    def raise_interrupt() -> int:
+        raise KeyboardInterrupt
+
+    instance.run_foreground_command.return_value = _stub_command(raise_interrupt)
+    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+        result = _passthrough_instance(instance, ["run", "--", "--dev=reload"])
+
+    assert result.exit_code == 130
+    instance.run_foreground_command.assert_called_once_with(args=("--dev=reload",))
+
+
+def test_run_native_exit_code_and_streams_remain_unwrapped() -> None:
+    instance = MagicMock()
+
+    def run_foreground() -> int:
+        sys.stdout.write("native stdout")
+        sys.stderr.write("native stderr")
+        return 17
+
+    instance.run_foreground_command.return_value = _stub_command(run_foreground)
+    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+        result = _passthrough_instance(instance, ["run", "--", "--workers=2"])
+
+    assert result.exit_code == 17
+    assert result.stdout == "native stdout"
+    assert result.stderr == "native stderr"
+    instance.run_foreground_command.assert_called_once_with(args=("--workers=2",))
+
+
+@pytest.mark.parametrize(
+    "output", [("--format", "rich"), ("--format", "json"), ("--format", "toon"), ("--json",)]
+)
+def test_run_dry_run_formats_expose_the_captured_native_argv(output: tuple[str, ...]) -> None:
+    native_args = ("--dev=reload", "space value", "meta;$(touch should-not-run)")
+    executor = RecordingExecutor()
+    prepared = PreparedStep(
+        step_id="instance.foreground",
+        argv=("odoo", *native_args),
+        mutating=False,
+        inherit_stdio=True,
+        start_new_session=True,
+    )
+    command = Command.create(
+        ExecutionPlan(
+            steps=(
+                ProcessStep(
+                    step_id="instance.foreground",
+                    argv=prepared.argv,
+                    display="odoo native args",
+                    executable="odoo",
+                    mode="foreground",
+                    long_running=True,
+                ),
+            )
+        ),
+        lambda _context: 0,
+        (prepared,),
+        executor=executor,
+    )
+    instance = MagicMock()
+    instance.run_foreground_command.return_value = command
+    client = MagicMock()
+
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=(client, SimpleNamespace(), instance),
+        ),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, ["run", "--dry-run", *output, "--", *native_args])
+
+    assert result.exit_code == 0, result.output
+    if output == ("--format", "rich"):
+        assert "--dev=reload" in result.stdout
+        assert "space value" in result.stdout
+    elif output == ("--format", "toon"):
+        from toon import DecodeOptions, decode
+
+        payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+        assert tuple(payload["result"]["steps"][0]["argv"])[-3:] == native_args
+    else:
+        payload = json.loads(result.stdout)
+        assert tuple(payload["result"]["steps"][0]["argv"])[-3:] == native_args
+    assert executor.executed == []
+    client.environments.record_use.assert_not_called()
+    instance.run_foreground_command.assert_called_once_with(args=native_args)
 
 
 def test_passthrough_run_and_shell_preserve_native_streams() -> None:
