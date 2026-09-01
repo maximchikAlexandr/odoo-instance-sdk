@@ -266,3 +266,30 @@ Checkout provenance SHALL use the stable values `matched`, `mismatched`, and `un
 
 - **WHEN** a backup with `source_git_branch="release/19"` is restored and later loaded through the restore mapping
 - **THEN** the returned `Backup.source_git_branch` equals `release/19`
+
+### Requirement: Public execution model vocabulary
+
+The SDK SHALL publicly export lazy-loaded `Command[T]`, `ExecutionPlan`, frozen `ProcessStep`, frozen `ActionStep`, concrete plan errors, and `StalePlanError`. The public plan/value models SHALL be immutable, strictly typed, serializable through the project model boundary, and free of Expression or private executor types. `Command[T]` SHALL be immutable and strictly typed, but its private executable callback and snapshot SHALL NOT be serializable or included in project model conversion; only its public plan projection may be converted.
+
+#### Scenario: Public execution imports
+
+- **WHEN** a caller imports each execution model from `odoo_instance_sdk` or its canonical module
+- **THEN** both imports return the same public object
+- **AND** constructing or inspecting the models requires no private executor import through the package root
+
+#### Scenario: Command model conversion is requested
+
+- **WHEN** a caller converts public execution values through the project model boundary
+- **THEN** `ExecutionPlan`, `ProcessStep`, `ActionStep`, and other public plan/value models produce serializable values
+- **AND** the `Command[T]` private callback and executable snapshot are neither traversed nor emitted
+
+### Requirement: Concrete recursive JSON values
+
+Production model, output, and adapter annotations SHALL use a recursive `JsonValue`, concrete unions, protocols, typed mappings, or frozen structs instead of explicit `Any` or bare `object`. Untyped third-party data SHALL be validated and narrowed in one adapter before it enters production domain or output models.
+
+#### Scenario: Untyped third-party mapping enters the SDK
+
+- **WHEN** FastAPI, TOON, JSON, msgspec, or another weakly typed dependency returns an untyped value
+- **THEN** one adapter validates it into `JsonValue` or a concrete model
+- **AND** downstream annotations contain no `Any` or bare `object`
+
