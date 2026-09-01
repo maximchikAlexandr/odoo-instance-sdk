@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
 from odoo_instance_sdk.exceptions import PgAdminUnavailableError, StalePlanError
-from odoo_instance_sdk.execution import ExecutionPlan
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal import pgadmin, pgadmin_container, pgadmin_files
 from odoo_instance_sdk.internal.address import AddressState
 from odoo_instance_sdk.internal.proc import (
@@ -26,6 +27,198 @@ from odoo_instance_sdk.internal.proc import (
 from odoo_instance_sdk.models import PgAdminOpenResult, PgAdminOpenState
 
 from .pgadmin_test_support import _paths
+
+_LINUX_PHASE_GAP_ACL_STEPS = (
+    "pgadmin.reconciliation.preparation.acl.root",
+    "pgadmin.reconciliation.preparation.acl.private",
+    "pgadmin.reconciliation.preparation.acl.data",
+    "pgadmin.reconciliation.preparation.acl.data.default",
+    "pgadmin.reconciliation.preparation.acl.fingerprint-key",
+    "pgadmin.reconciliation.preparation.acl.admin-password",
+    "pgadmin.reconciliation.preparation.acl.pgpass",
+    "pgadmin.reconciliation.preparation.acl.servers",
+    "pgadmin.reconciliation.preparation.acl.metadata",
+)
+
+
+def _run_phase_gap_command_in_fork(
+    command: Command[PgAdminOpenResult], executor: RecordingExecutor, output: Any
+) -> None:
+    try:
+        command.run()
+    except BaseException as exc:
+        output.put(
+            (
+                type(exc).__name__,
+                str(exc),
+                tuple(step.step_id for step in executor.executed),
+            )
+        )
+    else:
+        output.put(("success", "", tuple(step.step_id for step in executor.executed)))
+
+
+def _linux_phase_gap_command(  # noqa: C901
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    witness: str,
+) -> tuple[Command[PgAdminOpenResult], RecordingExecutor, tuple[str, ...], list[object]]:
+    """Build a complete captured continuation with one Linux witness fault."""
+    from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
+    from odoo_instance_sdk.internal.proc import PreparedAction, PreparedProcess
+
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(pgadmin_files, "get_data_root", lambda *, ensure_exists: tmp_path)
+    monkeypatch.setattr(pgadmin_files, "_linux", lambda: True)
+    paths.root.mkdir(parents=True)
+    paths.private_dir.mkdir()
+    paths.data_dir.mkdir()
+    paths.root.chmod(0o710)
+    paths.private_dir.chmod(0o710)
+    paths.data_dir.chmod(0o770)
+    (paths.private_dir / ".fingerprint-key").write_bytes(b"k" * 32)
+    (paths.private_dir / ".fingerprint-key").chmod(0o600)
+    for path in (paths.admin_password, paths.pgpass, paths.servers_json, paths.metadata):
+        path.write_bytes(b"captured\n")
+        path.chmod(0o640)
+
+    mounts = pgadmin_files.pgadmin_mounts(paths)
+    if witness == "mount.destination":
+        mounts = (
+            pgadmin_files.PgAdminMount(
+                paths.admin_password,
+                "/var/lib/pgadmin/private/admin-password",
+                True,
+            ),
+            *mounts[1:],
+        )
+    elif witness == "mount.read-only":
+        mounts = (
+            pgadmin_files.PgAdminMount(
+                paths.admin_password,
+                pgadmin_files.PGADMIN_PASSWORD_DESTINATION,
+                False,
+            ),
+            *mounts[1:],
+        )
+    preparation = pgadmin_files.PgAdminPreparation(
+        paths=paths,
+        fingerprint="captured-hmac",
+        port=5050,
+        container_name=pgadmin_files.PGADMIN_CONTAINER_NAME,
+        mounts=mounts,
+    )
+    prefix = pgadmin_files.preparation_revalidation_steps(paths)
+
+    def acl_output(step: PreparedStep) -> str:
+        if step.step_id == witness:
+            if step.step_id.endswith(".default"):
+                return "default:user::---"
+            return "user::---"
+        if step.step_id.endswith(".root") or step.step_id.endswith(".private"):
+            entries = pgadmin_files._directory_acl(0o710)
+        elif step.step_id.endswith(".data"):
+            entries = pgadmin_files._directory_acl(0o770)
+        elif step.step_id.endswith(".data.default"):
+            entries = pgadmin_files._default_directory_acl()
+            return "\n".join(f"default:{entry}" for entry in sorted(entries))
+        elif step.step_id.endswith(".fingerprint-key"):
+            entries = pgadmin_files._fingerprint_key_acl()
+        else:
+            entries = pgadmin_files._file_acl()
+        return "\n".join(sorted(entries))
+
+    def result_factory(process: PreparedProcess) -> ProcessResult:
+        step = cast("PreparedStep", process)
+        assert step.argv[:2] == ("getfacl", "-cp")
+        assert step.read_only
+        assert not step.mutating
+        return ProcessResult(
+            step.argv,
+            0,
+            acl_output(step),
+            "",
+            0.0,
+            step.cwd,
+            step.environment,
+        )
+
+    executor = RecordingExecutor(result_factory=result_factory)
+    inspect_calls: list[object] = []
+
+    def unexpected_inspect(*args: object, **kwargs: object) -> None:
+        inspect_calls.append((args, kwargs))
+        raise AssertionError("Docker inspect must not follow a failed preparation witness")
+
+    monkeypatch.setattr(pgadmin_container, "inspect_container", unexpected_inspect)
+    steps: tuple[PreparedStep | PreparedAction, ...] = (
+        *prefix,
+        pgadmin_container.reconciliation_inspect_step(),
+        PreparedAction(
+            step_id="pgadmin.reconciliation.port.revalidate",
+            action="pgadmin_reconciliation_port_revalidate",
+            read_only=True,
+        ),
+        *pgadmin_container.reconciliation_steps(
+            paths=paths,
+            port=5050,
+            network="project_default",
+            fingerprint="captured-hmac",
+            secret_values=("captured-hmac", "database-password"),
+        ),
+    )
+    carrier = pgadmin._PgAdminReconciliationCarrier(
+        preparation=preparation,
+        runner=cast("ComposeRunner", object()),
+        network="project_default",
+        database="demo",
+        timeout=1.0,
+        steps=steps,
+        executor=executor,
+        fingerprint_key=b"k" * 32,
+    )
+    command = carrier.reconciliation_command()
+    return command, executor, tuple(step.step_id for step in prefix), inspect_calls
+
+
+@pytest.mark.parametrize(
+    "witness",
+    (*_LINUX_PHASE_GAP_ACL_STEPS, "mount.destination", "mount.read-only"),
+)
+def test_linux_phase_gap_witness_is_read_only_and_matches_in_fork(
+    witness: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every ACL/mount witness fails before Docker and preserves the exact prefix."""
+    command, executor, prefix_ids, inspect_calls = _linux_phase_gap_command(
+        tmp_path, monkeypatch, witness
+    )
+    planned_ids = tuple(step.step_id for step in command.plan.steps)
+    assert planned_ids[: len(prefix_ids)] == prefix_ids
+    if witness in _LINUX_PHASE_GAP_ACL_STEPS:
+        expected_ids = prefix_ids[: prefix_ids.index(witness) + 1]
+    else:
+        expected_ids = ()
+
+    context = mp.get_context("fork")
+    output = context.Queue()
+    child = context.Process(
+        target=_run_phase_gap_command_in_fork,
+        args=(command, executor, output),
+    )
+    child.start()
+    child.join(10)
+    assert child.exitcode == 0
+    child_result = output.get(timeout=5)
+    assert child_result[0] == "StalePlanError"
+    assert child_result[1] == "captured pgAdmin preparation changed before execution"
+    assert child_result[2] == expected_ids
+
+    with pytest.raises(StalePlanError, match="preparation changed"):
+        command.run()
+    assert tuple(step.step_id for step in executor.executed) == expected_ids
+    assert not inspect_calls
+    assert all(step.argv[:2] == ("getfacl", "-cp") for step in executor.executed)
+    assert all(step.read_only and not step.mutating for step in executor.executed)
 
 
 def test_fingerprint_key_drift_fails_before_file_or_docker_mutation(

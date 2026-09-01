@@ -54,7 +54,7 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("tests/unit/internal/test_pgadmin_files.py", 442),
         ("tests/unit/internal/test_pgadmin_files.py", 501),
-        ("tests/unit/internal/test_pgadmin.py", 340),
+        ("tests/unit/internal/test_pgadmin.py", 533),
         ("tests/unit/internal/test_postgres_size.py", 28),
         ("tests/unit/internal/test_postgres_size.py", 55),
         ("tests/unit/internal/test_postgres_size.py", 78),
