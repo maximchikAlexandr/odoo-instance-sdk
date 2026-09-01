@@ -26,9 +26,9 @@ The Click `run` adapter already builds one command for both `run_or_preview` pat
 
 Replace the shell-specific name with one private pure function that freezes `Sequence[str]` to `tuple[str, ...]`, scans each token once, raises `InstanceConfigurationError` for a protected name, and otherwise returns the tuple unchanged. Both `shell_command()` and `run_foreground_command()` call it before snapshot or `PreparedStep` construction.
 
-The deny set is limited to environment identity and managed resources: config/database selectors, database connection and credentials, addons/upgrade/data paths, HTTP/gevent/longpolling bind ports, and logfile. Long options match only exact names or `name=value`; short aliases match exact or attached values. This avoids the current broad prefix behavior while covering Odoo's spaced and attached forms. Everything else is passed through rather than being maintained in a second allowlist.
+The deny set is limited to environment identity and managed resources: config/database selectors, database connection and credentials, addons/upgrade/data paths, HTTP/gevent/longpolling bind ports, and logfile. For a token beginning `--`, validation isolates the option name before the first `=` and rejects it when it is an exact protected long name or a non-empty proper prefix of any protected long name. This deliberately fails closed for unique abbreviations that Odoo's `optparse` may resolve (for example `--datab` to `--database`), even when a short prefix is ambiguous or unknown to a particular Odoo version. A longer near-prefix such as `--database-extra` is not an abbreviation and is not rejected by this rule. Short aliases match exact or attached values. Everything else is passed through rather than being maintained in a second allowlist.
 
-Alternative considered: reproduce Odoo's option parser or maintain an allowed-option catalog. Rejected because it will drift across Odoo versions and is explicitly outside GitHub #35.
+Alternative considered: reproduce Odoo's ambiguity resolution or maintain an allowed-option catalog. Rejected because either will drift across Odoo versions and is explicitly outside GitHub #35; conservatively denying every protected-name prefix is the version-independent fail-closed boundary.
 
 ### 2. Capture native argv in the existing foreground command
 
@@ -44,9 +44,9 @@ Alternative considered: append CLI arguments immediately before spawn. Rejected 
 
 ### 3. Keep Click as delimiter parsing and delegation only
 
-Give `run` the same `click.UNPROCESSED`, variadic argument shape already used by `shell`. Click owns the `--` delimiter and returns an ordered tuple; the callback passes it to `run_foreground_command(args=...)` without validation or normalization. Unknown Odoo-looking options before the delimiter remain Click usage errors.
+Give `run` a variadic `click.UNPROCESSED` argument plus a small run-specific `click.Command` subclass. Its `parse_args(ctx, args)` override snapshots the raw token list, delegates normal option parsing to Click, and, when the parsed variadic tuple is non-empty, raises `click.UsageError` unless the raw list contained a literal `--` before the first passthrough token. This preserves Click's standard unknown-option handling while rejecting bare positionals such as `odcli run sale`; after the guard, the callback passes Click's ordered tuple to `run_foreground_command(args=...)` without validation or normalization.
 
-The existing `run_or_preview(lambda: command, emit_normal=False)` stays unchanged. Normal execution inherits native streams and exits with the command's integer result. Dry-run emits the captured plan through the existing output boundary in the already supported Rich/JSON/TOON modes. Port preflight and `record_use` ordering stay unchanged.
+The existing `run_or_preview(lambda: command, emit_normal=False)` stays unchanged. After ready-instance resolution, port preflight runs first and a conflict returns before command construction. On a free port the callback captures `run_foreground_command(args=...)` exactly once. Dry-run then previews that command without `record_use`; normal execution calls `record_use` once after command capture and before `run_or_preview` executes it. Normal execution inherits native streams and exits with the command's integer result; dry-run emits the captured plan through the existing Rich/JSON/TOON boundary.
 
 Alternative considered: create `commands/run.py` solely for this feature. Rejected because the current callback is short and a move would add churn without isolating a new responsibility.
 
@@ -66,8 +66,8 @@ Alternative considered: treat the preliminary checkout measurement as sufficient
 
 ## Risks / Trade-offs
 
-- [A protected Odoo synonym is missed] → Keep one explicit security-focused protected-name table with tests for every exact, equals, spaced, and short-attached spelling; fail closed when new binding flags are identified.
-- [A broad prefix rejects an unrelated option] → Match long names only exactly or before `=` and short aliases only in documented attached form.
+- [A protected Odoo synonym is missed] → Keep one explicit security-focused protected-name table with tests for exact, equals, spaced, abbreviated-long, and short-attached spellings; fail closed when new binding flags are identified.
+- [A protected-name prefix is ambiguous or unknown in one Odoo version] → Reject it conservatively; only longer near-prefixes that cannot abbreviate a protected name bypass this boundary.
 - [CLI preview differs from execution] → Assert public plan argv against redacted recording-executor inputs from the same `Command` instance.
 - [Caller mutates an input list after planning] → Freeze before validation and step construction; test mutation after command creation.
 - [Native output is accidentally wrapped] → Retain `emit_normal=False` and existing raw-stream characterization while adding argv assertions.

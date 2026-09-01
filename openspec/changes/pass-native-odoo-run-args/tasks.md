@@ -1,13 +1,13 @@
 ## 1. Characterize the Existing Foreground Boundary
 
-- [ ] 1.1 Extend `tests/unit/test_cli_characterization.py` and `tests/unit/test_cli_security_contract.py` with failing pre-change cases for `run` delimiter parsing, exact `run_foreground_command(args=...)` delegation, port-conflict short-circuiting, use-event ordering, dry-run format/alias behavior, and normal native exit/interrupt behavior; update only the additive run-help snapshot text.
+- [ ] 1.1 Extend `tests/unit/test_cli_characterization.py` and `tests/unit/test_cli_security_contract.py` with failing pre-change cases for `run` delimiter parsing (including bare positional input), exact `run_foreground_command(args=...)` delegation, port-conflict short-circuiting, command-capture/use-event ordering, dry-run with zero use-metadata writes, dry-run format/alias behavior, and normal native exit/interrupt behavior; update only the additive run-help snapshot text.
 - [ ] 1.2 Extend `tests/unit/resources/test_instance_runtime.py` and `tests/unit/test_run_foreground_runtime_identity.py` with failing pre-change cases that pin generated-config-before-native-argv order, repeated/space/metacharacter element boundaries, input-list mutation after capture, recording-executor parity, inherited stdio, PID persistence/clearing, artifact-lock ordering, process-group cleanup, and real exit-code propagation.
 
 ## 2. Share and Harden Native Runtime Argument Validation
 
 - [ ] 2.1 Replace `_FORBIDDEN_SHELL_FLAGS`/`_check_shell_overrides` in `src/odoo_instance_sdk/resources/instance.py` with one private pure runtime-argument validator that returns an unchanged tuple and is called by both foreground and interactive-shell command construction before any snapshot, prepared step, preflight, lock, secret write, identity write, or launch.
-- [ ] 2.2 Define the single protected-name table for config/database selectors, database host/port/user/password/SSL mode, db filter, addons/upgrade/data paths, HTTP/gevent/longpolling bind ports, and logfile; match long names only exactly or before `=`, and short `-c`/`-d`/`-r`/`-w` aliases exactly or with attached values.
-- [ ] 2.3 Add table-driven SDK tests covering every protected option in spaced and `--name=value` forms plus every short attached form, proving identical shell/foreground rejection, the offending option in a sanitized `InstanceConfigurationError`, and zero execution-side effects; add allowed/repeated `--dev`, `--log-level`, `--workers`, and `--stop-after-init` cases plus near-prefix long options that must not be falsely rejected.
+- [ ] 2.2 Define the single protected-name table for config/database selectors, database host/port/user/password/SSL mode, db filter, addons/upgrade/data paths, HTTP/gevent/longpolling bind ports, and logfile; for long tokens compare the name before `=` and reject exact names plus every non-empty proper prefix of a protected name, while short `-c`/`-d`/`-r`/`-w` aliases match exactly or with attached values.
+- [ ] 2.3 Add table-driven SDK tests covering every protected option in spaced and `--name=value` forms, representative abbreviated forms with and without `=`, and every short attached form, proving identical shell/foreground rejection, the offending option in a sanitized `InstanceConfigurationError`, and zero execution-side effects; include the `--datab`/`--datab=other` bypass regression, allowed/repeated `--dev`, `--log-level`, `--workers`, and `--stop-after-init`, and longer non-abbreviation near-prefixes such as `--database-extra`.
 
 ## 3. Capture Native Argv in the Existing SDK Command
 
@@ -17,9 +17,9 @@
 
 ## 4. Pass Click Delimiter Arguments Through the Thin Run Adapter
 
-- [ ] 4.1 Add variadic `click.UNPROCESSED` `odoo_args` to the existing `run` command, document the `--` delimiter in its help, and pass the exact tuple to `instance.run_foreground_command(args=...)` without CLI validation, normalization, subprocess construction, or a new `commands/run.py` module.
-- [ ] 4.2 Add CLI tests proving `odcli run -- --dev=reload --log-level debug --dev=xml` preserves values/repetition/order, while `odcli run --dev=reload` exits `2` before SDK resolution; prove protected arguments fail before spawn through the SDK boundary and produce no partial machine document.
-- [ ] 4.3 Add dry-run/normal parity cases for default Rich, `--format rich|json|toon`, and `--json`: every preview exposes the same captured native argv without executor activity, JSON alias parity remains exact, and normal execution remains unwrapped native stdin/stdout/stderr with Odoo exit code and interrupt `130`.
+- [ ] 4.1 Add variadic `click.UNPROCESSED` `odoo_args` and a small run-specific `click.Command.parse_args` guard that retains the raw-token knowledge needed to require a literal `--` before any non-empty passthrough tuple; document the delimiter and pass the exact tuple to `instance.run_foreground_command(args=...)` without CLI validation, normalization, subprocess construction, or a new `commands/run.py` module.
+- [ ] 4.2 Add CLI tests proving `odcli run -- --dev=reload --log-level debug --dev=xml` preserves values/repetition/order, while both `odcli run --dev=reload` and bare positional `odcli run sale` exit `2` before SDK resolution; prove protected arguments fail before spawn through the SDK boundary and produce no partial machine document.
+- [ ] 4.3 Add dry-run/normal parity cases for default Rich, `--format rich|json|toon`, and `--json`: every preview exposes the same captured native argv without executor activity or use-metadata writes, JSON alias parity remains exact, and normal execution preserves command capture → one `record_use` → unwrapped native execution with Odoo exit code and interrupt `130`.
 
 ## 5. Close the GitHub #35 Architecture Gate and Documentation
 
