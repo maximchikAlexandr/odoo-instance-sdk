@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
+from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     MasterPasswordRequiredError,
@@ -307,6 +308,88 @@ class TestRunForeground:
         with patch("odoo_instance_sdk.resources.instance._build_cli_args", return_value=[]):
             result = inst.run_foreground(cfg)
         assert result == 0
+
+    def test_foreground_plan_appends_native_argv_after_generated_config(
+        self, tmp_path: Path
+    ) -> None:
+        client = _make_client()
+        config = StartConfig(
+            http_port=9999,
+            http_interface="127.0.0.1",
+            config_path=str(tmp_path / "generated.conf"),
+        )
+        native_args = (
+            "--dev=reload",
+            "--log-level",
+            "debug",
+            "--dev=xml",
+            "space value",
+            "meta;$(touch should-not-run)",
+        )
+        executor = RecordingExecutor(handles={"instance.foreground": _recording_handle()})
+
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
+            command = client.instance(base_url="http://localhost:8069").run_foreground_command(
+                config, args=native_args
+            )
+            process = command.plan.process_steps[0]
+            assert process.argv == (
+                "python3",
+                *_build_cli_args(config),
+                *native_args,
+            )
+            assert command.run() == 0
+
+        assert executor.spawned[0].argv == process.argv
+        assert executor.spawned[0].inherit_stdio is True
+        assert executor.spawned[0].start_new_session is True
+
+    def test_foreground_command_freezes_mutable_args_and_recording_executor_replays_them(
+        self, tmp_path: Path
+    ) -> None:
+        client = _make_client()
+        config = StartConfig(
+            http_port=9999,
+            http_interface="127.0.0.1",
+            config_path=str(tmp_path / "generated.conf"),
+        )
+        native_args = ["--dev=reload", "space value", "meta;echo no-shell"]
+        expected = tuple(native_args)
+        executor = RecordingExecutor(handles={"instance.foreground": _recording_handle()})
+
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
+            command = client.instance(base_url="http://localhost:8069").run_foreground_command(
+                config, args=native_args
+            )
+            native_args[:] = ["--database", "wrong"]
+            planned = command.plan.process_steps[0].argv
+            assert planned[-len(expected) :] == expected
+            assert command.commands[0].argv == planned
+            assert command.run() == 0
+
+        assert executor.spawned[0].argv == planned
+
+    def test_foreground_returns_native_process_exit_code(self, tmp_path: Path) -> None:
+        client = _make_client()
+        config = StartConfig(
+            http_port=9999,
+            http_interface="127.0.0.1",
+            config_path=str(tmp_path / "generated.conf"),
+        )
+        instance = OdooInstance(
+            config=InstanceConfig(
+                base_url="http://localhost:8069",
+                start_config=config,
+                command_prefix=("python3", "-c", "import sys; sys.exit(23)"),
+            ),
+            _client=client,
+        )
+
+        assert instance.run_foreground(args=("--stop-after-init",)) == 23
 
 
 class TestShell:
