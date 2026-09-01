@@ -5,6 +5,7 @@ import importlib.metadata
 import inspect
 import json
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,35 +18,19 @@ from click.testing import CliRunner, Result
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.context import CliContext
 from odoo_instance_sdk.commands.output import OutputMode, build_envelope
+from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
 from odoo_instance_sdk.internal.context import resolve_environment, resolve_project
+from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
+from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor, RunContext
 from odoo_instance_sdk.models import Snapshot
+from odoo_instance_sdk.resources.backup import BackupResource
+from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.environment import EnvironmentResource
+from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-
-BOUNDED_LEAVES = (
-    ("init",),
-    ("doctor",),
-    ("env", "checkout"),
-    ("env", "list"),
-    ("env", "remove"),
-    ("env", "sync"),
-    ("db", "refresh"),
-    ("db", "reset-admin-password"),
-    ("eval",),
-    ("exec",),
-    ("test",),
-    ("module", "list"),
-    ("module", "update"),
-    ("module", "test"),
-    ("translations", "export"),
-    ("deps", "verify"),
-    ("vscode", "generate"),
-    ("postgres", "approve-image"),
-    ("postgres", "status"),
-    ("postgres", "up"),
-    ("postgres", "stop"),
-)
+from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
 
 ROOT_HELP_SNAPSHOT = """Usage: cli [OPTIONS] COMMAND [ARGS]...
 
@@ -91,6 +76,7 @@ Options:
   --test-tags TEXT           Test tags.  [required]
   --reload-tests
   --allow-empty
+  --dry-run                  Plan only.
   --format [rich|json|toon]  Output format (default: rich).
   --json                     Emit JSON envelope.
   --help                     Show this message and exit.
@@ -120,6 +106,49 @@ def _passthrough_instance(
         return_value=(MagicMock(), SimpleNamespace(), instance),
     ):
         return CliRunner().invoke(cli, args, input=input_text)
+
+
+def _stub_command(callback: Callable[[], int]) -> Command[int]:
+    """Build a valid command-contract double for native passthrough tests."""
+    return Command.create(ExecutionPlan(), lambda _context: callback(), ())
+
+
+def _captured_raw_command(
+    leaf: str,
+) -> tuple[Command[int], RecordingExecutor, list[str], MagicMock]:
+    executor = RecordingExecutor()
+    effects: list[str] = []
+    prepared = PreparedStep(
+        step_id=f"instance.{leaf}",
+        argv=("odoo", "--stop-after-init"),
+        mutating=False,
+    )
+
+    def callback(_context: RunContext[int]) -> int:
+        effects.append("run")
+        return 0
+
+    command = Command.create(
+        ExecutionPlan(
+            steps=(
+                ProcessStep(
+                    step_id=f"instance.{leaf}",
+                    argv=prepared.argv,
+                    display="odoo --stop-after-init",
+                    executable="odoo",
+                ),
+            )
+        ),
+        callback,
+        (prepared,),
+        executor=executor,
+    )
+    instance = MagicMock()
+    if leaf == "run":
+        instance.run_foreground_command.return_value = command
+    else:
+        instance.shell_command.return_value = command
+    return command, executor, effects, instance
 
 
 def test_cli_import_and_console_script_surface_are_stable() -> None:
@@ -197,15 +226,21 @@ def test_prechange_root_and_module_help_snapshots_are_stable() -> None:
 
 
 def test_command_local_json_placement_is_stable() -> None:
-    for path in BOUNDED_LEAVES:
+    for case in PUBLIC_LEAF_CASES:
+        if not case.is_bounded:
+            continue
+        path = case.path
         command = _command(path)
         assert "--json" in _option_names(command), path
         help_result = CliRunner().invoke(cli, [*path, "--help"])
         assert help_result.exit_code == 0
         assert "--json" in help_result.output
 
-    for path in (("run",), ("shell",), ("logs",), ("monitor",)):
+    for path in (("logs",), ("monitor",)):
         assert "--json" not in _option_names(_command(path)), path
+    for path in (("run",), ("shell",)):
+        assert "--dry-run" in _option_names(_command(path)), path
+        assert "--json" in _option_names(_command(path)), path
 
     root_json = CliRunner().invoke(cli, ["--json", "env", "list"])
     assert root_json.exit_code == 2
@@ -213,21 +248,263 @@ def test_command_local_json_placement_is_stable() -> None:
     assert "No such option" in root_json.stderr
 
 
+@pytest.mark.parametrize("leaf", ["run", "shell"])
+@pytest.mark.parametrize(
+    "option",
+    [
+        ("--json",),
+        ("--format", "rich"),
+        ("--format", "json"),
+        ("--format", "toon"),
+        ("--json", "--format", "json"),
+        ("--format", "json", "--json"),
+    ],
+)
+def test_raw_stream_output_options_require_dry_run_before_sdk_resolution(
+    leaf: str, option: tuple[str, ...]
+) -> None:
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        side_effect=AssertionError("raw option validation must precede SDK resolution"),
+    ):
+        result = CliRunner().invoke(cli, [leaf, *option])
+    assert result.exit_code == 2
+    assert "require --dry-run" in result.stderr
+
+
+@pytest.mark.parametrize("leaf", ["run", "shell"])
+@pytest.mark.parametrize(
+    "option",
+    [
+        (),
+        ("--format", "rich"),
+        ("--format", "json"),
+        ("--format", "toon"),
+        ("--json",),
+    ],
+)
+def test_raw_stream_dry_run_emits_one_captured_command_without_running(
+    leaf: str, option: tuple[str, ...]
+) -> None:
+    from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
+    from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
+
+    executor = RecordingExecutor()
+    effects: list[str] = []
+    prepared = PreparedStep(
+        step_id=f"instance.{leaf}",
+        argv=("odoo", "--stop-after-init"),
+        mutating=False,
+    )
+
+    def callback(_context: object) -> int:
+        effects.append("run")
+        return 0
+
+    command = Command.create(
+        ExecutionPlan(
+            steps=(
+                ProcessStep(
+                    step_id=f"instance.{leaf}",
+                    argv=prepared.argv,
+                    display="odoo --stop-after-init",
+                    executable="odoo",
+                ),
+            )
+        ),
+        callback,
+        (prepared,),
+        executor=executor,
+    )
+    instance = MagicMock()
+    if leaf == "run":
+        instance.run_foreground_command.return_value = command
+    else:
+        instance.shell_command.return_value = command
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=(MagicMock(), SimpleNamespace(), instance),
+        ),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, [leaf, "--dry-run", *option])
+    assert result.exit_code == 0, result.output
+    if option in {(), ("--format", "rich")}:
+        assert "Plan: " + leaf in result.stdout
+        assert "instance." + leaf in result.stdout
+    else:
+        if option == ("--format", "json") or option == ("--json",):
+            payload = json.loads(result.stdout)
+        else:
+            from toon import DecodeOptions, decode
+
+            payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+        assert payload["dry_run"] is True
+        assert payload["result"]["steps"][0]["step_id"] == f"instance.{leaf}"
+    assert effects == []
+    assert executor.executed == []
+
+
+@pytest.mark.parametrize("leaf", ["run", "shell"])
+def test_raw_stream_json_alias_matches_format_json_on_one_captured_command(leaf: str) -> None:
+    _command, executor, effects, instance = _captured_raw_command(leaf)
+    suffix = ["--", "--dev"] if leaf == "shell" else []
+
+    def invoke(options: list[str]) -> Result:
+        with (
+            patch(
+                "odoo_instance_sdk.cli.cli_context.ready_instance",
+                return_value=(MagicMock(), SimpleNamespace(), instance),
+            ),
+            patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+        ):
+            return CliRunner().invoke(cli, [leaf, *options, *suffix])
+
+    alias_result = invoke(["--dry-run", "--json"])
+    format_result = invoke(["--dry-run", "--format", "json"])
+
+    assert alias_result.exit_code == format_result.exit_code == 0
+    assert json.loads(alias_result.stdout) == json.loads(format_result.stdout)
+    assert alias_result.stderr == format_result.stderr == ""
+    assert effects == []
+    assert executor.executed == []
+    method = instance.run_foreground_command if leaf == "run" else instance.shell_command
+    assert method.call_count == 2
+    if leaf == "shell":
+        assert all(call.kwargs == {"args": ["--dev"]} for call in method.call_args_list)
+
+
+@pytest.mark.parametrize("leaf", ["run", "shell"])
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--dry-run", "--json"),
+        ("--json", "--dry-run"),
+        ("--dry-run", "--format", "rich"),
+        ("--format", "rich", "--dry-run"),
+        ("--dry-run", "--format", "json"),
+        ("--format", "json", "--dry-run"),
+        ("--dry-run", "--format", "toon"),
+        ("--format", "toon", "--dry-run"),
+    ],
+)
+def test_raw_stream_dry_run_option_order_is_stable_and_preserves_shell_args(
+    leaf: str, options: tuple[str, ...]
+) -> None:
+    _command, executor, effects, instance = _captured_raw_command(leaf)
+    suffix = ["--", "--dev"] if leaf == "shell" else []
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=(MagicMock(), SimpleNamespace(), instance),
+        ),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, [leaf, *options, *suffix])
+
+    assert result.exit_code == 0, result.output
+    assert executor.executed == []
+    assert effects == []
+    if "--format" in options and options[options.index("--format") + 1] == "rich":
+        assert "Plan: " + leaf in result.stdout
+    elif "toon" in options:
+        from toon import DecodeOptions, decode
+
+        assert decode(result.stdout, DecodeOptions(indent=2, strict=True))["dry_run"] is True
+    else:
+        assert json.loads(result.stdout)["dry_run"] is True
+    if leaf == "shell":
+        assert instance.shell_command.call_args.kwargs == {"args": ["--dev"]}
+
+
 def test_discovered_public_methods() -> None:
     expected = {
         EnvironmentResource: (
             "checkout",
+            "checkout_command",
             "checkout_with_plan",
             "get",
             "list",
+            "list_command",
             "open_pgadmin",
+            "open_pgadmin_command",
+            "open_pgadmin_phase",
+            "open_pgadmin_phase_command",
             "plan_checkout",
             "record_use",
             "refresh_database",
+            "refresh_database_command",
             "remove",
+            "remove_command",
             "sync_python",
+            "sync_python_command",
         ),
-        EnvironmentMonitor: ("snapshot", "watch"),
+        EnvironmentMonitor: ("snapshot", "snapshot_command", "watch"),
+        PostgresCluster: (
+            "approve_image",
+            "approve_image_command",
+            "ensure_running",
+            "ensure_running_command",
+            "from_project",
+            "resolve_image_digest",
+            "resolve_image_digest_command",
+            "resource_snapshot",
+            "resource_snapshot_command",
+            "status",
+            "status_command",
+            "stop",
+            "stop_command",
+            "to_diagnostic_dict",
+        ),
+        DatabaseResource: (
+            "backup",
+            "backup_command",
+            "current",
+            "current_command",
+            "drop",
+            "drop_command",
+            "exists",
+            "exists_command",
+            "list",
+            "names",
+            "reset_admin_password",
+            "reset_admin_password_command",
+            "restore",
+            "restore_command",
+        ),
+        BackupResource: (
+            "delete",
+            "delete_command",
+            "history",
+            "latest",
+            "list",
+            "validate",
+            "validate_command",
+        ),
+        DatabasePreparationCoordinator: (
+            "prepare",
+            "prepare_command",
+            "refresh_database",
+            "refresh_database_command",
+        ),
+        OdooInstance: (
+            "iter_logs",
+            "run",
+            "run_command",
+            "run_foreground",
+            "run_foreground_command",
+            "run_shell_script",
+            "run_shell_script_command",
+            "shell",
+            "shell_command",
+            "start",
+            "start_command",
+            "status",
+            "stop",
+            "stop_command",
+            "wait_ready",
+        ),
         BackupCatalog: (
             "active_environment_for",
             "add_environment_event",
@@ -271,7 +548,7 @@ def test_discovered_public_methods() -> None:
             for name, value in inspect.getmembers(cls, inspect.isroutine)
             if not name.startswith("_")
         )
-        assert discovered == names
+        assert discovered == names, (cls.__name__, names, discovered)
 
 
 def _assert_envelope_keys(envelope: dict[str, object], *, success: bool) -> None:
@@ -361,8 +638,8 @@ def test_click_parse_failure_remains_native_usage_error() -> None:
 def test_passthrough_commands_forward_child_exit_code(command: str) -> None:
     instance = MagicMock()
     child_exit = 17 if command == "run" else 23
-    method = instance.run_foreground if command == "run" else instance.shell
-    method.return_value = child_exit
+    method = instance.run_foreground_command if command == "run" else instance.shell_command
+    method.return_value = _stub_command(lambda: child_exit)
 
     with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
         result = _passthrough_instance(
@@ -378,8 +655,12 @@ def test_passthrough_commands_forward_child_exit_code(command: str) -> None:
 @pytest.mark.parametrize("command", ["run", "shell"])
 def test_passthrough_commands_map_keyboard_interrupt_to_130(command: str) -> None:
     instance = MagicMock()
-    method = instance.run_foreground if command == "run" else instance.shell
-    method.side_effect = KeyboardInterrupt
+
+    def raise_interrupt() -> int:
+        raise KeyboardInterrupt
+
+    method = instance.run_foreground_command if command == "run" else instance.shell_command
+    method.return_value = _stub_command(raise_interrupt)
 
     with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
         result = _passthrough_instance(instance, [command])
@@ -397,7 +678,7 @@ def test_passthrough_run_and_shell_preserve_native_streams() -> None:
         sys.stderr.write("run stderr")
         return 0
 
-    run_instance.run_foreground.side_effect = run_foreground
+    run_instance.run_foreground_command.return_value = _stub_command(run_foreground)
     with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
         run_result = _passthrough_instance(run_instance, ["run"])
     assert run_result.stdout == "run stdout"
@@ -413,7 +694,11 @@ def test_passthrough_run_and_shell_preserve_native_streams() -> None:
         assert args == ["--dev"]
         return 0
 
-    shell_instance.shell.side_effect = shell
+    def shell_command(*, args: list[str]) -> Command[int]:
+        assert args == ["--dev"]
+        return _stub_command(lambda: shell(args=args))
+
+    shell_instance.shell_command.side_effect = shell_command
     shell_result = _passthrough_instance(
         shell_instance,
         ["shell", "--", "--dev"],

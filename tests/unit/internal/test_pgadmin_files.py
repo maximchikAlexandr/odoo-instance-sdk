@@ -172,8 +172,21 @@ def test_fingerprint_uses_private_hmac_key_for_password_rotation(
         host="postgres",
         user="odoo",
     )
-    old = pgadmin_files.server_fingerprint(local_paths, identity, "demo", "old")
-    new = pgadmin_files.server_fingerprint(local_paths, identity, "demo", "new")
+    old_inputs = pgadmin_files.execution_fingerprint_inputs(local_paths, identity, "demo", "old")
+    pgadmin_files.prepare_files(
+        paths=local_paths,
+        servers_json=pgadmin_files.server_json(identity, "demo"),
+        pgpass=pgadmin_files.pgpass_line(identity, "old"),
+        fingerprint=old_inputs.fingerprint,
+        fingerprint_key=old_inputs.key,
+        port=5050,
+    )
+    old = pgadmin_files.execution_fingerprint_inputs(
+        local_paths, identity, "demo", "old"
+    ).fingerprint
+    new = pgadmin_files.execution_fingerprint_inputs(
+        local_paths, identity, "demo", "new"
+    ).fingerprint
     key = (local_paths.private_dir / ".fingerprint-key").read_bytes()
     material = json.dumps(
         {
@@ -193,6 +206,102 @@ def test_fingerprint_uses_private_hmac_key_for_password_rotation(
     candidate_key = hashlib.sha256(b"postgres|project_default|5432|odoo|demo|old").digest()
     assert old != hmac.new(candidate_key, material, hashlib.sha256).hexdigest()
     assert hashlib.sha256(b"old").hexdigest() not in old
+
+
+def test_command_fingerprint_is_keyed_and_non_mutating_before_preparation(
+    local_paths: pgadmin_files.PgAdminPaths,
+) -> None:
+    identity = pgadmin_files.PostgresIdentity(
+        container_name="postgres",
+        network="project_default",
+        host="postgres",
+        user="odoo",
+    )
+
+    first = pgadmin_files.execution_fingerprint_inputs(
+        local_paths, identity, "demo", "first"
+    ).fingerprint
+    identical = pgadmin_files.execution_fingerprint_inputs(
+        local_paths, identity, "demo", "first"
+    ).fingerprint
+    second = pgadmin_files.execution_fingerprint_inputs(
+        local_paths, identity, "demo", "second"
+    ).fingerprint
+
+    # Preview capture is pure and intentionally does not reserve a shared
+    # first-run key.  Execution selects the persistent key under the lifecycle
+    # lock; independent previews therefore need not be equal.
+    assert identical != first
+    assert first != second
+    assert len(first) == len(second) == 64
+    assert all(character in "0123456789abcdef" for character in first + second)
+    assert not local_paths.root.exists()
+    assert first != hashlib.sha256(b"first").hexdigest()
+    assert second != hashlib.sha256(b"second").hexdigest()
+
+
+def test_first_command_fingerprint_persists_the_captured_private_key(
+    local_paths: pgadmin_files.PgAdminPaths,
+) -> None:
+    identity = pgadmin_files.PostgresIdentity(
+        container_name="postgres",
+        network="project_default",
+        host="postgres",
+        user="odoo",
+    )
+    captured = pgadmin_files.execution_fingerprint_inputs(local_paths, identity, "demo", "first")
+
+    pgadmin_files.prepare_files(
+        paths=local_paths,
+        servers_json=pgadmin_files.server_json(identity, "demo"),
+        pgpass=pgadmin_files.pgpass_line(identity, "first"),
+        fingerprint=captured.fingerprint,
+        fingerprint_key=captured.key,
+        port=5050,
+    )
+
+    assert (local_paths.private_dir / ".fingerprint-key").read_bytes() == captured.key
+    assert (
+        pgadmin_files.execution_fingerprint_inputs(
+            local_paths, identity, "demo", "first"
+        ).fingerprint
+        == captured.fingerprint
+    )
+
+
+def test_command_fingerprint_uses_existing_private_hmac_key_for_rotation(
+    local_paths: pgadmin_files.PgAdminPaths,
+) -> None:
+    identity = pgadmin_files.PostgresIdentity(
+        container_name="postgres",
+        network="project_default",
+        host="postgres",
+        user="odoo",
+    )
+    pgadmin_files.prepare_files(
+        paths=local_paths,
+        servers_json=pgadmin_files.server_json(identity, "demo"),
+        pgpass=pgadmin_files.pgpass_line(identity, "first"),
+        fingerprint="opaque-first",
+        port=5050,
+    )
+
+    old = pgadmin_files.execution_fingerprint_inputs(
+        local_paths, identity, "demo", "first"
+    ).fingerprint
+    new = pgadmin_files.execution_fingerprint_inputs(
+        local_paths, identity, "demo", "second"
+    ).fingerprint
+
+    assert (
+        old
+        == pgadmin_files.execution_fingerprint_inputs(
+            local_paths, identity, "demo", "first"
+        ).fingerprint
+    )
+    assert old != new
+    assert "first" not in old
+    assert "second" not in new
 
 
 @pytest.mark.parametrize("password", ["a", "ab"])

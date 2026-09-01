@@ -23,7 +23,8 @@ from odoo_instance_sdk.exceptions import (
     PostgresPortCollisionError,
 )
 from odoo_instance_sdk.internal.address import AddressState
-from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
+from odoo_instance_sdk.internal.postgres_compose import ComposeRunner, SubprocessComposeRunner
+from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -240,6 +241,46 @@ def test_status_compose_healthy_when_health_rc_zero(tmp_path: Path) -> None:
     cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
     state = cluster.status()
     assert state is PostgresClusterState.HEALTHY
+
+
+@pytest.mark.unit
+def test_status_command_consumes_the_inspected_process_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_compose_project(tmp_path)
+    cluster = PostgresCluster.from_project(root, compose_runner=SubprocessComposeRunner())
+    cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
+    cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
+    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+
+    def result(stdout: str) -> ProcessResult:
+        return ProcessResult(
+            argv=(),
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+
+    executor = RecordingExecutor(
+        results={
+            "postgres.status.ps": result('{"Name":"postgres","State":"running"}\n'),
+            "postgres.status.health": result("ok"),
+        }
+    )
+    command = cluster.status_command(executor=executor)
+
+    assert command.run() is PostgresClusterState.HEALTHY
+    assert tuple(step.step_id for step in command.plan.process_steps) == (
+        "postgres.status.ps",
+        "postgres.status.health",
+    )
+    assert tuple(step.step_id for step in executor.executed) == (
+        "postgres.status.ps",
+        "postgres.status.health",
+    )
 
 
 @pytest.mark.unit

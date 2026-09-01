@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import time
+from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 from odoo_instance_sdk.exceptions import PgAdminUnavailableError
 
+
+class _HttpResponse(Protocol):
+    status: int
+    code: int
+
+    def geturl(self) -> str: ...
+    def read(self, size: int = -1) -> bytes: ...
+
+
 _READINESS_RETRY_INTERVAL = 0.25
 
 
-def _validate_response(response: object, root_url: str) -> None:
+def _validate_response(response: _HttpResponse, root_url: str) -> None:
     final_url = getattr(response, "geturl", lambda: root_url)()
     if final_url != root_url:
         raise PgAdminUnavailableError()
@@ -20,7 +30,7 @@ def _validate_response(response: object, root_url: str) -> None:
         status = getattr(response, "code", 200)
     if status != 200:
         raise PgAdminUnavailableError()
-    body = response.read(64 * 1024)  # type: ignore[attr-defined]
+    body = response.read(64 * 1024)
     if isinstance(body, bytes):
         page = body.decode("utf-8", errors="ignore").lower()
     elif isinstance(body, str):

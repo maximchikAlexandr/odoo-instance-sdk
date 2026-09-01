@@ -191,7 +191,7 @@ def test_sanitized_error_bytes_match_production_openapi_schema() -> None:
     from odoo_instance_sdk.http.app import create_app
 
     class FailingMonitor:
-        def snapshot(self, project_id: str | None = None) -> object:
+        def snapshot(self, project_id: str | None = None) -> Snapshot:
             raise MonitorError("secret /absolute/internal/path")
 
     app = create_app(headless=True, monitor=FailingMonitor())
@@ -216,7 +216,7 @@ def test_unexpected_monitor_error_is_typed_json_and_matches_openapi() -> None:
     from odoo_instance_sdk.http.app import create_app
 
     class FailingMonitor:
-        def snapshot(self, project_id: str | None = None) -> object:
+        def snapshot(self, project_id: str | None = None) -> Snapshot:
             raise RuntimeError("password=top-secret /Users/private/catalog.sqlite3")
 
     app = create_app(headless=True, monitor=FailingMonitor())

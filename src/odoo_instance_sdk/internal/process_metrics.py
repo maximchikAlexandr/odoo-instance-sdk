@@ -1,8 +1,32 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Protocol, cast
+
+
+class _CpuTimes(Protocol):
+    user: float
+    system: float
+
+
+class _MemoryInfo(Protocol):
+    rss: int
+
+
+class _Process(Protocol):
+    pid: int
+
+    def memory_info(self) -> _MemoryInfo: ...
+    def cpu_times(self) -> _CpuTimes: ...
+    def children(self, recursive: bool = False) -> Sequence[_Process]: ...
+
+
+class _Psutil(Protocol):
+    NoSuchProcess: type[BaseException]
+    ZombieProcess: type[BaseException]
+    AccessDenied: type[BaseException]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -21,7 +45,7 @@ class CpuPoint:
     timestamp: float
 
 
-def _child_metrics(child: Any, psutil: Any) -> tuple[int, int, float] | None:
+def _child_metrics(child: _Process, psutil: _Psutil) -> tuple[int, int, float] | None:
     """Return one complete child sample, or ``None`` when it must be skipped.
 
     Skip on NoSuchProcess/ZombieProcess/AccessDenied (per spec D5: child
@@ -36,7 +60,7 @@ def _child_metrics(child: Any, psutil: Any) -> tuple[int, int, float] | None:
     return pid, rss, cpu_times.user + cpu_times.system
 
 
-def _build_tree(proc: Any, psutil: Any) -> tuple[list[int], int, float]:
+def _build_tree(proc: _Process, psutil: _Psutil) -> tuple[list[int], int, float]:
     """Return child PID, RSS, and CPU totals.
 
     Root process operations intentionally propagate psutil lifecycle errors to
@@ -84,7 +108,9 @@ def collect_process_tree(
         proc = psutil.Process(root_pid)
         if proc.create_time() != create_time:
             return None
-        child_pids, children_rss, children_cpu = _build_tree(proc, psutil)
+        child_pids, children_rss, children_cpu = _build_tree(
+            cast("_Process", proc), cast("_Psutil", psutil)
+        )
         root_rss = int(proc.memory_info().rss)
         root_cpu_times = proc.cpu_times()
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):

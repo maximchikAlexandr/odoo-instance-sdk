@@ -16,11 +16,11 @@ from odoo_instance_sdk.models import (
     PostgresClusterState,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
 
 
-def make_env(env_id: str, **overrides: object) -> dict[str, object]:
-    result: dict[str, object] = {
+def make_env(env_id: str, **overrides: CatalogValue) -> dict[str, CatalogValue]:
+    result: dict[str, CatalogValue] = {
         "id": env_id,
         "name": "test",
         "repository_root": "/repo",
@@ -66,7 +66,7 @@ def make_catalog(tmp_path: Path) -> BackupCatalog:
     return BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
 
 
-def seed_env(catalog: BackupCatalog, env: dict[str, object]) -> None:
+def seed_env(catalog: BackupCatalog, env: dict[str, CatalogValue]) -> None:
     catalog.create_environment(env)
 
 

@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from enum import StrEnum
-from typing import Any, Never, cast
+from typing import (
+    TYPE_CHECKING,
+    Generic,
+    Never,
+    ParamSpec,
+    Protocol,
+    TypeAliasType,
+    TypeVar,
+    cast,
+    overload,
+)
 
 import click
 import msgspec
@@ -14,6 +25,19 @@ from toon import encode
 
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
+
+
+def __getattr__(name: str) -> TypeAliasType:
+    """Resolve the canonical JSON alias only when a caller explicitly imports it."""
+    if name == "JsonValue":
+        from odoo_instance_sdk.execution import JsonValue
+
+        globals()[name] = JsonValue
+        return JsonValue
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class OutputMode(StrEnum):
@@ -24,9 +48,66 @@ class OutputMode(StrEnum):
     TOON = "toon"
 
 
-def output_options(command: Any) -> Any:
+type JsonObject = dict[str, JsonValue]
+type DiagnosticValue = str | BaseException
+
+
+class OutputError(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """The stable, machine-readable error part of a CLI document."""
+
+    code: str
+    message: str
+
+
+class OutputDocument(
+    msgspec.Struct,
+    frozen=True,
+    forbid_unknown_fields=True,
+    kw_only=True,
+    omit_defaults=True,
+):
+    """CLI-private immutable v1 document shared by every bounded transport."""
+
+    schema_version: int
+    ok: bool
+    command: str
+    context: JsonValue
+    provenance: JsonValue
+    dry_run: bool
+    warnings: tuple[str, ...]
+    # Optional fields are omitted by msgspec when they do not belong to the
+    # success/failure variant.  This preserves the existing v1 envelope shape
+    # while keeping construction and transport projection typed.
+    result: JsonValue = msgspec.field(default=None)
+    data: JsonValue = msgspec.field(default=None)
+    error: OutputError | None = msgspec.field(default=None)
+
+
+_ResultT = TypeVar("_ResultT")
+_ResultT_co = TypeVar("_ResultT_co", covariant=True)
+_P = ParamSpec("_P")
+
+
+class _InspectableCommand(Protocol, Generic[_ResultT_co]):
+    @property
+    def plan(self) -> msgspec.Struct: ...
+
+    def run(self) -> _ResultT_co: ...
+
+
+@overload
+def output_options(command: click.Command) -> click.Command: ...
+
+
+@overload
+def output_options(command: Callable[_P, None]) -> Callable[_P, None]: ...
+
+
+def output_options(
+    command: click.Command | Callable[_P, None],
+) -> click.Command | Callable[_P, None]:
     """Add the bounded command's local document-format options."""
-    command = click.option(
+    decorated = click.option(
         "--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope."
     )(command)
     return click.option(
@@ -35,7 +116,14 @@ def output_options(command: Any) -> Any:
         type=click.Choice([mode.value for mode in OutputMode], case_sensitive=True),
         default=None,
         help="Output format (default: rich).",
-    )(command)
+    )(decorated)
+
+
+def command_options(command: Callable[_P, None]) -> Callable[_P, None]:
+    """Add format aliases and the local preview switch to a spawning leaf."""
+    return click.option(
+        "--dry-run", "dry_run", is_flag=True, default=False, help="Inspect without starting."
+    )(output_options(command))
 
 
 def resolve_output_mode(output_format: str | None, json_output: bool) -> OutputMode:
@@ -47,20 +135,33 @@ def resolve_output_mode(output_format: str | None, json_output: bool) -> OutputM
     return OutputMode.JSON if json_output else OutputMode.RICH
 
 
-def sanitize_diagnostic(value: object) -> str:
+def resolve_command_options(
+    output_format: str | None,
+    json_output: bool,
+    dry_run: bool,
+    *,
+    command: str,
+) -> OutputMode:
+    """Resolve output aliases and enforce preview-only raw-stream formats."""
+    if not dry_run and (output_format is not None or json_output):
+        raise click.UsageError(f"--format/--json require --dry-run for raw-stream {command}")
+    return resolve_output_mode(output_format, json_output)
+
+
+def sanitize_diagnostic(value: DiagnosticValue) -> str:
     """Make every non-interactive diagnostic safe and bounded before emission."""
     return sanitize_last_error(str(value)) or "operation failed"
 
 
-def model_to_dict(value: object) -> dict[str, Any]:
+def model_to_dict(value: msgspec.Struct) -> JsonObject:
     """Project one public typed model into the shared envelope mapping."""
     builtins = msgspec.to_builtins(value)
     if not isinstance(builtins, dict):
         raise TypeError("CLI model result must be an object")
-    return cast("dict[str, Any]", builtins)
+    return cast("JsonObject", builtins)
 
 
-def _failure_context(error: BaseException | None) -> dict[str, Any]:
+def _failure_context(error: BaseException | None) -> JsonObject:
     """Project only the typed, secret-free retained-artifact context."""
     context = getattr(error, "failure_context", None) if error is not None else None
     if not isinstance(context, DatabasePreparationFailureContext):
@@ -68,7 +169,7 @@ def _failure_context(error: BaseException | None) -> dict[str, Any]:
     return model_to_dict(context)
 
 
-def _failure_message(message: object, context: dict[str, Any]) -> str:
+def _failure_message(message: DiagnosticValue, context: JsonObject) -> str:
     rendered = sanitize_diagnostic(message)
     details: list[str] = []
     if context.get("retained_backup_id") is not None:
@@ -79,7 +180,7 @@ def _failure_message(message: object, context: dict[str, Any]) -> str:
 
 
 def rich_print(
-    value: object,
+    value: str,
     *,
     end: str = "\n",
     preserve_newlines: bool = False,
@@ -89,92 +190,344 @@ def rich_print(
     Console().print(rendered, markup=False, soft_wrap=True, end=end)
 
 
-def _sanitize_envelope_value(value: Any) -> Any:
+def _sanitize_envelope_value(value: JsonValue, *, preserve_newlines: bool = True) -> JsonValue:
     """Recursively make machine-envelope values inert for terminal transports."""
     if isinstance(value, str):
-        return sanitize_terminal_text(value)
+        # Keep line feeds as data.  JSON/TOON escape them at serialization time,
+        # while the Rich plan projection must be able to render captured stdin
+        # and scripts as actual multiline blocks.
+        return sanitize_terminal_text(value, preserve_newlines=preserve_newlines)
     if isinstance(value, dict):
         return {
-            sanitize_terminal_text(key) if isinstance(key, str) else key: _sanitize_envelope_value(
-                item
+            sanitize_terminal_text(key): _sanitize_envelope_value(
+                item, preserve_newlines=preserve_newlines
             )
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):
-        return [_sanitize_envelope_value(item) for item in value]
+        return [
+            _sanitize_envelope_value(item, preserve_newlines=preserve_newlines) for item in value
+        ]
     return value
+
+
+def _document_payload(document: OutputDocument, *, preserve_newlines: bool = True) -> JsonObject:
+    """Build the exact v1 envelope projection for one immutable document."""
+    payload: JsonObject = {
+        "schema_version": document.schema_version,
+        "ok": document.ok,
+        "command": document.command,
+        "context": document.context,
+        "provenance": document.provenance,
+        "dry_run": document.dry_run,
+        "warnings": list(document.warnings),
+    }
+    if document.ok:
+        # ``result`` and ``data`` are intentionally equal in every success
+        # document, including an explicit JSON null result.
+        payload["result"] = document.result
+        payload["data"] = document.data
+    elif document.error is not None:
+        payload["error"] = {
+            "code": document.error.code,
+            "message": document.error.message,
+        }
+    return cast(
+        "JsonObject",
+        _sanitize_envelope_value(payload, preserve_newlines=preserve_newlines),
+    )
+
+
+def _document(
+    *,
+    ok: bool,
+    command: str,
+    result: JsonObject | None = None,
+    context: JsonObject | None = None,
+    provenance: JsonObject | None = None,
+    dry_run: bool = False,
+    warnings: tuple[str, ...] = (),
+    error_code: str | None = None,
+    error_message: DiagnosticValue | None = None,
+) -> OutputDocument:
+    safe_result = _sanitize_envelope_value(result or {}) if ok else None
+    message = (
+        sanitize_diagnostic(error_message) if error_message is not None else "operation failed"
+    )
+    error = (
+        None
+        if ok
+        else OutputError(
+            code=error_code or command.replace(".", "_") + "_failed",
+            message=message,
+        )
+    )
+    return OutputDocument(
+        schema_version=1,
+        ok=ok,
+        command=command,
+        context=_sanitize_envelope_value(context or {}),
+        provenance=_sanitize_envelope_value(provenance or {}),
+        dry_run=dry_run,
+        warnings=warnings,
+        result=safe_result,
+        data=safe_result,
+        error=error,
+    )
+
+
+def _default_rich_projection(document: OutputDocument) -> str:
+    """Return a human projection without owning a terminal or output mode."""
+    if not document.ok and document.error is not None:
+        return document.error.message
+    if document.result in (None, {}):
+        return ""
+    if isinstance(document.result, dict) and "steps" in document.result:
+        return _rich_plan_projection(document)
+    return json.dumps(document.result, ensure_ascii=False, default=str, indent=2)
+
+
+def emit(
+    document: OutputDocument,
+    mode: OutputMode,
+    *,
+    rich: Callable[[OutputDocument], str] | None = None,
+    diagnostic: str | None = None,
+) -> int:
+    """Emit one immutable document and return its normal CLI exit status."""
+    payload = _document_payload(document, preserve_newlines=mode is OutputMode.RICH)
+    if mode is OutputMode.JSON:
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif mode is OutputMode.TOON:
+        click.echo(encode(payload))
+    elif document.ok:
+        rendered = (rich or _default_rich_projection)(document)
+        if rendered:
+            rich_print(rendered, preserve_newlines=True)
+    else:
+        rendered = (rich or _default_rich_projection)(document)
+        click.echo(sanitize_diagnostic(rendered), err=True)
+    if diagnostic:
+        click.echo(sanitize_diagnostic(diagnostic), err=True)
+    return 0 if document.ok else 1
+
+
+def success_document(
+    *,
+    command: str,
+    result: JsonObject | None = None,
+    context: JsonObject | None = None,
+    provenance: JsonObject | None = None,
+    dry_run: bool = False,
+    warnings: tuple[str, ...] = (),
+) -> OutputDocument:
+    """Construct a typed successful v1 document for the shared emitter."""
+    return _document(
+        ok=True,
+        command=command,
+        result=result,
+        context=context,
+        provenance=provenance,
+        dry_run=dry_run,
+        warnings=warnings,
+    )
+
+
+def failure_document(
+    *,
+    command: str,
+    context: JsonObject | None = None,
+    provenance: JsonObject | None = None,
+    dry_run: bool = False,
+    warnings: tuple[str, ...] = (),
+    error_code: str | None = None,
+    error_message: DiagnosticValue | None = None,
+) -> OutputDocument:
+    """Construct a typed failed v1 document for the shared emitter."""
+    return _document(
+        ok=False,
+        command=command,
+        context=context,
+        provenance=provenance,
+        dry_run=dry_run,
+        warnings=warnings,
+        error_code=error_code,
+        error_message=error_message,
+    )
+
+
+def action_command(
+    step_id: str,
+    operation: Callable[[], _ResultT],
+    *,
+    description: str | None = None,
+    mutating: bool = False,
+) -> _InspectableCommand[_ResultT]:
+    """Capture a bounded domain operation behind one command-local action.
+
+    Process-backed SDK operations provide richer command siblings.  This
+    adapter is for bounded leaves whose domain operation is already the
+    canonical process boundary or a read-only computation; it still gives
+    preview and execution one immutable command object and one ledger entry.
+    """
+    from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
+
+    action = PreparedAction(
+        step_id=step_id,
+        action=step_id,
+        description=description or step_id,
+        mutating=mutating,
+    )
+
+    def callback(context: RunContext[_ResultT]) -> _ResultT:
+        context.action(step_id)
+        return operation()
+
+    return Command.create(
+        ExecutionPlan(
+            steps=(
+                ActionStep(
+                    step_id=step_id,
+                    action=step_id,
+                    description=description or step_id,
+                    mutating=mutating,
+                ),
+            )
+        ),
+        callback,
+        (action,),
+    )
+
+
+def run_or_preview(
+    build_command: Callable[[], _InspectableCommand[_ResultT]],
+    *,
+    command_name: str,
+    mode: OutputMode,
+    dry_run: bool,
+    result: Callable[[_ResultT | None], JsonObject] | None = None,
+    context: JsonObject | None = None,
+    provenance: JsonObject | None = None,
+    confirm: Callable[[], None] | None = None,
+    rich: Callable[[OutputDocument], str] | None = None,
+    preview: Callable[[_InspectableCommand[_ResultT]], JsonObject] | None = None,
+    emit_normal: bool = True,
+) -> tuple[int, _ResultT | None]:
+    """Build one command, then either inspect it or run that same instance.
+
+    Confirmation is deliberately invoked after construction, so a caller can
+    present or validate the complete snapshot before asking for consent.
+    """
+    command = build_command()
+    if dry_run:
+        return (
+            emit(
+                success_document(
+                    command=command_name,
+                    result=preview(command) if preview is not None else model_to_dict(command.plan),
+                    context=context,
+                    provenance=provenance,
+                    dry_run=True,
+                ),
+                mode,
+                rich=rich,
+            ),
+            None,
+        )
+    if confirm is not None:
+        confirm()
+    value = command.run()
+    if not emit_normal:
+        return 0, value
+    payload = result(value) if result is not None else {}
+    status = emit(
+        success_document(
+            command=command_name,
+            result=payload,
+            context=context,
+            provenance=provenance,
+        ),
+        mode,
+        rich=rich,
+    )
+    return status, value
 
 
 def build_envelope(
     *,
     ok: bool,
     command: str,
-    result: dict[str, Any] | None = None,
-    context: dict[str, Any] | None = None,
-    provenance: dict[str, Any] | None = None,
+    result: JsonObject | None = None,
+    context: JsonObject | None = None,
+    provenance: JsonObject | None = None,
     dry_run: bool = False,
     error_code: str | None = None,
-    error_message: object | None = None,
-) -> dict[str, Any]:
+    error_message: DiagnosticValue | None = None,
+) -> JsonObject:
     """Build the existing v1 envelope without selecting an output transport."""
-    envelope: dict[str, Any] = {
-        "schema_version": 1,
-        "ok": ok,
-        "command": command,
-        "context": context or {},
-        "provenance": provenance or {},
-        "dry_run": dry_run,
-        "warnings": [],
-    }
-    if ok:
-        safe_result = msgspec.to_builtins(result or {})
-        if not isinstance(safe_result, dict):
-            raise TypeError("CLI envelope result must be a JSON object")
-        envelope["result"] = safe_result
-        envelope["data"] = safe_result
-    else:
-        envelope["error"] = {
-            "code": error_code or command.replace(".", "_") + "_failed",
-            "message": sanitize_diagnostic(error_message),
-        }
-    return cast("dict[str, Any]", _sanitize_envelope_value(envelope))
+    document = (
+        success_document(
+            command=command,
+            result=result,
+            context=context,
+            provenance=provenance,
+            dry_run=dry_run,
+        )
+        if ok
+        else failure_document(
+            command=command,
+            context=context,
+            provenance=provenance,
+            dry_run=dry_run,
+            error_code=error_code,
+            error_message=error_message,
+        )
+    )
+    return _document_payload(
+        document,
+        preserve_newlines=False,
+    )
 
 
 def emit_json_envelope(
     *,
     ok: bool,
     command: str,
-    result: dict[str, Any] | None = None,
-    context: dict[str, Any] | None = None,
-    provenance: dict[str, Any] | None = None,
+    result: JsonObject | None = None,
+    context: JsonObject | None = None,
+    provenance: JsonObject | None = None,
     dry_run: bool = False,
     error_code: str | None = None,
-    error_message: object | None = None,
+    error_message: DiagnosticValue | None = None,
     mode: OutputMode = OutputMode.JSON,
 ) -> None:
     """Emit the v1 envelope as exactly one JSON or TOON stdout document."""
-    envelope = build_envelope(
-        ok=ok,
-        command=command,
-        result=result,
-        context=context,
-        provenance=provenance,
-        dry_run=dry_run,
-        error_code=error_code,
-        error_message=error_message,
+    emit(
+        success_document(
+            command=command,
+            result=result,
+            context=context,
+            provenance=provenance,
+            dry_run=dry_run,
+        )
+        if ok
+        else failure_document(
+            command=command,
+            context=context,
+            provenance=provenance,
+            dry_run=dry_run,
+            error_code=error_code,
+            error_message=error_message,
+        ),
+        mode,
     )
-    if mode is OutputMode.TOON:
-        click.echo(encode(envelope))
-    elif mode is OutputMode.JSON:
-        click.echo(json.dumps(envelope, indent=2))
-    else:
-        raise ValueError("structured envelope emission requires json or toon mode")
 
 
 def fail(
     output_mode: OutputMode | bool,
     command: str,
-    message: object,
+    message: DiagnosticValue,
     *,
     usage: bool = False,
 ) -> Never:
@@ -188,30 +541,143 @@ def fail(
     context = _failure_context(message if isinstance(message, BaseException) else None)
     rendered_message = _failure_message(message, context)
     if mode is not OutputMode.RICH:
-        emit_json_envelope(
-            ok=False,
-            command=command,
-            context=context,
-            error_code="usage_error" if usage else command.replace(".", "_") + "_failed",
-            error_message=rendered_message,
-            mode=mode,
+        emit(
+            failure_document(
+                command=command,
+                context=context,
+                error_code="usage_error" if usage else command.replace(".", "_") + "_failed",
+                error_message=rendered_message,
+            ),
+            mode,
         )
     else:
-        click.echo(rendered_message, err=True)
+        emit(
+            failure_document(command=command, error_message=rendered_message),
+            mode,
+        )
     if usage:
         raise click.exceptions.Exit(2)
     sys.exit(1)
 
 
 __all__ = [
+    "JsonValue",
+    "OutputDocument",
+    "OutputError",
     "OutputMode",
+    "action_command",
     "build_envelope",
+    "command_options",
+    "emit",
     "emit_json_envelope",
     "fail",
+    "failure_document",
     "model_to_dict",
     "output_options",
+    "resolve_command_options",
     "resolve_output_mode",
     "rich_print",
+    "run_or_preview",
     "sanitize_diagnostic",
     "sanitize_terminal_text",
+    "success_document",
 ]
+
+
+def _rich_plan_projection(document: OutputDocument) -> str:
+    """Render one captured plan as readable, fully redacted human text.
+
+    This is intentionally a pure projection.  It receives the same immutable
+    document as JSON and TOON, and therefore cannot launch a process, prompt,
+    or rebuild any command input.
+    """
+    result = document.result
+    if not isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False, default=str, indent=2)
+
+    lines = [f"Plan: {document.command}"]
+    steps = result.get("steps")
+    if isinstance(steps, list):
+        lines.extend(
+            line
+            for number, item in enumerate(steps, 1)
+            if isinstance(item, dict)
+            for line in _rich_step_lines(number, item)
+        )
+    lines.extend(_rich_plan_metadata(result, document.warnings))
+    return "\n".join(lines)
+
+
+def _rich_step_lines(number: int, item: dict[str, JsonValue]) -> list[str]:
+    kind = str(item.get("kind", "step"))
+    step_id = str(item.get("step_id", "<unnamed>"))
+    flags = tuple(
+        name
+        for name, enabled in (
+            ("mutating", item.get("mutating")),
+            ("interactive", item.get("interactive")),
+            ("long-running", item.get("long_running")),
+            ("read-only", item.get("read_only")),
+        )
+        if enabled is True
+    )
+    classification = ", ".join(flags) or "bounded"
+    lines = [f"{number}. {kind} {step_id} [{classification}]"]
+    lines.append(f"   classification: {classification}")
+    if kind == "process":
+        return lines + _rich_process_lines(item)
+    if "description" in item:
+        lines.append(f"   action: {item.get('description')}")
+    return lines
+
+
+def _rich_process_lines(item: dict[str, JsonValue]) -> list[str]:
+    lines: list[str] = []
+    argv = item.get("argv")
+    if isinstance(argv, list):
+        lines.append("   argv: " + json.dumps(argv, ensure_ascii=False, separators=(", ", ": ")))
+    for field, label in (
+        ("executable", "executable"),
+        ("cwd", "cwd"),
+        ("mode", "mode"),
+        ("timeout", "timeout"),
+    ):
+        value = item.get(field)
+        if value is not None:
+            lines.append(f"   {label}: {value}")
+    environment = item.get("environment_overrides")
+    if isinstance(environment, list) and environment:
+        lines.append(
+            "   environment: "
+            + json.dumps(environment, ensure_ascii=False, separators=(", ", ": "))
+        )
+    stdin = item.get("input_preview")
+    if isinstance(stdin, str):
+        lines.append("   stdin: |")
+        lines.extend(f"     {line}" for line in (stdin.splitlines() or [""]))
+    return lines
+
+
+def _rich_plan_metadata(
+    result: dict[str, JsonValue], document_warnings: tuple[str, ...]
+) -> list[str]:
+    lines: list[str] = []
+    observations = result.get("observations")
+    if isinstance(observations, list) and observations:
+        lines.append("observations:")
+        lines.extend(
+            "  - " + json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+            for item in observations
+        )
+    warnings = result.get("warnings")
+    warning_values = list(warnings) if isinstance(warnings, list) else []
+    for warning in document_warnings:
+        if warning not in warning_values:
+            warning_values.append(warning)
+    if warning_values:
+        lines.append("warnings:")
+        lines.extend(f"  - {warning}" for warning in warning_values)
+    fingerprint = result.get("fingerprint")
+    if isinstance(fingerprint, str) and fingerprint:
+        lines.append(f"fingerprint: {fingerprint}")
+    return lines

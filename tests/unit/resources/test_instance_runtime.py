@@ -10,13 +10,22 @@ from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     MasterPasswordRequiredError,
 )
+from odoo_instance_sdk.internal.proc import ProcessHandle, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.server import _build_cli_args
-from odoo_instance_sdk.models import CommandResult, StartConfig
+from odoo_instance_sdk.models import CommandResult, OdooProcess, StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 def _make_client() -> OdooClient:
     return OdooClient(config=OdooClientConfig(executable="python3"))
+
+
+def _recording_handle(pid: int = 4242) -> ProcessHandle:
+    process = MagicMock()
+    process.pid = pid
+    process.poll.return_value = 0
+    process.wait.return_value = 0
+    return ProcessHandle(process, (), pid, pid, True)
 
 
 class TestFromConfigNoPassword:
@@ -90,21 +99,14 @@ class TestInstancePrefix:
         )
         instance = env_client.instance.from_environment(env)
 
-        def spawn(*args: object, **kwargs: object) -> MagicMock:
-            events.append("spawn")
-            proc = MagicMock()
-            proc.pid = 4242
-            return proc
+        class EventExecutor(RecordingExecutor):
+            def spawn(self, step: object) -> ProcessHandle:
+                events.append("spawn")
+                return super().spawn(step)  # type: ignore[arg-type]
 
+        executor = EventExecutor(handles={"instance.foreground": _recording_handle()})
         with (
-            patch(
-                "odoo_instance_sdk.resources.instance.spawn_foreground_process",
-                side_effect=spawn,
-            ),
-            patch(
-                "odoo_instance_sdk.internal.server.wait_foreground_process",
-                return_value=0,
-            ),
+            patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
             patch("odoo_instance_sdk.resources.instance._process_create_time", return_value=1.0),
         ):
             instance.run_foreground()
@@ -183,15 +185,12 @@ class TestInstancePrefix:
         )
         env = env_client.environments.checkout(project_manifest, "feat/runprefix", options=opts)
         inst = env_client.instance.from_environment(env)
-        with patch("odoo_instance_sdk.resources.instance.run_command") as mock_run:
-            mock_run.return_value = CommandResult(
-                args=[], returncode=0, stdout="", stderr="", duration=0.0
-            )
+        executor = RecordingExecutor()
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
             inst.run(["--help"])
-            mock_run.assert_called_once()
-            called_exec = mock_run.call_args.args[0]
-            assert isinstance(called_exec, tuple)
-            assert called_exec[0] == str(fake_python)
+        assert executor.executed[0].argv[0] == str(fake_python)
 
 
 class TestStartConfigFromOdooConfig:
@@ -241,13 +240,8 @@ class TestBuildCliArgsSingleConfig:
             config_path=str(tmp_path / "odoo.conf"),
             db_password="secret",
         )
-        from odoo_instance_sdk.internal.server import start_process
-
-        with patch("odoo_instance_sdk.internal.server.subprocess.Popen") as mock_popen:
-            mock_handle = mock_popen.return_value
-            mock_handle.pid = 12345
-            _proc, _handle, secret = start_process("odoo", cfg)
-        assert secret is None
+        args = _build_cli_args(cfg)
+        assert args.count("--config") == 1
 
     def test_secret_config_when_no_config_path(self) -> None:
         cfg = StartConfig(
@@ -268,8 +262,10 @@ class TestRunForeground:
         client = _make_client()
         inst = client.instance(base_url="http://localhost:8069")
         cfg = StartConfig(http_port=9999, http_interface="127.0.0.1")
-        with patch("odoo_instance_sdk.resources.instance.run_foreground_process") as mock_fg:
-            mock_fg.return_value = 0
+        executor = RecordingExecutor(handles={"instance.foreground": _recording_handle()})
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
             result = inst.run_foreground(cfg)
         assert result == 0
 
@@ -295,29 +291,20 @@ class TestRunForeground:
         )
         env = env_client.environments.checkout(project_manifest, "feat/fgprefix", options=opts)
         inst = env_client.instance.from_environment(env)
+        executor = RecordingExecutor(handles={"instance.foreground": _recording_handle()})
         with (
             patch.object(OdooInstance, "_ensure_dependencies_ready"),
-            patch("odoo_instance_sdk.resources.instance.spawn_foreground_process") as mock_spawn,
-            patch(
-                "odoo_instance_sdk.internal.server.wait_foreground_process",
-                return_value=0,
-            ),
+            patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
             patch("odoo_instance_sdk.resources.instance._process_create_time", return_value=1.0),
         ):
-            mock_proc = MagicMock()
-            mock_proc.pid = 4242
-            mock_spawn.return_value = mock_proc
             inst.run_foreground()
-            mock_spawn.assert_called_once()
-            called_exec = mock_spawn.call_args.args[0]
-            assert isinstance(called_exec, tuple)
-            assert called_exec[0] == str(fake_python)
+            assert executor.spawned[0].argv[0] == str(fake_python)
 
     def test_run_foreground_real_exit_code(self) -> None:
         client = _make_client()
         inst = client.instance(base_url="http://localhost:8069")
         cfg = StartConfig(http_port=9999, http_interface="127.0.0.1")
-        with patch("odoo_instance_sdk.internal.server._build_cli_args", return_value=[]):
+        with patch("odoo_instance_sdk.resources.instance._build_cli_args", return_value=[]):
             result = inst.run_foreground(cfg)
         assert result == 0
 
@@ -373,8 +360,10 @@ class TestShell:
             "[options]\nhttp_port = 8069\nhttp_interface = 127.0.0.1\nadmin_passwd = x\n"
         )
         inst = client.instance.from_config(cfg_path)
-        with patch("odoo_instance_sdk.resources.instance.run_foreground_process") as mock_fg:
-            mock_fg.return_value = 0
+        executor = RecordingExecutor(handles={"instance.shell": _recording_handle()})
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
             result = inst.shell()
         assert result == 0
 
@@ -387,15 +376,27 @@ class TestRunShellScript:
             "[options]\nhttp_port = 8069\nhttp_interface = 127.0.0.1\nadmin_passwd = x\n"
         )
         inst = client.instance.from_config(cfg_path)
-        with patch("odoo_instance_sdk.internal.server._run_captured_shell") as mock_run:
-            mock_run.return_value = CommandResult(
-                args=["python3", "shell"], returncode=0, stdout="2\n", stderr="", duration=0.1
-            )
+        executor = RecordingExecutor(
+            results={
+                "instance.shell_script": ProcessResult(
+                    argv=("python3", "shell"),
+                    returncode=0,
+                    stdout="2\n",
+                    stderr="",
+                    duration=0.1,
+                    cwd=None,
+                    environment=(),
+                )
+            }
+        )
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
             result = inst.run_shell_script("print(1+1)")
         assert isinstance(result, CommandResult)
         assert result.returncode == 0
-        mock_run.assert_called_once()
-        assert mock_run.call_args.kwargs["source"] == "print(1+1)"
+        assert executor.executed[0].stdin is not None
+        assert "print(1+1)" in executor.executed[0].stdin.decode()
 
     def test_run_shell_script_no_start_config_raises(self) -> None:
         client = _make_client()
@@ -410,12 +411,12 @@ class TestRunShellScript:
             "[options]\nhttp_port = 8069\nhttp_interface = 127.0.0.1\nadmin_passwd = x\n"
         )
         inst = client.instance.from_config(cfg_path)
-        with patch("odoo_instance_sdk.internal.server._run_captured_shell") as mock_run:
-            mock_run.return_value = CommandResult(
-                args=[], returncode=0, stdout="", stderr="", duration=0.0
-            )
+        executor = RecordingExecutor()
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
             inst.run_shell_script("print(1)", commit=True)
-            assert mock_run.call_args.kwargs["commit"] is True
+        assert executor.executed[0].mutating is True
 
     def test_run_shell_script_argv_injected(self, tmp_path: Path) -> None:
         client = _make_client()
@@ -424,12 +425,12 @@ class TestRunShellScript:
             "[options]\nhttp_port = 8069\nhttp_interface = 127.0.0.1\nadmin_passwd = x\n"
         )
         inst = client.instance.from_config(cfg_path)
-        with patch("odoo_instance_sdk.internal.server._run_captured_shell") as mock_run:
-            mock_run.return_value = CommandResult(
-                args=[], returncode=0, stdout="", stderr="", duration=0.0
-            )
+        executor = RecordingExecutor()
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
             inst.run_shell_script("print(1)", argv=["--flag", "val"])
-            assert mock_run.call_args.kwargs["argv"] == ["--flag", "val"]
+        assert '"--flag", "val"' in (executor.executed[0].stdin or b"").decode()
 
     def test_shell_wrapper_contains_nonce_payload(self) -> None:
         from odoo_instance_sdk.internal.server import _build_shell_wrapper
@@ -439,6 +440,80 @@ class TestRunShellScript:
         assert "__END_PAYLOAD__abc123__" in wrapper
         assert "print(1)" in wrapper
         assert '"--x"' in wrapper
+
+
+class TestInspectableInstanceCommands:
+    def test_shell_script_plan_captures_source_and_transaction_intent(self) -> None:
+        client = _make_client()
+        inst = client.instance.from_config(_write_loopback_config(Path("/tmp/command-plan.conf")))
+        source = "line_one()\nline_two()\n"
+        command = inst.run_shell_script_command(source, argv=["--flag"], commit=True)
+
+        assert tuple(step.step_id for step in command.plan.steps) == (
+            "instance.shell_script",
+            "instance.shell_script.transaction",
+        )
+        process = command.plan.process_steps[0]
+        assert process.input_preview == "<redacted>"
+        action = command.plan.steps[1]
+        assert getattr(action, "action") == "commit"
+        assert command.plan.fingerprint
+
+    def test_run_command_result_preserves_proc_metadata(self) -> None:
+        client = _make_client()
+        inst = client.instance(base_url="http://localhost:8069")
+        executor = RecordingExecutor(
+            results={
+                "instance.run": ProcessResult(
+                    argv=("python3", "--version"),
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    duration=0.25,
+                    cwd="/work",
+                    environment=(("SAFE", "yes"),),
+                )
+            }
+        )
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
+            result = inst.run(["--version"], cwd="/work", timeout=3.0, env={"SAFE": "yes"})
+
+        assert result.argv == ["python3", "--version"]
+        assert result.cwd == "/work"
+        assert result.env == (("SAFE", "<redacted>"),)
+        assert result.timeout == 3.0
+        assert executor.executed[0].argv == ("python3", "--version")
+
+    def test_start_plan_redacts_private_config_path_without_writing(self, tmp_path: Path) -> None:
+        client = _make_client()
+        inst = client.instance(base_url="http://localhost:8069")
+        command = inst.start_command(StartConfig(db_password="private"))
+
+        step = command.plan.process_steps[0]
+        assert "private" not in repr(command)
+        assert step.mode == "long-running"
+        assert step.long_running is True
+        assert not list(tmp_path.iterdir())
+
+    def test_stop_plan_has_platform_specific_shared_boundary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _make_client()
+        inst = client.instance(base_url="http://localhost:8069")
+        raw = MagicMock()
+        raw.pid = 4242
+        proc = OdooProcess(id="proc", pid=4242, args=["odoo"], started_at=0.0)
+        client.register_process(proc, raw, None)
+
+        monkeypatch.setattr("odoo_instance_sdk.resources.instance.sys.platform", "linux")
+        posix = inst.stop_command(proc)
+        assert getattr(posix.plan.steps[0], "action") == "terminate_process_group"
+
+        monkeypatch.setattr("odoo_instance_sdk.resources.instance.sys.platform", "win32")
+        windows = inst.stop_command(proc)
+        assert windows.plan.process_steps[0].argv[:2] == ("taskkill", "/T")
 
 
 class TestEnvironmentResourceNoRuntimeMethods:

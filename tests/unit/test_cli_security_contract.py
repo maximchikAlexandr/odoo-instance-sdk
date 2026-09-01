@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -8,8 +9,13 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.resources.environment import EnvironmentState
 from tests.unit.monitor_support import FakeProcessProvider
+
+
+def _stub_command(callback: Callable[[], int]) -> Command[int]:
+    return Command.create(ExecutionPlan(), lambda _context: callback(), ())
 
 
 @pytest.fixture(autouse=True)
@@ -167,11 +173,11 @@ def test_env_list_is_read_only_through_public_resources() -> None:
 def test_run_records_use_once_before_foreground_start() -> None:
     client = MagicMock()
     instance = MagicMock()
-    instance.run_foreground.return_value = 0
+    instance.run_foreground_command.return_value = _stub_command(lambda: 0)
     env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
     calls = MagicMock()
     calls.attach_mock(client.environments.record_use, "record_use")
-    calls.attach_mock(instance.run_foreground, "run_foreground")
+    calls.attach_mock(instance.run_foreground_command, "run_foreground_command")
     with (
         patch(
             "odoo_instance_sdk.cli.cli_context.ready_instance", return_value=(client, env, instance)
@@ -182,8 +188,8 @@ def test_run_records_use_once_before_foreground_start() -> None:
 
     assert result.exit_code == 0, result.output
     assert calls.mock_calls == [
+        call.run_foreground_command(),
         call.record_use(env),
-        call.run_foreground(),
     ]
 
 
@@ -201,13 +207,13 @@ def test_port_conflict_does_not_record_use_or_start_foreground() -> None:
 
     assert result.exit_code == 1
     client.environments.record_use.assert_not_called()
-    instance.run_foreground.assert_not_called()
+    instance.run_foreground_command.assert_not_called()
 
 
 def test_shell_does_not_record_use() -> None:
     client = MagicMock()
     instance = MagicMock()
-    instance.shell.return_value = 0
+    instance.shell_command.return_value = _stub_command(lambda: 0)
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
         return_value=(client, SimpleNamespace(), instance),

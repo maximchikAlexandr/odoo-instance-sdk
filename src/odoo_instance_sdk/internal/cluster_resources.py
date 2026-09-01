@@ -4,12 +4,20 @@ import json
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from odoo_instance_sdk.internal.postgres_compose import ComposeRunner, compose_ps, docker_available
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.internal.postgres_compose import (
+    ComposeRunner,
+    SubprocessComposeRunner,
+    compose_ps,
+    docker_available,
+)
 from odoo_instance_sdk.models import (
     ClusterContainer,
     ClusterMetrics,
@@ -81,6 +89,11 @@ def resolve_container_id(
     rows = compose_ps(runner, compose_file, compose_project_name, timeout=timeout)
     if rows is None:
         return None
+    return container_id_from_rows(rows, service)
+
+
+def container_id_from_rows(rows: Sequence[Mapping[str, JsonValue]], service: str) -> str | None:
+    """Resolve a service container from an already-captured compose observation."""
     for row in rows:
         if str(row.get("Service", "")) == service:
             cid = row.get("ID") or row.get("Id")
@@ -89,8 +102,8 @@ def resolve_container_id(
     return None
 
 
-def _parse_inspect_payload(stdout: str, candidates: list[str]) -> dict[str, dict[str, object]]:
-    parsed: dict[str, dict[str, object]] = {}
+def _parse_inspect_payload(stdout: str, candidates: list[str]) -> dict[str, dict[str, JsonValue]]:
+    parsed: dict[str, dict[str, JsonValue]] = {}
     try:
         payload = json.loads(stdout)
     except (json.JSONDecodeError, ValueError):
@@ -108,10 +121,14 @@ def inspect_containers(
     *,
     runner: ComposeRunner,
     timeout: float | None = None,
-) -> dict[str, dict[str, object] | None]:
+    step_id: str | None = None,
+) -> dict[str, dict[str, JsonValue] | None]:
     """Batch `docker inspect <id1> <id2> ...` in one read-only CLI call."""
     res = _safe_run(
-        runner, ["docker", "inspect", "--format", "json", *container_ids], timeout=timeout
+        runner,
+        ["docker", "inspect", "--format", "json", *container_ids],
+        timeout=timeout,
+        step_id=step_id,
     )
     # Docker returns a non-zero status when one requested ID is absent, while
     # still writing valid JSON for its healthy siblings.  The payload is the
@@ -121,8 +138,8 @@ def inspect_containers(
     return {cid: parsed.get(cid) for cid in container_ids}
 
 
-def _parse_stats_payload(stdout: str) -> dict[str, dict[str, object]]:
-    by_id: dict[str, dict[str, object]] = {}
+def _parse_stats_payload(stdout: str) -> dict[str, dict[str, JsonValue]]:
+    by_id: dict[str, dict[str, JsonValue]] = {}
     for raw in stdout.splitlines():
         stripped = raw.strip()
         if not stripped:
@@ -145,7 +162,8 @@ def stats_containers(
     *,
     runner: ComposeRunner,
     timeout: float | None = None,
-) -> dict[str, dict[str, object] | None]:
+    step_id: str | None = None,
+) -> dict[str, dict[str, JsonValue] | None]:
     """Batch `docker stats --no-stream --format json <id1> <id2> ...`.
 
     One JSON object per line, identified by its `container`/`Container` field.
@@ -154,6 +172,7 @@ def stats_containers(
         runner,
         ["docker", "stats", "--no-stream", "--format", "json", *container_ids],
         timeout=timeout,
+        step_id=step_id,
     )
     # Like inspect, stats can contain useful lines before reporting a missing
     # container.  Preserve those samples and leave only absent IDs as None.
@@ -161,10 +180,15 @@ def stats_containers(
     return {cid: by_id.get(cid) or by_id.get(cid[:12]) for cid in container_ids}
 
 
-def volume_sizes(*, runner: ComposeRunner, timeout: float | None = None) -> dict[str, int]:
+def volume_sizes(
+    *, runner: ComposeRunner, timeout: float | None = None, step_id: str | None = None
+) -> dict[str, int]:
     """Return named-volume sizes reported by Docker, without host traversal."""
     result = _safe_run(
-        runner, ["docker", "system", "df", "-v", "--format", "{{json .}}"], timeout=timeout
+        runner,
+        ["docker", "system", "df", "-v", "--format", "{{json .}}"],
+        timeout=timeout,
+        step_id=step_id,
     )
     if result is None or result.returncode != 0:
         return {}
@@ -190,7 +214,7 @@ def volume_sizes(*, runner: ComposeRunner, timeout: float | None = None) -> dict
     return sizes
 
 
-def _volume_name(inspect_entry: dict[str, object]) -> str | None:
+def _volume_name(inspect_entry: dict[str, JsonValue]) -> str | None:
     mounts = inspect_entry.get("Mounts")
     if not isinstance(mounts, list):
         return None
@@ -202,7 +226,7 @@ def _volume_name(inspect_entry: dict[str, object]) -> str | None:
     return None
 
 
-def _lookup_id(entry: dict[str, object], candidates: list[str]) -> str:
+def _lookup_id(entry: dict[str, JsonValue], candidates: list[str]) -> str:
     """Match an inspect entry back to one of the requested container IDs."""
     ident = entry.get("Id")
     if isinstance(ident, str):
@@ -222,9 +246,13 @@ def _safe_run(
     args: Sequence[str],
     *,
     timeout: float | None = None,
+    step_id: str | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     try:
-        result: subprocess.CompletedProcess[str] = runner.run(args, cwd=None, timeout=timeout)
+        if step_id is not None and isinstance(runner, SubprocessComposeRunner):
+            result = runner.run(args, cwd=None, timeout=timeout, step_id=step_id)
+        else:
+            result = runner.run(args, cwd=None, timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return None
     return result
@@ -238,6 +266,9 @@ def cluster_resource_snapshot(
     runner: ComposeRunner,
     state: PostgresClusterState,
     timeout: float | None = None,
+    container_id: str | None = None,
+    resolve_container: bool = True,
+    step_ids: Mapping[str, str] | None = None,
 ) -> ClusterResourceSnapshot:
     """Build a read-only `ClusterResourceSnapshot` for one compose service.
 
@@ -274,6 +305,9 @@ def cluster_resource_snapshot(
                 service=service,
                 runner=runner,
                 state=state,
+                container_id=container_id,
+                resolve_container=resolve_container,
+                step_ids=step_ids,
             ),
         ),
         timeout=timeout,
@@ -290,9 +324,12 @@ class BatchClusterRequest:
     service: str
     runner: ComposeRunner
     state: PostgresClusterState
+    container_id: str | None = None
+    resolve_container: bool = True
     # Cache policy belongs to EnvironmentMonitor.  Only its persistent
     # production runner is cacheable; injected runners are isolated seams.
     cacheable: bool = False
+    step_ids: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,12 +361,16 @@ def collect_cluster_resource_batch(
                 container=None, metrics=None, unavailability_reason="stopped", sampled_at=None
             )
             continue
-        container_id = resolve_container_id(
-            request.compose_file,
-            request.compose_project_name,
-            request.service,
-            runner=request.runner,
-            timeout=timeout,
+        container_id = (
+            resolve_container_id(
+                request.compose_file,
+                request.compose_project_name,
+                request.service,
+                runner=request.runner,
+                timeout=timeout,
+            )
+            if request.resolve_container
+            else request.container_id
         )
         if container_id is None:
             resources[request.project_id] = ClusterResourceSnapshot(
@@ -350,16 +391,38 @@ def collect_cluster_resource_batch(
     for group in pending:
         runner = group[0][0].runner
         ids = tuple(dict.fromkeys(container_id for _, container_id in group))
-        inspected = inspect_containers(ids, runner=runner, timeout=timeout)
+        inspected = inspect_containers(
+            ids,
+            runner=runner,
+            timeout=timeout,
+            step_id=(group[0][0].step_ids or {}).get("inspect"),
+        )
         inspectable = tuple(cid for cid in ids if inspected.get(cid) is not None)
-        stats = stats_containers(inspectable, runner=runner, timeout=timeout) if inspectable else {}
+        stats = (
+            stats_containers(
+                inspectable,
+                runner=runner,
+                timeout=timeout,
+                step_id=(group[0][0].step_ids or {}).get("stats"),
+            )
+            if inspectable
+            else {}
+        )
         volume_names = {
             name
             for cid in inspectable
             if (entry := inspected.get(cid)) is not None
             if (name := _volume_name(entry)) is not None
         }
-        volumes = volume_sizes(runner=runner, timeout=timeout) if volume_names else {}
+        volumes = (
+            volume_sizes(
+                runner=runner,
+                timeout=timeout,
+                step_id=(group[0][0].step_ids or {}).get("volume-df"),
+            )
+            if volume_names
+            else {}
+        )
         sampled_at = datetime.now(UTC)
         for request, container_id in group:
             inspect_entry = inspected.get(container_id)
@@ -393,7 +456,7 @@ def collect_cluster_resource_batch(
     return BatchClusterResult(resources=resources, container_ids=container_ids)
 
 
-def build_container(inspect_entry: dict[str, object]) -> ClusterContainer:
+def build_container(inspect_entry: dict[str, JsonValue]) -> ClusterContainer:
     name_raw = inspect_entry.get("Name")
     name = name_raw[1:] if isinstance(name_raw, str) and name_raw.startswith("/") else name_raw
     config = inspect_entry.get("Config")
@@ -420,7 +483,7 @@ def build_container(inspect_entry: dict[str, object]) -> ClusterContainer:
 
 
 def build_metrics(
-    stats_entry: dict[str, object], sampled_at: datetime, volume_usage_bytes: int | None = None
+    stats_entry: dict[str, JsonValue], sampled_at: datetime, volume_usage_bytes: int | None = None
 ) -> ClusterMetrics:
     cpu_raw = stats_entry.get("CPUPerc")
     cpu_percent: float | None = None

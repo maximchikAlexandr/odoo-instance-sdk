@@ -289,7 +289,11 @@ class TestCopyRemoveRecovery:
         assert Path(env.worktree_path).is_dir()
 
     def test_dropped_missing_config_deletes_backup_then_files(
-        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         instance = _copy_instance()
         env = _checkout_copy(env_client, project_manifest, fake_python, "feat/rm-dropped", instance)
@@ -307,7 +311,7 @@ class TestCopyRemoveRecovery:
         delete = MagicMock()
         from odoo_instance_sdk.resources.backup import BackupResource
 
-        BackupResource.delete = delete  # type: ignore[method-assign]
+        monkeypatch.setattr(BackupResource, "delete", delete)
 
         env_client.environments.remove(env)
 
@@ -316,7 +320,11 @@ class TestCopyRemoveRecovery:
         assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED
 
     def test_backup_deleted_missing_config_removes_files_only(
-        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         instance = _copy_instance()
         env = _checkout_copy(
@@ -336,7 +344,7 @@ class TestCopyRemoveRecovery:
         delete = MagicMock()
         from odoo_instance_sdk.resources.backup import BackupResource
 
-        BackupResource.delete = delete  # type: ignore[method-assign]
+        monkeypatch.setattr(BackupResource, "delete", delete)
 
         env_client.environments.remove(env)
 
@@ -363,7 +371,11 @@ class TestCopyRemoveRecovery:
         assert env_client.environments.get(str(env.id)).state is EnvironmentState.CLEANUP_FAILED
 
     def test_successful_copy_remove_orders_database_backup_then_files(
-        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         instance = _copy_instance(target_exists=True)
         env = _checkout_copy(env_client, project_manifest, fake_python, "feat/rm-order", instance)
@@ -378,7 +390,7 @@ class TestCopyRemoveRecovery:
         delete = MagicMock(side_effect=lambda _backup: events.append("backup"))
         from odoo_instance_sdk.resources.backup import BackupResource
 
-        BackupResource.delete = delete  # type: ignore[method-assign]
+        monkeypatch.setattr(BackupResource, "delete", delete)
 
         env_client.environments.remove(env)
 

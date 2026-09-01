@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -14,8 +14,10 @@ from odoo_instance_sdk.commands.test import (
     resolve_module_test_selection,
     run_module_tests,
 )
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.test_selection import _ChangedSelection, _ChangedSelectionError
 from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec, StartConfig
+from odoo_instance_sdk.resources.instance import OdooInstance
 
 if TYPE_CHECKING:
     import pytest
@@ -47,6 +49,10 @@ def _addon(worktree: Path, name: str) -> None:
     (module / "__manifest__.py").write_text("{}\n")
     (module / "tests").mkdir()
     (module / "tests" / "test_order.py").write_text("# test\n")
+
+
+def _result_command(value: object) -> Command[object]:
+    return Command.create(ExecutionPlan(), lambda _context: value)
 
 
 def test_invalid_combinations_fail_before_environment_resolution(tmp_path: Path) -> None:
@@ -82,9 +88,9 @@ def test_executed_result_contains_only_native_execution_fields(
     def preflight(*_args: object, **_kwargs: object) -> None:
         calls.append("preflight")
 
-    def runner(*_args: object, **_kwargs: object) -> tuple[OdooTestResult, None]:
+    def runner(*_args: object, **_kwargs: object) -> Command[object]:
         calls.append("runner")
-        return typed, None
+        return _result_command((typed, None))
 
     with (
         patch(
@@ -92,7 +98,7 @@ def test_executed_result_contains_only_native_execution_fields(
             return_value=(None, env, instance),
         ),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules", side_effect=preflight),
-        patch("odoo_instance_sdk.commands.test.run_odoo_tests", side_effect=runner),
+        patch("odoo_instance_sdk.commands.test.run_odoo_tests_command", side_effect=runner),
     ):
         result = CliRunner().invoke(
             cli, ["test", "sale", "--tags", ":TestSale.test_order", "--format", "json"]
@@ -130,7 +136,10 @@ def test_changed_dry_run_omits_execution_fields_and_does_not_run(tmp_path: Path)
         ),
         patch("odoo_instance_sdk.commands.test.resolve_changed_selection", return_value=plan),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules") as preflight,
-        patch("odoo_instance_sdk.commands.test.run_odoo_tests") as runner,
+        patch(
+            "odoo_instance_sdk.commands.test.run_odoo_tests_command",
+            return_value=_result_command((None, None)),
+        ) as runner,
     ):
         result = CliRunner().invoke(cli, ["test", "--changed", "--dry-run", "--format", "json"])
 
@@ -142,7 +151,7 @@ def test_changed_dry_run_omits_execution_fields_and_does_not_run(tmp_path: Path)
     for key in ("test_tags", "reload_tests", "allow_empty", "counts", "failures", "zero_tests"):
         assert key not in payload
     preflight.assert_not_called()
-    runner.assert_not_called()
+    runner.assert_called_once()
 
 
 def test_changed_execution_uses_default_tags_and_preflight_before_runner(tmp_path: Path) -> None:
@@ -171,9 +180,9 @@ def test_changed_execution_uses_default_tags_and_preflight_before_runner(tmp_pat
     def preflight(*_args: object, **_kwargs: object) -> None:
         calls.append("preflight")
 
-    def runner(*_args: object, **_kwargs: object) -> tuple[OdooTestResult, None]:
+    def runner(*_args: object, **_kwargs: object) -> Command[object]:
         calls.append("runner")
-        return typed, None
+        return _result_command((typed, None))
 
     with (
         patch(
@@ -182,7 +191,9 @@ def test_changed_execution_uses_default_tags_and_preflight_before_runner(tmp_pat
         ),
         patch("odoo_instance_sdk.commands.test.resolve_changed_selection", return_value=plan),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules", side_effect=preflight),
-        patch("odoo_instance_sdk.commands.test.run_odoo_tests", side_effect=runner) as execute,
+        patch(
+            "odoo_instance_sdk.commands.test.run_odoo_tests_command", side_effect=runner
+        ) as execute,
     ):
         result = CliRunner().invoke(cli, ["test", "--changed", "--format", "json"])
 
@@ -190,7 +201,7 @@ def test_changed_execution_uses_default_tags_and_preflight_before_runner(tmp_pat
     payload = json.loads(result.stdout)["result"]
     assert payload["modules"] == ["sale", "stock"]
     assert payload["test_tags"] == "/sale,/stock"
-    assert calls == ["preflight", "runner"]
+    assert calls == ["runner"]
     assert execute.call_args.args[1].test_tags == "/sale,/stock"
 
 
@@ -215,7 +226,7 @@ def test_changed_no_addon_is_successful_noop_without_runner(tmp_path: Path) -> N
         ),
         patch("odoo_instance_sdk.commands.test.resolve_changed_selection", return_value=plan),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules") as preflight,
-        patch("odoo_instance_sdk.commands.test.run_odoo_tests") as runner,
+        patch("odoo_instance_sdk.commands.test.run_odoo_tests_command") as runner,
     ):
         result = CliRunner().invoke(cli, ["test", "--changed", "--format", "json"])
 
@@ -250,7 +261,7 @@ def test_changed_unmapped_path_returns_provenance_and_nonzero(tmp_path: Path) ->
         ),
         patch("odoo_instance_sdk.commands.test.resolve_changed_selection", return_value=plan),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules") as preflight,
-        patch("odoo_instance_sdk.commands.test.run_odoo_tests") as runner,
+        patch("odoo_instance_sdk.commands.test.run_odoo_tests_command") as runner,
     ):
         result = CliRunner().invoke(cli, ["test", "--changed", "--format", "toon"])
 
@@ -322,11 +333,12 @@ def test_module_alias_deduplicates_and_sorts_before_typed_preflight(tmp_path: Pa
     with (
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules") as preflight,
         patch(
-            "odoo_instance_sdk.commands.test.run_odoo_tests", return_value=(typed, None)
+            "odoo_instance_sdk.commands.test.run_odoo_tests_command",
+            return_value=_result_command((typed, None)),
         ) as runner,
     ):
         result, diagnostic = run_module_tests(
-            instance,
+            cast("OdooInstance", instance),
             selection,
             executed_spec,
             http_interface="127.0.0.1",
@@ -357,7 +369,10 @@ def test_module_alias_projects_registered_worktree_selection_provenance(tmp_path
             "odoo_instance_sdk.cli.cli_context.ready_instance",
             return_value=(None, env, instance),
         ),
-        patch("odoo_instance_sdk.cli.run_module_tests", return_value=(typed, None)) as runner,
+        patch(
+            "odoo_instance_sdk.cli.module_tests_command",
+            return_value=_result_command((typed, None)),
+        ) as runner,
         patch(
             "odoo_instance_sdk.cli.project_execution_result",
             wraps=project_execution_result,
@@ -385,8 +400,7 @@ def test_module_alias_projects_registered_worktree_selection_provenance(tmp_path
         "file_path": None,
     }
     runner.assert_called_once()
-    selection = runner.call_args.args[1]
-    assert selection[0].provenance.module_path == tmp_path / "addons" / "sale"
+    executed_spec = runner.call_args.args[1]
+    assert executed_spec.modules == ("sale",)
     projector.assert_called_once()
-    assert projector.call_args.args[2] is runner.call_args.args[2]
-    assert runner.call_args.args[2].modules == ("sale",)
+    assert projector.call_args.args[2] is executed_spec

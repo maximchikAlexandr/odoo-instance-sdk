@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import shutil
 import sqlite3
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
 
@@ -24,6 +25,7 @@ from odoo_instance_sdk.internal.cluster_resources import (
     BatchClusterRequest,
     collect_cluster_resource_batch,
 )
+from odoo_instance_sdk.internal.db_name import validate_filestore_containment
 from odoo_instance_sdk.internal.git_activity import (
     _resolve_identity,
     collect_git_activity_from_identity,
@@ -50,6 +52,7 @@ from odoo_instance_sdk.models import (
     EnvironmentSnapshot,
     GitActivity,
     GitActivityState,
+    GitDiff,
     PgAdminEligibility,
     PgAdminEligibilityState,
     PortObservation,
@@ -68,6 +71,24 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
 _SCHEMA_VERSION = 3
+_PROBE_TIMEOUT_SECONDS = 5.0
+
+
+def _default_monitor_executor() -> ProcessExecutor:
+    from odoo_instance_sdk.internal.proc import SubprocessExecutor
+
+    return SubprocessExecutor()
+
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        ProcessExecutor,
+        ProcessResult,
+        RunContext,
+    )
 
 
 class _ProcessProvider(Protocol):
@@ -152,6 +173,84 @@ def _empty_storage() -> StorageFootprint:
     )
 
 
+def _recorded_git_activity(results: Mapping[str, ProcessResult]) -> GitActivity:  # noqa: C901
+    """Rebuild the complete Git collector result from captured probe output."""
+
+    def output(name: str) -> tuple[int, str]:
+        result = results.get(name)
+        if result is None:
+            return 127, ""
+        value = result.stdout if isinstance(result.stdout, str) else ""
+        return result.returncode, value.strip()
+
+    head_rc, head = output("head")
+    branch_rc, branch = output("branch")
+    if head_rc != 0 or not head or branch_rc != 0 or not branch:
+        return _orphan_git()
+    upstream_rc, default_tip = output("upstream")
+    if upstream_rc == 0 and default_tip:
+        prefix = "upstream"
+    else:
+        local_rc, default_tip = output("local_main")
+        if local_rc != 0 or not default_tip:
+            return _orphan_git()
+        prefix = "local"
+    merge_rc, merge_base = output(f"{prefix}_merge_base")
+    if merge_rc == 1:
+        return GitActivity(
+            default_branch="main",
+            head_sha=head,
+            short_sha=head[:7],
+            branch=branch,
+            ahead=None,
+            behind=None,
+            diff=None,
+            state=GitActivityState.ORPHAN,
+        )
+    if merge_rc != 0 or not merge_base:
+        return _orphan_git()
+    ahead_rc, ahead_text = output(f"{prefix}_ahead")
+    behind_rc, behind_text = output(f"{prefix}_behind")
+    diff_rc, diff_text = output(f"{prefix}_diff")
+    if (
+        ahead_rc != 0
+        or behind_rc != 0
+        or diff_rc != 0
+        or not ahead_text.isdigit()
+        or not behind_text.isdigit()
+    ):
+        return _orphan_git()
+    added = deleted = 0
+    for line in diff_text.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or parts[0] == "-" or parts[1] == "-":
+            continue
+        try:
+            added += int(parts[0])
+            deleted += int(parts[1])
+        except ValueError:
+            continue
+    ahead, behind = int(ahead_text), int(behind_text)
+    if ahead == 0 and behind == 0:
+        state = GitActivityState.CLEAN
+    elif behind == 0:
+        state = GitActivityState.AHEAD
+    elif ahead == 0:
+        state = GitActivityState.BEHIND
+    else:
+        state = GitActivityState.DIVERGED
+    return GitActivity(
+        default_branch="main",
+        head_sha=head,
+        short_sha=head[:7],
+        branch=branch,
+        ahead=ahead,
+        behind=behind,
+        diff=GitDiff(added=added, deleted=deleted),
+        state=state,
+    )
+
+
 def _stopped_runtime() -> RuntimeMetrics:
     return RuntimeMetrics(
         state=RuntimeState.STOPPED,
@@ -212,9 +311,357 @@ class EnvironmentMonitor:
     _docker_runner: ComposeRunner = field(
         default_factory=SubprocessComposeRunner, repr=False, hash=False, compare=False
     )
+    _executor: ProcessExecutor = field(
+        default_factory=_default_monitor_executor, repr=False, hash=False, compare=False
+    )
 
     def snapshot(self, project_id: str | None = None, *, include_removed: bool = False) -> Snapshot:
-        """Perform one coherent collection pass and return an immutable ``Snapshot``."""
+        """Build one immutable snapshot command and execute it."""
+        return self.snapshot_command(project_id, include_removed=include_removed).run()
+
+    def snapshot_command(
+        self, project_id: str | None = None, *, include_removed: bool = False
+    ) -> Command[Snapshot]:
+        """Capture one finite monitor collection operation.
+
+        The monitor's catalog/cache reads and bounded probes remain in the
+        operation callback.  The action is deliberately consumed after the
+        collection so the command ledger still records a complete finite run;
+        ``watch`` constructs a fresh command for every tick.
+        """
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import (
+            PreparedAction,
+            ProcessExecutionError,
+            ProcessResult,
+            prepared_command,
+        )
+
+        action = PreparedAction(
+            step_id="monitor.snapshot",
+            action="collect_snapshot",
+            description="Collect one finite environment monitor snapshot",
+            details={
+                "project_id": project_id,
+                "include_removed": include_removed,
+            },
+            read_only=True,
+        )
+        probe_steps, catalog_rows = self._capture_probe_steps(
+            project_id=project_id, include_removed=include_removed
+        )
+        captured_steps: tuple[PreparedStep | PreparedAction, ...] = (*probe_steps, action)
+
+        def execute(context: RunContext[Snapshot]) -> Snapshot:
+            probe_results = cast("dict[str, ProcessResult]", context.results)
+            try:
+                for probe in probe_steps:
+                    try:
+                        probe_results[probe.step_id] = cast(
+                            "ProcessResult", context.process(probe.step_id)
+                        )
+                    except ProcessExecutionError as error:
+                        # Keep a typed failed observation in the same ledger.
+                        # Collectors must not retry a failed captured probe via
+                        # their legacy provider path.
+                        probe_results[probe.step_id] = ProcessResult(
+                            argv=error.argv,
+                            returncode=127,
+                            stdout="",
+                            stderr=str(error),
+                            duration=error.duration,
+                            cwd=probe.cwd,
+                            environment=probe.environment,
+                        )
+                if probe_steps:
+                    return self._snapshot_impl(
+                        project_id=project_id,
+                        include_removed=include_removed,
+                        probe_results=probe_results,
+                        catalog_rows=catalog_rows,
+                    )
+                return self._snapshot_impl(
+                    project_id=project_id,
+                    include_removed=include_removed,
+                )
+            finally:
+                # Optional branches (for example an upstream Git ref that is
+                # not present) are accounted for without launching a second
+                # process.  Required probes are consumed by the collectors
+                # through the active RunContext.
+                context.skip_remaining()
+                context.action(action.step_id)
+
+        plan = ExecutionPlan(
+            steps=tuple(step.public_projection() for step in captured_steps)
+        ).with_fingerprint()
+        return Command.from_prepared(
+            plan,
+            prepared_command(
+                execute,
+                captured_steps,
+                executor=self._executor,
+            ),
+        )
+
+    def _capture_probe_steps(  # noqa: C901
+        self, *, project_id: str | None, include_removed: bool
+    ) -> tuple[tuple[PreparedStep, ...], list[tuple[sqlite3.Row, sqlite3.Row | None]]]:
+        """Capture the finite process probe manifest for one snapshot command.
+
+        Catalog discovery is deliberately best-effort here: it is construction
+        of an inspectable manifest, not snapshot collection.  The callback
+        remains the authoritative domain collector, while this manifest keeps
+        Git, storage, Docker and PostgreSQL child-process inputs in the same
+        command ledger as the resulting snapshot.
+        """
+        from odoo_instance_sdk.internal.proc import PreparedStep
+
+        db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
+        try:
+            catalog = BackupCatalog(db_path=db_path)
+            try:
+                rows = catalog.list_environments_with_runtimes(include_removed=include_removed)
+            finally:
+                catalog.close()
+        except (BackupCatalogError, sqlite3.Error, OSError):
+            return (), []
+
+        steps: list[PreparedStep] = []
+        projects: set[tuple[Path, str]] = set()
+        repositories: set[tuple[Path, str]] = set()
+        for row, _runtime in rows:
+            worktree = Path(str(row["worktree_path"])).resolve()
+            env_id = str(row["id"])
+            repository = Path(str(row["repository_root"])).resolve()
+            resolved_project = f"project_{repo_key(repository, Path(str(row['git_common_dir'])))}"
+            if project_id is not None and resolved_project != project_id:
+                continue
+            if self.git_provider is None:
+                git_commands = (
+                    ("branch", ("rev-parse", "--abbrev-ref", "HEAD")),
+                    ("upstream", ("rev-parse", "--verify", "main@{upstream}")),
+                    ("local_main", ("rev-parse", "--verify", "refs/heads/main")),
+                    (
+                        "upstream_merge_base",
+                        ("merge-base", "main@{upstream}", "HEAD"),
+                    ),
+                    ("upstream_ahead", ("rev-list", "--count", "main@{upstream}..HEAD")),
+                    ("upstream_behind", ("rev-list", "--count", "HEAD..main@{upstream}")),
+                    ("upstream_diff", ("diff", "--numstat", "main@{upstream}...HEAD")),
+                    (
+                        "local_merge_base",
+                        ("merge-base", "refs/heads/main", "HEAD"),
+                    ),
+                    ("local_ahead", ("rev-list", "--count", "refs/heads/main..HEAD")),
+                    ("local_behind", ("rev-list", "--count", "HEAD..refs/heads/main")),
+                    ("local_diff", ("diff", "--numstat", "refs/heads/main...HEAD")),
+                )
+                steps.append(
+                    PreparedStep(
+                        step_id=f"monitor.{env_id}.git.head",
+                        argv=("git", "-C", str(worktree), "rev-parse", "--verify", "HEAD"),
+                        cwd=str(worktree),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        read_only=True,
+                        text=True,
+                    )
+                )
+            du = shutil.which("du") or "du"
+            steps.append(
+                PreparedStep(
+                    step_id=f"monitor.{env_id}.storage.worktree",
+                    argv=(du, "-sb", str(worktree)),
+                    cwd=str(worktree.parent),
+                    timeout=_PROBE_TIMEOUT_SECONDS,
+                    read_only=True,
+                    text=True,
+                )
+            )
+            database = (
+                row["target_db_name"] if str(row["db_mode"]) == "copy" else row["source_db_name"]
+            )
+            if database:
+                steps.append(
+                    PreparedStep(
+                        step_id=f"monitor.{env_id}.postgres.identity",
+                        argv=(
+                            "psql",
+                            "-X",
+                            "-w",
+                            "-d",
+                            str(database),
+                            "-t",
+                            "-A",
+                            "-c",
+                            "SELECT 1",
+                        ),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        read_only=True,
+                        text=True,
+                    )
+                )
+            if bool(int(row["python_environment_owned"])):
+                steps.append(
+                    PreparedStep(
+                        step_id=f"monitor.{env_id}.storage.python",
+                        argv=(du, "-sb", str(row["python_environment_path"])),
+                        cwd=str(Path(str(row["python_environment_path"])).parent),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        read_only=True,
+                        text=True,
+                    )
+                )
+            environment_root = Path(str(row["generated_config_path"])).parent
+            for suffix, path in (
+                ("cache", environment_root / "cache"),
+                ("artifacts", environment_root / "artifacts"),
+            ):
+                steps.append(
+                    PreparedStep(
+                        step_id=f"monitor.{env_id}.storage.{suffix}",
+                        argv=(du, "-sb", str(path)),
+                        cwd=str(path.parent),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        read_only=True,
+                        text=True,
+                    )
+                )
+            if str(row["db_mode"]) == "copy" and row["target_db_name"]:
+                database_name = str(row["target_db_name"]).replace("'", "''")
+                steps.append(
+                    PreparedStep(
+                        step_id=f"monitor.{env_id}.storage.postgres",
+                        argv=(
+                            "psql",
+                            "-X",
+                            "-w",
+                            "-d",
+                            str(row["target_db_name"]),
+                            "-t",
+                            "-A",
+                            "-c",
+                            f"SELECT pg_database_size('{database_name}')",
+                        ),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        read_only=True,
+                        text=True,
+                    )
+                )
+                try:
+                    from odoo_instance_sdk.models import StartConfig
+
+                    cfg = StartConfig.from_odoo_config(str(row["generated_config_path"]))
+                    data_dir = Path(cfg.data_dir) if cfg.data_dir is not None else None
+                    filestore = (
+                        validate_filestore_containment(data_dir, str(row["target_db_name"]))
+                        if data_dir is not None
+                        else None
+                    )
+                except Exception:
+                    filestore = None
+                if filestore is not None:
+                    steps.append(
+                        PreparedStep(
+                            step_id=f"monitor.{env_id}.storage.filestore",
+                            argv=(du, "-sb", str(filestore)),
+                            cwd=str(filestore.parent),
+                            timeout=_PROBE_TIMEOUT_SECONDS,
+                            read_only=True,
+                            text=True,
+                        )
+                    )
+            if self.git_provider is None:
+                for suffix, args in git_commands:
+                    steps.append(
+                        PreparedStep(
+                            step_id=f"monitor.{env_id}.git.{suffix}",
+                            argv=("git", "-C", str(worktree), *args),
+                            cwd=str(worktree),
+                            timeout=_PROBE_TIMEOUT_SECONDS,
+                            read_only=True,
+                            text=True,
+                        )
+                    )
+            projects.add((repository, resolved_project))
+            if (repository / ".git").exists():
+                repositories.add((repository, resolved_project))
+
+        for repository, project in sorted(projects, key=lambda item: (str(item[0]), item[1])):
+            if self.docker_provider is not None:
+                continue
+            from odoo_instance_sdk.internal.proc import SubprocessExecutor
+
+            if isinstance(self._executor, SubprocessExecutor) and shutil.which("docker") is None:
+                continue
+            compose_file = repository / "docker-compose.yml"
+            try:
+                cluster = PostgresCluster.from_project(repository)
+                if cluster.mode != "compose" or not isinstance(
+                    cluster.compose_runner, SubprocessComposeRunner
+                ):
+                    continue
+                if SubprocessComposeRunner.run.__module__ != (
+                    "odoo_instance_sdk.internal.postgres_compose"
+                ):
+                    continue
+                compose_file = cluster.compose_file
+            except (ProjectManifestNotFoundError, PostgresClusterError, OSError, AssertionError):
+                # The command still exposes the canonical production probe
+                # when construction cannot inspect a manifest.  If a custom
+                # runner was available, the branch above deliberately omitted
+                # it so injected process seams retain their old behavior.
+                pass
+            steps.append(
+                PreparedStep(
+                    step_id=f"monitor.{project}.docker.resources",
+                    argv=(
+                        "docker",
+                        "compose",
+                        "-f",
+                        str(compose_file),
+                        "-p",
+                        project,
+                        "ps",
+                        "--format",
+                        "json",
+                    ),
+                    cwd=str(repository),
+                    timeout=_PROBE_TIMEOUT_SECONDS,
+                    read_only=True,
+                    text=True,
+                )
+            )
+        for repository, project in sorted(repositories, key=lambda item: (str(item[0]), item[1])):
+            steps.append(
+                PreparedStep(
+                    step_id=f"monitor.{project}.git.worktrees",
+                    argv=(
+                        "git",
+                        "-C",
+                        str(repository),
+                        "worktree",
+                        "list",
+                        "--porcelain",
+                        "-z",
+                    ),
+                    cwd=str(repository),
+                    timeout=_PROBE_TIMEOUT_SECONDS,
+                    read_only=True,
+                    text=True,
+                )
+            )
+        return tuple(steps), rows
+
+    def _snapshot_impl(
+        self,
+        project_id: str | None = None,
+        *,
+        include_removed: bool = False,
+        probe_results: dict[str, ProcessResult] | None = None,
+        catalog_rows: list[tuple[sqlite3.Row, sqlite3.Row | None]] | None = None,
+    ) -> Snapshot:
+        """Perform one coherent collection pass and return an immutable snapshot."""
         generated_at = datetime.now(UTC)
         db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
         try:
@@ -224,12 +671,20 @@ class EnvironmentMonitor:
 
         try:
             plan = self._plan_snapshot(
-                catalog, project_id=project_id, include_removed=include_removed
+                catalog,
+                project_id=project_id,
+                include_removed=include_removed,
+                probe_results=probe_results,
+                catalog_rows=catalog_rows,
             )
         finally:
             catalog.close()
-        resources, active_clusters = self._collect_cluster_resources(list(plan.projects))
-        projects, environments = self._collect_snapshot_rows(plan.projects, resources)
+        resources, active_clusters = self._collect_cluster_resources(
+            list(plan.projects), probe_results=probe_results
+        )
+        projects, environments = self._collect_snapshot_rows(
+            plan.projects, resources, probe_results=probe_results
+        )
         self._prune_caches(
             set(plan.environment_ids),
             set(plan.worktrees),
@@ -250,12 +705,17 @@ class EnvironmentMonitor:
         *,
         project_id: str | None = None,
         include_removed: bool = False,
+        probe_results: dict[str, ProcessResult] | None = None,
+        catalog_rows: list[tuple[sqlite3.Row, sqlite3.Row | None]] | None = None,
     ) -> _SnapshotPlan:
         """Read catalog runtime once and derive deterministic project plans."""
-        try:
-            rows = catalog.list_environments_with_runtimes(include_removed=include_removed)
-        except (BackupCatalogError, sqlite3.Error) as exc:
-            raise MonitorError("monitor catalog unavailable") from exc
+        if catalog_rows is None:
+            try:
+                rows = catalog.list_environments_with_runtimes(include_removed=include_removed)
+            except (BackupCatalogError, sqlite3.Error) as exc:
+                raise MonitorError("monitor catalog unavailable") from exc
+        else:
+            rows = catalog_rows
         groups: dict[str, list[_EnvironmentPlan]] = {}
         environment_ids: set[str] = set()
         worktrees: set[Path] = set()
@@ -282,7 +742,12 @@ class EnvironmentMonitor:
             ):
                 cluster, state = None, None
             else:
-                cluster, state = self._project_cluster(repo_root, statuses)
+                cluster, state = self._project_cluster(
+                    repo_root,
+                    statuses,
+                    project_id=resolved_project_id,
+                    probe_results=probe_results,
+                )
             plans.append(
                 _ProjectPlan(
                     resolved_project_id,
@@ -301,12 +766,30 @@ class EnvironmentMonitor:
         )
 
     def _project_cluster(
-        self, repo_root: Path, statuses: set[str]
+        self,
+        repo_root: Path,
+        statuses: set[str],
+        *,
+        project_id: str,
+        probe_results: dict[str, ProcessResult] | None = None,
     ) -> tuple[PostgresCluster | None, PostgresClusterState | None]:
         try:
-            cluster = PostgresCluster.from_project(repo_root)
+            if (
+                probe_results is None
+                or PostgresCluster.from_project.__module__ != "odoo_instance_sdk.resources.postgres"
+            ):
+                cluster = PostgresCluster.from_project(repo_root)
+            else:
+                from odoo_instance_sdk.project import ProjectConfig
+
+                cluster = PostgresCluster._from_config(
+                    ProjectConfig.load(repo_root),
+                    repository_root=repo_root,
+                    compose_runner=self._docker_runner,
+                    project_id=project_id.removeprefix("project_"),
+                )
             statuses.add(str(cluster.compose_file.resolve()))
-            return cluster, self._cached_status(cluster)
+            return cluster, self._cached_status(cluster, probe_results=probe_results)
         except (ProjectManifestNotFoundError, PostgresClusterError, OSError):
             return None, None
 
@@ -314,6 +797,8 @@ class EnvironmentMonitor:
         self,
         plans: tuple[_ProjectPlan, ...],
         resources: dict[str, ClusterResourceSnapshot],
+        *,
+        probe_results: dict[str, ProcessResult] | None = None,
     ) -> tuple[tuple[ProjectSummary, ...], tuple[EnvironmentSnapshot, ...]]:
         projects: list[ProjectSummary] = []
         environments: list[EnvironmentSnapshot] = []
@@ -328,7 +813,7 @@ class EnvironmentMonitor:
                 )
             )
             environments.extend(
-                self._collect_environment(item.row, plan, item.runtime)
+                self._collect_environment(item.row, plan, item.runtime, probe_results=probe_results)
                 for item in sorted(plan.environments, key=lambda item: str(item.row["id"]))
             )
         return tuple(projects), tuple(sorted(environments, key=lambda item: item.id))
@@ -413,7 +898,12 @@ class EnvironmentMonitor:
             sampled_at=crs.sampled_at,
         )
 
-    def _cached_status(self, cluster: PostgresCluster) -> PostgresClusterState:
+    def _cached_status(
+        self,
+        cluster: PostgresCluster,
+        *,
+        probe_results: dict[str, ProcessResult] | None = None,
+    ) -> PostgresClusterState:
         # A compose project name is user-configurable and can collide.  The
         # manifest root is the ownership boundary for status caching.
         name = str(cluster.compose_file.resolve())
@@ -421,12 +911,37 @@ class EnvironmentMonitor:
         cached = self._cluster_status_cache.get(name)
         if cached is not None and now - cached[0] < _CLUSTER_STATUS_TTL:
             return cached[1]
+        if probe_results is not None:
+            diagnostic = getattr(cluster, "to_diagnostic_dict", None)
+            identity = diagnostic().get("project_id") if diagnostic is not None else None
+            project_id = f"project_{identity}" if identity else None
+            recorded = (
+                None
+                if project_id is None
+                else probe_results.get(f"monitor.{project_id}.docker.resources")
+            )
+            if recorded is not None and recorded.returncode == 0 and recorded.stdout:
+                try:
+                    rows = json.loads(str(recorded.stdout))
+                except (TypeError, ValueError):
+                    rows = []
+                if isinstance(rows, list):
+                    state = PostgresClusterState.HEALTHY if rows else PostgresClusterState.STOPPED
+                    self._cluster_status_cache[name] = (now, state)
+                    return state
+            if recorded is not None:
+                state = PostgresClusterState.STOPPED
+                self._cluster_status_cache[name] = (now, state)
+                return state
         state = cluster.status()
         self._cluster_status_cache[name] = (now, state)
         return state
 
-    def _collect_cluster_resources(
-        self, plans: list[_ProjectPlan]
+    def _collect_cluster_resources(  # noqa: C901
+        self,
+        plans: list[_ProjectPlan],
+        *,
+        probe_results: dict[str, ProcessResult] | None = None,
     ) -> tuple[dict[str, ClusterResourceSnapshot], set[str]]:
         """Collect compose resources in one inspect/stats pass for the catalog.
 
@@ -442,9 +957,24 @@ class EnvironmentMonitor:
         pending: list[BatchClusterRequest] = []
         now = time.monotonic()
 
+        if probe_results is not None:
+            for plan in plans:
+                recorded = probe_results.get(f"monitor.{plan.project_id}.docker.resources")
+                if recorded is not None:
+                    result[plan.project_id] = ClusterResourceSnapshot(
+                        container=None,
+                        metrics=None,
+                        unavailability_reason=(
+                            "stats_failed" if recorded.returncode == 0 else "inspect_failed"
+                        ),
+                        sampled_at=datetime.now(UTC),
+                    )
+
         for plan in plans:
             cluster = plan.cluster
             state = plan.state
+            if plan.project_id in result:
+                continue
             if cluster is None or state is None or cluster.mode == "external":
                 continue
             if state is PostgresClusterState.STOPPED:
@@ -518,7 +1048,12 @@ class EnvironmentMonitor:
     # ------------------------------------------------------------- environment
 
     def _collect_environment(
-        self, row: sqlite3.Row, plan: _ProjectPlan, runtime_record: sqlite3.Row | None
+        self,
+        row: sqlite3.Row,
+        plan: _ProjectPlan,
+        runtime_record: sqlite3.Row | None,
+        *,
+        probe_results: dict[str, ProcessResult] | None = None,
     ) -> EnvironmentSnapshot:
         env_id = str(row["id"])
         db_mode = str(row["db_mode"])
@@ -540,11 +1075,37 @@ class EnvironmentMonitor:
                 runtime = _stopped_runtime()
 
         worktree = Path(str(row["worktree_path"]))
-        git = self._collect_git(worktree)
+        git_probes = None
+        if probe_results is not None:
+            git_probes = {
+                key.rsplit(".git.", 1)[1]: value
+                for key, value in probe_results.items()
+                if key.startswith(f"monitor.{env_id}.git.")
+            }
+        git = self._collect_git(worktree, recorded=git_probes or None)
         short_sha = git.head_sha[:7] if git.head_sha else None
 
-        storage = self._collect_storage(row, env_id, db_mode)
-        artifacts = self._collect_artifacts(row)
+        storage_probes = (
+            None
+            if probe_results is None
+            else {
+                key.rsplit(f"monitor.{env_id}.storage.", 1)[1]: value
+                for key, value in probe_results.items()
+                if key.startswith(f"monitor.{env_id}.storage.")
+            }
+        )
+        storage = self._collect_storage(
+            row,
+            env_id,
+            db_mode,
+            recorded=storage_probes,
+        )
+        worktree_probe = (
+            None
+            if probe_results is None
+            else probe_results.get(f"monitor.{plan.project_id}.git.worktrees")
+        )
+        artifacts = self._collect_artifacts(row, recorded=worktree_probe)
         observed_port = self._observe_port(row, lifecycle_state, runtime, allocated_port)
         pgadmin = self._pgadmin_eligibility(lifecycle_state, database_str, plan.cluster, plan.state)
 
@@ -585,7 +1146,9 @@ class EnvironmentMonitor:
             state = PgAdminEligibilityState.ELIGIBLE
         return PgAdminEligibility(state=state)
 
-    def _collect_artifacts(self, row: sqlite3.Row) -> EnvironmentArtifacts:
+    def _collect_artifacts(  # noqa: C901
+        self, row: sqlite3.Row, *, recorded: ProcessResult | None = None
+    ) -> EnvironmentArtifacts:
         """Reconcile independent catalog/filesystem artifacts defensively."""
         worktree = Path(str(row["worktree_path"]))
         repository_root = Path(str(row["repository_root"]))
@@ -606,13 +1169,25 @@ class EnvironmentMonitor:
             except OSError:
                 return False
 
-        try:
-            registered = any(
-                Path(entry.worktree).resolve() == worktree.resolve()
-                for entry in worktree_list_porcelain(repository_root)
-            )
-        except Exception:
+        if recorded is not None:
             registered = False
+            if recorded.returncode == 0 and isinstance(recorded.stdout, str):
+                for entry in recorded.stdout.replace("\x00", "\n").splitlines():
+                    if entry.startswith("worktree "):
+                        try:
+                            if Path(entry[len("worktree ") :]).resolve() == worktree.resolve():
+                                registered = True
+                                break
+                        except OSError:
+                            pass
+        else:
+            try:
+                registered = any(
+                    Path(entry.worktree).resolve() == worktree.resolve()
+                    for entry in worktree_list_porcelain(repository_root)
+                )
+            except Exception:
+                registered = False
 
         if python_owned:
             python_exists = is_file(python_path / "bin" / "python")
@@ -736,7 +1311,14 @@ class EnvironmentMonitor:
                 return RuntimeState.READY
         return RuntimeState.NOT_READY
 
-    def _collect_git(self, worktree: Path) -> GitActivity:
+    def _collect_git(
+        self,
+        worktree: Path,
+        *,
+        recorded: Mapping[str, ProcessResult] | None = None,
+    ) -> GitActivity:
+        if recorded is not None:
+            return _recorded_git_activity(recorded)
         try:
             if self.git_provider is not None:
                 key = worktree.resolve()
@@ -765,8 +1347,95 @@ class EnvironmentMonitor:
             result = _orphan_git()
         return result
 
-    def _collect_storage(self, row: sqlite3.Row, env_id: str, db_mode: str) -> StorageFootprint:
+    def _collect_storage(  # noqa: C901
+        self,
+        row: sqlite3.Row,
+        env_id: str,
+        db_mode: str,
+        *,
+        recorded: Mapping[str, ProcessResult] | None = None,
+    ) -> StorageFootprint:
         now = time.monotonic()
+        if recorded is not None:
+            cached = self._storage_cache.get(env_id)
+            if cached is not None and now - cached[0] < _EXPENSIVE_TTL:
+                return cached[1]
+
+            def measured(name: str) -> int | None:
+                result = recorded.get(name)
+                if result is None or result.returncode != 0 or not result.stdout:
+                    return None
+                try:
+                    return int(str(result.stdout).strip().split()[0])
+                except (TypeError, ValueError, IndexError):
+                    return None
+
+            worktree_bytes = measured("worktree")
+            python_owned = bool(int(row["python_environment_owned"]))
+            python_bytes = measured("python") if python_owned else None
+            postgres_bytes = measured("postgres") if db_mode == "copy" else None
+            filestore_bytes = measured("filestore") if db_mode == "copy" else None
+            generated_config = Path(str(row["generated_config_path"]))
+            dependency_lock = Path(str(row["dependency_lock_path"]))
+
+            def file_size(path: Path) -> int | None:
+                try:
+                    return path.stat().st_size if path.is_file() else 0
+                except OSError:
+                    return None
+
+            def directory_size(path: Path, name: str) -> int | None:
+                if path.is_dir():
+                    measured_size = measured(name)
+                    if measured_size is not None:
+                        return measured_size
+                return None if path.exists() else 0
+
+            other_sizes = [
+                file_size(generated_config),
+                file_size(dependency_lock),
+                file_size(generated_config.parent / "odoo.log"),
+                directory_size(generated_config.parent / "cache", "cache"),
+                directory_size(generated_config.parent / "artifacts", "artifacts"),
+            ]
+            other_bytes = (
+                None
+                if any(value is None for value in other_sizes)
+                else sum(value for value in other_sizes if value is not None)
+            )
+            if worktree_bytes is not None:
+                database = DatabaseFootprint(
+                    owned=db_mode == "copy",
+                    postgres_bytes=postgres_bytes,
+                    filestore_bytes=filestore_bytes,
+                    total_bytes=(postgres_bytes or 0) + (filestore_bytes or 0)
+                    if postgres_bytes is not None or filestore_bytes is not None
+                    else None,
+                )
+                complete = worktree_bytes is not None and other_bytes is not None
+                if python_owned:
+                    complete = complete and python_bytes is not None
+                if db_mode == "copy":
+                    complete = (
+                        complete and postgres_bytes is not None and filestore_bytes is not None
+                    )
+                footprint = StorageFootprint(
+                    total_bytes=worktree_bytes
+                    + (python_bytes or 0)
+                    + (postgres_bytes or 0)
+                    + (filestore_bytes or 0)
+                    + (other_bytes or 0),
+                    complete=complete,
+                    worktree_bytes=worktree_bytes,
+                    python_environment=PythonEnvFootprint(owned=python_owned, bytes=python_bytes),
+                    database=database,
+                    other_files_bytes=other_bytes,
+                )
+                self._storage_cache[env_id] = (now, footprint)
+                return footprint
+            empty = _empty_storage()
+            self._storage_cache[env_id] = (now, empty)
+            return empty
         cached = self._storage_cache.get(env_id)
         if cached is not None and now - cached[0] < _EXPENSIVE_TTL:
             return cached[1]

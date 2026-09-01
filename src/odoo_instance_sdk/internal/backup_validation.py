@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 
 _REQUIRED_ROOT_MEMBERS = {"manifest.json", "dump.sql"}
 
@@ -74,6 +73,7 @@ def validate_dump(
     *,
     timeout: float = 60.0,
     raise_if_unavailable: bool = False,
+    step_id: str | None = None,
 ) -> DumpValidationResult:
     exe = shutil.which("pg_restore")
     if exe is None:
@@ -82,22 +82,28 @@ def validate_dump(
         return DumpValidationResult(valid=False, unavailable=True)
 
     try:
-        result = subprocess.run(
+        from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+
+        result = run_captured(
             [exe, "--list", str(path)],
-            env=sanitized_child_environment(),
-            capture_output=True,
-            text=True,
             timeout=timeout,
-            check=False,
+            text=True,
+            step_id=step_id or "backup.validate",
+            read_only=True,
         )
         if result.returncode != 0:
+            stderr = result.stderr if isinstance(result.stderr, str) else ""
             return DumpValidationResult(
                 valid=False,
-                errors=(result.stderr.strip() or "pg_restore exited with non-zero status",),
+                errors=(stderr.strip() or "pg_restore exited with non-zero status",),
             )
         return DumpValidationResult(valid=True)
     except subprocess.TimeoutExpired:
         return DumpValidationResult(valid=False, errors=("pg_restore timed out",))
+    except ProcessExecutionError as exc:
+        if exc.__class__.__name__ == "ProcessTimeoutError":
+            return DumpValidationResult(valid=False, errors=("pg_restore timed out",))
+        return DumpValidationResult(valid=False, unavailable=True)
     except FileNotFoundError:
         if raise_if_unavailable:
             raise BackupValidationUnavailableError(f"pg_restore not found at {exe}")

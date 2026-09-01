@@ -195,6 +195,7 @@ def test_wheel_metadata_has_strict_core_and_dashboard_dependency_contract() -> N
 
     assert core == {
         ("click", ("<9", ">=8.2")),
+        ("expression", ("<6", ">=5")),
         ("httpx", ("<1.0", ">=0.27")),
         ("json5", ("<1", ">=0.15")),
         ("msgspec", ("<1.0", ">=0.18")),

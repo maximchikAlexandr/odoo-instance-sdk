@@ -211,9 +211,14 @@ def test_snapshot_reuses_injected_monitor_and_forwards_filter() -> None:
         def __init__(self) -> None:
             self.calls: list[str | None] = []
 
-        def snapshot(self, project_id: str | None = None) -> dict[str, object]:
+        def snapshot(self, project_id: str | None = None) -> Snapshot:
             self.calls.append(project_id)
-            return {"schema_version": 3, "projects": [], "environments": []}
+            return Snapshot(
+                schema_version=3,
+                generated_at=datetime.now(UTC),
+                projects=(),
+                environments=(),
+            )
 
     monitor = Monitor()
     with _client(headless=True, monitor=monitor) as client:

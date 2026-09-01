@@ -5,7 +5,7 @@ import textwrap
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
 import msgspec
@@ -16,10 +16,14 @@ from odoo_instance_sdk.exceptions import (
     EnvironmentConflictError,
     EnvironmentNotFoundError,
     InstanceConfigurationError,
+    StalePlanError,
 )
+from odoo_instance_sdk.execution import Command
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
+    BackupFreshness,
+    BackupProvenanceComparison,
     BackupProvenanceStatus,
     Database,
     DatabasePreparationAction,
@@ -33,6 +37,8 @@ from odoo_instance_sdk.resources.environment import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
+    from odoo_instance_sdk.project import ProjectConfig
+    from odoo_instance_sdk.resources.environment import EnvironmentResource
 
 
 @pytest.fixture(autouse=True)
@@ -304,7 +310,7 @@ class TestCheckoutPreflight:
         coordinator.prepare.assert_not_called()
         assert 'default_source_database = "comerta"' in manifest.read_text()
 
-    def test_stale_checkout_refreshes_before_final_replan(
+    def test_stale_checkout_requires_a_separate_refresh_phase(
         self,
         env_client: OdooClient,
         project_manifest: Path,
@@ -339,31 +345,20 @@ class TestCheckoutPreflight:
 
         coordinator = MagicMock()
 
-        def switch_default(*_args: object, **_kwargs: object) -> None:
-            manifest.write_text(
-                manifest.read_text().replace(
-                    'default_source_database = "comerta"',
-                    'default_source_database = "fresh_db"',
-                )
-            )
-
-        coordinator.prepare.side_effect = switch_default
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.database_preparation.DatabasePreparationCoordinator",
             lambda _client: coordinator,
         )
 
-        result = env_client.environments.checkout_with_plan(
-            project_manifest,
-            "feat/replanned",
-            options=EnvironmentCheckoutOptions(python=str(fake_python)),
-        )
+        with pytest.raises(StalePlanError, match="separate phase"):
+            env_client.environments.checkout_with_plan(
+                project_manifest,
+                "feat/replanned",
+                options=EnvironmentCheckoutOptions(python=str(fake_python)),
+            )
 
-        coordinator.prepare.assert_called_once()
-        assert result.environment.source_db_name == "fresh_db"
-        assert result.plan.source_database == "fresh_db"
-        assert result.plan.freshness.value == "fresh"
-        assert result.plan.preparation_actions == ()
+        coordinator.prepare.assert_not_called()
+        assert env_client.environments.list(project=project_manifest) == []
 
     def test_unpinned_project_refresh_fails_before_preparation_mutation(
         self,
@@ -392,7 +387,7 @@ class TestCheckoutPreflight:
         monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
         before = manifest.read_text()
 
-        with pytest.raises(ConfigError, match="not approved outside the repository"):
+        with pytest.raises(StalePlanError, match="separate phase"):
             env_client.environments.checkout(
                 project_manifest,
                 "feat/unpinned-refresh",
@@ -463,7 +458,7 @@ class TestCheckoutPreflight:
             lambda _client: coordinator,
         )
 
-        with pytest.raises(RuntimeError, match="preparation failed"):
+        with pytest.raises(StalePlanError, match="separate phase"):
             env_client.environments.checkout(
                 project_manifest,
                 "feat/failed-refresh",
@@ -1025,6 +1020,277 @@ class TestCheckoutCopy:
 
 
 class TestCheckoutDryRun:
+    def test_checkout_command_captures_secret_free_snapshot(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/command",
+            options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+        )
+
+        assert isinstance(command, Command)
+        assert command.commands
+        assert any(step.argv[:2] == ("git", "-C") for step in command.commands)
+        for observation in command.plan.observations:
+            assert isinstance(observation, dict)
+            assert observation["read_only"] is True
+            assert observation["executed_during_planning"] is True
+        assert not any(token in repr(command).lower() for token in ("admin_passwd", "password"))
+        assert not (project_manifest / ".odcli-refresh").exists()
+
+    def test_checkout_command_public_steps_match_private_execution_steps(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        from odoo_instance_sdk import execution as execution_module
+        from odoo_instance_sdk.internal.proc import PreparedCommand
+
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/step-parity",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python), source_database="comerta", create_venv=True
+            ),
+        )
+        prepared = cast("PreparedCommand[object]", execution_module._COMMANDS[id(command)])
+
+        assert tuple(step.step_id for step in command.plan.steps) == tuple(
+            step.step_id for step in prepared.steps
+        )
+        assert tuple(step.step_id for step in command.plan.steps) == (
+            "checkout.validate.git.toplevel",
+            "checkout.validate.git.common-dir",
+            "checkout.validate.git.base",
+            "checkout.catalog",
+            "checkout.worktree",
+            "checkout.generated_config",
+            "checkout.venv",
+            "checkout.database",
+            "checkout.cleanup.worktree",
+            "checkout.cleanup",
+        )
+
+    def test_checkout_planning_failure_uses_typed_expression_error_branch(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import expression
+
+        resource = env_client.environments
+        errors: list[ConfigError] = []
+        original_error = expression.Error
+
+        def observe_error(error: ConfigError) -> object:
+            errors.append(error)
+            return original_error(error)
+
+        def fail_audit(
+            self: EnvironmentResource,
+            project: ProjectConfig | Path,
+            branch: str,
+            options: EnvironmentCheckoutOptions,
+        ) -> tuple[BackupProvenanceComparison, BackupFreshness, tuple[str, ...]]:
+            raise ConfigError("invalid captured checkout inputs")
+
+        monkeypatch.setattr(expression, "Error", observe_error)
+        monkeypatch.setattr(type(resource), "_audit_checkout_plan", fail_audit)
+
+        with pytest.raises(ConfigError, match="invalid captured"):
+            resource.plan_checkout(
+                project_manifest,
+                "feat/invalid-plan",
+                options=EnvironmentCheckoutOptions(
+                    python=str(fake_python), source_database="comerta"
+                ),
+            )
+        assert errors and errors[0].args == ("invalid captured checkout inputs",)
+
+    def test_checkout_command_rejects_changed_base_before_catalog_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/stale-command",
+            options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+        )
+        (project_manifest / "stale.txt").write_text("changed")
+        subprocess.run(["git", "add", "stale.txt"], cwd=project_manifest, check=True)
+        subprocess.run(["git", "commit", "-m", "stale command"], cwd=project_manifest, check=True)
+
+        with pytest.raises(StalePlanError):
+            command.run()
+        assert env_client.environments.list(project=project_manifest) == []
+
+    def test_checkout_command_rejects_changed_git_identity_before_catalog_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        from odoo_instance_sdk.internal.proc import (
+            PreparedProcess,
+            PreparedStep,
+            ProcessResult,
+            RecordingExecutor,
+        )
+
+        options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
+        snapshot = env_client.environments._build_checkout_snapshot(
+            project_manifest, "feat/stale-identity", options=options
+        )
+
+        def result_for(prepared: PreparedProcess) -> ProcessResult:
+            prepared = cast("PreparedStep", prepared)
+            return ProcessResult(
+                argv=prepared.argv,
+                returncode=0,
+                stdout=str(project_manifest / "another-repository"),
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+
+        with pytest.raises(StalePlanError, match="Git identity"):
+            env_client.environments._command_from_snapshot(
+                snapshot, executor=RecordingExecutor(result_factory=result_for)
+            ).run()
+        assert env_client.environments.list() == []
+
+    def test_checkout_command_rejects_changed_target_path_before_catalog_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
+        snapshot = env_client.environments._build_checkout_snapshot(
+            project_manifest, "feat/stale-target", options=options
+        )
+        snapshot.private.worktree.mkdir(parents=True)
+
+        with pytest.raises(StalePlanError, match="deterministic future path"):
+            env_client.environments._command_from_snapshot(snapshot).run()
+        assert env_client.environments.list(project=project_manifest) == []
+
+    def test_checkout_command_rejects_changed_selected_port_before_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.resources import environment as environment_module
+
+        options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
+        snapshot = env_client.environments._build_checkout_snapshot(
+            project_manifest, "feat/stale-port", options=options
+        )
+
+        def occupied_port(*_args: object, **_kwargs: object) -> int:
+            raise EnvironmentConflictError("port_in_use", "port was claimed")
+
+        monkeypatch.setattr(environment_module, "find_free_port", occupied_port)
+
+        with pytest.raises(EnvironmentConflictError, match="Port"):
+            env_client.environments._command_from_snapshot(snapshot).run()
+        assert env_client.environments.list(project=project_manifest) == []
+
+    def test_checkout_command_rejects_changed_database_identity_before_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        resource = env_client.environments
+        options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
+        snapshot = resource._build_checkout_snapshot(
+            project_manifest, "feat/stale-database", options=options
+        )
+        original_resolve_dbs = type(resource)._resolve_dbs
+
+        def changed_database(
+            self: EnvironmentResource,
+            options: EnvironmentCheckoutOptions,
+            project: ProjectConfig,
+            cfg: dict[str, str],
+            db_mode: str,
+            branch: str,
+            repo_root: Path,
+        ) -> tuple[str | None, str | None]:
+            _source, target = original_resolve_dbs(
+                self, options, project, cfg, db_mode, branch, repo_root
+            )
+            return "different-database", target
+
+        monkeypatch.setattr(type(resource), "_resolve_dbs", changed_database)
+
+        with pytest.raises(StalePlanError, match="resolved inputs"):
+            resource._command_from_snapshot(snapshot).run()
+        assert resource.list(project=project_manifest) == []
+
+    def test_checkout_command_rejects_changed_provenance_before_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        resource = env_client.environments
+        options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
+        snapshot = resource._build_checkout_snapshot(
+            project_manifest, "feat/stale-provenance", options=options
+        )
+        original_audit = type(resource)._audit_checkout_plan
+
+        def changed_provenance(
+            self: EnvironmentResource,
+            project: ProjectConfig | Path,
+            branch: str,
+            options: EnvironmentCheckoutOptions,
+        ) -> tuple[BackupProvenanceComparison, BackupFreshness, tuple[str, ...]]:
+            comparison, freshness, warnings = original_audit(self, project, branch, options)
+            return (
+                BackupProvenanceComparison(
+                    status=BackupProvenanceStatus.MATCHED,
+                    expected_base_ref=comparison.expected_base_ref,
+                    recorded_branch="different-branch",
+                ),
+                freshness,
+                warnings,
+            )
+
+        monkeypatch.setattr(type(resource), "_audit_checkout_plan", changed_provenance)
+
+        with pytest.raises(StalePlanError, match="database or provenance"):
+            resource._command_from_snapshot(snapshot).run()
+        assert resource.list(project=project_manifest) == []
+
+    def test_checkout_command_rejects_changed_deterministic_file_before_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
+        snapshot = env_client.environments._build_checkout_snapshot(
+            project_manifest, "feat/stale-file", options=options
+        )
+        lock = snapshot.private.dependency_lock
+        lock.parent.mkdir(parents=True)
+        lock.write_text("stale lock")
+
+        with pytest.raises(StalePlanError, match="deterministic future path"):
+            env_client.environments._command_from_snapshot(snapshot).run()
+        assert env_client.environments.list(project=project_manifest) == []
+
     def test_dry_run_nothing_created(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:

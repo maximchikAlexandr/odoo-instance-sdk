@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
@@ -81,13 +81,21 @@ class TestOdcliLifecycle:
         assert Path(env.generated_config_path).is_file()
 
         env_id = str(env.id)
+        run_command = MagicMock()
+        run_command.run.return_value = 0
+        shell_command = MagicMock()
+        shell_command.run.return_value = 0
         with (
             patch("odoo_instance_sdk.internal.context._check_port_free", return_value=True),
             patch(
-                "odoo_instance_sdk.resources.instance.OdooInstance.run_foreground",
-                return_value=0,
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_foreground_command",
+                return_value=run_command,
             ),
             patch("odoo_instance_sdk.resources.instance.OdooInstance.shell", return_value=0),
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.shell_command",
+                return_value=shell_command,
+            ),
         ):
             run_result = _invoke(env_client, ["--project", str(git_repo), "--env", env_id, "run"])
             assert run_result.exit_code == 0, run_result.output

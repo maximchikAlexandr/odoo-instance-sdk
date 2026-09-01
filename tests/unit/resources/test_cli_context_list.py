@@ -66,7 +66,7 @@ def test_nested_worktree_infers_remove_selector(
 
     assert result.exit_code == 0, result.output
     envelope = json.loads(result.output)
-    assert envelope["result"]["id"] == str(env.id)
+    assert envelope["result"]["steps"][0]["step_id"] == "environment.remove"
     assert envelope["dry_run"] is True
     assert Path(env.worktree_path).is_dir()
 
@@ -115,26 +115,17 @@ def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
 
     assert result.exit_code == 0, result.output
     plan = json.loads(result.output)["result"]
-    assert {
-        "name",
-        "branch",
-        "effective_base_ref",
-        "db_mode",
-        "source_database",
-        "target_database",
-        "python_mode",
-        "provenance",
-        "freshness",
-        "preparation_actions",
-        "warnings",
-    } <= plan.keys()
-    assert plan["db_mode"] == "shared"
+    assert {"steps", "observations", "warnings", "fingerprint"} <= plan.keys()
+    assert plan["steps"]
+    assert all(
+        observation["read_only"] is True and observation["executed_during_planning"] is True
+        for observation in plan["observations"]
+    )
     assert (
         not {
             "config",
             "config_path",
             "path",
-            "argv",
             "generated_config_path",
             "dependency_lock_path",
         }

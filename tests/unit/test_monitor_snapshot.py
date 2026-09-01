@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sqlite3
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +14,13 @@ import msgspec
 import pytest
 
 from odoo_instance_sdk.exceptions import MonitorError
+from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.internal.proc import (
+    PreparedStep,
+    ProcessResult,
+    RecordingExecutor,
+    SubprocessExecutor,
+)
 from odoo_instance_sdk.internal.process_metrics import ProcessTreeResult
 from odoo_instance_sdk.models import (
     ClusterContainer,
@@ -19,6 +28,7 @@ from odoo_instance_sdk.models import (
     ClusterResourceSnapshot,
     GitActivity,
     GitActivityState,
+    GitDiff,
     PidScope,
     PostgresClusterState,
     RuntimeState,
@@ -640,6 +650,234 @@ def test_watch_yields_snapshots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     snaps = asyncio.run(_take(2))
     assert len(snaps) == 2
     assert all(isinstance(s, Snapshot) for s in snaps)
+
+
+def test_snapshot_command_is_immutable_and_snapshot_delegates_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = Snapshot(
+        schema_version=3,
+        generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+        projects=(),
+        environments=(),
+    )
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
+    calls: list[tuple[str | None, bool]] = []
+
+    def collect(*, project_id: str | None = None, include_removed: bool = False) -> Snapshot:
+        calls.append((project_id, include_removed))
+        return expected
+
+    monkeypatch.setattr(
+        EnvironmentMonitor,
+        "_snapshot_impl",
+        lambda _self, **kwargs: collect(**kwargs),
+    )
+    command = monitor.snapshot_command("project-1", include_removed=True)
+    original_plan = command.plan
+
+    assert command.run() == expected
+    assert monitor.snapshot("project-1", include_removed=True) == expected
+    assert command.plan == original_plan
+    assert calls == [("project-1", True), ("project-1", True)]
+
+
+def test_snapshot_command_records_each_catalog_process_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (tmp_path / "cache").mkdir()
+    (tmp_path / "artifacts").mkdir()
+    config = tmp_path / "odoo.conf"
+    config.write_text("", encoding="utf-8")
+    lock = tmp_path / "requirements.lock"
+    lock.write_text("", encoding="utf-8")
+    _seed_env(
+        catalog,
+        _make_env(
+            env_id,
+            worktree_path=str(worktree),
+            generated_config_path=str(config),
+            dependency_lock_path=str(lock),
+        ),
+    )
+    catalog.close()
+
+    executor = RecordingExecutor(
+        result_factory=lambda step: ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout=(
+                "abcdef0123456789"
+                if step.step_id.endswith("git.head")
+                else "feature"
+                if step.step_id.endswith("git.branch")
+                else "fedcba9876543210"
+                if step.step_id.endswith("git.upstream")
+                else "fedcba9876543210"
+                if step.step_id.endswith("git.local_main")
+                else "base123"
+                if step.step_id.endswith("git.upstream_merge_base")
+                else "2"
+                if step.step_id.endswith("git.upstream_ahead")
+                else "1"
+                if step.step_id.endswith("git.upstream_behind")
+                else "3\t4\tfile.py\n"
+                if step.step_id.endswith("git.upstream_diff")
+                else "42\t/tmp/worktree"
+                if step.step_id.endswith("storage.worktree")
+                else "5\t/tmp/cache"
+                if step.step_id.endswith("storage.cache")
+                else "7\t/tmp/artifacts"
+                if step.step_id.endswith("storage.artifacts")
+                else "17"
+                if step.step_id.endswith("postgres.identity")
+                else "[]"
+            ),
+            stderr="",
+            duration=0.0,
+            cwd=cast("PreparedStep", step).cwd,
+            environment=cast("PreparedStep", step).environment,
+        )
+    )
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3", _executor=executor)
+
+    command = monitor.snapshot_command()
+    process_ids = tuple(step.step_id for step in command.plan.process_steps)
+    assert process_ids[:3] == (
+        f"monitor.{env_id}.git.head",
+        f"monitor.{env_id}.storage.worktree",
+        f"monitor.{env_id}.postgres.identity",
+    )
+    assert any(step_id.startswith("monitor.project_") for step_id in process_ids)
+    snapshot = command.run()
+    assert snapshot.environments[0].git.head_sha == "abcdef0123456789"
+    assert snapshot.environments[0].git.branch == "feature"
+    assert snapshot.environments[0].git.ahead == 2
+    assert snapshot.environments[0].git.behind == 1
+    assert snapshot.environments[0].git.diff == GitDiff(added=3, deleted=4)
+    assert snapshot.environments[0].storage.worktree_bytes == 42
+    assert snapshot.environments[0].storage.total_bytes == 54
+    assert snapshot.environments[0].storage.other_files_bytes == 12
+    assert tuple(step.step_id for step in executor.executed) == process_ids
+
+
+def test_snapshot_command_failed_git_and_docker_probes_are_not_retried(
+    tmp_path: Path,
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _seed_env(catalog, _make_env(env_id, worktree_path=str(worktree)))
+    catalog.close()
+
+    executor = RecordingExecutor(
+        result_factory=lambda step: ProcessResult(
+            argv=step.argv,
+            returncode=127 if ".git." in step.step_id or ".docker." in step.step_id else 0,
+            stdout="",
+            stderr="probe failed",
+            duration=0.0,
+            cwd=cast("PreparedStep", step).cwd,
+            environment=cast("PreparedStep", step).environment,
+        )
+    )
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3", _executor=executor)
+    command = monitor.snapshot_command()
+    process_ids = tuple(step.step_id for step in command.plan.process_steps)
+
+    snapshot = command.run()
+
+    assert snapshot.environments[0].git.state is GitActivityState.ORPHAN
+    assert tuple(step.step_id for step in executor.executed) == process_ids
+
+
+def test_hanging_storage_probe_is_bounded_and_keeps_sibling_observations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The installed-environment inventory remains useful if one probe hangs."""
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _seed_env(
+        catalog,
+        _make_env(
+            env_id,
+            worktree_path=str(worktree),
+            source_db_name=None,
+        ),
+    )
+    catalog.close()
+
+    hanging = tmp_path / "hanging-du"
+    hanging.write_text("#!/bin/sh\nexec sleep 10\n", encoding="utf-8")
+    hanging.chmod(0o755)
+    real_which = shutil.which
+
+    def which(name: str) -> str | None:
+        return str(hanging) if name == "du" else real_which(name)
+
+    monkeypatch.setattr("odoo_instance_sdk.resources.monitor.shutil.which", which)
+    monkeypatch.setattr("odoo_instance_sdk.resources.monitor._PROBE_TIMEOUT_SECONDS", 0.05)
+
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        git_provider=FakeGitProvider(),
+        docker_provider=FakeDockerProvider(),
+        _executor=SubprocessExecutor(),
+    )
+
+    snapshot = monitor.snapshot()
+
+    assert len(snapshot.environments) == 1
+    assert snapshot.environments[0].git.branch == "main"
+    assert snapshot.environments[0].storage.complete is False
+
+
+def test_watch_builds_a_fresh_snapshot_command_per_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = Snapshot(
+        schema_version=3,
+        generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+        projects=(),
+        environments=(),
+    )
+    monitor = EnvironmentMonitor()
+    commands: list[Command[Snapshot]] = []
+
+    original = EnvironmentMonitor.snapshot_command
+
+    def fresh(
+        self: EnvironmentMonitor,
+        project_id: str | None = None,
+        *,
+        include_removed: bool = False,
+    ) -> Command[Snapshot]:
+        command = original(self, project_id, include_removed=include_removed)
+        commands.append(command)
+        return command
+
+    monkeypatch.setattr(
+        EnvironmentMonitor,
+        "_snapshot_impl",
+        lambda _self, **_kwargs: expected,
+    )
+    monkeypatch.setattr(EnvironmentMonitor, "snapshot_command", fresh)
+
+    async def take_two() -> None:
+        generator = cast("AsyncGenerator[Snapshot, None]", monitor.watch(interval=0.1))
+        await generator.__anext__()
+        await generator.__anext__()
+        await generator.aclose()
+
+    asyncio.run(take_two())
+    assert len(commands) == 2
+    assert commands[0] is not commands[1]
+    assert commands[0].plan == commands[1].plan
 
 
 def test_watch_cancellation_cleans_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -23,4 +23,18 @@ def sanitized_child_environment(
     return child
 
 
-__all__ = ["sanitized_child_environment"]
+def captured_child_environment(
+    overrides: Mapping[str, str] | None = None,
+) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
+    """Capture exact child inputs and keep explicit overrides separately.
+
+    The first tuple is private execution state.  The second is the only
+    environment data eligible for a public command projection.
+    """
+    explicit = sanitized_child_environment(overrides or {})
+    child = sanitized_child_environment(None)
+    child.update(explicit)
+    return tuple(sorted(child.items())), tuple(sorted(explicit.items()))
+
+
+__all__ = ["captured_child_environment", "sanitized_child_environment"]

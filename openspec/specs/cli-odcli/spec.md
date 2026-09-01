@@ -147,15 +147,38 @@ Command-specific context handling MUST follow these rules.
 
 ### Requirement: Stable machine output
 
-The exact bounded structured leaf inventory is: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `eval`, `exec`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Each SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Existing `--json` SHALL remain a backward-compatible alias for `--format json`. Supplying `--json` with `--format toon` or `--format rich` SHALL be a Click usage error with exit code `2`; supplying `--json --format json` SHALL be accepted. `run`, interactive `shell`, and `logs --follow` SHALL remain raw-streaming and SHALL accept neither document output nor a Rich live wrapper.
+The exact bounded structured leaf inventory for normal execution SHALL be the canonical `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` data, currently: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `db refresh`, `db reset-admin-password`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. The spec and its tests SHALL derive/verify this one canonical inventory rather than maintain a second table. Each bounded normal-execution leaf SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Existing `--json` SHALL remain a backward-compatible alias for `--format json`. Supplying `--json` with `--format toon` or `--format rich` SHALL be a Click usage error with exit code `2`; supplying `--json --format json` SHALL be accepted. During normal execution, `run`, interactive `shell`, and `logs --follow` SHALL remain raw-streaming and SHALL not emit a document or use a Rich live wrapper. Eligible spawning `run` and `shell` SHALL accept document-format options only together with `--dry-run`; dry-run suppresses native execution and emits one bounded plan document in Rich, JSON, or TOON, with `--json` equivalent to `--format json`.
 
-The CLI SHALL define one CLI-only `OutputMode` with values `rich`, `json`, and `toon`. The mode and envelope types SHALL NOT become public SDK models or FastAPI response models. Each successful or failed bounded operation SHALL first build one JSON-safe CLI envelope v1 containing `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, and `warnings`; success SHALL contain equal `result` and `data`, and failure SHALL contain stable `error.code` and sanitized `error.message`.
+The CLI SHALL define one CLI-only `OutputMode` with values `rich`, `json`, and `toon`. The mode and envelope types SHALL NOT become public SDK models or FastAPI response models. Each successful or failed bounded operation, including bounded dry-run for an otherwise native-stream command, SHALL first build one JSON-safe CLI envelope v1 containing `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, and `warnings`; success SHALL contain equal `result` and `data`, and failure SHALL contain stable `error.code` and sanitized `error.message`.
 
 JSON and TOON SHALL serialize that exact envelope without building format-specific result graphs. Decoding a TOON document with the selected strict decoder SHALL yield the same JSON value as decoding JSON output for the same operation. Machine modes SHALL emit exactly one UTF-8 document to stdout with no ANSI, prompt, status, progress, or external log text; diagnostics SHALL go to stderr. Renderer selection SHALL NOT change operation execution, exception mapping, or exit code. Native Click parse failures that occur before output-mode resolution SHALL retain Click's stderr usage output and exit code `2`.
 
 For `env remove`, JSON and TOON document modes (including the `--json` alias) SHALL never call `click.confirm`. Without `--yes`, they SHALL NOT execute removal and SHALL emit exactly one sanitized failure envelope with `error.code="confirmation_required"` and exit code `1`. With `--yes`, JSON and TOON SHALL execute the same removal operation and normal success/failure mapping. Interactive Rich mode SHALL retain its existing confirmation behavior.
 
 Rich renderers SHALL remain adjacent to the concrete commands whose typed results they render. They MAY use `Table`, `Status`, `Progress`, and `Live` only when appropriate to the operation; they SHALL NOT introduce a generic renderer interface, registry, or DSL.
+
+#### Scenario: Native command dry-run supports every bounded format
+
+- **WHEN** `odcli run --dry-run` or spawning `odcli shell --dry-run` is requested with `--format rich|json|toon` or `--json`
+- **THEN** output contains exactly one bounded plan with `dry_run=true` in the selected format
+- **AND** `--json` and `--format json` produce equivalent JSON documents
+- **AND** no native child stream starts
+
+#### Scenario: Normal native command stays raw
+
+- **WHEN** `odcli run` or interactive `odcli shell` executes without `--dry-run`
+- **THEN** its inherited stream is not wrapped in a bounded document or Rich live view
+
+#### Scenario: Normal native command rejects machine options
+
+- **WHEN** `odcli run` or spawning `odcli shell` is invoked with `--format` or `--json` but without `--dry-run`
+- **THEN** Click exits `2` before invoking SDK code or starting a process
+
+#### Scenario: Canonical bounded inventory remains single-source
+
+- **WHEN** the stable machine-output characterization gate compares the documented normal-execution leaves
+- **THEN** they equal canonical `PUBLIC_LEAF_CASES`, including `test`, `db refresh`, and `db reset-admin-password`
+- **AND** no second bounded-leaf table is introduced
 
 #### Scenario: JSON envelope
 
@@ -930,3 +953,18 @@ Passwords, secret environment values, multipart bodies, complete Odoo config con
 
 - **WHEN** reset fails after restore
 - **THEN** the failure identifies retained backup/database and unchanged default without including `admin` as a password field/value
+
+### Requirement: Shared confirmation ordering
+
+For commands requiring confirmation, plan construction SHALL occur before confirmation. Machine modes and dry-run SHALL never prompt; dry-run SHALL stop after valid plan emission, while normal machine mode SHALL retain each command's existing explicit-confirmation requirement.
+
+#### Scenario: Dry-run of destructive command
+
+- **WHEN** a destructive command is invoked with `--dry-run` and without its apply/yes flag
+- **THEN** the valid plan is emitted without prompting or mutating
+
+#### Scenario: Normal machine removal lacks confirmation
+
+- **WHEN** `env remove` runs in JSON or TOON mode without `--yes` and without `--dry-run`
+- **THEN** it retains the existing `confirmation_required` failure and performs no removal
+

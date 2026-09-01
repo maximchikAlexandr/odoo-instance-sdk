@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import contextlib
+import shutil
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -13,6 +15,7 @@ from odoo_instance_sdk.exceptions import (
     BackupValidationUnavailableError,
 )
 from odoo_instance_sdk.internal.backup_validation import validate_dump, validate_zip
+from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import (
     Backup,
@@ -26,6 +29,15 @@ from odoo_instance_sdk.models import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        ProcessExecutor,
+        RunContext,
+    )
+
+T = TypeVar("T")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -81,6 +93,20 @@ class BackupResource:
         return tuple(events)
 
     def delete(self, backup: Backup) -> BackupDeletionResult:
+        return self.delete_command(backup).run()
+
+    def delete_command(
+        self, backup: Backup, *, executor: ProcessExecutor | None = None
+    ) -> Command[BackupDeletionResult]:
+        return self._command(
+            "backup.delete",
+            "Delete a backup artifact and record its deletion",
+            lambda: self._delete_impl(backup),
+            executor=executor,
+            mutating=True,
+        )
+
+    def _delete_impl(self, backup: Backup) -> BackupDeletionResult:
         catalog = self._client.get_catalog()
         existing = catalog.get_by_id(str(backup.id))
 
@@ -122,6 +148,58 @@ class BackupResource:
         raise_if_unavailable: bool = False,
         timeout: float = 60.0,
     ) -> BackupValidationResult:
+        return self.validate_command(
+            backup,
+            raise_if_unavailable=raise_if_unavailable,
+            timeout=timeout,
+        ).run()
+
+    def validate_command(
+        self,
+        backup: Backup,
+        *,
+        raise_if_unavailable: bool = False,
+        timeout: float = 60.0,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[BackupValidationResult]:
+        from odoo_instance_sdk.internal.proc import PreparedStep
+
+        steps: tuple[PreparedStep, ...] = ()
+        if backup.format == BackupFormat.DUMP:
+            executable = shutil.which("pg_restore")
+            if executable is not None:
+                steps = (
+                    PreparedStep(
+                        step_id="backup.validate.pg-restore",
+                        argv=(executable, "--list", str(Path(backup.path))),
+                        environment_snapshot=tuple(sorted(sanitized_child_environment().items())),
+                        timeout=timeout,
+                        read_only=True,
+                        text=True,
+                    ),
+                )
+        return self._command(
+            "backup.validate",
+            "Validate a backup artifact",
+            lambda: self._validate_impl(
+                backup,
+                raise_if_unavailable=raise_if_unavailable,
+                timeout=timeout,
+                process_step_id=(steps[0].step_id if steps else None),
+            ),
+            executor=executor,
+            read_only=True,
+            steps=steps,
+        )
+
+    def _validate_impl(
+        self,
+        backup: Backup,
+        *,
+        raise_if_unavailable: bool,
+        timeout: float,
+        process_step_id: str | None = None,
+    ) -> BackupValidationResult:
         catalog = self._client.get_catalog()
         catalog.verify_identity(backup, verify_content=True)
 
@@ -130,7 +208,10 @@ class BackupResource:
 
         if backup.format == BackupFormat.DUMP:
             return self._validate_dump(
-                backup, timeout=timeout, raise_if_unavailable=raise_if_unavailable
+                backup,
+                timeout=timeout,
+                raise_if_unavailable=raise_if_unavailable,
+                process_step_id=process_step_id,
             )
 
         zip_result = validate_zip(Path(backup.path))
@@ -142,18 +223,58 @@ class BackupResource:
             db_version=zip_result.db_version,
         )
 
+    def _command(
+        self,
+        step_id: str,
+        description: str,
+        callback: Callable[[], T],
+        *,
+        executor: ProcessExecutor | None,
+        read_only: bool = False,
+        mutating: bool = False,
+        steps: Sequence[PreparedStep] = (),
+    ) -> Command[T]:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
+
+        step = PreparedAction(
+            step_id=step_id,
+            action=step_id,
+            description=description,
+            read_only=read_only,
+            mutating=mutating,
+        )
+
+        def run(context: RunContext[T]) -> T:
+            context.action(step_id)
+            return callback()
+
+        prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (step, *steps)
+        from odoo_instance_sdk.internal.proc import prepared_command
+
+        return Command.from_prepared(
+            ExecutionPlan(steps=tuple(item.public_projection() for item in prepared_steps)),
+            prepared_command(
+                run,
+                prepared_steps,
+                executor=executor or SubprocessExecutor(),
+            ),
+        )
+
     def _validate_dump(
         self,
         backup: Backup,
         *,
         timeout: float,
         raise_if_unavailable: bool,
+        process_step_id: str | None,
     ) -> BackupValidationResult:
         try:
             dump_result = validate_dump(
                 Path(backup.path),
                 timeout=timeout,
                 raise_if_unavailable=raise_if_unavailable,
+                step_id=process_step_id,
             )
         except BackupValidationUnavailableError as e:
             self._record_and_build(

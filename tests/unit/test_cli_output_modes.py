@@ -1,32 +1,42 @@
 from __future__ import annotations
 
+import inspect
 import json
+import sys
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Literal, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
+import msgspec
 import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.output import (
+    JsonValue,
+    OutputDocument,
+    OutputError,
     OutputMode,
     build_envelope,
+    emit,
     emit_json_envelope,
+    failure_document,
+    model_to_dict,
     output_options,
     resolve_output_mode,
     rich_print,
+    run_or_preview,
+    success_document,
 )
+from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.automation import (
     DepsVerifyResult,
-    ModuleRecord,
-    ModuleUpdatePlan,
-    ShellOutcome,
-    TranslationExportResult,
 )
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
 from odoo_instance_sdk.models import (
@@ -34,83 +44,162 @@ from odoo_instance_sdk.models import (
     BackupFreshness,
     BackupProvenanceComparison,
     BackupProvenanceStatus,
+    CommandResult,
     DatabasePreparationAction,
     DatabasePreparationResult,
     DevelopmentEnvironment,
     EnvironmentCheckoutPlan,
-    EnvironmentCheckoutResult,
     EnvironmentPythonMode,
     OdooTestResult,
+    PostgresClusterState,
     Snapshot,
 )
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
-BOUNDED_LEAVES = (
-    ("init",),
-    ("doctor",),
-    ("env", "checkout"),
-    ("env", "list"),
-    ("env", "remove"),
-    ("env", "sync"),
-    ("db", "refresh"),
-    ("db", "reset-admin-password"),
-    ("eval",),
-    ("exec",),
-    ("test",),
-    ("module", "list"),
-    ("module", "update"),
-    ("module", "test"),
-    ("translations", "export"),
-    ("deps", "verify"),
-    ("vscode", "generate"),
-    ("postgres", "approve-image"),
-    ("postgres", "status"),
-    ("postgres", "up"),
-    ("postgres", "stop"),
-)
+T = TypeVar("T")
+
+
+def _emit_plan(command: Command[T], *, command_name: str, mode: OutputMode) -> int:
+    return emit(
+        success_document(
+            command=command_name,
+            result=model_to_dict(command.plan),
+            dry_run=True,
+        ),
+        mode,
+    )
+
+
+CliLeafClass = Literal[
+    "bounded-read-only",
+    "process-previewable-read-only",
+    "mutating-or-spawning",
+    "native-passthrough",
+    "rich-live",
+    "jsonl-stream",
+]
 
 
 @dataclass(frozen=True)
 class PublicLeafCase:
     path: tuple[str, ...]
     args: tuple[str, ...]
+    classification: CliLeafClass
+    requires_dry_run: bool
+    exception_reason: str | None = None
+    variants: tuple[CliLeafClass, ...] = ()
+
+    @property
+    def is_bounded(self) -> bool:
+        return self.classification in {
+            "bounded-read-only",
+            "process-previewable-read-only",
+            "mutating-or-spawning",
+        }
 
 
-PUBLIC_LEAF_CASES = tuple(
-    PublicLeafCase(path, args)
-    for path, args in zip(
-        BOUNDED_LEAVES,
+# This is the one CLI leaf inventory.  The output parity matrix below filters
+# this data by ``is_bounded``; native, Rich-live, and JSONL leaves remain here
+# with their explicit policy so a new leaf cannot avoid classification.
+_PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
+    PublicLeafCase(
+        ("init",),
+        ("init", "--no-input", "--odoo-bin", "/opt/odoo/odoo-bin", "--dry-run", "--project"),
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(("doctor",), ("doctor",), "bounded-read-only", False),
+    PublicLeafCase(
+        ("env", "checkout"), ("env", "checkout", "main", "--dry-run"), "mutating-or-spawning", True
+    ),
+    PublicLeafCase(
+        ("env", "list"),
+        ("env", "list", "--all-projects"),
+        "bounded-read-only",
+        False,
+        variants=("rich-live",),
+    ),
+    PublicLeafCase(
+        ("env", "remove"), ("env", "remove", "env-1", "--yes"), "mutating-or-spawning", True
+    ),
+    PublicLeafCase(("env", "sync"), ("env", "sync", "env-1"), "mutating-or-spawning", True),
+    PublicLeafCase(("db", "refresh"), ("db", "refresh"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("db", "reset-admin-password"), ("db", "reset-admin-password"), "mutating-or-spawning", True
+    ),
+    PublicLeafCase(("eval",), ("eval", "1"), "process-previewable-read-only", True),
+    PublicLeafCase(("exec",), ("exec", "-"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("test",), ("test", "--changed", "--dry-run"), "process-previewable-read-only", True
+    ),
+    PublicLeafCase(
+        ("module", "list"), ("module", "list", "sale"), "process-previewable-read-only", True
+    ),
+    PublicLeafCase(
+        ("module", "update"), ("module", "update", "sale", "--yes"), "mutating-or-spawning", True
+    ),
+    PublicLeafCase(
+        ("module", "test"),
+        ("module", "test", "sale", "--test-tags", "/sale"),
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(
+        ("translations", "export"),
+        ("translations", "export", "--module", "sale", "--language", "fr_FR"),
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(("deps", "verify"), ("deps", "verify"), "process-previewable-read-only", True),
+    PublicLeafCase(("vscode", "generate"), ("vscode", "generate"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("postgres", "approve-image"),
         (
-            ("init", "--no-input", "--odoo-bin", "/opt/odoo/odoo-bin", "--dry-run", "--project"),
-            ("doctor",),
-            ("env", "checkout", "main", "--dry-run"),
-            ("env", "list", "--all-projects"),
-            ("env", "remove", "env-1", "--yes"),
-            ("env", "sync", "env-1"),
-            ("db", "refresh"),
-            ("db", "reset-admin-password"),
-            ("eval", "1"),
-            ("exec", "-"),
-            ("test", "--changed", "--dry-run"),
-            ("module", "list", "sale"),
-            ("module", "update", "sale", "--yes"),
-            ("module", "test", "sale", "--test-tags", "/sale"),
-            ("translations", "export", "--module", "sale", "--language", "fr_FR"),
-            ("deps", "verify"),
-            ("vscode", "generate"),
-            (
-                "postgres",
-                "approve-image",
-                "--image-digest",
-                "docker.io/library/postgres@sha256:" + "a" * 64,
-            ),
-            ("postgres", "status"),
-            ("postgres", "up"),
-            ("postgres", "stop"),
+            "postgres",
+            "approve-image",
+            "--image-digest",
+            "docker.io/library/postgres@sha256:" + "a" * 64,
         ),
-    )
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(
+        ("postgres", "status"), ("postgres", "status"), "process-previewable-read-only", True
+    ),
+    PublicLeafCase(("postgres", "up"), ("postgres", "up"), "mutating-or-spawning", True),
+    PublicLeafCase(("postgres", "stop"), ("postgres", "stop"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("run",),
+        ("run",),
+        "native-passthrough",
+        True,
+        "normal execution owns inherited Odoo TTY streams; dry-run is still required",
+    ),
+    PublicLeafCase(
+        ("logs",),
+        ("logs", "--follow"),
+        "jsonl-stream",
+        False,
+        "read-only logfile subscription has no finite child-process or mutation plan",
+    ),
+    PublicLeafCase(
+        ("shell",),
+        ("shell",),
+        "native-passthrough",
+        True,
+        "normal execution owns interactive Odoo streams; dry-run is still required",
+    ),
+    PublicLeafCase(
+        ("monitor",),
+        ("monitor",),
+        "native-passthrough",
+        False,
+        "long-running monitor server has no finite bounded output plan",
+    ),
 )
+
+PUBLIC_LEAF_CASES = tuple(_PUBLIC_LEAF_DATA)
 
 
 def _matrix_environment() -> SimpleNamespace:
@@ -130,6 +219,53 @@ def _matrix_environment() -> SimpleNamespace:
         source_db_name=None,
         target_db_name="demo",
     )
+
+
+def _cli_leaf_paths(command: click.Command, prefix: tuple[str, ...] = ()) -> set[tuple[str, ...]]:
+    if not isinstance(command, click.Group):
+        return {prefix}
+    return {
+        leaf_path
+        for name, child in command.commands.items()
+        for leaf_path in _cli_leaf_paths(child, (*prefix, name))
+    }
+
+
+def test_public_leaf_inventory_is_complete_and_classified() -> None:
+    paths = [case.path for case in PUBLIC_LEAF_CASES]
+    assert len(paths) == len(set(paths))
+    assert set(paths) == _cli_leaf_paths(cli)
+    valid_classes = {
+        "bounded-read-only",
+        "process-previewable-read-only",
+        "mutating-or-spawning",
+        "native-passthrough",
+        "rich-live",
+        "jsonl-stream",
+    }
+    assert all(case.classification in valid_classes for case in PUBLIC_LEAF_CASES)
+    assert all(variant in valid_classes for case in PUBLIC_LEAF_CASES for variant in case.variants)
+    assert all(
+        case.exception_reason is not None
+        for case in PUBLIC_LEAF_CASES
+        if not case.is_bounded and not case.requires_dry_run
+    )
+    assert all(
+        case.requires_dry_run or case.exception_reason is not None
+        for case in PUBLIC_LEAF_CASES
+        if case.classification in {"mutating-or-spawning", "process-previewable-read-only"}
+    )
+
+
+def test_every_eligible_leaf_uses_the_shared_preview_or_run_helper() -> None:
+    """Keep the canonical inventory coupled to the executable composition path."""
+    for case in PUBLIC_LEAF_CASES:
+        if not case.requires_dry_run:
+            continue
+        callback = _command(case.path).callback
+        assert callback is not None
+        callback = inspect.unwrap(callback)
+        assert "run_or_preview" in callback.__code__.co_names, case.path
 
 
 def _matrix_checkout_plan(*, name: str = "demo") -> EnvironmentCheckoutPlan:
@@ -173,6 +309,38 @@ def _matrix_public_environment(*, name: str = "demo") -> DevelopmentEnvironment:
     )
 
 
+def _payload_stdout(payload: dict[str, Any], nonce: str = "deadbeefdeadbeef") -> str:
+    return f"__ODCLI_PAYLOAD__{nonce}__ {json.dumps(payload)} __END_PAYLOAD__{nonce}__\n"
+
+
+def _command_result(returncode: int, payload: dict[str, Any]) -> CommandResult:
+    return CommandResult(
+        args=[],
+        returncode=returncode,
+        stdout=_payload_stdout(payload),
+        stderr="",
+        duration=0.0,
+    )
+
+
+def _matrix_command(
+    value: T,
+    *,
+    error: BaseException | None = None,
+    private_projection: EnvironmentCheckoutPlan | None = None,
+) -> Command[T]:
+    def run(_context: object) -> T:
+        if error is not None:
+            raise error
+        return value
+
+    return Command.create(
+        ExecutionPlan(),
+        run,
+        private_projection=private_projection,
+    )
+
+
 def _patch_leaf_external(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
     case: PublicLeafCase,
@@ -202,12 +370,12 @@ def _patch_leaf_external(  # noqa: C901
     if path[:2] == ("env", "checkout"):
         client = MagicMock()
         plan = _matrix_checkout_plan()
-        client.environments.plan_checkout.side_effect = fail_operation if failing else None
-        client.environments.plan_checkout.return_value = plan
-        client.environments.checkout_with_plan.side_effect = fail_operation if failing else None
-        client.environments.checkout_with_plan.return_value = EnvironmentCheckoutResult(
-            environment=_matrix_public_environment(), plan=plan
-        )
+        if failing:
+            client.environments.checkout_command.side_effect = fail_operation
+        else:
+            client.environments.checkout_command.return_value = _matrix_command(
+                _matrix_public_environment(), private_projection=plan
+            )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.resolve_project_path", lambda _ctx: tmp_path
         )
@@ -216,9 +384,9 @@ def _patch_leaf_external(  # noqa: C901
 
     if path == ("db", "refresh"):
         client = MagicMock()
-        client.environments.refresh_database.side_effect = fail_operation if failing else None
-        client.environments.refresh_database.return_value = DatabasePreparationResult(
-            mode=DatabasePreparationAction.DOWNLOAD
+        client.environments.refresh_database_command.return_value = _matrix_command(
+            DatabasePreparationResult(mode=DatabasePreparationAction.DOWNLOAD),
+            error=RuntimeError("isolated external operation failed") if failing else None,
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
@@ -229,9 +397,9 @@ def _patch_leaf_external(  # noqa: C901
     if path == ("db", "reset-admin-password"):
         instance = MagicMock()
         instance.config.configured_database_names = ("demo",)
-        instance.databases.reset_admin_password.side_effect = fail_operation if failing else None
-        instance.databases.reset_admin_password.return_value = AdminPasswordResetResult(
-            database="demo", completed=True, xml_id="base.user_admin"
+        instance.databases.reset_admin_password_command.return_value = _matrix_command(
+            AdminPasswordResetResult(database="demo", completed=True, xml_id="base.user_admin"),
+            error=RuntimeError("isolated external operation failed") if failing else None,
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.db.ready_instance",
@@ -261,12 +429,16 @@ def _patch_leaf_external(  # noqa: C901
         client = MagicMock()
         env = _matrix_environment()
         client.environments.get.return_value = env
-        client.environments.sync_python.return_value = env
-        if failing:
-            if path[1] == "remove":
-                client.environments.get.side_effect = fail_operation
-            else:
-                client.environments.sync_python.side_effect = fail_operation
+        client.environments.remove_command.return_value = _matrix_command(
+            None,
+            error=RuntimeError("isolated external operation failed") if failing else None,
+        )
+        client.environments.sync_python_command.return_value = _matrix_command(
+            env,
+            error=RuntimeError("isolated external operation failed") if failing else None,
+        )
+        if failing and path[1] == "remove":
+            client.environments.get.side_effect = fail_operation
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.resolve_project_path", lambda _ctx: tmp_path
         )
@@ -293,28 +465,35 @@ def _patch_leaf_external(  # noqa: C901
 
     if path == ("eval",):
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.eval_expression",
+            "odoo_instance_sdk.cli.eval_expression_command",
             fail_operation
             if failing
-            else lambda *_args, **_kwargs: ShellOutcome(0, "", "", {"result": 42}),
+            else lambda *_args, **_kwargs: _matrix_command(_command_result(0, {"result": 42})),
         )
         return
 
     if path == ("exec",):
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.exec_script",
+            "odoo_instance_sdk.cli.exec_script_command",
             fail_operation
             if failing
-            else lambda *_args, **_kwargs: ShellOutcome(0, "", "", {"result": "ok"}),
+            else lambda *_args, **_kwargs: _matrix_command(
+                _command_result(0, {"returncode": 0, "stdout": "", "stderr": ""})
+            ),
         )
         return
 
     if path == ("module", "list"):
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.list_modules",
+            "odoo_instance_sdk.cli.list_modules_command",
             fail_operation
             if failing
-            else lambda *_args, **_kwargs: [ModuleRecord("sale", "installed")],
+            else lambda *_args, **_kwargs: _matrix_command(
+                _command_result(
+                    0,
+                    {"result": [{"name": "sale", "state": "installed"}]},
+                )
+            ),
         )
         return
 
@@ -334,18 +513,37 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.commands.test.resolve_changed_selection",
             fail_operation if failing else lambda *_args, **_kwargs: selection_plan,
         )
+        if not failing:
+            monkeypatch.setattr(
+                "odoo_instance_sdk.commands.test.run_odoo_tests_command",
+                lambda *_args, **_kwargs: _matrix_command(
+                    (
+                        OdooTestResult(
+                            counts={
+                                "tests": 1,
+                                "successful": 1,
+                                "failed": 0,
+                                "errors": 0,
+                                "skipped": 0,
+                            },
+                            failures=False,
+                            zero_tests=False,
+                            exit_code=0,
+                        ),
+                        None,
+                    )
+                ),
+            )
         return
 
     if path == ("module", "update"):
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.plan_module_update",
+            "odoo_instance_sdk.cli.update_modules_command",
             fail_operation
             if failing
-            else lambda *_args, **_kwargs: ModuleUpdatePlan(modules=["sale"]),
-        )
-        monkeypatch.setattr(
-            "odoo_instance_sdk.cli.update_modules",
-            lambda *_args, **_kwargs: ShellOutcome(0, "", "", {"result": {"updated": ["sale"]}}),
+            else lambda *_args, **_kwargs: _matrix_command(
+                _command_result(0, {"result": {"updated": ["sale"]}})
+            ),
         )
         return
 
@@ -365,42 +563,40 @@ def _patch_leaf_external(  # noqa: C901
             ),
         )
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.run_module_tests",
+            "odoo_instance_sdk.cli.module_tests_command",
             fail_operation
             if failing
-            else lambda *_args, **_kwargs: (
-                OdooTestResult(
-                    counts={
-                        "tests": 1,
-                        "successful": 1,
-                        "failed": 0,
-                        "errors": 0,
-                        "skipped": 0,
-                    },
-                    failures=False,
-                    zero_tests=False,
-                    exit_code=0,
-                ),
-                None,
+            else lambda *_args, **_kwargs: _matrix_command(
+                (
+                    OdooTestResult(
+                        counts={
+                            "tests": 1,
+                            "successful": 1,
+                            "failed": 0,
+                            "errors": 0,
+                            "skipped": 0,
+                        },
+                        failures=False,
+                        zero_tests=False,
+                        exit_code=0,
+                    ),
+                    None,
+                )
             ),
         )
         return
 
     if path == ("translations", "export"):
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.export_translations",
-            fail_operation
-            if failing
-            else lambda *_args, **_kwargs: [
-                TranslationExportResult("sale", "fr_FR", "fr.po", tmp_path / "fr.po", 2)
-            ],
+            "odoo_instance_sdk.cli.export_translations_command",
+            fail_operation if failing else lambda *_args, **_kwargs: _matrix_command([]),
         )
         return
 
     if path == ("deps", "verify"):
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.verify_deps",
-            fail_operation if failing else lambda **_kwargs: DepsVerifyResult(),
+            "odoo_instance_sdk.cli.verify_deps_command",
+            fail_operation if failing else lambda **_kwargs: _matrix_command(DepsVerifyResult()),
         )
         return
 
@@ -420,26 +616,42 @@ def _patch_leaf_external(  # noqa: C901
             endpoint_host = "127.0.0.1"
             endpoint_port = 5432
 
-            def approve_image(self, *_args: object, **_kwargs: object) -> None:
-                if failing:
-                    raise RuntimeError("isolated external operation failed")
+            @staticmethod
+            def _command(operation: Callable[[], T]) -> Command[T]:
+                return Command.create(ExecutionPlan(), lambda _context: operation(), ())
 
-            def status(self) -> object:
-                if failing:
-                    raise RuntimeError("isolated external operation failed")
-                from odoo_instance_sdk.models import PostgresClusterState
+            def approve_image_command(self, *_args: object, **_kwargs: object) -> Command[None]:
+                def operation() -> None:
+                    if failing:
+                        raise RuntimeError("isolated external operation failed")
 
-                return PostgresClusterState.HEALTHY
+                return self._command(operation)
 
-            def ensure_running(self, *, timeout: float) -> None:
+            def status_command(self) -> Command[PostgresClusterState]:
+                def operation() -> PostgresClusterState:
+                    if failing:
+                        raise RuntimeError("isolated external operation failed")
+                    return PostgresClusterState.HEALTHY
+
+                return self._command(operation)
+
+            def ensure_running_command(self, *, timeout: float) -> Command[None]:
                 _ = timeout
-                if failing:
-                    raise RuntimeError("isolated external operation failed")
 
-            def stop(self, *, timeout: float) -> None:
+                def operation() -> None:
+                    if failing:
+                        raise RuntimeError("isolated external operation failed")
+
+                return self._command(operation)
+
+            def stop_command(self, *, timeout: float) -> Command[None]:
                 _ = timeout
-                if failing:
-                    raise RuntimeError("isolated external operation failed")
+
+                def operation() -> None:
+                    if failing:
+                        raise RuntimeError("isolated external operation failed")
+
+                return self._command(operation)
 
             def to_diagnostic_dict(self) -> dict[str, object]:
                 return {
@@ -467,7 +679,11 @@ def _decode_document(document: str, mode: str) -> object:
     return decode(document, DecodeOptions(indent=2, strict=True))
 
 
-@pytest.mark.parametrize("case", PUBLIC_LEAF_CASES, ids=lambda case: ".".join(case.path))
+@pytest.mark.parametrize(
+    "case",
+    [case for case in PUBLIC_LEAF_CASES if case.is_bounded],
+    ids=lambda case: ".".join(case.path),
+)
 def test_public_cli_leaf_matrix_has_json_toon_parity(
     case: PublicLeafCase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -551,16 +767,24 @@ def _option_names(command: click.Command) -> set[str]:
 
 
 def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
-    for path in BOUNDED_LEAVES:
+    for case in PUBLIC_LEAF_CASES:
+        if not case.is_bounded:
+            continue
+        path = case.path
         command = _command(path)
         options = _option_names(command)
         assert "--format" in options, path
         assert "--json" in options, path
 
-    for path in (("run",), ("shell",), ("logs",), ("monitor",)):
+    for path in (("logs",), ("monitor",)):
         options = _option_names(_command(path))
         assert "--format" not in options, path
         assert "--json" not in options, path
+    for path in (("run",), ("shell",)):
+        options = _option_names(_command(path))
+        assert "--dry-run" in options, path
+        assert "--format" in options, path
+        assert "--json" in options, path
 
     root_result = CliRunner().invoke(cli, ["--format", "json", "env", "list"])
     assert root_result.exit_code == 2
@@ -583,7 +807,12 @@ def test_invalid_format_uses_native_click_parse_failure() -> None:
 
 
 def test_json_and_toon_emit_the_same_sanitized_envelope(capsys: pytest.CaptureFixture[str]) -> None:
-    result = {"message": "secret=***", "items": [], "enabled": True, "value": None}
+    result: dict[str, JsonValue] = {
+        "message": "secret=***",
+        "items": [],
+        "enabled": True,
+        "value": None,
+    }
     emit_json_envelope(ok=True, command="test", result=result, mode=OutputMode.JSON)
     json_document = capsys.readouterr().out
     emit_json_envelope(ok=True, command="test", result=result, mode=OutputMode.TOON)
@@ -595,10 +824,273 @@ def test_json_and_toon_emit_the_same_sanitized_envelope(capsys: pytest.CaptureFi
     toon_value = decode(toon_document, DecodeOptions(indent=2, strict=True))
     assert toon_value == json_value
     assert "\033[" not in json_document + toon_document
-    assert (
-        build_envelope(ok=False, command="test", error_message="token=hidden")["error"]["message"]
-        == "<redacted>"
+    failure = cast(
+        "dict[str, dict[str, JsonValue]]",
+        build_envelope(ok=False, command="test", error_message="token=hidden"),
     )
+    assert failure["error"]["message"] == "<redacted>"
+
+
+def test_typed_output_documents_are_frozen_and_keep_v1_shape() -> None:
+    success = success_document(
+        command="typed",
+        result={"secret": "password=hidden\x00", "items": [1, True]},
+        dry_run=True,
+    )
+    failure = failure_document(
+        command="typed",
+        error_code="stale_plan",
+        error_message="token=hidden",
+    )
+    assert isinstance(success, OutputDocument)
+    assert isinstance(failure.error, OutputError)
+    success_builtins = cast("dict[str, dict[str, JsonValue]]", msgspec.to_builtins(success))
+    failure_builtins = cast("dict[str, dict[str, JsonValue]]", msgspec.to_builtins(failure))
+    assert success_builtins["result"]["secret"] == r"password=hidden\x00"
+    assert failure_builtins["error"]["code"] == "stale_plan"
+    with pytest.raises(AttributeError):
+        success.ok = False  # type: ignore[misc]
+
+
+def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PreparedAction, RecordingExecutor, RunContext
+
+    executor = RecordingExecutor()
+    builds = 0
+    confirmations: list[str] = []
+
+    def build() -> Command[str]:
+        nonlocal builds
+        builds += 1
+        action = PreparedAction("typed.action")
+
+        def callback(context: RunContext[str]) -> str:
+            context.action("typed.action")
+            return "done"
+
+        return Command.create(
+            ExecutionPlan(
+                steps=(ActionStep(step_id="typed.action", action="inspect", description="inspect"),)
+            ),
+            callback,
+            (action,),
+            executor=executor,
+        )
+
+    def result_payload(item: str | None) -> dict[str, JsonValue]:
+        return {"value": item}
+
+    status, value = run_or_preview(
+        build,
+        command_name="typed",
+        mode=OutputMode.JSON,
+        dry_run=True,
+        result=result_payload,
+        confirm=lambda: confirmations.append("confirmed"),
+    )
+    assert (status, value, builds, confirmations, executor.executed) == (0, None, 1, [], [])
+    assert json.loads(capsys.readouterr().out)["dry_run"] is True
+
+    status, value = run_or_preview(
+        build,
+        command_name="typed",
+        mode=OutputMode.JSON,
+        dry_run=False,
+        result=lambda item: {"value": item},
+        confirm=lambda: confirmations.append("confirmed"),
+    )
+    assert status == 0
+    assert value == "done"
+    assert builds == 2
+    assert confirmations == ["confirmed"]
+
+
+def test_rich_plan_projection_preserves_ordered_steps_and_multiline_input(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rich is a pure, readable projection of the same redacted plan."""
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, RunContext
+
+    private_process = PreparedStep(
+        step_id="instance.shell_script",
+        argv=("odoo", "--config", "password=top secret"),
+        stdin=b"password=top secret\nprint('ready')\n",
+        public_input_preview="password=top secret\nprint('ready')\n",
+        secret_values=("top secret",),
+        cwd="/private/worktree",
+        environment=(("DB_PASSWORD", "top secret"),),
+        mutating=True,
+    )
+    private_action = PreparedAction(
+        "instance.commit",
+        action="commit",
+        description="Commit transaction",
+        mutating=True,
+    )
+    plan = ExecutionPlan(
+        steps=(private_process.public_projection(), private_action.public_projection()),
+        observations=({"probe": "git", "read_only": True, "executed_during_planning": True},),
+        warnings=("rollback remains available",),
+    ).with_fingerprint(secrets=("top secret",))
+
+    def callback(context: RunContext[None]) -> None:
+        context.process("instance.shell_script")
+        context.action("instance.commit")
+
+    command = Command.create(plan, callback, steps=(private_process, private_action))
+    assert _emit_plan(command, command_name="instance.shell", mode=OutputMode.RICH) == 0
+    rendered = capsys.readouterr().out
+    assert "1. process instance.shell_script [mutating]" in rendered
+    assert "2. action instance.commit [mutating]" in rendered
+    assert "stdin: |" in rendered
+    assert "print('ready')" in rendered
+    assert "classification: mutating" in rendered
+    assert "top secret" not in rendered
+    assert "observations:" in rendered
+    assert "warnings:" in rendered
+    assert plan.fingerprint in rendered
+
+
+def test_plan_machine_transports_are_equal_for_one_frozen_redacted_plan(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+
+    plan = ExecutionPlan(
+        observations=({"token": "<redacted>", "read_only": True},),
+        warnings=("secret remains redacted",),
+    ).with_fingerprint(secrets=("token-value",))
+    command = Command.create(plan, lambda _context: None)
+
+    _emit_plan(command, command_name="probe", mode=OutputMode.JSON)
+    json_document = capsys.readouterr().out
+    _emit_plan(command, command_name="probe", mode=OutputMode.TOON)
+    toon_document = capsys.readouterr().out
+    from toon import DecodeOptions, decode
+
+    assert decode(toon_document, DecodeOptions(indent=2, strict=True)) == json.loads(json_document)
+
+
+def test_capture_boundary_corpus_is_secret_free_in_all_public_surfaces(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One captured private step must stay safe in plans, results, and failures."""
+    from odoo_instance_sdk.internal.proc import (
+        PreparedStep,
+        ProcessResult,
+        ProcessSpawnError,
+        ProcessTimeoutError,
+        SubprocessExecutor,
+    )
+    from odoo_instance_sdk.resources.instance import _command_result
+
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature"
+    cookie = "session=oauth-cookie-value"
+    bearer = "bearer-oauth-value"
+    uri_password = "uri-password-value"
+    client_secret = "client-secret-value"
+    refresh_token = "refresh-token-value"
+    database_url = "postgresql://db-user:database-url-password@example.test/app"
+    private = PreparedStep(
+        step_id="security.corpus",
+        argv=(
+            "tool",
+            "--profile=staging",
+            "--client-secret",
+            client_secret,
+            f"--refresh-token={refresh_token}",
+            "--header",
+            f"Authorization: Bearer {bearer}",
+            "--cookie",
+            cookie,
+            f"https://oauth:{uri_password}@example.test/callback",
+            jwt,
+        ),
+        environment=(
+            ("DATABASE_URL", database_url),
+            ("OAUTH_COOKIE", cookie),
+            ("LANG", "C"),
+        ),
+        environment_snapshot=(
+            ("DATABASE_URL", database_url),
+            ("OAUTH_COOKIE", cookie),
+            ("INHERITED_PRIVATE", "inherited-secret"),
+        ),
+        environment_overrides=(
+            ("DATABASE_URL", database_url),
+            ("OAUTH_COOKIE", cookie),
+            ("LANG", "C"),
+        ),
+        stdin=b'password = "quoted\nmultiline-secret"\n',
+        public_input_preview=None,
+        secret_values=(
+            client_secret,
+            refresh_token,
+            bearer,
+            cookie,
+            uri_password,
+            jwt,
+            database_url,
+            "inherited-secret",
+            "multiline-secret",
+        ),
+        timeout=0.01,
+    )
+    command: Command[ProcessResult] = Command.create(
+        ExecutionPlan(steps=(private.public_projection(),)).with_fingerprint(
+            secrets=private.secret_values
+        ),
+        lambda context: context.process(private.step_id),
+        steps=(private,),
+    )
+    raw_values = (*private.secret_values, "quoted")
+
+    for mode in (OutputMode.RICH, OutputMode.JSON, OutputMode.TOON):
+        _emit_plan(command, command_name="security.corpus", mode=mode)
+        rendered = capsys.readouterr().out
+        for value in raw_values:
+            assert value not in rendered
+    assert "--profile=staging" in private.public_projection().argv
+
+    result = _command_result(
+        ProcessResult(
+            argv=private.argv,
+            returncode=9,
+            stdout=f"jwt={jwt}\n{database_url}\n{cookie}\n",
+            stderr=f"Authorization: Bearer {bearer}; uri={uri_password}\n",
+            duration=0.01,
+            cwd=private.cwd,
+            environment=private.environment,
+        ),
+        private.timeout,
+        private,
+    )
+    result_text = repr(result)
+    for value in raw_values:
+        assert value not in result_text
+
+    missing = PreparedStep(
+        step_id="security.spawn",
+        argv=("/definitely/missing", "--client-secret", client_secret),
+        secret_values=(client_secret,),
+    )
+    with pytest.raises(ProcessSpawnError) as spawn:
+        SubprocessExecutor().execute(missing)
+    assert client_secret not in str(spawn.value)
+
+    timeout_step = PreparedStep(
+        step_id="security.timeout",
+        argv=(sys.executable, "-c", "import time; time.sleep(1)", "--token", jwt),
+        secret_values=(jwt,),
+        timeout=0.01,
+    )
+    with pytest.raises(ProcessTimeoutError) as timed_out:
+        SubprocessExecutor().execute(timeout_step)
+    assert jwt not in str(timed_out.value)
 
 
 @pytest.mark.parametrize("source", ["direct", "imported", "catalog"])
@@ -825,6 +1317,7 @@ def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path
     )
     client = MagicMock()
     client.environments.get.return_value = env
+    client.environments.remove_command.return_value = _matrix_command(None)
     with (
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
@@ -835,7 +1328,8 @@ def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
     assert result.output.count("schema_version") == 1
-    client.environments.remove.assert_called_once_with(env)
+    client.environments.remove_command.assert_called_once_with(env)
+    client.environments.remove.assert_not_called()
     confirm.assert_not_called()
 
 
@@ -885,8 +1379,8 @@ def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) 
         warnings=("backup is stale and will be refreshed",),
     )
     client = MagicMock()
-    client.environments.checkout_with_plan.return_value = EnvironmentCheckoutResult(
-        environment=_matrix_public_environment(), plan=plan
+    client.environments.checkout_command.return_value = _matrix_command(
+        _matrix_public_environment(), private_projection=plan
     )
 
     with (
@@ -910,6 +1404,117 @@ def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) 
         "python_selector",
     ):
         assert f"{private_field}:" not in result.output
+
+
+def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
+        RecordingExecutor,
+        RunContext,
+    )
+
+    domain_plan = _matrix_checkout_plan()
+    dry_effects: list[str] = []
+    dry_executor = RecordingExecutor()
+    dry_private_process = PreparedStep(
+        step_id="checkout.worktree",
+        argv=("git", "-C", "/project", "worktree", "add", "secret-target"),
+        secret_values=("secret-target",),
+        mutating=True,
+    )
+    dry_private_action = PreparedAction("checkout.cleanup")
+    dry_public_process = dry_private_process.public_projection()
+    dry_public_plan = ExecutionPlan(
+        steps=(
+            dry_public_process,
+            ActionStep(
+                step_id="checkout.cleanup",
+                action="cleanup_on_failure",
+                description="Remove owned checkout artifacts if execution fails",
+                mutating=True,
+            ),
+        ),
+        observations=(
+            {
+                "argv": ["git", "--version"],
+                "returncode": 0,
+                "read_only": True,
+                "executed_during_planning": True,
+            },
+        ),
+        warnings=("secret-target will remain redacted",),
+    )
+    dry_public_plan = dry_public_plan.with_fingerprint(secrets=("secret-target",))
+
+    def dry_callback(_context: object) -> DevelopmentEnvironment:
+        dry_effects.append("run")
+        return _matrix_public_environment()
+
+    dry_command = Command.create(
+        dry_public_plan,
+        dry_callback,
+        steps=(dry_private_process, dry_private_action),
+        executor=dry_executor,
+        private_projection=domain_plan,
+    )
+    client = MagicMock()
+    client.environments.checkout_command.return_value = dry_command
+
+    with (
+        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+    ):
+        dry_result = CliRunner().invoke(cli, ["env", "checkout", "feature", "--dry-run", "--json"])
+
+    assert dry_result.exit_code == 0, dry_result.output
+    dry_payload = json.loads(dry_result.stdout)["result"]
+    assert dry_payload == json.loads(json.dumps(model_to_dict(dry_command.plan)))
+    assert dry_payload["steps"][0]["argv"][-1] == "<redacted>"
+    assert dry_payload["observations"][0]["executed_during_planning"] is True
+    assert dry_payload["fingerprint"] == dry_command.plan.fingerprint
+    assert dry_effects == []
+    assert dry_executor.executed == []
+    client.environments.checkout_command.assert_called_once()
+    client.environments.checkout_with_plan.assert_not_called()
+
+    run_executor = RecordingExecutor()
+    run_effects: list[str] = []
+
+    def run_callback_with_steps(
+        context: RunContext[DevelopmentEnvironment],
+    ) -> DevelopmentEnvironment:
+        context.process("checkout.worktree")
+        context.action("checkout.cleanup")
+        run_effects.append("run")
+        return _matrix_public_environment()
+
+    run_command = Command.create(
+        dry_public_plan,
+        run_callback_with_steps,
+        steps=(dry_private_process, dry_private_action),
+        executor=run_executor,
+        private_projection=domain_plan,
+    )
+    client.environments.checkout_command.reset_mock()
+    client.environments.checkout_command.return_value = run_command
+    with (
+        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+    ):
+        run_result = CliRunner().invoke(cli, ["env", "checkout", "feature"])
+
+    assert run_result.exit_code == 0, run_result.output
+    assert run_effects == ["run"]
+    assert run_executor.executed == [dry_private_process]
+    assert msgspec.to_builtins(run_command.plan.steps[0]) == msgspec.to_builtins(
+        dry_private_process.public_projection()
+    )
+    client.environments.checkout_command.assert_called_once()
+    client.environments.checkout_with_plan.assert_not_called()
 
 
 def test_rich_print_sanitizes_by_default_and_preserves_document_line_feeds(
@@ -968,13 +1573,13 @@ def test_public_human_callbacks_neutralize_terminal_controls(
         client.environments.get.return_value = env
         if command == "checkout":
             plan = _matrix_checkout_plan(name=f"evil-{payload}")
-            client.environments.plan_checkout.return_value = plan
-            client.environments.checkout_with_plan.return_value = EnvironmentCheckoutResult(
-                environment=_matrix_public_environment(name=f"evil-{payload}"), plan=plan
+            client.environments.checkout_command.return_value = _matrix_command(
+                _matrix_public_environment(name=f"evil-{payload}"), private_projection=plan
             )
+        elif command == "remove":
+            client.environments.remove_command.return_value = _matrix_command(None)
         else:
-            client.environments.checkout.return_value = env
-        client.environments.sync_python.return_value = env
+            client.environments.sync_python_command.return_value = _matrix_command(env)
         with (
             patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
             patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),

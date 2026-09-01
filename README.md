@@ -57,6 +57,14 @@ promise: commands that support it expose `--format rich|json|toon` and/or
 `--json`. Supplying `--json` with `--format json` is allowed where both are
 documented. TOON is the compact structured form.
 
+All bounded mutating or process-backed leaves support the same inspect-first
+shape: add `--dry-run` to render the captured typed plan, then omit it to run
+the command. The preview contains ordered process/action steps, redacted
+arguments and stdin, planning observations, warnings, classifications, and a
+fingerprint. A preview never launches a process, prompts, or mutates the
+workspace. See [execution boundary and CLI inventory](docs/execution-boundary.md)
+for the complete eligibility table and the intentionally narrow exceptions.
+
 ## Common workflows
 
 ### Tests, modules, dependencies, translations, and VS Code
@@ -127,6 +135,22 @@ odcli --env feature/customer-credit logs --follow
 The interactive shell requires an interactive TTY. `logs --follow` stays
 attached until interrupted.
 
+Native `run` and interactive `shell` retain their normal foreground/TTY
+streams, but expose the same bounded preview contract:
+
+```bash
+odcli --env feature/customer-credit run --dry-run
+odcli --env feature/customer-credit run --dry-run --format json
+odcli --env feature/customer-credit shell --dry-run --format toon -- --dev
+```
+
+`--json` is the shorthand for `--format json`; both forms serialize the same
+captured plan. Supplying either output option without `--dry-run` is rejected
+by Click with exit `2` before SDK resolution or process launch. `logs
+--follow`, the monitor server, and normal interactive shell/run streams are
+documented native transports because they are intentionally unbounded or
+interactive rather than finite plan documents.
+
 ## Complete CLI command reference
 
 This is the complete shipped command-path inventory. The Click object
@@ -179,7 +203,9 @@ for database in instance.databases.list():
 ```
 
 See [Python SDK examples](docs/python-sdk.md) for runnable examples covering
-database backup/restore, processes, environments, PostgreSQL, and monitoring.
+database backup/restore, processes, environments, PostgreSQL, monitoring, and
+inspect-then-run command siblings. The complete boundary inventory and
+allowlist rationale are in [docs/execution-boundary.md](docs/execution-boundary.md).
 
 ## Monitor and local API
 

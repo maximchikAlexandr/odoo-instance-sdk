@@ -8,10 +8,14 @@ from typing import TypedDict
 import pytest
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
-from odoo_instance_sdk.storage.backup_catalog import CURRENT_SCHEMA_VERSION, BackupCatalog
+from odoo_instance_sdk.storage.backup_catalog import (
+    CURRENT_SCHEMA_VERSION,
+    BackupCatalog,
+    CatalogValue,
+)
 
 
-def _make_env(env_id: str) -> dict[str, object]:
+def _make_env(env_id: str) -> dict[str, CatalogValue]:
     return {
         "id": env_id,
         "name": "test",

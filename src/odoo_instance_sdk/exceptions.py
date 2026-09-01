@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
+
+type PlanJsonValue = (
+    None | bool | int | float | str | list[PlanJsonValue] | dict[str, PlanJsonValue]
+)
+
 
 class OdooInstanceSdkError(Exception):
     """Base exception for all SDK errors."""
@@ -11,6 +21,79 @@ class ConfigError(OdooInstanceSdkError):
 
 class CommandTimeoutError(OdooInstanceSdkError):
     """CLI command exceeded timeout."""  # ponytail: spec-mandated, not yet raised in this slice
+
+
+class PlanError(OdooInstanceSdkError):
+    """Base class for an expected command-planning failure."""
+
+    code = "plan_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: Mapping[str, PlanJsonValue] | None = None,
+    ) -> None:
+        self.details: dict[str, PlanJsonValue] = dict(details or {})
+        super().__init__(message)
+
+
+class PlanValidationError(PlanError):
+    """Captured inputs do not satisfy the operation's planning contract."""
+
+    code = "plan_validation"
+
+
+class StalePlanError(PlanError):
+    """A captured precondition changed before execution began."""
+
+    code = "stale_plan"
+
+    def __init__(
+        self,
+        message: str = "captured execution precondition changed",
+        *,
+        expected: PlanJsonValue | None = None,
+        actual: PlanJsonValue | None = None,
+    ) -> None:
+        self.expected = expected
+        self.actual = actual
+        details: dict[str, PlanJsonValue] = {}
+        if expected is not None:
+            details["expected"] = expected
+        if actual is not None:
+            details["actual"] = actual
+        super().__init__(message, details=details)
+
+
+class UnplannedStepError(PlanError):
+    """Execution requested a step absent from the immutable snapshot."""
+
+    code = "unplanned_step"
+
+    def __init__(self, step_id: str, *, reason: str = "step is not in the plan") -> None:
+        self.step_id = step_id
+        super().__init__(f"Unplanned execution step {step_id!r}: {reason}")
+
+
+class DuplicateStepError(PlanError):
+    """Execution requested one captured step more than once."""
+
+    code = "duplicate_step"
+
+    def __init__(self, step_id: str) -> None:
+        self.step_id = step_id
+        super().__init__(f"Execution step {step_id!r} was consumed more than once")
+
+
+class OmittedStepError(PlanError):
+    """The operation callback completed without consuming all captured steps."""
+
+    code = "omitted_step"
+
+    def __init__(self, step_ids: tuple[str, ...]) -> None:
+        self.step_ids = step_ids
+        super().__init__(f"Execution omitted planned steps: {', '.join(step_ids)}")
 
 
 class ProcessNotFoundError(OdooInstanceSdkError):
@@ -169,7 +252,7 @@ class EnvironmentConflictError(OdooInstanceSdkError):
     """Environment conflict (duplicate active env, port, ambiguous selector)."""
 
     def __init__(
-        self, code: str, message: str, *, details: dict[str, object] | None = None
+        self, code: str, message: str, *, details: dict[str, JsonValue] | None = None
     ) -> None:
         self.code = code
         self.details = details or {}
@@ -181,7 +264,11 @@ class EnvironmentResolutionError(EnvironmentConflictError):
 
     def __init__(self, message: str, *, candidates: list[str] | None = None) -> None:
         self.candidates = candidates or []
-        super().__init__("environment_resolution", message, details={"candidates": self.candidates})
+        super().__init__(
+            "environment_resolution",
+            message,
+            details={"candidates": cast("JsonValue", list(self.candidates))},
+        )
 
 
 class LockConflictError(OdooInstanceSdkError):

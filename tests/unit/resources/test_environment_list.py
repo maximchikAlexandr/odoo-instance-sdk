@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+from unittest.mock import MagicMock
 
 from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
+    EnvironmentResource,
     EnvironmentState,
 )
 
@@ -61,3 +63,36 @@ class TestEnvList:
         env_client.environments.checkout(project_manifest, "feat/all-proj", options=opts)
         envs = env_client.environments.list()
         assert len(envs) >= 1
+
+    def test_list_command_consumes_captured_git_identity_once(self, tmp_path: Path) -> None:
+        from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RecordingExecutor
+
+        client = MagicMock()
+        catalog = client.get_catalog.return_value
+        catalog.list_environments.return_value = []
+        resource = EnvironmentResource(_client=client)
+
+        def list_result(step: object) -> ProcessResult:
+            prepared = cast("PreparedStep", step)
+            return ProcessResult(
+                argv=prepared.argv,
+                returncode=0,
+                stdout=str(tmp_path) if prepared.step_id.endswith("toplevel") else ".git\n",
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+
+        executor = RecordingExecutor(result_factory=list_result)
+
+        result = resource.list_command(project=tmp_path, executor=executor).run()
+
+        assert result == []
+        assert [step.step_id for step in executor.executed] == [
+            "environment.list.git.toplevel",
+            "environment.list.git.common-dir",
+        ]
+        catalog.list_environments.assert_called_once_with(
+            git_common_dir=str((Path.cwd() / ".git").resolve()), include_removed=False
+        )

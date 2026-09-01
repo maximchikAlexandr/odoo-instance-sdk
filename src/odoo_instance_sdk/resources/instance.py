@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import os
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 from collections import deque
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO, cast
+from typing import TYPE_CHECKING, TextIO, TypeVar, cast
 
 import psutil
 
@@ -26,16 +29,24 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_db_names,
     parse_odoo_config,
 )
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
+from odoo_instance_sdk.internal.proc import (
+    PreparedAction,
+    PreparedStep,
+    ProcessExecutor,
+    ProcessHandle,
+    ProcessResult,
+    SubprocessExecutor,
+    terminate,
+    wait_foreground,
+)
+from odoo_instance_sdk.internal.process_env import (
+    captured_child_environment,
+    sanitized_child_environment,
+)
 from odoo_instance_sdk.internal.server import (
+    _write_secret_config,
+    cleanup_secret_config,
     get_process_status,
-    run_command,
-    run_foreground_process,
-    spawn_foreground_process,
-    start_process,
-    stop_process,
-    terminate_foreground_process,
-    wait_foreground_process_with_cleanup,
 )
 from odoo_instance_sdk.internal.urls import assert_local, normalize_base_url
 from odoo_instance_sdk.models import (
@@ -47,8 +58,22 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.resources.database import DatabaseResource
 
+T = TypeVar("T")
+
+
+def _build_cli_args(config: StartConfig, *, secret_config_path: str | None = None) -> list[str]:
+    """Resolve the shared non-launching CLI argument builder at the boundary."""
+    from odoo_instance_sdk.internal.server import _build_cli_args as build_args
+
+    if secret_config_path is None:
+        return build_args(config)
+    return build_args(config, secret_config_path=secret_config_path)
+
+
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -268,7 +293,11 @@ def _process_create_time(pid: int) -> float:
     return float(psutil.Process(pid).create_time())
 
 
-def _worktree_ref(cwd: str | Path | None) -> tuple[str, str]:
+def _worktree_ref(
+    cwd: str | Path | None,
+    *,
+    context: RunContext[T] | None = None,
+) -> tuple[str, str]:
     """Return ``(branch, commit_sha)`` for the worktree at ``cwd``.
 
     Best-effort: on any git failure returns ``("unknown", "")``.
@@ -277,26 +306,30 @@ def _worktree_ref(cwd: str | Path | None) -> tuple[str, str]:
         return "unknown", ""
     target = str(cwd)
     try:
-        branch_proc = subprocess.run(
-            ["git", "-C", target, "rev-parse", "--abbrev-ref", "HEAD"],
-            env=sanitized_child_environment(),
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        sha_proc = subprocess.run(
-            ["git", "-C", target, "rev-parse", "HEAD"],
-            env=sanitized_child_environment(),
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        if context is None:
+            from odoo_instance_sdk.internal.proc import run_captured
+
+            branch_proc = run_captured(
+                ("git", "-C", target, "rev-parse", "--abbrev-ref", "HEAD"),
+                env=sanitized_child_environment(),
+                timeout=10,
+                text=True,
+            )
+            sha_proc = run_captured(
+                ("git", "-C", target, "rev-parse", "HEAD"),
+                env=sanitized_child_environment(),
+                timeout=10,
+                text=True,
+            )
+        else:
+            branch_proc = cast("ProcessResult", context.process("instance.foreground.git.branch"))
+            sha_proc = cast("ProcessResult", context.process("instance.foreground.git.commit"))
     except (subprocess.SubprocessError, OSError):
         return "unknown", ""
-    branch = branch_proc.stdout.strip() if branch_proc.returncode == 0 else "unknown"
-    sha = sha_proc.stdout.strip() if sha_proc.returncode == 0 else ""
+    branch_output = branch_proc.stdout if isinstance(branch_proc.stdout, str) else ""
+    sha_output = sha_proc.stdout if isinstance(sha_proc.stdout, str) else ""
+    branch = branch_output.strip() if branch_proc.returncode == 0 else "unknown"
+    sha = sha_output.strip() if sha_proc.returncode == 0 else ""
     return branch or "unknown", sha
 
 
@@ -313,6 +346,123 @@ def _check_shell_overrides(args: Sequence[str]) -> None:
                     f"shell() passthrough override {tok!r} is forbidden; "
                     "config/DB binding cannot be changed"
                 )
+
+
+def _command_plan(
+    steps: tuple[PreparedStep | PreparedAction, ...],
+    *,
+    secrets: Sequence[str] = (),
+) -> ExecutionPlan:
+    from odoo_instance_sdk.execution import ExecutionPlan
+
+    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
+    return plan.with_fingerprint(secrets=secrets)
+
+
+def _command_result(
+    result: ProcessResult,
+    timeout: float | None,
+    step: PreparedStep | None = None,
+) -> CommandResult:
+    stdout = (
+        result.stdout.decode(errors="replace")
+        if isinstance(result.stdout, bytes)
+        else result.stdout
+    )
+    stderr = (
+        result.stderr.decode(errors="replace")
+        if isinstance(result.stderr, bytes)
+        else result.stderr
+    )
+    if step is not None:
+        from odoo_instance_sdk.internal.proc.redaction import (
+            captured_secret_values,
+            redacted_projection,
+        )
+
+        public_step = step.public_projection()
+        args = list(public_step.argv)
+        environment = public_step.environment_overrides
+        secrets = captured_secret_values(step)
+        stdout = cast("str", redacted_projection(stdout or "", secrets=secrets, field="stdout"))
+        stderr = cast("str", redacted_projection(stderr or "", secrets=secrets, field="stderr"))
+    else:
+        from odoo_instance_sdk.internal.proc.redaction import redacted_argv
+
+        args = list(redacted_argv(result.argv))
+        environment = ()
+    return CommandResult(
+        args=args,
+        returncode=result.returncode,
+        stdout=stdout or "",
+        stderr=stderr or "",
+        duration=result.duration,
+        cwd=result.cwd,
+        environment=environment,
+        timeout=timeout,
+    )
+
+
+def _snapshot_start_inputs(
+    config: StartConfig,
+    *,
+    secret_config_path: str | None = None,
+) -> tuple[StartConfig, tuple[str, ...], str | None, tuple[str, ...]]:
+    snapshot = copy.deepcopy(config)
+    secret_path = secret_config_path
+    if snapshot.config_path is None and snapshot.db_password is not None:
+        secret_path = secret_path or str(
+            Path(tempfile.gettempdir()) / f"odoo-sdk-{uuid.uuid4().hex}.conf"
+        )
+    elif snapshot.config_path is not None:
+        secret_path = None
+    args = tuple(
+        _build_cli_args(snapshot)
+        if secret_path is None
+        else _build_cli_args(snapshot, secret_config_path=secret_path)
+    )
+    secrets = tuple(value for value in (snapshot.db_password, secret_path) if value is not None)
+    return snapshot, args, secret_path, secrets
+
+
+def _build_shell_script_step(
+    config: StartConfig,
+    *,
+    executable_prefix: Sequence[str],
+    default_cwd: Path | None,
+    source: str,
+    argv: Sequence[str] = (),
+    timeout: float | None = None,
+    commit: bool = False,
+    nonce: str | None = None,
+    secret_config_path: str | None = None,
+) -> tuple[PreparedStep, StartConfig, str | None, tuple[str, ...]]:
+    """Capture one shell script's complete private process input."""
+    snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(
+        config, secret_config_path=secret_config_path
+    )
+    secrets = (*secrets, source)
+    from odoo_instance_sdk.internal.server import _build_shell_wrapper
+
+    wrapper_nonce = nonce or uuid.uuid4().hex
+    wrapper = _build_shell_wrapper(source, list(argv), commit=commit, nonce=wrapper_nonce)
+    environment_snapshot, environment_overrides = captured_child_environment(None)
+    step = PreparedStep(
+        step_id="instance.shell_script",
+        argv=(*executable_prefix, *cli_args, "shell"),
+        cwd=None if default_cwd is None else str(default_cwd),
+        environment=environment_overrides,
+        environment_snapshot=environment_snapshot,
+        environment_overrides=environment_overrides,
+        stdin=wrapper.encode(),
+        wrapper_nonce=wrapper_nonce,
+        secret_config_path=secret_path,
+        timeout=timeout,
+        secret_values=secrets,
+        read_only=not commit,
+        mutating=commit,
+    )
+    return step, snapshot, secret_path, secrets
 
 
 @dataclass(slots=True, kw_only=True)
@@ -334,7 +484,29 @@ class OdooInstance:
     def __repr__(self) -> str:
         return f"OdooInstance(base_url={self.config.base_url!r}, databases=<DatabaseResource>)"
 
-    def _ensure_dependencies_ready(self) -> None:
+    def _dependency_manifest(
+        self,
+    ) -> tuple[tuple[PreparedStep | PreparedAction, ...], Path | None]:
+        if self._postgres_cluster is None:
+            return (), None
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        if not isinstance(self._postgres_cluster, PostgresCluster):
+            return (), None
+        temporary_path: Path | None = None
+        if self._postgres_cluster.mode == "compose":
+            compose_file = self._postgres_cluster.compose_file
+            temporary_path = compose_file.parent / f".compose-{uuid.uuid4().hex}.yaml.tmp"
+        steps = self._postgres_cluster._ensure_running_steps(60.0, temporary_path=temporary_path)
+        return tuple(steps), temporary_path
+
+    def _ensure_dependencies_ready(
+        self,
+        context: RunContext[T] | None = None,
+        *,
+        dependency_steps: Sequence[PreparedStep | PreparedAction] = (),
+        temporary_path: Path | None = None,
+    ) -> None:
         """Dependency preflight: ensure project PostgresCluster is ready before spawn.
 
         Called exactly once per public spawn entrypoint. The exclusive shell
@@ -344,8 +516,25 @@ class OdooInstance:
         Manual instances (``instance(base_url=...)`` / ``from_config()``) have
         ``_postgres_cluster is None`` and skip preflight.
         """
-        if self._postgres_cluster is not None:
-            self._postgres_cluster.ensure_running(timeout=60.0)
+        if self._postgres_cluster is None:
+            return
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        if isinstance(self._postgres_cluster, PostgresCluster):
+            step_ids = {
+                step.step_id: step.step_id
+                for step in dependency_steps
+                if isinstance(step, PreparedStep)
+            }
+            self._postgres_cluster._ensure_running_impl(
+                60.0,
+                temporary_path=temporary_path,
+                step_ids=step_ids,
+            )
+            if context is not None:
+                self._postgres_cluster._account_optional_steps(context, dependency_steps)
+            return
+        self._postgres_cluster.ensure_running(timeout=60.0)
 
     def _executable_prefix(self) -> tuple[str, ...]:
         if self.config.command_prefix is not None:
@@ -360,12 +549,41 @@ class OdooInstance:
         env: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> CommandResult:
-        return run_command(
-            self._executable_prefix(),
-            args,
-            cwd=cwd,
-            env=env,
+        return self.run_command(args, cwd=cwd, env=env, timeout=timeout).run()
+
+    def run_command(
+        self,
+        args: list[str],
+        *,
+        cwd: str | Path | None = None,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> Command[CommandResult]:
+
+        argv = (*self._executable_prefix(), *tuple(args))
+        environment_snapshot, environment_overrides = captured_child_environment(env)
+        step = PreparedStep(
+            step_id="instance.run",
+            argv=argv,
+            cwd=None if cwd is None else str(cwd),
+            environment=environment_overrides,
+            environment_snapshot=environment_snapshot,
+            environment_overrides=environment_overrides,
             timeout=timeout,
+            read_only=True,
+        )
+
+        def execute(context: RunContext[CommandResult]) -> CommandResult:
+            result = cast("ProcessResult", context.process(step.step_id))
+            return _command_result(result, timeout, step)
+
+        from odoo_instance_sdk.execution import Command
+
+        return Command.create(
+            _command_plan((step,)),
+            execute,
+            (step,),
+            executor=SubprocessExecutor(),
         )
 
     def start(
@@ -375,17 +593,77 @@ class OdooInstance:
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
     ) -> OdooProcess:
+        return self.start_command(config, cwd=cwd, env=env).run()
+
+    def start_command(
+        self,
+        config: StartConfig | None = None,
+        *,
+        cwd: str | Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Command[OdooProcess]:
         if config is None:
             config = self.config.start_config
             if config is None:
                 raise InstanceConfigurationError(
                     "No StartConfig — pass one explicitly or create instance via from_config()"
                 )
-        proc, handle, secret_config = start_process(
-            self._executable_prefix(), config, cwd=cwd, env=env
+        snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
+        argv = (*self._executable_prefix(), *cli_args)
+        environment_snapshot, environment_overrides = captured_child_environment(env)
+        step = PreparedStep(
+            step_id="instance.start",
+            argv=argv,
+            cwd=None if cwd is None else str(cwd),
+            environment=environment_overrides,
+            environment_snapshot=environment_snapshot,
+            environment_overrides=environment_overrides,
+            mode="long-running",
+            secret_values=secrets,
+            long_running=True,
+            start_new_session=True,
+            inherit_stdio=True,
         )
-        self._client.register_process(proc, handle, secret_config)
-        return proc
+        dependency_steps, dependency_temporary_path = self._dependency_manifest()
+        prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (
+            *dependency_steps,
+            step,
+        )
+
+        def execute(context: RunContext[OdooProcess]) -> OdooProcess:
+            self._ensure_dependencies_ready(
+                context,
+                dependency_steps=dependency_steps,
+                temporary_path=dependency_temporary_path,
+            )
+            secret_created = False
+            try:
+                if secret_path is not None:
+                    _write_secret_config(snapshot, secret_path)
+                    secret_created = True
+                handle = context.spawn(step.step_id)
+                proc = OdooProcess(
+                    id=uuid.uuid4().hex,
+                    pid=handle.pid,
+                    args=list(argv),
+                    started_at=time.time(),
+                )
+                self._client.register_process(proc, handle.process, secret_path)
+            except BaseException:
+                if secret_created:
+                    cleanup_secret_config(secret_path)
+                raise
+            else:
+                return proc
+
+        from odoo_instance_sdk.execution import Command
+
+        return Command.create(
+            _command_plan(prepared_steps, secrets=secrets),
+            execute,
+            prepared_steps,
+            executor=SubprocessExecutor(),
+        )
 
     def run_foreground(
         self,
@@ -394,72 +672,124 @@ class OdooInstance:
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
     ) -> int:
+        return self.run_foreground_command(config, cwd=cwd, env=env).run()
+
+    def run_foreground_command(  # noqa: C901
+        self,
+        config: StartConfig | None = None,
+        *,
+        cwd: str | Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Command[int]:
         if config is None:
             config = self.config.start_config
             if config is None:
                 raise InstanceConfigurationError(
                     "No StartConfig — pass one explicitly or create instance via from_config()"
                 )
-        self._ensure_dependencies_ready()
         resolved_cwd = cwd if cwd is not None else self.config.default_cwd
-        from odoo_instance_sdk.internal.server import _build_cli_args
-
-        cli_args = _build_cli_args(config)
-        with self._artifact_lock():
-            if self._environment_id is None:
-                return run_foreground_process(
-                    self._executable_prefix(),
-                    cli_args,
-                    cwd=resolved_cwd,
-                    env=env,
-                )
-            return self._run_foreground_tracked(config, cli_args, resolved_cwd, env)
-
-    def _run_foreground_tracked(
-        self,
-        config: StartConfig,
-        cli_args: list[str],
-        resolved_cwd: str | Path | None,
-        env: dict[str, str] | None,
-    ) -> int:
-        """Spawn, persist runtime identity, wait, then clear in finally.
-
-        Bound to an environment (``_environment_id`` set); manual instances
-        take the untracked branch in :meth:`run_foreground`.
-        """
-        proc = spawn_foreground_process(
-            self._executable_prefix(), cli_args, cwd=resolved_cwd, env=env
+        snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
+        environment_snapshot, environment_overrides = captured_child_environment(env)
+        step = PreparedStep(
+            step_id="instance.foreground",
+            argv=(*self._executable_prefix(), *cli_args),
+            cwd=None if resolved_cwd is None else str(resolved_cwd),
+            environment=environment_overrides,
+            environment_snapshot=environment_snapshot,
+            environment_overrides=environment_overrides,
+            mode="foreground",
+            secret_values=secrets,
+            long_running=True,
+            start_new_session=True,
+            inherit_stdio=True,
         )
-        # ``spawn_foreground_process`` uses ``start_new_session=True``.  The
-        # PID is consequently the owned process-group ID even if the leader
-        # exits before exceptional wait cleanup runs.
-        process_group_id = proc.pid
-        try:
-            try:
-                self._persist_runtime_identity(proc.pid, config, resolved_cwd)
-            except BaseException:
-                # Runtime identity is mandatory for tracked instances.  Do not leave
-                # a child running when catalog/git/process inspection rejects it.
-                # Preserve the persistence exception even if best-effort
-                # process-group cleanup itself encounters an OS error.
-                with contextlib.suppress(BaseException):
-                    terminate_foreground_process(proc, process_group_id=process_group_id)
-                raise
-            return wait_foreground_process_with_cleanup(proc)
-        finally:
-            self._clear_runtime_identity()
+        from odoo_instance_sdk.internal.proc import PreparedStep as _PreparedStep
+
+        dependency_steps, dependency_temporary_path = self._dependency_manifest()
+        prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (*dependency_steps, step)
+        if self._environment_id is not None and resolved_cwd is not None:
+            target = str(resolved_cwd)
+            prepared_steps += (
+                _PreparedStep(
+                    step_id="instance.foreground.git.branch",
+                    argv=("git", "-C", target, "rev-parse", "--abbrev-ref", "HEAD"),
+                    cwd=target,
+                    timeout=10.0,
+                    read_only=True,
+                ),
+                _PreparedStep(
+                    step_id="instance.foreground.git.commit",
+                    argv=("git", "-C", target, "rev-parse", "HEAD"),
+                    cwd=target,
+                    timeout=10.0,
+                    read_only=True,
+                ),
+            )
+
+        def execute(context: RunContext[int]) -> int:
+            self._ensure_dependencies_ready(
+                context,
+                dependency_steps=dependency_steps,
+                temporary_path=dependency_temporary_path,
+            )
+            for dependency_step in dependency_steps:
+                if context.planned(dependency_step.step_id) and not context.consumed(
+                    dependency_step.step_id
+                ):
+                    context.skip(dependency_step.step_id)
+            with self._artifact_lock():
+                secret_created = False
+                if secret_path is not None:
+                    _write_secret_config(snapshot, secret_path)
+                    secret_created = True
+                handle: ProcessHandle | None = None
+                try:
+                    handle = context.spawn(step.step_id)
+                    if self._environment_id is not None:
+                        self._persist_runtime_identity(
+                            handle.pid,
+                            snapshot,
+                            resolved_cwd,
+                            context=context,
+                        )
+                    from odoo_instance_sdk.internal.server import wait_foreground_process
+
+                    return wait_foreground_process(handle.process)
+                except BaseException:
+                    if handle is not None:
+                        with contextlib.suppress(BaseException):
+                            terminate(
+                                handle,
+                                process_group_id=handle.process_group_id,
+                                timeout=5.0,
+                            )
+                    raise
+                finally:
+                    self._clear_runtime_identity()
+                    if secret_created:
+                        cleanup_secret_config(secret_path)
+
+        from odoo_instance_sdk.execution import Command
+
+        return Command.create(
+            _command_plan(prepared_steps, secrets=secrets),
+            execute,
+            prepared_steps,
+            executor=SubprocessExecutor(),
+        )
 
     def _persist_runtime_identity(
         self,
         root_pid: int,
         config: StartConfig,
         cwd: str | Path | None,
+        context: RunContext[T] | None = None,
     ) -> None:
         """Persist the exact runtime identity before foreground waiting begins."""
         if self._environment_id is None:
             return
         create_time = _process_create_time(root_pid)
-        checkout_branch, commit_sha = _worktree_ref(cwd)
+        checkout_branch, commit_sha = _worktree_ref(cwd, context=context)
         http_url = f"http://{config.http_interface}:{config.http_port}"
         self._client.get_catalog().upsert_environment_runtime(
             self._environment_id,
@@ -499,24 +829,70 @@ class OdooInstance:
         yield from _iter_logfile(path, tail=tail, follow=follow)
 
     def shell(self, *, args: Sequence[str] = ()) -> int:
+        return self.shell_command(args=args).run()
+
+    def shell_command(self, *, args: Sequence[str] = ()) -> Command[int]:
         config = self.config.start_config
         if config is None:
             raise InstanceConfigurationError(
                 "No StartConfig — create instance via from_config() or from_environment()"
             )
         _check_shell_overrides(args)
-        self._ensure_dependencies_ready()
-        from odoo_instance_sdk.internal.server import _build_cli_args
-
-        cli_args = _build_cli_args(config)
-        full_args = [*cli_args, "shell", *args]
+        snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
+        full_args = (*self._executable_prefix(), *cli_args, "shell", *tuple(args))
         resolved_cwd = self.config.default_cwd
-        with self._artifact_lock():
-            return run_foreground_process(
-                self._executable_prefix(),
-                full_args,
-                cwd=resolved_cwd,
+        environment_snapshot, environment_overrides = captured_child_environment(None)
+        step = PreparedStep(
+            step_id="instance.shell",
+            argv=full_args,
+            cwd=None if resolved_cwd is None else str(resolved_cwd),
+            environment=environment_overrides,
+            environment_snapshot=environment_snapshot,
+            environment_overrides=environment_overrides,
+            mode="foreground",
+            secret_values=secrets,
+            interactive=True,
+            long_running=True,
+            start_new_session=True,
+            inherit_stdio=True,
+        )
+        dependency_steps, dependency_temporary_path = self._dependency_manifest()
+        prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (
+            *dependency_steps,
+            step,
+        )
+
+        def execute(context: RunContext[int]) -> int:
+            self._ensure_dependencies_ready(
+                context,
+                dependency_steps=dependency_steps,
+                temporary_path=dependency_temporary_path,
             )
+            for dependency_step in dependency_steps:
+                if context.planned(dependency_step.step_id) and not context.consumed(
+                    dependency_step.step_id
+                ):
+                    context.skip(dependency_step.step_id)
+            with self._artifact_lock():
+                secret_created = False
+                if secret_path is not None:
+                    _write_secret_config(snapshot, secret_path)
+                    secret_created = True
+                try:
+                    handle = context.spawn(step.step_id)
+                    return wait_foreground(handle)
+                finally:
+                    if secret_created:
+                        cleanup_secret_config(secret_path)
+
+        from odoo_instance_sdk.execution import Command
+
+        return Command.create(
+            _command_plan(prepared_steps, secrets=secrets),
+            execute,
+            prepared_steps,
+            executor=SubprocessExecutor(),
+        )
 
     def run_shell_script(
         self,
@@ -526,11 +902,168 @@ class OdooInstance:
         timeout: float | None = None,
         commit: bool = False,
     ) -> CommandResult:
-        self._ensure_dependencies_ready()
-        with self._artifact_lock():
-            return self._run_shell_script_unlocked(
-                source, argv=argv, timeout=timeout, commit=commit
+        return self.run_shell_script_command(
+            source, argv=argv, timeout=timeout, commit=commit
+        ).run()
+
+    def run_shell_script_command(
+        self,
+        source: str,
+        *,
+        argv: Sequence[str] = (),
+        timeout: float | None = None,
+        commit: bool = False,
+    ) -> Command[CommandResult]:
+        return self._shell_script_command(
+            source, argv=argv, timeout=timeout, commit=commit, exclusive=False
+        )
+
+    def _shell_script_command(
+        self,
+        source: str,
+        *,
+        argv: Sequence[str] = (),
+        timeout: float | None = None,
+        commit: bool = False,
+        exclusive: bool,
+        result_converter: Callable[[CommandResult], T] | None = None,
+        callback_override: Callable[[], T] | None = None,
+        preflight: Callable[[RunContext[T]], None] | None = None,
+        extra_steps: Sequence[PreparedStep | PreparedAction] = (),
+        executor: ProcessExecutor | None = None,
+    ) -> Command[T]:
+        config = self.config.start_config
+        if config is None:
+            raise InstanceConfigurationError(
+                "No StartConfig — create instance via from_config() or from_environment()"
             )
+        step, snapshot, secret_path, secrets = _build_shell_script_step(
+            config,
+            executable_prefix=self._executable_prefix(),
+            default_cwd=self.config.default_cwd,
+            source=source,
+            argv=argv,
+            timeout=timeout,
+            commit=commit,
+        )
+        dependency_steps, dependency_temporary_path = self._dependency_manifest()
+        action = PreparedAction(
+            step_id="instance.shell_script.transaction",
+            action="commit" if commit else "rollback",
+            description="Commit or roll back the Odoo shell transaction",
+            details={"commit": commit},
+            read_only=not commit,
+            mutating=commit,
+        )
+
+        captured_steps = (*dependency_steps, *extra_steps, step, action)
+
+        def execute(context: RunContext[T]) -> T:
+            # Stale-plan validation is deliberately the first operation.  In
+            # particular it must precede readiness, lock acquisition, and
+            # secret-config creation so a preview cannot turn into a partial
+            # execution when its provenance has changed.
+            if preflight is not None:
+                preflight(context)
+
+            def run_inside_lock() -> T:
+                secret_created = False
+                if secret_path is not None:
+                    _write_secret_config(snapshot, secret_path)
+                    secret_created = True
+                try:
+                    if callback_override is not None:
+                        converted_result = callback_override()
+                        context.action(action.step_id)
+                        return converted_result
+                    result = cast("ProcessResult", context.process(step.step_id))
+                    context.action(action.step_id)
+                    converted = _command_result(result, timeout, step)
+                    return (
+                        result_converter(converted)
+                        if result_converter is not None
+                        else cast("T", converted)
+                    )
+                finally:
+                    if secret_created:
+                        cleanup_secret_config(secret_path)
+
+            if exclusive:
+                with self._artifact_operation(exclusive=True):
+                    self._ensure_dependencies_ready(
+                        context,
+                        dependency_steps=dependency_steps,
+                        temporary_path=dependency_temporary_path,
+                    )
+                    return run_inside_lock()
+            self._ensure_dependencies_ready(
+                context,
+                dependency_steps=dependency_steps,
+                temporary_path=dependency_temporary_path,
+            )
+            with self._artifact_lock():
+                return run_inside_lock()
+
+        from odoo_instance_sdk.execution import Command
+
+        return Command.create(
+            _command_plan(captured_steps, secrets=secrets),
+            execute,
+            captured_steps,
+            executor=executor or SubprocessExecutor(),
+        )
+
+    def _run_shell_script_in_context(
+        self,
+        context: RunContext[PrivateJsonValue],
+        source: str,
+        *,
+        argv: Sequence[str] = (),
+        timeout: float | None = None,
+        commit: bool = False,
+    ) -> CommandResult:
+        """Consume a shell step from an already-owned command ledger.
+
+        Database preparation owns the lock and the command snapshot.  Calling
+        ``run_shell_script_command().run()`` from that callback would silently
+        create a second ledger, so this small adapter deliberately mirrors the
+        captured step construction and consumes it on the active context.
+        """
+        config = self.config.start_config
+        if config is None:
+            raise InstanceConfigurationError(
+                "No StartConfig — create instance via from_config() or from_environment()"
+            )
+        captured = context.prepared("instance.shell_script")
+        runtime_step, snapshot, secret_path, _ = _build_shell_script_step(
+            config,
+            executable_prefix=self._executable_prefix(),
+            default_cwd=self.config.default_cwd,
+            source=source,
+            argv=argv,
+            timeout=timeout,
+            commit=commit,
+            nonce=captured.wrapper_nonce,
+            secret_config_path=captured.secret_config_path,
+        )
+        # The active command owns the complete immutable process input.  Even
+        # seemingly harmless late binding (argv, cwd, environment, stdin,
+        # timeout, or mode) would turn an inspected child into a different
+        # child, so reject it before the executor is reached.
+        if runtime_step != captured:
+            from odoo_instance_sdk.exceptions import UnplannedStepError
+
+            raise UnplannedStepError(captured.step_id, reason="shell inputs changed after capture")
+        secret_created = False
+        if secret_path is not None:
+            _write_secret_config(snapshot, secret_path)
+            secret_created = True
+        try:
+            result = cast("ProcessResult", context.process_prepared(captured))
+            return _command_result(result, timeout, captured)
+        finally:
+            if secret_created:
+                cleanup_secret_config(secret_path)
 
     def _run_shell_script_exclusive(
         self,
@@ -541,42 +1074,20 @@ class OdooInstance:
         commit: bool = False,
     ) -> CommandResult:
         """Internal mutator entrypoint; lock choice belongs to this instance only."""
-        with self._artifact_operation(exclusive=True):
-            # Recheck the project cluster after claiming the artifact lock so a
-            # mutator cannot race a concurrent lifecycle operation.
-            self._ensure_dependencies_ready()
-            return self._run_shell_script_unlocked(
-                source, argv=argv, timeout=timeout, commit=commit
-            )
+        from odoo_instance_sdk.internal.proc import active_context
 
-    def _run_shell_script_unlocked(
-        self,
-        source: str,
-        *,
-        argv: Sequence[str] = (),
-        timeout: float | None = None,
-        commit: bool = False,
-    ) -> CommandResult:
-        """Internal shell primitive for coordinators which already own the artifact lock."""
-        config = self.config.start_config
-        if config is None:
-            raise InstanceConfigurationError(
-                "No StartConfig — create instance via from_config() or from_environment()"
+        context = active_context()
+        if context is not None:
+            return self._run_shell_script_in_context(
+                context,
+                source,
+                argv=argv,
+                timeout=timeout,
+                commit=commit,
             )
-        from odoo_instance_sdk.internal.server import _build_cli_args, _run_captured_shell
-
-        cli_args = _build_cli_args(config)
-        full_args = [*cli_args, "shell"]
-        resolved_cwd = self.config.default_cwd
-        return _run_captured_shell(
-            self._executable_prefix(),
-            full_args,
-            source=source,
-            argv=list(argv),
-            timeout=timeout,
-            commit=commit,
-            cwd=resolved_cwd,
-        )
+        return self._shell_script_command(
+            source, argv=argv, timeout=timeout, commit=commit, exclusive=True
+        ).run()
 
     @contextlib.contextmanager
     def _artifact_lock(self) -> Iterator[None]:
@@ -593,9 +1104,77 @@ class OdooInstance:
             yield
 
     def stop(self, proc: OdooProcess, *, timeout: float = 10.0) -> None:
-        handle, secret_config = self._client.unregister_process(proc.id)
+        self.stop_command(proc, timeout=timeout).run()
+
+    def stop_command(self, proc: OdooProcess, *, timeout: float = 10.0) -> Command[None]:
+        handle = self._client.get_handle(proc.id)
+        steps: list[PreparedStep | PreparedAction] = []
+        if handle is not None and sys.platform == "win32":
+            steps.append(
+                PreparedStep(
+                    step_id="instance.stop.taskkill",
+                    argv=("taskkill", "/T", "/PID", str(proc.pid), "/F"),
+                    timeout=timeout,
+                    mode="captured",
+                    mutating=True,
+                )
+            )
+        elif handle is not None:
+            steps.append(
+                PreparedAction(
+                    step_id="instance.stop.signal",
+                    action="terminate_process_group",
+                    description="Terminate the owned POSIX process group",
+                    details={"pid": proc.pid, "timeout": timeout},
+                    mutating=True,
+                )
+            )
         if handle is not None:
-            stop_process(handle, timeout=timeout, secret_config_path=secret_config)
+            steps.append(
+                PreparedAction(
+                    step_id="instance.stop.cleanup",
+                    action="cleanup_secret_config",
+                    description="Remove the private process configuration",
+                    mutating=True,
+                )
+            )
+        frozen_steps = tuple(steps)
+
+        def execute(context: RunContext[None]) -> None:
+            owned, secret_config = self._client.unregister_process(proc.id)
+            if owned is None:
+                return
+            if sys.platform == "win32":
+                context.process("instance.stop.taskkill")
+            else:
+                context.action("instance.stop.signal")
+                try:
+                    terminate(
+                        ProcessHandle(
+                            process=owned,
+                            argv=(),
+                            process_group_id=owned.pid,
+                            session_id=owned.pid,
+                            inherited_stdio=False,
+                        ),
+                        process_group_id=owned.pid,
+                        timeout=timeout,
+                    )
+                finally:
+                    context.action("instance.stop.cleanup")
+                    cleanup_secret_config(secret_config)
+                return
+            context.action("instance.stop.cleanup")
+            cleanup_secret_config(secret_config)
+
+        from odoo_instance_sdk.execution import Command
+
+        return Command.create(
+            _command_plan(frozen_steps),
+            execute,
+            frozen_steps,
+            executor=SubprocessExecutor(),
+        )
 
     def status(self, proc: OdooProcess) -> ProcessStatus:
         self._client.get_process(proc.id)

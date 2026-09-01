@@ -5,23 +5,27 @@ import contextlib
 import json
 import os
 import re
-import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, TypeVar, cast
 
-from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.exceptions import ConfigError, StalePlanError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
+from odoo_instance_sdk.internal.process_env import captured_child_environment
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
-from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec
+from odoo_instance_sdk.models import CommandResult, OdooTestResult, OdooTestSpec
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import Command, JsonValue
+    from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
 
+
 _MODULE_MANIFEST_RE = re.compile(r"^\s*(?:\{|['\"]info['\"]\s*[:=]\s*\{)", re.MULTILINE)
+_PreflightT = TypeVar("_PreflightT")
 
 
 @dataclass(slots=True)
@@ -29,44 +33,158 @@ class ShellOutcome:
     returncode: int
     stdout: str
     stderr: str
-    payload: dict[str, Any] | None
+    payload: dict[str, JsonValue] | None
+
+
+@dataclass(frozen=True, slots=True)
+class TestCommandSnapshot:
+    """Immutable selection/provenance facts captured before test execution."""
+
+    worktree: Path | None
+    git_head: str | None
+    git_base: str | None
+    changed_files: tuple[str, ...]
+    modules: tuple[str, ...]
+    database_names: tuple[str, ...]
+    database_identity: tuple[str | None, int | None, str | None]
+    interface: str
+    port: int
+
+
+def _test_command_preflight(  # noqa: C901
+    snapshot: TestCommandSnapshot,
+    instance: OdooInstance,
+    spec: OdooTestSpec,
+) -> Callable[[RunContext[_PreflightT]], None]:
+    """Return the no-mutation validation for a captured Odoo test command."""
+
+    def validate(context: RunContext[_PreflightT]) -> None:  # noqa: C901
+        config = instance.config
+        current_start = config.start_config
+        current_interface = (
+            current_start.http_interface if current_start is not None else snapshot.interface
+        )
+        current_port = current_start.http_port if current_start is not None else snapshot.port
+        if current_interface != snapshot.interface or current_port != snapshot.port:
+            raise StalePlanError(
+                "captured test port/interface changed",
+                expected=f"{snapshot.interface}:{snapshot.port}",
+                actual=f"{current_interface}:{current_port}",
+            )
+        address_state = probe_address(snapshot.interface, snapshot.port)
+        if address_state is not AddressState.FREE:
+            raise StalePlanError(
+                "captured test port state changed",
+                expected="free",
+                actual=str(address_state),
+            )
+        current_databases = tuple(config.configured_database_names)
+        if current_databases != snapshot.database_names:
+            raise StalePlanError(
+                "captured test database identity changed",
+                expected=list(snapshot.database_names),
+                actual=list(current_databases),
+            )
+        current_identity = (config.db_host, config.db_port, config.db_user)
+        if current_identity != snapshot.database_identity:
+            raise StalePlanError(
+                "captured test database connection identity changed",
+                expected=list(snapshot.database_identity),
+                actual=list(current_identity),
+            )
+        if tuple(spec.modules) != snapshot.modules:
+            raise StalePlanError(
+                "captured test module selection changed",
+                expected=list(snapshot.modules),
+                actual=list(spec.modules),
+            )
+
+        if snapshot.worktree is not None and snapshot.git_head is not None:
+            captured = cast("ProcessResult", context.process("odoo.tests.provenance.git"))
+            actual = "" if captured.stdout is None else str(captured.stdout).strip()
+            if captured.returncode != 0 or actual != snapshot.git_head:
+                raise StalePlanError(
+                    "captured test Git revision changed",
+                    expected=snapshot.git_head,
+                    actual=actual,
+                )
+            if snapshot.changed_files and snapshot.git_base is not None:
+                selection_result = cast(
+                    "ProcessResult", context.process("odoo.tests.provenance.selection")
+                )
+                selected = tuple(
+                    sorted(
+                        line.strip()
+                        for line in str(selection_result.stdout or "").splitlines()
+                        if line.strip()
+                    )
+                )
+                expected = tuple(sorted(snapshot.changed_files))
+                if selection_result.returncode != 0 or selected != expected:
+                    raise StalePlanError(
+                        "captured changed-file selection changed",
+                        expected=list(expected),
+                        actual=list(selected),
+                    )
+        if snapshot.database_names and len(snapshot.database_names) == 1:
+            modules_result = cast("ProcessResult", context.process("odoo.tests.provenance.modules"))
+            module_output = "" if modules_result.stdout is None else str(modules_result.stdout)
+            installed = tuple(
+                sorted(line.strip() for line in module_output.splitlines() if line.strip())
+            )
+            if modules_result.returncode != 0 or installed != tuple(sorted(snapshot.modules)):
+                raise StalePlanError(
+                    "captured installed-module selection changed",
+                    expected=list(snapshot.modules),
+                    actual=list(installed),
+                )
+
+    return validate
 
 
 def _safe_stderr(value: str) -> str:
     return sanitize_last_error(value) or "<no diagnostic>"
 
 
-def _run_with_payload(
-    instance: OdooInstance,
-    source: str,
-    *,
-    argv: tuple[str, ...] = (),
-    commit: bool = False,
-    timeout: float | None = None,
-) -> ShellOutcome:
-    result = instance.run_shell_script(source, argv=argv, timeout=timeout, commit=commit)
-    payload = parse_payload(result.stdout)
-    return ShellOutcome(
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        payload=payload,
-    )
-
-
 def eval_expression(
     instance: OdooInstance, expression: str, *, commit: bool = False
 ) -> ShellOutcome:
+    return _shell_outcome(eval_expression_command(instance, expression, commit=commit).run())
+
+
+def eval_expression_command(
+    instance: OdooInstance, expression: str, *, commit: bool = False
+) -> Command[CommandResult]:
+    """Capture the exact Odoo shell used by the eval leaf."""
     if not isinstance(expression, str) or not expression.strip():
         raise ConfigError("eval requires a non-empty expression")
-    source = f"result = ({expression})\n"
-    return _run_with_payload(instance, source, commit=commit)
+    return instance.run_shell_script_command(f"result = ({expression})\n", commit=commit)
 
 
 def exec_script(
     instance: OdooInstance, script: str, argv: tuple[str, ...] = (), *, commit: bool = False
 ) -> ShellOutcome:
-    return _run_with_payload(instance, script, argv=argv, commit=commit)
+    return _shell_outcome(exec_script_command(instance, script, argv=argv, commit=commit).run())
+
+
+def exec_script_command(
+    instance: OdooInstance,
+    script: str,
+    argv: tuple[str, ...] = (),
+    *,
+    commit: bool = False,
+) -> Command[CommandResult]:
+    """Capture the exact Odoo shell used by the exec leaf."""
+    return instance.run_shell_script_command(script, argv=argv, commit=commit)
+
+
+def _shell_outcome(result: CommandResult) -> ShellOutcome:
+    return ShellOutcome(
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        payload=parse_payload(result.stdout),
+    )
 
 
 @dataclass(slots=True)
@@ -79,7 +197,7 @@ class ModuleRecord:
     license: str | None = None
     summary: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, JsonValue]:
         return {
             "name": self.name,
             "state": self.state,
@@ -91,33 +209,17 @@ class ModuleRecord:
         }
 
 
+def _optional_text(value: JsonValue) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def list_modules(
     instance: OdooInstance,
     names: tuple[str, ...] = (),
     *,
     state: str | None = None,
 ) -> list[ModuleRecord]:
-    names_repr = json.dumps(list(names))
-    state_repr = json.dumps(state)
-    source = (
-        "import json as _mjson\n"
-        f"_names = _mjson.loads({names_repr!r})\n"
-        f"_state = _mjson.loads({state_repr!r})\n"
-        "_dom = []\n"
-        "if _names:\n"
-        "    _dom.append(('name', 'in', _names))\n"
-        "if _state:\n"
-        "    _dom.append(('state', '=', _state))\n"
-        "_mods = env['ir.module.module'].search(_dom, order='name')\n"
-        "result = [\n"
-        "    {'name': m.name, 'state': m.state, 'technical_name': m.name,\n"
-        "     'installed_version': m.installed_version,\n"
-        "     'latest_version': m.latest_version, 'license': m.license,\n"
-        "     'summary': m.summary}\n"
-        "    for m in _mods\n"
-        "]\n"
-    )
-    outcome = _run_with_payload(instance, source)
+    outcome = _shell_outcome(list_modules_command(instance, names=names, state=state).run())
     if outcome.returncode != 0:
         raise RuntimeError(
             f"module list failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
@@ -135,14 +237,68 @@ def list_modules(
             ModuleRecord(
                 name=str(item.get("name", "")),
                 state=str(item.get("state", "")),
-                technical_name=item.get("technical_name"),
-                installed_version=item.get("installed_version"),
-                latest_version=item.get("latest_version"),
-                license=item.get("license"),
-                summary=item.get("summary"),
+                technical_name=_optional_text(item.get("technical_name")),
+                installed_version=_optional_text(item.get("installed_version")),
+                latest_version=_optional_text(item.get("latest_version")),
+                license=_optional_text(item.get("license")),
+                summary=_optional_text(item.get("summary")),
             )
         )
     return out
+
+
+def _module_list_source(names: tuple[str, ...], state: str | None) -> str:
+    names_repr = json.dumps(list(names))
+    state_repr = json.dumps(state)
+    return (
+        "import json as _mjson\n"
+        f"_names = _mjson.loads({names_repr!r})\n"
+        f"_state = _mjson.loads({state_repr!r})\n"
+        "_dom = []\n"
+        "if _names:\n"
+        "    _dom.append(('name', 'in', _names))\n"
+        "if _state:\n"
+        "    _dom.append(('state', '=', _state))\n"
+        "_mods = env['ir.module.module'].search(_dom, order='name')\n"
+        "result = [{'name': m.name, 'state': m.state, 'technical_name': m.name, "
+        "'installed_version': m.installed_version, 'latest_version': m.latest_version, "
+        "'license': m.license, 'summary': m.summary} for m in _mods]\n"
+    )
+
+
+def list_modules_command(
+    instance: OdooInstance,
+    names: tuple[str, ...] = (),
+    *,
+    state: str | None = None,
+) -> Command[CommandResult]:
+    """Capture the read-only module listing as an inspectable child step."""
+    source = _module_list_source(names, state)
+    return instance.run_shell_script_command(source)
+
+
+def module_records_from_result(result: CommandResult) -> list[ModuleRecord]:
+    """Decode one captured module-list result without launching another child."""
+    payload = parse_payload(result.stdout)
+    raw = payload.get("result") if payload is not None else None
+    if not isinstance(raw, list):
+        return []
+    records: list[ModuleRecord] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        records.append(
+            ModuleRecord(
+                name=str(item.get("name", "")),
+                state=str(item.get("state", "")),
+                technical_name=_optional_text(item.get("technical_name")),
+                installed_version=_optional_text(item.get("installed_version")),
+                latest_version=_optional_text(item.get("latest_version")),
+                license=_optional_text(item.get("license")),
+                summary=_optional_text(item.get("summary")),
+            )
+        )
+    return records
 
 
 @dataclass(slots=True)
@@ -171,20 +327,33 @@ def update_modules(
         raise ConfigError(f"modules not installed: {', '.join(plan.not_installed)}")
     if not plan.modules:
         raise ConfigError("no installed modules to update")
-    modules_repr = json.dumps(list(plan.modules))
-    source = (
+    _ = env_id
+    return _shell_outcome(
+        update_modules_command(instance, tuple(plan.modules), env_id=env_id).run()
+    )
+
+
+def update_modules_command(
+    instance: OdooInstance,
+    modules: tuple[str, ...],
+    *,
+    env_id: str,
+) -> Command[CommandResult]:
+    """Capture one exact module-upgrade child after selection is frozen."""
+    if not modules:
+        raise ConfigError("no installed modules to update")
+    source = _update_modules_source(modules)
+    _ = env_id
+    return instance._shell_script_command(source, commit=True, exclusive=True)
+
+
+def _update_modules_source(modules: tuple[str, ...]) -> str:
+    modules_repr = json.dumps(list(modules))
+    return (
         f"_mods = env['ir.module.module'].search([('name', 'in', {modules_repr!r}), "
         "('state', '=', 'installed')])\n"
         "_mods.button_immediate_upgrade()\n"
         "result = {'updated': list(_mods.mapped('name'))}\n"
-    )
-    _ = env_id
-    result = instance._run_shell_script_exclusive(source, commit=True)
-    return ShellOutcome(
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        payload=parse_payload(result.stdout),
     )
 
 
@@ -219,11 +388,11 @@ def _test_runner_source(modules: tuple[str, ...], test_tags: str, reload_tests: 
     )
 
 
-def _nonnegative_count(value: object) -> int:
+def _nonnegative_count(value: JsonValue) -> int:
     return value if type(value) is int and value >= 0 else 0
 
 
-def _test_counts(payload: dict[str, Any]) -> dict[str, int]:
+def _test_counts(payload: dict[str, JsonValue]) -> dict[str, int]:
     raw = payload.get("result", {})
     if not isinstance(raw, dict):
         raw = {}
@@ -241,45 +410,181 @@ def run_odoo_tests(
     http_port: int | None = None,
 ) -> tuple[OdooTestResult, str | None]:
     """Execute one validated native Odoo test plan under the bound lock."""
+    return run_odoo_tests_command(
+        instance,
+        spec,
+        http_interface=http_interface,
+        http_port=http_port,
+    ).run()
+
+
+def module_tests_command(
+    instance: OdooInstance,
+    spec: OdooTestSpec,
+    *,
+    http_interface: str,
+    http_port: int,
+) -> Command[tuple[OdooTestResult, str | None]]:
+    """Capture the same native test command used by the module-test leaf."""
+    return run_odoo_tests_command(
+        instance,
+        spec,
+        http_interface=http_interface,
+        http_port=http_port,
+    )
+
+
+def run_odoo_tests_command(
+    instance: OdooInstance,
+    spec: OdooTestSpec,
+    *,
+    http_interface: str | None = None,
+    http_port: int | None = None,
+    selection_snapshot: TestCommandSnapshot | None = None,
+) -> Command[tuple[OdooTestResult, str | None]]:
+    """Capture the native Odoo test shell as one inspectable command."""
     if not isinstance(spec, OdooTestSpec):
         raise ConfigError("run_odoo_tests requires an OdooTestSpec")
     config = instance.config.start_config
-    if http_interface is None:
-        http_interface = config.http_interface if config is not None else "127.0.0.1"
-    if http_port is None:
-        http_port = config.http_port if config is not None else 8069
-
-    address_state = probe_address(http_interface, http_port)
+    resolved_interface = http_interface or (
+        config.http_interface if config is not None else "127.0.0.1"
+    )
+    resolved_port = http_port or (config.http_port if config is not None else 8069)
+    address_state = probe_address(resolved_interface, resolved_port)
     if address_state is not AddressState.FREE:
         raise ConfigError(
-            f"port {address_state}: {http_interface}:{http_port} cannot be reserved for module tests"
+            f"port {address_state}: {resolved_interface}:{resolved_port} cannot be reserved for module tests"
         )
-    result = instance._run_shell_script_exclusive(
-        _test_runner_source(spec.modules, spec.test_tags, spec.reload_tests), commit=False
-    )
-    outcome = ShellOutcome(
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        payload=parse_payload(result.stdout),
-    )
-    counts = _test_counts(outcome.payload or {})
-    failures = counts["failed"] > 0 or counts["errors"] > 0
-    zero_tests = counts["tests"] == 0
-    exit_code = (
-        1 if outcome.returncode != 0 or failures or (zero_tests and not spec.allow_empty) else 0
-    )
-    diagnostic = _safe_stderr(outcome.stderr) if outcome.returncode != 0 else None
-    if outcome.returncode == 0 and failures and outcome.stderr:
-        diagnostic = _safe_stderr(outcome.stderr)
-    return (
-        OdooTestResult(
-            counts=counts,
-            failures=failures,
-            zero_tests=zero_tests,
-            exit_code=exit_code,
+
+    def convert(result: CommandResult) -> tuple[OdooTestResult, str | None]:
+        payload = parse_payload(result.stdout)
+        counts = _test_counts(payload or {})
+        failures = counts["failed"] > 0 or counts["errors"] > 0
+        zero_tests = counts["tests"] == 0
+        exit_code = (
+            1 if result.returncode != 0 or failures or (zero_tests and not spec.allow_empty) else 0
+        )
+        diagnostic = _safe_stderr(result.stderr) if result.returncode != 0 else None
+        if result.returncode == 0 and failures and result.stderr:
+            diagnostic = _safe_stderr(result.stderr)
+        return (
+            OdooTestResult(
+                counts=counts,
+                failures=failures,
+                zero_tests=zero_tests,
+                exit_code=exit_code,
+            ),
+            diagnostic,
+        )
+
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    captured_snapshot = selection_snapshot or TestCommandSnapshot(
+        worktree=None,
+        git_head=None,
+        git_base=None,
+        changed_files=(),
+        modules=tuple(spec.modules),
+        database_names=tuple(instance.config.configured_database_names),
+        database_identity=(
+            instance.config.db_host,
+            instance.config.db_port,
+            instance.config.db_user,
         ),
-        diagnostic,
+        interface=resolved_interface,
+        port=resolved_port,
+    )
+    provenance_steps: list[PreparedStep] = []
+    if captured_snapshot.worktree is not None and captured_snapshot.git_head is not None:
+        provenance_steps.append(
+            PreparedStep(
+                step_id="odoo.tests.provenance.git",
+                argv=(
+                    "git",
+                    "-C",
+                    str(captured_snapshot.worktree),
+                    "rev-parse",
+                    "--verify",
+                    "HEAD",
+                ),
+                cwd=str(captured_snapshot.worktree),
+                read_only=True,
+                text=True,
+            )
+        )
+        if captured_snapshot.changed_files and captured_snapshot.git_base is not None:
+            provenance_steps.append(
+                PreparedStep(
+                    step_id="odoo.tests.provenance.selection",
+                    argv=(
+                        "git",
+                        "-C",
+                        str(captured_snapshot.worktree),
+                        "diff",
+                        "--name-only",
+                        f"{captured_snapshot.git_base}..HEAD",
+                        "--",
+                    ),
+                    cwd=str(captured_snapshot.worktree),
+                    read_only=True,
+                    text=True,
+                )
+            )
+    if captured_snapshot.database_names and len(captured_snapshot.database_names) == 1:
+        database = captured_snapshot.database_names[0]
+        query = (
+            "SELECT name FROM ir_module_module WHERE state = 'installed' AND name IN ("
+            + ", ".join(
+                f"'{module.replace(chr(39), chr(39) + chr(39))}'" for module in spec.modules
+            )
+            + ") ORDER BY name"
+        )
+        instance_config = instance.config
+        module_environment: tuple[tuple[str, str], ...] = ()
+        if instance_config.db_password is not None:
+            module_environment = (("PGPASSWORD", instance_config.db_password),)
+        module_environment_snapshot, module_environment_overrides = captured_child_environment(
+            dict(module_environment)
+        )
+        module_argv = ["psql", "-X", "-w"]
+        if instance_config.db_host is not None:
+            module_argv.extend(("-h", instance_config.db_host))
+        module_argv.extend(
+            [
+                "-p",
+                str(instance_config.db_port or 5432),
+                "-U",
+                instance_config.db_user or "",
+                "-d",
+                database,
+                "-t",
+                "-A",
+                "-c",
+                query,
+            ]
+        )
+        provenance_steps.append(
+            PreparedStep(
+                step_id="odoo.tests.provenance.modules",
+                argv=tuple(module_argv),
+                environment=module_environment_overrides,
+                environment_snapshot=module_environment_snapshot,
+                environment_overrides=module_environment_overrides,
+                secret_values=(instance_config.db_password,)
+                if instance_config.db_password is not None
+                else (),
+                read_only=True,
+                text=True,
+            )
+        )
+
+    return instance._shell_script_command(
+        _test_runner_source(spec.modules, spec.test_tags, spec.reload_tests),
+        commit=False,
+        exclusive=True,
+        result_converter=convert,
+        preflight=_test_command_preflight(captured_snapshot, instance, spec),
+        extra_steps=tuple(provenance_steps),
     )
 
 
@@ -336,7 +641,7 @@ def _addons_paths(worktree_root: Path, configured: list[str] | None) -> tuple[Pa
     return tuple(roots)
 
 
-def _expected_translation_filename(module: str, lang: str, raw: dict[str, Any]) -> str:
+def _expected_translation_filename(module: str, lang: str, raw: dict[str, JsonValue]) -> str:
     if lang in ("pot", "__new__", ""):
         return f"{module}.pot"
     iso = raw.get("iso")
@@ -345,8 +650,8 @@ def _expected_translation_filename(module: str, lang: str, raw: dict[str, Any]) 
     return f"{iso}.po"
 
 
-def _decode_translation_payload(data_b64: object, module: str, lang: str) -> bytes:
-    if not isinstance(data_b64, str) or not data_b64:
+def _decode_translation_payload(data_b64: str, module: str, lang: str) -> bytes:
+    if not data_b64:
         raise ConfigError(f"translations export produced empty payload for {module}/{lang}")
     try:
         content = base64.b64decode(data_b64, validate=True)
@@ -366,46 +671,60 @@ def export_translations(
     *,
     worktree_root: Path,
 ) -> list[TranslationExportResult]:
-    if not modules:
-        raise ConfigError("translations export requires --module")
-    if not languages:
-        raise ConfigError("translations export requires --language")
-    results: list[TranslationExportResult] = []
-    for module in modules:
-        for lang in languages:
-            results.append(_export_one(instance, module, lang, worktree_root=worktree_root))
-    return results
+    return export_translations_command(
+        instance,
+        modules,
+        languages,
+        worktree_root=worktree_root,
+    ).run()
 
 
-def _export_one(
+def export_translations_command(
     instance: OdooInstance,
-    module: str,
-    lang: str,
+    modules: tuple[str, ...],
+    languages: tuple[str, ...],
     *,
     worktree_root: Path,
-) -> TranslationExportResult:
-    if not module:
-        raise ConfigError("translations export requires a module name")
-    source = _build_export_source(module, lang)
-    outcome = _run_with_payload(instance, source)
-    if outcome.returncode != 0:
-        raise RuntimeError(
-            f"translations export failed (rc={outcome.returncode}): {_safe_stderr(outcome.stderr)}"
+) -> Command[list[TranslationExportResult]]:
+    """Capture all translation requests in one Odoo shell invocation."""
+    if not modules or not languages:
+        raise ConfigError("translations export requires --module and --language")
+    chunks = [
+        _build_export_source(module, language) for module in modules for language in languages
+    ]
+    source = "_odcli_exports = []\n"
+    for index, chunk in enumerate(chunks):
+        if index:
+            source += "del result\n"
+        source += chunk
+        source += "_odcli_exports.append(result)\n"
+    source += "result = _odcli_exports\n"
+
+    def convert(result: CommandResult) -> list[TranslationExportResult]:
+        payload = parse_payload(result.stdout)
+        raw_results = payload.get("result") if payload is not None else None
+        if not isinstance(raw_results, list):
+            raise ConfigError("translations export produced no payload")
+        addons_paths = (
+            instance.config.start_config.addons_path
+            if instance.config.start_config is not None
+            else None
         )
-    if outcome.payload is None or "result" not in outcome.payload:
-        raise RuntimeError("translations export produced no payload")
-    raw = outcome.payload.get("result")
-    if not isinstance(raw, dict):
-        raise TypeError("translations export produced malformed payload")
-    if raw.get("error"):
-        raise ConfigError(f"translations export error: {raw.get('error')}")
-    addons_paths = (
-        instance.config.start_config.addons_path
-        if instance.config.start_config is not None
-        else None
-    )
-    return _finalize_export(
-        module, lang, raw, worktree_root=worktree_root, addons_paths=addons_paths
+        return [
+            _finalize_export(
+                module,
+                language,
+                raw if isinstance(raw, dict) else {},
+                worktree_root=worktree_root,
+                addons_paths=addons_paths,
+            )
+            for (module, language), raw in zip(
+                ((m, lang) for m in modules for lang in languages), raw_results, strict=True
+            )
+        ]
+
+    return instance._shell_script_command(
+        source, commit=False, exclusive=False, result_converter=convert
     )
 
 
@@ -450,7 +769,7 @@ def _build_export_source(module: str, lang: str) -> str:
 def _finalize_export(
     module: str,
     lang: str,
-    raw: dict[str, Any],
+    raw: dict[str, JsonValue],
     *,
     worktree_root: Path,
     addons_paths: list[str] | None,
@@ -471,7 +790,10 @@ def _finalize_export(
     target = target_dir / filename
     if not _is_path_within(target, worktree_root) or target_dir.is_symlink():
         raise ConfigError(f"target path {target} escapes worktree root {worktree_root}")
-    content = _decode_translation_payload(raw.get("data"), module, lang)
+    data = raw.get("data")
+    if not isinstance(data, str):
+        raise ConfigError(f"translations export produced empty payload for {module}/{lang}")
+    content = _decode_translation_payload(data, module, lang)
     target_dir.mkdir(parents=True, exist_ok=True)
     if target_dir.is_symlink() or not _is_path_within(target, worktree_root):
         raise ConfigError(f"target path {target} escapes worktree root {worktree_root}")
@@ -506,7 +828,7 @@ def _finalize_export(
 
 @dataclass(slots=True)
 class DepsVerifyResult:
-    distributions: list[dict[str, Any]] = field(default_factory=list)
+    distributions: list[dict[str, JsonValue]] = field(default_factory=list)
     missing_imports: list[dict[str, str]] = field(default_factory=list)
     pip_check_ok: bool = True
     pip_check_output: str = ""
@@ -518,37 +840,61 @@ def verify_deps(
     worktree_root: Path,
     uv_executable: str = "uv",
 ) -> DepsVerifyResult:
-    result = DepsVerifyResult()
-    pip_cmd = [uv_executable, "pip", "check", "--python", str(recorded_python)]
-    proc = subprocess.run(
-        pip_cmd,
-        env=sanitized_child_environment(),
-        shell=False,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    result.pip_check_output = (proc.stdout + proc.stderr).strip()
-    result.pip_check_ok = proc.returncode == 0
-    for raw_line in result.pip_check_output.splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        result.distributions.append({"detail": stripped})
-    declared = _scan_external_python_deps(worktree_root)
-    for module_name, import_name in declared:
-        check = subprocess.run(
-            [str(recorded_python), "-c", f"import {import_name}"],
-            env=sanitized_child_environment(),
-            shell=False,
-            capture_output=True,
+    return verify_deps_command(
+        recorded_python=recorded_python,
+        worktree_root=worktree_root,
+        uv_executable=uv_executable,
+    ).run()
+
+
+def verify_deps_command(
+    *,
+    recorded_python: Path,
+    worktree_root: Path,
+    uv_executable: str = "uv",
+) -> Command[DepsVerifyResult]:
+    """Capture dependency verification probes in one command ledger."""
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
+
+    imports = _scan_external_python_deps(worktree_root)
+    steps = [
+        PreparedStep(
+            step_id="deps.verify.pip-check",
+            argv=(uv_executable, "pip", "check", "--python", str(recorded_python)),
+            read_only=True,
             text=True,
-            check=False,
-            cwd=str(worktree_root),
         )
-        if check.returncode != 0:
-            result.missing_imports.append({"module": module_name, "import": import_name})
-    return result
+    ]
+    for index, (_module, import_name) in enumerate(imports):
+        steps.append(
+            PreparedStep(
+                step_id=f"deps.verify.import.{index}",
+                argv=(str(recorded_python), "-c", f"import {import_name}"),
+                cwd=str(worktree_root),
+                read_only=True,
+                text=True,
+            )
+        )
+
+    def run(context: RunContext[DepsVerifyResult]) -> DepsVerifyResult:
+        result = DepsVerifyResult()
+        check = cast("ProcessResult", context.process(steps[0].step_id))
+        stdout = check.stdout if isinstance(check.stdout, str) else ""
+        stderr = check.stderr if isinstance(check.stderr, str) else ""
+        result.pip_check_output = (stdout + stderr).strip()
+        result.pip_check_ok = check.returncode == 0
+        for raw_line in result.pip_check_output.splitlines():
+            if raw_line.strip():
+                result.distributions.append({"detail": raw_line.strip()})
+        for index, (module_name, import_name) in enumerate(imports):
+            probe = cast("ProcessResult", context.process(f"deps.verify.import.{index}"))
+            if probe.returncode != 0:
+                result.missing_imports.append({"module": module_name, "import": import_name})
+        return result
+
+    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
+    return Command.create(plan, run, tuple(steps), executor=SubprocessExecutor())
 
 
 def _scan_external_python_deps(worktree_root: Path) -> list[tuple[str, str]]:

@@ -1,9 +1,17 @@
 """Odoo Instance SDK — typed Python API for managing local Odoo 19.0 instances."""
 
+from __future__ import annotations
+
 from importlib import import_module
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from enum import Enum
+    from typing import Protocol
+
+    import msgspec
+
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
     from odoo_instance_sdk.exceptions import (
@@ -18,6 +26,7 @@ if TYPE_CHECKING:
         DatabaseError,
         DatabaseManagerUnavailableError,
         DropFailedError,
+        DuplicateStepError,
         EnvironmentConflictError,
         EnvironmentNotFoundError,
         EnvironmentResolutionError,
@@ -28,11 +37,14 @@ if TYPE_CHECKING:
         MonitorError,
         NonLocalInstanceError,
         OdooInstanceSdkError,
+        OmittedStepError,
         PgAdminDatabaseNotFoundError,
         PgAdminEnvironmentNotFoundError,
         PgAdminError,
         PgAdminNotEligibleError,
         PgAdminUnavailableError,
+        PlanError,
+        PlanValidationError,
         PostgresClusterError,
         PostgresClusterNotOwnedError,
         PostgresClusterStartError,
@@ -50,7 +62,19 @@ if TYPE_CHECKING:
         ProjectManifestNotFoundError,
         ReadinessTimeoutError,
         RestoreFailedError,
+        StalePlanError,
+        UnplannedStepError,
         VscodeImportError,
+    )
+    from odoo_instance_sdk.execution import (
+        ActionStep,
+        Command,
+        ExecutionPlan,
+        JsonValue,
+        ProcessStep,
+        canonical_plan_bytes,
+        canonical_plan_projection,
+        fingerprint_plan,
     )
     from odoo_instance_sdk.models import (
         AdminPasswordResetResult,
@@ -127,6 +151,36 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    class _CanonicalBytes(Protocol):
+        def __call__(self, plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> bytes: ...
+
+    class _CanonicalProjection(Protocol):
+        def __call__(self, plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> JsonValue: ...
+
+    class _Fingerprint(Protocol):
+        def __call__(self, plan: ExecutionPlan, *, secrets: Sequence[str] = ()) -> str: ...
+
+    type LazyExport = (
+        type[
+            BaseException
+            | Enum
+            | msgspec.Struct
+            | OdooClient
+            | OdooClientConfig
+            | InstanceConfig
+            | BackupResource
+            | DatabaseResource
+            | EnvironmentResource
+            | EnvironmentMonitor
+            | InstanceFactory
+            | OdooInstance
+            | PostgresCluster
+        ]
+        | _CanonicalBytes
+        | _CanonicalProjection
+        | _Fingerprint
+    )
 
 __version__ = "0.1.0"
 
@@ -315,10 +369,27 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "StorageFootprint": ("odoo_instance_sdk.models", "StorageFootprint"),
     "TestInstanceProjectConfig": ("odoo_instance_sdk.project", "TestInstanceProjectConfig"),
     "VscodeImportError": ("odoo_instance_sdk.exceptions", "VscodeImportError"),
+    "ActionStep": ("odoo_instance_sdk.execution", "ActionStep"),
+    "Command": ("odoo_instance_sdk.execution", "Command"),
+    "DuplicateStepError": ("odoo_instance_sdk.exceptions", "DuplicateStepError"),
+    "ExecutionPlan": ("odoo_instance_sdk.execution", "ExecutionPlan"),
+    "JsonValue": ("odoo_instance_sdk.execution", "JsonValue"),
+    "OmittedStepError": ("odoo_instance_sdk.exceptions", "OmittedStepError"),
+    "PlanError": ("odoo_instance_sdk.exceptions", "PlanError"),
+    "PlanValidationError": ("odoo_instance_sdk.exceptions", "PlanValidationError"),
+    "ProcessStep": ("odoo_instance_sdk.execution", "ProcessStep"),
+    "StalePlanError": ("odoo_instance_sdk.exceptions", "StalePlanError"),
+    "UnplannedStepError": ("odoo_instance_sdk.exceptions", "UnplannedStepError"),
+    "canonical_plan_bytes": ("odoo_instance_sdk.execution", "canonical_plan_bytes"),
+    "canonical_plan_projection": (
+        "odoo_instance_sdk.execution",
+        "canonical_plan_projection",
+    ),
+    "fingerprint_plan": ("odoo_instance_sdk.execution", "fingerprint_plan"),
 }
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> LazyExport:
     """Resolve one public export on first access and cache its canonical object."""
     target = _LAZY_EXPORTS.get(name)
     if target is None:
@@ -326,10 +397,11 @@ def __getattr__(name: str) -> Any:
     module_name, attribute_name = target
     value = getattr(import_module(module_name), attribute_name)
     globals()[name] = value
-    return value
+    return cast("LazyExport", value)
 
 
 __all__ = [
+    "ActionStep",
     "AdminPasswordResetResult",
     "Backup",
     "BackupBranchOrigin",
@@ -354,6 +426,7 @@ __all__ = [
     "ClusterMetrics",
     "ClusterResourceSnapshot",
     "ClusterSnapshot",
+    "Command",
     "CommandResult",
     "CommandTimeoutError",
     "ConfigError",
@@ -369,6 +442,7 @@ __all__ = [
     "DevelopmentEnvironment",
     "DropFailedError",
     "DropResult",
+    "DuplicateStepError",
     "EnvironmentArtifacts",
     "EnvironmentCheckoutOptions",
     "EnvironmentCheckoutPlan",
@@ -382,6 +456,7 @@ __all__ = [
     "EnvironmentResource",
     "EnvironmentSnapshot",
     "EnvironmentState",
+    "ExecutionPlan",
     "GitActivity",
     "GitActivityState",
     "GitDiff",
@@ -391,6 +466,7 @@ __all__ = [
     "InstanceConfigurationError",
     "InstanceFactory",
     "InvalidBaseUrlError",
+    "JsonValue",
     "LockConflictError",
     "MasterPasswordRequiredError",
     "MonitorError",
@@ -403,6 +479,7 @@ __all__ = [
     "OdooProcess",
     "OdooTestResult",
     "OdooTestSpec",
+    "OmittedStepError",
     "PgAdminDatabaseNotFoundError",
     "PgAdminEligibility",
     "PgAdminEligibilityState",
@@ -414,6 +491,8 @@ __all__ = [
     "PgAdminOpenState",
     "PgAdminUnavailableError",
     "PidScope",
+    "PlanError",
+    "PlanValidationError",
     "PortObservation",
     "PostgresCluster",
     "PostgresClusterError",
@@ -432,6 +511,7 @@ __all__ = [
     "ProcessExitedBeforeReady",
     "ProcessNotFoundError",
     "ProcessStatus",
+    "ProcessStep",
     "ProjectConfig",
     "ProjectContextError",
     "ProjectManifestNotFoundError",
@@ -444,8 +524,17 @@ __all__ = [
     "RuntimeMetrics",
     "RuntimeState",
     "Snapshot",
+    "StalePlanError",
     "StartConfig",
     "StorageFootprint",
     "TestInstanceProjectConfig",
+    "UnplannedStepError",
     "VscodeImportError",
+    "canonical_plan_bytes",
+    "canonical_plan_projection",
+    "fingerprint_plan",
 ]
+
+# Keep the export surface mechanically aligned with the lazy map as execution
+# models are added while preserving the historical order in that map.
+__all__ = list(_LAZY_EXPORTS)

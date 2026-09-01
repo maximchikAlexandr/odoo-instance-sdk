@@ -3,7 +3,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.models import GitActivity, GitActivityState, GitDiff
 
 _DEFAULT_BRANCH = "main"
@@ -16,17 +15,18 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
     On timeout or OSError (git not in PATH) returns (-1, "", "").
     """
     try:
-        proc = subprocess.run(
+        from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+
+        proc = run_captured(
             ["git", "-C", str(cwd), *args],
-            env=sanitized_child_environment(),
-            capture_output=True,
-            text=True,
             timeout=_GIT_TIMEOUT,
-            check=False,
+            text=True,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError, ProcessExecutionError):
         return -1, "", ""
-    return proc.returncode, proc.stdout, proc.stderr
+    stdout = proc.stdout if isinstance(proc.stdout, str) else ""
+    stderr = proc.stderr if isinstance(proc.stderr, str) else ""
+    return proc.returncode, stdout, stderr
 
 
 def _orphan_full() -> GitActivity:

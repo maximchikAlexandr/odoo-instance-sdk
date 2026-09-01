@@ -17,6 +17,7 @@ from odoo_instance_sdk.models import (
 )
 
 _DU_TIMEOUT = 10.0
+_SUBPROCESS_COMPAT = subprocess
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,20 +35,21 @@ class DatabaseStorageInput:
 
 def _du_size(du: str, path: Path) -> int | None:
     """Try ``du -sb``; return bytes or ``None`` on any failure/timeout."""
+    from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
+
     try:
-        proc = subprocess.run(
-            [du, "-sb", str(path)],
+        proc = run_captured(
+            (du, "-sb", str(path)),
             env=sanitized_child_environment(),
-            capture_output=True,
-            text=True,
             timeout=_DU_TIMEOUT,
-            check=False,
+            text=True,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except (ProcessExecutionError, OSError):
         return None
     if proc.returncode != 0:
         return None
-    token = proc.stdout.strip().split()
+    stdout = proc.stdout if isinstance(proc.stdout, str) else ""
+    token = stdout.strip().split()
     if not token:
         return None
     try:

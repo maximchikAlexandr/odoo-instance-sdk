@@ -8,6 +8,7 @@ Run with: ``pytest -m integration tests/integration/test_postgres_lifecycle.py``
 
 from __future__ import annotations
 
+import shutil
 import socket
 import subprocess
 from pathlib import Path
@@ -15,15 +16,18 @@ from pathlib import Path
 import pytest
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.internal.postgres_compose import docker_available
+from odoo_instance_sdk.internal.postgres_compose import docker_ready
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 pytestmark = pytest.mark.integration
 
 
 def _skip_if_no_docker() -> None:
-    if not docker_available():
-        pytest.skip("docker not available; skipping postgres lifecycle integration test")
+    ready, diagnostic = docker_ready(timeout=3.0)
+    if not ready:
+        pytest.skip(
+            f"docker is not ready ({diagnostic}); skipping postgres lifecycle integration test"
+        )
 
 
 def _free_loopback_port() -> int:
@@ -72,10 +76,10 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
     assert cluster.owned is True
     primary_failure: BaseException | None = None
     try:
-        digest = cluster.resolve_image_digest(timeout=120.0)
-        cluster.approve_image(digest, timeout=120.0)
+        digest = cluster.resolve_image_digest(timeout=45.0)
+        cluster.approve_image(digest, timeout=45.0)
         # up — should start the cluster and become healthy.
-        cluster.ensure_running(timeout=120.0)
+        cluster.ensure_running(timeout=45.0)
         state = cluster.status()
         assert state.value == "healthy"
 
@@ -90,14 +94,12 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         # instance preflight: build an OdooInstance bound to the cluster and
         # call run_foreground with a stubbed binary that exits 0 immediately,
         # proving the dependency preflight fires against the running cluster.
-        from unittest.mock import patch
-
         from odoo_instance_sdk.client import OdooClient
         from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
         from odoo_instance_sdk.models import StartConfig
         from odoo_instance_sdk.resources.instance import OdooInstance
 
-        client = OdooClient(config=OdooClientConfig(executable="/bin/true"))
+        client = OdooClient(config=OdooClientConfig(executable=shutil.which("true") or "true"))
         instance = OdooInstance(
             config=InstanceConfig(
                 base_url="http://127.0.0.1:8069",
@@ -106,11 +108,7 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
             _client=client,
             _postgres_cluster=cluster,
         )
-        with patch(
-            "odoo_instance_sdk.resources.instance.run_foreground_process",
-            return_value=0,
-        ):
-            exit_code = instance.run_foreground()
+        exit_code = instance.run_foreground()
         assert exit_code == 0  # preflight passed (cluster already healthy)
 
         # stop — preserves the volume.
@@ -132,7 +130,7 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         )
 
         # Restart (idempotent ensure_running).
-        cluster.ensure_running(timeout=60.0)
+        cluster.ensure_running(timeout=45.0)
         assert cluster.status().value == "healthy"
     except BaseException as exc:
         primary_failure = exc

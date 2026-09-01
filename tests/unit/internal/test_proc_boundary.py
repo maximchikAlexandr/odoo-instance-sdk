@@ -1,0 +1,331 @@
+from __future__ import annotations
+
+import sys
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from odoo_instance_sdk.exceptions import DuplicateStepError, UnplannedStepError
+from odoo_instance_sdk.internal.proc import (
+    ProcessExecutionError,
+    ProcessResult,
+    ProcessSpawnError,
+    ProcessTimeoutError,
+    RecordingExecutor,
+    RunContext,
+    SubprocessExecutor,
+    prepared_command,
+    prepared_step,
+    run_captured,
+    run_captured_limited,
+    spawn,
+)
+
+
+def _python(source: str) -> tuple[str, ...]:
+    return (sys.executable, "-c", source)
+
+
+def test_captured_text_preserves_argv_cwd_stdin_and_sanitized_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "must-not-cross-boundary")
+    argv = _python(
+        "import os, pathlib, sys; "
+        "print(pathlib.Path.cwd()); "
+        "print(os.environ['PROC_TEST_VALUE']); "
+        "print('secret' if 'ODCLI_TEST_MASTER_PASSWORD' in os.environ else 'clean'); "
+        "print(sys.stdin.read())"
+    )
+    result = run_captured(
+        argv,
+        cwd=tmp_path,
+        env={
+            "PROC_TEST_VALUE": "override",
+            "ODCLI_TEST_MASTER_PASSWORD": "override-secret",
+        },
+        stdin=b"input-bytes",
+    )
+
+    assert result.argv == argv
+    assert result.returncode == 0
+    assert result.stdout is not None
+    assert str(tmp_path) in result.stdout
+    assert "override" in result.stdout
+    assert "clean" in result.stdout
+    assert "input-bytes" in result.stdout
+    assert result.cwd == str(tmp_path)
+    assert result.environment == (
+        ("ODCLI_TEST_MASTER_PASSWORD", "override-secret"),
+        ("PROC_TEST_VALUE", "override"),
+    )
+    assert result.duration >= 0
+
+
+def test_captured_bytes_and_nonzero_result() -> None:
+    step = prepared_step(
+        _python("import sys; sys.stdout.buffer.write(b'\\xff'); sys.exit(7)"), text=False
+    )
+    result = SubprocessExecutor().execute(step)
+
+    assert result.returncode == 7
+    assert result.stdout == b"\xff"
+    assert result.stderr == b""
+
+
+def test_explicit_empty_environment_does_not_inherit_ambient_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROC_EXPLICIT_SENTINEL", "ambient-secret")
+    step = prepared_step(
+        _python("import os, sys; sys.exit(0 if 'PROC_EXPLICIT_SENTINEL' not in os.environ else 1)"),
+        env={},
+        environment_policy="explicit",
+    )
+
+    result = SubprocessExecutor().execute(step)
+
+    assert result.returncode == 0
+    assert result.environment == ()
+
+
+def test_explicit_empty_environment_spawn_does_not_inherit_ambient_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROC_EXPLICIT_SENTINEL", "ambient-secret")
+    step = prepared_step(
+        _python("import os, sys; sys.exit(0 if 'PROC_EXPLICIT_SENTINEL' not in os.environ else 1)"),
+        step_id="explicit-empty-spawn",
+        env={},
+        environment_policy="explicit",
+    )
+
+    handle = SubprocessExecutor().spawn(step)
+
+    assert handle.wait() == 0
+
+
+def test_timeout_and_spawn_failures_are_typed() -> None:
+    with pytest.raises(ProcessTimeoutError) as timeout:
+        run_captured(_python("import time; time.sleep(10)"), timeout=0.01)
+    assert timeout.value.timeout == 0.01
+
+    with pytest.raises(ProcessSpawnError) as spawn_error:
+        run_captured(("/definitely/missing/odoo-sdk-executable",))
+    assert spawn_error.value.argv == ("/definitely/missing/odoo-sdk-executable",)
+
+
+def test_process_boundary_error_diagnostics_use_the_safe_argv_projection() -> None:
+    timeout_step = prepared_step(
+        (*_python("import time; time.sleep(10)"), "--token", "timeout-secret"),
+        step_id="timeout-secret",
+        timeout=0.01,
+    )
+    timeout_step = replace(timeout_step, secret_values=("timeout-secret",))
+    with pytest.raises(ProcessTimeoutError) as timeout:
+        SubprocessExecutor().execute(timeout_step)
+    assert "timeout-secret" not in str(timeout.value)
+    assert timeout.value.argv[-1] == "<redacted>"
+
+    spawn_step = prepared_step(
+        "/definitely/missing/odoo-sdk-executable",
+        ("--password=spawn-secret",),
+        step_id="spawn-secret",
+    )
+    with pytest.raises(ProcessSpawnError) as spawn_error:
+        SubprocessExecutor().execute(spawn_step)
+    assert "spawn-secret" not in str(spawn_error.value)
+    assert spawn_error.value.argv[-1] == "--password=<redacted>"
+
+
+def test_inherited_spawn_owns_stdio_and_process_group() -> None:
+    handle = spawn(_python("import sys; sys.exit(3)"), inherit_stdio=True)
+    assert handle.stdin is None
+    assert handle.stdout is None
+    assert handle.stderr is None
+    assert handle.process_group_id == handle.pid
+    assert handle.session_id == handle.pid
+    assert handle.wait() == 3
+
+    captured = spawn(_python("import sys; sys.exit(4)"), inherit_stdio=False)
+    assert captured.stdin is not None
+    assert captured.stdout is not None
+    assert captured.stderr is not None
+    assert captured.wait() == 4
+
+
+def test_recording_executor_returns_typed_result_and_exact_private_step() -> None:
+    expected = ProcessResult(
+        argv=("tool", "--flag"),
+        returncode=4,
+        stdout="out",
+        stderr="err",
+        duration=0.25,
+        cwd="/work",
+        environment=(("TOKEN", "private"),),
+    )
+    executor = RecordingExecutor(results={"step": expected})
+    step = prepared_step(
+        "tool",
+        ["--flag"],
+        step_id="step",
+        cwd="/work",
+        env={"TOKEN": "private"},
+        stdin=b"secret input",
+        timeout=2.0,
+    )
+
+    result = executor.execute(step)
+
+    assert result is expected
+    assert executor.executed == [step]
+    assert executor.executed[0].stdin == b"secret input"
+    assert executor.executed[0].timeout == 2.0
+
+
+def test_run_captured_limited_preserves_streams_cwd_and_environment(tmp_path: Path) -> None:
+    result = run_captured_limited(
+        _python(
+            "import os, pathlib, sys; "
+            "sys.stdout.buffer.write(pathlib.Path.cwd().name.encode()); "
+            "sys.stderr.buffer.write(os.environ['LIMITED_TEST_VALUE'].encode())"
+        ),
+        cwd=tmp_path,
+        env={"LIMITED_TEST_VALUE": "stderr"},
+        max_output_bytes=32,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == tmp_path.name.encode()
+    assert result.stderr == b"stderr"
+    assert result.cwd == str(tmp_path)
+    assert result.environment == (("LIMITED_TEST_VALUE", "stderr"),)
+
+
+def test_run_captured_limited_preserves_nonzero_return_code() -> None:
+    result = run_captured_limited(
+        _python(
+            "import sys; sys.stdout.buffer.write(b'out'); sys.stderr.buffer.write(b'err'); sys.exit(9)"
+        ),
+        max_output_bytes=3,
+    )
+
+    assert result.returncode == 9
+    assert result.stdout == b"out"
+    assert result.stderr == b"err"
+
+
+def test_run_captured_limited_budget_boundaries() -> None:
+    empty = _python("pass")
+    assert run_captured_limited(empty, max_output_bytes=0).stdout == b""
+    with pytest.raises(ValueError, match="must not be negative"):
+        run_captured_limited(empty, max_output_bytes=-1)
+
+    exact = _python("import sys; sys.stdout.buffer.write(b'123'); sys.stderr.buffer.write(b'xy')")
+    result = run_captured_limited(exact, max_output_bytes=3)
+    assert result.stdout == b"123"
+    assert result.stderr == b"xy"
+
+    with pytest.raises(ProcessExecutionError, match="output exceeded"):
+        run_captured_limited(exact, max_output_bytes=2)
+
+    with pytest.raises(ProcessExecutionError, match="output exceeded"):
+        run_captured_limited(
+            _python("import sys; sys.stdout.buffer.write(b'x')"), max_output_bytes=0
+        )
+
+
+def test_run_captured_limited_timeout_and_spawn_errors() -> None:
+    with pytest.raises(ProcessTimeoutError) as timeout:
+        run_captured_limited(
+            _python("import time; time.sleep(10)"), timeout=0.01, max_output_bytes=1
+        )
+    assert timeout.value.timeout == 0.01
+
+    with pytest.raises(ProcessSpawnError) as spawn_error:
+        run_captured_limited(("/definitely/missing/odoo-sdk-executable",), max_output_bytes=1)
+    assert spawn_error.value.argv == ("/definitely/missing/odoo-sdk-executable",)
+
+
+def test_run_captured_limited_active_context_uses_one_recorded_launch() -> None:
+    step = prepared_step(
+        _python("import sys; sys.stdout.buffer.write(b'recorded')"),
+        step_id="limited",
+        text=False,
+    )
+    expected = ProcessResult(
+        argv=step.argv,
+        returncode=0,
+        stdout=b"recorded",
+        stderr=b"",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+    executor = RecordingExecutor(results={"limited": expected})
+
+    def callback(_context: object) -> ProcessResult:
+        result = run_captured_limited(
+            step.argv,
+            max_output_bytes=32,
+            step_id=step.step_id,
+        )
+        with pytest.raises(DuplicateStepError):
+            run_captured_limited(step.argv, max_output_bytes=32, step_id=step.step_id)
+        return result
+
+    command = prepared_command(callback, (step,), executor=executor)
+    result = command.run()
+
+    assert result is expected
+    assert executor.executed == [step]
+
+
+def test_process_prepared_rejects_same_argv_with_changed_private_inputs() -> None:
+    step = prepared_step(
+        ("tool", "same-argv"),
+        step_id="captured",
+        cwd="/captured",
+        env={"PRIVATE": "captured-value"},
+        stdin=b"captured-input",
+        timeout=2.0,
+        mode="captured",
+    )
+    result = ProcessResult(
+        argv=step.argv,
+        returncode=0,
+        stdout="ok",
+        stderr="",
+        duration=0.0,
+        cwd=step.cwd,
+        environment=step.environment,
+    )
+
+    replacements = (
+        replace(step, cwd="/substituted"),
+        replace(step, environment_snapshot=(("PRIVATE", "substituted-value"),)),
+        replace(step, stdin=b"substituted-input"),
+        replace(step, timeout=3.0),
+        replace(step, mode="inherited"),
+        replace(step, step_id="different-id"),
+    )
+    for replacement in replacements:
+        executor = RecordingExecutor(results={step.step_id: result})
+
+        def reject(run_context: RunContext[object], requested: object = replacement) -> None:
+            with pytest.raises(UnplannedStepError):
+                run_context.process_prepared(requested)  # type: ignore[arg-type]
+            run_context.skip(step.step_id)
+
+        prepared_command(reject, (step,), executor=executor).run()
+        assert executor.executed == []
+
+    executor = RecordingExecutor(results={step.step_id: result})
+    exact = prepared_command(
+        lambda context: context.process_prepared(step),
+        (step,),
+        executor=executor,
+    )
+    assert exact.run() is result
+    assert executor.executed == [step]

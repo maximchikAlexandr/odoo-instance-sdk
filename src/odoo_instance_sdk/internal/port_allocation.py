@@ -115,7 +115,7 @@ def _add_manifest_ports(repo_root: Path, used: set[int]) -> None:
         used.add(cfg.postgres.port)
 
 
-def _http_port_from_generated_config(path: object) -> int | None:
+def _http_port_from_generated_config(path: Path) -> int | None:
     """Read http_port from a generated odoo.conf (single source for per-env HTTP port)."""
     try:
         cfg = parse_odoo_config(Path(str(path)))

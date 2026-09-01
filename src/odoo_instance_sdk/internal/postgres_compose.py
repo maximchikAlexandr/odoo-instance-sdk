@@ -12,7 +12,7 @@ import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.exceptions import (
     PostgresClusterStartError,
@@ -22,8 +22,11 @@ from odoo_instance_sdk.exceptions import (
     PostgresComposeUnavailableError,
     PostgresPortCollisionError,
 )
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.models import PostgresClusterState
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.proc import ProcessResult
 
 _PROJECT_NAME_PREFIX = "odcli_pg_"
 
@@ -67,20 +70,94 @@ class SubprocessComposeRunner(ComposeRunner):
         *,
         cwd: Path | None = None,
         timeout: float | None = None,
+        step_id: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            list(args),
-            cwd=str(cwd) if cwd is not None else None,
-            env=sanitized_child_environment(),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+        from odoo_instance_sdk.internal.proc import (
+            ProcessTimeoutError,
+            SubprocessExecutor,
+            active_context,
+            prepared_step,
         )
+
+        context = active_context()
+        if context is not None:
+            if step_id is None:
+                from odoo_instance_sdk.exceptions import UnplannedStepError
+
+                raise UnplannedStepError("compose process requires captured step_id")
+            captured_step = context.prepared(step_id)
+            if (
+                captured_step.argv != tuple(args)
+                or captured_step.cwd != (None if cwd is None else str(cwd))
+                or captured_step.timeout != timeout
+            ):
+                from odoo_instance_sdk.exceptions import UnplannedStepError
+
+                raise UnplannedStepError(step_id)
+            captured = cast("ProcessResult", context.process_prepared(captured_step))
+            stdout = captured.stdout if isinstance(captured.stdout, str) else ""
+            stderr = captured.stderr if isinstance(captured.stderr, str) else ""
+            return subprocess.CompletedProcess(args, captured.returncode, stdout, stderr)
+        try:
+            result = SubprocessExecutor().execute(
+                prepared_step(args, cwd=cwd, timeout=timeout, text=True)
+            )
+        except ProcessTimeoutError as exc:
+            raise subprocess.TimeoutExpired(list(args), timeout or 0.0) from exc
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        stderr = result.stderr if isinstance(result.stderr, str) else ""
+        return subprocess.CompletedProcess(list(args), result.returncode, stdout, stderr)
+
+
+def _run_compose(
+    runner: ComposeRunner,
+    args: Sequence[str],
+    *,
+    cwd: Path | None,
+    timeout: float | None,
+    step_id: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Use the exact captured process when a command owns the ledger."""
+    if step_id is None or not isinstance(runner, SubprocessComposeRunner):
+        return runner.run(args, cwd=cwd, timeout=timeout)
+    # Lifecycle helpers calculate a remaining outer deadline between probes.
+    # Once a command owns a captured step, the child timeout is immutable too;
+    # use that captured value rather than turning the same step into a new
+    # request with a different budget.
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    captured_timeout = timeout if context is None else context.prepared(step_id).timeout
+    return runner.run(args, cwd=cwd, timeout=captured_timeout, step_id=step_id)
 
 
 def docker_available() -> bool:
     return shutil.which("docker") is not None
+
+
+def docker_ready(*, timeout: float = 3.0) -> tuple[bool, str]:
+    """Check the Docker daemon and Compose plugin without mutating state."""
+    if not docker_available():
+        return False, "docker CLI not found on PATH"
+    from odoo_instance_sdk.internal.proc import (
+        PreparedStep,
+        ProcessExecutionError,
+        SubprocessExecutor,
+    )
+
+    for step_id, argv in (
+        ("docker.info", ("docker", "info")),
+        ("docker.compose.version", ("docker", "compose", "version")),
+    ):
+        try:
+            result = SubprocessExecutor().execute(
+                PreparedStep(step_id=step_id, argv=argv, timeout=timeout, read_only=True)
+            )
+        except ProcessExecutionError as error:
+            return False, error.__class__.__name__
+        if result.returncode != 0:
+            return False, f"{step_id} exited with status {result.returncode}"
+    return True, "ready"
 
 
 def compose_project_name(project_id: str) -> str:
@@ -96,8 +173,8 @@ def assert_image_safe(image: str) -> None:
         raise PostgresComposeInvalidError(f"invalid postgres image: {image!r}")
 
 
-def is_oci_digest(reference: object) -> bool:
-    return isinstance(reference, str) and _DIGEST_RE.fullmatch(reference) is not None
+def is_oci_digest(reference: str) -> bool:
+    return _DIGEST_RE.fullmatch(reference) is not None
 
 
 def assert_user_safe(user: str) -> None:
@@ -186,18 +263,25 @@ def write_compose_file_atomic(
     runner: ComposeRunner,
     project_name: str,
     timeout: float | None = None,
+    temporary_path: Path | None = None,
+    step_id: str | None = None,
 ) -> None:
     """Validate then atomically publish ``compose.yaml`` with mode 0600."""
     compose_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(compose_path.parent), prefix=".compose-", suffix=".yaml.tmp"
-    )
+    if temporary_path is None:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(compose_path.parent), prefix=".compose-", suffix=".yaml.tmp"
+        )
+    else:
+        tmp_name = str(temporary_path)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(tmp_name, flags, 0o600)
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.chmod(tmp_path, 0o600)
-        compose_config(runner, tmp_path, project_name, timeout=timeout)
+        compose_config(runner, tmp_path, project_name, timeout=timeout, step_id=step_id)
         os.replace(tmp_path, compose_path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -226,12 +310,13 @@ def compose_config(
     project_name: str,
     *,
     timeout: float | None = None,
+    step_id: str | None = None,
 ) -> None:
     """Validate the generated compose file via ``docker compose config --quiet``."""
     _require_timeout_budget(timeout)
     args = [*_compose_base_args(compose_file, project_name), "config", "--quiet"]
     try:
-        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+        res = _run_compose(runner, args, cwd=compose_file.parent, timeout=timeout, step_id=step_id)
     except subprocess.TimeoutExpired as exc:
         raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     if res.returncode != 0:
@@ -246,11 +331,12 @@ def compose_up(
     project_name: str,
     *,
     timeout: float | None = None,
+    step_id: str | None = None,
 ) -> None:
     _require_timeout_budget(timeout)
     args = [*_compose_base_args(compose_file, project_name), "up", "--detach", "--wait"]
     try:
-        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+        res = _run_compose(runner, args, cwd=compose_file.parent, timeout=timeout, step_id=step_id)
     except subprocess.TimeoutExpired as exc:
         raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     if res.returncode != 0:
@@ -264,7 +350,14 @@ def compose_up(
         )
 
 
-def resolve_image_digest(runner: ComposeRunner, image: str, *, timeout: float | None = None) -> str:
+def resolve_image_digest(
+    runner: ComposeRunner,
+    image: str,
+    *,
+    timeout: float | None = None,
+    pull_step_id: str | None = None,
+    inspect_step_id: str | None = None,
+) -> str:
     """Pull a mutable image reference then return Docker's immutable RepoDigest."""
     _require_timeout_budget(timeout)
     assert_image_safe(image)
@@ -276,16 +369,24 @@ def resolve_image_digest(runner: ComposeRunner, image: str, *, timeout: float | 
         return value
 
     try:
-        pull = runner.run(["docker", "image", "pull", image], cwd=None, timeout=remaining())
+        pull = _run_compose(
+            runner,
+            ["docker", "image", "pull", image],
+            cwd=None,
+            timeout=remaining(),
+            step_id=pull_step_id,
+        )
         if pull.returncode != 0:
             raise PostgresClusterStartError(
                 f"docker image pull failed: {pull.stderr.strip() or pull.stdout.strip()}",
                 returncode=pull.returncode,
             )
-        inspected = runner.run(
+        inspected = _run_compose(
+            runner,
             ["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", image],
             cwd=None,
             timeout=remaining(),
+            step_id=inspect_step_id,
         )
     except subprocess.TimeoutExpired as exc:
         raise PostgresClusterTimeoutError(timeout or 0.0) from exc
@@ -313,6 +414,8 @@ def compose_stop(
     project_name: str,
     *,
     timeout: float | None = None,
+    command_timeout: int | None = None,
+    step_id: str | None = None,
 ) -> None:
     """Stop the compose project; preserves the named volume (never ``down -v``)."""
     _require_timeout_budget(timeout)
@@ -320,10 +423,16 @@ def compose_stop(
         *_compose_base_args(compose_file, project_name),
         "stop",
         "--timeout",
-        str(int(max(1, timeout)) if timeout is not None else 30),
+        str(
+            command_timeout
+            if command_timeout is not None
+            else int(max(1, timeout))
+            if timeout is not None
+            else 30
+        ),
     ]
     try:
-        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+        res = _run_compose(runner, args, cwd=compose_file.parent, timeout=timeout, step_id=step_id)
     except subprocess.TimeoutExpired as exc:
         raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     if res.returncode != 0:
@@ -339,12 +448,13 @@ def compose_ps(
     project_name: str,
     *,
     timeout: float | None = None,
-) -> list[dict[str, object]] | None:
+    step_id: str | None = None,
+) -> list[dict[str, JsonValue]] | None:
     """Return parsed ``docker compose ps --format json`` rows, or None on CLI failure."""
     _require_timeout_budget(timeout)
     args = [*_compose_base_args(compose_file, project_name), "ps", "--format", "json"]
     try:
-        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+        res = _run_compose(runner, args, cwd=compose_file.parent, timeout=timeout, step_id=step_id)
     except (subprocess.TimeoutExpired, OSError):
         # This is monitor discovery, not lifecycle control.  Turn a broken
         # Docker command into a missing service so one project cannot abort a
@@ -352,7 +462,7 @@ def compose_ps(
         return None
     if res.returncode != 0:
         return None
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, JsonValue]] = []
     for raw in res.stdout.splitlines():
         line = raw.strip()
         if not line:
@@ -373,6 +483,7 @@ def compose_health(
     *,
     user: str,
     timeout: float | None = None,
+    step_id: str | None = None,
 ) -> tuple[int, str]:
     """Run ``pg_isready`` inside the postgres service container."""
     _require_timeout_budget(timeout)
@@ -388,19 +499,21 @@ def compose_health(
         "postgres",
     ]
     try:
-        res = runner.run(args, cwd=compose_file.parent, timeout=timeout)
+        res = _run_compose(runner, args, cwd=compose_file.parent, timeout=timeout, step_id=step_id)
     except subprocess.TimeoutExpired as exc:
         raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     return res.returncode, (res.stdout + res.stderr).strip()
 
 
-def derive_state(
+def derive_state(  # noqa: C901
     runner: ComposeRunner,
     compose_file: Path,
     project_name: str,
     *,
     user: str,
     timeout: float | None = None,
+    health_step_id: str | None = None,
+    ps_step_id: str | None = None,
 ) -> PostgresClusterState:
     deadline = time.monotonic() + timeout if timeout is not None else None
 
@@ -410,12 +523,26 @@ def derive_state(
         return value
 
     try:
-        rows = compose_ps(runner, compose_file, project_name, timeout=remaining())
+        rows = compose_ps(
+            runner, compose_file, project_name, timeout=remaining(), step_id=ps_step_id
+        )
     except (OSError, subprocess.SubprocessError):
         return PostgresClusterState.UNKNOWN
     if rows is None:
+        if health_step_id is not None:
+            from odoo_instance_sdk.internal.proc import active_context
+
+            context = active_context()
+            if context is not None:
+                context.skip(health_step_id)
         return PostgresClusterState.UNKNOWN
     if not rows:
+        if health_step_id is not None:
+            from odoo_instance_sdk.internal.proc import active_context
+
+            context = active_context()
+            if context is not None:
+                context.skip(health_step_id)
         return PostgresClusterState.STOPPED
     stopped_states = {"created", "dead", "exited"}
     reported_states = {str(row.get("State", "")).lower() for row in rows}
@@ -423,7 +550,12 @@ def derive_state(
         return PostgresClusterState.STOPPED
     try:
         rc, _output = compose_health(
-            runner, compose_file, project_name, user=user, timeout=remaining()
+            runner,
+            compose_file,
+            project_name,
+            user=user,
+            timeout=remaining(),
+            step_id=health_step_id,
         )
     except (OSError, subprocess.SubprocessError):
         return PostgresClusterState.UNKNOWN

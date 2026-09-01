@@ -1,19 +1,15 @@
 from __future__ import annotations
 
-import contextlib
 import keyword
 import os
-import selectors
 import subprocess
-import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import IO, TYPE_CHECKING, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Literal, NoReturn
 
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.postgres_transport import run_psql
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import StartConfig
 
@@ -415,7 +411,7 @@ _GIT_TIMEOUT_SECONDS = 10.0
 _GIT_OUTPUT_LIMIT = 4 * 1024 * 1024
 
 
-def _run_git_bytes(  # noqa: C901
+def _run_git_bytes(
     argv: Sequence[str],
     cwd: Path,
     *,
@@ -423,89 +419,32 @@ def _run_git_bytes(  # noqa: C901
     max_output_bytes: int = _GIT_OUTPUT_LIMIT,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run one bounded, local Git argv without decoding or shell interpolation."""
-    if max_output_bytes < 0:
-        raise ValueError("max_output_bytes must not be negative")
-    command = ["git", "-C", str(cwd), *argv]
+    from odoo_instance_sdk.internal.proc import (
+        ProcessExecutionError,
+        ProcessTimeoutError,
+        run_captured_limited,
+    )
+
     try:
-        process = subprocess.Popen(
-            command,
-            env=sanitized_child_environment(),
-            shell=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        result = run_captured_limited(
+            ("git", "-C", str(cwd)),
+            argv,
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
         )
-    except FileNotFoundError as exc:
-        raise ConfigError("git is not available for changed test selection") from exc
-    except OSError as exc:
+    except ProcessTimeoutError as exc:
+        raise ConfigError("git timed out during changed test selection") from exc
+    except ProcessExecutionError as exc:
+        if "output exceeded" in str(exc):
+            raise ConfigError("git output exceeded the changed test selection limit") from exc
+        if isinstance(exc.__cause__, FileNotFoundError):
+            raise ConfigError("git is not available for changed test selection") from exc
         raise ConfigError("git could not be started for changed test selection") from exc
 
-    stdout = process.stdout
-    stderr = process.stderr
-    assert stdout is not None
-    assert stderr is not None
-    streams: dict[IO[bytes], bytearray] = {stdout: bytearray(), stderr: bytearray()}
-    selector = selectors.DefaultSelector()
-    started = time.monotonic()
-
-    def terminate_and_reap() -> None:
-        if process.poll() is None:
-            with contextlib.suppress(OSError):
-                process.terminate()
-        try:
-            process.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(OSError):
-                process.kill()
-            process.wait()
-
-    def terminate_and_fail(message: str) -> NoReturn:
-        terminate_and_reap()
-        raise ConfigError(message)
-
-    try:
-        selector.register(stdout, selectors.EVENT_READ)
-        selector.register(stderr, selectors.EVENT_READ)
-        while selector.get_map():
-            remaining = timeout - (time.monotonic() - started)
-            if remaining <= 0:
-                terminate_and_fail("git timed out during changed test selection")
-            ready = selector.select(remaining)
-            if not ready:
-                terminate_and_fail("git timed out during changed test selection")
-            for key, _ in ready:
-                stream = cast("IO[bytes]", key.fileobj)
-                chunk = os.read(stream.fileno(), 64 * 1024)
-                if not chunk:
-                    selector.unregister(stream)
-                    stream.close()
-                    continue
-                buffer = streams[stream]
-                if len(buffer) + len(chunk) > max_output_bytes:
-                    terminate_and_fail("git output exceeded the changed test selection limit")
-                buffer.extend(chunk)
-        remaining = timeout - (time.monotonic() - started)
-        if remaining <= 0:
-            terminate_and_fail("git timed out during changed test selection")
-        process.wait(timeout=remaining)
-    except subprocess.TimeoutExpired:
-        terminate_and_reap()
-        raise ConfigError("git timed out during changed test selection") from None
-    except (ConfigError, OSError):
-        if process.poll() is None:
-            terminate_and_reap()
-        raise
-    finally:
-        selector.close()
-        for stream in (stdout, stderr):
-            if not stream.closed:
-                stream.close()
-
-    return subprocess.CompletedProcess(
-        command,
-        process.returncode,
-        bytes(streams[stdout]),
-        bytes(streams[stderr]),
-    )
+    stdout = result.stdout if isinstance(result.stdout, bytes) else b""
+    stderr = result.stderr if isinstance(result.stderr, bytes) else b""
+    command = ["git", "-C", str(cwd), *argv]
+    return subprocess.CompletedProcess(command, result.returncode, stdout, stderr)
 
 
 def _git_error(result: subprocess.CompletedProcess[bytes], argv: Sequence[str]) -> ConfigError:

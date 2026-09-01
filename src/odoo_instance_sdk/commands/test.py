@@ -3,24 +3,35 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, cast
 
 import click
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
+    OutputDocument,
     OutputMode,
-    emit_json_envelope,
+    emit,
     fail,
+    model_to_dict,
     output_options,
     resolve_output_mode,
-    rich_print,
-    sanitize_diagnostic,
+    run_or_preview,
+    success_document,
 )
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.models import DevelopmentEnvironment
+    from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.internal.automation import run_odoo_tests
+from odoo_instance_sdk.internal.automation import (
+    TestCommandSnapshot,
+    run_odoo_tests_command,
+)
 from odoo_instance_sdk.internal.test_selection import (
+    _ChangedSelection,
     _ChangedSelectionError,
     _TestSelection,
     preflight_installed_modules,
@@ -55,8 +66,8 @@ def _validate_options(
 
 
 def _selection_dict(
-    selection: _TestSelection | tuple[_TestSelection, ...] | dict[str, Any],
-) -> dict[str, Any]:
+    selection: _TestSelection | tuple[_TestSelection, ...] | dict[str, JsonValue],
+) -> dict[str, JsonValue]:
     if isinstance(selection, dict):
         return dict(selection)
     if isinstance(selection, tuple):
@@ -80,12 +91,12 @@ def _selection_dict(
 
 
 def _common_result(
-    env_obj: Any,
+    env_obj: DevelopmentEnvironment,
     *,
-    selection: dict[str, Any],
+    selection: dict[str, JsonValue],
     modules: tuple[str, ...],
     exit_code: int,
-) -> dict[str, Any]:
+) -> dict[str, JsonValue]:
     return {
         "environment_id": str(env_obj.id),
         "environment_name": str(env_obj.name),
@@ -96,7 +107,7 @@ def _common_result(
     }
 
 
-def _changed_result(plan: Any, result: dict[str, Any]) -> dict[str, Any]:
+def _changed_result(plan: _ChangedSelection, result: dict[str, JsonValue]) -> dict[str, JsonValue]:
     result.update(
         {
             "base_source": plan.base_source,
@@ -113,11 +124,11 @@ def _changed_result(plan: Any, result: dict[str, Any]) -> dict[str, Any]:
 
 
 def project_execution_result(
-    env_obj: Any,
-    selection: _TestSelection | tuple[_TestSelection, ...] | dict[str, Any],
+    env_obj: DevelopmentEnvironment,
+    selection: _TestSelection | tuple[_TestSelection, ...] | dict[str, JsonValue],
     spec: OdooTestSpec,
     typed: OdooTestResult,
-) -> dict[str, Any]:
+) -> dict[str, JsonValue]:
     """Project every executed test entry point through one result shape."""
     result = _common_result(
         env_obj,
@@ -142,55 +153,69 @@ def _emit_result(
     *,
     mode: OutputMode,
     command: str,
-    result: dict[str, Any],
+    result: dict[str, JsonValue],
     dry_run: bool,
     diagnostic: str | None = None,
 ) -> None:
-    if mode is not OutputMode.RICH:
-        emit_json_envelope(
-            ok=True,
+    def rich_projection(_document: OutputDocument) -> str:
+        selection = result.get("selection")
+        selection_kind = (
+            str(selection.get("kind", "unknown")) if isinstance(selection, dict) else "unknown"
+        )
+        modules = result.get("modules")
+        module_text = (
+            ", ".join(str(item) for item in modules) if isinstance(modules, list) else "none"
+        )
+        lines = [
+            f"environment={result['environment_name']} ({result['environment_id']})",
+            f"selection={selection_kind}",
+            f"modules={module_text or 'none'}",
+        ]
+        if "test_tags" in result:
+            counts = result.get("counts")
+            counts = counts if isinstance(counts, dict) else {}
+            lines.append(
+                f"tests={counts.get('tests', 0)} "
+                f"ok={counts.get('successful', 0)} "
+                f"failed={counts.get('failed', 0)} "
+                f"errors={counts.get('errors', 0)} "
+                f"skipped={counts.get('skipped', 0)}"
+            )
+        elif result.get("reason") == "no_addon_changes":
+            lines.append("reason=no_addon_changes")
+        elif result.get("dry_run"):
+            lines.append("dry_run=true")
+        lines.append(f"exit_code={result['exit_code']}")
+        return "\n".join(lines)
+
+    emit(
+        success_document(
             command=command,
             result=result,
             dry_run=dry_run,
-            mode=mode,
-        )
-    else:
-        rich_print(f"environment={result['environment_name']} ({result['environment_id']})")
-        rich_print(f"selection={result['selection']['kind']}")
-        rich_print(f"modules={', '.join(result['modules']) or 'none'}")
-        if "test_tags" in result:
-            rich_print(
-                f"tests={result['counts']['tests']} "
-                f"ok={result['counts']['successful']} "
-                f"failed={result['counts']['failed']} "
-                f"errors={result['counts']['errors']} "
-                f"skipped={result['counts']['skipped']}"
-            )
-        elif result.get("reason") == "no_addon_changes":
-            rich_print("reason=no_addon_changes")
-        elif result.get("dry_run"):
-            rich_print("dry_run=true")
-        rich_print(f"exit_code={result['exit_code']}")
-    if diagnostic:
-        click.echo(sanitize_diagnostic(diagnostic), err=True)
+        ),
+        mode,
+        rich=rich_projection,
+        diagnostic=diagnostic,
+    )
 
 
-def _start_config(instance: Any) -> StartConfig:
+def _start_config(instance: OdooInstance) -> StartConfig:
     config = instance.config.start_config
     if config is None:
         raise ConfigError("selected environment has no generated Odoo config")
-    return cast("StartConfig", config)
+    return config
 
 
 def _execute_selection(
-    instance: Any,
-    env_obj: Any,
+    instance: OdooInstance,
+    env_obj: DevelopmentEnvironment,
     selection: _TestSelection,
     *,
     reload_tests: bool,
     allow_empty: bool,
     tags: str | None,
-) -> tuple[dict[str, Any], str | None]:
+) -> tuple[dict[str, JsonValue], str | None]:
     spec = OdooTestSpec(
         modules=selection.modules,
         test_tags=selection.test_tags if tags is None else tags,
@@ -198,12 +223,12 @@ def _execute_selection(
         allow_empty=allow_empty,
     )
     preflight_installed_modules(instance, spec.modules)
-    typed, diagnostic = run_odoo_tests(
+    typed, diagnostic = run_odoo_tests_command(
         instance,
         spec,
         http_interface=env_obj.http_interface,
         http_port=env_obj.http_port,
-    )
+    ).run()
     return project_execution_result(env_obj, selection, spec, typed), diagnostic
 
 
@@ -284,23 +309,46 @@ def test_command(
                     result["dry_run"] = True
                 _emit_result(mode=mode, command="test", result=result, dry_run=dry_run)
                 raise click.exceptions.Exit(0)  # noqa: TRY301
-            if dry_run:
-                result["dry_run"] = True
-                _emit_result(mode=mode, command="test", result=result, dry_run=True)
-                raise click.exceptions.Exit(0)  # noqa: TRY301
             spec = OdooTestSpec(
                 modules=plan.modules,
-                test_tags=plan.test_tags or "",
+                test_tags=getattr(plan, "test_tags", None)
+                or ",".join(f"/{module}" for module in plan.modules),
                 reload_tests=reload_tests,
                 allow_empty=allow_empty,
             )
-            preflight_installed_modules(instance, spec.modules)
-            typed, diagnostic = run_odoo_tests(
+            command = run_odoo_tests_command(
                 instance,
                 spec,
                 http_interface=env_obj.http_interface,
                 http_port=env_obj.http_port,
+                selection_snapshot=TestCommandSnapshot(
+                    worktree=Path(env_obj.worktree_path),
+                    git_head=getattr(plan, "head", None),
+                    git_base=getattr(plan, "resolved_base", None),
+                    changed_files=tuple(plan.changed_files),
+                    modules=tuple(plan.modules),
+                    database_names=tuple(getattr(instance.config, "configured_database_names", ())),
+                    database_identity=(
+                        getattr(instance.config, "db_host", None),
+                        getattr(instance.config, "db_port", None),
+                        getattr(instance.config, "db_user", None),
+                    ),
+                    interface=env_obj.http_interface,
+                    port=env_obj.http_port,
+                ),
             )
+            if dry_run:
+                result["plan"] = model_to_dict(command.plan)
+                result["dry_run"] = True
+                run_or_preview(
+                    lambda: command,
+                    command_name="test",
+                    mode=mode,
+                    dry_run=True,
+                    preview=lambda _command: result,
+                )
+                raise click.exceptions.Exit(0)  # noqa: TRY301
+            typed, diagnostic = command.run()
             result = project_execution_result(
                 env_obj,
                 {"kind": "changed", "value": None},
@@ -329,7 +377,7 @@ def test_command(
             tags=tags,
         )
         _emit_result(mode=mode, command="test", result=result, dry_run=False, diagnostic=diagnostic)
-        raise click.exceptions.Exit(result["exit_code"])  # noqa: TRY301
+        raise click.exceptions.Exit(cast("int", result["exit_code"]))  # noqa: TRY301
     except (click.exceptions.Exit, SystemExit):
         raise
     except _ChangedSelectionError as exc:
@@ -347,7 +395,7 @@ def test_command(
 
 
 def run_module_tests(
-    instance: Any,
+    instance: OdooInstance,
     selection: tuple[_TestSelection, ...],
     spec: OdooTestSpec,
     *,
@@ -358,12 +406,12 @@ def run_module_tests(
     if tuple(item.modules[0] for item in selection) != spec.modules:
         raise ConfigError("module test selection does not match requested modules")
     preflight_installed_modules(instance, spec.modules)
-    typed, diagnostic = run_odoo_tests(
+    typed, diagnostic = run_odoo_tests_command(
         instance,
         spec,
         http_interface=http_interface,
         http_port=http_port,
-    )
+    ).run()
     return typed, diagnostic
 
 
