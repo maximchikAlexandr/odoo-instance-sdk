@@ -84,6 +84,8 @@ Options:
 
 RUN_HELP_SNAPSHOT = """Usage: cli run [OPTIONS] [ODOO_ARGS]...
 
+Native Odoo arguments must follow a literal `--` delimiter.
+
 Options:
   --dry-run                  Inspect without starting.
   --format [rich|json|toon]  Output format (default: rich).
@@ -788,8 +790,8 @@ def test_run_dry_run_formats_expose_the_captured_native_argv(output: tuple[str, 
 
     assert result.exit_code == 0, result.output
     if output == ("--format", "rich"):
-        assert "--dev=reload" in result.stdout
-        assert "space value" in result.stdout
+        expected_argv = json.dumps(list(native_args), ensure_ascii=False, separators=(", ", ": "))
+        assert expected_argv in result.stdout
     elif output == ("--format", "toon"):
         from toon import DecodeOptions, decode
 
