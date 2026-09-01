@@ -1355,7 +1355,11 @@ class EnvironmentMonitor:
         *,
         recorded: Mapping[str, ProcessResult] | None = None,
     ) -> StorageFootprint:
+        now = time.monotonic()
         if recorded is not None:
+            cached = self._storage_cache.get(env_id)
+            if cached is not None and now - cached[0] < _EXPENSIVE_TTL:
+                return cached[1]
 
             def measured(name: str) -> int | None:
                 result = recorded.get(name)
@@ -1415,7 +1419,7 @@ class EnvironmentMonitor:
                     complete = (
                         complete and postgres_bytes is not None and filestore_bytes is not None
                     )
-                return StorageFootprint(
+                footprint = StorageFootprint(
                     total_bytes=worktree_bytes
                     + (python_bytes or 0)
                     + (postgres_bytes or 0)
@@ -1427,13 +1431,11 @@ class EnvironmentMonitor:
                     database=database,
                     other_files_bytes=other_bytes,
                 )
-            cached = self._storage_cache.get(env_id)
-            if cached is not None and time.monotonic() - cached[0] < _EXPENSIVE_TTL:
-                return cached[1]
+                self._storage_cache[env_id] = (now, footprint)
+                return footprint
             empty = _empty_storage()
-            self._storage_cache[env_id] = (time.monotonic(), empty)
+            self._storage_cache[env_id] = (now, empty)
             return empty
-        now = time.monotonic()
         cached = self._storage_cache.get(env_id)
         if cached is not None and now - cached[0] < _EXPENSIVE_TTL:
             return cached[1]

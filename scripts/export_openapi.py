@@ -49,12 +49,13 @@ def _schema_pgadmin_opener(environment_id: str) -> PgAdminOpenResult:
 
 def build_openapi() -> dict[str, Any]:
     """Build OpenAPI exclusively through the static-free production app."""
-    return create_app(
+    document: dict[str, Any] = create_app(
         headless=False,
         static_assets=False,
         monitor=_SchemaMonitor(),
         pgadmin_opener=_schema_pgadmin_opener,
     ).openapi()
+    return document
 
 
 def _reject_unsafe(value: object, *, key: str = "") -> None:  # noqa: C901
