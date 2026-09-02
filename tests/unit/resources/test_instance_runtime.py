@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -27,6 +28,58 @@ def _recording_handle(pid: int = 4242) -> ProcessHandle:
     process.poll.return_value = 0
     process.wait.return_value = 0
     return ProcessHandle(process, (), pid, pid, True)
+
+
+_PROTECTED_LONG_OPTIONS = (
+    "--config",
+    "--database",
+    "--db-filter",
+    "--db_user",
+    "--db_password",
+    "--db_host",
+    "--db_port",
+    "--db_sslmode",
+    "--addons-path",
+    "--upgrade-path",
+    "--data-dir",
+    "--http-interface",
+    "--http-port",
+    "--gevent-port",
+    "--longpolling-port",
+    "--logfile",
+)
+_PROTECTED_SHORT_OPTIONS = ("-c", "-d", "-r", "-w")
+_PROTECTED_RUNTIME_CASES = tuple(
+    [
+        pytest.param((option, "private-secret"), option, id=f"{option}-spaced")
+        for option in _PROTECTED_LONG_OPTIONS
+    ]
+    + [
+        pytest.param((f"{option}=private-secret",), option, id=f"{option}-equals")
+        for option in _PROTECTED_LONG_OPTIONS
+    ]
+    + [pytest.param((option,), option, id=f"{option}-exact") for option in _PROTECTED_SHORT_OPTIONS]
+    + [
+        pytest.param((f"{option}private-secret",), option, id=f"{option}-attached")
+        for option in _PROTECTED_SHORT_OPTIONS
+    ]
+    + [
+        pytest.param((option[:-1], "private-secret"), option[:-1], id=f"{option}-prefix-spaced")
+        for option in _PROTECTED_LONG_OPTIONS
+    ]
+    + [
+        pytest.param(
+            (f"{option[:-1]}=private-secret",),
+            option[:-1],
+            id=f"{option}-prefix-equals",
+        )
+        for option in _PROTECTED_LONG_OPTIONS
+    ]
+    + [
+        pytest.param(("--datab", "private-secret"), "--datab", id="--datab-prefix-spaced"),
+        pytest.param(("--datab=other",), "--datab", id="--datab-prefix-equals"),
+    ]
+)
 
 
 class TestFromConfigNoPassword:
@@ -390,6 +443,78 @@ class TestRunForeground:
         )
 
         assert instance.run_foreground(args=("--stop-after-init",)) == 23
+
+    def test_runtime_validator_returns_an_unchanged_frozen_tuple(self) -> None:
+        from odoo_instance_sdk.resources.instance import _validate_runtime_args
+
+        source = ["--dev=reload", "space value"]
+        captured = _validate_runtime_args(source)
+        source[:] = ["--database", "wrong"]
+
+        assert isinstance(captured, tuple)
+        assert captured == ("--dev=reload", "space value")
+
+    @pytest.mark.parametrize("args, offending", _PROTECTED_RUNTIME_CASES)
+    def test_protected_runtime_args_are_identical_for_shell_and_foreground(
+        self,
+        tmp_path: Path,
+        args: tuple[str, ...],
+        offending: str,
+    ) -> None:
+        client = _make_client()
+        instance = client.instance.from_config(_write_loopback_config(tmp_path / "odoo.conf"))
+
+        with (
+            patch(
+                "odoo_instance_sdk.resources.instance._snapshot_start_inputs",
+                side_effect=AssertionError("validation must precede snapshot"),
+            ) as snapshot,
+            patch(
+                "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+                side_effect=AssertionError("validation must precede executor construction"),
+            ) as executor,
+        ):
+            builders: tuple[Callable[[], object], ...] = (
+                lambda: instance.shell_command(args=args),
+                lambda: instance.run_foreground_command(args=args),
+            )
+            for build in builders:
+                with pytest.raises(InstanceConfigurationError) as raised:
+                    build()
+                message = str(raised.value)
+                assert offending in message
+                assert "private-secret" not in message
+
+        snapshot.assert_not_called()
+        executor.assert_not_called()
+
+    def test_allowed_repeated_runtime_args_and_longer_near_prefix_are_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        client = _make_client()
+        instance = client.instance.from_config(_write_loopback_config(tmp_path / "odoo.conf"))
+        args = (
+            "--dev=reload",
+            "--dev=xml",
+            "--log-level",
+            "debug",
+            "--workers",
+            "2",
+            "--stop-after-init",
+            "--database-extra",
+            "value",
+        )
+        executor = MagicMock()
+
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
+            foreground = instance.run_foreground_command(args=args)
+            shell = instance.shell_command(args=args)
+
+        assert foreground.plan.process_steps[0].argv[-len(args) :] == args
+        assert shell.plan.process_steps[0].argv[-len(args) :] == args
+        assert shell.plan.process_steps[0].argv[-len(args) - 1] == "shell"
 
 
 class TestShell:
