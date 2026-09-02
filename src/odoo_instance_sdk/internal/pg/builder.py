@@ -155,7 +155,12 @@ def validate_native_psql_args(  # noqa: C901
 def _statement_timeout(timeout: float | None) -> str | None:
     if timeout is None:
         return None
-    if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
         raise ConfigError("psql timeout must be finite and greater than zero")
     milliseconds = max(1, math.ceil(float(timeout) * 1000))
     return f"-c statement_timeout={milliseconds}"
@@ -260,6 +265,7 @@ def build_psql_specification(  # noqa: C901
         read_only=True,
         interactive=mode == "foreground",
         inherit_stdio=mode == "foreground",
+        start_new_session=mode == "foreground",
         text=True,
         secret_values=(password,) if password else (),
     )

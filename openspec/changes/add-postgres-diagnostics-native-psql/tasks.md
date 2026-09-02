@@ -14,15 +14,15 @@
 
 ## 3. DatabaseResource Command Surface
 
-- [ ] 3.1 Implement `psql_command()` and delegating `psql()` on `DatabaseResource`, including bound database identity, owned-cluster readiness action, external reachability behavior, inherited TTY, native signals/streams, and exit code.
-- [ ] 3.2 Implement `execute_sql_command()` and delegating `execute_sql()` with exact caller SQL, positive finite timeout validation, captured execution, and sanitized `SqlExecutionResult`.
-- [ ] 3.3 Implement one reusable database/context resolver for diagnostics and psql; cover registered-worktree default, unambiguous project default, explicit same-cluster database, stopped Odoo, and pre-spawn missing/ambiguous errors.
+- [x] 3.1 Implement `psql_command()` and delegating `psql()` on `DatabaseResource`, including bound database identity, owned-cluster readiness action, external reachability behavior, inherited TTY, native signals/streams, and exit code.
+- [x] 3.2 Implement `execute_sql_command()` and delegating `execute_sql()` with exact caller SQL, positive finite timeout validation, captured execution, and sanitized `SqlExecutionResult`.
+- [x] 3.3 Implement one reusable database/context resolver for diagnostics and psql; cover registered-worktree default, unambiguous project default, explicit same-cluster database, stopped Odoo, and pre-spawn missing/ambiguous errors.
 
 ## 4. Bounded Diagnostics
 
-- [ ] 4.1 Independently author and package the versioned lock SQL, decode it into typed rows, enforce top/timeout/query-preview bounds and stable ordering, and unit-test real blocker mapping without persistent database objects.
-- [ ] 4.2 Author the statistics SQL with the specified total-bytes/bytes top order, buffer-byte and ratio denominators, hot `usagecount >= 3` rule, mandatory cumulative warning, and one quiet transaction using `pg_temp` plus dynamic `DO` handling of SQLSTATE `42P01`/`42883`/`42501`; test one final JSON, stdout suppression, null/zero behavior, and cleanup on success/failure.
-- [ ] 4.3 Author the bloat SQL with the specified dead-tuple estimates, independent candidate/final `NULLS LAST` orders, top-before-threshold selection, exact `pgstattuple`/B-tree `pgstatindex` formulas, mandatory cumulative warning, and the same dynamic session-local error boundary; test all methods, thresholds, mixed optional failures, one final JSON, and no persistent objects.
+- [x] 4.1 Independently author and package the versioned lock SQL, decode it into typed rows, enforce top/timeout/query-preview bounds and stable ordering, and unit-test real blocker mapping without persistent database objects.
+- [x] 4.2 Author the statistics SQL with the specified total-bytes/bytes top order, buffer-byte and ratio denominators, hot `usagecount >= 3` rule, mandatory cumulative warning, and one quiet transaction using `pg_temp` plus dynamic `DO` handling of SQLSTATE `42P01`/`42883`/`42501`; test one final JSON, stdout suppression, null/zero behavior, and cleanup on success/failure.
+- [x] 4.3 Author the bloat SQL with the specified dead-tuple estimates, independent candidate/final `NULLS LAST` orders, top-before-threshold selection, exact `pgstattuple`/B-tree `pgstatindex` formulas, mandatory cumulative warning, and the same dynamic session-local error boundary; test all methods, thresholds, mixed optional failures, one final JSON, and no persistent objects.
 - [ ] 4.4 Implement `locks()`, `stats()`, and `bloat()` on `DatabaseResource` using the shared transport, one final JSON value per command, frozen typed decoding, server/subprocess timeouts, and no generic row mapper.
 - [ ] 4.5 Implement initialization as one quiet transaction with a `pg_temp` outcome table: for each extension check `pg_extension`, then precheck `pg_available_extensions`, use precheck absence as the only `not_available` path without executing `CREATE EXTENSION`, and use one dynamic `DO` exception subtransaction only for available absent entries; test no-CREATE on precheck absence, classification of only `42501` as `privilege_denied`, re-raise/outer rollback for `0A000` and every other post-precheck CREATE error, exact installed/already-present/skipped meanings, partial commit only for classified outcomes, single final JSON, external rejection, and repeated execution.
 
