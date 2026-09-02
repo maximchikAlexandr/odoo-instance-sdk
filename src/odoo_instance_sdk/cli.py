@@ -29,7 +29,15 @@ from odoo_instance_sdk.commands.output import (
     run_or_preview,
     sanitize_diagnostic,
 )
-from odoo_instance_sdk.commands.pg import postgres_group as _postgres_group
+from odoo_instance_sdk.commands.pg import (
+    postgres_group as _postgres_group,
+)
+from odoo_instance_sdk.commands.pg import (
+    psql as _psql,
+)
+from odoo_instance_sdk.commands.pg import (
+    register_database_commands,
+)
 from odoo_instance_sdk.commands.test import (
     project_execution_result,
     resolve_module_test_selection,
@@ -178,6 +186,8 @@ cli.add_command(env_group, name="env")
 cli.add_command(test_command, name="test")
 cli.add_command(db_group, name="db")
 cli.add_command(_postgres_group, name="postgres")
+register_database_commands(db_group)
+cli.add_command(_psql, name="psql")
 
 
 class _RunCommand(click.Command):

@@ -20,14 +20,9 @@ def decode_stats(stdout: str | bytes) -> PostgresStatsResult:
     return decode_typed_json(stdout, PostgresStatsResult, "stats")
 
 
-build_stats_query = build_stats_sql
-decode_stats_result = decode_stats
-
 __all__ = [
     "STATS_SQL",
     "STATS_SQL_VERSION",
-    "build_stats_query",
     "build_stats_sql",
     "decode_stats",
-    "decode_stats_result",
 ]

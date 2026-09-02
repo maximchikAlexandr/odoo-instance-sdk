@@ -50,6 +50,16 @@ classification is bounded and whose contract requires `--dry-run`:
 | `postgres up` | mutating-or-spawning |
 | `postgres stop` | mutating-or-spawning |
 
+PostgreSQL database diagnostics (`db locks`, `db stats`, and `db bloat`) are
+bounded read-only typed documents and use the same resolver, captured
+`Command`, redacted plan, and shared output projections. `db init-monitoring`
+is a mutating leaf: it requires explicit confirmation, is inert in dry-run,
+and is rejected before planning for external clusters. The root `psql` leaf
+is a native inherited-stream transport; its passthrough arguments are checked
+by the private grammar, but document formatting is rejected on normal runs.
+All four diagnostics and native `psql` preserve the instance-bound cluster
+identity and do not accept replacement host/user/password flags.
+
 The complete shipped CLI also contains `doctor` and `env list` as bounded
 read-only leaves, plus `run`, `shell`, `logs`, and `monitor` native/stream
 leaves. They remain in `PUBLIC_LEAF_CASES` with their explicit classifications

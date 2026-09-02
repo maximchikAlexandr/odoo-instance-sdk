@@ -844,10 +844,7 @@ def test_open_pgadmin_real_cluster_uses_one_captured_docker_ledger(  # noqa: C90
         EnvironmentResource, "_configured_pgadmin_instance", lambda _self, _env: instance
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.database.shutil.which", lambda _name: "/bin/psql"
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _name: "/bin/psql"
+        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: "/bin/psql"
     )
     monkeypatch.setattr(
         instance.databases.__class__,

@@ -1,21 +1,23 @@
 ## Block 1 baseline (tasks 1.1–1.3)
 
 Captured on 2026-09-02 on Darwin, Python 3.12.13, uv 0.11.1, from the
-`feat/MYL-70-postgres-diagnostics` checkout rebased onto published commit
-`c076ec8807a4e91757e9d25a82cfd3498dcc54a8`.
+`feat/MYL-70-postgres-diagnostics` worktree rebased onto the current
+`origin/main` commit `ea24ac9e79ea497fee985e72a6854cf61f08d614`.
 
 ### 1.1 Prerequisite and rebase
 
 The requested pre-change sequence completed successfully. `main` and the
-feature branch are separate worktrees, so the fast-forward and rebase were
-run in their respective checkouts:
+feature branch are separate worktrees. The feature checkout was rebased onto
+`origin/main`; this handoff checkout carries the resulting fast-forwarded
+history:
 
 ```text
 git fetch origin
-git checkout main
+git switch main
 git merge --ff-only origin/main
-git rebase origin/feat/MYL-70-postgres-diagnostics
-git merge-base --is-ancestor c076ec8807a4e91757e9d25a82cfd3498dcc54a8 HEAD
+git switch feat/MYL-70-postgres-diagnostics
+git rebase origin/main
+git merge-base --is-ancestor origin/main HEAD
 ```
 
 After `git fetch origin`, `main` was already at
@@ -23,13 +25,12 @@ After `git fetch origin`, `main` was already at
 `git merge --ff-only origin/main` returned `Already up to date`. The merge
 commit is
 `Merge pull request #47 from maximchikAlexandr/feat/MYL-68-execution-architecture`.
-The feature branch rebased cleanly onto published `c076ec8`, producing
-baseline-only HEAD `1d18d30a2c501bc8c212ab03a15b6b674f09181a`. The ancestry
-check above returned zero.
+The feature branch rebased cleanly onto current `origin/main`; the baseline
+handoff before review fixes was `1662d50` (the commit's full SHA is recorded by
+Git). The ancestry check above returned zero.
 
 ```text
-git merge-base --is-ancestor origin/main main
-git merge-base --is-ancestor main HEAD
+git merge-base --is-ancestor origin/main HEAD
 ```
 
 The launch prerequisite is MYL-68 in `done`. The shared execution contract

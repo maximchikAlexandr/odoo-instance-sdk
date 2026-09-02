@@ -1,28 +1,45 @@
 from __future__ import annotations
 
-import subprocess
-from typing import TYPE_CHECKING, Any
+import pytest
 
-from odoo_instance_sdk.internal.postgres_transport import run_psql
+from odoo_instance_sdk.internal.pg import transport as transport_module
+from odoo_instance_sdk.internal.proc import ProcessResult
 
-if TYPE_CHECKING:
-    import pytest
+
+def _capture_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    which: str | None = "/usr/bin/psql",
+    outcome: ProcessResult | BaseException | None = None,
+) -> dict[str, object]:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: which)
+
+    def execute(specification: object) -> ProcessResult:
+        step = specification.prepared_step  # type: ignore[attr-defined]
+        captured["step"] = step
+        if isinstance(outcome, BaseException):
+            raise outcome
+        if outcome is not None:
+            return outcome
+        return ProcessResult(
+            argv=step.argv,
+            returncode=0,
+            stdout="1\n",
+            stderr="",
+            duration=0.0,
+            cwd=step.cwd,
+            environment=step.environment,
+        )
+
+    monkeypatch.setattr(transport_module, "execute_psql", execute)
+    return captured
 
 
 def test_run_psql_scrubs_ambient_startup_and_transport_inputs_but_keeps_pgpassfile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, Any] = {}
-
-    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(args, 0, "1\n", "")
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/usr/bin/psql"
-    )
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
+    captured = _capture_transport(monkeypatch)
     for key in (
         "PSQLRC",
         "PGSERVICE",
@@ -36,14 +53,14 @@ def test_run_psql_scrubs_ambient_startup_and_transport_inputs_but_keeps_pgpassfi
     monkeypatch.setenv("PGPASSFILE", "/tmp/passwords")
 
     assert (
-        run_psql(
+        transport_module.run_psql(
             host="127.0.0.1", port=5432, user="odoo", password=None, query="SELECT 1", timeout=1
         )
         is not None
     )
-    assert "-X" in captured["args"]
-    env = captured["env"]
-    assert isinstance(env, dict)
+    step = captured["step"]
+    assert step.argv[0] == "/usr/bin/psql"  # type: ignore[attr-defined]
+    env = dict(step.environment_snapshot)  # type: ignore[attr-defined]
     for key in (
         "PSQLRC",
         "PGSERVICE",
@@ -60,78 +77,50 @@ def test_run_psql_scrubs_ambient_startup_and_transport_inputs_but_keeps_pgpassfi
 def test_run_psql_explicit_password_overrides_ambient_password(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, Any] = {}
-
-    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(args, 0, "1\n", "")
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/usr/bin/psql"
-    )
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
+    captured = _capture_transport(monkeypatch)
     monkeypatch.setenv("PGPASSWORD", "ambient")
-    run_psql(host=None, port=5432, user="odoo", password="configured", query="SELECT 1", timeout=1)
-    assert captured["env"]["PGPASSWORD"] == "configured"
+    transport_module.run_psql(
+        host=None, port=5432, user="odoo", password="configured", query="SELECT 1", timeout=1
+    )
+    step = captured["step"]
+    assert dict(step.environment_snapshot)["PGPASSWORD"] == "configured"  # type: ignore[attr-defined]
 
 
 def test_run_psql_none_host_uses_unix_socket_without_h(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(args, 0, "1\n", "")
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/usr/bin/psql"
-    )
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
+    captured = _capture_transport(monkeypatch)
     monkeypatch.setenv("PGHOST", "127.0.0.1")
     monkeypatch.setenv("PGHOSTADDR", "127.0.0.2")
-    run_psql(host=None, port=5432, user="odoo", password=None, query="SELECT 1", timeout=1)
-    assert "-h" not in captured["args"]
-    assert captured["args"][:4] == ["psql", "-X", "-p", "5432"]
-    assert "PGHOST" not in captured["env"]
-    assert "PGHOSTADDR" not in captured["env"]
+    transport_module.run_psql(
+        host=None, port=5432, user="odoo", password=None, query="SELECT 1", timeout=1
+    )
+    step = captured["step"]
+    assert "-h" not in step.argv  # type: ignore[attr-defined]
+    assert step.argv[:4] == ("/usr/bin/psql", "-X", "-p", "5432")  # type: ignore[attr-defined]
 
 
 def test_run_psql_explicit_host_uses_tcp_h(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(args, 0, "1\n", "")
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/usr/bin/psql"
-    )
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
+    captured = _capture_transport(monkeypatch)
     monkeypatch.setenv("PGHOST", "/wrong/socket")
     monkeypatch.setenv("PGHOSTADDR", "127.0.0.2")
-    run_psql(host="127.0.0.1", port=5432, user="odoo", password=None, query="SELECT 1", timeout=1)
-    assert captured["args"][:6] == ["psql", "-X", "-h", "127.0.0.1", "-p", "5432"]
-    assert "PGHOST" not in captured["env"]
-    assert "PGHOSTADDR" not in captured["env"]
+    transport_module.run_psql(
+        host="127.0.0.1", port=5432, user="odoo", password=None, query="SELECT 1", timeout=1
+    )
+    step = captured["step"]
+    assert step.argv[:6] == (  # type: ignore[attr-defined]
+        "/usr/bin/psql",
+        "-X",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        "5432",
+    )
 
 
 def test_run_psql_targets_requested_database_without_changing_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, Any] = {}
-
-    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return subprocess.CompletedProcess(args, 0, "sale\n", "")
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/usr/bin/psql"
-    )
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", run)
-
-    run_psql(
+    captured = _capture_transport(monkeypatch)
+    transport_module.run_psql(
         host=None,
         port=5432,
         user="odoo",
@@ -140,47 +129,23 @@ def test_run_psql_targets_requested_database_without_changing_default(
         timeout=3,
         database="bound_db",
     )
-
-    args = captured["args"]
-    assert args[args.index("-d") + 1] == "bound_db"
-    assert captured["kwargs"]["timeout"] == 3
-    assert captured["kwargs"]["shell"] is False
+    step = captured["step"]
+    assert step.argv[step.argv.index("-d") + 1] == "bound_db"  # type: ignore[attr-defined]
+    assert step.timeout == 3  # type: ignore[attr-defined]
 
 
-def test_run_psql_returns_none_for_missing_tool_or_timeout(
+@pytest.mark.parametrize("outcome", [OSError("nope"), RuntimeError("timeout")])
+def test_run_psql_returns_none_for_missing_tool_or_transport_failure(
     monkeypatch: pytest.MonkeyPatch,
+    outcome: BaseException,
 ) -> None:
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: None
+    if isinstance(outcome, OSError):
+        captured = _capture_transport(monkeypatch, which=None)
+    else:
+        captured = _capture_transport(monkeypatch, outcome=outcome)
+    result = transport_module.run_psql(
+        host=None, port=5432, user="odoo", password=None, query="SELECT 1", timeout=1
     )
-    assert (
-        run_psql(
-            host=None,
-            port=5432,
-            user="odoo",
-            password=None,
-            query="SELECT 1",
-            timeout=1,
-        )
-        is None
-    )
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.postgres_transport.shutil.which", lambda _: "/usr/bin/psql"
-    )
-
-    def timeout(*args: Any, **kwargs: Any) -> None:
-        raise subprocess.TimeoutExpired(kwargs["timeout"], 1)
-
-    monkeypatch.setattr("odoo_instance_sdk.internal.postgres_transport.subprocess.run", timeout)
-    assert (
-        run_psql(
-            host=None,
-            port=5432,
-            user="odoo",
-            password=None,
-            query="SELECT 1",
-            timeout=1,
-        )
-        is None
-    )
+    assert result is None
+    if isinstance(outcome, RuntimeError):
+        assert "step" in captured

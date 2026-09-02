@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Sequence
-from typing import Generic, Protocol, TypeVar, cast
+from typing import Generic, Literal, Protocol, TypeVar, cast
 
 import msgspec
 
@@ -33,6 +33,39 @@ from odoo_instance_sdk.internal.proc import (
 )
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
+
+
+class DeadlineBoundAttempt(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """The public description of a group of attempts sharing one deadline.
+
+    ``started_at`` is deliberately not part of the plan: it is a per-run
+    monotonic value and would make an otherwise immutable plan unstable.  A
+    consumer can calculate the live remainder as ``remaining(elapsed)`` from
+    the stable budget recorded here.
+    """
+
+    kind: Literal["deadline-bound-attempt"] = "deadline-bound-attempt"
+    scope: str
+    step_ids: tuple[str, ...]
+    budget_seconds: float
+
+    def remaining(self, elapsed_seconds: float) -> float:
+        """Return the non-negative budget remainder for a run elapsed time."""
+        return max(0.0, self.budget_seconds - elapsed_seconds)
+
+
+def deadline_bound_attempt_observation(
+    *, scope: str, step_ids: Sequence[str], budget_seconds: float
+) -> JsonValue:
+    """Project a shared deadline into an immutable plan observation."""
+    model = DeadlineBoundAttempt(
+        scope=scope,
+        step_ids=tuple(step_ids),
+        budget_seconds=budget_seconds,
+    )
+    projected = cast("dict[str, JsonValue]", msgspec.to_builtins(model))
+    projected["step_ids"] = list(model.step_ids)
+    return projected
 
 
 class ProcessStep(
@@ -208,6 +241,7 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
 __all__ = [
     "ActionStep",
     "Command",
+    "DeadlineBoundAttempt",
     "DuplicateStepError",
     "ExecutionPlan",
     "ExecutionStep",
@@ -220,5 +254,6 @@ __all__ = [
     "UnplannedStepError",
     "canonical_plan_bytes",
     "canonical_plan_projection",
+    "deadline_bound_attempt_observation",
     "fingerprint_plan",
 ]

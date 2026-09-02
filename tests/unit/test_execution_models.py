@@ -10,6 +10,7 @@ import pytest
 from odoo_instance_sdk import (
     ActionStep,
     Command,
+    DeadlineBoundAttempt,
     ExecutionPlan,
     JsonValue,
     ProcessStep,
@@ -58,6 +59,19 @@ def test_public_projection_is_frozen_json_safe_and_keeps_argv_boundaries() -> No
     assert msgspec.json.decode(msgspec.json.encode(public), type=ProcessStep) == public
     with pytest.raises(AttributeError):
         public.argv = ("changed",)  # type: ignore[misc]
+
+
+def test_deadline_bound_attempt_is_immutable_and_calculates_remaining() -> None:
+    attempt = DeadlineBoundAttempt(
+        scope="postgres.status.server-summary",
+        step_ids=("one", "two"),
+        budget_seconds=1.0,
+    )
+
+    assert attempt.remaining(0.7499) == pytest.approx(0.2501)
+    assert attempt.remaining(2.0) == 0.0
+    with pytest.raises(AttributeError):
+        attempt.budget_seconds = 2.0  # type: ignore[misc]
 
 
 def test_public_projection_separates_inherited_environment_and_redacts_argv_secrets(

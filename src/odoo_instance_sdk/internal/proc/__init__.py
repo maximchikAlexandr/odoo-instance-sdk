@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -36,6 +38,51 @@ class ProcessResultLike(Protocol):
     def __repr__(self) -> str: ...
 
 
+MIN_PROCESS_TIMEOUT = 0.001
+
+
+class DeadlineExceeded(TimeoutError):
+    """The shared monotonic deadline has no safe process-start remainder."""
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ExecutionDeadline:
+    """One per-run monotonic deadline shared by a sequence of process steps."""
+
+    started_at: float
+    budget: float
+    monotonic: Callable[[], float] = time.monotonic
+
+    @classmethod
+    def start(
+        cls, budget: float, *, monotonic: Callable[[], float] = time.monotonic
+    ) -> ExecutionDeadline:
+        if (
+            isinstance(budget, bool)
+            or not isinstance(budget, (int, float))
+            or not math.isfinite(budget)
+            or budget <= 0
+        ):
+            raise ValueError("deadline budget must be finite and greater than zero")
+        return cls(started_at=monotonic(), budget=float(budget), monotonic=monotonic)
+
+    @property
+    def expires_at(self) -> float:
+        return self.started_at + self.budget
+
+    def remaining(self) -> float:
+        return max(0.0, self.expires_at - self.monotonic())
+
+    def timeout_for(self, requested: float | None) -> float:
+        """Return a timeout no greater than the current monotonic remainder."""
+        remaining = self.remaining()
+        if remaining < MIN_PROCESS_TIMEOUT:
+            raise DeadlineExceeded
+        if requested is None:
+            return remaining
+        return min(float(requested), remaining)
+
+
 type PrivateJsonValue = (
     None
     | bool
@@ -60,15 +107,27 @@ class ProcessExecutor(Protocol):
         """Spawn one already-captured long-running step."""
 
 
+class DeadlineProcessExecutor(Protocol):
+    def execute_with_deadline(
+        self, step: PreparedStep, deadline: ExecutionDeadline
+    ) -> ProcessResultLike:
+        """Execute the exact captured step under a shared monotonic deadline."""
+
+
 class _NullExecutor:
     def execute(self, step: PreparedStep) -> ProcessResultLike:
+        return cast("ProcessResultLike", None)
+
+    def execute_with_deadline(
+        self, step: PreparedStep, deadline: ExecutionDeadline
+    ) -> ProcessResultLike:
         return cast("ProcessResultLike", None)
 
     def spawn(self, step: PreparedStep) -> ProcessHandle:
         return cast("ProcessHandle", None)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class PreparedStep:
     """Exact private process inputs; never expose this through public models."""
 
@@ -103,6 +162,10 @@ class PreparedStep:
     start_new_session: bool = False
     inherit_stdio: bool = False
 
+    def __repr__(self) -> str:
+        """Render only the already-redacted public process projection."""
+        return f"PreparedStep(public_projection={self.public_projection()!r})"
+
     def __post_init__(self) -> None:
         if not self.environment_snapshot:
             from odoo_instance_sdk.internal.process_env import captured_child_environment
@@ -126,6 +189,35 @@ class PreparedStep:
         from odoo_instance_sdk.internal.proc.redaction import project_process_step
 
         return project_process_step(self)
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedProcessInputs:
+    """Ephemeral child-process controls derived from a captured step.
+
+    This is intentionally not a ``PreparedStep``.  The ledger and recording
+    executor retain the exact captured step; only the subprocess boundary
+    receives these per-attempt controls.
+    """
+
+    timeout: float
+    environment_snapshot: tuple[tuple[str, str], ...]
+
+
+def bounded_process_inputs(step: PreparedStep, deadline: ExecutionDeadline) -> BoundedProcessInputs:
+    """Calculate bounded child controls without replacing the captured step."""
+    timeout = deadline.timeout_for(step.timeout)
+    environment = dict(step.environment_snapshot)
+    statement_timeout = environment.get("PGOPTIONS")
+    if statement_timeout is not None and statement_timeout.startswith("-c statement_timeout="):
+        # PostgreSQL accepts integer milliseconds.  Flooring is required: a
+        # ceil would make the server timeout exceed a fractional monotonic
+        # remainder (and sub-millisecond attempts are refused above).
+        environment["PGOPTIONS"] = f"-c statement_timeout={math.floor(timeout * 1000)}"
+    return BoundedProcessInputs(
+        timeout=timeout,
+        environment_snapshot=tuple(sorted(environment.items())),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,15 +264,35 @@ class RunContext(Generic[T]):
 
     def process_prepared(self, requested: PreparedStep) -> ProcessResultLike:
         """Consume the exact immutable captured step, never a substituted request."""
+        captured = self._capture_prepared(requested)
+        result = self._executor.execute(captured)
+        self._results[requested.step_id] = result
+        return result
+
+    def process_prepared_with_deadline(
+        self, requested: PreparedStep, deadline: ExecutionDeadline
+    ) -> ProcessResultLike:
+        """Consume the exact captured step under a shared monotonic deadline.
+
+        The deadline is an explicit execution control, not a replacement
+        ``PreparedStep``.  This keeps the immutable public plan, ledger entry,
+        and injected executor request in parity while the common process
+        boundary computes the live child timeout.
+        """
+        captured = self._capture_prepared(requested)
+        deadline_executor = cast("DeadlineProcessExecutor", self._executor)
+        result = deadline_executor.execute_with_deadline(captured, deadline)
+        self._results[requested.step_id] = result
+        return result
+
+    def _capture_prepared(self, requested: PreparedStep) -> PreparedStep:
         captured = self._steps.get(requested.step_id)
         if not isinstance(captured, PreparedStep) or captured != requested:
             raise UnplannedStepError(requested.step_id)
         if requested.step_id in self._consumed:
             raise DuplicateStepError(requested.step_id)
         self._consumed.add(requested.step_id)
-        result = self._executor.execute(captured)
-        self._results[requested.step_id] = result
-        return result
+        return captured
 
     def spawn(self, step_id: str) -> ProcessHandle:
         step = self._consume(step_id)
@@ -300,6 +412,10 @@ def prepared_command(
 
 
 __all__ = [
+    "BoundedProcessInputs",
+    "DeadlineExceeded",
+    "DeadlineProcessExecutor",
+    "ExecutionDeadline",
     "PreparedAction",
     "PreparedCommand",
     "PreparedProcess",
@@ -315,6 +431,7 @@ __all__ = [
     "RunContext",
     "SubprocessExecutor",
     "active_context",
+    "bounded_process_inputs",
     "owned_handle",
     "prepared_command",
     "prepared_step",

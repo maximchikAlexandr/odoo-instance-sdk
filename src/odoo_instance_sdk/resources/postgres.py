@@ -50,6 +50,7 @@ from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+    from odoo_instance_sdk.internal.pg.server import ServerSummary
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
@@ -435,7 +436,10 @@ class PostgresCluster:
         return self.status_command().run()
 
     def status_command(
-        self, *, executor: ProcessExecutor | None = None
+        self,
+        *,
+        executor: ProcessExecutor | None = None,
+        server_summary_sink: Callable[[ServerSummary], None] | None = None,
     ) -> Command[PostgresClusterState]:
         from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
@@ -496,6 +500,13 @@ class PostgresCluster:
                 ),
             )
 
+        server_steps: tuple[PreparedStep, ...] = ()
+        if isinstance(self._compose_runner, SubprocessComposeRunner) or executor is not None:
+            from odoo_instance_sdk.internal.pg.server import build_server_summary_steps
+
+            server_steps = build_server_summary_steps(self)
+        all_steps: tuple[PreparedStep | PreparedAction, ...] = (*steps, *server_steps)
+
         unavailable_state = (
             PostgresClusterState.UNKNOWN
             if self._compose_runner.requires_docker and not docker_available()
@@ -505,19 +516,40 @@ class PostgresCluster:
         def run(context: RunContext[PostgresClusterState]) -> PostgresClusterState:
             if self._mode == "external":
                 context.action("postgres.status.external")
-                return self._status_external()
-            if len(steps) == 1:
+                state = self._status_external()
+            elif len(steps) == 1:
                 context.action(steps[0].step_id)
-                return unavailable_state
-            result = self._status_compose(
-                health_step_id="postgres.status.health",
-                ps_step_id="postgres.status.ps",
-            )
-            self._account_legacy_steps(context, steps)
-            return result
+                state = unavailable_state
+            else:
+                state = self._status_compose(
+                    health_step_id="postgres.status.health",
+                    ps_step_id="postgres.status.ps",
+                )
+            if state is PostgresClusterState.HEALTHY:
+                from odoo_instance_sdk.internal.pg.server import collect_server_summary
 
-        plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-        return self._make_command(plan, run, steps, executor=executor or SubprocessExecutor())
+                summary = collect_server_summary(
+                    self,
+                    context=context,
+                    steps=server_steps,
+                )
+                if server_summary_sink is not None:
+                    server_summary_sink(summary)
+            else:
+                self._account_optional_steps(context, server_steps)
+            self._account_legacy_steps(context, all_steps)
+            return state
+
+        observations: tuple[JsonValue, ...] = ()
+        if server_steps:
+            from odoo_instance_sdk.internal.pg.server import server_summary_deadline_observation
+
+            observations = (server_summary_deadline_observation(server_steps),)
+        plan = ExecutionPlan(
+            steps=tuple(step.public_projection() for step in all_steps),
+            observations=observations,
+        )
+        return self._make_command(plan, run, all_steps, executor=executor or SubprocessExecutor())
 
     def _status_impl(self) -> PostgresClusterState:
         if self._mode == "external":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -162,8 +163,16 @@ def _statement_timeout(timeout: float | None) -> str | None:
         or timeout <= 0
     ):
         raise ConfigError("psql timeout must be finite and greater than zero")
-    milliseconds = max(1, math.ceil(float(timeout) * 1000))
+    milliseconds = max(1, math.floor(float(timeout) * 1000))
     return f"-c statement_timeout={milliseconds}"
+
+
+def resolve_psql_executable() -> str | None:
+    """Capture the trusted absolute ``psql`` path for one command plan."""
+    resolved = shutil.which("psql")
+    if resolved is None:
+        return None
+    return os.path.abspath(resolved)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -172,15 +181,6 @@ class PsqlSpecification:
 
     prepared_step: PreparedStep
     public_step: ProcessStep
-
-    @property
-    def step(self) -> PreparedStep:
-        """Compatibility alias for consumers referring to the private step."""
-        return self.prepared_step
-
-    @property
-    def process_step(self) -> ProcessStep:
-        return self.public_step
 
     def __repr__(self) -> str:
         return f"PsqlSpecification(public_step={self.public_step!r})"
@@ -202,6 +202,11 @@ def build_psql_specification(  # noqa: C901
     _inject_timeout: bool = True,
     _allow_missing_user: bool = False,
     _require_binary: bool = True,
+    _executable: str | None = None,
+    _read_only: bool = True,
+    _mutating: bool = False,
+    _environment_values: Sequence[tuple[str, str]] = (),
+    _redact_database: bool = False,
 ) -> PsqlSpecification:
     """Build one exact psql launch for both captured and foreground modes."""
     if (user is None or not user) and not _allow_missing_user:
@@ -212,12 +217,17 @@ def build_psql_specification(  # noqa: C901
         raise ConfigError("psql requires a bound database name")
     if mode not in {"captured", "foreground"}:
         raise ConfigError("psql mode must be 'captured' or 'foreground'")
-    if _require_binary and shutil.which("psql") is None:
+    executable = _executable if _executable is not None else resolve_psql_executable()
+    if _require_binary and executable is None:
         raise FileNotFoundError("psql is not available on PATH")
+    # A missing executable is only representable in a deliberately skipped
+    # diagnostic plan.  Such a step is never executed, but retaining a stable
+    # absolute-or-captured argv keeps the snapshot shape deterministic.
+    executable = os.path.abspath(executable) if executable is not None else "psql"
     native = validate_native_psql_args(args)
     statement_timeout = _statement_timeout(timeout) if _inject_timeout else None
 
-    command = ["psql", "-X"]
+    command = [executable, "-X"]
     if host is not None:
         command.extend(("-h", host))
     command.extend(("-p", str(port)))
@@ -226,6 +236,7 @@ def build_psql_specification(  # noqa: C901
     command.extend(("-d", database))
     command.extend(_trusted_args)
     command.extend(native)
+    sensitive_argv_indices = (command.index("-d") + 1,) if _redact_database else ()
 
     environment = sanitized_child_environment()
     for key in (
@@ -245,12 +256,17 @@ def build_psql_specification(  # noqa: C901
         environment["PGPASSWORD"] = password
     if statement_timeout is not None:
         environment["PGOPTIONS"] = statement_timeout
+    for key, value in _environment_values:
+        if not key or "=" in key:
+            raise ConfigError("psql environment keys must be non-empty names")
+        environment[key] = value
 
     from odoo_instance_sdk.internal.proc import PreparedStep
 
     prepared = PreparedStep(
         step_id=step_id,
         argv=tuple(command),
+        sensitive_argv_indices=sensitive_argv_indices,
         # The complete environment is private execution state.  Keeping the
         # result metadata empty prevents inherited credentials from appearing
         # in a ProcessResult representation; the executor uses the snapshot.
@@ -262,7 +278,8 @@ def build_psql_specification(  # noqa: C901
         public_input_preview=None if stdin is None else "<redacted>",
         timeout=timeout,
         mode=mode,
-        read_only=True,
+        read_only=_read_only,
+        mutating=_mutating,
         interactive=mode == "foreground",
         inherit_stdio=mode == "foreground",
         start_new_session=mode == "foreground",
@@ -276,5 +293,6 @@ def build_psql_specification(  # noqa: C901
 __all__ = [
     "PsqlSpecification",
     "build_psql_specification",
+    "resolve_psql_executable",
     "validate_native_psql_args",
 ]

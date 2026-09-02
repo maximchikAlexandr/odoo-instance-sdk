@@ -9,6 +9,7 @@ from odoo_instance_sdk.internal.pg.builder import (
     build_psql_specification,
     validate_native_psql_args,
 )
+from odoo_instance_sdk.internal.pg.context import DatabaseContext
 
 
 def _value_forms(options: set[str]) -> list[object]:
@@ -159,9 +160,8 @@ def test_builder_pairs_one_private_step_with_one_safe_projection(
 
     private = spec.prepared_step
     public = spec.public_step
-    assert spec.process_step is public
     assert private.argv == (
-        "psql",
+        "/psql",
         "-X",
         "-h",
         "bound-host",
@@ -207,3 +207,49 @@ def test_builder_foreground_changes_only_shared_tty_mode(
     assert not captured.public_step.interactive
     assert foreground.public_step.interactive
     assert foreground.prepared_step.inherit_stdio
+
+
+def test_builder_captures_absolute_psql_path_once_against_path_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def which(name: str) -> str:
+        calls.append(name)
+        return "/trusted/bin/psql" if len(calls) == 1 else "/attacker/bin/psql"
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", which)
+    spec = build_psql_specification(
+        host="127.0.0.1",
+        port=5432,
+        user="odoo",
+        database="postgres",
+        password="canary-secret",
+    )
+    assert calls == ["psql"]
+    assert spec.prepared_step.argv[0] == "/trusted/bin/psql"
+    assert spec.public_step.argv[0] == "/trusted/bin/psql"
+
+
+def test_secret_bearing_reprs_are_redacted_with_a_unique_canary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canary = "unique-canary-password-7f1c"
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    binding = DatabaseContext(
+        database="postgres",
+        host="127.0.0.1",
+        port=5432,
+        user="odoo",
+        password=canary,
+    )
+    spec = build_psql_specification(
+        host=binding.host,
+        port=binding.port,
+        user=binding.user,
+        database=binding.database,
+        password=binding.password,
+    )
+    assert canary not in repr(binding)
+    assert canary not in repr(spec.prepared_step)
+    assert canary not in repr(spec)

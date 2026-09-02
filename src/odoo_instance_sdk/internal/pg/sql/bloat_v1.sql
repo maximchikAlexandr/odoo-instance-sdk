@@ -63,7 +63,8 @@ BEGIN
         ORDER BY bloat_bytes DESC NULLS LAST, total_bytes DESC, schema_name ASC, table_name ASC
         LIMIT __ODCLI_TOP__
     ) AS selected_tables
-        WHERE total_bytes <= __ODCLI_EXACT_MAX_SCAN_BYTES__
+        WHERE __ODCLI_EXACT_MAX_SCAN_BYTES__ > 0
+          AND total_bytes <= __ODCLI_EXACT_MAX_SCAN_BYTES__
         ORDER BY bloat_bytes DESC NULLS LAST, total_bytes DESC, schema_name ASC, table_name ASC
     LOOP
         BEGIN
@@ -89,11 +90,12 @@ BEGIN
 
     FOR item IN SELECT * FROM (
         SELECT * FROM pgdiag_bloat_indexes
-        WHERE access_method = 'btree'
         ORDER BY bloat_bytes DESC NULLS LAST, total_bytes DESC, schema_name ASC, index_name ASC
         LIMIT __ODCLI_TOP__
     ) AS selected_indexes
-        WHERE total_bytes <= __ODCLI_EXACT_MAX_SCAN_BYTES__
+        WHERE access_method = 'btree'
+          AND __ODCLI_EXACT_MAX_SCAN_BYTES__ > 0
+          AND total_bytes <= __ODCLI_EXACT_MAX_SCAN_BYTES__
         ORDER BY bloat_bytes DESC NULLS LAST, total_bytes DESC, schema_name ASC, index_name ASC
     LOOP
         BEGIN

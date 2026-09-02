@@ -249,11 +249,17 @@ def _safe_run(
     step_id: str | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     try:
+        from odoo_instance_sdk.internal.proc import ProcessExecutionError
+
         if step_id is not None and isinstance(runner, SubprocessComposeRunner):
-            result = runner.run(args, cwd=None, timeout=timeout, step_id=step_id)
+            from odoo_instance_sdk.internal.proc import active_context
+
+            context = active_context()
+            captured_timeout = timeout if context is None else context.prepared(step_id).timeout
+            result = runner.run(args, cwd=None, timeout=captured_timeout, step_id=step_id)
         else:
             result = runner.run(args, cwd=None, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ProcessExecutionError, subprocess.SubprocessError):
         return None
     return result
 

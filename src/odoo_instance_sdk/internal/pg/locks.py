@@ -20,15 +20,9 @@ def decode_locks(stdout: str | bytes) -> LocksResult:
     return decode_typed_json(stdout, LocksResult, "locks")
 
 
-# Names used by callers that treat a query as a template rather than a script.
-build_locks_query = build_locks_sql
-decode_locks_result = decode_locks
-
 __all__ = [
     "LOCKS_SQL",
     "LOCKS_SQL_VERSION",
-    "build_locks_query",
     "build_locks_sql",
     "decode_locks",
-    "decode_locks_result",
 ]

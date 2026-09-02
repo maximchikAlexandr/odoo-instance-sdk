@@ -44,6 +44,8 @@ from odoo_instance_sdk.models import (
     BackupFreshness,
     BackupProvenanceComparison,
     BackupProvenanceStatus,
+    ClusterEndpoint,
+    ClusterSnapshot,
     CommandResult,
     DatabasePreparationAction,
     DatabasePreparationResult,
@@ -164,11 +166,25 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "mutating-or-spawning",
         True,
     ),
-    PublicLeafCase(
-        ("postgres", "status"), ("postgres", "status"), "process-previewable-read-only", True
-    ),
+    PublicLeafCase(("postgres", "status"), ("postgres", "status"), "bounded-read-only", False),
     PublicLeafCase(("postgres", "up"), ("postgres", "up"), "mutating-or-spawning", True),
     PublicLeafCase(("postgres", "stop"), ("postgres", "stop"), "mutating-or-spawning", True),
+    PublicLeafCase(("db", "locks"), ("db", "locks", "demo"), "bounded-read-only", False),
+    PublicLeafCase(("db", "stats"), ("db", "stats", "demo"), "bounded-read-only", False),
+    PublicLeafCase(("db", "bloat"), ("db", "bloat", "demo"), "bounded-read-only", False),
+    PublicLeafCase(
+        ("db", "init-monitoring"),
+        ("db", "init-monitoring", "demo", "--yes", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(
+        ("psql",),
+        ("psql", "--dry-run", "-c", "SELECT 1"),
+        "native-passthrough",
+        True,
+        "normal execution owns inherited native psql streams; dry-run uses the shared plan",
+    ),
     PublicLeafCase(
         ("run",),
         ("run",),
@@ -607,6 +623,38 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
+    if path[:2] in {("db", "locks"), ("db", "stats"), ("db", "bloat"), ("db", "init-monitoring")}:
+        resource = MagicMock()
+        result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
+        command = _matrix_command(
+            result,
+            error=RuntimeError("isolated external operation failed") if failing else None,
+        )
+        resource.locks_command.return_value = command
+        resource.stats_command.return_value = command
+        resource.bloat_command.return_value = command
+        resource.init_monitoring_command.return_value = command
+        if failing and path == ("db", "init-monitoring"):
+            resource.init_monitoring_command.side_effect = fail_operation
+        environment = _matrix_public_environment()
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.pg._database_resource",
+            lambda _ctx, _database: (environment, resource, "demo"),
+        )
+        return
+
+    if path == ("psql",):
+        resource = MagicMock()
+        resource.psql_command.return_value = _matrix_command(
+            0,
+            error=RuntimeError("isolated external operation failed") if failing else None,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.pg._database_resource",
+            lambda _ctx, _database: (_matrix_public_environment(), resource, "demo"),
+        )
+        return
+
     if path[:1] == ("postgres",):
 
         class FakeCluster:
@@ -663,6 +711,19 @@ def _patch_leaf_external(  # noqa: C901
 
         cluster = FakeCluster()
         monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(lambda _path: cluster))
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.postgres_cli.cluster_snapshot",
+            lambda _cluster, state: ClusterSnapshot(
+                mode="external",
+                owned=False,
+                state=state,
+                endpoint=ClusterEndpoint(host="127.0.0.1", port=5432),
+                container=None,
+                metrics=None,
+                unavailability_reason="external_not_owned",
+                sampled_at=None,
+            ),
+        )
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.postgres_cli.resolve_project_path", lambda _ctx: tmp_path
         )
@@ -754,6 +815,71 @@ def test_public_cli_leaf_matrix_rejects_env_list_watch_json(
     assert "--watch is only available with Rich output" in result.stderr
 
 
+def test_postgres_cli_diagnostic_formats_share_one_typed_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resource = MagicMock()
+    result = CommandResult(
+        args=[],
+        returncode=0,
+        stdout="",
+        stderr="",
+        duration=0.0,
+    )
+    resource.stats_command.return_value = _matrix_command(result)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.pg._database_resource",
+        lambda _ctx, _database: (_matrix_public_environment(), resource, "demo"),
+    )
+    documents: list[object] = []
+    for mode in ("json", "toon"):
+        invoked = CliRunner().invoke(cli, ["db", "stats", "demo", "--format", mode])
+        assert invoked.exit_code == 0, invoked.output
+        documents.append(_decode_document(invoked.stdout, mode))
+    assert documents[0] == documents[1]
+    assert resource.stats_command.call_count == 2
+
+
+def test_init_monitoring_machine_mode_requires_yes_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.pg._database_resource",
+        lambda *_args, **_kwargs: pytest.fail("confirmation must precede resolution"),
+    )
+    result = CliRunner().invoke(cli, ["db", "init-monitoring", "--format", "json"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"]["code"] == "confirmation_required"
+
+
+def test_psql_cli_keeps_native_args_and_rejects_document_mode_without_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resource = MagicMock()
+    resource.psql_command.return_value = _matrix_command(17)
+    resolve_resource = MagicMock(return_value=(_matrix_public_environment(), resource, "demo"))
+    monkeypatch.setattr("odoo_instance_sdk.commands.pg._database_resource", resolve_resource)
+    invoked = CliRunner().invoke(cli, ["psql", "-c", "SELECT 1"])
+    assert invoked.exit_code == 17
+    assert invoked.stdout == ""
+    resource.psql_command.assert_called_once_with(("-c", "SELECT 1"))
+
+    resolved_before_rejection = resolve_resource.call_count
+    for args in (("--format", "json"), ("--json",)):
+        rejected = CliRunner().invoke(cli, ["psql", *args])
+        assert rejected.exit_code == 2
+        assert "No such option" in rejected.stderr
+        assert "Usage: cli psql" in rejected.stderr
+    assert resolve_resource.call_count == resolved_before_rejection
+    assert resource.psql_command.call_count == 1
+
+    help_result = CliRunner().invoke(cli, ["psql", "--help"])
+    assert help_result.exit_code == 0
+    assert "--dry-run" in help_result.stdout
+    assert "--format" not in help_result.stdout
+    assert "--json" not in help_result.stdout
+
+
 def _command(path: tuple[str, ...]) -> click.Command:
     command: click.Command = cli
     for name in path:
@@ -780,6 +906,15 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         options = _option_names(_command(path))
         assert "--format" not in options, path
         assert "--json" not in options, path
+    for path in (
+        ("db", "locks"),
+        ("db", "stats"),
+        ("db", "bloat"),
+        ("postgres", "status"),
+    ):
+        assert "--dry-run" not in _option_names(_command(path)), path
+    assert "--dry-run" in _option_names(_command(("db", "init-monitoring")))
+    assert "--dry-run" in _option_names(_command(("psql",)))
     for path in (("run",), ("shell",)):
         options = _option_names(_command(path))
         assert "--dry-run" in options, path

@@ -29,14 +29,9 @@ def decode_bloat(stdout: str | bytes) -> PostgresBloatResult:
     return decode_typed_json(stdout, PostgresBloatResult, "bloat")
 
 
-build_bloat_query = build_bloat_sql
-decode_bloat_result = decode_bloat
-
 __all__ = [
     "BLOAT_SQL",
     "BLOAT_SQL_VERSION",
-    "build_bloat_query",
     "build_bloat_sql",
     "decode_bloat",
-    "decode_bloat_result",
 ]

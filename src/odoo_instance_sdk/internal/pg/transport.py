@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from typing import TYPE_CHECKING, cast
 
@@ -40,7 +39,7 @@ def run_psql(
     step_id: str | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
     """Run one read-only psql query using the canonical private specification."""
-    if user is None or shutil.which("psql") is None:
+    if user is None:
         return None
     try:
         from odoo_instance_sdk.internal.proc import active_context

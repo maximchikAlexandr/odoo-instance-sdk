@@ -19,13 +19,22 @@ WITH waiting AS (
         CASE WHEN blocked.query_start IS NULL THEN NULL
              ELSE greatest(0.0, extract(epoch FROM clock_timestamp() - blocked.query_start)::double precision)
         END AS query_age_seconds,
+        CASE WHEN waits.wait_started_at IS NULL THEN NULL
+             ELSE greatest(0.0, extract(epoch FROM clock_timestamp() - waits.wait_started_at)::double precision)
+        END AS wait_age_seconds,
         left(regexp_replace(coalesce(blocked.query, ''), '\s+', ' ', 'g'), 240) AS query_preview
     FROM pg_stat_activity AS blocked
+    LEFT JOIN (
+        SELECT pid, min(waitstart) AS wait_started_at
+        FROM pg_locks
+        WHERE NOT granted
+        GROUP BY pid
+    ) AS waits ON waits.pid = blocked.pid
     WHERE cardinality(pg_blocking_pids(blocked.pid)) > 0
       AND (blocked.wait_event IS NOT NULL OR blocked.wait_event_type IS NOT NULL)
 )
 SELECT * FROM waiting
-ORDER BY query_age_seconds DESC NULLS LAST, blocked_pid ASC
+ORDER BY wait_age_seconds DESC NULLS LAST, blocked_pid ASC
 LIMIT __ODCLI_TOP__;
 
 SELECT json_build_object(
@@ -43,7 +52,7 @@ SELECT json_build_object(
         'transaction_age_seconds', transaction_age_seconds,
         'query_age_seconds', query_age_seconds,
         'query_preview', query_preview
-    ) ORDER BY query_age_seconds DESC NULLS LAST, blocked_pid ASC)
+    ) ORDER BY wait_age_seconds DESC NULLS LAST, blocked_pid ASC)
     FROM pgdiag_locks), '[]'::json),
     'warnings', '[]'::json
 );

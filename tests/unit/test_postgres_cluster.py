@@ -23,6 +23,7 @@ from odoo_instance_sdk.exceptions import (
     PostgresPortCollisionError,
 )
 from odoo_instance_sdk.internal.address import AddressState
+from odoo_instance_sdk.internal.pg.server import ServerSummary
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner, SubprocessComposeRunner
 from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
 from odoo_instance_sdk.models import PostgresClusterState
@@ -252,6 +253,9 @@ def test_status_command_consumes_the_inspected_process_steps(
     cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
     cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
     monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: "/usr/bin/psql"
+    )
 
     def result(stdout: str) -> ProcessResult:
         return ProcessResult(
@@ -268,19 +272,41 @@ def test_status_command_consumes_the_inspected_process_steps(
         results={
             "postgres.status.ps": result('{"Name":"postgres","State":"running"}\n'),
             "postgres.status.health": result("ok"),
+            "postgres.status.server-summary.0": result(
+                '{"version":"16","postmaster_started_at":"2026-01-01T00:00:00Z",'
+                '"uptime_seconds":42,"connections_total":2,"connections_active":1,'
+                '"connections_idle":1,"max_connections":100,"connectable_databases":1}'
+            ),
         }
     )
-    command = cluster.status_command(executor=executor)
+    summaries: list[ServerSummary] = []
+    command = cluster.status_command(executor=executor, server_summary_sink=summaries.append)
 
     assert command.run() is PostgresClusterState.HEALTHY
     assert tuple(step.step_id for step in command.plan.process_steps) == (
         "postgres.status.ps",
         "postgres.status.health",
+        "postgres.status.server-summary.0",
+        "postgres.status.server-summary.1",
     )
     assert tuple(step.step_id for step in executor.executed) == (
         "postgres.status.ps",
         "postgres.status.health",
+        "postgres.status.server-summary.0",
     )
+    assert command.plan.observations == (
+        {
+            "kind": "deadline-bound-attempt",
+            "scope": "postgres.status.server-summary",
+            "step_ids": [
+                "postgres.status.server-summary.0",
+                "postgres.status.server-summary.1",
+            ],
+            "budget_seconds": 10.0,
+        },
+    )
+    assert len(summaries) == 1
+    assert summaries[0].server is not None
 
 
 @pytest.mark.unit

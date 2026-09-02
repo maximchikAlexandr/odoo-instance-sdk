@@ -43,3 +43,11 @@ If the server query succeeds, `server` SHALL be populated and the reason SHALL b
 
 - **WHEN** the first candidate consumes most of the total status-query timeout and returns continuable SQLSTATE `3D000`
 - **THEN** the next candidate receives only the remaining budget and no attempt starts after that budget reaches zero
+
+#### Scenario: Deadline-bound attempts are visible in the status plan
+
+- **WHEN** `postgres status` captures more than one maintenance candidate
+- **THEN** its immutable `ExecutionPlan` identifies the candidate step IDs and one shared total budget
+- **AND** each `RunContext` attempt passes the original captured step plus explicit monotonic deadline context to the shared executor
+- **AND** the executor derives both subprocess and PostgreSQL statement timeouts from the current remainder without replacing the captured step
+- **AND** no attempt starts when the remainder is below one millisecond

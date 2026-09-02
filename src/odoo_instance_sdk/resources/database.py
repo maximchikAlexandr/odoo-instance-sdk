@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
-import shutil
 import unicodedata
 import uuid
 from collections.abc import Callable, Iterator, Sequence
@@ -25,6 +24,7 @@ from odoo_instance_sdk.exceptions import (
     DropFailedError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
+    PostgresClusterNotOwnedError,
     RestoreFailedError,
 )
 from odoo_instance_sdk.internal.files import (
@@ -42,7 +42,11 @@ from odoo_instance_sdk.models import (
     BackupFormat,
     Database,
     DropResult,
+    LocksResult,
+    MonitoringInitializationResult,
     NoBackup,
+    PostgresBloatResult,
+    PostgresStatsResult,
     RestoreResult,
     SqlExecutionResult,
 )
@@ -315,6 +319,193 @@ class DatabaseResource:
             ),
         )
 
+    def locks(self, database: str, *, top: int = 20, timeout: float = 30.0) -> LocksResult:
+        """Return a bounded, typed snapshot of active PostgreSQL blockers."""
+        return self.locks_command(database, top=top, timeout=timeout).run()
+
+    def locks_command(
+        self,
+        database: str,
+        *,
+        top: int = 20,
+        timeout: float = 30.0,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[LocksResult]:
+        from odoo_instance_sdk.internal.pg.locks import build_locks_sql, decode_locks
+
+        return self._captured_diagnostic_command(
+            database=database,
+            sql=build_locks_sql(top=top, timeout=timeout),
+            timeout=timeout,
+            step_id="database.locks.psql",
+            decoder=decode_locks,
+            executor=executor,
+        )
+
+    def stats(self, database: str, *, top: int = 20, timeout: float = 30.0) -> PostgresStatsResult:
+        """Return a bounded, typed snapshot of PostgreSQL table statistics."""
+        return self.stats_command(database, top=top, timeout=timeout).run()
+
+    def stats_command(
+        self,
+        database: str,
+        *,
+        top: int = 20,
+        timeout: float = 30.0,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[PostgresStatsResult]:
+        from odoo_instance_sdk.internal.pg.stats import build_stats_sql, decode_stats
+
+        return self._captured_diagnostic_command(
+            database=database,
+            sql=build_stats_sql(top=top, timeout=timeout),
+            timeout=timeout,
+            step_id="database.stats.psql",
+            decoder=decode_stats,
+            executor=executor,
+        )
+
+    def bloat(
+        self,
+        database: str,
+        *,
+        top: int = 20,
+        exact_max_scan_mb: int = 64,
+        timeout: float = 30.0,
+    ) -> PostgresBloatResult:
+        """Return bounded estimated and optional exact bloat diagnostics."""
+        return self.bloat_command(
+            database,
+            top=top,
+            exact_max_scan_mb=exact_max_scan_mb,
+            timeout=timeout,
+        ).run()
+
+    def bloat_command(
+        self,
+        database: str,
+        *,
+        top: int = 20,
+        exact_max_scan_mb: int = 64,
+        timeout: float = 30.0,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[PostgresBloatResult]:
+        from odoo_instance_sdk.internal.pg.bloat import build_bloat_sql, decode_bloat
+
+        return self._captured_diagnostic_command(
+            database=database,
+            sql=build_bloat_sql(top=top, exact_max_scan_mb=exact_max_scan_mb, timeout=timeout),
+            timeout=timeout,
+            step_id="database.bloat.psql",
+            decoder=decode_bloat,
+            executor=executor,
+        )
+
+    def init_monitoring(
+        self, database: str, *, timeout: float = 30.0
+    ) -> MonitoringInitializationResult:
+        """Install only the explicitly supported monitoring extensions."""
+        return self.init_monitoring_command(database, timeout=timeout).run()
+
+    def init_monitoring_command(
+        self,
+        database: str,
+        *,
+        timeout: float = 30.0,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[MonitoringInitializationResult]:
+        from odoo_instance_sdk.internal.pg.monitoring import (
+            build_monitoring_sql,
+            decode_monitoring,
+        )
+
+        if self._instance._postgres_cluster is None or not self._instance._postgres_cluster.owned:
+            raise PostgresClusterNotOwnedError(
+                "monitoring initialization requires an SDK-owned PostgreSQL cluster"
+            )
+        return self._captured_diagnostic_command(
+            database=database,
+            sql=build_monitoring_sql(timeout=timeout),
+            timeout=timeout,
+            step_id="database.init-monitoring.psql",
+            decoder=decode_monitoring,
+            executor=executor,
+            mutating=True,
+        )
+
+    def _captured_diagnostic_command(
+        self,
+        *,
+        database: str,
+        sql: str,
+        timeout: float,
+        step_id: str,
+        decoder: Callable[[str], T],
+        executor: ProcessExecutor | None,
+        mutating: bool = False,
+    ) -> Command[T]:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.pg.builder import build_psql_specification
+        from odoo_instance_sdk.internal.pg.context import resolve_database_context
+        from odoo_instance_sdk.internal.proc import SubprocessExecutor
+
+        binding = resolve_database_context(self._instance, explicit=database)
+        specification = build_psql_specification(
+            host=binding.host,
+            port=binding.port,
+            user=binding.user,
+            password=binding.password,
+            database=binding.database,
+            stdin=sql.encode(),
+            timeout=timeout,
+            mode="captured",
+            step_id=step_id,
+            _trusted_args=("-q", "-t", "-A", "-v", "ON_ERROR_STOP=1"),
+            _read_only=not mutating,
+            _mutating=mutating,
+        )
+        dependency_steps, dependency_temporary_path = self._instance._dependency_manifest()
+        psql_step = specification.prepared_step
+        prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (
+            *dependency_steps,
+            psql_step,
+        )
+
+        def execute(context: RunContext[T]) -> T:
+            self._instance._ensure_dependencies_ready(
+                context,
+                dependency_steps=dependency_steps,
+                temporary_path=dependency_temporary_path,
+            )
+            for dependency_step in dependency_steps:
+                if context.planned(dependency_step.step_id) and not context.consumed(
+                    dependency_step.step_id
+                ):
+                    context.skip(dependency_step.step_id)
+            result = cast("ProcessResult", context.process(psql_step.step_id))
+            if result.returncode != 0:
+                raise ConfigError(
+                    f"PostgreSQL diagnostic command failed with exit code {result.returncode}"
+                ) from None
+            stdout = (
+                result.stdout.decode(errors="replace")
+                if isinstance(result.stdout, bytes)
+                else (result.stdout or "")
+            )
+            return decoder(stdout)
+
+        plan = ExecutionPlan(steps=tuple(step.public_projection() for step in prepared_steps))
+        from odoo_instance_sdk.internal.proc import prepared_command
+
+        return Command.from_prepared(
+            plan,
+            prepared_command(
+                execute,
+                prepared_steps,
+                executor=executor or SubprocessExecutor(),
+            ),
+        )
+
     def _latest_backup_for(self, db_host: str | None, db_port: int, name: str) -> Backup | NoBackup:
         b = self._instance._client.get_catalog().latest_restore(db_host, db_port, name)
         return b if b is not None else NoBackup()
@@ -488,26 +679,29 @@ class DatabaseResource:
     def _psql_probe_for(self, name: str, step_id: str) -> PreparedStep | None:
         cluster = self._cluster
         user = self._instance.config.db_user
-        if cluster is None or user is None or shutil.which("psql") is None:
+        if cluster is None or user is None:
             return None
         host, port = cluster
         from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 
         query_name = name.replace("'", "''")
-        return build_psql_specification(
-            step_id=step_id,
-            host=host,
-            port=port,
-            user=user,
-            password=self._instance.config.db_password,
-            database="postgres",
-            args=(
-                "-c",
-                f"SELECT 1 FROM pg_database WHERE datname='{query_name}'",
-            ),
-            _trusted_args=("-t", "-A"),
-            timeout=30.0,
-        ).prepared_step
+        try:
+            return build_psql_specification(
+                step_id=step_id,
+                host=host,
+                port=port,
+                user=user,
+                password=self._instance.config.db_password,
+                database="postgres",
+                args=(
+                    "-c",
+                    f"SELECT 1 FROM pg_database WHERE datname='{query_name}'",
+                ),
+                _trusted_args=("-t", "-A"),
+                timeout=30.0,
+            ).prepared_step
+        except FileNotFoundError:
+            return None
 
     def _current_impl(self, *, psql_step_id: str | None = None) -> Database:
         configured = self._instance.config.configured_database_names

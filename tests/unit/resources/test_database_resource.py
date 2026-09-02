@@ -196,14 +196,9 @@ class TestExists:
         from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
 
         inst = _make_instance_with_cluster_key(client, db_user="odoo")
-        with (
-            patch(
-                "odoo_instance_sdk.resources.database.shutil.which", return_value="/usr/bin/psql"
-            ),
-            patch(
-                "odoo_instance_sdk.internal.postgres_transport.shutil.which",
-                return_value="/usr/bin/psql",
-            ),
+        with patch(
+            "odoo_instance_sdk.internal.pg.builder.shutil.which",
+            return_value="/usr/bin/psql",
         ):
             probe = inst.databases._psql_probe_for("mydb", "pgadmin.database.exists.psql")
         assert probe is not None
@@ -237,7 +232,7 @@ class TestExists:
         monkeypatch.setenv("PGHOST", "ambient-substitution")
         with (
             patch(
-                "odoo_instance_sdk.internal.postgres_transport.shutil.which",
+                "odoo_instance_sdk.internal.pg.builder.shutil.which",
                 return_value="/usr/bin/psql",
             ),
         ):
@@ -262,10 +257,7 @@ class TestExists:
                 side_effect=DatabaseManagerUnavailableError("down"),
             ),
             patch(
-                "odoo_instance_sdk.resources.database.shutil.which", return_value="/usr/bin/psql"
-            ),
-            patch(
-                "odoo_instance_sdk.internal.postgres_transport.shutil.which",
+                "odoo_instance_sdk.internal.pg.builder.shutil.which",
                 return_value="/usr/bin/psql",
             ),
         ):
@@ -289,7 +281,7 @@ class TestExists:
         inst = _make_instance_with_cluster_key(client, db_user="odoo")
         executor = RecordingExecutor()
         monkeypatch.setattr(
-            "odoo_instance_sdk.resources.database.shutil.which", lambda _: "/usr/bin/psql"
+            "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
         )
         with patch("httpx.Client", return_value=_mock_http({"result": ["mydb"]})):
             command = inst.databases.exists_command("mydb", executor=executor)

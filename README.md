@@ -101,6 +101,41 @@ odcli postgres stop
 External PostgreSQL remains externally managed; `status` reports it but `stop`
 does not take ownership of it.
 
+### PostgreSQL diagnostics and native `psql`
+
+Diagnostics resolve the selected environment/database before any process is
+planned.  When no database is given, a registered worktree binding or one
+unambiguous project default is used; an ambiguous or missing binding fails
+before spawn.  The read-only leaves share one typed transport:
+
+```bash
+odcli db locks --format json
+odcli db stats --format toon
+odcli db bloat --exact-max-scan-mb 64
+odcli db init-monitoring --yes
+odcli psql -c 'SELECT current_database();'
+```
+
+`locks` reports only waiting sessions and their real blocker relationships.
+`stats` exposes cumulative read/hit/scan counters and numeric byte values;
+optional cache data may be `null` when the capability is unavailable.
+`bloat` starts with bounded estimates and performs bounded exact checks only
+when requested (the default exact scan budget is 64 MiB).  Partial extension
+capabilities and privilege failures remain closed, cumulative warnings rather
+than hidden output.  JSON and TOON are equivalent projections of the same
+typed document; progress and debug text never contaminates stdout.
+
+`init-monitoring` is the only mutating diagnostic and requires `--yes`; its
+dry-run plan is inert and never creates an extension.  Initialization is
+available only for SDK-owned clusters and reports installed, already-present,
+or explicitly skipped extensions.  External clusters reject mutation before
+planning.  Native `psql` is deliberately different: it accepts only the
+native passthrough arguments, keeps the bound host/user/database identity,
+removes ambient `PGOPTIONS`, and inherits terminal streams, history behavior,
+signals, and native exit status.  Do not pass document-format options to a
+normal interactive `psql`; `--dry-run` is the plan-only exception and redacts
+credentials.
+
 ### Prepare a project database
 
 Database refresh can use a pinned remote test instance while keeping its
@@ -193,6 +228,11 @@ sentence; use the entry's `--help` for exact options.
 - `odcli postgres status` — Report the configured PostgreSQL cluster state and endpoint.
 - `odcli postgres up` — Start or verify the configured PostgreSQL cluster.
 - `odcli postgres stop` — Stop an SDK-owned PostgreSQL cluster without deleting its volume.
+- `odcli psql` — Run native `psql` with inherited terminal streams and bound identity.
+- `odcli db locks` — Show bounded waiting-session blocker relationships.
+- `odcli db stats` — Show bounded table/index statistics and cumulative counters.
+- `odcli db bloat` — Show estimated bloat and optional bounded exact measurements.
+- `odcli db init-monitoring` — Idempotently initialize supported monitoring extensions on an owned cluster.
 - `odcli db refresh` — Refresh an environment database from its configured source policy.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.

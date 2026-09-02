@@ -52,16 +52,17 @@ SELECT
     greatest(0, pg_indexes_size(c.oid))::bigint,
     greatest(0, pg_total_relation_size(c.oid))::bigint,
     greatest(0, (SELECT count(*) FROM pg_index ix WHERE ix.indrelid = c.oid))::bigint,
-    greatest(0, coalesce(s.heap_blks_read, 0))::bigint,
-    greatest(0, coalesce(s.heap_blks_hit, 0))::bigint,
-    greatest(0, coalesce(s.idx_blks_read, 0))::bigint,
-    greatest(0, coalesce(s.idx_blks_hit, 0))::bigint
+    greatest(0, coalesce(io.heap_blks_read, 0))::bigint,
+    greatest(0, coalesce(io.heap_blks_hit, 0))::bigint,
+    greatest(0, coalesce(io.idx_blks_read, 0))::bigint,
+    greatest(0, coalesce(io.idx_blks_hit, 0))::bigint
 FROM pg_class AS c
 JOIN pg_namespace AS n ON n.oid = c.relnamespace
 LEFT JOIN pg_stat_user_tables AS s ON s.relid = c.oid
+LEFT JOIN pg_statio_user_tables AS io ON io.relid = c.oid
 WHERE c.relkind IN ('r', 'p')
   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-ORDER BY total_bytes DESC, schema_name ASC, table_name ASC;
+ORDER BY pg_total_relation_size(c.oid) DESC, n.nspname ASC, c.relname ASC;
 
 INSERT INTO pgdiag_stats_indexes (schema_name, index_name, table_name, access_method, columns, bytes, scans)
 SELECT
@@ -82,7 +83,7 @@ LEFT JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS keys(attnum, ordinality) 
 LEFT JOIN pg_attribute AS a ON a.attrelid = t.oid AND a.attnum = keys.attnum
 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
 GROUP BY n.nspname, i.relname, t.relname, am.amname, i.oid, si.idx_scan
-ORDER BY bytes DESC, schema_name ASC, index_name ASC;
+ORDER BY pg_relation_size(i.oid) DESC, n.nspname ASC, i.relname ASC;
 
 -- Optional cache data is the only dynamic catalog boundary.  All state is
 -- session-local and all non-classified errors are reported without leaking text.
@@ -91,22 +92,26 @@ BEGIN
     BEGIN
         EXECUTE $sql$
             UPDATE pgdiag_stats_tables AS t
-            SET shared_buffer_bytes = q.cached_buffers * current_setting('block_size')::int,
+            SET shared_buffer_bytes = coalesce(q.cached_buffers, 0)
+                    * current_setting('block_size')::int,
                 shared_buffer_ratio = CASE WHEN t.total_bytes = 0 THEN 0.0
-                    ELSE least(1.0, (q.cached_buffers * current_setting('block_size')::numeric) / t.total_bytes) END,
-                hot_page_ratio = CASE WHEN q.cached_buffers = 0 THEN 0.0
-                    ELSE q.hot_buffers::numeric / q.cached_buffers END
-            FROM (
+                    ELSE least(1.0, (coalesce(q.cached_buffers, 0)
+                        * current_setting('block_size')::numeric) / t.total_bytes) END,
+                hot_page_ratio = CASE WHEN coalesce(q.cached_buffers, 0) = 0 THEN 0.0
+                    ELSE coalesce(q.hot_buffers, 0)::numeric / q.cached_buffers END
+            FROM pgdiag_stats_tables AS all_tables
+            LEFT JOIN (
                 SELECT c.oid,
-                       count(*) FILTER (WHERE b.forknum = 0) AS cached_buffers,
-                       count(*) FILTER (WHERE b.forknum = 0 AND b.usagecount >= 3) AS hot_buffers
+                       count(*)::bigint AS cached_buffers,
+                       count(*) FILTER (WHERE b.usagecount >= 3)::bigint AS hot_buffers
                 FROM pg_buffercache AS b
                 JOIN pg_class AS c ON c.relfilenode = b.relfilenode
                     AND (b.reltablespace = 0 OR b.reltablespace = c.reltablespace)
                     AND (b.reldatabase = 0 OR b.reldatabase = (SELECT oid FROM pg_database WHERE datname = current_database()))
+                WHERE b.forknum = 0
                 GROUP BY c.oid
-            ) AS q
-            WHERE q.oid = t.oid
+            ) AS q ON q.oid = all_tables.oid
+            WHERE all_tables.oid = t.oid
         $sql$;
         UPDATE pgdiag_stats_capability SET usable = true, warning_code = NULL;
     EXCEPTION

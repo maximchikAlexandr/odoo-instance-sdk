@@ -42,6 +42,25 @@ Every finite public SDK operation that can launch a child process SHALL expose a
 - **THEN** the plan contains an `ActionStep` describing that action
 - **AND** it contains no invented shell command or pseudo-Python
 
+### Requirement: Deadline-bound attempts are plan-visible
+
+When an operation runs multiple captured process attempts under one monotonic
+budget, its `ExecutionPlan.observations` SHALL contain a frozen,
+serializable `DeadlineBoundAttempt` projection with the attempt step IDs and
+total budget. The projection SHALL describe the stable budget only; a
+per-invocation monotonic start time SHALL remain private run state. The shared
+process boundary SHALL compute each attempt's remaining timeout from that
+single deadline and SHALL receive the original captured process step together
+with explicit deadline context, never a substituted `PreparedStep`.
+
+#### Scenario: Deadline policy remains visible while runtime controls vary
+
+- **WHEN** a recording executor runs two inspected attempts under one shared deadline
+- **THEN** the public plan identifies both step IDs and the total budget
+- **AND** the ledger and recording executor receive the exact captured steps from that plan
+- **AND** the subprocess timeout and server statement timeout use no more than the current monotonic remainder
+- **AND** an exhausted or sub-millisecond remainder starts no process
+
 ### Requirement: One private executable snapshot
 
 Command construction SHALL capture one immutable private executable snapshot. `Command.run()` SHALL be repeatable: each invocation SHALL create an independent per-run consumption ledger over that same snapshot and SHALL share no consumption state with earlier, later, or concurrent invocations. Within one run, execution SHALL request each captured process step through its identifier exactly once. An unplanned, substituted, or duplicate request SHALL fail before the requested child starts. An omitted step SHALL fail the run when the operation callback completes and the ledger is checked; effects completed earlier in that run are not promised to be absent or rolled back unless the operation's existing lifecycle contract provides that guarantee.
@@ -171,4 +190,3 @@ Sequential pure resolve, validation, selection, normalization, and capture stage
 - **WHEN** the OS raises timeout, spawn, wait, or cleanup failure during execution
 - **THEN** the concrete effect/domain exception propagates according to existing lifecycle rules
 - **AND** it is not wrapped in a universal planning `Result`
-
