@@ -300,7 +300,7 @@ def test_port_conflict_after_instance_creation_skips_capture_use_and_launch() ->
     instance = MagicMock()
     env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
 
-    def ready() -> tuple[MagicMock, SimpleNamespace, MagicMock]:
+    def ready(_ctx: object) -> tuple[MagicMock, SimpleNamespace, MagicMock]:
         events.append("ready")
         return client, env, instance
 
