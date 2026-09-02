@@ -22,12 +22,12 @@ After spawn, only an instance bound through `from_environment()` SHALL persist c
 - **WHEN** `instance.run_foreground(config=cfg)` runs and Odoo exits with code `0`
 - **THEN** the method returns `0` and clears runtime identity in `finally`
 
-#### Scenario: Foreground run uses start config
+#### Scenario: Foreground run uses start_config
 
 - **WHEN** `instance.run_foreground()` is called on an instance created through `from_environment()` with a bound start config
 - **THEN** the captured command uses `self.config.start_config`
 
-#### Scenario: Foreground run has no start config
+#### Scenario: Foreground run no start_config — error
 
 - **WHEN** `instance.run_foreground()` is called with `config=None` and `self.config.start_config is None`
 - **THEN** it raises `InstanceConfigurationError` before child-process launch

@@ -23,12 +23,12 @@ The command SHALL:
 
 The CLI SHALL use a run-specific Click command boundary that inspects the raw argument list before Click discards the `--` marker and rejects every non-empty variadic `odoo_args` tuple unless a literal `--` preceded it. The CLI SHALL not change or bypass shared `ready_instance()`, duplicate the SDK protected-override validator, construct subprocess argv, acquire the artifact lock, or rebuild the command between preview and execution. `--format`/`--json` SHALL retain their existing rule that they are accepted for `run` only with `--dry-run` and fail with Click exit `2` before SDK resolution otherwise.
 
-#### Scenario: Port conflict remains deterministic
+#### Scenario: Port conflict deterministic error
 
 - **WHEN** `odcli run -- --dev=reload` finds the bound port occupied
 - **THEN** `ready_instance()` has already completed SDK/environment resolution and instance creation, but the command returns `port-conflict`/ownership-unknown with no foreground command construction, use update, config change, or process launch
 
-#### Scenario: Free port starts Odoo with exact native arguments
+#### Scenario: Free port starts Odoo
 
 - **WHEN** `odcli run -- --dev=reload --log-level debug --dev=xml` finds the port free
 - **THEN** it uses the instance returned by `ready_instance()`, captures `run_foreground_command(args=("--dev=reload", "--log-level", "debug", "--dev=xml"))` once, and then records use once before execution
