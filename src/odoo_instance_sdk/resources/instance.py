@@ -359,14 +359,16 @@ def _validate_runtime_args(args: Sequence[str]) -> tuple[str, ...]:
     for token in captured:
         if token.startswith("--"):
             option = token.split("=", 1)[0]
-            for protected in _PROTECTED_RUNTIME_OPTIONS:
-                if protected.startswith("--") and (
-                    option == protected or protected.startswith(option)
-                ):
-                    raise InstanceConfigurationError(
-                        f"runtime argument override {option!r} is forbidden; "
-                        "managed environment binding cannot be changed"
-                    )
+            long_name = option[2:]
+            if long_name:
+                for protected in _PROTECTED_RUNTIME_OPTIONS:
+                    if protected.startswith("--") and (
+                        option == protected or protected.startswith(option)
+                    ):
+                        raise InstanceConfigurationError(
+                            f"runtime argument override {option!r} is forbidden; "
+                            "managed environment binding cannot be changed"
+                        )
         else:
             for protected in _PROTECTED_RUNTIME_OPTIONS:
                 if not protected.startswith("--") and (
