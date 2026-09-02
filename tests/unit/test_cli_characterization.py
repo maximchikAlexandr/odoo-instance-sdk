@@ -748,7 +748,9 @@ def test_run_native_exit_code_and_streams_remain_unwrapped() -> None:
 @pytest.mark.parametrize(
     "output", [("--format", "rich"), ("--format", "json"), ("--format", "toon"), ("--json",)]
 )
-def test_run_dry_run_formats_expose_the_captured_native_argv(output: tuple[str, ...]) -> None:
+def test_run_dry_run_formats_use_single_shared_rich_projection(
+    output: tuple[str, ...],
+) -> None:
     native_args = ("--dev=reload", "space value", "meta;$(touch should-not-run)")
     executor = RecordingExecutor()
     prepared = PreparedStep(
@@ -793,7 +795,8 @@ def test_run_dry_run_formats_expose_the_captured_native_argv(output: tuple[str, 
         expected_argv = json.dumps(
             ["odoo", *native_args], ensure_ascii=False, separators=(", ", ": ")
         )
-        assert expected_argv in result.stdout
+        assert result.stdout.count(expected_argv) == 1
+        assert "Native argv:" not in result.stdout
     elif output == ("--format", "toon"):
         from toon import DecodeOptions, decode
 
