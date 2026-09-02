@@ -237,6 +237,8 @@ def test_real_odoo_test_command_is_disposable_and_read_only(
                 pytest.skip(f"real Odoo prerequisite module is not installed: {module}")
             raise
 
+        assert instance.run_foreground(args=("--stop-after-init",)) == 0
+
         monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
         before_status = subprocess.run(
             ["git", "-C", str(env.worktree_path), "status", "--porcelain"],

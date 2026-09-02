@@ -404,3 +404,39 @@ def test_expression_assessment_records_both_checkpoints() -> None:
     assert (before_branches, before_adapters) == (12, 0)
     assert (after_branches, after_adapters) == (5, 6)
     assert after_adapters <= before_branches - after_branches
+
+
+def test_expression_assessment_records_completed_post_35_gate() -> None:
+    record = (
+        (_REPO_ROOT / "docs/adr/0002-bounded-expression-checkout-assessment.md")
+        .read_text(encoding="utf-8")
+        .lower()
+    )
+    assert "post-#35 measurement: native run arguments" in record
+    assert "pending" not in record.split("post-#35 measurement: native run arguments", 1)[1]
+    assert "ea24ac9e79ea497fee985e72a6854cf61f08d614" in record
+    assert "ddbdca3b8d0945464d433a80a4033a7520380591" in record
+    assert "odooinstance.run_foreground_command" in record
+    assert "odooinstance.shell_command" in record
+    assert "_validate_runtime_args" in record
+    assert "ast.if, ast.ifexp, ast.match" in record
+    before = re.search(
+        r"\| native run-argument planning before #35 \(`([0-9a-f]{40})`\) \| (\d+) \| (\d+) \|",
+        record,
+    )
+    after = re.search(
+        r"\| native run-argument planning after #35 \(`([0-9a-f]{40})`\) \| (\d+) \| (\d+) \|",
+        record,
+    )
+    assert before is not None and after is not None
+    before_revision, before_branch_text, before_adapter_text = before.groups()
+    after_revision, after_branch_text, after_adapter_text = after.groups()
+    assert before_revision == "ea24ac9e79ea497fee985e72a6854cf61f08d614"
+    assert after_revision == "ddbdca3b8d0945464d433a80a4033a7520380591"
+    before_branches, before_adapters = int(before_branch_text), int(before_adapter_text)
+    after_branches, after_adapters = int(after_branch_text), int(after_adapter_text)
+    assert (before_branches, before_adapters) == (15, 0)
+    assert (after_branches, after_adapters) == (15, 0)
+    assert after_adapters <= before_branches - after_branches
+    assert "0 <= 0" in record
+    assert "retain expression provisionally" in record
