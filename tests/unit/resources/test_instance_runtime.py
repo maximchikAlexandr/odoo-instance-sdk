@@ -516,6 +516,27 @@ class TestRunForeground:
         assert shell.plan.process_steps[0].argv[-len(args) :] == args
         assert shell.plan.process_steps[0].argv[-len(args) - 1] == "shell"
 
+    @pytest.mark.parametrize("leaf", ["shell", "run"])
+    def test_literal_delimiter_is_allowed_and_preserved_for_runtime_commands(
+        self, tmp_path: Path, leaf: str
+    ) -> None:
+        client = _make_client()
+        instance = client.instance.from_config(_write_loopback_config(tmp_path / "odoo.conf"))
+        native_args = ("--",)
+
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=MagicMock()
+        ):
+            if leaf == "shell":
+                command = instance.shell_command(args=native_args)
+            else:
+                command = instance.run_foreground_command(args=native_args)
+
+        process = command.plan.process_steps[0]
+        assert process.argv[-len(native_args) :] == native_args
+        if leaf == "shell":
+            assert process.argv[-len(native_args) - 1] == "shell"
+
 
 class TestShell:
     def test_shell_no_start_config_raises(self) -> None:
