@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 from odoo_instance_sdk.exceptions import (
     DuplicateStepError,
     OmittedStepError,
+    PlanValidationError,
     UnplannedStepError,
 )
 from odoo_instance_sdk.models import EnvironmentCheckoutPlan
@@ -107,11 +108,21 @@ class ProcessExecutor(Protocol):
         """Spawn one already-captured long-running step."""
 
 
-class DeadlineProcessExecutor(Protocol):
+class DeadlineProcessExecutor(ProcessExecutor, Protocol):
     def execute_with_deadline(
         self, step: PreparedStep, deadline: ExecutionDeadline
     ) -> ProcessResultLike:
         """Execute the exact captured step under a shared monotonic deadline."""
+
+
+def require_deadline_executor(executor: ProcessExecutor) -> DeadlineProcessExecutor:
+    """Validate the optional deadline capability before a process can launch."""
+    execute_with_deadline = getattr(executor, "execute_with_deadline", None)
+    if not callable(execute_with_deadline):
+        raise PlanValidationError(
+            "status server-summary requires an executor implementing execute_with_deadline"
+        )
+    return cast("DeadlineProcessExecutor", executor)
 
 
 class _NullExecutor:
@@ -279,8 +290,8 @@ class RunContext(Generic[T]):
         and injected executor request in parity while the common process
         boundary computes the live child timeout.
         """
+        deadline_executor = require_deadline_executor(self._executor)
         captured = self._capture_prepared(requested)
-        deadline_executor = cast("DeadlineProcessExecutor", self._executor)
         result = deadline_executor.execute_with_deadline(captured, deadline)
         self._results[requested.step_id] = result
         return result
@@ -435,6 +446,7 @@ __all__ = [
     "owned_handle",
     "prepared_command",
     "prepared_step",
+    "require_deadline_executor",
     "run_captured",
     "run_captured_limited",
     "spawn",

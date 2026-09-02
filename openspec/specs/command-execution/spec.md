@@ -46,12 +46,13 @@ Every finite public SDK operation that can launch a child process SHALL expose a
 
 When an operation runs multiple captured process attempts under one monotonic
 budget, its `ExecutionPlan.observations` SHALL contain a frozen,
-serializable `DeadlineBoundAttempt` projection with the attempt step IDs and
-total budget. The projection SHALL describe the stable budget only; a
+serializable private deadline observation with the attempt step IDs and total
+budget. The observation SHALL describe the stable budget only; a
 per-invocation monotonic start time SHALL remain private run state. The shared
 process boundary SHALL compute each attempt's remaining timeout from that
 single deadline and SHALL receive the original captured process step together
-with explicit deadline context, never a substituted `PreparedStep`.
+with explicit deadline context, never a substituted `PreparedStep`. This
+observation is plan-visible but is not part of the public SDK model vocabulary.
 
 #### Scenario: Deadline policy remains visible while runtime controls vary
 

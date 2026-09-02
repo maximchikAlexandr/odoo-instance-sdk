@@ -269,7 +269,7 @@ Checkout provenance SHALL use the stable values `matched`, `mismatched`, and `un
 
 ### Requirement: Public execution model vocabulary
 
-The SDK SHALL publicly export lazy-loaded `Command[T]`, `ExecutionPlan`, frozen `ProcessStep`, frozen `ActionStep`, frozen `DeadlineBoundAttempt`, concrete plan errors, and `StalePlanError`. The public plan/value models SHALL be immutable, strictly typed, serializable through the project model boundary, and free of Expression or private executor types. `DeadlineBoundAttempt` SHALL expose a stable scope, captured attempt step IDs, and total budget plus a pure remaining-budget calculation; it SHALL NOT contain a per-run monotonic timestamp or executor state. `Command[T]` SHALL be immutable and strictly typed, but its private executable callback and snapshot SHALL NOT be serializable or included in project model conversion; only its public plan projection may be converted.
+The SDK SHALL publicly export lazy-loaded `Command[T]`, `ExecutionPlan`, frozen `ProcessStep`, frozen `ActionStep`, concrete plan errors, and `StalePlanError`. The public plan/value models SHALL be immutable, strictly typed, serializable through the project model boundary, and free of Expression or private executor types. A deadline-bound status observation MAY be plan-visible as private frozen serializable metadata, but SHALL NOT add a public model or remaining-budget API; it SHALL contain no per-run monotonic timestamp or executor state. `Command[T]` SHALL be immutable and strictly typed, but its private executable callback and snapshot SHALL NOT be serializable or included in project model conversion; only its public plan projection may be converted.
 
 #### Scenario: Public execution imports
 

@@ -6,10 +6,12 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from odoo_instance_sdk.exceptions import (
+    PlanValidationError,
     PostgresClusterError,
     PostgresClusterNotOwnedError,
     PostgresClusterStartError,
@@ -22,10 +24,17 @@ from odoo_instance_sdk.exceptions import (
     PostgresImageNotTrustedError,
     PostgresPortCollisionError,
 )
+from odoo_instance_sdk.execution import _PlanObservation
 from odoo_instance_sdk.internal.address import AddressState
 from odoo_instance_sdk.internal.pg.server import ServerSummary
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner, SubprocessComposeRunner
-from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    DeadlineProcessExecutor,
+    PreparedProcess,
+    ProcessHandle,
+    ProcessResult,
+    RecordingExecutor,
+)
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -107,6 +116,16 @@ class StartingComposeRunner(FakeComposeRunner):
             self._ps_rows = [{"Name": "postgres"}]
             self._health_rc = 0
         return result
+
+
+class LegacyProcessExecutor:
+    """A legacy executor without the deadline capability."""
+
+    def execute(self, _step: PreparedProcess) -> ProcessResult:
+        raise AssertionError("legacy executor must fail during status planning")
+
+    def spawn(self, _step: PreparedProcess) -> ProcessHandle:
+        raise AssertionError("legacy executor must not spawn")
 
 
 def _rows_to_jsonl(rows: list[dict[str, object]]) -> str:
@@ -294,19 +313,38 @@ def test_status_command_consumes_the_inspected_process_steps(
         "postgres.status.health",
         "postgres.status.server-summary.0",
     )
-    assert command.plan.observations == (
-        {
-            "kind": "deadline-bound-attempt",
-            "scope": "postgres.status.server-summary",
-            "step_ids": [
-                "postgres.status.server-summary.0",
-                "postgres.status.server-summary.1",
-            ],
-            "budget_seconds": 10.0,
-        },
+    observation = command.plan.observations[0]
+    assert isinstance(observation, _PlanObservation)
+    fingerprint = command.plan.fingerprint
+    assert observation.kind == "deadline-bound-attempt"
+    assert observation.scope == "postgres.status.server-summary"
+    assert observation.step_ids == (
+        "postgres.status.server-summary.0",
+        "postgres.status.server-summary.1",
     )
+    assert observation.budget_seconds == 10.0
+    with pytest.raises(AttributeError):
+        observation.budget_seconds = 20.0  # type: ignore[misc]
+    assert command.plan.fingerprint == fingerprint
     assert len(summaries) == 1
     assert summaries[0].server is not None
+
+
+@pytest.mark.unit
+def test_status_command_rejects_legacy_executor_during_planning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_compose_project(tmp_path)
+    cluster = PostgresCluster.from_project(root, compose_runner=SubprocessComposeRunner())
+    cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
+    cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
+    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: "/usr/bin/psql"
+    )
+
+    with pytest.raises(PlanValidationError, match="execute_with_deadline"):
+        cluster.status_command(executor=cast("DeadlineProcessExecutor", LegacyProcessExecutor()))
 
 
 @pytest.mark.unit

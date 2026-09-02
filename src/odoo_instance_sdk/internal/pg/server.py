@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 
-from odoo_instance_sdk.execution import JsonValue, deadline_bound_attempt_observation
+from odoo_instance_sdk.exceptions import PlanValidationError
+from odoo_instance_sdk.execution import _PlanObservation
 from odoo_instance_sdk.internal.proc import MIN_PROCESS_TIMEOUT, ExecutionDeadline
 from odoo_instance_sdk.models import PostgresServerInfo, ServerUnavailabilityReason
 
@@ -50,6 +51,14 @@ class ServerSummary:
 
     server: PostgresServerInfo | None
     reason: ServerUnavailabilityReason | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ServerSummaryPlan:
+    """Captured summary inputs and their plan-time eligibility decision."""
+
+    steps: tuple[PreparedStep, ...]
+    reason: ServerUnavailabilityReason | None = None
 
 
 def classify_server_failure(
@@ -93,18 +102,20 @@ def maintenance_database_candidates(
     return tuple(dict.fromkeys(candidates))
 
 
-def build_server_summary_steps(
+def build_server_summary_plan(
     cluster: _ServerCluster, *, timeout: float = SERVER_SUMMARY_TIMEOUT
-) -> tuple[PreparedStep, ...]:
-    """Capture all candidate summary processes for one status command."""
+) -> _ServerSummaryPlan:
+    """Capture summary processes and eligibility for one status command."""
     budget = validate_timeout(timeout)
     host, port, user, password = _credentials(cluster)
+    if not user:
+        return _ServerSummaryPlan(steps=(), reason="credentials_missing")
     executable = resolve_psql_executable()
-    if not user or executable is None:
-        return ()
+    if executable is None:
+        return _ServerSummaryPlan(steps=(), reason="psql_missing")
     generated, project_default = _project_database(cluster)
     candidates = maintenance_database_candidates(generated, project_default)
-    return tuple(
+    steps = tuple(
         build_psql_specification(
             host=host,
             port=port,
@@ -121,13 +132,15 @@ def build_server_summary_steps(
         ).prepared_step
         for index, database in enumerate(candidates)
     )
+    return _ServerSummaryPlan(steps=steps)
 
 
 def server_summary_deadline_observation(
     steps: Sequence[PreparedStep], *, timeout: float = SERVER_SUMMARY_TIMEOUT
-) -> JsonValue:
+) -> _PlanObservation:
     """Describe the shared attempt boundary in the public execution plan."""
-    return deadline_bound_attempt_observation(
+    return _PlanObservation(
+        kind="deadline-bound-attempt",
         scope="postgres.status.server-summary",
         step_ids=tuple(step.step_id for step in steps),
         budget_seconds=validate_timeout(timeout),
@@ -188,17 +201,16 @@ def _sqlstate(stderr: str | bytes | None) -> str | None:
 
 
 def collect_server_summary(  # noqa: C901
-    cluster: _ServerCluster,
     *,
     timeout: float = 10.0,
     monotonic: Callable[[], float] | None = None,
     context: RunContext[_ContextT],
     steps: Sequence[PreparedStep],
+    eligibility: ServerUnavailabilityReason | None = None,
 ) -> ServerSummary:
-    """Try each captured maintenance probe under one monotonic deadline."""
+    """Try captured maintenance probes under one deadline and plan decision."""
     budget = validate_timeout(timeout)
     clock = monotonic or time.monotonic
-    _host, _port, user, _password = _credentials(cluster)
 
     captured_steps = tuple(steps)
 
@@ -208,8 +220,8 @@ def collect_server_summary(  # noqa: C901
                 context.skip(step.step_id)
         return summary
 
-    if not user:
-        return finish(ServerSummary(None, "credentials_missing"))
+    if eligibility is not None:
+        return finish(ServerSummary(None, eligibility))
     if not captured_steps:
         return finish(ServerSummary(None, "psql_missing"))
 
@@ -224,6 +236,8 @@ def collect_server_summary(  # noqa: C901
             return finish(ServerSummary(None, "psql_missing"))
         except TimeoutError:
             return finish(ServerSummary(None, "timeout"))
+        except PlanValidationError:
+            raise
         except Exception as exc:
             from odoo_instance_sdk.internal.proc import ProcessSpawnError, ProcessTimeoutError
 
@@ -258,7 +272,7 @@ __all__ = [
     "SERVER_SUMMARY_SQL_VERSION",
     "SERVER_SUMMARY_TIMEOUT",
     "ServerSummary",
-    "build_server_summary_steps",
+    "build_server_summary_plan",
     "classify_server_failure",
     "collect_server_summary",
     "decode_server_summary",

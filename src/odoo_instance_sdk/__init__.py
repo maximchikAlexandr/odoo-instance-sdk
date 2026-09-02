@@ -69,7 +69,6 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
         ActionStep,
         Command,
-        DeadlineBoundAttempt,
         ExecutionPlan,
         JsonValue,
         ProcessStep,
@@ -412,7 +411,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "VscodeImportError": ("odoo_instance_sdk.exceptions", "VscodeImportError"),
     "ActionStep": ("odoo_instance_sdk.execution", "ActionStep"),
     "Command": ("odoo_instance_sdk.execution", "Command"),
-    "DeadlineBoundAttempt": ("odoo_instance_sdk.execution", "DeadlineBoundAttempt"),
     "DuplicateStepError": ("odoo_instance_sdk.exceptions", "DuplicateStepError"),
     "ExecutionPlan": ("odoo_instance_sdk.execution", "ExecutionPlan"),
     "JsonValue": ("odoo_instance_sdk.execution", "JsonValue"),
@@ -426,10 +424,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "canonical_plan_projection": (
         "odoo_instance_sdk.execution",
         "canonical_plan_projection",
-    ),
-    "deadline_bound_attempt_observation": (
-        "odoo_instance_sdk.execution",
-        "deadline_bound_attempt_observation",
     ),
     "fingerprint_plan": ("odoo_instance_sdk.execution", "fingerprint_plan"),
 }
@@ -486,7 +480,6 @@ __all__ = [
     "DatabasePreparationResult",
     "DatabaseRefreshOptions",
     "DatabaseResource",
-    "DeadlineBoundAttempt",
     "DevelopmentEnvironment",
     "DiagnosticWarning",
     "DropFailedError",
@@ -596,7 +589,6 @@ __all__ = [
     "VscodeImportError",
     "canonical_plan_bytes",
     "canonical_plan_projection",
-    "deadline_bound_attempt_observation",
     "fingerprint_plan",
 ]
 
