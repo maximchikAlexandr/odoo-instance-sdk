@@ -481,25 +481,31 @@ class EnvironmentMonitor:
             database = (
                 row["target_db_name"] if str(row["db_mode"]) == "copy" else row["source_db_name"]
             )
+            db_config = None
             if database:
+                try:
+                    from odoo_instance_sdk.models import StartConfig
+
+                    db_config = StartConfig.from_odoo_config(str(row["generated_config_path"]))
+                except Exception:
+                    db_config = None
+            if database:
+                from odoo_instance_sdk.internal.pg.builder import build_psql_specification
+
                 steps.append(
-                    PreparedStep(
+                    build_psql_specification(
                         step_id=f"monitor.{env_id}.postgres.identity",
-                        argv=(
-                            "psql",
-                            "-X",
-                            "-w",
-                            "-d",
-                            str(database),
-                            "-t",
-                            "-A",
-                            "-c",
-                            "SELECT 1",
-                        ),
+                        host=db_config.db_host if db_config is not None else None,
+                        port=db_config.db_port or 5432 if db_config is not None else 5432,
+                        user=db_config.db_user if db_config is not None else None,
+                        password=db_config.db_password if db_config is not None else None,
+                        database=str(database),
+                        args=("-w", "-c", "SELECT 1"),
+                        _trusted_args=("-t", "-A"),
                         timeout=_PROBE_TIMEOUT_SECONDS,
-                        read_only=True,
-                        text=True,
-                    )
+                        _allow_missing_user=True,
+                        _require_binary=False,
+                    ).prepared_step
                 )
             if bool(int(row["python_environment_owned"])):
                 steps.append(
@@ -529,25 +535,28 @@ class EnvironmentMonitor:
                 )
             if str(row["db_mode"]) == "copy" and row["target_db_name"]:
                 database_name = str(row["target_db_name"]).replace("'", "''")
-                steps.append(
-                    PreparedStep(
-                        step_id=f"monitor.{env_id}.storage.postgres",
-                        argv=(
-                            "psql",
-                            "-X",
-                            "-w",
-                            "-d",
-                            str(row["target_db_name"]),
-                            "-t",
-                            "-A",
-                            "-c",
-                            f"SELECT pg_database_size('{database_name}')",
-                        ),
-                        timeout=_PROBE_TIMEOUT_SECONDS,
-                        read_only=True,
-                        text=True,
+                if row["target_db_name"] is not None:
+                    from odoo_instance_sdk.internal.pg.builder import build_psql_specification
+
+                    steps.append(
+                        build_psql_specification(
+                            step_id=f"monitor.{env_id}.storage.postgres",
+                            host=db_config.db_host if db_config is not None else None,
+                            port=db_config.db_port or 5432 if db_config is not None else 5432,
+                            user=db_config.db_user if db_config is not None else None,
+                            password=db_config.db_password if db_config is not None else None,
+                            database=str(row["target_db_name"]),
+                            args=(
+                                "-w",
+                                "-c",
+                                f"SELECT pg_database_size('{database_name}')",
+                            ),
+                            _trusted_args=("-t", "-A"),
+                            timeout=_PROBE_TIMEOUT_SECONDS,
+                            _allow_missing_user=True,
+                            _require_binary=False,
+                        ).prepared_step
                     )
-                )
                 try:
                     from odoo_instance_sdk.models import StartConfig
 

@@ -33,7 +33,6 @@ from odoo_instance_sdk.internal.files import (
     make_download_filename,
 )
 from odoo_instance_sdk.internal.paths import get_backups_dir
-from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.redact import format_error
 from odoo_instance_sdk.internal.urls import assert_local, warn_if_cleartext_secret
 from odoo_instance_sdk.models import (
@@ -57,56 +56,6 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 T = TypeVar("T")
-
-
-def _database_psql_step(
-    *,
-    step_id: str,
-    host: str | None,
-    port: int,
-    user: str,
-    password: str | None,
-    database_name: str,
-) -> PreparedStep:
-    from odoo_instance_sdk.internal.proc import PreparedStep
-
-    query_name = database_name.replace("'", "''")
-    argv = [
-        "psql",
-        "-X",
-        "-p",
-        str(port),
-        "-U",
-        user,
-        "-d",
-        "postgres",
-        "-t",
-        "-A",
-        "-c",
-        f"SELECT 1 FROM pg_database WHERE datname='{query_name}'",
-    ]
-    if host is not None:
-        argv[2:2] = ["-h", host]
-    environment = sanitized_child_environment()
-    environment.pop("PGPASSWORD", None)
-    for key in ("PSQLRC", "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS", "PGHOST", "PGHOSTADDR"):
-        environment.pop(key, None)
-    if password is not None:
-        environment["PGPASSWORD"] = password
-    environment_snapshot = tuple(sorted(environment.items()))
-    environment_overrides = (("PGPASSWORD", password),) if password is not None else ()
-    return PreparedStep(
-        step_id=step_id,
-        argv=tuple(argv),
-        environment=environment_snapshot,
-        environment_snapshot=environment_snapshot,
-        environment_overrides=environment_overrides,
-        environment_policy="sanitized-inherit",
-        timeout=30.0,
-        read_only=True,
-        text=True,
-        secret_values=(password,) if password else (),
-    )
 
 
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
@@ -175,7 +124,7 @@ def _verify_database_via_psql(
     """
     if "\\" in database_name:
         return None
-    from odoo_instance_sdk.internal.postgres_transport import run_psql
+    from odoo_instance_sdk.internal.pg.transport import run_psql
 
     escaped = database_name.replace("'", "''")
     proc = run_psql(
@@ -393,14 +342,23 @@ class DatabaseResource:
         if cluster is None or user is None or shutil.which("psql") is None:
             return None
         host, port = cluster
-        return _database_psql_step(
+        from odoo_instance_sdk.internal.pg.builder import build_psql_specification
+
+        query_name = name.replace("'", "''")
+        return build_psql_specification(
             step_id=step_id,
             host=host,
             port=port,
             user=user,
             password=self._instance.config.db_password,
-            database_name=name,
-        )
+            database="postgres",
+            args=(
+                "-c",
+                f"SELECT 1 FROM pg_database WHERE datname='{query_name}'",
+            ),
+            _trusted_args=("-t", "-A"),
+            timeout=30.0,
+        ).prepared_step
 
     def _current_impl(self, *, psql_step_id: str | None = None) -> Database:
         configured = self._instance.config.configured_database_names

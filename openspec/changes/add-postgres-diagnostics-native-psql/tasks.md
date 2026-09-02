@@ -6,11 +6,11 @@
 
 ## 2. Shared PostgreSQL Transport and Models
 
-- [ ] 2.1 Create the short `internal/pg/` package and `commands/pg.py`, move only PostgreSQL-specific transport/CLI implementation into them, preserve lazy imports, and prove existing PostgreSQL lifecycle/database tests still pass before adding behavior.
-- [ ] 2.2 Add the exact frozen SQL, lock, statistics, bloat, closed capability/warning, monitoring-initialization, and `PostgresServerInfo` schemas from the specs; enforce tuple collections, datetime/nullability, non-negative numeric fields, ratio bounds, and export only the intended public SDK types.
-- [ ] 2.3 Implement one immutable psql specification builder on the shared executor for captured and inherited-TTY modes, including binary resolution, exact argv/stdin, timeout, sanitized environment, removal of ambient `PGOPTIONS` before private SDK timeout injection, private password handling, and redacted public plan/fingerprint.
-- [ ] 2.4 Implement the closed token grammar and table-driven pre-spawn tests for every protected identity form, every declared zero-value option, split/attached/long-`=` forms of `-c/-f/-F/-L/-o/-P/-R/-T/-v`, missing values, unknown options, positional database/user/URI/keyword strings, and operands after `--`; prove exact argv boundaries.
-- [ ] 2.5 Migrate the existing database-existence fallback and other PostgreSQL launches in scope to the shared builder/executor, then delete the superseded direct `subprocess` transport path.
+- [x] 2.1 Create the short `internal/pg/` package and `commands/pg.py`, move only PostgreSQL-specific transport/CLI implementation into them, preserve lazy imports, and prove existing PostgreSQL lifecycle/database tests still pass before adding behavior.
+- [x] 2.2 Add the exact frozen SQL, lock, statistics, bloat, closed capability/warning, monitoring-initialization, and `PostgresServerInfo` schemas from the specs; enforce tuple collections, datetime/nullability, non-negative numeric fields, ratio bounds, and export only the intended public SDK types.
+- [x] 2.3 Implement one immutable psql specification builder on the shared executor for captured and inherited-TTY modes, including binary resolution, exact argv/stdin, timeout, sanitized environment, removal of ambient `PGOPTIONS` before private SDK timeout injection, private password handling, and redacted public plan/fingerprint.
+- [x] 2.4 Implement the closed token grammar and table-driven pre-spawn tests for every protected identity form, every declared zero-value option, split/attached/long-`=` forms of `-c/-f/-F/-L/-o/-P/-R/-T/-v`, missing values, unknown options, positional database/user/URI/keyword strings, and operands after `--`; prove exact argv boundaries.
+- [x] 2.5 Migrate the existing database-existence fallback and other PostgreSQL launches in scope to the shared builder/executor, then delete the superseded direct `subprocess` transport path.
 
 ## 3. DatabaseResource Command Surface
 

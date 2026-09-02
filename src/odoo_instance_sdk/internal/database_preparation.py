@@ -873,10 +873,8 @@ def _preparation_process_steps(
     if not options.restore:
         return tuple(steps)
 
-    from odoo_instance_sdk.resources.database import (
-        _RESET_ADMIN_PASSWORD_SCRIPT,
-        _database_psql_step,
-    )
+    from odoo_instance_sdk.internal.pg.builder import build_psql_specification
+    from odoo_instance_sdk.resources.database import _RESET_ADMIN_PASSWORD_SCRIPT
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
     # The real Git identity is captured by the two process steps above and
@@ -914,30 +912,48 @@ def _preparation_process_steps(
         password = parsed.get("db_password")
         steps.extend(
             (
-                _database_psql_step(
+                build_psql_specification(
                     step_id="database.restore.exists-reservation",
                     host=db_host,
                     port=db_port,
                     user=db_user,
                     password=password,
-                    database_name=target_database,
-                ),
-                _database_psql_step(
+                    database="postgres",
+                    args=(
+                        "-c",
+                        f"SELECT 1 FROM pg_database WHERE datname='{target_database.replace(chr(39), chr(39) + chr(39))}'",
+                    ),
+                    _trusted_args=("-t", "-A"),
+                    timeout=30.0,
+                ).prepared_step,
+                build_psql_specification(
                     step_id="database.restore.exists-before",
                     host=db_host,
                     port=db_port,
                     user=db_user,
                     password=password,
-                    database_name=target_database,
-                ),
-                _database_psql_step(
+                    database="postgres",
+                    args=(
+                        "-c",
+                        f"SELECT 1 FROM pg_database WHERE datname='{target_database.replace(chr(39), chr(39) + chr(39))}'",
+                    ),
+                    _trusted_args=("-t", "-A"),
+                    timeout=30.0,
+                ).prepared_step,
+                build_psql_specification(
                     step_id="database.restore.exists-after",
                     host=db_host,
                     port=db_port,
                     user=db_user,
                     password=password,
-                    database_name=target_database,
-                ),
+                    database="postgres",
+                    args=(
+                        "-c",
+                        f"SELECT 1 FROM pg_database WHERE datname='{target_database.replace(chr(39), chr(39) + chr(39))}'",
+                    ),
+                    _trusted_args=("-t", "-A"),
+                    timeout=30.0,
+                ).prepared_step,
             )
         )
 
