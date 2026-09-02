@@ -191,6 +191,38 @@
               }
             ]
           },
+          "server": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PostgresServerInfo"
+              }
+            ],
+            "default": null
+          },
+          "server_unavailability_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "authentication_failed",
+                  "credentials_missing",
+                  "invalid_response",
+                  "maintenance_database_unavailable",
+                  "privilege_denied",
+                  "psql_missing",
+                  "query_failed",
+                  "server_unreachable",
+                  "timeout"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "state": {
             "$ref": "#/components/schemas/PostgresClusterState"
           },
@@ -659,6 +691,47 @@
           "unreachable"
         ],
         "title": "PostgresClusterState"
+      },
+      "PostgresServerInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "connectable_databases": {
+            "type": "integer"
+          },
+          "connections_active": {
+            "type": "integer"
+          },
+          "connections_idle": {
+            "type": "integer"
+          },
+          "connections_total": {
+            "type": "integer"
+          },
+          "max_connections": {
+            "type": "integer"
+          },
+          "postmaster_started_at": {
+            "type": "string"
+          },
+          "uptime_seconds": {
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "postmaster_started_at",
+          "uptime_seconds",
+          "connections_total",
+          "connections_active",
+          "connections_idle",
+          "max_connections",
+          "connectable_databases"
+        ],
+        "title": "PostgresServerInfo",
+        "type": "object"
       },
       "ProjectSummary": {
         "additionalProperties": false,
