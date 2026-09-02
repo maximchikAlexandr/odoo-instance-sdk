@@ -285,7 +285,28 @@ def _logfile_cursor_snapshot(handle: TextIO) -> tuple[int, bytes]:
     return cursor, _logfile_sentinel(fd, cursor)
 
 
-_FORBIDDEN_SHELL_FLAGS = ("-c", "--config", "-d", "--database")
+_PROTECTED_RUNTIME_OPTIONS = (
+    "--config",
+    "--database",
+    "--db-filter",
+    "--db_user",
+    "--db_password",
+    "--db_host",
+    "--db_port",
+    "--db_sslmode",
+    "--addons-path",
+    "--upgrade-path",
+    "--data-dir",
+    "--http-interface",
+    "--http-port",
+    "--gevent-port",
+    "--longpolling-port",
+    "--logfile",
+    "-c",
+    "-d",
+    "-r",
+    "-w",
+)
 
 
 def _process_create_time(pid: int) -> float:
@@ -333,19 +354,31 @@ def _worktree_ref(
     return branch or "unknown", sha
 
 
-def _check_shell_overrides(args: Sequence[str]) -> None:
-    for tok in args:
-        if tok in _FORBIDDEN_SHELL_FLAGS:
-            raise InstanceConfigurationError(
-                f"shell() passthrough override {tok!r} is forbidden; "
-                "config/DB binding cannot be changed"
-            )
-        for flag in _FORBIDDEN_SHELL_FLAGS:
-            if tok.startswith(flag) and len(tok) > len(flag):
-                raise InstanceConfigurationError(
-                    f"shell() passthrough override {tok!r} is forbidden; "
-                    "config/DB binding cannot be changed"
-                )
+def _validate_runtime_args(args: Sequence[str]) -> tuple[str, ...]:
+    captured = tuple(args)
+    for token in captured:
+        if token.startswith("--"):
+            option = token.split("=", 1)[0]
+            long_name = option[2:]
+            if long_name:
+                for protected in _PROTECTED_RUNTIME_OPTIONS:
+                    if protected.startswith("--") and (
+                        option == protected or protected.startswith(option)
+                    ):
+                        raise InstanceConfigurationError(
+                            f"runtime argument override {option!r} is forbidden; "
+                            "managed environment binding cannot be changed"
+                        )
+        else:
+            for protected in _PROTECTED_RUNTIME_OPTIONS:
+                if not protected.startswith("--") and (
+                    token == protected or token.startswith(protected)
+                ):
+                    raise InstanceConfigurationError(
+                        f"runtime argument override {protected!r} is forbidden; "
+                        "managed environment binding cannot be changed"
+                    )
+    return captured
 
 
 def _command_plan(
@@ -669,15 +702,17 @@ class OdooInstance:
         self,
         config: StartConfig | None = None,
         *,
+        args: Sequence[str] = (),
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
     ) -> int:
-        return self.run_foreground_command(config, cwd=cwd, env=env).run()
+        return self.run_foreground_command(config, args=args, cwd=cwd, env=env).run()
 
     def run_foreground_command(  # noqa: C901
         self,
         config: StartConfig | None = None,
         *,
+        args: Sequence[str] = (),
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
     ) -> Command[int]:
@@ -687,12 +722,13 @@ class OdooInstance:
                 raise InstanceConfigurationError(
                     "No StartConfig — pass one explicitly or create instance via from_config()"
                 )
+        validated_args = _validate_runtime_args(args)
         resolved_cwd = cwd if cwd is not None else self.config.default_cwd
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         environment_snapshot, environment_overrides = captured_child_environment(env)
         step = PreparedStep(
             step_id="instance.foreground",
-            argv=(*self._executable_prefix(), *cli_args),
+            argv=(*self._executable_prefix(), *cli_args, *validated_args),
             cwd=None if resolved_cwd is None else str(resolved_cwd),
             environment=environment_overrides,
             environment_snapshot=environment_snapshot,
@@ -837,9 +873,9 @@ class OdooInstance:
             raise InstanceConfigurationError(
                 "No StartConfig — create instance via from_config() or from_environment()"
             )
-        _check_shell_overrides(args)
+        validated_args = _validate_runtime_args(args)
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
-        full_args = (*self._executable_prefix(), *cli_args, "shell", *tuple(args))
+        full_args = (*self._executable_prefix(), *cli_args, "shell", *validated_args)
         resolved_cwd = self.config.default_cwd
         environment_snapshot, environment_overrides = captured_child_environment(None)
         step = PreparedStep(

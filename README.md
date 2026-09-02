@@ -141,6 +141,8 @@ streams, but expose the same bounded preview contract:
 ```bash
 odcli --env feature/customer-credit run --dry-run
 odcli --env feature/customer-credit run --dry-run --format json
+odcli --env feature/customer-credit run -- --dev=reload --log-level debug
+odcli --env feature/customer-credit run --dry-run -- --stop-after-init -u sale
 odcli --env feature/customer-credit shell --dry-run --format toon -- --dev
 ```
 
@@ -150,6 +152,14 @@ by Click with exit `2` before SDK resolution or process launch. `logs
 --follow`, the monitor server, and normal interactive shell/run streams are
 documented native transports because they are intentionally unbounded or
 interactive rather than finite plan documents.
+
+The literal `--` delimiter is required for every non-empty native Odoo argv;
+the tokens after it are preserved in order and repeated values are allowed.
+The SDK rejects managed runtime overrides before capture, including config and
+database/credential, addons/upgrade/data-path, HTTP/gevent/longpolling bind or
+port, and logfile option families. Dry-run captures and redacts the same argv
+without recording use or starting Odoo; normal `run` forwards native stdin,
+stdout, and stderr and returns Odoo's exit code.
 
 ## Complete CLI command reference
 
@@ -201,6 +211,25 @@ instance = client.instance.from_config("./odoo.conf")
 for database in instance.databases.list():
     print(database.name, database.backup)
 ```
+
+Native runtime arguments are available through the same SDK instance. Pass a
+tuple (or another sequence) to freeze the exact argv in the captured command;
+the command's plan and execution use that same snapshot:
+
+```python
+command = instance.run_foreground_command(
+    args=("--dev=reload", "--log-level", "debug", "--stop-after-init")
+)
+print(command.plan)       # redacted argv, including native arguments
+result = command.run()    # native inherited stdin/stdout/stderr
+print(result)
+```
+
+SDK foreground calls reject the managed config and database/credential,
+addons/upgrade/data-path, HTTP/gevent/longpolling bind or port, and logfile
+families. Other Odoo arguments may repeat and retain their original boundaries
+and order. The CLI equivalent requires the literal `--` delimiter; its
+`--dry-run` preview does not record use or execute the command.
 
 See [Python SDK examples](docs/python-sdk.md) for runnable examples covering
 database backup/restore, processes, environments, PostgreSQL, monitoring, and

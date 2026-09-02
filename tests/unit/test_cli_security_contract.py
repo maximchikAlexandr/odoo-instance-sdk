@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.resources.environment import EnvironmentState
 from tests.unit.monitor_support import FakeProcessProvider
@@ -184,13 +185,96 @@ def test_run_records_use_once_before_foreground_start() -> None:
         ),
         patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
     ):
-        result = CliRunner().invoke(cli, ["run"])
+        result = CliRunner().invoke(cli, ["run", "--", "--dev=reload"])
 
     assert result.exit_code == 0, result.output
     assert calls.mock_calls == [
-        call.run_foreground_command(),
+        call.run_foreground_command(args=("--dev=reload",)),
         call.record_use(env),
     ]
+
+
+def test_run_captures_then_records_use_then_executes_the_same_command() -> None:
+    events: list[str] = []
+    client = MagicMock()
+    instance = MagicMock()
+    env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
+
+    def execute() -> int:
+        events.append("execute")
+        return 0
+
+    command = _stub_command(execute)
+
+    def capture(*, args: tuple[str, ...]) -> Command[int]:
+        assert args == ("--dev=reload", "--dev=xml")
+        events.append("capture")
+        return command
+
+    instance.run_foreground_command.side_effect = capture
+
+    def record_use(_env: object) -> None:
+        events.append("record")
+
+    client.environments.record_use.side_effect = record_use
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance", return_value=(client, env, instance)
+        ),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            ["run", "--", "--dev=reload", "--dev=xml"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert events == ["capture", "record", "execute"]
+    client.environments.record_use.assert_called_once_with(env)
+
+
+def test_ready_instance_resolves_environment_before_creating_instance() -> None:
+    events: list[str] = []
+    client = MagicMock()
+    instance = MagicMock()
+    instance.run_foreground_command.return_value = _stub_command(lambda: 0)
+    env = SimpleNamespace(
+        id="env-id",
+        name="test",
+        state=EnvironmentState.READY,
+        repository_root="/repo",
+        http_interface="127.0.0.1",
+        http_port=8069,
+    )
+
+    def create_instance(_value: object) -> MagicMock:
+        events.append("instance")
+        return instance
+
+    client.instance.from_environment.side_effect = create_instance
+
+    def resolve_environment(*_args: object, **_kwargs: object) -> object:
+        events.append("environment")
+        return env
+
+    with (
+        patch("odoo_instance_sdk.commands.context._client_class", return_value=lambda **_: client),
+        patch(
+            "odoo_instance_sdk.commands.context._client_config_class",
+            return_value=lambda **_: SimpleNamespace(executable="odoo"),
+        ),
+        patch(
+            "odoo_instance_sdk.internal.context.resolve_environment",
+            side_effect=resolve_environment,
+        ),
+        patch("odoo_instance_sdk.internal.context._verify_env_runtime"),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, ["run", "--", "--stop-after-init"])
+
+    assert result.exit_code == 0, result.output
+    assert events == ["environment", "instance"]
+    instance.run_foreground_command.assert_called_once_with(args=("--stop-after-init",))
 
 
 def test_port_conflict_does_not_record_use_or_start_foreground() -> None:
@@ -208,6 +292,62 @@ def test_port_conflict_does_not_record_use_or_start_foreground() -> None:
     assert result.exit_code == 1
     client.environments.record_use.assert_not_called()
     instance.run_foreground_command.assert_not_called()
+
+
+def test_port_conflict_after_instance_creation_skips_capture_use_and_launch() -> None:
+    events: list[str] = []
+    client = MagicMock()
+    instance = MagicMock()
+    env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
+
+    def ready(_ctx: object) -> tuple[MagicMock, SimpleNamespace, MagicMock]:
+        events.append("ready")
+        return client, env, instance
+
+    def port_free(_env: object) -> bool:
+        events.append("port")
+        return False
+
+    with (
+        patch("odoo_instance_sdk.cli.cli_context.ready_instance", side_effect=ready),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", side_effect=port_free),
+    ):
+        result = CliRunner().invoke(cli, ["run", "--", "--dev=reload"])
+
+    assert result.exit_code == 1
+    assert events == ["ready", "port"]
+    instance.run_foreground_command.assert_not_called()
+    client.environments.record_use.assert_not_called()
+
+
+def test_protected_native_argument_is_rejected_at_sdk_boundary_without_machine_document() -> None:
+    client = MagicMock()
+    instance = MagicMock()
+    instance.run_foreground_command.side_effect = InstanceConfigurationError(
+        "protected runtime option '--database'"
+    )
+    env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
+
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=(client, env, instance),
+        ),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+    ):
+        result = CliRunner().invoke(
+            cli,
+            ["run", "--dry-run", "--json", "--", "--database", "other"],
+        )
+
+    assert result.exit_code == 1
+    assert result.stderr == ""
+    assert result.stdout.count('"schema_version"') == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "--database" in payload["error"]["message"]
+    client.environments.record_use.assert_not_called()
+    instance.run_foreground_command.assert_called_once_with(args=("--database", "other"))
 
 
 def test_shell_does_not_record_use() -> None:

@@ -204,6 +204,35 @@ cli.add_command(test_command, name="test")
 cli.add_command(db_group, name="db")
 
 
+class _RunCommand(click.Command):
+    def get_short_help_str(self, limit: int = 45) -> str:
+        del limit
+        return ""
+
+    def format_help_text(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        del ctx
+        if self.help is not None:
+            formatter.write_paragraph()
+            formatter.write_text(self.help)
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        raw_args = tuple(args)
+        parsed_args = super().parse_args(ctx, args)
+        odoo_args = tuple(ctx.params.get("odoo_args", ()))
+        if odoo_args:
+            try:
+                delimiter = raw_args.index("--")
+            except ValueError as exc:
+                raise click.UsageError(
+                    "Native Odoo arguments must follow a literal `--` delimiter.", ctx
+                ) from exc
+            if raw_args[delimiter + 1 :] != odoo_args:
+                raise click.UsageError(
+                    "Native Odoo arguments must follow a literal `--` delimiter.", ctx
+                )
+        return parsed_args
+
+
 @cli.command()
 @click.option("--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin.")
 @click.option("--python", "python", default=None, help="Python interpreter or uv selector.")
@@ -610,11 +639,16 @@ def _print_doctor(report: DoctorReport) -> None:
         rich_print(f"  {marker:<5} {c.name}: {sanitize_diagnostic(c.detail)}")
 
 
-@cli.command()
+@cli.command(
+    cls=_RunCommand,
+    help="Native Odoo arguments must follow a literal `--` delimiter.",
+)
+@click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
 @command_options
 @pass_cli_context
 def run(
     ctx: CliContext,
+    odoo_args: tuple[str, ...],
     dry_run: bool,
     output_format: str | None,
     json_output: bool,
@@ -629,7 +663,7 @@ def run(
                 f"port-conflict: {env_obj.http_interface}:{env_obj.http_port} is occupied "
                 "(ownership unknown)",
             )
-        command = instance.run_foreground_command()
+        command = instance.run_foreground_command(args=odoo_args)
     except SystemExit:
         raise
     except Exception as e:
