@@ -790,7 +790,9 @@ def test_run_dry_run_formats_expose_the_captured_native_argv(output: tuple[str, 
 
     assert result.exit_code == 0, result.output
     if output == ("--format", "rich"):
-        expected_argv = json.dumps(list(native_args), ensure_ascii=False, separators=(", ", ": "))
+        expected_argv = json.dumps(
+            ["odoo", *native_args], ensure_ascii=False, separators=(", ", ": ")
+        )
         assert expected_argv in result.stdout
     elif output == ("--format", "toon"):
         from toon import DecodeOptions, decode

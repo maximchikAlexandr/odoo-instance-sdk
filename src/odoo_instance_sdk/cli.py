@@ -233,33 +233,6 @@ class _RunCommand(click.Command):
         return parsed_args
 
 
-def _run_rich_preview(document: OutputDocument, native_arg_count: int) -> str:
-    from odoo_instance_sdk.commands.output import _default_rich_projection
-
-    rendered = _default_rich_projection(document)
-    if native_arg_count == 0 or not isinstance(document.result, dict):
-        return rendered
-    steps = document.result.get("steps")
-    if not isinstance(steps, list):
-        return rendered
-    for step in steps:
-        if not isinstance(step, dict) or step.get("step_id") != "instance.foreground":
-            continue
-        argv = step.get("argv")
-        if isinstance(argv, list):
-            native_argv = argv[-native_arg_count:]
-            return (
-                rendered
-                + "\nNative argv: "
-                + json.dumps(
-                    native_argv,
-                    ensure_ascii=False,
-                    separators=(", ", ": "),
-                )
-            )
-    return rendered
-
-
 @cli.command()
 @click.option("--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin.")
 @click.option("--python", "python", default=None, help="Python interpreter or uv selector.")
@@ -704,7 +677,6 @@ def run(
             mode=output_mode,
             dry_run=dry_run,
             emit_normal=False,
-            rich=lambda document: _run_rich_preview(document, len(odoo_args)),
         )
     except KeyboardInterrupt:
         value = 130
