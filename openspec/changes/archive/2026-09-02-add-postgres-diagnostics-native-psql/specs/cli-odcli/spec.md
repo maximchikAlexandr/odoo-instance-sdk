@@ -2,7 +2,7 @@
 
 ### Requirement: Stable machine output
 
-The exact bounded structured leaf inventory is: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `db refresh`, `db reset-admin-password`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `db locks`, `db stats`, `db bloat`, `db init-monitoring`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Each SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Existing `--json` SHALL remain a backward-compatible alias for `--format json`. Supplying `--json` with `--format toon` or `--format rich` SHALL be a Click usage error with exit code `2`; supplying `--json --format json` SHALL be accepted. `run`, interactive `shell`, `psql`, and `logs --follow` SHALL remain raw-streaming and SHALL accept neither document output nor a Rich live wrapper.
+The exact bounded structured leaf inventory is: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `db refresh`, `db reset-admin-password`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `db locks`, `db stats`, `db bloat`, `db init-monitoring`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Each SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Existing `--json` SHALL remain a backward-compatible alias for `--format json`. Supplying `--json` with `--format toon` or `--format rich` SHALL be a Click usage error with exit code `2`; supplying `--json --format json` SHALL be accepted. During normal execution, `run`, interactive `shell`, `psql`, and `logs --follow` SHALL remain raw-streaming and SHALL not emit document output or use a Rich live wrapper. Eligible spawning `run` and `shell` SHALL accept document-format options only together with `--dry-run`; those dry-run paths SHALL suppress native execution and emit one bounded plan document in Rich, JSON, or TOON, with `--json` equivalent to `--format json`. `psql --dry-run` SHALL remain an explicit plan-only exception that emits the shared sanitized native command plan without spawning; normal `psql` remains raw passthrough and SHALL continue to reject `--format` and `--json`.
 
 The CLI SHALL define one CLI-only `OutputMode` with values `rich`, `json`, and `toon`. The mode and envelope types SHALL NOT become public SDK models or FastAPI response models. Each successful or failed bounded operation SHALL first build one JSON-safe CLI envelope v1 containing `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, and `warnings`; success SHALL contain equal `result` and `data`, and failure SHALL contain stable `error.code` and sanitized `error.message`.
 
@@ -56,6 +56,29 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 
 - **WHEN** one frozen `db stats` result is projected as JSON and TOON
 - **THEN** both decoded envelopes contain equal summary, tables, indexes, capabilities, and warnings with numeric byte fields
+
+#### Scenario: Native command dry-run supports every bounded format
+
+- **WHEN** `odcli run --dry-run` or spawning `odcli shell --dry-run` is requested with `--format rich|json|toon` or `--json`
+- **THEN** output contains exactly one bounded plan with `dry_run=true` in the selected format
+- **AND** `--json` and `--format json` produce equivalent JSON documents
+- **AND** no native child stream starts
+
+#### Scenario: Normal native command stays raw
+
+- **WHEN** `odcli run` or interactive `odcli shell` executes without `--dry-run`
+- **THEN** its inherited stream is not wrapped in a bounded document or Rich live view
+
+#### Scenario: Normal native command rejects machine options
+
+- **WHEN** `odcli run` or spawning `odcli shell` is invoked with `--format` or `--json` but without `--dry-run`
+- **THEN** Click exits `2` before invoking SDK code or starting a process
+
+#### Scenario: Canonical bounded inventory remains single-source
+
+- **WHEN** the stable machine-output characterization gate compares the documented normal-execution leaves
+- **THEN** they equal canonical `PUBLIC_LEAF_CASES`, including `test`, `db refresh`, and `db reset-admin-password`
+- **AND** no second bounded-leaf table is introduced
 
 ## ADDED Requirements
 
