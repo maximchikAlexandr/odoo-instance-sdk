@@ -70,11 +70,14 @@ def _backup(tmp_path: Path, *, downloaded_at: datetime) -> Backup:
 
 
 def test_preparation_command_captures_restore_process_manifest_before_run(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Restore planning exposes Git, compose, and psql children in one snapshot."""
     from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
 
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: "/usr/bin/psql"
+    )
     source = tmp_path / "odoo.conf"
     source.write_text(
         "[options]\n"
@@ -190,6 +193,9 @@ def _production_restore_command(
     )
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: "/usr/bin/psql"
+    )
     source = tmp_path / "odoo.conf"
     source.write_text(
         "[options]\n"
