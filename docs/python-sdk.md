@@ -44,6 +44,26 @@ result = command.run()    # runs that same captured snapshot
 print(result.returncode)
 ```
 
+For a native foreground Odoo run, pass a sequence through the keyword-only
+`args` parameter. It is frozen into the one captured process step, so the
+preview and execution keep identical boundaries, order, and repeated values:
+
+```python
+native = instance.run_foreground_command(
+    args=("--dev=reload", "--log-level", "debug", "--stop-after-init")
+)
+print(native.plan)       # redacted native argv
+result = native.run()    # inherited stdin/stdout/stderr, native exit code
+print(result)
+```
+
+The CLI spelling is `odcli run -- --dev=reload`; the literal `--` delimiter is
+required for non-empty native argv. `--dry-run` previews without recording use
+or launching Odoo. SDK and CLI validation rejects managed config and
+database/credential, addons/upgrade/data-path, HTTP/gevent/longpolling bind or
+port, and logfile option families; ordinary Odoo flags such as repeated
+`--dev`, `--log-level`, and terminating `--stop-after-init` pass unchanged.
+
 The same pattern applies to `instance.start_command()`,
 `run_foreground_command()`, `shell_command()`,
 `run_shell_script_command()`, and `stop_command()`; to
