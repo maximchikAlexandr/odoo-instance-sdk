@@ -312,6 +312,34 @@ class TestBuildCliArgsSingleConfig:
 
 
 class TestRunForeground:
+    def test_run_foreground_delegates_exactly_once_with_native_args(self) -> None:
+        client = _make_client()
+        instance = client.instance(base_url="http://localhost:8069")
+        command = MagicMock()
+        command.run.return_value = 17
+        config = StartConfig(http_port=9999, http_interface="127.0.0.1")
+        native_args = ("--dev=reload", "--stop-after-init")
+        environment = {"LANG": "C"}
+
+        with patch.object(
+            OdooInstance, "run_foreground_command", return_value=command
+        ) as construct:
+            result = instance.run_foreground(
+                config,
+                args=native_args,
+                cwd="/worktree",
+                env=environment,
+            )
+
+        assert result == 17
+        construct.assert_called_once_with(
+            config,
+            args=native_args,
+            cwd="/worktree",
+            env=environment,
+        )
+        command.run.assert_called_once_with()
+
     def test_run_foreground_returns_exit_code(self) -> None:
         client = _make_client()
         inst = client.instance(base_url="http://localhost:8069")
@@ -425,6 +453,46 @@ class TestRunForeground:
             assert command.run() == 0
 
         assert executor.spawned[0].argv == planned
+
+    def test_foreground_command_keeps_redacted_projection_and_private_execution_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        client = _make_client()
+        config = StartConfig(
+            http_port=9999,
+            http_interface="127.0.0.1",
+            config_path=str(tmp_path / "generated.conf"),
+            db_password="private-secret",
+        )
+        expected_config_args = tuple(_build_cli_args(config))
+        native_args = ["--dev=reload", "private-secret"]
+        expected_native_args = tuple(native_args)
+        executor = RecordingExecutor(handles={"instance.foreground": _recording_handle()})
+
+        with patch(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor
+        ):
+            command = client.instance(base_url="http://localhost:8069").run_foreground_command(
+                config, args=native_args
+            )
+            config.http_port = 1234
+            native_args[:] = ["--database", "wrong"]
+
+            public_step = command.plan.process_steps[0]
+            assert command.commands == (public_step,)
+            assert public_step.argv == (
+                "python3",
+                *expected_config_args,
+                "--dev=reload",
+                "<redacted>",
+            )
+            assert command.run() == 0
+
+        assert executor.spawned[0].argv == (
+            "python3",
+            *expected_config_args,
+            *expected_native_args,
+        )
 
     def test_foreground_returns_native_process_exit_code(self, tmp_path: Path) -> None:
         client = _make_client()

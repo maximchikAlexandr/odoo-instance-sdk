@@ -279,7 +279,13 @@ def test_foreground_keyboard_interrupt_cleans_up_the_owned_process_group(
     inst = _make_manual_instance(client, wt)
     process = MagicMock()
     process.pid = 4242
-    handle = ProcessHandle(process, (), 4242, 9898, True)
+    handle = ProcessHandle(
+        process=process,
+        argv=(),
+        process_group_id=9898,
+        session_id=4242,
+        inherited_stdio=True,
+    )
     executor = RecordingExecutor(handles={"instance.foreground": handle})
 
     with (
