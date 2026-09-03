@@ -729,7 +729,7 @@ class TestRunForeground:
 
         assert foreground.plan.process_steps[0].argv[-len(args) :] == args
         assert shell.plan.process_steps[0].argv[-len(args) :] == args
-        assert shell.plan.process_steps[0].argv[-len(args) - 1] == "shell"
+        assert shell.plan.process_steps[0].argv[1] == "shell"
 
     @pytest.mark.parametrize("leaf", ["shell", "run"])
     def test_literal_delimiter_is_allowed_and_preserved_for_runtime_commands(
@@ -750,7 +750,7 @@ class TestRunForeground:
         process = command.plan.process_steps[0]
         assert process.argv[-len(native_args) :] == native_args
         if leaf == "shell":
-            assert process.argv[-len(native_args) - 1] == "shell"
+            assert process.argv[1] == "shell"
 
 
 class TestShell:
@@ -813,6 +813,16 @@ class TestShell:
 
 
 class TestRunShellScript:
+    def test_shell_subcommand_precedes_server_options(self, tmp_path: Path) -> None:
+        client = _make_client()
+        inst = client.instance.from_config(_write_loopback_config(tmp_path / "odoo.conf"))
+
+        interactive = inst.shell_command()
+        scripted = inst.run_shell_script_command("result = 1")
+
+        assert interactive.plan.process_steps[0].argv[1] == "shell"
+        assert scripted.plan.process_steps[0].argv[1] == "shell"
+
     def test_run_shell_script_returns_command_result(self, tmp_path: Path) -> None:
         client = _make_client()
         cfg_path = tmp_path / "odoo.conf"

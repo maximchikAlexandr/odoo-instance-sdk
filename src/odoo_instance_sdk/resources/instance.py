@@ -552,7 +552,7 @@ def _build_shell_script_step(
     environment_snapshot, environment_overrides = captured_child_environment(None)
     step = PreparedStep(
         step_id="instance.shell_script",
-        argv=(*executable_prefix, *cli_args, "shell"),
+        argv=(*executable_prefix, "shell", *cli_args),
         cwd=None if default_cwd is None else str(default_cwd),
         environment=environment_overrides,
         environment_snapshot=environment_snapshot,
@@ -945,7 +945,7 @@ class OdooInstance:
             )
         validated_args = _validate_runtime_args(args)
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
-        full_args = (*self._executable_prefix(), *cli_args, "shell", *validated_args)
+        full_args = (*self._executable_prefix(), "shell", *cli_args, *validated_args)
         resolved_cwd = self.config.default_cwd
         environment_snapshot, environment_overrides = captured_child_environment(None)
         step = PreparedStep(

@@ -452,6 +452,40 @@ class TestOdooTestRunner:
 
 
 class TestTranslationsExport:
+    @pytest.mark.parametrize(
+        ("module", "language"),
+        [
+            ("komfarm_data_exchange", "ru_RU"),
+            ("komfarm_data_exchange", "__new__"),
+            ("модуль_аптека", "be_BY"),
+        ],
+    )
+    def test_generated_source_preserves_module_and_language(
+        self, module: str, language: str
+    ) -> None:
+        from odoo_instance_sdk.internal.automation import _build_export_source
+
+        assignments = "\n".join(
+            line
+            for line in _build_export_source(module, language).splitlines()
+            if line.startswith(("_module = ", "_lang = "))
+        )
+        namespace: dict[str, str] = {}
+        exec(assignments, {}, namespace)
+
+        assert namespace == {"_module": module, "_lang": language}
+
+    def test_generated_source_uses_odoo_19_export_wizard_contract(self) -> None:
+        from odoo_instance_sdk.internal.automation import _build_export_source
+
+        source = _build_export_source("komfarm_data_exchange", "ru_RU")
+
+        assert "'lang': _lang" in source
+        assert "_wiz.act_getfile()" in source
+        assert "'filename': _wiz.name" in source
+        assert "_b64.b64encode(_b64.b64decode(_wiz.data or b''))" in source
+        assert "act_update" not in source
+
     def test_ru_ru_writes_ru_po(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
         po_content = b'msgid ""\nmsgstr ""\n'
@@ -480,6 +514,35 @@ class TestTranslationsExport:
         assert r.requested_lang == "ru_RU"
         assert r.path.name == "ru.po"
         assert r.path.read_bytes() == po_content
+
+    def test_new_language_writes_module_pot(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        pot_content = b'msgid ""\nmsgstr ""\n'
+        payload = {
+            "ok": True,
+            "commit": False,
+            "result": {
+                "iso": "__new__",
+                "filename": "komfarm_data_exchange.pot",
+                "data": base64.b64encode(pot_content).decode(),
+                "module": "komfarm_data_exchange",
+                "installed": True,
+                "lang": "__new__",
+            },
+        }
+        worktree = tmp_path / "wt"
+        (worktree / "komfarm_data_exchange" / "i18n").mkdir(parents=True)
+        (worktree / "komfarm_data_exchange" / "__manifest__.py").write_text("{}")
+        with patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)):
+            results = export_translations(
+                inst,
+                ("komfarm_data_exchange",),
+                ("__new__",),
+                worktree_root=worktree,
+            )
+
+        assert results[0].path.name == "komfarm_data_exchange.pot"
+        assert results[0].path.read_bytes() == pot_content
 
     def test_containment_escape_rejected(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
