@@ -23,15 +23,18 @@ Use Python 3.12 or newer. Git and `uv` are needed for environment workflows;
 Docker Compose is needed only for SDK-owned PostgreSQL, and Node.js is needed
 only when developing the bundled dashboard.
 
+The package is not published on PyPI yet. Install `odcli` as a user-level uv
+tool directly from GitHub:
+
 ```bash
-uv tool install odoo-instance-sdk
+uv tool install "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
 odcli --help
 ```
 
 For the monitor dashboard, install the optional extra in a project environment:
 
 ```bash
-uv add 'odoo-instance-sdk[dashboard]'
+uv add "odoo-instance-sdk[dashboard] @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
 uv run odcli monitor
 ```
 
