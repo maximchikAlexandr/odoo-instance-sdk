@@ -671,8 +671,16 @@ class TestCliEval:
         env_client: OdooClient,
         project_manifest: Path,
         fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from click.testing import CliRunner
+
+        from odoo_instance_sdk.resources import environment as environment_module
+
+        def deterministic_port(*_args: object, **_kwargs: object) -> int:
+            return 18085
+
+        monkeypatch.setattr(environment_module, "find_free_port", deterministic_port)
 
         opts = EnvironmentCheckoutOptions(
             python=str(fake_python),

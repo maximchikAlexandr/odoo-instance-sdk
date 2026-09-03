@@ -1098,3 +1098,13 @@ class TestDrop:
 
         assert result.db == "mydb"
         mock_catalog.record_database_dropped.assert_not_called()
+
+
+@pytest.mark.parametrize("payload", [[], {"result": "disabled"}])
+def test_rejects_malformed_names_response(
+    instance: OdooInstance, payload: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mock_cm = _mock_http(payload)
+    monkeypatch.setattr("httpx.Client", lambda **_: mock_cm)
+    with pytest.raises(DatabaseManagerUnavailableError):
+        instance.databases.names()

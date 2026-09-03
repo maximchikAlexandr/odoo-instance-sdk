@@ -25,6 +25,16 @@ make test
 
 `make pr` is the local equivalent of the required PR gates: lint, types, coverage tests, compatibility tests, dashboard unit/build checks, the mandatory monitor smoke check, and package checks. `make smoke` is intentionally separate so its integration marker cannot be hidden by dashboard unit-test selection. It does not run mutation or live Odoo. The package gate builds the bundled dashboard, so install a supported Node.js/npm runtime (CI uses Node 22) before running it locally.
 
+The reproducible core offline gate from a clean checkout is `make test`. It uses
+`not real_odoo and not packaging and not dashboard`, so it does not require
+package artifacts, Node.js, or dashboard dependencies. The optional gates are
+separate: `make package` runs `npm ci`, builds the dashboard and Python
+artifacts, then runs the packaging tests; `make dashboard` requires the
+dashboard extra plus Node.js/npm, runs `npm ci`, validates OpenAPI codegen, and
+runs the dashboard tests. Package tests are skipped with an actionable message
+when artifacts have not been built, so an explicitly broad offline invocation
+remains clean-checkout safe; use the named optional gates to exercise them.
+
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/) and are enforced by the local `commit-msg` hook. The `pre-commit` hook runs Ruff and mypy only.
 
 ## Test layers
@@ -35,9 +45,12 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/) and 
 | `integration` | Default offline suite; local fake HTTP, PostgreSQL, or process boundaries |
 | `serial` | After the parallel slice; signal, process, and catalog concurrency |
 | `packaging` | `make package` only |
+| `dashboard` | `make dashboard` only; requires the dashboard extra and Node.js/npm |
 | `real_odoo` | `make live` only |
 
-The default suite is offline: no real Odoo, credentials, or external network. `pytest` already excludes `real_odoo` and `packaging`.
+The default suite is offline: no real Odoo, credentials, or external network.
+`make test` excludes `real_odoo`, `packaging`, and `dashboard`; run `make package`
+or `make dashboard` for those optional prerequisites and checks.
 
 ```bash
 make targeted PYTEST_ARGS='tests/unit/internal/test_urls.py'

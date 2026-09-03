@@ -16,6 +16,14 @@ def _checker() -> ModuleType:
     return module
 
 
+def _dashboard_codegen_prerequisites_available() -> bool:
+    web_root = Path(__file__).parents[2] / "src" / "odoo_instance_sdk" / "web"
+    node_bin = web_root / "node_modules" / ".bin"
+    return importlib.util.find_spec("fastapi") is not None and any(
+        (node_bin / executable).is_file() for executable in ("openapi-ts", "openapi-ts.cmd")
+    )
+
+
 def _fixture_tree(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, Path]:
     committed_openapi = tmp_path / "openapi.json"
     first_openapi = tmp_path / "first-openapi.json"
@@ -144,4 +152,6 @@ def test_verify_outputs_reports_stale_generated_output_without_mutation(tmp_path
 
 @pytest.mark.dashboard
 def test_check_codegen_accepts_the_committed_worktree() -> None:
+    if not _dashboard_codegen_prerequisites_available():
+        pytest.skip("dashboard codegen prerequisites are unavailable; run `make dashboard`")
     _checker().check_codegen()
