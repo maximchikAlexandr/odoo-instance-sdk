@@ -177,6 +177,20 @@ def test_from_project_compose_mode(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_from_project_git_identity_does_not_depend_on_cwd(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_compose_project(git_repo)
+    monkeypatch.chdir(root)
+    from_repository = PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
+
+    monkeypatch.chdir(root.parent)
+    from_parent = PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
+
+    assert from_parent.compose_project_name == from_repository.compose_project_name
+
+
+@pytest.mark.unit
 def test_from_project_external_reads_source_config(tmp_path: Path) -> None:
     cfg_path = _write_source_config(tmp_path, db_host="db.local", db_port=5433)
     root = _write_compose_project(tmp_path, mode="external", source_config=cfg_path)

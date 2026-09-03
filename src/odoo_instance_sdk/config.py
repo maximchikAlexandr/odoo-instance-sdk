@@ -10,6 +10,7 @@ from odoo_instance_sdk.models import StartConfig
 class OdooClientConfig:
     executable: str
     http_timeout_seconds: float = 30.0
+    backup_timeout_seconds: float = 600.0
     backups_directory: Path | None = None
 
     def __repr__(self) -> str:

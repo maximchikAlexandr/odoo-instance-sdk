@@ -70,7 +70,10 @@ def rev_parse_git_common_dir(path: Path) -> Path:
     out = proc.stdout.strip()
     if not out:
         raise GitError(f"git rev-parse --git-common-dir returned empty for {path}")
-    return Path(out).resolve()
+    common_dir = Path(out)
+    if not common_dir.is_absolute():
+        common_dir = path.resolve() / common_dir
+    return common_dir.resolve()
 
 
 def rev_parse_verify(repo_root: Path, ref: str) -> str:

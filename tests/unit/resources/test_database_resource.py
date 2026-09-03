@@ -685,6 +685,33 @@ class TestVerifyPsql:
 
 
 class TestBackupProvenance:
+    @pytest.mark.parametrize(("timeout", "expected"), [(None, 600.0), (12.5, 12.5)])
+    def test_backup_uses_long_default_timeout_and_honors_override(
+        self,
+        instance: OdooInstance,
+        tmp_path: Path,
+        timeout: float | None,
+        expected: float,
+    ) -> None:
+        catalog = MagicMock()
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {}
+        response.iter_bytes.return_value = [b"backup"]
+        http_cm = _mock_http({})
+        http_cm.__enter__.return_value.post.return_value = response
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm) as http_client,
+        ):
+            instance.databases.backup("testdb", destination=tmp_path, timeout=timeout)
+
+        configured_timeout = http_client.call_args.kwargs["timeout"]
+        assert configured_timeout.connect == expected
+        assert configured_timeout.read == expected
+        assert configured_timeout.write == expected
+        assert configured_timeout.pool == expected
+
     def test_direct_https_backup_does_not_require_repository_origin_pin(
         self, client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

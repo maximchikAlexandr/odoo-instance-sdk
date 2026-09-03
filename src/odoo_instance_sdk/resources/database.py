@@ -836,7 +836,16 @@ class DatabaseResource:
 
         try:
             server_filename, size_bytes, sha256_hex = self._download_backup_part(
-                database_name, pwd, part_path, timeout=timeout, format=format, filestore=filestore
+                database_name,
+                pwd,
+                part_path,
+                timeout=(
+                    timeout
+                    if timeout is not None
+                    else self._instance._client.config.backup_timeout_seconds
+                ),
+                format=format,
+                filestore=filestore,
             )
 
             actual_filename = make_download_filename(backup_id, server_filename)

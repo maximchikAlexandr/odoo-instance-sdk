@@ -63,6 +63,7 @@ T = TypeVar("T")
 
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_STOP_TIMEOUT = 30.0
+_RESOURCE_SNAPSHOT_TIMEOUT = 5.0
 
 
 def _resolve_project_id(repository_root: Path) -> str:
@@ -1173,7 +1174,7 @@ class PostgresCluster:
                         PreparedStep(
                             step_id="postgres.resource.inspect",
                             argv=("docker", "inspect", "--format", "json", captured_container_id),
-                            timeout=5.0,
+                            timeout=_RESOURCE_SNAPSHOT_TIMEOUT,
                             read_only=True,
                         ),
                         PreparedStep(
@@ -1186,7 +1187,7 @@ class PostgresCluster:
                                 "json",
                                 captured_container_id,
                             ),
-                            timeout=5.0,
+                            timeout=_RESOURCE_SNAPSHOT_TIMEOUT,
                             read_only=True,
                         ),
                     )
@@ -1195,7 +1196,7 @@ class PostgresCluster:
                 PreparedStep(
                     step_id="postgres.resource.volume-df",
                     argv=("docker", "system", "df", "-v", "--format", "{{json .}}"),
-                    timeout=5.0,
+                    timeout=_RESOURCE_SNAPSHOT_TIMEOUT,
                     read_only=True,
                 )
             )
@@ -1307,6 +1308,7 @@ class PostgresCluster:
             # unplanned resolver during execution.
             resolve_container=False,
             step_ids=step_ids,
+            timeout=_RESOURCE_SNAPSHOT_TIMEOUT,
         )
 
 

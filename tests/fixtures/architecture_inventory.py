@@ -70,7 +70,7 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/resources/test_environment_python.py", 233),
         ("tests/unit/resources/test_environment_python.py", 271),
         ("tests/unit/test_monitor_cache_and_docker.py", 128),
-        ("tests/unit/test_cluster_resources.py", 189),
+        ("tests/unit/test_cluster_resources.py", 190),
         ("tests/unit/internal/test_proc_boundary.py", 255),
     }
 )
