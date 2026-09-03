@@ -976,6 +976,31 @@ def test_remote_drop_rejected(instance_remote: OdooInstance) -> None:
 
 
 class TestRestore:
+    def test_default_timeout_uses_long_running_backup_budget(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_text("fake content")
+        backup = _make_backup(path=str(backup_path))
+        instance = _make_instance_with_cluster_key(client)
+        http_cm = _mock_http({"result": True})
+
+        with (
+            patch("httpx.Client", return_value=http_cm) as mock_client_cls,
+            patch.object(instance, "_client") as mock_client,
+            patch(
+                "odoo_instance_sdk.resources.database.DatabaseResource.exists",
+                side_effect=[False, True],
+            ),
+        ):
+            mock_client.config = client.config
+            mock_client.get_catalog.return_value = MagicMock()
+            instance.databases.restore(backup, "newdb")
+
+        timeout = mock_client_cls.call_args.kwargs["timeout"]
+        assert timeout.connect == client.config.backup_timeout_seconds
+        assert timeout.read == client.config.backup_timeout_seconds
+
     def test_http_failure_does_not_retain_request_or_backup_graph(
         self, client: OdooClient, tmp_path: Path
     ) -> None:

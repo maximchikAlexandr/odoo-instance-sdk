@@ -1107,7 +1107,12 @@ class DatabaseResource:
 
         http_failure: tuple[int, str] | tuple[None, str] | None = None
         try:
-            with open(backup_path, "rb") as fp, self._http(timeout=timeout) as http:
+            restore_timeout = (
+                timeout
+                if timeout is not None
+                else self._instance._client.config.backup_timeout_seconds
+            )
+            with open(backup_path, "rb") as fp, self._http(timeout=restore_timeout) as http:
                 resp = http.post(
                     self._url("restore"),
                     data={
