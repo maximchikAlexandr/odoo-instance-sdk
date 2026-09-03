@@ -419,7 +419,7 @@ def db_init_monitoring(
     raise click.exceptions.Exit(status)
 
 
-@click.group()
+@click.group(help="Inspect and manage project PostgreSQL.")
 def postgres_group() -> None:
     """Project-level PostgreSQL cluster lifecycle (read-only / idempotent)."""
 

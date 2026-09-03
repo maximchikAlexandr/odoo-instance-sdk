@@ -256,7 +256,7 @@ def resolve_module_test_selection(
     )
 
 
-@click.command("test")
+@click.command("test", help="Select and run Odoo tests.")
 @click.argument("target", required=False)
 @click.option("--tags", "tags", default=None, help="Native Odoo test tags.")
 @click.option("--reload-tests", is_flag=True, default=False)

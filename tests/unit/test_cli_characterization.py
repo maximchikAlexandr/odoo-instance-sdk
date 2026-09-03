@@ -32,35 +32,28 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
 
-ROOT_HELP_SNAPSHOT = """Usage: cli [OPTIONS] COMMAND [ARGS]...
-
-Options:
-  --version       Show the version and exit.
-  --project PATH  Explicit project path.
-  --env TEXT      Environment selector (UUID or name).
-  --help          Show this message and exit.
-
-Commands:
-  db            Prepare and reset project databases.
-  deps
-  doctor
-  env
-  eval
-  exec
-  init
-  logs
-  module
-  monitor       Start the observability monitor (FastAPI + React UI).
-  postgres      Project-level PostgreSQL cluster lifecycle (read-only /...
-  psql          Run the bound native psql client with inherited terminal...
-  run
-  shell
-  test
-  translations
-  vscode
-"""
+ROOT_HELP_DESCRIPTIONS = (
+    "Prepare and reset project databases.",
+    "Verify Python and add-on dependencies.",
+    "Diagnose project, runtime, and PostgreSQL.",
+    "Manage isolated development environments.",
+    "Evaluate a Python expression in Odoo.",
+    "Execute a Python script in Odoo.",
+    "Create or update the project manifest.",
+    "Read or follow retained Odoo logs.",
+    "Discover, test, and upgrade Odoo modules.",
+    "Start the observability monitor (FastAPI + React UI).",
+    "Inspect and manage project PostgreSQL.",
+    "Start resolved Odoo in the foreground.",
+    "Open an interactive Odoo shell.",
+    "Select and run Odoo tests.",
+    "Export Odoo module translations.",
+    "Generate VS Code launch configuration.",
+)
 
 MODULE_HELP_SNAPSHOT = """Usage: cli module [OPTIONS] COMMAND [ARGS]...
+
+  Discover, test, and upgrade Odoo modules.
 
 Options:
   --help  Show this message and exit.
@@ -233,9 +226,19 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
 
 def test_prechange_root_and_module_help_snapshots_are_stable() -> None:
     runner = CliRunner()
-    assert runner.invoke(cli, ["--help"]).output == ROOT_HELP_SNAPSHOT
+    root_help = runner.invoke(cli, ["--help"]).output
+    assert "\x1b[" not in root_help
+    assert all(description in root_help for description in ROOT_HELP_DESCRIPTIONS)
     assert runner.invoke(cli, ["module", "--help"]).output == MODULE_HELP_SNAPSHOT
     assert runner.invoke(cli, ["module", "test", "--help"]).output == MODULE_TEST_HELP_SNAPSHOT
+
+
+def test_root_help_uses_rich_terminal_layout() -> None:
+    result = CliRunner().invoke(cli, ["--help"], color=True)
+
+    assert result.exit_code == 0
+    assert "╭" in result.output
+    assert "\x1b[" in result.output
 
 
 def test_run_help_snapshot_documents_delimiter_passthrough() -> None:

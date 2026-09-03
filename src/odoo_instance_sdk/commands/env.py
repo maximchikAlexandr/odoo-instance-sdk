@@ -86,7 +86,7 @@ _ENV_LIST_COLUMNS = (
 )
 
 
-@click.group()
+@click.group(help="Manage isolated development environments.")
 def env_group() -> None:
     pass
 
