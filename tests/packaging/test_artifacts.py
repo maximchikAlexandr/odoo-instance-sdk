@@ -20,6 +20,8 @@ def _dist() -> tuple[Path, Path]:
     dist = _REPO / "dist"
     wheels = list(dist.glob("*.whl")) if dist.is_dir() else []
     sdists = list(dist.glob("*.tar.gz")) if dist.is_dir() else []
+    if not dist.is_dir() or (not wheels and not sdists):
+        pytest.skip("package artifacts are unavailable; run `make package` for the package gate")
     if len(wheels) != 1 or len(sdists) != 1:
         pytest.fail("dist/ must contain exactly one wheel and one sdist; run `make package`")
     return wheels[0], sdists[0]

@@ -169,6 +169,49 @@ def test_source_branch_roundtrips_through_download_and_queries(tmp_path: Path) -
     catalog.close()
 
 
+def test_backup_queries_filter_by_format(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    source = "http://localhost:8069"
+    database = "db"
+    zip_path = _create_backup_file(tmp_path, "filtered.zip")
+    dump_path = _create_backup_file(tmp_path, "newer.dump")
+    zip_id = _u("format-filter-zip")
+    dump_id = _u("format-filter-dump")
+    catalog.start_download(zip_id, source, database, "zip", True, zip_path)
+    catalog.success_download(
+        zip_id,
+        "filtered.zip",
+        1,
+        "",
+        downloaded_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    catalog.start_download(dump_id, source, database, "dump", True, dump_path)
+    catalog.success_download(
+        dump_id,
+        "newer.dump",
+        2,
+        "",
+        downloaded_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    listed = catalog.list_backups(source_base_url=source, database_name=database, format="zip")
+    latest = catalog.latest_backup(source, database, format="zip")
+    unfiltered_latest = catalog.latest_backup(source, database)
+    missing_listed = catalog.list_backups(
+        source_base_url=source, database_name=database, format="tar"
+    )
+    missing_latest = catalog.latest_backup(source, database, format="tar")
+
+    assert [backup.id for backup in listed] == [uuid.UUID(zip_id)]
+    assert latest is not None
+    assert latest.id == uuid.UUID(zip_id)
+    assert unfiltered_latest is not None
+    assert unfiltered_latest.id == uuid.UUID(dump_id)
+    assert missing_listed == []
+    assert missing_latest is None
+    catalog.close()
+
+
 def test_success_download(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "backup.zip")

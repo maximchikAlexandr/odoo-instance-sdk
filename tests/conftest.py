@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import textwrap
@@ -11,6 +12,13 @@ import pytest
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
+
+
+_DASHBOARD_MODULES = ("fastapi", "uvicorn")
+
+
+def _dashboard_extra_available() -> bool:
+    return all(importlib.util.find_spec(name) is not None for name in _DASHBOARD_MODULES)
 
 
 @pytest.fixture
@@ -137,6 +145,7 @@ def project_manifest(git_repo: Path, fake_python: Path, source_config: Path) -> 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     root = Path(__file__).resolve().parent
+    dashboard_extra_available = _dashboard_extra_available()
     for item in items:
         rel = Path(item.path).relative_to(root).as_posix()
         if rel.startswith("packaging/"):
@@ -145,3 +154,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.integration)
         else:
             item.add_marker(pytest.mark.unit)
+        if not dashboard_extra_available and item.get_closest_marker("dashboard") is not None:
+            item.add_marker(
+                pytest.mark.skip(reason="dashboard extra unavailable; run `make dashboard`")
+            )

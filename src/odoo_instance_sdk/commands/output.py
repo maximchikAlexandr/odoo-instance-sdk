@@ -530,6 +530,7 @@ def fail(
     message: DiagnosticValue,
     *,
     usage: bool = False,
+    error_code: str | None = None,
 ) -> Never:
     mode = (
         output_mode
@@ -545,7 +546,8 @@ def fail(
             failure_document(
                 command=command,
                 context=context,
-                error_code="usage_error" if usage else command.replace(".", "_") + "_failed",
+                error_code=error_code
+                or ("usage_error" if usage else command.replace(".", "_") + "_failed"),
                 error_message=rendered_message,
             ),
             mode,

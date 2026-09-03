@@ -106,6 +106,32 @@ raise SystemExit(exit_code)
     }
 
 
+def test_postgres_command_registration_keeps_resource_transport_lazy(tmp_path: Path) -> None:
+    result = _fresh_process(
+        """
+import json
+import sys
+from odoo_instance_sdk.commands.pg import postgres_group
+assert postgres_group.name == 'postgres'
+print(json.dumps({name: name in sys.modules for name in (
+    'odoo_instance_sdk.commands.pg',
+    'odoo_instance_sdk.resources.postgres',
+    'odoo_instance_sdk.internal.pg.transport',
+    'odoo_instance_sdk.internal.proc',
+)}))
+""",
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "odoo_instance_sdk.commands.pg": True,
+        "odoo_instance_sdk.resources.postgres": False,
+        "odoo_instance_sdk.internal.pg.transport": False,
+        "odoo_instance_sdk.internal.proc": False,
+    }
+
+
 def test_lazy_exports_preserve_order_identity_import_syntax_and_errors() -> None:
     sdk = importlib.import_module("odoo_instance_sdk")
     expected_order = tuple(sdk._LAZY_EXPORTS)

@@ -6,7 +6,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import cast
 
-from . import PreparedProcess, PreparedStep, ProcessResultLike
+from . import (
+    ExecutionDeadline,
+    PreparedProcess,
+    PreparedStep,
+    ProcessResultLike,
+    bounded_process_inputs,
+)
 from .executor import ProcessHandle, ProcessResult
 
 
@@ -20,6 +26,8 @@ class RecordingExecutor:
     result_factory: Callable[[PreparedProcess], ProcessResultLike] | None = None
     executed: list[PreparedStep] = field(default_factory=list)
     spawned: list[PreparedStep] = field(default_factory=list)
+    effective_timeouts: list[float] = field(default_factory=list)
+    effective_environment_snapshots: list[tuple[tuple[str, str], ...]] = field(default_factory=list)
 
     def execute(self, step: PreparedProcess) -> ProcessResultLike:
         prepared = cast("PreparedStep", step)
@@ -38,6 +46,18 @@ class RecordingExecutor:
                 environment=prepared.environment,
             )
         return result
+
+    def execute_with_deadline(
+        self, step: PreparedProcess, deadline: ExecutionDeadline
+    ) -> ProcessResultLike:
+        prepared = cast("PreparedStep", step)
+        bounded = bounded_process_inputs(prepared, deadline)
+        self.effective_timeouts.append(bounded.timeout)
+        self.effective_environment_snapshots.append(bounded.environment_snapshot)
+        # Keep the result factory and executed ledger entry on the exact
+        # captured step.  The bounded values are separate transport inputs,
+        # never a substituted PreparedStep.
+        return self.execute(prepared)
 
     def spawn(self, step: PreparedProcess) -> ProcessHandle:
         prepared = cast("PreparedStep", step)

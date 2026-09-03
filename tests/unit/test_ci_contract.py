@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    import pytest
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW = _REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+
+
+def _test_conftest() -> ModuleType:
+    script = _REPOSITORY_ROOT / "tests" / "conftest.py"
+    spec = importlib.util.spec_from_file_location("repository_conftest", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _dashboard_job() -> str:
@@ -79,3 +94,38 @@ def test_offline_selector_excludes_dashboard_dependent_nodes() -> None:
         "tests/unit/test_web_codegen_check.py::test_check_codegen_accepts_",
     )
     assert not any(node in collected for node in dashboard_nodes)
+
+
+def test_optional_gate_prerequisites_are_documented() -> None:
+    contributing = (_REPOSITORY_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "`make package`" in contributing
+    assert "`make dashboard`" in contributing
+    assert "not real_odoo and not packaging and not dashboard" in contributing
+
+
+def test_collection_guard_skips_dashboard_items_without_the_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conftest = _test_conftest()
+    monkeypatch.setattr(conftest.importlib.util, "find_spec", lambda _name: None)
+
+    class FakeItem:
+        def __init__(self, dashboard: bool) -> None:
+            self.path = Path(__file__)
+            self.dashboard = dashboard
+            self.markers: list[Any] = []
+
+        def get_closest_marker(self, name: str) -> Any:
+            return object() if name == "dashboard" and self.dashboard else None
+
+        def add_marker(self, marker: Any) -> None:
+            self.markers.append(marker)
+
+    dashboard_item = FakeItem(dashboard=True)
+    regular_item = FakeItem(dashboard=False)
+    conftest.pytest_collection_modifyitems(
+        cast("list[pytest.Item]", [dashboard_item, regular_item])
+    )
+
+    assert any(getattr(marker, "name", None) == "skip" for marker in dashboard_item.markers)
+    assert not any(getattr(marker, "name", None) == "skip" for marker in regular_item.markers)

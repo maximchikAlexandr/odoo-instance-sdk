@@ -44,6 +44,8 @@ export type ClusterSnapshot = {
     mode: 'compose' | 'external';
     owned: boolean;
     sampled_at: string | null;
+    server?: null | PostgresServerInfo;
+    server_unavailability_reason?: 'authentication_failed' | 'credentials_missing' | 'invalid_response' | 'maintenance_database_unavailable' | 'privilege_denied' | 'psql_missing' | 'query_failed' | 'server_unreachable' | 'timeout' | null;
     state: PostgresClusterState;
     unavailability_reason: 'docker_unavailable' | 'external_not_owned' | 'inspect_failed' | 'missing' | 'stats_failed' | 'stopped' | null;
 };
@@ -249,6 +251,20 @@ export enum PostgresClusterState {
     UNKNOWN = 'unknown',
     UNREACHABLE = 'unreachable'
 }
+
+/**
+ * PostgresServerInfo
+ */
+export type PostgresServerInfo = {
+    connectable_databases: number;
+    connections_active: number;
+    connections_idle: number;
+    connections_total: number;
+    max_connections: number;
+    postmaster_started_at: string;
+    uptime_seconds: number;
+    version: string;
+};
 
 /**
  * ProjectSummary

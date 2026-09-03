@@ -269,7 +269,7 @@ Checkout provenance SHALL use the stable values `matched`, `mismatched`, and `un
 
 ### Requirement: Public execution model vocabulary
 
-The SDK SHALL publicly export lazy-loaded `Command[T]`, `ExecutionPlan`, frozen `ProcessStep`, frozen `ActionStep`, concrete plan errors, and `StalePlanError`. The public plan/value models SHALL be immutable, strictly typed, serializable through the project model boundary, and free of Expression or private executor types. `Command[T]` SHALL be immutable and strictly typed, but its private executable callback and snapshot SHALL NOT be serializable or included in project model conversion; only its public plan projection may be converted.
+The SDK SHALL publicly export lazy-loaded `Command[T]`, `ExecutionPlan`, frozen `ProcessStep`, frozen `ActionStep`, concrete plan errors, and `StalePlanError`. The public plan/value models SHALL be immutable, strictly typed, serializable through the project model boundary, and free of Expression or private executor types. A deadline-bound status observation MAY be plan-visible as private frozen serializable metadata, but SHALL NOT add a public model or remaining-budget API; it SHALL contain no per-run monotonic timestamp or executor state. `Command[T]` SHALL be immutable and strictly typed, but its private executable callback and snapshot SHALL NOT be serializable or included in project model conversion; only its public plan projection may be converted.
 
 #### Scenario: Public execution imports
 
@@ -292,4 +292,3 @@ Production model, output, and adapter annotations SHALL use a recursive `JsonVal
 - **WHEN** FastAPI, TOON, JSON, msgspec, or another weakly typed dependency returns an untyped value
 - **THEN** one adapter validates it into `JsonValue` or a concrete model
 - **AND** downstream annotations contain no `Any` or bare `object`
-

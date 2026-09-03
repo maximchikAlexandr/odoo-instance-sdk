@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import click
-import msgspec
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
@@ -29,6 +28,15 @@ from odoo_instance_sdk.commands.output import (
     rich_print,
     run_or_preview,
     sanitize_diagnostic,
+)
+from odoo_instance_sdk.commands.pg import (
+    postgres_group as _postgres_group,
+)
+from odoo_instance_sdk.commands.pg import (
+    psql as _psql,
+)
+from odoo_instance_sdk.commands.pg import (
+    register_database_commands,
 )
 from odoo_instance_sdk.commands.test import (
     project_execution_result,
@@ -129,42 +137,17 @@ def _run_doctor() -> Callable[[OdooClient, Path | None], DoctorReport]:
 
 
 def _postgres_cluster(ctx: CliContext) -> PostgresCluster:
-    """Resolve the cluster once while composing a CLI command."""
-    cluster_type = getattr(sys.modules[__name__], "PostgresCluster")
-    from odoo_instance_sdk.internal import postgres_cli
+    """Compatibility wrapper for callers of the pre-module PostgreSQL seam."""
+    from odoo_instance_sdk.commands.pg import _postgres_cluster as resolve_cluster
 
-    return cast(
-        "PostgresCluster",
-        cluster_type.from_project(getattr(postgres_cli, "resolve_project_path")(ctx)),
-    )
+    return resolve_cluster(ctx)
 
 
 def _cluster_rich(document: OutputDocument) -> str:
-    payload = document.result if isinstance(document.result, dict) else {}
-    endpoint = payload.get("endpoint", "—")
-    parts = [
-        f"mode={payload.get('mode', 'unknown')} owned={payload.get('owned', False)} "
-        f"state={payload.get('state', 'unknown')} endpoint={endpoint}"
-    ]
-    container = payload.get("container")
-    if isinstance(container, dict):
-        if container.get("id"):
-            parts.append(f"container={str(container['id'])[:12]}")
-        if container.get("pid") is not None:
-            scope = "vm" if container.get("pid_scope") == "docker_vm" else "host"
-            parts.append(f"pid={scope}:{container['pid']}")
-    metrics = payload.get("metrics")
-    if isinstance(metrics, dict):
-        cpu = metrics.get("cpu_percent")
-        memory = metrics.get("memory_usage_bytes")
-        volume = metrics.get("volume_usage_bytes")
-        if isinstance(cpu, (int, float)):
-            parts.append(f"cpu={float(cpu):.1f}%")
-        if isinstance(memory, (int, float)):
-            parts.append(f"ram={int(memory) / 1024**2:.1f} MiB")
-        if isinstance(volume, (int, float)):
-            parts.append(f"disk={int(volume) / 1024**3:.1f} GiB")
-    return " ".join(parts)
+    """Compatibility wrapper for the moved PostgreSQL renderer."""
+    from odoo_instance_sdk.commands.pg import _cluster_rich as render_cluster
+
+    return render_cluster(document)
 
 
 def _updated_modules(value: CommandResult | None) -> JsonValue:
@@ -202,6 +185,9 @@ def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> No
 cli.add_command(env_group, name="env")
 cli.add_command(test_command, name="test")
 cli.add_command(db_group, name="db")
+cli.add_command(_postgres_group, name="postgres")
+register_database_commands(db_group)
+cli.add_command(_psql, name="psql")
 
 
 class _RunCommand(click.Command):
@@ -1211,196 +1197,7 @@ def vscode_generate(
     sys.exit(status)
 
 
-@cli.group("postgres")
-def postgres_group() -> None:
-    """Project-level PostgreSQL cluster lifecycle (read-only / idempotent)."""
-
-
-@postgres_group.command("approve-image")
-@click.option("--image-digest", required=True, help="Exact OCI RepoDigest shown by Docker.")
-@click.option(
-    "--timeout",
-    type=float,
-    default=60.0,
-    show_default=True,
-    help="Seconds allowed for Docker pull and inspect.",
-)
-@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
-@output_options
-@pass_cli_context
-def postgres_approve_image(
-    ctx: CliContext,
-    image_digest: str,
-    timeout: float,
-    dry_run: bool,
-    output_format: str | None,
-    json_output: bool,
-) -> None:
-    output_mode = resolve_output_mode(output_format, json_output)
-    """Approve the current compose image in the local, non-repository trust store."""
-    try:
-        cluster_holder: dict[str, PostgresCluster] = {}
-
-        def build_command() -> Command[None]:
-            cluster = _postgres_cluster(ctx)
-            cluster_holder["cluster"] = cluster
-            return cluster.approve_image_command(image_digest, timeout=timeout)
-
-        status, _value = run_or_preview(
-            build_command,
-            command_name="postgres.approve-image",
-            mode=output_mode,
-            dry_run=dry_run,
-            result=lambda result: {
-                "approved": True,
-                "image": cast("JsonValue", cluster_holder["cluster"].to_diagnostic_dict()["image"])
-                if result is not None
-                else None,
-                "digest": image_digest,
-            },
-            rich=lambda document: (
-                f"approved image={document.result.get('image')} digest={image_digest}"
-                if isinstance(document.result, dict)
-                else ""
-            ),
-        )
-    except Exception as exc:
-        fail(output_mode, "postgres.approve-image", exc)
-    sys.exit(status)
-
-
-@postgres_group.command("status")
-@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
-@output_options
-@pass_cli_context
-def postgres_status(
-    ctx: CliContext, dry_run: bool, output_format: str | None, json_output: bool
-) -> None:
-    output_mode = resolve_output_mode(output_format, json_output)
-    snapshot: ClusterSnapshot | None = None
-    cluster_holder: dict[str, PostgresCluster] = {}
-
-    def project_status(
-        result: PostgresClusterState | None,
-    ) -> dict[str, JsonValue]:
-        nonlocal snapshot
-        if result is None:
-            return {}
-        cluster = cluster_holder["cluster"]
-        from odoo_instance_sdk.internal.postgres_cli import cluster_snapshot
-
-        snapshot = cluster_snapshot(cluster, result)
-        return cast("dict[str, JsonValue]", msgspec.to_builtins(snapshot))
-
-    def build_command() -> Command[PostgresClusterState]:
-        cluster = _postgres_cluster(ctx)
-        cluster_holder["cluster"] = cluster
-        return cluster.status_command()
-
-    try:
-        status, value = run_or_preview(
-            build_command,
-            command_name="postgres.status",
-            mode=output_mode,
-            dry_run=dry_run,
-            result=project_status,
-            rich=_cluster_rich,
-        )
-    except Exception as exc:
-        fail(output_mode, "postgres.status", exc)
-    if value is not None and not dry_run and snapshot is not None:
-        from odoo_instance_sdk.internal.postgres_cli import status_exit_code
-
-        sys.exit(status_exit_code(snapshot))
-    sys.exit(status)
-
-
-@postgres_group.command("up")
-@click.option(
-    "--wait-timeout",
-    "wait_timeout",
-    type=float,
-    default=60.0,
-    help="Seconds to wait for the cluster to become healthy.",
-)
-@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
-@output_options
-@pass_cli_context
-def postgres_up(
-    ctx: CliContext,
-    wait_timeout: float,
-    dry_run: bool,
-    output_format: str | None,
-    json_output: bool,
-) -> None:
-    output_mode = resolve_output_mode(output_format, json_output)
-
-    cluster_holder: dict[str, PostgresCluster] = {}
-
-    def build_command() -> Command[None]:
-        cluster = _postgres_cluster(ctx)
-        cluster_holder["cluster"] = cluster
-        return cluster.ensure_running_command(timeout=wait_timeout)
-
-    try:
-        status, _value = run_or_preview(
-            build_command,
-            command_name="postgres.up",
-            mode=output_mode,
-            dry_run=dry_run,
-            result=lambda result: cast(
-                "dict[str, JsonValue]",
-                cluster_holder["cluster"].to_diagnostic_dict() if result is not None else {},
-            ),
-            rich=_cluster_rich,
-        )
-    except Exception as exc:
-        fail(output_mode, "postgres.up", exc)
-    sys.exit(status)
-
-
-@postgres_group.command("stop")
-@click.option(
-    "--timeout",
-    "timeout",
-    type=float,
-    default=30.0,
-    help="Seconds to wait for graceful stop.",
-)
-@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
-@output_options
-@pass_cli_context
-def postgres_stop(
-    ctx: CliContext,
-    timeout: float,
-    dry_run: bool,
-    output_format: str | None,
-    json_output: bool,
-) -> None:
-    output_mode = resolve_output_mode(output_format, json_output)
-
-    cluster_holder: dict[str, PostgresCluster] = {}
-
-    def build_command() -> Command[None]:
-        cluster = _postgres_cluster(ctx)
-        cluster_holder["cluster"] = cluster
-        return cluster.stop_command(timeout=timeout)
-
-    try:
-        status, _value = run_or_preview(
-            build_command,
-            command_name="postgres.stop",
-            mode=output_mode,
-            dry_run=dry_run,
-            result=lambda result: cast(
-                "dict[str, JsonValue]",
-                cluster_holder["cluster"].to_diagnostic_dict() if result is not None else {},
-            ),
-            rich=_cluster_rich,
-        )
-    except Exception as exc:
-        fail(output_mode, "postgres.stop", exc)
-    sys.exit(status)
+postgres_group = _postgres_group
 
 
 @cli.command("monitor")

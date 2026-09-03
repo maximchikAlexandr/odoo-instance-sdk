@@ -363,6 +363,8 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                     },
                     "unavailability_reason": None,
                     "sampled_at": None,
+                    "server": None,
+                    "server_unavailability_reason": None,
                 },
             }
         ],

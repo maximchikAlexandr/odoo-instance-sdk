@@ -20,7 +20,13 @@ from odoo_instance_sdk.internal.process_env import (
     sanitized_child_environment,
 )
 
-from . import PreparedProcess, PreparedStep
+from . import (
+    BoundedProcessInputs,
+    ExecutionDeadline,
+    PreparedProcess,
+    PreparedStep,
+    bounded_process_inputs,
+)
 
 _CLEANUP_TIMEOUT = 5.0
 
@@ -175,6 +181,24 @@ class SubprocessExecutor:
 
     def execute(self, step: PreparedProcess) -> ProcessResult:
         prepared = cast("PreparedStep", step)
+        return self._execute(prepared)
+
+    def execute_with_deadline(
+        self, step: PreparedProcess, deadline: ExecutionDeadline
+    ) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        return self._execute(prepared, deadline=deadline)
+
+    def _execute(
+        self, prepared: PreparedStep, *, deadline: ExecutionDeadline | None = None
+    ) -> ProcessResult:
+        bounded: BoundedProcessInputs | None = None
+        if deadline is not None:
+            bounded = bounded_process_inputs(prepared, deadline)
+        timeout = prepared.timeout if bounded is None else bounded.timeout
+        environment_snapshot = (
+            prepared.environment_snapshot if bounded is None else bounded.environment_snapshot
+        )
         started = time.perf_counter()
         try:
             text_mode = prepared.text and prepared.stdin is None
@@ -184,19 +208,19 @@ class SubprocessExecutor:
                 env=_environment(
                     prepared.environment,
                     policy=prepared.environment_policy,
-                    snapshot=prepared.environment_snapshot,
+                    snapshot=environment_snapshot,
                 ),
                 input=prepared.stdin,
                 capture_output=prepared.mode == "captured",
                 text=text_mode,
-                timeout=prepared.timeout,
+                timeout=timeout,
                 check=False,
                 shell=False,
             )
         except subprocess.TimeoutExpired:
             raise ProcessTimeoutError(
                 prepared.argv,
-                prepared.timeout if prepared.timeout is not None else 0.0,
+                timeout if timeout is not None else 0.0,
                 duration=time.perf_counter() - started,
                 secrets=_captured_error_secrets(prepared),
                 sensitive_indices=prepared.sensitive_argv_indices,
@@ -572,10 +596,22 @@ def terminate(
         return
     with contextlib.suppress(OSError):
         os.killpg(group_id, signal.SIGTERM)
-    if not _wait_for_process_group_exit(handle, group_id, timeout=timeout):
+
+    # Reap the direct child before checking the group.  On Darwin a terminated
+    # group leader can remain visible to ``killpg(..., 0)`` while it is a
+    # zombie; waiting on the owned handle first makes signal-driven foreground
+    # cleanup bounded instead of waiting through the full TERM/KILL windows.
+    try:
+        handle.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
         with contextlib.suppress(OSError):
             os.killpg(group_id, signal.SIGKILL)
         _wait_for_process_group_exit(handle, group_id, timeout=timeout)
+    else:
+        if _process_group_is_alive(group_id):
+            with contextlib.suppress(OSError):
+                os.killpg(group_id, signal.SIGKILL)
+            _wait_for_process_group_exit(handle, group_id, timeout=timeout)
     with contextlib.suppress(subprocess.TimeoutExpired):
         handle.wait(timeout=timeout)
 
@@ -589,20 +625,39 @@ def wait_foreground(handle: ProcessHandle) -> int:
         del signum, frame
         nonlocal interrupted
         interrupted = True
-        with contextlib.suppress(BaseException):
-            terminate(handle, process_group_id=process_group_id)
+        # Let the normal wait path reap the direct child.  Calling the
+        # bounded group-reaper from a Python signal handler can observe the
+        # just-terminated group leader as a Darwin zombie and block the CLI;
+        # the group signal is the forwarding action, while cleanup below is
+        # performed after ``wait`` has reaped the child.
+        with contextlib.suppress(OSError):
+            os.killpg(process_group_id, signal.SIGTERM)
 
     if sys.platform != "win32":
         signal.signal(signal.SIGINT, on_sigint)
     try:
         try:
-            exit_code = handle.wait()
+            if sys.platform == "win32":
+                exit_code = handle.wait()
+            else:
+                while True:
+                    try:
+                        exit_code = handle.wait(timeout=0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if interrupted:
+                            terminate(handle, process_group_id=process_group_id)
+                            exit_code = handle.wait()
+                            break
         except KeyboardInterrupt:
             interrupted = True
             with contextlib.suppress(BaseException):
                 terminate(handle, process_group_id=process_group_id)
             exit_code = 130
     finally:
+        if interrupted:
+            with contextlib.suppress(BaseException):
+                terminate(handle, process_group_id=process_group_id)
         if sys.platform != "win32":
             signal.signal(signal.SIGINT, previous)
     return 130 if interrupted else exit_code

@@ -154,6 +154,38 @@ print(cluster.status())
 Starting an SDK-owned Compose cluster requires prior image approval; external
 clusters remain externally managed.
 
+Database diagnostics use the instance-bound cluster and a shared resolver. An
+explicit database name changes only the database while host, port, user, and
+cluster ownership remain bound to the instance:
+
+```python
+instance = client.instance.from_config("./odoo.conf")
+database = instance.databases
+locks = database.locks("postgres", top=20)
+stats = database.stats("postgres", top=20)
+bloat = database.bloat("postgres", top=20, exact_max_scan_mb=64)
+
+print(locks.rows)
+print(stats.summary.database_bytes, stats.warnings)
+print([(row.table, row.method) for row in bloat.tables])
+```
+
+`stats` bytes are numeric and its counters are cumulative; cache fields are
+nullable only when the cache capability cannot be measured. Bloat estimates
+are bounded by default and exact scans are opt-in and bounded. Results are
+frozen typed models with closed warnings/capabilities, so JSON and TOON CLI
+projections preserve the same values and failure exit semantics.
+
+`init_monitoring("postgres")` is a mutating, SDK-owned-cluster operation and
+must be explicitly confirmed at the CLI with `--yes`. It reports sorted,
+disjoint `installed`, `already_present`, and privilege/availability `skipped`
+extensions; an unavailable extension is never created. A dry-run is inert and
+redacts secrets. For native terminal use, `database.psql(("-c", "SELECT current_database();"))`
+delegates to native `psql`, preserving its streams,
+signals, and exit code. Native `psql` does not accept document formatting;
+the SDK removes ambient `PGOPTIONS` and never exposes the password in plans or
+errors.
+
 ## Snapshot monitoring
 
 ```python

@@ -8,6 +8,9 @@ import pytest
 
 from odoo_instance_sdk.exceptions import DuplicateStepError, UnplannedStepError
 from odoo_instance_sdk.internal.proc import (
+    DeadlineExceeded,
+    ExecutionDeadline,
+    PreparedStep,
     ProcessExecutionError,
     ProcessResult,
     ProcessSpawnError,
@@ -182,6 +185,89 @@ def test_recording_executor_returns_typed_result_and_exact_private_step() -> Non
     assert executor.executed == [step]
     assert executor.executed[0].stdin == b"secret input"
     assert executor.executed[0].timeout == 2.0
+
+
+def test_deadline_context_records_exact_step_and_bounded_transport_inputs() -> None:
+    clock_now = [0.0]
+
+    def clock() -> float:
+        return clock_now[0]
+
+    step = PreparedStep(
+        step_id="deadline-step",
+        argv=("psql",),
+        environment_snapshot=(("PGOPTIONS", "-c statement_timeout=1000"),),
+        timeout=1.0,
+    )
+    executor = RecordingExecutor()
+    context: RunContext[object] = RunContext((step,), executor)
+    deadline = ExecutionDeadline.start(1.0, monotonic=clock)
+
+    clock_now[0] = 0.7499
+    context.process_prepared_with_deadline(step, deadline)
+
+    assert executor.executed == [step]
+    assert executor.executed[0] is step
+    assert executor.effective_timeouts == [pytest.approx(0.2501)]
+    assert dict(executor.effective_environment_snapshots[0])["PGOPTIONS"] == (
+        "-c statement_timeout=250"
+    )
+    assert step.environment_snapshot == (("PGOPTIONS", "-c statement_timeout=1000"),)
+
+
+def test_deadline_context_refuses_submillisecond_attempt_without_starting_process() -> None:
+    clock_now = [0.0]
+
+    def clock() -> float:
+        return clock_now[0]
+
+    step = PreparedStep(
+        step_id="expired-deadline-step",
+        argv=("psql",),
+        environment_snapshot=(("PGOPTIONS", "-c statement_timeout=1000"),),
+        timeout=1.0,
+    )
+    executor = RecordingExecutor()
+    context: RunContext[object] = RunContext((step,), executor)
+    deadline = ExecutionDeadline.start(1.0, monotonic=clock)
+    clock_now[0] = 0.9995
+
+    with pytest.raises(DeadlineExceeded):
+        context.process_prepared_with_deadline(step, deadline)
+
+    assert executor.executed == []
+    assert context.consumed(step.step_id)
+
+
+def test_subprocess_deadline_receives_remainder_and_floored_statement_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_now = [0.0]
+    calls: list[dict[str, object]] = []
+
+    def clock() -> float:
+        return clock_now[0]
+
+    def fake_run(argv: list[str], **kwargs: object) -> object:
+        calls.append({"argv": argv, **kwargs})
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor.subprocess.run", fake_run)
+    step = PreparedStep(
+        step_id="subprocess-deadline-step",
+        argv=("psql",),
+        environment_snapshot=(("PGOPTIONS", "-c statement_timeout=1000"),),
+        timeout=1.0,
+    )
+    deadline = ExecutionDeadline.start(1.0, monotonic=clock)
+    clock_now[0] = 0.7499
+
+    SubprocessExecutor().execute_with_deadline(step, deadline)
+
+    assert calls[0]["timeout"] == pytest.approx(0.2501)
+    child_environment = calls[0]["env"]
+    assert isinstance(child_environment, dict)
+    assert child_environment["PGOPTIONS"] == "-c statement_timeout=250"
 
 
 def test_run_captured_limited_preserves_streams_cwd_and_environment(tmp_path: Path) -> None:

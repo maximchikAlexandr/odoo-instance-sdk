@@ -1,6 +1,8 @@
+"""PostgreSQL size collection built on the shared native transport."""
+
 from __future__ import annotations
 
-from odoo_instance_sdk.internal.postgres_transport import run_psql
+from odoo_instance_sdk.internal.pg.transport import run_psql
 
 
 def database_size_bytes(
@@ -12,19 +14,11 @@ def database_size_bytes(
     database_name: str,
     timeout: float = 10.0,
 ) -> int | None:
-    """Return ``pg_database_size(database_name)`` in bytes, or ``None`` on any failure.
-
-    Mirrors ``_verify_database_via_psql`` in ``resources/database.py``: PGPASSWORD on
-    env (never argv), single-quote escaping, ``-t -A`` raw output. ``None`` covers
-    missing user, backslash injection guard, missing psql, non-zero exit, timeout,
-    OSError, or unparseable stdout.
-    """
+    """Return ``pg_database_size(database_name)`` in bytes, or ``None`` on failure."""
     if "\\" in database_name:
         return None
     escaped = database_name.replace("'", "''")
     proc = run_psql(
-        # Monitor collection requires explicit loopback TCP.  The shared
-        # transport preserves host=None for restore tracking's Unix socket.
         host=host if host is not None else "127.0.0.1",
         port=port,
         user=user,
@@ -34,8 +28,7 @@ def database_size_bytes(
     )
     if proc is None or proc.returncode != 0:
         return None
-    out = proc.stdout.strip()
     try:
-        return int(out)
+        return int(proc.stdout.strip())
     except ValueError:
         return None

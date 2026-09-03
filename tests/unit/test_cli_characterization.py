@@ -52,6 +52,7 @@ Commands:
   module
   monitor       Start the observability monitor (FastAPI + React UI).
   postgres      Project-level PostgreSQL cluster lifecycle (read-only /...
+  psql          Run the bound native psql client with inherited terminal...
   run
   shell
   test
@@ -223,6 +224,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "deps",
         "vscode",
         "postgres",
+        "psql",
         "monitor",
     }
     assert "--project" in result.output
@@ -478,18 +480,30 @@ def test_discovered_public_methods() -> None:
         DatabaseResource: (
             "backup",
             "backup_command",
+            "bloat",
+            "bloat_command",
             "current",
             "current_command",
             "drop",
             "drop_command",
+            "execute_sql",
+            "execute_sql_command",
             "exists",
             "exists_command",
+            "init_monitoring",
+            "init_monitoring_command",
             "list",
+            "locks",
+            "locks_command",
             "names",
+            "psql",
+            "psql_command",
             "reset_admin_password",
             "reset_admin_password_command",
             "restore",
             "restore_command",
+            "stats",
+            "stats_command",
         ),
         BackupResource: (
             "delete",

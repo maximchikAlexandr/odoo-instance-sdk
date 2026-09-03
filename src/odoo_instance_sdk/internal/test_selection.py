@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, NoReturn
 
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.internal.postgres_transport import run_psql
+from odoo_instance_sdk.internal.pg.transport import run_psql
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import StartConfig
 

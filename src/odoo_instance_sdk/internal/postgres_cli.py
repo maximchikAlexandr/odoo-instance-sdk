@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from odoo_instance_sdk.commands.context import CliContext, resolve_project_path
 from odoo_instance_sdk.commands.output import (
@@ -23,6 +23,9 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 _PostgresCommandResult = TypeVar("_PostgresCommandResult")
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.internal.pg.server import ServerSummary
 
 
 def run_postgres_command(
@@ -56,7 +59,12 @@ def emit_postgres_result(
         )
 
 
-def cluster_snapshot(cluster: PostgresCluster, state: PostgresClusterState) -> ClusterSnapshot:
+def cluster_snapshot(
+    cluster: PostgresCluster,
+    state: PostgresClusterState,
+    *,
+    server_summary: ServerSummary | None = None,
+) -> ClusterSnapshot:
     """Build the canonical typed status object without a dict conversion boundary."""
     try:
         endpoint: ClusterEndpoint | None = ClusterEndpoint(
@@ -76,6 +84,8 @@ def cluster_snapshot(cluster: PostgresCluster, state: PostgresClusterState) -> C
             metrics = resource.metrics
             reason = resource.unavailability_reason
             sampled_at = resource.sampled_at
+    server = server_summary.server if server_summary is not None else None
+    server_reason = server_summary.reason if server_summary is not None else None
     return ClusterSnapshot(
         mode=cluster.mode,
         owned=cluster.owned,
@@ -85,6 +95,8 @@ def cluster_snapshot(cluster: PostgresCluster, state: PostgresClusterState) -> C
         metrics=metrics,
         unavailability_reason=reason,
         sampled_at=sampled_at,
+        server=server,
+        server_unavailability_reason=server_reason,
     )
 
 

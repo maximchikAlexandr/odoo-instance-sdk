@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import ConfigError, StalePlanError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
-from odoo_instance_sdk.internal.process_env import captured_child_environment
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.models import CommandResult, OdooTestResult, OdooTestSpec
@@ -540,43 +539,22 @@ def run_odoo_tests_command(
             + ") ORDER BY name"
         )
         instance_config = instance.config
-        module_environment: tuple[tuple[str, str], ...] = ()
-        if instance_config.db_password is not None:
-            module_environment = (("PGPASSWORD", instance_config.db_password),)
-        module_environment_snapshot, module_environment_overrides = captured_child_environment(
-            dict(module_environment)
-        )
-        module_argv = ["psql", "-X", "-w"]
-        if instance_config.db_host is not None:
-            module_argv.extend(("-h", instance_config.db_host))
-        module_argv.extend(
-            [
-                "-p",
-                str(instance_config.db_port or 5432),
-                "-U",
-                instance_config.db_user or "",
-                "-d",
-                database,
-                "-t",
-                "-A",
-                "-c",
-                query,
-            ]
-        )
-        provenance_steps.append(
-            PreparedStep(
-                step_id="odoo.tests.provenance.modules",
-                argv=tuple(module_argv),
-                environment=module_environment_overrides,
-                environment_snapshot=module_environment_snapshot,
-                environment_overrides=module_environment_overrides,
-                secret_values=(instance_config.db_password,)
-                if instance_config.db_password is not None
-                else (),
-                read_only=True,
-                text=True,
-            )
-        )
+        from odoo_instance_sdk.internal.pg.builder import build_psql_specification
+
+        module_step = build_psql_specification(
+            step_id="odoo.tests.provenance.modules",
+            host=instance_config.db_host,
+            port=instance_config.db_port or 5432,
+            user=instance_config.db_user,
+            password=instance_config.db_password,
+            database=database,
+            args=("-w", "-c", query),
+            _trusted_args=("-t", "-A"),
+            timeout=30.0,
+            _allow_missing_user=True,
+            _require_binary=False,
+        ).prepared_step
+        provenance_steps.append(module_step)
 
     return instance._shell_script_command(
         _test_runner_source(spec.modules, spec.test_tags, spec.reload_tests),

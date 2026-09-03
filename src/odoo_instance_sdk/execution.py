@@ -35,6 +35,18 @@ from odoo_instance_sdk.internal.proc import (
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 
+class _PlanObservation(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Immutable, serializable metadata attached to an execution plan."""
+
+    kind: str
+    scope: str
+    step_ids: tuple[str, ...]
+    budget_seconds: float
+
+
+type PlanObservation = JsonValue | _PlanObservation
+
+
 class ProcessStep(
     msgspec.Struct,
     frozen=True,
@@ -86,7 +98,7 @@ class ExecutionPlan(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_
     """The immutable public projection of one prepared operation."""
 
     steps: tuple[ExecutionStep, ...] = ()
-    observations: tuple[JsonValue, ...] = ()
+    observations: tuple[PlanObservation, ...] = ()
     warnings: tuple[str, ...] = ()
     fingerprint: str = ""
 
