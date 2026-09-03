@@ -313,7 +313,10 @@ publish stored secrets or absolute catalog paths.
 Secrets are never written to the project manifest. Generated secret config and
 PostgreSQL credentials use restricted user-data files; the backup catalog uses
 the platform cache directory. Remote destructive database operations are
-rejected, and cleartext remote authentication emits a warning.
+rejected. Repository-selected remote test instances require an exact external
+origin pin. Pinned HTTP origins are permitted for legacy deployments, but emit
+a warning because the master password crosses the network in cleartext; HTTPS
+remains strongly recommended.
 
 ## Contributing
 

@@ -44,12 +44,19 @@ The run callback records use only when the resolved context contains an actual e
 
 First replace `ready_instance()` with the typed runtime-context resolver, then adapt project-capable commands. Commands whose behavior relies on generated config, retained logs, or other environment-owned artifacts must explicitly reject project context until their requirements define project behavior; they must not silently reconstruct it.
 
+### Prefer a planned PostgreSQL probe for restore existence checks
+
+When database refresh has captured a PostgreSQL existence step, `DatabaseResource` consumes that direct probe before consulting the Odoo database-manager list. This makes PostgreSQL, where restore actually creates the database, authoritative for the precondition and postcondition. It also avoids a false negative when the Odoo process was launched with `--database <previous-default>` and therefore hides the new database from `/web/database/list`.
+
+The existing HTTP fallback remains for instances without a usable PostgreSQL binding. Alternative rejected: restart Odoo without `--database` during refresh, because that changes process lifecycle and weakens the project runtime identity merely to compensate for an unsuitable verification source.
+
 ## Risks / Trade-offs
 
 - [Project manifests may reference stale paths] → Validate required paths and configuration before building a process command and return sanitized field-specific errors.
 - [Resolution precedence could change existing worktree behavior] → Characterize explicit environment and exact-worktree cases before adding project fallback.
 - [Commands may accidentally assume environment metadata] → Make source narrowing explicit and cover every instance command with environment/project tests.
 - [Project and environment command construction may drift] → Both factories produce the same `OdooInstance` execution abstractions and share protected-argument validation.
+- [A restore succeeds but Odoo filters the new database from its list] → Consume the planned direct PostgreSQL probe as the authoritative existence check.
 
 ## Migration Plan
 

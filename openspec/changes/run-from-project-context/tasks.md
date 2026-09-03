@@ -31,3 +31,9 @@
 - [x] 6.1 Update README/help examples to show context-driven `odcli run` from an initialized main checkout and explicit environment selection; verify examples match the Click help surface.
 - [x] 6.2 Run formatting, lint, type checking, focused unit/integration tests, and the repository full test gate; verify all complete successfully.
 - [x] 6.3 Run `openspec validate run-from-project-context --strict` and verify the change remains valid after implementation.
+
+## 7. Fix Project Restore Verification
+
+- [x] 7.1 Make planned PostgreSQL existence probes authoritative before HTTP database listing and preserve the existing fallback when no direct probe is available.
+- [x] 7.2 Add regression coverage for an Odoo database-manager list restricted to the previous database while PostgreSQL confirms the restored target.
+- [x] 7.3 Re-run focused restore tests, the repository full gate, real project verification, and strict OpenSpec validation.

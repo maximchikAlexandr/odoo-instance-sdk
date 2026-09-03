@@ -547,18 +547,32 @@ def test_freshness_boundaries(tmp_path: Path) -> None:
     )
 
 
-def test_target_name_is_valid_and_utf8_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_target_name_is_valid_and_utf8_bounded() -> None:
     from odoo_instance_sdk.internal.database_preparation import generate_target_database
     from odoo_instance_sdk.internal.db_name import validate_db_name
 
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_preparation.uuid.uuid4",
-        lambda: MagicMock(hex="a" * 32),
+    name = generate_target_database(
+        "source_" + "x" * 100,
+        now=datetime(2026, 9, 3, 9, 4, 20, tzinfo=UTC),
+        suffix="2ee3a458a068",
     )
-    name = generate_target_database("source_" + "x" * 100)
     validate_db_name(name)
     assert len(name.encode("utf-8")) <= 63
-    assert "refresh" in name
+    assert name.endswith("_20260903090420_2ee3a458a068")
+    assert "_refresh_" not in name
+
+
+def test_target_name_omits_refresh_marker() -> None:
+    from odoo_instance_sdk.internal.database_preparation import generate_target_database
+
+    assert (
+        generate_target_database(
+            "KOM-307_4",
+            now=datetime(2026, 9, 3, 9, 4, 20, tzinfo=UTC),
+            suffix="2ee3a458a068",
+        )
+        == "KOM-307_4_20260903090420_2ee3a458a068"
+    )
 
 
 def test_target_reservation_rechecks_collisions() -> None:
@@ -1099,6 +1113,39 @@ def test_restore_admin_reset_failure_retains_target_and_removes_config(
     assert not list(tmp_path.glob(".odcli-refresh-*.conf"))
     assert project.default_source_database == "old"
     local.databases.restore.assert_called_once()
+
+
+def test_pinned_http_download_reaches_remote_database_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import database_preparation as preparation
+
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        test_instance=ConfigTestInstance(
+            base_url="http://example.test:8069",
+            database="remote_test",
+        ),
+    )
+    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    client = MagicMock()
+    client.instance.return_value.databases.backup.return_value = backup
+    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
+    monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "http://example.test:8069")
+    monkeypatch.setattr(
+        preparation, "canonical_project_identity", lambda _: (tmp_path, tmp_path, "repo")
+    )
+    monkeypatch.setattr(preparation, "exclusive_lock", lambda _: contextlib.nullcontext())
+
+    result = preparation.prepare_download(client, project)
+
+    assert result.backup == backup
+    client.instance.assert_called_once_with(
+        "http://example.test:8069", master_password="remote-secret"
+    )
+    client.instance.return_value.databases.backup.assert_called_once_with(
+        "remote_test", source_git_branch=None
+    )
 
 
 def test_checkout_coalesces_fresh_result_under_preparation_lock(

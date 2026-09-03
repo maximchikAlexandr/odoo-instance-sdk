@@ -27,16 +27,28 @@ def test_approval_requires_exact_origin_pin() -> None:
         require_test_instance_origin_approval("https://example.com:8443")
 
 
+def test_approved_remote_http_origin_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "http://example.com:8069")
+
+    assert require_test_instance_origin_approval("http://example.com:8069") == (
+        "http://example.com:8069"
+    )
+
+
+def test_unapproved_remote_http_origin_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", raising=False)
+
+    with pytest.raises(ConfigError, match="not approved outside the repository"):
+        require_test_instance_origin_approval("http://example.com:8069")
+
+
 def test_loopback_is_operator_controlled_without_a_pin() -> None:
     assert require_test_instance_origin_approval("https://127.0.0.1:8443") == (
         "https://127.0.0.1:8443"
     )
 
 
-@pytest.mark.parametrize(
-    ("url", "error"),
-    [("http://example.com", ConfigError), ("ftp://example.com", InvalidBaseUrlError)],
-)
+@pytest.mark.parametrize(("url", "error"), [("ftp://example.com", InvalidBaseUrlError)])
 def test_approval_rejects_unsafe_transport(url: str, error: type[Exception]) -> None:
     with pytest.raises(error):
         require_test_instance_origin_approval(url)

@@ -250,7 +250,7 @@ def generate_target_database(
     slug = _TARGET_SLUG_RE.sub("_", remote_database).strip("._-") or "database"
     suffix_value = suffix or uuid.uuid4().hex[:12]
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%d%H%M%S")
-    marker = f"_refresh_{stamp}_{suffix_value}"
+    marker = f"_{stamp}_{suffix_value}"
     prefix = _truncate_utf8(slug, max(1, _MAX_TARGET_BYTES - len(marker.encode("utf-8"))))
     candidate = f"{prefix}{marker}"
     candidate = _truncate_utf8(candidate, _MAX_TARGET_BYTES)

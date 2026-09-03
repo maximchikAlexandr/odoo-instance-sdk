@@ -9,6 +9,7 @@ An initialized project already records enough Odoo runtime information to launch
 - Keep explicit environment selection and exact worktree matching higher priority than project fallback.
 - Keep environment lifecycle commands environment-only; a project context is not a synthetic environment and does not appear in the environment catalogue.
 - Preserve command passthrough, dry-run output, redaction, process ownership, and exit-code behavior for project-based runs.
+- Keep project database refresh postconditions authoritative when the running Odoo process is restricted to the previously selected database.
 
 ## Capabilities
 
@@ -24,6 +25,6 @@ None.
 ## Impact
 
 - Affects CLI context resolution, instance construction, `odcli run`, and other commands that currently assume a `DevelopmentEnvironment`.
-- Adds tests for resolution precedence, main-checkout launch, environment-only rejection, dry-run output, argument forwarding, and secret redaction.
+- Adds tests for resolution precedence, main-checkout launch, environment-only rejection, dry-run output, argument forwarding, secret redaction, and direct PostgreSQL restore verification.
 - Updates user documentation for context-dependent instance startup.
 - Does not change the environment catalogue schema, create worktrees, or add dependencies.

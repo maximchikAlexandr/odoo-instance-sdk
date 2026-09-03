@@ -618,10 +618,14 @@ class DatabaseResource:
     def _exists_impl(self, name: str, *, psql_step_id: str | None = None) -> bool:
         from odoo_instance_sdk.internal.proc import active_context
 
+        ck = self._cluster
+        direct_result = self._planned_exists_result(name, psql_step_id)
+        if direct_result is not None:
+            return direct_result
+
         try:
             databases = self.list()
         except DatabaseManagerUnavailableError:
-            ck = self._cluster
             if ck is not None and self._instance.config.db_user is not None:
                 db_host, db_port = ck
                 result = _verify_database_via_psql(
@@ -640,7 +644,6 @@ class DatabaseResource:
                     return False
             raise
 
-        ck = self._cluster
         found = any(db.name == name for db in databases)
         if psql_step_id is not None:
             context = active_context()
@@ -652,6 +655,30 @@ class DatabaseResource:
             if catalog.has_tracked_database(db_host, db_port, name):
                 catalog.record_database_dropped(db_host, db_port, name)
         return found
+
+    def _planned_exists_result(self, name: str, step_id: str | None) -> bool | None:
+        ck = self._cluster
+        user = self._instance.config.db_user
+        if step_id is None or ck is None or user is None:
+            return None
+        db_host, db_port = ck
+        result = _verify_database_via_psql(
+            db_host,
+            db_port,
+            user,
+            self._instance.config.db_password,
+            name,
+            step_id=step_id,
+        )
+        if result is None:
+            raise DatabaseManagerUnavailableError(
+                f"PostgreSQL database existence probe failed for {name!r}"
+            )
+        if not result:
+            catalog = self._instance._client.get_catalog()
+            if catalog.has_tracked_database(db_host, db_port, name):
+                catalog.record_database_dropped(db_host, db_port, name)
+        return result
 
     def __getitem__(self, index: int) -> Database:
         if not isinstance(index, int):

@@ -8,7 +8,6 @@ from odoo_instance_sdk.exceptions import InvalidBaseUrlError, NonLocalInstanceEr
 from odoo_instance_sdk.internal import urls
 from odoo_instance_sdk.internal.urls import (
     assert_local,
-    assert_password_transport_allowed,
     canonical_origin,
     is_loopback_host,
     normalize_base_url,
@@ -62,11 +61,6 @@ def test_assert_local_refuses(url: str) -> None:
 def test_assert_local_rejects_missing_hostname() -> None:
     with pytest.raises(NonLocalInstanceError, match="hostname"):
         assert_local("http://")
-
-
-def test_password_transport_allows_loopback_and_https() -> None:
-    assert_password_transport_allowed("http://127.0.0.1:8069")
-    assert_password_transport_allowed("https://example.com")
 
 
 class TestWarnIfCleartextSecret:

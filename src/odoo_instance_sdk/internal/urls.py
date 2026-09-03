@@ -4,7 +4,7 @@ import ipaddress
 import warnings
 from urllib.parse import urlsplit
 
-from odoo_instance_sdk.exceptions import ConfigError, InvalidBaseUrlError, NonLocalInstanceError
+from odoo_instance_sdk.exceptions import InvalidBaseUrlError, NonLocalInstanceError
 
 _cleartext_warned: list[bool] = [False]
 
@@ -71,16 +71,6 @@ def canonical_origin(base_url: str) -> str:
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     host = f"[{hostname}]" if ":" in hostname else hostname
     return f"{parsed.scheme}://{host}:{port}"
-
-
-def assert_password_transport_allowed(base_url: str) -> None:
-    """Reject cleartext password transport except to a loopback endpoint."""
-    normalized = normalize_base_url(base_url)
-    parsed = urlsplit(normalized)
-    if parsed.scheme == "http" and (
-        parsed.hostname is None or not is_loopback_host(parsed.hostname)
-    ):
-        raise ConfigError("refusing to send a master password over non-loopback HTTP; use HTTPS")
 
 
 def warn_if_cleartext_secret(base_url: str) -> None:

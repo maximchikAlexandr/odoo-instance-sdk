@@ -163,3 +163,19 @@ Port preflight remains specific to `run`.
 
 - **WHEN** an environment lifecycle operation is invoked from only the main project checkout without an environment selector
 - **THEN** it does not treat the project as a development environment
+
+## ADDED Requirements
+
+### Requirement: Project restore postconditions use the database authority
+
+When `odcli db refresh --restore` targets a project PostgreSQL cluster, existence checks before and after restore MUST query that PostgreSQL endpoint directly when a PostgreSQL probe is available. The checks MUST NOT infer absence solely from the running Odoo database-manager list because an Odoo process constrained by `--database` can omit a newly restored database. An inconclusive PostgreSQL probe MUST fail closed rather than silently converting the result into confirmed absence.
+
+#### Scenario: Running Odoo is restricted to the previous database
+
+- **WHEN** restore creates the target in the project PostgreSQL cluster but `/web/database/list` only returns the database selected when Odoo started
+- **THEN** the post-restore check confirms the target through PostgreSQL and the refresh proceeds to its remaining steps
+
+#### Scenario: Direct probe confirms absence
+
+- **WHEN** the planned PostgreSQL post-restore probe completes successfully with no matching database
+- **THEN** restore fails with the retained-backup and retained-database safety context

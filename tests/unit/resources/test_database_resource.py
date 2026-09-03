@@ -269,28 +269,28 @@ class TestExists:
         )
         assert tuple(step.step_id for step in executor.executed) == ("database.exists.psql",)
 
+    def test_probe_consumed(self, client: OdooClient, monkeypatch: pytest.MonkeyPatch) -> None:
+        inst = _make_instance_with_cluster_key(client, db_user="odoo")
+        result = MagicMock(returncode=0, stdout="1\n")
+        executor = RecordingExecutor(results={"database.exists.psql": result})
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
+        )
+        with patch("httpx.Client", return_value=_mock_http({"result": ["mydb"]})) as http:
+            command = inst.databases.exists_command("mydb", executor=executor)
+            assert command.run() is True
+        assert tuple(step.step_id for step in command.plan.process_steps) == (
+            "database.exists.psql",
+        )
+        assert tuple(step.step_id for step in executor.executed) == ("database.exists.psql",)
+
+        http.assert_not_called()
+
     def test_true(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["mydb", "other"]})
         with patch("httpx.Client", return_value=mock_cm):
             result = instance.databases.exists("mydb")
         assert result is True
-
-    def test_successful_list_accounts_reserved_psql_probe(
-        self, client: OdooClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        inst = _make_instance_with_cluster_key(client, db_user="odoo")
-        executor = RecordingExecutor()
-        monkeypatch.setattr(
-            "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
-        )
-        with patch("httpx.Client", return_value=_mock_http({"result": ["mydb"]})):
-            command = inst.databases.exists_command("mydb", executor=executor)
-            assert command.run() is True
-
-        assert tuple(step.step_id for step in command.plan.process_steps) == (
-            "database.exists.psql",
-        )
-        assert executor.executed == []
 
     def test_false(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["other"]})
@@ -1160,3 +1160,144 @@ def test_rejects_malformed_names_response(
     monkeypatch.setattr("httpx.Client", lambda **_: mock_cm)
     with pytest.raises(DatabaseManagerUnavailableError):
         instance.databases.names()
+
+
+class TestPlannedExistsProbe:
+    def test_is_authoritative_over_filtered_odoo_list(
+        self, client: OdooClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        inst = _make_instance_with_cluster_key(client, db_user="odoo")
+        result = ProcessResult(
+            argv=(),
+            returncode=0,
+            stdout="1\n",
+            stderr="",
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+        executor = RecordingExecutor(results={"database.exists.psql": result})
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
+        )
+        with patch("httpx.Client", return_value=_mock_http({"result": ["previous-db"]})) as http:
+            command = inst.databases.exists_command("mydb", executor=executor)
+            assert command.run() is True
+
+        assert tuple(step.step_id for step in command.plan.process_steps) == (
+            "database.exists.psql",
+        )
+        assert tuple(step.step_id for step in executor.executed) == ("database.exists.psql",)
+        http.assert_not_called()
+
+    @pytest.mark.parametrize(("probe_result", "expected"), [(True, True), (False, False)])
+    def test_unplanned_psql_fallback_when_odoo_is_unavailable(
+        self, client: OdooClient, probe_result: bool, expected: bool
+    ) -> None:
+        inst = _make_instance_with_cluster_key(client, db_user="odoo")
+        catalog = MagicMock()
+        with (
+            patch.object(
+                inst.databases.__class__, "list", side_effect=DatabaseManagerUnavailableError
+            ),
+            patch(
+                "odoo_instance_sdk.resources.database._verify_database_via_psql",
+                return_value=probe_result,
+            ),
+            patch.object(inst, "_client") as mock_client,
+        ):
+            mock_client.get_catalog.return_value = catalog
+            assert inst.databases._exists_impl("mydb") is expected
+
+        if probe_result:
+            catalog.record_database_dropped.assert_not_called()
+        else:
+            catalog.record_database_dropped.assert_called_once_with("localhost", 5432, "mydb")
+
+    def test_confirmed_absence_is_authoritative(
+        self, client: OdooClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        inst = _make_instance_with_cluster_key(client, db_user="odoo")
+        result = ProcessResult(
+            argv=(),
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+        executor = RecordingExecutor(results={"database.exists.psql": result})
+        catalog = MagicMock()
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
+        )
+        with (
+            patch.object(inst, "_client") as mock_client,
+            patch("httpx.Client", return_value=_mock_http({"result": ["mydb"]})) as http,
+        ):
+            mock_client.get_catalog.return_value = catalog
+            catalog.has_tracked_database.return_value = True
+            assert inst.databases.exists_command("mydb", executor=executor).run() is False
+
+        catalog.record_database_dropped.assert_called_once_with("localhost", 5432, "mydb")
+        http.assert_not_called()
+
+    def test_without_cluster_or_user_has_no_direct_probe(
+        self, instance: OdooInstance, client: OdooClient
+    ) -> None:
+        assert instance.databases._planned_exists_result("mydb", "probe") is None
+        inst = _make_instance_with_cluster_key(client)
+        assert inst.databases._planned_exists_result("mydb", "probe") is None
+
+    def test_inconclusive_result_does_not_fall_back_to_odoo_list(
+        self, client: OdooClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        inst = _make_instance_with_cluster_key(client, db_user="odoo")
+        result = ProcessResult(
+            argv=(),
+            returncode=1,
+            stdout="",
+            stderr="connection failed",
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+        executor = RecordingExecutor(results={"database.exists.psql": result})
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
+        )
+        with (
+            patch("httpx.Client", return_value=_mock_http({"result": ["mydb"]})) as http,
+            pytest.raises(DatabaseManagerUnavailableError, match="existence probe failed"),
+        ):
+            inst.databases.exists_command("mydb", executor=executor).run()
+
+        http.assert_not_called()
+
+
+def test_remote_http_backup_warns_without_exposing_password(
+    client: OdooClient, tmp_path: Path
+) -> None:
+    from odoo_instance_sdk.internal import urls
+
+    urls._cleartext_warned = [False]
+    password = "cleartext-password-sentinel"
+    catalog = MagicMock()
+    response = MagicMock(spec=httpx.Response)
+    response.headers = {}
+    response.iter_bytes.return_value = [b"backup"]
+    http_cm = _mock_http({})
+    http_cm.__enter__.return_value.post.return_value = response
+    instance = client.instance("http://example.test:8069", master_password=password)
+
+    with (
+        patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+        patch("httpx.Client", return_value=http_cm),
+        pytest.warns(UserWarning, match="cleartext") as warnings,
+    ):
+        instance.databases.backup("testdb", destination=tmp_path)
+
+    request_data = http_cm.__enter__.return_value.post.call_args.kwargs["data"]
+    assert request_data["master_pwd"] == password
+    assert password not in str(warnings[0].message)
