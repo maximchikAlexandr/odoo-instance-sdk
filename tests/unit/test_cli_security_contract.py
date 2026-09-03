@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -11,6 +12,7 @@ from click.testing import CliRunner
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentState
 from tests.unit.monitor_support import FakeProcessProvider
 
@@ -192,6 +194,41 @@ def test_run_records_use_once_before_foreground_start() -> None:
         call.run_foreground_command(args=("--dev=reload",)),
         call.record_use(env),
     ]
+
+
+def test_project_run_never_records_environment_use(tmp_path: Path) -> None:
+    client = MagicMock()
+    instance = MagicMock()
+    instance.run_foreground_command.return_value = _stub_command(lambda: 0)
+    project = ProjectConfig(repository_root=tmp_path)
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=(client, project, instance),
+        ),
+        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+    ):
+        result = CliRunner().invoke(cli, ["run", "--", "--dev=reload"])
+
+    assert result.exit_code == 0, result.output
+    instance.run_foreground_command.assert_called_once_with(args=("--dev=reload",))
+    client.environments.record_use.assert_not_called()
+
+
+def test_environment_owned_command_rejects_project_context(tmp_path: Path) -> None:
+    client = MagicMock()
+    instance = MagicMock()
+    project = ProjectConfig(repository_root=tmp_path)
+    with patch(
+        "odoo_instance_sdk.cli.cli_context.ready_instance",
+        return_value=(client, project, instance),
+    ):
+        result = CliRunner().invoke(cli, ["module", "update", "sale", "--yes"])
+
+    assert result.exit_code == 1
+    assert "requires a development environment" in result.output
+    instance.run_shell_script_command.assert_not_called()
+    client.environments.record_use.assert_not_called()
 
 
 def test_run_captures_then_records_use_then_executes_the_same_command() -> None:

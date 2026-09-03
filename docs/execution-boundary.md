@@ -98,7 +98,7 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:740-741` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:741-742` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
 - `src/odoo_instance_sdk/commands/env.py:373` — existing Rich-live inventory
   transport; remove when Rich live output is supplied by a distinct transport

@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, ExecutionPlan
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
+    from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -208,6 +209,55 @@ class InstanceFactory:
             _environment_id=str(environment.id),
         )
 
+    def from_project(self, project: ProjectConfig) -> OdooInstance:
+        """Construct a local instance from an initialized project manifest."""
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        root = project.repository_root.resolve()
+        config_path = _project_path(root, project.source_config, field="source_config")
+        odoo_bin = _project_path(root, project.odoo_bin, field="odoo_bin")
+        python_bin = _project_path(root, project.python, field="python")
+        default_cwd = (
+            _project_path(root, project.runtime_cwd, field="runtime_cwd", directory=True)
+            if project.runtime_cwd is not None
+            else root
+        )
+
+        start_cfg = StartConfig.from_odoo_config(config_path)
+        if project.preferred_http_port is not None:
+            start_cfg.http_port = project.preferred_http_port
+        if project.default_source_database is not None:
+            start_cfg.db_name = project.default_source_database
+        normalized = normalize_base_url(f"http://{start_cfg.http_interface}:{start_cfg.http_port}")
+        try:
+            assert_local(normalized)
+        except NonLocalInstanceError as e:
+            raise InstanceConfigurationError(
+                f"from_project requires a local instance; {normalized} is remote"
+            ) from e
+
+        db_port = start_cfg.db_port
+        if start_cfg.db_host and db_port is None:
+            db_port = 5432
+        cluster = PostgresCluster.from_project(root)
+        return OdooInstance(
+            config=InstanceConfig(
+                base_url=normalized,
+                master_password=None,
+                configured_database_names=parse_db_names(start_cfg.db_name),
+                start_config=start_cfg,
+                command_prefix=(str(python_bin), str(odoo_bin)),
+                default_cwd=default_cwd,
+                default_run_args=project.default_run_args,
+                db_host=start_cfg.db_host,
+                db_port=db_port,
+                db_user=start_cfg.db_user,
+                db_password=start_cfg.db_password,
+            ),
+            _client=self._client,
+            _postgres_cluster=cluster,
+        )
+
 
 def _runtime_json_for(client: OdooClient, env: DevelopmentEnvironment) -> str | None:
     row = client.get_catalog().get_environment(str(env.id))
@@ -224,6 +274,26 @@ def _resolve_python_binary(env: DevelopmentEnvironment) -> str:
     if py_path.is_dir():
         return str(py_path / "bin" / "python")
     return str(py_path)
+
+
+def _project_path(
+    root: Path,
+    value: str | Path | None,
+    *,
+    field: str,
+    directory: bool = False,
+) -> Path:
+    if value is None:
+        raise InstanceConfigurationError(f"Project manifest requires {field}")
+    path = Path(value)
+    if not path.is_absolute():
+        path = root / path
+    path = Path(os.path.abspath(path))
+    valid = path.is_dir() if directory else path.is_file()
+    if not valid:
+        kind = "directory" if directory else "file"
+        raise InstanceConfigurationError(f"Project {field} {kind} not found: {path}")
+    return path
 
 
 def _iter_logfile(path: Path, *, tail: int, follow: bool) -> Iterator[str]:
@@ -722,7 +792,7 @@ class OdooInstance:
                 raise InstanceConfigurationError(
                     "No StartConfig — pass one explicitly or create instance via from_config()"
                 )
-        validated_args = _validate_runtime_args(args)
+        validated_args = _validate_runtime_args((*self.config.default_run_args, *args))
         resolved_cwd = cwd if cwd is not None else self.config.default_cwd
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         environment_snapshot, environment_overrides = captured_child_environment(env)

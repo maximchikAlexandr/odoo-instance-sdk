@@ -74,7 +74,12 @@ from odoo_instance_sdk.internal.vscode_generate import (
     write_launch_json,
 )
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
-from odoo_instance_sdk.models import CommandResult, OdooTestSpec, PostgresClusterState, StartConfig
+from odoo_instance_sdk.models import (
+    CommandResult,
+    OdooTestSpec,
+    PostgresClusterState,
+    StartConfig,
+)
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 
 if TYPE_CHECKING:
@@ -692,21 +697,21 @@ def run(
 ) -> None:
     output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
     try:
-        client, env_obj, instance = cli_context.ready_instance(ctx)
-        if not cli_context._check_port_free(env_obj):
+        client, runtime_context, instance = cli_context.ready_instance(ctx)
+        if not cli_context._check_port_free(runtime_context):
+            http_interface, http_port = cli_context.instance_address(runtime_context, instance)
             fail(
                 output_mode,
                 "run",
-                f"port-conflict: {env_obj.http_interface}:{env_obj.http_port} is occupied "
-                "(ownership unknown)",
+                f"port-conflict: {http_interface}:{http_port} is occupied (ownership unknown)",
             )
         command = instance.run_foreground_command(args=odoo_args)
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "run", e)
-    if not dry_run:
-        client.environments.record_use(env_obj)
+    if not dry_run and not isinstance(runtime_context, ProjectConfig):
+        client.environments.record_use(runtime_context)
     try:
         _status, value = run_or_preview(
             lambda: command,
@@ -966,7 +971,8 @@ def module_update(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, env_obj, instance = cli_context.ready_instance(ctx)
+        _client, runtime_context, instance = cli_context.ready_instance(ctx)
+        env_obj = cli_context.require_environment(runtime_context)
     except SystemExit:
         raise
     except Exception as e:
@@ -1040,7 +1046,8 @@ def module_test(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, env_obj, instance = cli_context.ready_instance(ctx)
+        _client, runtime_context, instance = cli_context.ready_instance(ctx)
+        env_obj = cli_context.require_environment(runtime_context)
         start_config = instance.config.start_config
         if start_config is None:
             raise RuntimeError(  # noqa: TRY301
@@ -1103,13 +1110,13 @@ def translations_export(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, env_obj, instance = cli_context.ready_instance(ctx)
+        _client, runtime_context, instance = cli_context.ready_instance(ctx)
         status, _results = run_or_preview(
             lambda: export_translations_command(
                 instance,
                 tuple(modules),
                 tuple(languages),
-                worktree_root=Path(env_obj.worktree_path),
+                worktree_root=cli_context.worktree_path(runtime_context),
             ),
             command_name="translations.export",
             mode=output_mode,
@@ -1156,14 +1163,12 @@ def deps_verify(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, env_obj, _instance = cli_context.ready_instance(ctx)
-        recorded_python = Path(env_obj.python_environment_path)
-        if recorded_python.is_dir():
-            recorded_python = recorded_python / "bin" / "python"
+        _client, runtime_context, _instance = cli_context.ready_instance(ctx)
+        recorded_python = cli_context.python_path(runtime_context)
         status, _result = run_or_preview(
             lambda: verify_deps_command(
                 recorded_python=recorded_python,
-                worktree_root=Path(env_obj.worktree_path),
+                worktree_root=cli_context.worktree_path(runtime_context),
             ),
             command_name="deps.verify",
             mode=output_mode,
@@ -1212,7 +1217,8 @@ def vscode_generate(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        client, env_obj, _instance = cli_context.ready_instance(ctx)
+        client, runtime_context, _instance = cli_context.ready_instance(ctx)
+        env_obj = cli_context.require_environment(runtime_context)
 
         def operation() -> dict[str, JsonValue]:
             profile = build_launch_profile(client, env_obj)

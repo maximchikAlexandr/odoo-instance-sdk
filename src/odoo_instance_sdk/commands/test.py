@@ -281,7 +281,8 @@ def test_command(
     mode = resolve_output_mode(output_format, json_output)
     _validate_options(target, changed=changed, base=base, dry_run=dry_run, tags=tags)
     try:
-        _client, env_obj, instance = cli_context.ready_instance(ctx)
+        _client, runtime_context, instance = cli_context.ready_instance(ctx)
+        env_obj = cli_context.require_environment(runtime_context)
         start_config = _start_config(instance)
         if changed:
             plan = resolve_changed_selection(

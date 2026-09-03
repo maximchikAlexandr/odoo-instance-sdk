@@ -111,7 +111,10 @@ def db_reset_admin_password(
     """Reset the administrator on the exact ready environment binding."""
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, environment, instance = ready_instance(ctx)
+        _client, runtime_context, instance = ready_instance(ctx)
+        from odoo_instance_sdk.commands.context import require_environment
+
+        environment = require_environment(runtime_context)
         _validate_recorded_database_binding(instance, environment)
         command = instance.databases.reset_admin_password_command()
     except Exception as exc:

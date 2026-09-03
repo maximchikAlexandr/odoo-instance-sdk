@@ -25,6 +25,7 @@ class InstanceConfig:
     start_config: StartConfig | None = field(default=None, repr=False)
     command_prefix: tuple[str, ...] | None = None
     default_cwd: Path | None = None
+    default_run_args: tuple[str, ...] = ()
     db_host: str | None = field(default=None)
     db_port: int | None = field(default=None)
     db_user: str | None = field(default=None)

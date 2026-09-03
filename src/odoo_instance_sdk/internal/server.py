@@ -22,6 +22,15 @@ _SENSITIVE_FIELDS = frozenset({"db_password", "admin_passwd", "config_path", "lo
 
 
 def _cli_flag(field_name: str) -> str:
+    odoo_spelling = {
+        "db_name": "--database",
+        "dbfilter": "--db-filter",
+        "db_host": "--db_host",
+        "db_port": "--db_port",
+        "db_user": "--db_user",
+    }
+    if field_name in odoo_spelling:
+        return odoo_spelling[field_name]
     if field_name == "dev_mode":
         return "--dev"
     return "--" + field_name.replace("_", "-")

@@ -15,6 +15,7 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.proc import ProcessHandle, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import CommandResult, OdooProcess, StartConfig
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -120,6 +121,134 @@ class TestFromConfigNoPassword:
 
 
 class TestInstancePrefix:
+    def test_from_project_binds_runtime_without_catalog_access(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project = ProjectConfig.load(project_manifest)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+        get_catalog = MagicMock(side_effect=AssertionError("catalog must not be opened"))
+        monkeypatch.setattr(OdooClient, "get_catalog", get_catalog)
+
+        inst = env_client.instance.from_project(project)
+
+        assert inst.config.command_prefix == (
+            str(fake_python),
+            str(fake_python.parent / "odoo-bin"),
+        )
+        assert inst.config.default_cwd == project_manifest
+        assert inst.config.configured_database_names == ("comerta",)
+        assert inst.config.start_config is not None
+        assert inst.config.start_config.config_path == str(project_manifest / "odoo.conf")
+        assert inst.config.start_config.db_name == "comerta"
+        get_catalog.assert_not_called()
+
+    @pytest.mark.parametrize("field", ["odoo_bin", "python", "source_config"])
+    def test_from_project_requires_runtime_file(
+        self,
+        tmp_path: Path,
+        field: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        python = root / "python"
+        odoo_bin = root / "odoo-bin"
+        config = root / "odoo.conf"
+        for path in (python, odoo_bin, config):
+            path.write_text("[options]\n" if path == config else "")
+        missing = root / "missing"
+        project = ProjectConfig(
+            repository_root=root,
+            odoo_bin=missing if field == "odoo_bin" else odoo_bin,
+            python=missing if field == "python" else python,
+            source_config=missing if field == "source_config" else config,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+
+        with pytest.raises(InstanceConfigurationError, match=field):
+            _make_client().instance.from_project(project)
+
+    def test_from_project_applies_runtime_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        for name in ("python", "odoo-bin"):
+            (root / name).write_text("")
+        (root / "odoo.conf").write_text(
+            "[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8069\ndb_name = old\n"
+        )
+        runtime = root / "runtime"
+        runtime.mkdir()
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path("python"),
+            odoo_bin=Path("odoo-bin"),
+            source_config=Path("odoo.conf"),
+            runtime_cwd=Path("runtime"),
+            preferred_http_port=8077,
+            default_source_database="fresh",
+            default_run_args=("--dev=xml",),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+
+        inst = _make_client().instance.from_project(project)
+
+        assert inst.config.base_url == "http://127.0.0.1:8077"
+        assert inst.config.default_cwd == runtime
+        assert inst.config.default_run_args == ("--dev=xml",)
+        assert inst.config.configured_database_names == ("fresh",)
+        command = inst.run_foreground_command(args=("--stop-after-init",))
+        foreground = next(
+            step for step in command.commands if step.step_id == "instance.foreground"
+        )
+        assert foreground.argv[-2:] == ("--dev=xml", "--stop-after-init")
+
+    def test_from_project_preserves_virtualenv_python_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        base_python = tmp_path / "base-python"
+        base_python.write_text("")
+        venv = root / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        venv_python = venv / "python"
+        venv_python.symlink_to(base_python)
+        odoo_bin = root / "odoo-bin"
+        odoo_bin.write_text("")
+        config = root / "odoo.conf"
+        config.write_text("[options]\n")
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path(".venv/bin/python"),
+            odoo_bin=odoo_bin,
+            source_config=config,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+
+        inst = _make_client().instance.from_project(project)
+
+        assert inst.config.command_prefix is not None
+        assert inst.config.command_prefix[0] == str(venv_python)
+        assert inst.config.command_prefix[0] != str(base_python)
+
     def test_factory_bound_cluster_preflights_before_spawn(
         self,
         env_client: OdooClient,
@@ -265,6 +394,24 @@ class TestStartConfigFromOdooConfig:
 
 
 class TestBuildCliArgsSingleConfig:
+    def test_uses_odoo_database_option_spellings(self) -> None:
+        cfg = StartConfig(
+            db_name="example",
+            dbfilter="^example$",
+            db_host="127.0.0.1",
+            db_port=5432,
+            db_user="odoo",
+        )
+
+        args = _build_cli_args(cfg)
+
+        assert "--database" in args
+        assert "--db-filter" in args
+        assert "--db_host" in args
+        assert "--db_port" in args
+        assert "--db_user" in args
+        assert not {"--db-name", "--dbfilter", "--db-host", "--db-port", "--db-user"} & set(args)
+
     def test_single_config_when_config_path_set(self, tmp_path: Path) -> None:
         cfg = StartConfig(
             http_port=8069,
