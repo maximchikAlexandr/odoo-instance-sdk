@@ -17,7 +17,7 @@ import msgspec
 import pytest
 from click.testing import CliRunner
 
-from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.cli import _rich_shell_projection, cli
 from odoo_instance_sdk.commands.context import ResolvedContext
 from odoo_instance_sdk.commands.output import (
     JsonValue,
@@ -1101,6 +1101,65 @@ def test_eval_payload_fields_round_trip_in_json_and_toon(
     assert json_value["data"]["truncated"] is True
 
 
+def test_shell_failure_details_round_trip_and_rich_parity(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    details: dict[str, JsonValue] = {
+        "result": None,
+        "user_stdout": "before\n",
+        "user_error": {
+            "type": "ValueError",
+            "message": "failure",
+            "source": {"file": "<odcli-shell-script>", "line": 2, "text": "raise ValueError()"},
+        },
+        "truncated": False,
+    }
+    emit_json_envelope(
+        ok=False,
+        command="eval",
+        error_code="eval_user_code_failed",
+        error_message="ValueError: failure",
+        error_details=details,
+        mode=OutputMode.JSON,
+    )
+    json_document = capsys.readouterr().out
+    emit_json_envelope(
+        ok=False,
+        command="eval",
+        error_code="eval_user_code_failed",
+        error_message="ValueError: failure",
+        error_details=details,
+        mode=OutputMode.TOON,
+    )
+    toon_document = capsys.readouterr().out
+
+    from toon import DecodeOptions, decode
+
+    json_value = json.loads(json_document)
+    toon_value = decode(toon_document, DecodeOptions(indent=2, strict=True))
+    assert toon_value == json_value
+    assert json_value["ok"] is False
+    assert "result" not in json_value
+    assert "data" not in json_value
+    assert set(json_value["error"]["details"]) == {
+        "result",
+        "user_stdout",
+        "user_error",
+        "truncated",
+    }
+    rendered = _rich_shell_projection(
+        failure_document(
+            command="eval",
+            error_code="eval_user_code_failed",
+            error_message="ValueError: failure",
+            error_details=details,
+        )
+    )
+    assert "Result: null" in rendered
+    assert "Output:" in rendered and "before" in rendered
+    assert "Error: ValueError: failure" in rendered
+
+
 def test_typed_output_documents_are_frozen_and_keep_v1_shape() -> None:
     success = success_document(
         command="typed",
@@ -1118,6 +1177,7 @@ def test_typed_output_documents_are_frozen_and_keep_v1_shape() -> None:
     failure_builtins = cast("dict[str, dict[str, JsonValue]]", msgspec.to_builtins(failure))
     assert success_builtins["result"]["secret"] == r"password=hidden\x00"
     assert failure_builtins["error"]["code"] == "stale_plan"
+    assert "details" not in failure_builtins["error"]
     with pytest.raises(AttributeError):
         success.ok = False  # type: ignore[misc]
 

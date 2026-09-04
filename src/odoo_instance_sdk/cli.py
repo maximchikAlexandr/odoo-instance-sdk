@@ -137,25 +137,97 @@ def __getattr__(name: str) -> CliLazyExport:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+class _ShellCommandFailure(RuntimeError):
+    """Carry a classified shell failure into the shared CLI envelope."""
+
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        *,
+        details: JsonObject | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.details = details
+
+
 def _shell_payload(value: CommandResult) -> dict[str, JsonValue]:
     """Project the framed shell payload without exposing startup logs."""
     payload = parse_payload(value.stdout) or {}
+    user_stdout = payload.get("user_stdout", "")
+    if not isinstance(user_stdout, str):
+        user_stdout = ""
+    truncated = payload.get("truncated") is True
+    if len(user_stdout) > 32768:
+        user_stdout = user_stdout[:32768]
+        truncated = True
     return {
         "result": redacted_projection(payload.get("result"), field="result"),
-        "user_stdout": redacted_projection(payload.get("user_stdout", ""), field="user_stdout"),
+        "user_stdout": redacted_projection(user_stdout, field="user_stdout"),
         "user_error": redacted_projection(payload.get("user_error"), field="error"),
-        "truncated": payload.get("truncated") is True,
+        "truncated": truncated,
     }
+
+
+def _framed_shell_error(value: CommandResult) -> dict[str, JsonValue] | None:
+    """Return details only for a complete, valid framed user-code error."""
+    payload = parse_payload(value.stdout)
+    if payload is None:
+        return None
+    user_error = payload.get("user_error")
+    if (
+        "result" not in payload
+        or payload["result"] is not None
+        or not isinstance(payload.get("user_stdout"), str)
+        or not isinstance(payload.get("truncated"), bool)
+        or not isinstance(user_error, dict)
+        or not isinstance(user_error.get("type"), str)
+        or not isinstance(user_error.get("message"), str)
+    ):
+        return None
+    details = _shell_payload(value)
+    if not isinstance(details["user_error"], dict):
+        return None
+    return details
+
+
+def _shell_failure(value: CommandResult, command: str) -> _ShellCommandFailure:
+    """Classify a non-zero shell result as user-code or startup failure."""
+    details = _framed_shell_error(value)
+    if details is not None:
+        error = details["user_error"]
+        assert isinstance(error, dict)
+        error_type = error.get("type", "UserCodeError")
+        error_message = error.get("message", "user code failed")
+        return _ShellCommandFailure(
+            f"{command}_user_code_failed",
+            f"{error_type}: {error_message}",
+            details=details,
+        )
+    stderr = value.stderr.strip()
+    message = f"shell exited {value.returncode}"
+    if stderr:
+        message += f": {stderr}"
+    return _ShellCommandFailure(f"{command}_startup_failed", message)
 
 
 def _rich_shell_projection(document: OutputDocument) -> str:
     """Render eval/exec result, user output, and errors as separate sections."""
-    if not isinstance(document.result, dict):
+    if document.ok:
+        details = document.result
+    elif document.error is not None:
+        details = document.error.details
+    else:
+        details = None
+    if not isinstance(details, dict):
+        if document.error is not None:
+            return document.error.message
         return json.dumps(document.result, ensure_ascii=False, default=str, indent=2)
-    result = document.result.get("result")
-    output = document.result.get("user_stdout", "")
-    error = document.result.get("user_error")
-    truncated = document.result.get("truncated") is True
+    result = details.get("result")
+    output = details.get("user_stdout", "")
+    error = details.get("user_error")
+    truncated = details.get("truncated") is True
     lines = [f"Result: {json.dumps(result, ensure_ascii=False, default=str)}"]
     if isinstance(output, str) and output:
         lines.extend(["Output:", output])
@@ -836,10 +908,8 @@ def eval_cmd(
                 return {}
             returncode = value.returncode
             shell_payload = _shell_payload(value)
-            if returncode != 0 and shell_payload["user_error"] is None:
-                raise RuntimeError(  # noqa: TRY301
-                    f"shell exited {returncode}: {value.stderr.strip()}"
-                )
+            if returncode != 0:
+                raise _shell_failure(value, "eval")  # noqa: TRY301
             return {**shell_payload, "returncode": returncode, "commit": commit}
 
         def build_command() -> Command[CommandResult]:
@@ -857,6 +927,8 @@ def eval_cmd(
             status = 1
     except SystemExit:
         raise
+    except _ShellCommandFailure as e:
+        fail(output_mode, "eval", e, error_code=e.error_code, details=e.details)
     except Exception as e:
         fail(output_mode, "eval", e)
     sys.exit(status)
@@ -900,10 +972,8 @@ def exec_cmd(  # noqa: C901
                 return {}
             returncode = value.returncode
             shell_payload = _shell_payload(value)
-            if returncode != 0 and shell_payload["user_error"] is None:
-                raise RuntimeError(  # noqa: TRY301
-                    f"shell exited {returncode}: {value.stderr.strip()}"
-                )
+            if returncode != 0:
+                raise _shell_failure(value, "exec")  # noqa: TRY301
             return {
                 "returncode": returncode,
                 "stdout": shell_payload["user_stdout"],
@@ -927,6 +997,8 @@ def exec_cmd(  # noqa: C901
             status = 1
     except SystemExit:
         raise
+    except _ShellCommandFailure as e:
+        fail(output_mode, "exec", e, error_code=e.error_code, details=e.details)
     except Exception as e:
         fail(output_mode, "exec", e)
     sys.exit(status)

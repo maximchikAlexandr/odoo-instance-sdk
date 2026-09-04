@@ -59,11 +59,18 @@ type JsonObject = dict[str, JsonValue]
 type DiagnosticValue = str | BaseException
 
 
-class OutputError(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+class OutputError(
+    msgspec.Struct,
+    frozen=True,
+    forbid_unknown_fields=True,
+    kw_only=True,
+    omit_defaults=True,
+):
     """The stable, machine-readable error part of a CLI document."""
 
     code: str
     message: str
+    details: JsonObject | None = msgspec.field(default=None)
 
 
 class OutputDocument(
@@ -302,10 +309,13 @@ def _document_payload(document: OutputDocument, *, preserve_newlines: bool = Tru
         payload["result"] = document.result
         payload["data"] = document.data
     elif document.error is not None:
-        payload["error"] = {
+        error_payload: JsonObject = {
             "code": document.error.code,
             "message": document.error.message,
         }
+        if document.error.details is not None:
+            error_payload["details"] = document.error.details
+        payload["error"] = error_payload
     return cast(
         "JsonObject",
         _sanitize_envelope_value(payload, preserve_newlines=preserve_newlines),
@@ -323,6 +333,7 @@ def _document(
     warnings: tuple[str, ...] = (),
     error_code: str | None = None,
     error_message: DiagnosticValue | None = None,
+    error_details: JsonObject | None = None,
 ) -> OutputDocument:
     safe_result = _sanitize_envelope_value(result or {}) if ok else None
     message = (
@@ -334,6 +345,11 @@ def _document(
         else OutputError(
             code=error_code or command.replace(".", "_") + "_failed",
             message=message,
+            details=(
+                cast("JsonObject", _sanitize_envelope_value(error_details))
+                if error_details is not None
+                else None
+            ),
         )
     )
     return OutputDocument(
@@ -416,6 +432,7 @@ def failure_document(
     warnings: tuple[str, ...] = (),
     error_code: str | None = None,
     error_message: DiagnosticValue | None = None,
+    error_details: JsonObject | None = None,
 ) -> OutputDocument:
     """Construct a typed failed v1 document for the shared emitter."""
     return _document(
@@ -427,6 +444,7 @@ def failure_document(
         warnings=warnings,
         error_code=error_code,
         error_message=error_message,
+        error_details=error_details,
     )
 
 
@@ -546,6 +564,7 @@ def build_envelope(
     dry_run: bool = False,
     error_code: str | None = None,
     error_message: DiagnosticValue | None = None,
+    error_details: JsonObject | None = None,
 ) -> JsonObject:
     """Build the existing v1 envelope without selecting an output transport."""
     document = (
@@ -564,6 +583,7 @@ def build_envelope(
             dry_run=dry_run,
             error_code=error_code,
             error_message=error_message,
+            error_details=error_details,
         )
     )
     return _document_payload(
@@ -582,6 +602,7 @@ def emit_json_envelope(
     dry_run: bool = False,
     error_code: str | None = None,
     error_message: DiagnosticValue | None = None,
+    error_details: JsonObject | None = None,
     mode: OutputMode = OutputMode.JSON,
 ) -> None:
     """Emit the v1 envelope as exactly one JSON or TOON stdout document."""
@@ -601,6 +622,7 @@ def emit_json_envelope(
             dry_run=dry_run,
             error_code=error_code,
             error_message=error_message,
+            error_details=error_details,
         ),
         mode,
     )
@@ -613,6 +635,7 @@ def fail(
     *,
     usage: bool = False,
     error_code: str | None = None,
+    details: JsonObject | None = None,
 ) -> Never:
     mode = (
         output_mode
@@ -631,12 +654,17 @@ def fail(
                 error_code=error_code
                 or ("usage_error" if usage else command.replace(".", "_") + "_failed"),
                 error_message=rendered_message,
+                error_details=details,
             ),
             mode,
         )
     else:
         emit(
-            failure_document(command=command, error_message=rendered_message),
+            failure_document(
+                command=command,
+                error_message=rendered_message,
+                error_details=details,
+            ),
             mode,
         )
     if usage:
