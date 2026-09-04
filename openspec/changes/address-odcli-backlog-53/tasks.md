@@ -1,6 +1,6 @@
 ## 1. Help and packaging boundary
 
-- [ ] 1.1 Add a bounded compatible `rich-click` core dependency alongside all nine existing dependencies including `expression>=5,<6`, refresh the lockfile, and update wheel assertions to require exactly ten core dependencies and the sole existing `dashboard` extra.
+- [ ] 1.1 Add exactly `rich-click>=1.9,<2` alongside all nine existing dependencies including `expression>=5,<6`, refresh the lockfile, and update wheel assertions to require exactly ten core dependencies with those bounds and the sole existing `dashboard` extra.
 - [ ] 1.2 Replace `_RichHelpGroup` with `rich-click` command/group integration at the existing Click entry point without routing command results through it.
 - [ ] 1.3 Add missing one-line help text and at most four stable task-oriented panels across the root and nested command tree.
 - [ ] 1.4 Add characterization tests for root help, a nested group, a typed leaf, required/default/type metadata, validation errors, narrow width, redirected/color-disabled output, shell completion, and lightweight startup imports.
@@ -28,8 +28,8 @@
 - [ ] 4.2 Replace the implementation-heavy default Rich plan rendering with one shared semantic projection and add JSON/TOON equality tests proving full snapshots remain unchanged.
 - [ ] 4.3 Move HTTP-port inspection into foreground run planning and execution revalidation so dry-run emits a failed precondition while normal execution still performs no spawn or use update on conflict.
 - [ ] 4.4 Extend the existing `Command`/`RunContext` and process executor with an optional typed step observer for start/completion/failure and opt-in sanitized stdout/stderr chunks, preserving final capture and exit behavior.
-- [ ] 4.5 Wire interactive restore to Rich logical-step progress and `--show-command-output`; suppress observer rendering/streams in JSON and TOON and associate every visible chunk with its plan step.
-- [ ] 4.6 Add tests for ordered restore events, success/failure state, TTY and non-TTY behavior, split-chunk secret redaction, machine stdout isolation, unchanged subprocess results, and existing exit codes.
+- [ ] 4.5 Wire restore to TTY Rich `Live` progress and non-TTY Rich step-prefixed sanitized lines; make `--show-command-output` Rich-only, reject it with JSON/TOON/`--json` as exit-2 usage before SDK work, and associate every visible chunk with its plan step.
+- [ ] 4.6 Add tests for ordered restore events, TTY `Live`, non-TTY line output without cursor control, Rich-only stream chunks, machine-mode stream-flag usage errors and single-document output without the flag, split-chunk redaction, unchanged subprocess results, and existing execution exit codes.
 
 ## 5. Safe project-cluster database drop
 

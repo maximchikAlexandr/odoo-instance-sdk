@@ -20,7 +20,18 @@ Execution plans SHALL expose enough typed goal, target, mutation, precondition, 
 
 ### Requirement: Planning is non-mutating and observable
 
-Building or previewing a command SHALL start none of its planned processes and SHALL perform no filesystem, database, network, catalogue, lock, or process mutation. Bounded read-only probes required for resolution MAY execute through the shared process boundary and SHALL be recorded as observations with `read_only=true` and `executed_during_planning=true`. Resolving an initialized project, monitoring it, or producing any dry-run SHALL NOT register/upsert the project or runtime. Successful non-preview init and normal foreground execution/lifecycle MAY perform the registration writes explicitly authorized by their own execution requirements, after planning and outside resolution.
+Building a command SHALL start none of its planned processes and SHALL perform no filesystem, database, network, catalog, lock, or process mutation. Bounded read-only probes required for resolution MAY execute through the shared process boundary and SHALL be recorded as observations with `read_only=true` and `executed_during_planning=true`. Resolving an initialized project, monitoring it, or producing any dry-run SHALL NOT register/upsert the project or runtime. Successful non-preview init and normal foreground execution/lifecycle MAY perform the registration writes explicitly authorized by their own execution requirements, after planning and outside resolution.
+
+#### Scenario: Dry command construction
+
+- **WHEN** a command is built with a fake executor and mutation sentinels
+- **THEN** no planned process, file creation, catalog migration, database mutation, network mutation, lock acquisition, or prompt occurs
+
+#### Scenario: Read-only Git probe is required
+
+- **WHEN** planning executes Git status, rev-parse, merge-base, or an equivalent bounded probe
+- **THEN** the redacted probe and relevant result metadata appear in plan observations
+- **AND** the probe runs through `internal/proc`
 
 #### Scenario: Project preview does not mutate catalogue
 - **WHEN** a command is built or dry-run from an unregistered initialized project with catalogue mutation sentinels

@@ -66,7 +66,7 @@ Alternative considered: call Odoo's `/web/database/drop`. Rejected because it ca
 
 ### 6. Replace custom root formatting with bounded `rich-click` configuration
 
-`rich-click` becomes a bounded core dependency. The root and nested groups use its Click-compatible command classes/configuration; `_RichHelpGroup` is removed. Metadata decorators provide missing one-line descriptions and a small stable panel map. Result emission and Rich `Table`/`Live` output remain in existing modules. Tests pin startup imports, completion, errors, redirects, widths, and representative help pages.
+`rich-click>=1.9,<2` becomes the bounded core dependency. The root and nested groups use its Click-compatible command classes/configuration; `_RichHelpGroup` is removed. Metadata decorators provide missing one-line descriptions and a small stable panel map. Result emission and Rich `Table`/`Live` output remain in existing modules. Tests pin startup imports, completion, errors, redirects, widths, and representative help pages.
 
 Alternative considered: expand `_RichHelpGroup` into a custom formatter for every command. Rejected because #53 excludes a custom `HelpFormatter` and would duplicate Click's validation/help behavior.
 
@@ -105,7 +105,7 @@ Alternative considered: infer user output by subtracting known startup lines. Re
 7. Extend monitor models/collector, HTTP schema/codegen, and dashboard rendering.
 8. Add eval payload framing and output regressions, then run full Python, frontend, architecture, build, and disposable integration suites.
 
-Rollback of application code is safe after restoring the pre-migration catalogue backup. Because the schema migration replaces runtime storage, deployment tooling SHALL copy the SQLite catalogue before migration; rollback SHALL restore that copy rather than asking older code to read the new schema.
+Rollback across the catalogue migration requires an operator-created pre-migration SQLite catalogue backup. This is a documented deployment prerequisite, not behavior implemented by this change: operators rolling application code back must restore that backup because older code cannot read the replacement runtime-storage schema.
 
 ## Open Questions
 
