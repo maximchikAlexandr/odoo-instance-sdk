@@ -23,12 +23,22 @@ The workflow SHALL support download-only and download-plus-restore. Admin reset 
 
 The workflow SHALL resolve the remote base URL and database only from `[test_instance]` in the project manifest. The remote database master password SHALL be read only from `ODCLI_TEST_MASTER_PASSWORD` at execution time, SHALL be passed only to the remote `OdooInstance`, and SHALL NOT be persisted in the manifest, catalog, result, exception, argv, or logs. Missing configuration or a missing/empty environment secret SHALL fail before network or local mutation.
 
-Repository-selected preparation flows SHALL require an external exact-origin approval for every non-loopback test-instance origin before preparation work begins. `ODCLI_TEST_INSTANCE_ORIGIN_PINS` SHALL be the sole approval channel and SHALL contain one comma-separated list of non-secret exact origins. Entries SHALL be compared after the existing canonical-origin normalization (lowercase scheme/host and effective port); paths, queries, fragments, wildcards, and host-only values SHALL not broaden approval. Loopback origins SHALL not require a pin, but non-loopback HTTP SHALL still be rejected. Transport and approval SHALL be checked before the preparation lock, PostgreSQL readiness, database-manager access, HTTP, catalog mutation, or manifest mutation. The approval variable SHALL not be persisted. Generic direct `DatabaseResource.backup()` calls SHALL retain their existing contract and SHALL not require this repository-selected approval.
+Repository-selected preparation flows SHALL require an external exact-origin approval for every non-loopback test-instance origin before preparation work begins. `ODCLI_TEST_INSTANCE_ORIGIN_PINS` SHALL be the sole approval channel and SHALL contain one comma-separated list of non-secret exact origins. Entries SHALL be compared after the existing canonical-origin normalization (lowercase scheme/host and effective port); paths, queries, fragments, wildcards, and host-only values SHALL not broaden approval. Loopback origins SHALL not require a pin. A non-loopback HTTP origin SHALL be permitted only when its canonical exact origin is pinned and SHALL emit the existing once-per-process cleartext-secret warning before sending a master password. Transport and approval SHALL be checked before the preparation lock, PostgreSQL readiness, database-manager access, HTTP, catalog mutation, or manifest mutation. The approval variable SHALL not be persisted. Generic direct `DatabaseResource.backup()` calls SHALL retain their existing contract and SHALL not require this repository-selected approval.
 
 #### Scenario: Operator approves a repository-selected origin
 
 - **WHEN** the operator exports `ODCLI_TEST_INSTANCE_ORIGIN_PINS="https://odoo-test.example:443"` and runs project refresh against `[test_instance].base_url = "https://odoo-test.example"`
 - **THEN** the canonical exact-origin check accepts the remote source without exposing or persisting a password; an unpinned or differently ported origin fails before preparation mutation
+
+#### Scenario: Operator approves a repository-selected HTTP origin
+
+- **WHEN** the operator pins the exact canonical origin `http://odoo-test.example:8069` and runs project refresh against that HTTP test instance
+- **THEN** preparation is allowed, the cleartext-secret warning is emitted before the password-bearing request, and the password remains redacted from every output and persisted artifact
+
+#### Scenario: Unpinned HTTP origin remains rejected
+
+- **WHEN** a repository selects a non-loopback HTTP origin that is absent from `ODCLI_TEST_INSTANCE_ORIGIN_PINS`
+- **THEN** preparation fails before network or local mutation
 
 `source_branch` in typed options SHALL override `test_instance.git_branch`. The branch value is declarative provenance; the SDK SHALL NOT query or infer Git state from the remote Odoo instance. The result SHALL identify the branch origin as `explicit`, `configured`, or `unknown` without exposing secrets.
 
@@ -46,7 +56,7 @@ Repository-selected preparation flows SHALL require an external exact-origin app
 
 For `restore=True`, the workflow SHALL perform all non-mutating local rejection checks before starting the remote download: resolve the project and source config, assert the target Odoo endpoint is local, require its local master password, verify a ready local runtime/database-manager path, and require `PostgresCluster.ensure_running()` to complete successfully. Download-only SHALL NOT require local runtime or PostgreSQL readiness.
 
-The workflow SHALL generate a new PostgreSQL-safe target name from the remote database plus a refresh marker and collision-resistant suffix. It SHALL validate the name with the existing database-name rules, remain within PostgreSQL's 63-byte identifier limit, and recheck `DatabaseResource.exists()` under the project preparation lock. It SHALL never drop, overwrite, or reuse an existing database.
+The workflow SHALL generate a new PostgreSQL-safe target name from the remote database, a UTC timestamp, and a collision-resistant suffix, without inserting a literal refresh marker. It SHALL validate the name with the existing database-name rules, remain within PostgreSQL's 63-byte identifier limit, and recheck `DatabaseResource.exists()` under the project preparation lock. It SHALL never drop, overwrite, or reuse an existing database.
 
 #### Scenario: Restore preflight fails before download
 
@@ -57,6 +67,11 @@ The workflow SHALL generate a new PostgreSQL-safe target name from the remote da
 
 - **WHEN** a generated target name already exists
 - **THEN** the workflow generates/rechecks another safe name and never drops or overwrites the existing database
+
+#### Scenario: Generated name omits refresh marker
+
+- **WHEN** the workflow automatically generates a restore target for source database `source` at timestamp `20260903090420` with suffix `2ee3a458a068`
+- **THEN** the target is `source_20260903090420_2ee3a458a068` and does not contain `_refresh_`
 
 ### Requirement: Restore, optional admin reset, and atomic default switch
 

@@ -86,7 +86,7 @@ _ENV_LIST_COLUMNS = (
 )
 
 
-@click.group()
+@click.group(help="Manage isolated development environments.")
 def env_group() -> None:
     pass
 
@@ -222,7 +222,7 @@ def env_checkout(
                 else {}
             ),
             provenance={
-                "project_source": cli_ctx.project_source,
+                "project_source": _project_provenance(cli_ctx),
                 "environment_source": "null",
             },
             dry_run=dry_run,
@@ -297,7 +297,7 @@ def env_list(
             command="env.list",
             result=result,
             provenance={
-                "project_source": "null" if all_projects else ctx.project_source,
+                "project_source": "null" if all_projects else _project_provenance(ctx),
                 "environment_source": "null",
             },
             mode=output_mode,
@@ -371,6 +371,12 @@ def _resolve_monitor_project_id(ctx: CliContext, all_projects: bool) -> str | No
 
 def _print_env_list_human(snapshot: Snapshot) -> None:
     Console().print(_render_env_list_rich(snapshot))
+
+
+def _project_provenance(cli_context: CliContext) -> str:
+    from odoo_instance_sdk.commands.context import project_provenance
+
+    return project_provenance(cli_context)
 
 
 def _render_env_list_rich(snapshot: Snapshot) -> Group:
@@ -646,14 +652,13 @@ def env_remove(
                 usage=True,
             )
         try:
-            env_obj = resolve_environment(client, None, cli_context=ctx)
+            env_obj = resolve_environment(client, None)
         except Exception as e:
             fail(output_mode, "env.remove", str(e))
     else:
         try:
             resolve_project_path(ctx)
             env_obj = client.environments.get(environment)
-            ctx.resolved_environment = env_obj
         except Exception as e:
             fail(output_mode, "env.remove", str(e))
     try:
@@ -684,7 +689,7 @@ def env_remove(
                 "worktree_path": env_obj.worktree_path,
             },
             provenance={
-                "project_source": ctx.project_source,
+                "project_source": _project_provenance(ctx),
                 "environment_source": "explicit" if environment else "cwd",
             },
             rich=lambda _document: f"Removed environment {env_obj.name} ({env_obj.id})",
@@ -725,7 +730,7 @@ def env_sync(
                 usage=True,
             )
         try:
-            environment = str(resolve_environment(client, None, cli_context=ctx).id)
+            environment = str(resolve_environment(client, None).id)
         except Exception as e:
             fail(output_mode, "env.sync", str(e))
     try:

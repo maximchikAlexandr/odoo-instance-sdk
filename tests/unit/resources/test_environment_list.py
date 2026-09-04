@@ -94,5 +94,5 @@ class TestEnvList:
             "environment.list.git.common-dir",
         ]
         catalog.list_environments.assert_called_once_with(
-            git_common_dir=str((Path.cwd() / ".git").resolve()), include_removed=False
+            git_common_dir=str((tmp_path / ".git").resolve()), include_removed=False
         )

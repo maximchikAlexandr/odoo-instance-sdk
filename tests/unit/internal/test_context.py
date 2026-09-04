@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +11,9 @@ import pytest
 
 from odoo_instance_sdk.commands.context import (
     CliContext,
+    ResolvedContext,
+    environment_provenance,
+    project_provenance,
     ready_instance,
     resolve_project_path,
 )
@@ -89,6 +93,28 @@ def test_resolve_project_nearest_manifest(tmp_path: Path) -> None:
     assert isinstance(cfg, ProjectConfig)
 
 
+def test_resolve_project_prefers_registered_worktree_over_nearest_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nearest = tmp_path / "nearest"
+    nearest_manifest_dir = nearest / ".odcli"
+    nearest_manifest_dir.mkdir(parents=True)
+    (nearest_manifest_dir / "project.toml").write_text("[project]\n")
+    registered = tmp_path / "registered"
+    registered_manifest_dir = registered / ".odcli"
+    registered_manifest_dir.mkdir(parents=True)
+    (registered_manifest_dir / "project.toml").write_text("[project]\n")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context._project_from_registered_worktree",
+        lambda _cwd: registered,
+    )
+
+    resolved = resolve_project(None, cwd=nearest)
+
+    assert isinstance(resolved, ProjectConfig)
+    assert resolved.repository_root == registered.resolve()
+
+
 def test_resolve_project_no_manifest_errors(tmp_path: Path) -> None:
     from odoo_instance_sdk.exceptions import ProjectContextError
 
@@ -106,9 +132,7 @@ def test_cli_context_records_explicit_project_resolution(tmp_path: Path) -> None
 
     assert resolved == tmp_path.resolve()
     assert context.project == str(tmp_path)
-    assert context.resolved_project == tmp_path.resolve()
-    assert context.project_source == "explicit"
-    assert context.environment_source == "null"
+    assert project_provenance(context) == "explicit"
 
 
 def test_cli_context_records_cwd_project_resolution(
@@ -126,9 +150,7 @@ def test_cli_context_records_cwd_project_resolution(
 
     assert resolved == tmp_path.resolve()
     assert context.project is None
-    assert context.resolved_project == tmp_path.resolve()
-    assert context.project_source == "cwd"
-    assert context.environment_source == "null"
+    assert project_provenance(context) == "cwd"
 
 
 def test_resolve_environment_explicit_uuid() -> None:
@@ -158,12 +180,11 @@ def test_cli_context_records_explicit_environment_resolution() -> None:
     client.environments.list.return_value = [env]
     context = CliContext(env=env.name)
 
-    result = resolve_cli_environment(client, env.name, cli_context=context)
+    result = resolve_cli_environment(client, env.name)
 
     assert result is env
     assert context.env == env.name
-    assert context.resolved_environment is env
-    assert context.environment_source == "explicit"
+    assert environment_provenance(context) == "explicit"
 
 
 def test_cli_context_records_cwd_environment_resolution(
@@ -183,12 +204,11 @@ def test_cli_context_records_cwd_environment_resolution(
     )
     context = CliContext()
 
-    result = resolve_cli_environment(client, None, cwd=worktree, cli_context=context)
+    result = resolve_cli_environment(client, None, cwd=worktree)
 
     assert result is env
     assert context.env is None
-    assert context.resolved_environment is env
-    assert context.environment_source == "cwd"
+    assert environment_provenance(context) == "cwd"
 
 
 def test_resolve_environment_not_found() -> None:
@@ -263,28 +283,122 @@ def test_ready_instance_reads_selector_from_typed_context(
     ctx = CliContext(env=env.name, project="/repo")
     monkeypatch.setattr("odoo_instance_sdk.commands.context.OdooClient", lambda **_kwargs: client)
 
-    def resolve_project_for_test(context: CliContext) -> Path:
-        context.resolved_project = Path("/repo")
-        context.project_source = "explicit"
-        return Path("/repo")
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.context.resolve_project_path", resolve_project_for_test
-    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.context.resolve_environment",
         lambda _client, selector, **_kwargs: env if selector == env.name else None,
     )
-    result_client, result_env, result_instance = ready_instance(ctx)
+    resolved = ready_instance(ctx)
 
-    assert result_client is client
-    assert result_env is env
-    assert result_instance is instance
-    assert ctx.resolved_project == Path("/repo")
-    assert ctx.resolved_environment is env
-    assert ctx.project_source == "explicit"
-    assert ctx.environment_source == "explicit"
+    assert resolved.client is client
+    assert resolved.source is env
+    assert resolved.instance is instance
+    assert resolved.provenance == "explicit"
     client.instance.from_environment.assert_called_once_with(env)
+
+
+def test_ready_instance_falls_back_to_nearest_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = ProjectConfig(repository_root=tmp_path)
+    client = MagicMock()
+    instance = MagicMock()
+    client.instance.from_project.return_value = instance
+    ctx = CliContext()
+    monkeypatch.setattr("odoo_instance_sdk.commands.context.OdooClient", lambda **_: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_environment",
+        MagicMock(side_effect=EnvironmentResolutionError("no worktree")),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_project", lambda *_a, **_k: project
+    )
+
+    resolved = ready_instance(ctx)
+
+    assert resolved.client is client
+    assert resolved.source is project
+    assert resolved.instance is instance
+    assert resolved.provenance == "cwd"
+    client.instance.from_project.assert_called_once_with(project)
+
+
+def test_ready_instance_invalid_explicit_environment_never_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock()
+    project_resolver = MagicMock()
+    ctx = CliContext(env="missing")
+    monkeypatch.setattr("odoo_instance_sdk.commands.context.OdooClient", lambda **_: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.resolve_environment",
+        MagicMock(side_effect=EnvironmentNotFoundError("missing")),
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.context.resolve_project", project_resolver)
+
+    with pytest.raises(EnvironmentNotFoundError):
+        ready_instance(ctx)
+
+    project_resolver.assert_not_called()
+    client.instance.from_project.assert_not_called()
+
+
+def test_project_context_accessors_do_not_create_environment(tmp_path: Path) -> None:
+    python = tmp_path / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        python=Path(".venv/bin/python"),
+    )
+    context = ResolvedContext(
+        client=MagicMock(),
+        instance=MagicMock(),
+        source=project,
+        provenance="explicit",
+    )
+
+    assert context.worktree_path() == tmp_path
+    assert context.python_path() == python
+    with pytest.raises(EnvironmentResolutionError, match="requires a development environment"):
+        context.require_environment()
+
+
+def test_project_python_selector_is_resolved_through_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved_python = tmp_path / "resolved-python3"
+    resolved_python.write_text("#!/bin/sh\n")
+    resolved_python.chmod(0o755)
+    project = ProjectConfig(repository_root=tmp_path, python="python3")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.project_runtime.shutil.which",
+        lambda value: str(resolved_python) if value == "python3" else None,
+    )
+    context = ResolvedContext(
+        client=MagicMock(),
+        instance=MagicMock(),
+        source=project,
+        provenance="explicit",
+    )
+
+    assert context.python_path() == resolved_python
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
+def test_project_python_uv_selector_uses_real_uv_resolution(tmp_path: Path) -> None:
+    project = ProjectConfig(repository_root=tmp_path, python="3.12")
+    context = ResolvedContext(
+        client=MagicMock(),
+        instance=MagicMock(),
+        source=project,
+        provenance="explicit",
+    )
+
+    resolved = context.python_path()
+
+    assert resolved.is_absolute()
+    assert resolved.is_file()
 
 
 def test_ready_instance_explicit_env_ignores_malformed_cwd_manifest(
@@ -310,11 +424,8 @@ def test_ready_instance_explicit_env_ignores_malformed_cwd_manifest(
     ready_instance(ctx)
 
     assert ctx.project is None
-    assert ctx.resolved_project is None
-    assert ctx.project_source == "null"
     assert ctx.env == env.name
-    assert ctx.resolved_environment is env
-    assert ctx.environment_source == "explicit"
+    assert environment_provenance(ctx) == "explicit"
 
 
 @pytest.mark.parametrize(
@@ -388,27 +499,36 @@ def test_ready_instance_validates_recorded_runtime_artifacts(
         client.instance.from_environment.assert_not_called()
 
 
-def test_ready_instance_rejects_environment_from_another_project(
+def test_ready_instance_exact_worktree_wins_over_foreign_project(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    env = _make_env()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    env = _make_env(worktree=str(worktree))
     client = MagicMock()
-    ctx = CliContext(project="/selected", env=str(env.id))
+    client.environments.list.return_value = [env]
+    ctx = CliContext(project="/selected")
     monkeypatch.setattr("odoo_instance_sdk.commands.context.OdooClient", lambda **_kwargs: client)
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.context.resolve_project_path", lambda _ctx: Path("/selected")
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_toplevel", lambda _path: worktree
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.context.resolve_environment", lambda *_args, **_kwargs: env
+        "odoo_instance_sdk.internal.git_worktree.rev_parse_git_common_dir",
+        lambda _path: Path(env.git_common_dir),
     )
+    monkeypatch.setattr("odoo_instance_sdk.internal.context._verify_env_runtime", lambda _env: None)
+    monkeypatch.chdir(worktree)
 
-    with pytest.raises(EnvironmentResolutionError, match="does not belong to project"):
-        ready_instance(ctx)
-    client.instance.from_environment.assert_not_called()
+    resolved = ready_instance(ctx)
+
+    assert resolved.source is env
+    assert resolved.provenance == "worktree"
+    client.instance.from_environment.assert_called_once_with(env)
 
 
 def test_ready_instance_rejects_missing_explicit_project(tmp_path: Path) -> None:
-    ctx = CliContext(project=str(tmp_path / "missing"), env="demo")
+    ctx = CliContext(project=str(tmp_path / "missing"))
     with pytest.raises(ProjectContextError, match="Explicit --project"):
         ready_instance(ctx)
 

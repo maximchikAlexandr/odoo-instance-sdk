@@ -8,7 +8,9 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
+from odoo_instance_sdk import OdooClient
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeSource
 from odoo_instance_sdk.commands.test import (
     project_execution_result,
     resolve_module_test_selection,
@@ -40,6 +42,15 @@ def _instance(worktree: Path) -> SimpleNamespace:
             start_config=StartConfig(addons_path=["addons"]),
             default_cwd=worktree,
         )
+    )
+
+
+def _resolved_context(source: object, instance: object) -> ResolvedContext:
+    return ResolvedContext(
+        client=cast("OdooClient", None),
+        source=cast("RuntimeSource", source),
+        instance=cast("OdooInstance", instance),
+        provenance="explicit",
     )
 
 
@@ -95,7 +106,7 @@ def test_executed_result_contains_only_native_execution_fields(
     with (
         patch(
             "odoo_instance_sdk.commands.test.cli_context.ready_instance",
-            return_value=(None, env, instance),
+            return_value=_resolved_context(env, instance),
         ),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules", side_effect=preflight),
         patch("odoo_instance_sdk.commands.test.run_odoo_tests_command", side_effect=runner),
@@ -132,7 +143,7 @@ def test_changed_dry_run_omits_execution_fields_and_does_not_run(tmp_path: Path)
     with (
         patch(
             "odoo_instance_sdk.commands.test.cli_context.ready_instance",
-            return_value=(None, env, instance),
+            return_value=_resolved_context(env, instance),
         ),
         patch("odoo_instance_sdk.commands.test.resolve_changed_selection", return_value=plan),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules") as preflight,
@@ -187,7 +198,7 @@ def test_changed_execution_uses_default_tags_and_preflight_before_runner(tmp_pat
     with (
         patch(
             "odoo_instance_sdk.commands.test.cli_context.ready_instance",
-            return_value=(None, env, instance),
+            return_value=_resolved_context(env, instance),
         ),
         patch("odoo_instance_sdk.commands.test.resolve_changed_selection", return_value=plan),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules", side_effect=preflight),
@@ -222,7 +233,7 @@ def test_changed_no_addon_is_successful_noop_without_runner(tmp_path: Path) -> N
     with (
         patch(
             "odoo_instance_sdk.commands.test.cli_context.ready_instance",
-            return_value=(None, env, instance),
+            return_value=_resolved_context(env, instance),
         ),
         patch("odoo_instance_sdk.commands.test.resolve_changed_selection", return_value=plan),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules") as preflight,
@@ -257,7 +268,7 @@ def test_changed_unmapped_path_returns_provenance_and_nonzero(tmp_path: Path) ->
     with (
         patch(
             "odoo_instance_sdk.commands.test.cli_context.ready_instance",
-            return_value=(None, env, instance),
+            return_value=_resolved_context(env, instance),
         ),
         patch("odoo_instance_sdk.commands.test.resolve_changed_selection", return_value=plan),
         patch("odoo_instance_sdk.commands.test.preflight_installed_modules") as preflight,
@@ -289,7 +300,7 @@ def test_changed_git_failure_returns_partial_sanitized_provenance(tmp_path: Path
     with (
         patch(
             "odoo_instance_sdk.commands.test.cli_context.ready_instance",
-            return_value=(None, env, instance),
+            return_value=_resolved_context(env, instance),
         ),
         patch(
             "odoo_instance_sdk.commands.test.resolve_changed_selection",
@@ -367,7 +378,7 @@ def test_module_alias_projects_registered_worktree_selection_provenance(tmp_path
     with (
         patch(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
-            return_value=(None, env, instance),
+            return_value=_resolved_context(env, instance),
         ),
         patch(
             "odoo_instance_sdk.cli.module_tests_command",

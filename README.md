@@ -41,17 +41,26 @@ uv run odcli monitor
 ## CLI-first quick start
 
 Run these commands from the Odoo project repository. `init` writes the project
-manifest; inspect the plan before creating a feature environment.
+manifest. The main checkout can run directly from that project context; create
+an environment only when an isolated feature worktree is useful.
 
 ```bash
 odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --config ./odoo.conf
 odcli doctor
+odcli run --dry-run
+odcli run
 odcli env checkout feature/customer-credit --dry-run
 odcli env checkout feature/customer-credit
-odcli --env feature/customer-credit run
+odcli --env feature/customer-credit run -- --dev=reload
 odcli --env feature/customer-credit logs
 odcli env list
 ```
+
+`odcli run` resolves an explicit `--env` first, then an exact registered
+worktree, then the initialized project containing the current directory. A
+project run reads Python, `odoo-bin`, source config, working directory, port,
+database, and default run arguments from `.odcli/project.toml`; it does not
+create an environment or add the main checkout to `odcli env list`.
 
 Global selectors such as `--project` and `--env` belong before the subcommand.
 Exact flags are intentionally delegated to executable help, for example
@@ -212,7 +221,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli env list` — List registered environments, active-only unless `--all` is requested.
 - `odcli env remove` — Remove a registered environment and its owned artifacts safely.
 - `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
-- `odcli run` — Start resolved Odoo in the foreground for the selected environment.
+- `odcli run` — Start resolved Odoo in the foreground from a project or environment.
 - `odcli logs` — Read retained Odoo logs, optionally following new output.
 - `odcli shell` — Open an interactive Odoo shell in the selected environment.
 - `odcli eval` — Evaluate one Python expression through the Odoo shell boundary.
@@ -304,7 +313,10 @@ publish stored secrets or absolute catalog paths.
 Secrets are never written to the project manifest. Generated secret config and
 PostgreSQL credentials use restricted user-data files; the backup catalog uses
 the platform cache directory. Remote destructive database operations are
-rejected, and cleartext remote authentication emits a warning.
+rejected. Repository-selected remote test instances require an exact external
+origin pin. Pinned HTTP origins are permitted for legacy deployments, but emit
+a warning because the master password crosses the network in cleartext; HTTPS
+remains strongly recommended.
 
 ## Contributing
 

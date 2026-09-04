@@ -4,10 +4,14 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import click
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
@@ -70,7 +74,12 @@ from odoo_instance_sdk.internal.vscode_generate import (
     write_launch_json,
 )
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
-from odoo_instance_sdk.models import CommandResult, OdooTestSpec, PostgresClusterState, StartConfig
+from odoo_instance_sdk.models import (
+    CommandResult,
+    OdooTestSpec,
+    PostgresClusterState,
+    StartConfig,
+)
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 
 if TYPE_CHECKING:
@@ -167,7 +176,54 @@ def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject
     return {"modules": [record.to_dict() for record in records]}
 
 
-@click.group()
+class _RichHelpGroup(click.Group):
+    """Render the root command inventory as a compact Rich reference."""
+
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        stream = StringIO()
+        console = Console(
+            file=stream,
+            force_terminal=True,
+            color_system="standard",
+            width=formatter.width,
+        )
+        console.print(
+            Panel(
+                "Manage local Odoo projects, environments, databases, and tooling.",
+                title=f"[bold cyan]{ctx.command_path}[/]",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
+        console.print("[bold cyan]Usage[/]")
+        console.print(f"  {ctx.command_path} [OPTIONS] COMMAND [ARGS]...")
+
+        options = Table(box=None, show_header=False, pad_edge=False, padding=(0, 2))
+        options.add_column(style="green", no_wrap=True)
+        options.add_column()
+        for param in self.get_params(ctx):
+            record = param.get_help_record(ctx)
+            if record is not None:
+                options.add_row(*record)
+        console.print()
+        console.print("[bold cyan]Options[/]")
+        console.print(options)
+
+        commands = Table(box=None, show_header=False, pad_edge=False, padding=(0, 2))
+        commands.add_column(style="bold green", no_wrap=True)
+        commands.add_column()
+        for name in self.list_commands(ctx):
+            command = self.get_command(ctx, name)
+            if command is not None and not command.hidden:
+                commands.add_row(name, command.get_short_help_str(limit=60))
+        console.print()
+        console.print("[bold cyan]Commands[/]")
+        console.print(commands)
+
+        formatter.write(stream.getvalue())
+
+
+@click.group(cls=_RichHelpGroup)
 @click.version_option(package_name="odoo-instance-sdk")
 @click.option(
     "--project",
@@ -192,8 +248,7 @@ cli.add_command(_psql, name="psql")
 
 class _RunCommand(click.Command):
     def get_short_help_str(self, limit: int = 45) -> str:
-        del limit
-        return ""
+        return super().get_short_help_str(limit)
 
     def format_help_text(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         del ctx
@@ -219,7 +274,7 @@ class _RunCommand(click.Command):
         return parsed_args
 
 
-@cli.command()
+@cli.command(help="Create or update the project manifest.")
 @click.option("--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin.")
 @click.option("--python", "python", default=None, help="Python interpreter or uv selector.")
 @click.option(
@@ -574,7 +629,7 @@ def _manifest_dict(
     }
 
 
-@cli.command()
+@cli.command(help="Diagnose project, runtime, and PostgreSQL.")
 @output_options
 @pass_cli_context
 def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
@@ -628,6 +683,7 @@ def _print_doctor(report: DoctorReport) -> None:
 @cli.command(
     cls=_RunCommand,
     help="Native Odoo arguments must follow a literal `--` delimiter.",
+    short_help="Start resolved Odoo in the foreground.",
 )
 @click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
 @command_options
@@ -641,21 +697,21 @@ def run(
 ) -> None:
     output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
     try:
-        client, env_obj, instance = cli_context.ready_instance(ctx)
-        if not cli_context._check_port_free(env_obj):
+        runtime_context = cli_context.ready_instance(ctx)
+        if not runtime_context.check_port_free():
+            http_interface, http_port = runtime_context.instance_address()
             fail(
                 output_mode,
                 "run",
-                f"port-conflict: {env_obj.http_interface}:{env_obj.http_port} is occupied "
-                "(ownership unknown)",
+                f"port-conflict: {http_interface}:{http_port} is occupied (ownership unknown)",
             )
-        command = instance.run_foreground_command(args=odoo_args)
+        command = runtime_context.instance.run_foreground_command(args=odoo_args)
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "run", e)
-    if not dry_run:
-        client.environments.record_use(env_obj)
+    if not dry_run and runtime_context.is_environment:
+        runtime_context.client.environments.record_use(runtime_context.require_environment())
     try:
         _status, value = run_or_preview(
             lambda: command,
@@ -673,14 +729,14 @@ def run(
     return
 
 
-@cli.command()
+@cli.command(help="Read or follow retained Odoo logs.")
 @click.option("-n", "--tail", type=click.IntRange(min=1), default=100, show_default=True)
 @click.option("-f", "--follow", is_flag=True, default=False)
 @pass_cli_context
 def logs(ctx: CliContext, tail: int, follow: bool) -> None:
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
-        for line in instance.iter_logs(tail=tail, follow=follow):
+        runtime_context = cli_context.ready_instance(ctx)
+        for line in runtime_context.instance.iter_logs(tail=tail, follow=follow):
             sys.stdout.write(line)
             sys.stdout.flush()
     except KeyboardInterrupt:
@@ -693,7 +749,7 @@ def logs(ctx: CliContext, tail: int, follow: bool) -> None:
         fail(False, "logs", str(e))
 
 
-@cli.command()
+@cli.command(help="Open an interactive Odoo shell.")
 @click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
 @command_options
 @pass_cli_context
@@ -706,8 +762,8 @@ def shell(
 ) -> None:
     output_mode = resolve_command_options(output_format, json_output, dry_run, command="shell")
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
-        command = instance.shell_command(args=list(odoo_args))
+        runtime_context = cli_context.ready_instance(ctx)
+        command = runtime_context.instance.shell_command(args=list(odoo_args))
     except SystemExit:
         raise
     except Exception as e:
@@ -729,7 +785,7 @@ def shell(
     return
 
 
-@cli.command("eval")
+@cli.command("eval", help="Evaluate a Python expression in Odoo.")
 @click.argument("expression")
 @click.option(
     "--commit", "commit", is_flag=True, default=False, help="Commit after eval (best-effort)."
@@ -747,7 +803,8 @@ def eval_cmd(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        instance = runtime_context.instance
 
         def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
             if value is None:
@@ -779,7 +836,7 @@ def eval_cmd(
     sys.exit(status)
 
 
-@cli.command("exec")
+@cli.command("exec", help="Execute a Python script in Odoo.")
 @click.argument("script")
 @click.argument("script_args", nargs=-1, type=click.UNPROCESSED)
 @click.option(
@@ -809,7 +866,8 @@ def exec_cmd(
         except OSError as e:
             fail(output_mode, "exec", f"cannot read script: {e}")
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        instance = runtime_context.instance
 
         def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
             if value is None:
@@ -846,7 +904,7 @@ def exec_cmd(
     sys.exit(status)
 
 
-@cli.group("module")
+@cli.group("module", help="Discover, test, and upgrade Odoo modules.")
 def module_group() -> None:
     pass
 
@@ -867,7 +925,8 @@ def module_list(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        instance = runtime_context.instance
         status, _records = run_or_preview(
             lambda: list_modules_command(instance, names=tuple(modules), state=state),
             command_name="module.list",
@@ -915,7 +974,9 @@ def module_update(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, env_obj, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        env_obj = runtime_context.require_environment()
+        instance = runtime_context.instance
     except SystemExit:
         raise
     except Exception as e:
@@ -989,7 +1050,9 @@ def module_test(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, env_obj, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        env_obj = runtime_context.require_environment()
+        instance = runtime_context.instance
         start_config = instance.config.start_config
         if start_config is None:
             raise RuntimeError(  # noqa: TRY301
@@ -1031,7 +1094,7 @@ def module_test(
     sys.exit(outcome[0].exit_code if outcome is not None and not dry_run else status)
 
 
-@cli.group("translations")
+@cli.group("translations", help="Export Odoo module translations.")
 def translations_group() -> None:
     pass
 
@@ -1052,13 +1115,14 @@ def translations_export(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, env_obj, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        instance = runtime_context.instance
         status, _results = run_or_preview(
             lambda: export_translations_command(
                 instance,
                 tuple(modules),
                 tuple(languages),
-                worktree_root=Path(env_obj.worktree_path),
+                worktree_root=runtime_context.worktree_path(),
             ),
             command_name="translations.export",
             mode=output_mode,
@@ -1091,7 +1155,7 @@ def translations_export(
     sys.exit(status)
 
 
-@cli.group("deps")
+@cli.group("deps", help="Verify Python and add-on dependencies.")
 def deps_group() -> None:
     pass
 
@@ -1103,16 +1167,25 @@ def deps_group() -> None:
 def deps_verify(
     ctx: CliContext, dry_run: bool, output_format: str | None, json_output: bool
 ) -> None:
+    from odoo_instance_sdk.internal.project_runtime import is_uv_python_selector
+
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, env_obj, _instance = cli_context.ready_instance(ctx)
-        recorded_python = Path(env_obj.python_environment_path)
-        if recorded_python.is_dir():
-            recorded_python = recorded_python / "bin" / "python"
+        runtime_context = cli_context.ready_instance(ctx)
+        project_python = (
+            runtime_context.source.python
+            if isinstance(runtime_context.source, ProjectConfig)
+            else None
+        )
+        recorded_python = (
+            cast("str", project_python)
+            if is_uv_python_selector(project_python)
+            else runtime_context.python_path()
+        )
         status, _result = run_or_preview(
             lambda: verify_deps_command(
                 recorded_python=recorded_python,
-                worktree_root=Path(env_obj.worktree_path),
+                worktree_root=runtime_context.worktree_path(),
             ),
             command_name="deps.verify",
             mode=output_mode,
@@ -1140,7 +1213,7 @@ def deps_verify(
     sys.exit(1 if _result is not None and getattr(_result, "missing_imports", []) else status)
 
 
-@cli.group("vscode")
+@cli.group("vscode", help="Generate VS Code launch configuration.")
 def vscode_group() -> None:
     pass
 
@@ -1161,12 +1234,14 @@ def vscode_generate(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        client, env_obj, _instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        client = runtime_context.client
+        env_obj = runtime_context.require_environment()
 
         def operation() -> dict[str, JsonValue]:
             profile = build_launch_profile(client, env_obj)
             if write_file:
-                project_path = cli_context.resolve_project_path(ctx)
+                project_path = runtime_context.project_root
                 written = write_launch_json(project_path, launch_json(profile))
                 return {"profile": profile, "written": str(written)}
             return {"profile": profile}

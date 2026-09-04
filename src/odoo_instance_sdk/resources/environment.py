@@ -673,9 +673,9 @@ class EnvironmentResource:
             common_dir = Path(output("checkout.validate.git.common-dir").strip())
             if not common_dir.is_absolute():
                 # Match ``rev_parse_git_common_dir``'s normalization used
-                # while capturing the plan.  Git may emit ``.git`` for a
-                # linked worktree even though its common dir is elsewhere.
-                common_dir = common_dir.resolve()
+                # while capturing the plan. Git reports this path relative
+                # to the directory supplied through ``git -C``.
+                common_dir = plan.repo_root / common_dir
             actual_identity = (
                 str(top_dir),
                 str(common_dir.resolve()),
@@ -1726,7 +1726,9 @@ class EnvironmentResource:
                     from odoo_instance_sdk.internal.git_worktree import GitError
 
                     raise GitError(f"git common directory unavailable: {project_path}")
-                common_path = Path(_text(common).strip()).resolve()
+                common_path = Path(_text(common).strip())
+                if not common_path.is_absolute():
+                    common_path = project_path / common_path
                 rows = catalog.list_environments(
                     git_common_dir=str(common_path.resolve()),
                     include_removed=include_removed,

@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, cast
 import click
 import msgspec
 
-from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
+from odoo_instance_sdk.commands.context import (
+    CliContext,
+    environment_provenance,
+    pass_cli_context,
+)
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputMode,
@@ -106,7 +110,7 @@ def _database_instance(ctx: CliContext) -> tuple[DevelopmentEnvironment | None, 
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     project_root = resolve_project_path(ctx).resolve()
     try:
-        environment = resolve_environment(client, ctx.env, cwd=Path.cwd(), cli_context=ctx)
+        environment = resolve_environment(client, ctx.env, cwd=Path.cwd())
     except EnvironmentResolutionError:
         if ctx.env is not None:
             raise
@@ -231,7 +235,7 @@ def _run_database_command(
             dry_run=dry_run,
             result=cast("Callable[[msgspec.Struct | None], dict[str, JsonValue]]", model_to_dict),
             context=context,
-            provenance={"environment_source": ctx.environment_source},
+            provenance={"environment_source": environment_provenance(ctx)},
             rich=rich,
         )
     except Exception as exc:
@@ -410,7 +414,7 @@ def db_init_monitoring(
             dry_run=dry_run,
             result=cast("Callable[[msgspec.Struct | None], dict[str, JsonValue]]", model_to_dict),
             context=context,
-            provenance={"environment_source": ctx.environment_source},
+            provenance={"environment_source": environment_provenance(ctx)},
             confirm=confirm,
             rich=_monitoring_rich,
         )
@@ -419,7 +423,7 @@ def db_init_monitoring(
     raise click.exceptions.Exit(status)
 
 
-@click.group()
+@click.group(help="Inspect and manage project PostgreSQL.")
 def postgres_group() -> None:
     """Project-level PostgreSQL cluster lifecycle (read-only / idempotent)."""
 

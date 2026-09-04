@@ -618,10 +618,14 @@ class DatabaseResource:
     def _exists_impl(self, name: str, *, psql_step_id: str | None = None) -> bool:
         from odoo_instance_sdk.internal.proc import active_context
 
+        ck = self._cluster
+        direct_result = self._planned_exists_result(name, psql_step_id)
+        if direct_result is not None:
+            return direct_result
+
         try:
             databases = self.list()
         except DatabaseManagerUnavailableError:
-            ck = self._cluster
             if ck is not None and self._instance.config.db_user is not None:
                 db_host, db_port = ck
                 result = _verify_database_via_psql(
@@ -640,7 +644,6 @@ class DatabaseResource:
                     return False
             raise
 
-        ck = self._cluster
         found = any(db.name == name for db in databases)
         if psql_step_id is not None:
             context = active_context()
@@ -652,6 +655,30 @@ class DatabaseResource:
             if catalog.has_tracked_database(db_host, db_port, name):
                 catalog.record_database_dropped(db_host, db_port, name)
         return found
+
+    def _planned_exists_result(self, name: str, step_id: str | None) -> bool | None:
+        ck = self._cluster
+        user = self._instance.config.db_user
+        if step_id is None or ck is None or user is None:
+            return None
+        db_host, db_port = ck
+        result = _verify_database_via_psql(
+            db_host,
+            db_port,
+            user,
+            self._instance.config.db_password,
+            name,
+            step_id=step_id,
+        )
+        if result is None:
+            raise DatabaseManagerUnavailableError(
+                f"PostgreSQL database existence probe failed for {name!r}"
+            )
+        if not result:
+            catalog = self._instance._client.get_catalog()
+            if catalog.has_tracked_database(db_host, db_port, name):
+                catalog.record_database_dropped(db_host, db_port, name)
+        return result
 
     def __getitem__(self, index: int) -> Database:
         if not isinstance(index, int):
@@ -836,7 +863,16 @@ class DatabaseResource:
 
         try:
             server_filename, size_bytes, sha256_hex = self._download_backup_part(
-                database_name, pwd, part_path, timeout=timeout, format=format, filestore=filestore
+                database_name,
+                pwd,
+                part_path,
+                timeout=(
+                    timeout
+                    if timeout is not None
+                    else self._instance._client.config.backup_timeout_seconds
+                ),
+                format=format,
+                filestore=filestore,
             )
 
             actual_filename = make_download_filename(backup_id, server_filename)
@@ -921,7 +957,12 @@ class DatabaseResource:
     def reset_admin_password(self) -> AdminPasswordResetResult:
         from odoo_instance_sdk.internal.proc import active_context
 
-        if active_context() is not None and self._instance.config.start_config is not None:
+        context = active_context()
+        if (
+            context is not None
+            and context.planned("instance.shell_script")
+            and self._instance.config.start_config is not None
+        ):
             configured = self._instance.config.configured_database_names
             if len(configured) != 1 or not configured[0].strip():
                 raise InstanceConfigurationError(
@@ -1098,7 +1139,12 @@ class DatabaseResource:
 
         http_failure: tuple[int, str] | tuple[None, str] | None = None
         try:
-            with open(backup_path, "rb") as fp, self._http(timeout=timeout) as http:
+            restore_timeout = (
+                timeout
+                if timeout is not None
+                else self._instance._client.config.backup_timeout_seconds
+            )
+            with open(backup_path, "rb") as fp, self._http(timeout=restore_timeout) as http:
                 resp = http.post(
                     self._url("restore"),
                     data={

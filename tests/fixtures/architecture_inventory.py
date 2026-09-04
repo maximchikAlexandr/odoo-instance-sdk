@@ -18,15 +18,15 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 684),
-        ("src/odoo_instance_sdk/cli.py", 685),
+        ("src/odoo_instance_sdk/cli.py", 741),
+        ("src/odoo_instance_sdk/cli.py", 740),
         ("src/odoo_instance_sdk/commands/env.py", 373),
         ("src/odoo_instance_sdk/commands/output.py", 190),
         ("src/odoo_instance_sdk/commands/output.py", 300),
         ("src/odoo_instance_sdk/commands/output.py", 302),
         ("src/odoo_instance_sdk/commands/output.py", 309),
         ("src/odoo_instance_sdk/commands/output.py", 311),
-        ("src/odoo_instance_sdk/resources/instance.py", 848),
+        ("src/odoo_instance_sdk/resources/instance.py", 899),
     }
 )
 
@@ -38,9 +38,9 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 302): "shared TOON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 309): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/commands/output.py", 311): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/cli.py", 684): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 685): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/resources/instance.py", 848): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/cli.py", 741): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 740): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/resources/instance.py", 899): "lifecycle cleanup diagnostic transport",
 }
 
 
@@ -70,7 +70,7 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/resources/test_environment_python.py", 233),
         ("tests/unit/resources/test_environment_python.py", 271),
         ("tests/unit/test_monitor_cache_and_docker.py", 128),
-        ("tests/unit/test_cluster_resources.py", 189),
+        ("tests/unit/test_cluster_resources.py", 190),
         ("tests/unit/internal/test_proc_boundary.py", 255),
     }
 )

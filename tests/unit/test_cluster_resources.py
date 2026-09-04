@@ -178,6 +178,7 @@ def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
         if context is None:
             return _cp(args, 0, output_for(args))
         assert step_id is not None
+        assert context.prepared(step_id).timeout == timeout
         captured = cast("ProcessResult", context.process(step_id))
         return _cp(
             args,

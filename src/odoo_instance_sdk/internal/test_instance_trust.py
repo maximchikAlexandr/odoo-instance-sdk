@@ -7,11 +7,7 @@ from collections.abc import Mapping
 from urllib.parse import urlsplit
 
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.internal.urls import (
-    assert_password_transport_allowed,
-    canonical_origin,
-    is_loopback_host,
-)
+from odoo_instance_sdk.internal.urls import canonical_origin, is_loopback_host
 
 _PIN_ENV = "ODCLI_TEST_INSTANCE_ORIGIN_PINS"
 
@@ -32,8 +28,7 @@ def approved_test_instance_origins(*, environ: Mapping[str, str] | None = None) 
 
 
 def require_test_instance_origin_approval(base_url: str) -> str:
-    """Validate transport and require an exact user-owned origin approval."""
-    assert_password_transport_allowed(base_url)
+    """Require an exact user-owned approval for a remote origin."""
     origin = canonical_origin(base_url)
     # Loopback is a local operator-controlled endpoint; remote origins require
     # a pin that repository configuration cannot create or modify.

@@ -256,7 +256,7 @@ def resolve_module_test_selection(
     )
 
 
-@click.command("test")
+@click.command("test", help="Select and run Odoo tests.")
 @click.argument("target", required=False)
 @click.option("--tags", "tags", default=None, help="Native Odoo test tags.")
 @click.option("--reload-tests", is_flag=True, default=False)
@@ -281,7 +281,9 @@ def test_command(
     mode = resolve_output_mode(output_format, json_output)
     _validate_options(target, changed=changed, base=base, dry_run=dry_run, tags=tags)
     try:
-        _client, env_obj, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        env_obj = runtime_context.require_environment()
+        instance = runtime_context.instance
         start_config = _start_config(instance)
         if changed:
             plan = resolve_changed_selection(

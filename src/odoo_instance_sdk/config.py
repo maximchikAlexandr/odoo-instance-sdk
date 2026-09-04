@@ -2,14 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.models import StartConfig
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.internal.project_runtime import DeferredProjectRuntime
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class OdooClientConfig:
     executable: str
     http_timeout_seconds: float = 30.0
+    backup_timeout_seconds: float = 600.0
     backups_directory: Path | None = None
 
     def __repr__(self) -> str:
@@ -23,7 +28,9 @@ class InstanceConfig:
     configured_database_names: tuple[str, ...] = ()
     start_config: StartConfig | None = field(default=None, repr=False)
     command_prefix: tuple[str, ...] | None = None
+    deferred_runtime: DeferredProjectRuntime | None = field(default=None, repr=False)
     default_cwd: Path | None = None
+    default_run_args: tuple[str, ...] = ()
     db_host: str | None = field(default=None)
     db_port: int | None = field(default=None)
     db_user: str | None = field(default=None)

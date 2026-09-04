@@ -343,6 +343,25 @@ def test_full_audit_retention(tmp_path: Path) -> None:
     catalog.close()
 
 
+def test_backup_history_filters_by_source_and_database(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    matching_id = _u("history-filter-match")
+    other_id = _u("history-filter-other")
+    matching_path = _create_backup_file(tmp_path, "matching.zip")
+    other_path = _create_backup_file(tmp_path, "other.zip")
+    catalog.start_download(
+        matching_id, "http://localhost:8069", "matching_db", "zip", True, matching_path
+    )
+    catalog.start_download(other_id, "http://other:8069", "other_db", "zip", True, other_path)
+
+    events = catalog.get_backup_history(
+        source_base_url="http://localhost:8069", database_name="matching_db"
+    )
+
+    assert {event.backup_id for event in events} == {uuid.UUID(matching_id)}
+    catalog.close()
+
+
 def test_validation_succeeded_and_failed_events(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
@@ -355,6 +374,20 @@ def test_validation_succeeded_and_failed_events(tmp_path: Path) -> None:
     events = catalog.get_backup_history(backup_id=bid)
     kinds = [e.event_type.value for e in events]
     assert "validation_succeeded" in kinds
+    catalog.close()
+
+
+def test_update_environment_sanitizes_errors_and_empty_update_is_noop(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    environment_id = _u("update-environment")
+    catalog.create_environment(make_env(environment_id))
+
+    catalog.update_environment(environment_id, {})
+    catalog.update_environment(environment_id, {"last_error": "password=secret-value"})
+
+    row = catalog.get_environment(environment_id)
+    assert row is not None
+    assert row["last_error"] == "<redacted>"
     catalog.close()
 
 

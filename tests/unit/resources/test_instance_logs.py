@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ from click.testing import CliRunner, Result
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeSource
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import InstanceConfigurationError, LogfileAccessError
 from odoo_instance_sdk.models import StartConfig
@@ -26,6 +28,15 @@ def _instance_from_config(tmp_path: Path, *, logfile: str | None) -> OdooInstanc
         body += f"logfile = {logfile}\n"
     conf.write_text(body)
     return OdooClient(config=OdooClientConfig(executable="python3")).instance.from_config(conf)
+
+
+def _resolved_context(client: object, source: object, instance: object) -> ResolvedContext:
+    return ResolvedContext(
+        client=cast("OdooClient", client),
+        source=cast("RuntimeSource", source),
+        instance=cast("OdooInstance", instance),
+        provenance="explicit",
+    )
 
 
 @pytest.mark.parametrize(
@@ -203,7 +214,7 @@ def test_iter_logs_requires_start_config() -> None:
 def _invoke_logs(*args: str, instance: OdooInstance | MagicMock) -> Result:
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
-        return_value=(MagicMock(), MagicMock(), instance),
+        return_value=_resolved_context(MagicMock(), MagicMock(), instance),
     ):
         return CliRunner().invoke(cli, ["logs", *args])
 
@@ -281,7 +292,7 @@ def test_cli_logs_does_not_record_use() -> None:
     instance.iter_logs.return_value = iter([])
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
-        return_value=(client, MagicMock(), instance),
+        return_value=_resolved_context(client, MagicMock(), instance),
     ):
         result = CliRunner().invoke(cli, ["logs"])
     assert result.exit_code == 0, result.output

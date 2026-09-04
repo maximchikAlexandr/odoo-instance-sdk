@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,6 +16,7 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.proc import ProcessHandle, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import CommandResult, OdooProcess, StartConfig
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -120,6 +122,290 @@ class TestFromConfigNoPassword:
 
 
 class TestInstancePrefix:
+    def test_from_project_binds_runtime_without_catalog_access(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        project = ProjectConfig.load(project_manifest)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+        get_catalog = MagicMock(side_effect=AssertionError("catalog must not be opened"))
+        monkeypatch.setattr(OdooClient, "get_catalog", get_catalog)
+
+        inst = env_client.instance.from_project(project)
+
+        assert inst.config.command_prefix == (
+            str(fake_python),
+            str(fake_python.parent / "odoo-bin"),
+        )
+        assert inst.config.default_cwd == project_manifest
+        assert inst.config.configured_database_names == ("comerta",)
+        assert inst.config.start_config is not None
+        assert inst.config.start_config.config_path == str(project_manifest / "odoo.conf")
+        assert inst.config.start_config.db_name == "comerta"
+        get_catalog.assert_not_called()
+
+    @pytest.mark.parametrize("field", ["odoo_bin", "python", "source_config"])
+    def test_from_project_requires_runtime_file(
+        self,
+        tmp_path: Path,
+        field: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        python = root / "python"
+        odoo_bin = root / "odoo-bin"
+        config = root / "odoo.conf"
+        for path in (python, odoo_bin, config):
+            path.write_text("[options]\n" if path == config else "")
+        python.chmod(0o755)
+        missing = root / "missing"
+        project = ProjectConfig(
+            repository_root=root,
+            odoo_bin=missing if field == "odoo_bin" else odoo_bin,
+            python=missing if field == "python" else python,
+            source_config=missing if field == "source_config" else config,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+
+        with pytest.raises(InstanceConfigurationError, match=field):
+            _make_client().instance.from_project(project)
+
+    def test_from_project_rejects_non_executable_python_before_cluster_construction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        python = root / "python"
+        odoo_bin = root / "odoo-bin"
+        config = root / "odoo.conf"
+        python.write_text("#!/bin/sh\nexit 0\n")
+        odoo_bin.write_text("#!/bin/sh\nexit 0\n")
+        config.write_text("[options]\n")
+        cluster_factory = MagicMock(return_value=MagicMock())
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(cluster_factory),
+        )
+        project = ProjectConfig(
+            repository_root=root,
+            python=python,
+            odoo_bin=odoo_bin,
+            source_config=config,
+        )
+
+        with pytest.raises(InstanceConfigurationError, match="not executable"):
+            _make_client().instance.from_project(project)
+
+        cluster_factory.assert_not_called()
+
+    def test_from_project_applies_runtime_defaults(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        for name in ("python", "odoo-bin"):
+            (root / name).write_text("")
+        (root / "python").chmod(0o755)
+        (root / "odoo.conf").write_text(
+            "[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8069\ndb_name = old\n"
+        )
+        runtime = root / "runtime"
+        runtime.mkdir()
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path("python"),
+            odoo_bin=Path("odoo-bin"),
+            source_config=Path("odoo.conf"),
+            runtime_cwd=Path("runtime"),
+            preferred_http_port=8077,
+            default_source_database="fresh",
+            default_run_args=("--dev=xml",),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+
+        inst = _make_client().instance.from_project(project)
+
+        assert inst.config.base_url == "http://127.0.0.1:8077"
+        assert inst.config.default_cwd == runtime
+        assert inst.config.default_run_args == ("--dev=xml",)
+        assert inst.config.configured_database_names == ("fresh",)
+        command = inst.run_foreground_command(args=("--stop-after-init",))
+        foreground = next(
+            step for step in command.commands if step.step_id == "instance.foreground"
+        )
+        assert foreground.argv[-2:] == ("--dev=xml", "--stop-after-init")
+
+    @pytest.mark.parametrize("selector", ["python3"])
+    def test_from_project_resolves_python_selectors(
+        self, tmp_path: Path, selector: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        resolved_python = tmp_path / f"resolved-{selector.replace('.', '_')}"
+        resolved_python.write_text("")
+        resolved_python.chmod(0o755)
+        odoo_bin = root / "odoo-bin"
+        odoo_bin.write_text("")
+        config = root / "odoo.conf"
+        config.write_text("[options]\n")
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.project_runtime.shutil.which",
+            lambda value: str(resolved_python) if value == selector else None,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+        project = ProjectConfig(
+            repository_root=root,
+            python=selector,
+            odoo_bin=odoo_bin,
+            source_config=config,
+        )
+
+        inst = _make_client().instance.from_project(project)
+
+        assert inst.config.command_prefix is not None
+        assert inst.config.command_prefix[0] == str(resolved_python)
+
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
+    def test_from_project_resolves_uv_python_selector(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        odoo_bin = root / "odoo-bin"
+        odoo_bin.write_text("")
+        config = root / "odoo.conf"
+        config.write_text("[options]\n")
+        project = ProjectConfig(
+            repository_root=root,
+            python="3.12",
+            odoo_bin=odoo_bin,
+            source_config=config,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+        uv_resolution = MagicMock(side_effect=AssertionError("uv must run at execution time"))
+        monkeypatch.setattr("odoo_instance_sdk.internal.server.run_command", uv_resolution)
+
+        inst = _make_client().instance.from_project(project)
+
+        assert inst.config.deferred_runtime is not None
+        command = inst.run_foreground_command()
+
+        uv_resolution.assert_not_called()
+        uv_path = shutil.which("uv")
+        assert uv_path is not None
+        step = command.plan.process_steps[0]
+        assert step.step_id == "instance.foreground"
+        assert step.argv[:8] == (
+            str(Path(uv_path).absolute()),
+            "run",
+            "--no-project",
+            "--python",
+            "3.12",
+            "--",
+            "python",
+            str(odoo_bin),
+        )
+        assert step.cwd == str(root)
+
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
+    def test_uv_python_selector_execution_consumes_the_captured_native_argv(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        odoo_bin = root / "odoo-bin"
+        odoo_bin.write_text("#!/bin/sh\nexit 0\n")
+        config = root / "odoo.conf"
+        config.write_text("[options]\n")
+        project = ProjectConfig(
+            repository_root=root,
+            python="3.12",
+            odoo_bin=odoo_bin,
+            source_config=config,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+        executor = RecordingExecutor(handles={"instance.foreground": _recording_handle()})
+
+        inst = _make_client().instance.from_project(project)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+            lambda: executor,
+        )
+        command = inst.run_foreground_command()
+
+        assert command.run() == 0
+        from odoo_instance_sdk.internal.proc.redaction import project_process_step
+
+        assert len(executor.spawned) == 1
+        assert project_process_step(executor.spawned[0]) == command.plan.process_steps[0]
+        uv_path = shutil.which("uv")
+        assert uv_path is not None
+        assert executor.spawned[0].argv[:8] == (
+            str(Path(uv_path).absolute()),
+            "run",
+            "--no-project",
+            "--python",
+            "3.12",
+            "--",
+            "python",
+            str(odoo_bin),
+        )
+
+    def test_from_project_preserves_virtualenv_python_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        base_python = tmp_path / "base-python"
+        base_python.write_text("")
+        base_python.chmod(0o755)
+        venv = root / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        venv_python = venv / "python"
+        venv_python.symlink_to(base_python)
+        odoo_bin = root / "odoo-bin"
+        odoo_bin.write_text("")
+        config = root / "odoo.conf"
+        config.write_text("[options]\n")
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path(".venv/bin/python"),
+            odoo_bin=odoo_bin,
+            source_config=config,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+
+        inst = _make_client().instance.from_project(project)
+
+        assert inst.config.command_prefix is not None
+        assert inst.config.command_prefix[0] == str(venv_python)
+        assert inst.config.command_prefix[0] != str(base_python)
+
     def test_factory_bound_cluster_preflights_before_spawn(
         self,
         env_client: OdooClient,
@@ -265,6 +551,24 @@ class TestStartConfigFromOdooConfig:
 
 
 class TestBuildCliArgsSingleConfig:
+    def test_uses_odoo_database_option_spellings(self) -> None:
+        cfg = StartConfig(
+            db_name="example",
+            dbfilter="^example$",
+            db_host="127.0.0.1",
+            db_port=5432,
+            db_user="odoo",
+        )
+
+        args = _build_cli_args(cfg)
+
+        assert "--database" in args
+        assert "--db-filter" in args
+        assert "--db_host" in args
+        assert "--db_port" in args
+        assert "--db_user" in args
+        assert not {"--db-name", "--dbfilter", "--db-host", "--db-port", "--db-user"} & set(args)
+
     def test_single_config_when_config_path_set(self, tmp_path: Path) -> None:
         cfg = StartConfig(
             http_port=8069,
@@ -582,7 +886,7 @@ class TestRunForeground:
 
         assert foreground.plan.process_steps[0].argv[-len(args) :] == args
         assert shell.plan.process_steps[0].argv[-len(args) :] == args
-        assert shell.plan.process_steps[0].argv[-len(args) - 1] == "shell"
+        assert shell.plan.process_steps[0].argv[1] == "shell"
 
     @pytest.mark.parametrize("leaf", ["shell", "run"])
     def test_literal_delimiter_is_allowed_and_preserved_for_runtime_commands(
@@ -603,7 +907,7 @@ class TestRunForeground:
         process = command.plan.process_steps[0]
         assert process.argv[-len(native_args) :] == native_args
         if leaf == "shell":
-            assert process.argv[-len(native_args) - 1] == "shell"
+            assert process.argv[1] == "shell"
 
 
 class TestShell:
@@ -666,6 +970,16 @@ class TestShell:
 
 
 class TestRunShellScript:
+    def test_shell_subcommand_precedes_server_options(self, tmp_path: Path) -> None:
+        client = _make_client()
+        inst = client.instance.from_config(_write_loopback_config(tmp_path / "odoo.conf"))
+
+        interactive = inst.shell_command()
+        scripted = inst.run_shell_script_command("result = 1")
+
+        assert interactive.plan.process_steps[0].argv[1] == "shell"
+        assert scripted.plan.process_steps[0].argv[1] == "shell"
+
     def test_run_shell_script_returns_command_result(self, tmp_path: Path) -> None:
         client = _make_client()
         cfg_path = tmp_path / "odoo.conf"

@@ -98,7 +98,7 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:684-685` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:740-741` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
 - `src/odoo_instance_sdk/commands/env.py:373` — existing Rich-live inventory
   transport; remove when Rich live output is supplied by a distinct transport
@@ -113,7 +113,7 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:311` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:848` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance.py:899` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 

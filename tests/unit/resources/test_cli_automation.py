@@ -3,10 +3,11 @@ from __future__ import annotations
 import ast
 import base64
 import json
+import shutil
 import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -452,6 +453,40 @@ class TestOdooTestRunner:
 
 
 class TestTranslationsExport:
+    @pytest.mark.parametrize(
+        ("module", "language"),
+        [
+            ("komfarm_data_exchange", "ru_RU"),
+            ("komfarm_data_exchange", "__new__"),
+            ("модуль_аптека", "be_BY"),
+        ],
+    )
+    def test_generated_source_preserves_module_and_language(
+        self, module: str, language: str
+    ) -> None:
+        from odoo_instance_sdk.internal.automation import _build_export_source
+
+        assignments = "\n".join(
+            line
+            for line in _build_export_source(module, language).splitlines()
+            if line.startswith(("_module = ", "_lang = "))
+        )
+        namespace: dict[str, str] = {}
+        exec(assignments, {}, namespace)
+
+        assert namespace == {"_module": module, "_lang": language}
+
+    def test_generated_source_uses_odoo_19_export_wizard_contract(self) -> None:
+        from odoo_instance_sdk.internal.automation import _build_export_source
+
+        source = _build_export_source("komfarm_data_exchange", "ru_RU")
+
+        assert "'lang': _lang" in source
+        assert "_wiz.act_getfile()" in source
+        assert "'filename': _wiz.name" in source
+        assert "_b64.b64encode(_b64.b64decode(_wiz.data or b''))" in source
+        assert "act_update" not in source
+
     def test_ru_ru_writes_ru_po(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
         po_content = b'msgid ""\nmsgstr ""\n'
@@ -480,6 +515,35 @@ class TestTranslationsExport:
         assert r.requested_lang == "ru_RU"
         assert r.path.name == "ru.po"
         assert r.path.read_bytes() == po_content
+
+    def test_new_language_writes_module_pot(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        pot_content = b'msgid ""\nmsgstr ""\n'
+        payload = {
+            "ok": True,
+            "commit": False,
+            "result": {
+                "iso": "__new__",
+                "filename": "komfarm_data_exchange.pot",
+                "data": base64.b64encode(pot_content).decode(),
+                "module": "komfarm_data_exchange",
+                "installed": True,
+                "lang": "__new__",
+            },
+        }
+        worktree = tmp_path / "wt"
+        (worktree / "komfarm_data_exchange" / "i18n").mkdir(parents=True)
+        (worktree / "komfarm_data_exchange" / "__manifest__.py").write_text("{}")
+        with patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)):
+            results = export_translations(
+                inst,
+                ("komfarm_data_exchange",),
+                ("__new__",),
+                worktree_root=worktree,
+            )
+
+        assert results[0].path.name == "komfarm_data_exchange.pot"
+        assert results[0].path.read_bytes() == pot_content
 
     def test_containment_escape_rejected(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
@@ -591,6 +655,96 @@ class TestTranslationsExport:
 
 
 class TestDepsVerify:
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
+    def test_uv_selector_captures_native_argv_before_execution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from odoo_instance_sdk.internal.automation import verify_deps_command
+
+        resolver = MagicMock(side_effect=AssertionError("uv python find must not run"))
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.server.run_command",
+            resolver,
+        )
+        command = verify_deps_command(recorded_python="3.12", worktree_root=tmp_path)
+
+        uv_path = shutil.which("uv")
+        assert uv_path is not None
+        assert command.plan.process_steps[0].step_id == "deps.verify.pip-check"
+        assert command.plan.process_steps[0].argv[:6] == (
+            str(Path(uv_path).absolute()),
+            "pip",
+            "check",
+            "--python",
+            "3.12",
+        )
+        assert all(
+            step.step_id != "deps.verify.resolve-project-runtime" for step in command.plan.steps
+        )
+        resolver.assert_not_called()
+
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
+    def test_uv_selector_executes_the_captured_probe_steps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from odoo_instance_sdk.internal.automation import verify_deps_command
+        from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RecordingExecutor
+
+        worktree = tmp_path / "wt"
+        manifest = worktree / "myaddon"
+        manifest.mkdir(parents=True)
+        (manifest / "__manifest__.py").write_text(
+            "{'external_dependencies': {'python': ['requests']}}"
+        )
+
+        def result_for(step: object) -> ProcessResult:
+            prepared = cast("PreparedStep", step)
+            return ProcessResult(
+                argv=prepared.argv,
+                returncode=0,
+                stdout="",
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+
+        executor = RecordingExecutor(result_factory=result_for)
+
+        command = verify_deps_command(
+            recorded_python="3.12",
+            worktree_root=worktree,
+            executor=executor,
+        )
+        planned = command.plan.process_steps
+
+        assert tuple(step.step_id for step in planned) == (
+            "deps.verify.pip-check",
+            "deps.verify.import.0",
+        )
+        uv_path = shutil.which("uv")
+        assert uv_path is not None
+        assert planned[1].argv[:8] == (
+            str(Path(uv_path).absolute()),
+            "run",
+            "--no-project",
+            "--python",
+            "3.12",
+            "--",
+            "python",
+            "-c",
+        )
+        command.run()
+        from odoo_instance_sdk.internal.proc.redaction import project_process_step
+
+        assert tuple(step.step_id for step in executor.executed) == tuple(
+            step.step_id for step in planned
+        )
+        assert all(
+            project_process_step(actual) == expected
+            for actual, expected in zip(executor.executed, planned, strict=True)
+        )
+
     def test_missing_import_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         worktree = tmp_path / "wt"
         mod_dir = worktree / "myaddon"

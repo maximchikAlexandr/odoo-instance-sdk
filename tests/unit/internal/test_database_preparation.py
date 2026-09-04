@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -124,6 +125,77 @@ def test_preparation_command_captures_restore_process_manifest_before_run(
     )
 
 
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
+def test_restore_uv_selector_is_not_resolved_while_planning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
+
+    source = tmp_path / "odoo.conf"
+    source.write_text(
+        "[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8069\nadmin_passwd = local-secret\n"
+    )
+    odoo = tmp_path / "odoo-bin"
+    odoo.write_text("#!/bin/sh\nexit 0\n")
+    odoo.chmod(0o755)
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        python="3.12",
+        odoo_bin=odoo,
+        source_config=source,
+        default_source_database="source",
+        test_instance=ConfigTestInstance(base_url="https://example.test", database="remote"),
+    )
+    uv_resolution = MagicMock(side_effect=AssertionError("uv must run at execution time"))
+    monkeypatch.setattr("odoo_instance_sdk.internal.server.run_command", uv_resolution)
+
+    command = DatabasePreparationCoordinator(MagicMock()).refresh_database_command(
+        project,
+        options=DatabaseRefreshOptions(restore=True, reset_admin_password=True),
+    )
+
+    uv_resolution.assert_not_called()
+    uv_path = shutil.which("uv")
+    assert uv_path is not None
+    shell_step = next(
+        step for step in command.plan.process_steps if step.step_id == "instance.shell_script"
+    )
+    assert shell_step.argv[:8] == (
+        str(Path(uv_path).absolute()),
+        "run",
+        "--no-project",
+        "--python",
+        "3.12",
+        "--",
+        "python",
+        str(odoo),
+    )
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
+def test_restore_uv_selector_executes_the_captured_shell_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command, executor, _project, _backup, _write = _production_restore_command(
+        tmp_path,
+        monkeypatch,
+        python_value="3.12",
+    )
+
+    command.run()
+
+    shell_step = next(
+        step for step in command.plan.process_steps if step.step_id == "instance.shell_script"
+    )
+    from odoo_instance_sdk.internal.proc.redaction import project_process_step
+
+    assert project_process_step(executor.executed[-1]) == shell_step
+    assert executor.executed[-1].argv[:8] == shell_step.argv[:8]
+    assert tuple(step.step_id for step in executor.executed) == tuple(
+        step.step_id for step in command.plan.process_steps
+    )
+
+
 def test_preparation_command_runs_captured_git_steps_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -170,6 +242,7 @@ def _production_restore_command(
     monkeypatch: pytest.MonkeyPatch,
     *,
     odoo_returncode: int = 0,
+    python_value: str | Path | None = None,
 ) -> tuple[
     Command[DatabasePreparationResult],
     RecordingExecutor,
@@ -178,9 +251,10 @@ def _production_restore_command(
     MagicMock,
 ]:
     """Build the public preparation command with real active adapters."""
+    import shutil
+
     from odoo_instance_sdk.internal import database_preparation as preparation
     from odoo_instance_sdk.internal.database_preparation import (
-        ProjectRuntimeBinding,
         RestorePreflight,
         resolve_test_source,
     )
@@ -193,8 +267,10 @@ def _production_restore_command(
     )
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
+    real_which = shutil.which
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: "/usr/bin/psql"
+        "odoo_instance_sdk.internal.pg.builder.shutil.which",
+        lambda name: "/usr/bin/psql" if name == "psql" else real_which(name),
     )
     source = tmp_path / "odoo.conf"
     source.write_text(
@@ -216,7 +292,7 @@ def _production_restore_command(
     odoo.chmod(0o755)
     project = ProjectConfig(
         repository_root=tmp_path,
-        python=python,
+        python=python if python_value is None else python_value,
         odoo_bin=odoo,
         source_config=source,
         postgres=PostgresProjectConfig(
@@ -240,7 +316,7 @@ def _production_restore_command(
     )
     options = DatabaseRefreshOptions(restore=True, reset_admin_password=True)
     source_resolution = resolve_test_source(project, options)
-    runtime = ProjectRuntimeBinding(str(python), str(odoo), tmp_path)
+    runtime = preparation.resolve_runtime_binding(project, tmp_path)
 
     @contextlib.contextmanager
     def fake_preflight(
@@ -335,6 +411,26 @@ def test_production_restore_command_consumes_compose_psql_and_odoo_steps(
     assert executor.executed[-1].wrapper_nonce.encode() in (executor.executed[-1].stdin or b"")
     assert len(executor.executed) == len({step.step_id for step in executor.executed})
     assert write.called
+
+
+def test_production_restore_reset_uses_python_selector_from_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    resolved_python = shutil.which("python3")
+    if resolved_python is None:
+        pytest.skip("python3 is required")
+
+    command, executor, _project_config, _backup_value, _write = _production_restore_command(
+        tmp_path,
+        monkeypatch,
+        python_value="python3",
+    )
+
+    command.run()
+
+    assert executor.executed[-1].argv[0] == str(Path(resolved_python).absolute())
 
 
 def test_production_restore_command_rolls_back_after_odoo_child_failure(
@@ -547,18 +643,32 @@ def test_freshness_boundaries(tmp_path: Path) -> None:
     )
 
 
-def test_target_name_is_valid_and_utf8_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_target_name_is_valid_and_utf8_bounded() -> None:
     from odoo_instance_sdk.internal.database_preparation import generate_target_database
     from odoo_instance_sdk.internal.db_name import validate_db_name
 
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_preparation.uuid.uuid4",
-        lambda: MagicMock(hex="a" * 32),
+    name = generate_target_database(
+        "source_" + "x" * 100,
+        now=datetime(2026, 9, 3, 9, 4, 20, tzinfo=UTC),
+        suffix="2ee3a458a068",
     )
-    name = generate_target_database("source_" + "x" * 100)
     validate_db_name(name)
     assert len(name.encode("utf-8")) <= 63
-    assert "refresh" in name
+    assert name.endswith("_20260903090420_2ee3a458a068")
+    assert "_refresh_" not in name
+
+
+def test_target_name_omits_refresh_marker() -> None:
+    from odoo_instance_sdk.internal.database_preparation import generate_target_database
+
+    assert (
+        generate_target_database(
+            "KOM-307_4",
+            now=datetime(2026, 9, 3, 9, 4, 20, tzinfo=UTC),
+            suffix="2ee3a458a068",
+        )
+        == "KOM-307_4_20260903090420_2ee3a458a068"
+    )
 
 
 def test_target_reservation_rechecks_collisions() -> None:
@@ -1099,6 +1209,39 @@ def test_restore_admin_reset_failure_retains_target_and_removes_config(
     assert not list(tmp_path.glob(".odcli-refresh-*.conf"))
     assert project.default_source_database == "old"
     local.databases.restore.assert_called_once()
+
+
+def test_pinned_http_download_reaches_remote_database_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import database_preparation as preparation
+
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        test_instance=ConfigTestInstance(
+            base_url="http://example.test:8069",
+            database="remote_test",
+        ),
+    )
+    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    client = MagicMock()
+    client.instance.return_value.databases.backup.return_value = backup
+    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
+    monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "http://example.test:8069")
+    monkeypatch.setattr(
+        preparation, "canonical_project_identity", lambda _: (tmp_path, tmp_path, "repo")
+    )
+    monkeypatch.setattr(preparation, "exclusive_lock", lambda _: contextlib.nullcontext())
+
+    result = preparation.prepare_download(client, project)
+
+    assert result.backup == backup
+    client.instance.assert_called_once_with(
+        "http://example.test:8069", master_password="remote-secret"
+    )
+    client.instance.return_value.databases.backup.assert_called_once_with(
+        "remote_test", source_git_branch=None
+    )
 
 
 def test_checkout_coalesces_fresh_result_under_preparation_lock(

@@ -12,6 +12,7 @@ import click
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
+    project_provenance,
     ready_instance,
     resolve_project_path,
 )
@@ -90,7 +91,7 @@ def db_refresh(
             result=cast(
                 "Callable[[DatabasePreparationResult | None], dict[str, JsonValue]]", model_to_dict
             ),
-            provenance={"project_source": ctx.project_source},
+            provenance={"project_source": project_provenance(ctx)},
             rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
         )
     except Exception as exc:
@@ -111,7 +112,9 @@ def db_reset_admin_password(
     """Reset the administrator on the exact ready environment binding."""
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, environment, instance = ready_instance(ctx)
+        runtime_context = ready_instance(ctx)
+        instance = runtime_context.instance
+        environment = runtime_context.require_environment()
         _validate_recorded_database_binding(instance, environment)
         command = instance.databases.reset_admin_password_command()
     except Exception as exc:
@@ -127,7 +130,7 @@ def db_reset_admin_password(
                 "Callable[[AdminPasswordResetResult | None], dict[str, JsonValue]]", model_to_dict
             ),
             context={"environment_id": str(environment.id)},
-            provenance={"environment_source": ctx.environment_source},
+            provenance=cast("dict[str, JsonValue]", runtime_context.output_provenance),
             rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
         )
     except Exception as exc:

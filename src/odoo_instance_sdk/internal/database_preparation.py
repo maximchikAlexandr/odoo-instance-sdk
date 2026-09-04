@@ -39,6 +39,12 @@ from odoo_instance_sdk.internal.locks import (
     exclusive_lock_until,
 )
 from odoo_instance_sdk.internal.odoo_config import infer_base_url, parse_odoo_config
+from odoo_instance_sdk.internal.project_runtime import (
+    is_uv_python_selector,
+    resolve_project_runtime,
+    resolve_uv_executable,
+    uv_run_prefix,
+)
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.test_instance_trust import require_test_instance_origin_approval
 from odoo_instance_sdk.internal.urls import assert_local, normalize_base_url
@@ -93,12 +99,22 @@ class TestSourceResolution:
 
 @dataclass(frozen=True, slots=True)
 class ProjectRuntimeBinding:
-    python_executable: str
+    python_executable: str | None
     odoo_bin: str
     runtime_cwd: Path
+    python_selector: str | None = None
+    uv_executable: str | None = None
 
     @property
-    def command_prefix(self) -> tuple[str, str]:
+    def command_prefix(self) -> tuple[str, ...]:
+        if self.python_selector is not None:
+            return uv_run_prefix(
+                self.python_selector,
+                uv_executable=self.uv_executable,
+                command=("python", self.odoo_bin),
+            )
+        if self.python_executable is None:
+            raise InstanceConfigurationError("project runtime has no Python executable")
         return (self.python_executable, self.odoo_bin)
 
 
@@ -250,7 +266,7 @@ def generate_target_database(
     slug = _TARGET_SLUG_RE.sub("_", remote_database).strip("._-") or "database"
     suffix_value = suffix or uuid.uuid4().hex[:12]
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%d%H%M%S")
-    marker = f"_refresh_{stamp}_{suffix_value}"
+    marker = f"_{stamp}_{suffix_value}"
     prefix = _truncate_utf8(slug, max(1, _MAX_TARGET_BYTES - len(marker.encode("utf-8"))))
     candidate = f"{prefix}{marker}"
     candidate = _truncate_utf8(candidate, _MAX_TARGET_BYTES)
@@ -410,8 +426,21 @@ def resolve_runtime_binding(project: ProjectConfig, root: Path) -> ProjectRuntim
         runtime_cwd = runtime_cwd.resolve()
     if not runtime_cwd.is_dir():
         raise InstanceConfigurationError("runtime cwd is missing or not a directory")
+    if is_uv_python_selector(project.python):
+        selector = cast("str", project.python)
+        uv_executable = resolve_uv_executable(selector=selector)
+        return ProjectRuntimeBinding(
+            python_executable=None,
+            odoo_bin=_resolve_executable(project.odoo_bin, root, "odoo_bin"),
+            runtime_cwd=runtime_cwd,
+            python_selector=selector,
+            uv_executable=str(uv_executable),
+        )
+    python_executable = resolve_project_runtime(root, project.python, field="python")
+    if not os.access(python_executable, os.X_OK):
+        raise InstanceConfigurationError("python executable is missing or not executable")
     return ProjectRuntimeBinding(
-        python_executable=_resolve_executable(project.python, root, "python"),
+        python_executable=str(python_executable),
         odoo_bin=_resolve_executable(project.odoo_bin, root, "odoo_bin"),
         runtime_cwd=runtime_cwd,
     )

@@ -19,7 +19,12 @@ from odoo_instance_sdk.models import CommandResult, OdooTestResult, OdooTestSpec
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
-    from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RunContext
+    from odoo_instance_sdk.internal.proc import (
+        PreparedStep,
+        ProcessExecutor,
+        ProcessResult,
+        RunContext,
+    )
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -707,17 +712,15 @@ def export_translations_command(
 
 
 def _build_export_source(module: str, lang: str) -> str:
-    modules_repr = json.dumps([module])
-    lang_repr = json.dumps(lang)
     return (
         "import base64 as _b64\n"
         "from odoo.tools import get_iso_codes as _get_iso_codes\n"
-        f"_module = {modules_repr!r}[0]\n"
-        f"_lang = {lang_repr!r}\n"
+        f"_module = {module!r}\n"
+        f"_lang = {lang!r}\n"
         "_is_pot = _lang in ('pot', '__new__', '', None)\n"
         "if _is_pot:\n"
         "    _wiz = env['base.language.export'].create({\n"
-        "        'name': '__new__', 'format': 'po', 'export_type': 'module',\n"
+        "        'lang': '__new__', 'format': 'po', 'export_type': 'module',\n"
         f"        'modules': [(_module,)] if False else [(6, 0, env['ir.module.module'].search([('name','=',_module)]).ids)],\n"
         "    })\n"
         "else:\n"
@@ -726,17 +729,17 @@ def _build_export_source(module: str, lang: str) -> str:
         "        result = {'error': 'language not active', 'lang': _lang}\n"
         "    else:\n"
         "        _wiz = env['base.language.export'].create({\n"
-        "            'name': _lang_obj.id, 'format': 'po', 'export_type': 'module',\n"
+        "            'lang': _lang, 'format': 'po', 'export_type': 'module',\n"
         f"            'modules': [(6, 0, env['ir.module.module'].search([('name','=',_module)]).ids)],\n"
         "        })\n"
         "if 'result' not in globals() or not isinstance(result, dict) or 'error' not in result:\n"
-        "    _wiz.act_update()\n"
-        "    _iso = _get_iso_codes(_wiz.name) if not _is_pot else _wiz.name\n"
-        "    _data = _wiz.data or ''\n"
+        "    _wiz.act_getfile()\n"
+        "    _iso = _get_iso_codes(_lang) if not _is_pot else _module\n"
+        "    _data = _b64.b64encode(_b64.b64decode(_wiz.data or b'')).decode('ascii')\n"
         "    _mod_obj = env['ir.module.module'].search([('name','=',_module)], limit=1)\n"
         "    _mod_path = _mod_obj._module_path if hasattr(_mod_obj, '_module_path') else None\n"
         "    result = {\n"
-        "        'iso': _iso, 'filename': (_iso or _lang) + '.po',\n"
+        "        'iso': _iso, 'filename': _wiz.name,\n"
         "        'data': _data, 'module': _module,\n"
         "        'installed': bool(_mod_obj and _mod_obj.state in ('installed', 'to upgrade')),\n"
         "        'lang': _lang,\n"
@@ -814,7 +817,7 @@ class DepsVerifyResult:
 
 def verify_deps(
     *,
-    recorded_python: Path,
+    recorded_python: Path | str,
     worktree_root: Path,
     uv_executable: str = "uv",
 ) -> DepsVerifyResult:
@@ -827,19 +830,33 @@ def verify_deps(
 
 def verify_deps_command(
     *,
-    recorded_python: Path,
+    recorded_python: Path | str,
     worktree_root: Path,
     uv_executable: str = "uv",
+    executor: ProcessExecutor | None = None,
 ) -> Command[DepsVerifyResult]:
     """Capture dependency verification probes in one command ledger."""
     from odoo_instance_sdk.execution import Command, ExecutionPlan
     from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
+    from odoo_instance_sdk.internal.project_runtime import (
+        is_uv_python_selector,
+        uv_run_prefix,
+    )
 
     imports = _scan_external_python_deps(worktree_root)
+    python_prefix = (
+        uv_run_prefix(
+            str(recorded_python),
+            uv_executable=uv_executable,
+            command=("python",),
+        )
+        if is_uv_python_selector(recorded_python)
+        else (str(recorded_python),)
+    )
     steps = [
         PreparedStep(
             step_id="deps.verify.pip-check",
-            argv=(uv_executable, "pip", "check", "--python", str(recorded_python)),
+            argv=(python_prefix[0], "pip", "check", "--python", str(recorded_python)),
             read_only=True,
             text=True,
         )
@@ -848,7 +865,7 @@ def verify_deps_command(
         steps.append(
             PreparedStep(
                 step_id=f"deps.verify.import.{index}",
-                argv=(str(recorded_python), "-c", f"import {import_name}"),
+                argv=(*python_prefix, "-c", f"import {import_name}"),
                 cwd=str(worktree_root),
                 read_only=True,
                 text=True,
@@ -872,7 +889,7 @@ def verify_deps_command(
         return result
 
     plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-    return Command.create(plan, run, tuple(steps), executor=SubprocessExecutor())
+    return Command.create(plan, run, tuple(steps), executor=executor or SubprocessExecutor())
 
 
 def _scan_external_python_deps(worktree_root: Path) -> list[tuple[str, str]]:
