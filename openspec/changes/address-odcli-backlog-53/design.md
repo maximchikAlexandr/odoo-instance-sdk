@@ -78,11 +78,15 @@ The catalogue receives a minimal durable `projects` registration keyed by the ca
 
 Alternative considered: scan the filesystem on every monitor request. Rejected because it is nondeterministic, unbounded, and cannot provide a reliable global project inventory.
 
-### 8. Frame eval user output inside the existing shell payload
+### 8. Frame eval and exec user output inside the existing shell payload
 
-The eval wrapper will redirect user-code stdout to an in-memory buffer and emit one nonce-framed typed payload containing `result`, `user_stdout`, and structured `user_error`. Startup stdout remains outside the payload. Exception serialization keeps type, message, and bounded traceback/source context; truncation removes oldest unrelated startup material first and records a flag. The CLI maps this payload into Rich and machine envelopes without raw writes.
+The shared eval/exec shell wrapper will redirect user-code stdout to an in-memory buffer and emit one nonce-framed typed payload containing `result`, `user_stdout`, structured `user_error`, and `truncated`. Startup stdout remains outside the payload. Exception serialization keeps type, message, and bounded traceback/source context; truncation removes oldest unrelated startup material first and records a flag.
+
+A valid framed user-code exception from either `eval` or `exec` is a failed bounded operation, not a successful document with a non-zero process exit. The process exits `1` and JSON/TOON emit envelope v1 with `ok=false`, no top-level `result` or `data`, a sanitized `error.message`, and additive `error.details`. The command-specific code is `eval_user_code_failed` for `eval` and `exec_user_code_failed` for `exec`. For either failure, `error.details` is the redacted framed diagnostic object with exactly `result=null`, bounded `user_stdout`, non-null structured `user_error`, and boolean `truncated`. `OutputError.details` is an optional JSON-safe field: other failures omit it, so their existing v1 shape is unchanged. A non-zero command without a valid framed user-code error is a startup/transport failure with `eval_startup_failed` or `exec_startup_failed`, respectively, and no fabricated framed details. Rich renders the same typed failure details as separate result, output, and error sections.
 
 Alternative considered: infer user output by subtracting known startup lines. Rejected because Odoo startup logs vary and caused the reported diagnostic loss.
+
+Alternative considered: keep `ok=true` so the framed payload can remain under top-level `result`/`data`, then return a non-zero process exit out of band. Rejected because it contradicts the bounded-operation success/failure invariant and makes machine consumers disagree with the process status.
 
 ## Risks / Trade-offs
 

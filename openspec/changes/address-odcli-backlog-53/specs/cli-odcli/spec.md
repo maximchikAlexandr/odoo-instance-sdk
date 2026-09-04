@@ -78,7 +78,7 @@ The CLI SHALL expose `odcli db drop DATABASE [--force-default] [--force-connecti
 
 The exact bounded structured leaf inventory is: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `db refresh`, `db reset-admin-password`, `db drop`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `db locks`, `db stats`, `db bloat`, `db init-monitoring`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Each SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Existing `--json` SHALL remain a backward-compatible alias for `--format json`. Supplying `--json` with `--format toon` or `--format rich` SHALL be a Click usage error with exit code `2`; supplying `--json --format json` SHALL be accepted. During normal execution, `run`, interactive `shell`, `psql`, and `logs --follow` SHALL remain raw-streaming and SHALL not emit document output or use a Rich live wrapper. Eligible spawning `run` and `shell` SHALL accept document-format options only together with `--dry-run`; those dry-run paths SHALL suppress native execution and emit one bounded plan document in Rich, JSON, or TOON, with `--json` equivalent to `--format json`. `psql --dry-run` SHALL remain an explicit plan-only exception that emits the shared sanitized native command plan without spawning; normal `psql` remains raw passthrough and SHALL continue to reject `--format` and `--json`.
 
-The CLI SHALL define one CLI-only `OutputMode` with values `rich`, `json`, and `toon`. The mode and envelope types SHALL NOT become public SDK models or FastAPI response models. Each successful or failed bounded operation SHALL first build one JSON-safe CLI envelope v1 containing `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, and `warnings`; success SHALL contain equal `result` and `data`, and failure SHALL contain stable `error.code` and sanitized `error.message`.
+The CLI SHALL define one CLI-only `OutputMode` with values `rich`, `json`, and `toon`. The mode and envelope types SHALL NOT become public SDK models or FastAPI response models. Each successful or failed bounded operation SHALL first build one JSON-safe CLI envelope v1 containing `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, and `warnings`; success SHALL contain equal `result` and `data`, while failure SHALL omit top-level `result` and `data` and SHALL contain stable `error.code` and sanitized `error.message`. `error` MAY additionally contain an operation-specific JSON-safe `details` field; failures without structured details SHALL omit it and retain their existing v1 shape.
 
 JSON and TOON SHALL serialize that exact envelope without building format-specific result graphs. Decoding a TOON document with the selected strict decoder SHALL yield the same JSON value as decoding JSON output for the same operation. Machine modes SHALL emit exactly one UTF-8 document to stdout with no ANSI, prompt, status, progress, or external log text; diagnostics SHALL go to stderr. Renderer selection SHALL NOT change operation execution, exception mapping, or exit code. Native Click parse failures that occur before output-mode resolution SHALL retain Click's stderr usage output and exit code `2`.
 
@@ -110,6 +110,12 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 
 - **WHEN** a bounded machine-mode operation reports a sanitized diagnostic in addition to its result
 - **THEN** stdout contains exactly one JSON or TOON envelope and the diagnostic is written only to stderr
+
+#### Scenario: Structured failure details preserve the failure variant
+
+- **WHEN** a bounded operation has structured diagnostics required by its capability contract
+- **THEN** the machine document has `ok=false`, omits top-level `result` and `data`, retains `error.code` and sanitized `error.message`, and stores those diagnostics only in JSON-safe `error.details`
+- **AND** a failure without such diagnostics omits `error.details`
 
 #### Scenario: Machine remove requires explicit confirmation
 
@@ -221,9 +227,10 @@ odcli exec ./script.py -- arg1 arg2
 
 - `eval` MUST вычислять одно Python expression в Odoo shell context (`env`, `odoo`, `self`) и возвращать scalar/collection JSON либо typed recordset summary `{model, ids, count}`; unknown objects MUST получать bounded sanitized `repr`.
 - `eval` SHALL return captured user stdout separately from the expression result, including print-only `exec(...)`, Unicode/multiline output, and output emitted before an exception.
-- Eval failure SHALL distinguish Odoo startup failure from user-code failure and preserve the exception type, message, and relevant traceback/source context after bounded truncation; startup-log prefixes SHALL NOT replace the actual exception.
+- Eval failure SHALL distinguish Odoo startup failure from user-code failure and preserve the exception type, message, and relevant traceback/source context after bounded truncation; startup-log prefixes SHALL NOT replace the actual exception. A valid framed user-code exception SHALL produce envelope v1 with `ok=false`, no top-level `result` or `data`, `error.code="eval_user_code_failed"`, and `error.details` containing exactly `result=null`, bounded `user_stdout`, non-null structured `user_error`, and boolean `truncated`. A non-zero eval without a valid framed user-code error SHALL use `error.code="eval_startup_failed"` and SHALL NOT fabricate framed details.
 - Rich SHALL label user output separately; JSON and TOON SHALL carry it as a structured field and SHALL never inject raw prints into machine stdout.
 - `exec` MUST читать explicit file (`-` означает caller stdin), передавать script через shell stdin и устанавливать predictable `sys.argv` из tokens после `--`.
+- `exec` SHALL apply the same framed failure shape and exit behavior as `eval`: a valid framed user-code exception SHALL exit `1` with `ok=false`, no top-level `result` or `data`, `error.code="exec_user_code_failed"`, and `error.details` containing exactly `result=null`, bounded `user_stdout`, non-null structured `user_error`, and boolean `truncated`; a non-zero exec without a valid framed user-code error SHALL use `error.code="exec_startup_failed"` and SHALL NOT fabricate `error.details`.
 - default MUST быть best-effort shell rollback. Explicit `--commit` MUST быть виден в plan.
 - project config MUST NOT автоматически подставлять eval/exec source.
 - All output and diagnostics SHALL remain secret-redacted, and failures SHALL remain non-zero.
@@ -234,7 +241,23 @@ odcli exec ./script.py -- arg1 arg2
 
 #### Scenario: Print then fail
 - **WHEN** eval runs `exec("print('before'); raise ValueError('failure')")`
-- **THEN** captured user output contains `before`, the diagnostic identifies `ValueError: failure` with relevant context, and the command exits non-zero
+- **THEN** the command exits `1` and JSON/TOON emit one failure envelope with `ok=false`, no top-level `result` or `data`, and `error.code="eval_user_code_failed"`
+- **AND** `error.details.result` is null, `error.details.user_stdout` contains `before`, `error.details.user_error` identifies `ValueError: failure` with relevant source context, and `error.details.truncated` reports bounded truncation
+- **AND** Rich renders those same redacted details as separate result, output, and error sections
+
+#### Scenario: Startup failure has no user-code payload
+- **WHEN** eval exits non-zero before producing a valid framed user-code error
+- **THEN** the command exits `1` with one failure envelope using `error.code="eval_startup_failed"`, a sanitized message, no top-level `result` or `data`, and no fabricated `error.details`
+
+#### Scenario: Exec script prints then fails
+- **WHEN** `odcli exec` runs a script that prints `before` and then raises `ValueError("failure")`
+- **THEN** the command exits `1` and JSON/TOON emit one failure envelope with `ok=false`, no top-level `result` or `data`, and `error.code="exec_user_code_failed"`
+- **AND** `error.details` contains exactly `result=null`, bounded `user_stdout` containing `before`, non-null structured `user_error` identifying `ValueError: failure` with relevant source context, and boolean `truncated`
+- **AND** Rich renders those same redacted details as separate result, output, and error sections
+
+#### Scenario: Exec startup failure has no user-code payload
+- **WHEN** exec exits non-zero before producing a valid framed user-code error
+- **THEN** the command exits `1` with one failure envelope using `error.code="exec_startup_failed"`, a sanitized message, no top-level `result` or `data`, and no fabricated `error.details`
 
 ### Requirement: `module` commands
 

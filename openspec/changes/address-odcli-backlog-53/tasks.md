@@ -56,12 +56,12 @@
 - [x] 7.2 Regenerate the TypeScript client from the canonical OpenAPI schema and update the project card/empty-state logic to render live project-owned runtime metrics when no environments exist.
 - [x] 7.3 Add FastAPI serialization and React tests for project-only, mixed, stopped/stale, filtered, and redacted snapshots without adding an endpoint or handwritten DTO.
 
-## 8. Eval diagnostics and captured output
+## 8. Eval and exec diagnostics and captured output
 
 - [x] 8.1 Extend the existing nonce-framed eval wrapper payload with separate typed result, captured user stdout, structured user-code error, and truncation state while leaving startup output outside the frame.
 - [x] 8.2 Implement bounded exception/source-context retention that distinguishes startup failure from user-code failure and preferentially retains exception type/message after long startup logs.
-- [x] 8.3 Update Rich and machine projections to display/store user output separately, keep print-only results null, preserve non-zero failure exits, and redact every result/output/diagnostic field.
-- [x] 8.4 Add regressions for scalar success, print-only exec, print-then-exception, multiline Unicode, startup failure, exception after a long startup log, truncation signaling, JSON/TOON parsing, and secret redaction.
+- [ ] 8.3 Map a valid framed user-code exception from eval or exec to exit `1` and envelope v1 `ok=false` with no top-level `result`/`data`, command-specific `error.code` (`eval_user_code_failed` or `exec_user_code_failed`), sanitized `error.message`, and `error.details` containing exactly `result=null`, bounded `user_stdout`, non-null structured `user_error`, and boolean `truncated`; add optional JSON-safe `OutputError.details` without changing failures that omit it, classify non-framed non-zero commands as `eval_startup_failed` or `exec_startup_failed`, render Rich from the same details, and redact every field.
+- [ ] 8.4 Add regressions for eval scalar success, exec print-only success, eval and exec print-then-exception with their exact command-specific failure-envelope shapes and exit `1`, eval and exec startup failures without fabricated details, multiline Unicode, exception after a long startup log, truncation signaling, JSON/TOON semantic equality, Rich parity, unchanged failures without details, and secret redaction.
 
 ## 9. Acceptance and delivery
 
