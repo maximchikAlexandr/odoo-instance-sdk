@@ -60,6 +60,27 @@ class PgAdminEligibilityState(enum.StrEnum):
     CLUSTER_NOT_OWNED = "cluster_not_owned"
     CLUSTER_UNHEALTHY = "cluster_unhealthy"
 
+type ClusterUnavailabilityReason = Literal[
+    "external_not_owned",
+    "stopped",
+    "missing",
+    "docker_unavailable",
+    "inspect_failed",
+    "stats_failed",
+]
+
+type ServerUnavailabilityReason = Literal[
+    "psql_missing",
+    "credentials_missing",
+    "server_unreachable",
+    "maintenance_database_unavailable",
+    "authentication_failed",
+    "privilege_denied",
+    "timeout",
+    "query_failed",
+    "invalid_response",
+]
+
 class PgAdminEligibility:
     state: PgAdminEligibilityState
 
@@ -127,6 +148,16 @@ class ClusterEndpoint:
     host: str
     port: int
 
+class PostgresServerInfo:
+    version: str
+    postmaster_started_at: datetime
+    uptime_seconds: int
+    connections_total: int
+    connections_active: int
+    connections_idle: int
+    max_connections: int
+    connectable_databases: int
+
 class ClusterResourceSnapshot:
     container: ClusterContainer | None
     metrics: ClusterMetrics | None
@@ -140,8 +171,10 @@ class ClusterSnapshot:
     endpoint: ClusterEndpoint | None
     container: ClusterContainer | None
     metrics: ClusterMetrics | None
-    unavailability_reason: str | None
+    unavailability_reason: ClusterUnavailabilityReason | None
     sampled_at: datetime | None
+    server: PostgresServerInfo | None
+    server_unavailability_reason: ServerUnavailabilityReason | None
 
 class EnvironmentArtifacts:
     worktree_exists: bool
@@ -186,7 +219,7 @@ class Snapshot:
 
 `ProjectSummary.runtime` SHALL be `None` when no project-owned runtime record exists. A recorded but non-live or stale project runtime SHALL be present with `state="stopped"`, `root_pid=None`, `child_pids=()`, `process_count=0`, and every CPU/RAM/start/HTTP/database/commit/branch field null. Live project runtime SHALL use the same collection and redaction rules as environment runtime. No other public field SHALL be added.
 
-`unavailability_reason` allowed values: `external_not_owned`, `stopped`, `missing`, `docker_unavailable`, `inspect_failed`, `stats_failed`.
+`ClusterUnavailabilityReason` allowed values SHALL remain `external_not_owned`, `stopped`, `missing`, `docker_unavailable`, `inspect_failed`, and `stats_failed`. `ServerUnavailabilityReason` allowed values SHALL remain `psql_missing`, `credentials_missing`, `server_unreachable`, `maintenance_database_unavailable`, `authentication_failed`, `privilege_denied`, `timeout`, `query_failed`, and `invalid_response`. `ClusterSnapshot.server` and `server_unavailability_reason` SHALL preserve the existing PostgreSQL diagnostics collection, validation, nullability, redaction, and serialization contract.
 
 Collector MUST populate `EnvironmentSnapshot` as:
 
@@ -221,6 +254,11 @@ UI lifecycle badge uses `lifecycle_state`. UI/CLI port uses `runtime.http_port` 
 
 - **WHEN** one registered project has no runtime record and another has a stale project-owned record
 - **THEN** the first has `runtime is None` and the second has the canonical present stopped/null `RuntimeMetrics` without unrelated process data
+
+#### Scenario: PostgreSQL diagnostics remain in schema version 4
+
+- **WHEN** a cluster snapshot contains PostgreSQL server diagnostics or a typed server unavailability reason
+- **THEN** `PostgresServerInfo`, `ClusterSnapshot.server`, `ClusterSnapshot.server_unavailability_reason`, and both exact reason aliases remain present and serialize unchanged alongside the additive project runtime field
 
 ### Requirement: Snapshot top-level contract
 

@@ -47,12 +47,12 @@
 - [ ] 6.2 Upsert registration only after successful non-preview init and before permitted normal foreground runtime persistence; keep resolution/read-only/monitor/dry-run inert and test failed init, legacy project-only normal-run discovery, preview non-discovery, idempotency, backfill, and rollback.
 - [ ] 6.3 Attach one private runtime binding from both `InstanceFactory.from_environment()` and `from_project()` and make foreground spawn/finally persistence owner-neutral while leaving manual/shell/background operations unpersisted.
 - [ ] 6.4 Refactor monitor planning to start from registered projects, join optional environments and both runtime owners, and reuse existing process/readiness/Git/storage/PostgreSQL collectors and stale-PID checks.
-- [ ] 6.5 Bump snapshot schema to 4 and add exactly `ProjectSummary.runtime: RuntimeMetrics | None`, implementing distinct absent-null and present-stopped/null semantics while preserving v3 environment fields, filtering, ordering, cache/invalidation, partial results, redaction, and JSON/TOON behavior; add v3-to-v4 migration assertions.
-- [ ] 6.6 Add unit and integration coverage for project-only catalogue state, live/stale project runtimes, mixed ownership, worker/process/CPU/RAM/readiness/URL/database/cluster metrics, and no synthetic environments.
+- [ ] 6.5 Bump snapshot schema to 4 and add exactly `ProjectSummary.runtime: RuntimeMetrics | None`, implementing distinct absent-null and present-stopped/null semantics while preserving v3 environment fields and the existing `PostgresServerInfo`, `ClusterSnapshot.server`, `ClusterSnapshot.server_unavailability_reason`, `ClusterUnavailabilityReason`, and `ServerUnavailabilityReason` diagnostics contracts; preserve filtering, ordering, cache/invalidation, partial results, redaction, and JSON/TOON behavior and add v3-to-v4 migration assertions.
+- [ ] 6.6 Add unit and integration coverage for project-only catalogue state, live/stale project runtimes, mixed ownership, worker/process/CPU/RAM/readiness/URL/database/cluster metrics, preserved PostgreSQL server diagnostics and every cluster/server unavailability reason, and no synthetic environments.
 
 ## 7. HTTP and dashboard project-runtime support
 
-- [ ] 7.1 Publish schema-version-4 `ProjectSummary.runtime` through the existing msgspec-to-OpenAPI bridge and verify null/stopped/live/mixed/filtered/redacted JSON plus v3 migration fixtures against the generated schema.
+- [ ] 7.1 Publish schema-version-4 `ProjectSummary.runtime` through the existing msgspec-to-OpenAPI bridge and verify null/stopped/live/mixed/filtered/redacted JSON, preserved `PostgresServerInfo` and both typed unavailability fields/reason sets, plus v3 migration fixtures against the generated schema.
 - [ ] 7.2 Regenerate the TypeScript client from the canonical OpenAPI schema and update the project card/empty-state logic to render live project-owned runtime metrics when no environments exist.
 - [ ] 7.3 Add FastAPI serialization and React tests for project-only, mixed, stopped/stale, filtered, and redacted snapshots without adding an endpoint or handwritten DTO.
 
