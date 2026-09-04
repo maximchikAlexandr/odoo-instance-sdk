@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import ast
 import base64
+import io
 import json
 import shutil
 import textwrap
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.cli import _shell_payload, cli
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.address import AddressState
@@ -806,6 +808,22 @@ class TestParsePayload:
 
 
 class TestShellWrapper:
+    @staticmethod
+    def _run(source: str, *, startup: str = "") -> dict[str, Any]:
+        output = io.StringIO()
+        output.write(startup)
+        try:
+            with redirect_stdout(output):
+                exec(
+                    _build_shell_wrapper(source, [], commit=False, nonce="abc123"),
+                    {"env": None},
+                )
+        except BaseException:
+            pass
+        payload = parse_payload(output.getvalue(), nonce="abc123")
+        assert payload is not None
+        return payload
+
     def test_wrapper_emits_result_when_defined(self) -> None:
         wrapper = _build_shell_wrapper("result = 5\n", [], commit=False, nonce="abc123")
         assert "_odcli_serialize_result" in wrapper
@@ -817,6 +835,67 @@ class TestShellWrapper:
         assert "x = 1" in wrapper
         assert '"--y"' in wrapper
         assert "True" in wrapper
+
+    def test_wrapper_separates_scalar_result_and_multiline_unicode_output(self) -> None:
+        payload = self._run(
+            "print('\\u0434\\u043e\\n\\u043f\\u043e\\u0441\\u043b\\u0435')\nresult = 5\n"
+        )
+
+        assert payload["result"] == 5
+        assert payload["user_stdout"] == "\u0434\u043e\n\u043f\u043e\u0441\u043b\u0435\n"
+        assert payload["user_error"] is None
+        assert payload["truncated"] is False
+
+    def test_wrapper_keeps_print_only_result_null(self) -> None:
+        payload = self._run("print('only output')\n")
+
+        assert payload["result"] is None
+        assert payload["user_stdout"] == "only output\n"
+
+    def test_wrapper_retains_structured_user_error_after_long_startup_output(self) -> None:
+        payload = self._run(
+            "print('before')\nraise ValueError('failure')\n",
+            startup="startup log\n" * 10000,
+        )
+
+        assert payload["ok"] is False
+        assert payload["user_stdout"] == "before\n"
+        assert payload["user_error"] == {
+            "type": "ValueError",
+            "message": "failure",
+            "source": {
+                "file": "<odcli-shell-script>",
+                "line": 2,
+                "text": "raise ValueError('failure')",
+            },
+        }
+
+    def test_wrapper_marks_bounded_user_output(self) -> None:
+        payload = self._run("print('x' * 40000)\n")
+
+        assert payload["truncated"] is True
+        assert len(payload["user_stdout"]) == 32768
+
+    def test_cli_payload_projection_redacts_result_and_user_output(self) -> None:
+        value = CommandResult(
+            args=[],
+            returncode=0,
+            stdout=_payload_stdout(
+                {
+                    "result": {"password": "secret", "safe": "ok"},
+                    "user_stdout": "password=secret\n",
+                    "user_error": None,
+                    "truncated": False,
+                }
+            ),
+            stderr="",
+            duration=0.0,
+        )
+
+        projected = _shell_payload(value)
+
+        assert projected["result"] == {"password": "<redacted>", "safe": "ok"}
+        assert projected["user_stdout"] == "password=<redacted>\n"
 
 
 class TestCliEval:
@@ -864,6 +943,66 @@ class TestCliEval:
         envelope = json.loads(result.output)
         assert envelope["ok"] is True
         assert envelope["data"]["result"] == 2
+
+    def test_cli_eval_preserves_user_error_payload_and_nonzero_exit(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from click.testing import CliRunner
+
+        from odoo_instance_sdk.resources import environment as environment_module
+
+        monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18086)
+        opts = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
+        )
+        env = env_client.environments.checkout(project_manifest, "feat/eval-error", options=opts)
+        with (
+            patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script_command"
+            ) as mock_run,
+        ):
+            mock_run.return_value = _command_result(
+                CommandResult(
+                    args=[],
+                    returncode=1,
+                    stdout=_payload_stdout(
+                        {
+                            "ok": False,
+                            "result": None,
+                            "user_stdout": "before\n",
+                            "user_error": {
+                                "type": "ValueError",
+                                "message": "failure",
+                                "source": {
+                                    "file": "<odcli-shell-script>",
+                                    "line": 1,
+                                    "text": "raise ValueError('failure')",
+                                },
+                            },
+                            "truncated": False,
+                        }
+                    ),
+                    stderr="Traceback: startup noise",
+                    duration=0.0,
+                )
+            )
+            result = CliRunner().invoke(cli, ["--env", str(env.id), "eval", "1", "--json"])
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is True
+        assert envelope["data"]["result"] is None
+        assert envelope["data"]["user_stdout"] == "before\n"
+        assert envelope["data"]["user_error"]["type"] == "ValueError"
+        assert envelope["data"]["user_error"]["message"] == "failure"
 
 
 class TestCliModuleUpdate:

@@ -269,7 +269,12 @@ def _sanitize_envelope_value(value: JsonValue, *, preserve_newlines: bool = True
     if isinstance(value, dict):
         return {
             sanitize_terminal_text(key): _sanitize_envelope_value(
-                item, preserve_newlines=preserve_newlines
+                item,
+                # User stdout is structured data: retain line feeds so JSON
+                # and TOON decoders recover the exact multiline text, while
+                # ordinary diagnostic/name fields keep the existing escaped
+                # control-character policy.
+                preserve_newlines=preserve_newlines or key == "user_stdout",
             )
             for key, item in value.items()
         }

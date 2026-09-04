@@ -58,10 +58,10 @@
 
 ## 8. Eval diagnostics and captured output
 
-- [ ] 8.1 Extend the existing nonce-framed eval wrapper payload with separate typed result, captured user stdout, structured user-code error, and truncation state while leaving startup output outside the frame.
-- [ ] 8.2 Implement bounded exception/source-context retention that distinguishes startup failure from user-code failure and preferentially retains exception type/message after long startup logs.
-- [ ] 8.3 Update Rich and machine projections to display/store user output separately, keep print-only results null, preserve non-zero failure exits, and redact every result/output/diagnostic field.
-- [ ] 8.4 Add regressions for scalar success, print-only exec, print-then-exception, multiline Unicode, startup failure, exception after a long startup log, truncation signaling, JSON/TOON parsing, and secret redaction.
+- [x] 8.1 Extend the existing nonce-framed eval wrapper payload with separate typed result, captured user stdout, structured user-code error, and truncation state while leaving startup output outside the frame.
+- [x] 8.2 Implement bounded exception/source-context retention that distinguishes startup failure from user-code failure and preferentially retains exception type/message after long startup logs.
+- [x] 8.3 Update Rich and machine projections to display/store user output separately, keep print-only results null, preserve non-zero failure exits, and redact every result/output/diagnostic field.
+- [x] 8.4 Add regressions for scalar success, print-only exec, print-then-exception, multiline Unicode, startup failure, exception after a long startup log, truncation signaling, JSON/TOON parsing, and secret redaction.
 
 ## 9. Acceptance and delivery
 
