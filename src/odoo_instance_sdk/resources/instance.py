@@ -957,7 +957,9 @@ class OdooInstance:
 
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
         prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (*dependency_steps, step)
-        if self._runtime_binding is not None and resolved_cwd is not None:
+        if (
+            self._runtime_binding is not None or self._environment_id is not None
+        ) and resolved_cwd is not None:
             target = str(resolved_cwd)
             prepared_steps += (
                 _PreparedStep(

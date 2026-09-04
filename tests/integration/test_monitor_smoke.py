@@ -119,7 +119,9 @@ def test_monitor_headless_api_multi_project_snapshot(
     stopped = [env for env in snapshot.environments if env.name == "a-stopped"]
     assert stopped and stopped[0].runtime.state.value == "stopped"
 
-    with TestClient(serve.create_app(headless=True), base_url="http://localhost") as client:
+    with TestClient(
+        serve.create_app(headless=True, monitor=monitor), base_url="http://localhost"
+    ) as client:
         health = client.get("/healthz")
         assert health.status_code == 200
         assert health.json() == {"status": "ok"}

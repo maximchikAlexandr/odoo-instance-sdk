@@ -100,10 +100,11 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         from odoo_instance_sdk.resources.instance import OdooInstance
 
         client = OdooClient(config=OdooClientConfig(executable=shutil.which("true") or "true"))
+        http_port = _free_loopback_port()
         instance = OdooInstance(
             config=InstanceConfig(
-                base_url="http://127.0.0.1:8069",
-                start_config=StartConfig(http_port=8069, config_path="/tmp/odoo.conf"),
+                base_url=f"http://127.0.0.1:{http_port}",
+                start_config=StartConfig(http_port=http_port, config_path="/tmp/odoo.conf"),
             ),
             _client=client,
             _postgres_cluster=cluster,

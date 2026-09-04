@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import socket
 import sys
 import uuid
 from collections.abc import Iterator
@@ -97,16 +98,17 @@ def _make_tracked_instance(
     env_id: str,
     cwd: Path,
     command_prefix: tuple[str, ...],
+    http_port: int,
 ) -> OdooInstance:
     start_cfg = StartConfig(
-        http_port=8069,
+        http_port=http_port,
         http_interface="127.0.0.1",
         config_path=str(cwd / "odoo.conf"),
         db_name="mydb",
     )
     return OdooInstance(
         config=InstanceConfig(
-            base_url="http://127.0.0.1:8069",
+            base_url=f"http://127.0.0.1:{http_port}",
             start_config=start_cfg,
             command_prefix=command_prefix,
             default_cwd=cwd,
@@ -116,16 +118,16 @@ def _make_tracked_instance(
     )
 
 
-def _make_manual_instance(client: OdooClient, cwd: Path) -> OdooInstance:
+def _make_manual_instance(client: OdooClient, cwd: Path, http_port: int) -> OdooInstance:
     start_cfg = StartConfig(
-        http_port=8069,
+        http_port=http_port,
         http_interface="127.0.0.1",
         config_path=str(cwd / "odoo.conf"),
         db_name="mydb",
     )
     return OdooInstance(
         config=InstanceConfig(
-            base_url="http://127.0.0.1:8069",
+            base_url=f"http://127.0.0.1:{http_port}",
             start_config=start_cfg,
             command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
             default_cwd=cwd,
@@ -152,9 +154,17 @@ def env_id(real_catalog: BackupCatalog) -> str:
     return eid
 
 
+@pytest.fixture()
+def http_port() -> int:
+    """Provide a free loopback port so tests ignore operator-owned listeners."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 @pytest.mark.unit
 def test_persist_after_spawn_and_clear_on_normal_exit(
-    env_id: str, tmp_path: Path, real_catalog: BackupCatalog
+    env_id: str, http_port: int, tmp_path: Path, real_catalog: BackupCatalog
 ) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
@@ -164,6 +174,7 @@ def test_persist_after_spawn_and_clear_on_normal_exit(
         env_id=env_id,
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+        http_port=http_port,
     )
     exit_code = inst.run_foreground(args=("--stop-after-init",))
     assert exit_code == 0
@@ -173,7 +184,7 @@ def test_persist_after_spawn_and_clear_on_normal_exit(
 
 @pytest.mark.unit
 def test_persist_called_with_expected_fields(
-    env_id: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    env_id: str, http_port: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wt = tmp_path / "wt"
     branch, sha = _init_git_worktree(wt)
@@ -184,6 +195,7 @@ def test_persist_called_with_expected_fields(
         env_id=env_id,
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+        http_port=http_port,
     )
     monkeypatch.setattr("odoo_instance_sdk.resources.instance._process_create_time", lambda _: 1.0)
 
@@ -199,14 +211,16 @@ def test_persist_called_with_expected_fields(
     assert isinstance(kw["started_at"], str)
     assert kw["checkout_branch"] == branch
     assert kw["commit_sha"] == sha
-    assert kw["http_url"] == "http://127.0.0.1:8069"
-    assert kw["http_port"] == 8069
+    assert kw["http_url"] == f"http://127.0.0.1:{http_port}"
+    assert kw["http_port"] == http_port
     assert kw["database_name"] == "mydb"
     assert fake.clear_calls == [env_id]
 
 
 @pytest.mark.unit
-def test_clear_on_nonzero_exit(env_id: str, tmp_path: Path, real_catalog: BackupCatalog) -> None:
+def test_clear_on_nonzero_exit(
+    env_id: str, http_port: int, tmp_path: Path, real_catalog: BackupCatalog
+) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     client = _client_with_catalog(real_catalog)
@@ -215,6 +229,7 @@ def test_clear_on_nonzero_exit(env_id: str, tmp_path: Path, real_catalog: Backup
         env_id=env_id,
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(7)"),
+        http_port=http_port,
     )
     exit_code = inst.run_foreground()
     assert exit_code == 7
@@ -222,7 +237,7 @@ def test_clear_on_nonzero_exit(env_id: str, tmp_path: Path, real_catalog: Backup
 
 
 @pytest.mark.unit
-def test_clear_on_crash_exception_propagates(env_id: str, tmp_path: Path) -> None:
+def test_clear_on_crash_exception_propagates(env_id: str, http_port: int, tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     fake = _FakeCatalog()
@@ -232,6 +247,7 @@ def test_clear_on_crash_exception_propagates(env_id: str, tmp_path: Path) -> Non
         env_id=env_id,
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+        http_port=http_port,
     )
 
     boom = RuntimeError("wait blew up")
@@ -245,7 +261,7 @@ def test_clear_on_crash_exception_propagates(env_id: str, tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_clear_on_keyboard_interrupt(env_id: str, tmp_path: Path) -> None:
+def test_clear_on_keyboard_interrupt(env_id: str, http_port: int, tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     fake = _FakeCatalog()
@@ -255,6 +271,7 @@ def test_clear_on_keyboard_interrupt(env_id: str, tmp_path: Path) -> None:
         env_id=env_id,
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+        http_port=http_port,
     )
 
     with (
@@ -271,12 +288,13 @@ def test_clear_on_keyboard_interrupt(env_id: str, tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_foreground_keyboard_interrupt_cleans_up_the_owned_process_group(
+    http_port: int,
     tmp_path: Path,
 ) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     client = _client_with_catalog(_FakeCatalog())
-    inst = _make_manual_instance(client, wt)
+    inst = _make_manual_instance(client, wt, http_port)
     process = MagicMock()
     process.pid = 4242
     handle = ProcessHandle(
@@ -304,14 +322,15 @@ def test_foreground_keyboard_interrupt_cleans_up_the_owned_process_group(
 
 @pytest.mark.unit
 def test_foreground_artifact_lock_wraps_secret_write_spawn_wait_and_cleanup(
+    http_port: int,
     tmp_path: Path,
 ) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     client = _client_with_catalog(_FakeCatalog())
-    inst = _make_manual_instance(client, wt)
+    inst = _make_manual_instance(client, wt, http_port)
     config = StartConfig(
-        http_port=8069,
+        http_port=http_port,
         http_interface="127.0.0.1",
         config_path=None,
         db_password="secret",
@@ -343,7 +362,7 @@ def test_foreground_artifact_lock_wraps_secret_write_spawn_wait_and_cleanup(
     def cleanup_secret(*_args: object, **_kwargs: object) -> None:
         events.append("secret-cleanup")
 
-    def wait_process(_process: object) -> int:
+    def wait_process(_process: object, **_kwargs: object) -> int:
         events.append("wait")
         return 0
 
@@ -374,12 +393,12 @@ def test_foreground_artifact_lock_wraps_secret_write_spawn_wait_and_cleanup(
 
 
 @pytest.mark.unit
-def test_manual_instance_no_persist_no_clear(tmp_path: Path) -> None:
+def test_manual_instance_no_persist_no_clear(http_port: int, tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     fake = _FakeCatalog()
     client = _client_with_catalog(fake)
-    inst = _make_manual_instance(client, wt)
+    inst = _make_manual_instance(client, wt, http_port)
 
     exit_code = inst.run_foreground()
 
@@ -390,7 +409,7 @@ def test_manual_instance_no_persist_no_clear(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_core_psutil_persists_exact_identity(
-    env_id: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    env_id: str, http_port: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
@@ -401,6 +420,7 @@ def test_core_psutil_persists_exact_identity(
         env_id=env_id,
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+        http_port=http_port,
     )
 
     monkeypatch.setattr(
@@ -412,7 +432,7 @@ def test_core_psutil_persists_exact_identity(
 
 @pytest.mark.unit
 def test_persisted_live_identity_is_accepted_by_default_process_collector(
-    env_id: str, tmp_path: Path
+    env_id: str, http_port: int, tmp_path: Path
 ) -> None:
     """The writer and default collector must share psutil's exact clock."""
     wt = tmp_path / "wt"
@@ -423,9 +443,10 @@ def test_persisted_live_identity_is_accepted_by_default_process_collector(
         env_id=env_id,
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import time; time.sleep(60)"),
+        http_port=http_port,
     )
 
-    def inspect_live_identity(proc: Any) -> int:
+    def inspect_live_identity(proc: Any, **_kwargs: object) -> int:
         assert len(catalog.upsert_calls) == 1
         identity = catalog.upsert_calls[0][1]
         result = collect_process_tree(
@@ -445,7 +466,9 @@ def test_persisted_live_identity_is_accepted_by_default_process_collector(
 
 
 @pytest.mark.unit
-def test_persist_failure_aborts_run_but_still_clears_runtime(env_id: str, tmp_path: Path) -> None:
+def test_persist_failure_aborts_run_but_still_clears_runtime(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     fake = _FakeCatalog(upsert_raises=RuntimeError("catalog down"))
@@ -455,6 +478,7 @@ def test_persist_failure_aborts_run_but_still_clears_runtime(env_id: str, tmp_pa
         env_id=env_id,
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import time; time.sleep(60)"),
+        http_port=http_port,
     )
 
     spawned: list[object] = []
@@ -481,7 +505,7 @@ def test_persist_failure_aborts_run_but_still_clears_runtime(env_id: str, tmp_pa
 
 @pytest.mark.unit
 def test_persist_failure_preserves_original_error_when_cleanup_fails(
-    env_id: str, tmp_path: Path
+    env_id: str, http_port: int, tmp_path: Path
 ) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
@@ -491,6 +515,7 @@ def test_persist_failure_preserves_original_error_when_cleanup_fails(
         env_id=env_id,
         cwd=wt,
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
+        http_port=http_port,
     )
     with (
         patch(

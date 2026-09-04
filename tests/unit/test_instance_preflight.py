@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import socket
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -21,11 +22,18 @@ from odoo_instance_sdk.models import PostgresClusterState, StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
 
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def _make_instance(cluster: Any = None) -> OdooInstance:
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
+    http_port = _free_loopback_port()
     config = InstanceConfig(
-        base_url="http://127.0.0.1:8069",
-        start_config=StartConfig(http_port=8069, config_path="/tmp/odoo.conf"),
+        base_url=f"http://127.0.0.1:{http_port}",
+        start_config=StartConfig(http_port=http_port, config_path="/tmp/odoo.conf"),
     )
     return OdooInstance(
         config=config,
