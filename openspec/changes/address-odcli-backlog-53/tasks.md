@@ -1,6 +1,6 @@
 ## 1. Help and packaging boundary
 
-- [ ] 1.1 Add a bounded compatible `rich-click` core dependency, refresh the lockfile, and update packaging assertions to require exactly the revised core dependency set.
+- [ ] 1.1 Add a bounded compatible `rich-click` core dependency alongside all nine existing dependencies including `expression>=5,<6`, refresh the lockfile, and update wheel assertions to require exactly ten core dependencies and the sole existing `dashboard` extra.
 - [ ] 1.2 Replace `_RichHelpGroup` with `rich-click` command/group integration at the existing Click entry point without routing command results through it.
 - [ ] 1.3 Add missing one-line help text and at most four stable task-oriented panels across the root and nested command tree.
 - [ ] 1.4 Add characterization tests for root help, a nested group, a typed leaf, required/default/type metadata, validation errors, narrow width, redirected/color-disabled output, shell completion, and lightweight startup imports.
@@ -12,15 +12,15 @@
 - [ ] 2.3 Refactor `module update` to use the resolved project database/runtime without its unused environment ID and preserve `--env`, `--yes`, dry-run, and output contracts.
 - [ ] 2.4 Refactor top-level and compatibility Odoo test paths to use the owner-neutral runtime view and one result/runner implementation without environment fabrication.
 - [ ] 2.5 Implement project-context changed-test base precedence as explicit `--base`, then configured non-`HEAD` effective checkout base, otherwise actionable failure; add local-only Git provenance tests.
-- [ ] 2.6 Add CLI regressions for VS Code print/write/dry-run, module update, direct test, module-test alias, Rich/JSON/TOON parity, and explicit-environment precedence in both owner contexts.
+- [ ] 2.6 Add CLI regressions for VS Code print/write/dry-run, module update, direct test, module-test alias, explicit-environment precedence, and exact owner/common-context result fields for executed, changed no-op, and dry-run states with Rich/JSON/TOON parity in both owner contexts.
 
 ## 3. Project-local environment variables
 
-- [ ] 3.1 Implement a UTF-8 project-bound `.odcli/.env` parser supporting quoted/unquoted assignments while rejecting interpolation, command substitution, malformed input, NULs, and paths outside the resolved project.
-- [ ] 3.2 Enforce process-environment precedence, owner-only POSIX permissions, immutable scoped mappings, and sanitized missing/unreadable/malformed-file behavior before project runtime mutation.
-- [ ] 3.3 Connect the scoped mapping to restore secret lookup so `ODCLI_TEST_MASTER_PASSWORD` works without shell sourcing while the subprocess boundary removes it from unrelated children.
-- [ ] 3.4 Ensure init ignore rules and documentation cover `.odcli/.env`, owner-only permissions, supported grammar, missing-file behavior, and non-exported lifetime.
-- [ ] 3.5 Add security tests covering project-boundary discovery, process overrides, permissions, malformed secret-bearing lines, child allowlisting, plans/fingerprints/errors/logs, and Rich/JSON/TOON redaction.
+- [ ] 3.1 Implement the exact UTF-8/BOM line grammar, key regex, whitespace/comment rules, unquoted/literal-single-quote/bounded-double-quote escape rules, and empty values; reject duplicates, multiline/trailing syntax, interpolation/substitution, unknown escapes, NULs, invalid UTF-8, and paths outside the resolved project.
+- [ ] 3.2 Enforce per-key process precedence, owner-only POSIX permissions, immutable scoped mappings, no `os.environ` mutation, and path/line-only missing/unreadable/malformed diagnostics before mutation.
+- [ ] 3.3 Propagate ordinary file values only to Odoo runtime children; preserve purpose-built Git/PostgreSQL/Docker/editor/browser/package/other child environments; consume and strip `ODCLI_TEST_MASTER_PASSWORD` before every spawn.
+- [ ] 3.4 Ensure init ignore rules and documentation cover `.odcli/.env`, owner-only permissions, exact grammar, process precedence, child propagation/deny matrix, secret classification, missing-file behavior, and non-exported lifetime.
+- [ ] 3.5 Add acceptance/security tests for every grammar form/rejection, project-boundary discovery, per-key process overrides, permissions, each Odoo/denied child class, master-password consumption, and plans/fingerprints/errors/logs/Rich/JSON/TOON redaction.
 
 ## 4. Shared plan presentation and execution observation
 
@@ -33,25 +33,26 @@
 
 ## 5. Safe project-cluster database drop
 
-- [ ] 5.1 Add exact database-name and PostgreSQL system/template guards plus cluster-bound existence, configured-default, and active-session precondition queries through the existing PostgreSQL transport.
-- [ ] 5.2 Add one inspectable database-drop command whose execution revalidates safety state, optionally terminates only target sessions, quotes the exact identifier, drops through a maintenance database, and verifies absence.
+- [ ] 5.1 Add a CLI-private/internal cluster-bound operation through the existing PostgreSQL transport with exact-name validation, denylist `postgres|template0|template1`, and existence/configured-default/active-session preconditions; do not alter public `DatabaseResource.drop/drop_command`.
+- [ ] 5.2 Add its inspectable command whose execution revalidates safety state, optionally terminates only target sessions, quotes the exact identifier, drops through maintenance database `postgres`, and verifies absence.
 - [ ] 5.3 Reconcile current database mappings and record exactly one sanitized `dropped` catalogue event only after the absence postcondition succeeds.
 - [ ] 5.4 Register `odcli db drop DATABASE` with `--force-default`, `--force-connections`, `--yes`, and `--dry-run`, using shared context, confirmation ordering, Rich/JSON/TOON output, and credential-free projections.
-- [ ] 5.5 Add unit/contract tests for system databases, missing targets, default protection, active sessions, stale precondition revalidation, quoting, dry-run, noninteractive confirmation, catalogue rollback, redaction, and no caller-controlled connection selector.
-- [ ] 5.6 Run end-to-end drop success and forced-session cases only on a newly created disposable PostgreSQL cluster/database, verify audit reconciliation, and destroy that disposable environment without touching any user instance.
+- [ ] 5.5 Add unit/contract tests for the exact denylist and maintenance DB, missing targets, default protection, active sessions, stale revalidation, quoting, dry-run, confirmation, catalogue rollback, redaction, no caller-controlled connection selector, unchanged HTTP/master-password SDK drop semantics, and unchanged `test_discovered_public_methods` set.
+- [ ] 5.6 Add `db drop` exactly once to canonical `PUBLIC_LEAF_CASES` and verify the single-source leaf-inventory consumer, all bounded formats/classification, and side-effect-free dry-run.
+- [ ] 5.7 Run end-to-end drop success and forced-session cases only on a newly created disposable PostgreSQL cluster/database, verify audit reconciliation, and destroy that disposable environment without touching any user instance.
 
 ## 6. Project runtime persistence and monitoring
 
 - [ ] 6.1 Add a transactional catalogue migration that registers canonical initialized projects, backfills them from environment rows, migrates environment runtime records to an exclusive `environment|project` owner table, and rejects invalid dual/no-owner records.
-- [ ] 6.2 Upsert project registration during init/resolution without environment lifecycle events, and add pre-migration/backfill/idempotency/rollback fixture tests.
+- [ ] 6.2 Upsert registration only after successful non-preview init and before permitted normal foreground runtime persistence; keep resolution/read-only/monitor/dry-run inert and test failed init, legacy project-only normal-run discovery, preview non-discovery, idempotency, backfill, and rollback.
 - [ ] 6.3 Attach one private runtime binding from both `InstanceFactory.from_environment()` and `from_project()` and make foreground spawn/finally persistence owner-neutral while leaving manual/shell/background operations unpersisted.
 - [ ] 6.4 Refactor monitor planning to start from registered projects, join optional environments and both runtime owners, and reuse existing process/readiness/Git/storage/PostgreSQL collectors and stale-PID checks.
-- [ ] 6.5 Extend typed snapshot models additively with nullable project runtime data, preserving environment fields, filtering, ordering, cache semantics, redaction, and JSON/TOON serialization.
+- [ ] 6.5 Bump snapshot schema to 4 and add exactly `ProjectSummary.runtime: RuntimeMetrics | None`, implementing distinct absent-null and present-stopped/null semantics while preserving v3 environment fields, filtering, ordering, cache/invalidation, partial results, redaction, and JSON/TOON behavior; add v3-to-v4 migration assertions.
 - [ ] 6.6 Add unit and integration coverage for project-only catalogue state, live/stale project runtimes, mixed ownership, worker/process/CPU/RAM/readiness/URL/database/cluster metrics, and no synthetic environments.
 
 ## 7. HTTP and dashboard project-runtime support
 
-- [ ] 7.1 Publish the additive project-runtime snapshot fields through the existing msgspec-to-OpenAPI bridge and verify representative runtime JSON against the generated schema.
+- [ ] 7.1 Publish schema-version-4 `ProjectSummary.runtime` through the existing msgspec-to-OpenAPI bridge and verify null/stopped/live/mixed/filtered/redacted JSON plus v3 migration fixtures against the generated schema.
 - [ ] 7.2 Regenerate the TypeScript client from the canonical OpenAPI schema and update the project card/empty-state logic to render live project-owned runtime metrics when no environments exist.
 - [ ] 7.3 Add FastAPI serialization and React tests for project-only, mixed, stopped/stale, filtered, and redacted snapshots without adding an endpoint or handwritten DTO.
 

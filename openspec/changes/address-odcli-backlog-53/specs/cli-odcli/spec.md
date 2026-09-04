@@ -58,6 +58,40 @@ The CLI SHALL expose `odcli db drop DATABASE [--force-default] [--force-connecti
 
 ## MODIFIED Requirements
 
+### Requirement: Stable machine output
+
+The exact bounded structured leaf inventory SHALL be the existing canonical inventory plus `db drop`: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `db refresh`, `db reset-admin-password`, `db drop`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `db locks`, `db stats`, `db bloat`, `db init-monitoring`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Every leaf SHALL retain its existing classification and format behavior; `db drop` SHALL be classified as a bounded `mutating-or-spawning` leaf with required dry-run support and SHALL accept command-local `--format rich|json|toon` plus the compatible `--json` alias. The canonical `PUBLIC_LEAF_CASES` table SHALL remain the single consumer/source for the documented leaf inventory and characterization matrix.
+
+#### Scenario: Database drop is in the canonical bounded inventory
+- **WHEN** the stable machine-output characterization gate compares discovered normal-execution leaves with `PUBLIC_LEAF_CASES`
+- **THEN** `db drop` appears exactly once as a bounded mutating leaf, accepts every shared output mode, and its dry-run variant performs no mutation
+
+### Requirement: Test output uses the shared CLI contract
+
+Both `odcli test` and `odcli module test` SHALL remain bounded structured leaves under `OutputMode` and CLI envelope v1. Their common result SHALL add exactly these owner/context fields: `owner_kind: "environment" | "project"`, `project_id: str`, `environment_id: str | null`, `environment_name: str | null`, `worktree_root: str`, `database: str`, `http_url: str`, and `command_prefix: list[str]`. For an environment owner, both environment fields SHALL be non-null and identify the resolved environment; for a project owner, both SHALL be null. `project_id`, worktree, database, HTTP URL, and command prefix SHALL always describe the same resolved owner and SHALL never fabricate an environment.
+
+Every successful result SHALL also contain selector kind/value and provenance, modules, and exit code. Executed results SHALL additionally contain effective native test tags, `reload_tests`, `allow_empty`, counts, and failure/zero-tests flags. A successful changed dry-run SHALL contain `dry_run=true` and complete base/Git provenance while omitting all execution-only fields. A changed selection with no addons SHALL contain `reason="no_addon_changes"`, complete base/Git provenance, empty modules, and `exit_code=0`, omitting those execution-only fields; if also a dry-run it MAY include `dry_run=true`. Neither non-executed state SHALL construct an `OdooTestResult` or emit execution progress. JSON and strict-decoded TOON SHALL be semantically equal in executed, no-op, and dry-run states. Rich SHALL render the same owner identity, common worktree/runtime context, selection/modules, and exit status, and SHALL show counts only for executed results. Machine stdout, diagnostics, aliases, error mapping, and command-name compatibility SHALL retain the existing shared CLI contract.
+
+#### Scenario: Environment-owned result remains compatible
+- **WHEN** an executed test resolves an environment owner
+- **THEN** every format identifies that environment, its project and common runtime context with `owner_kind="environment"`
+
+#### Scenario: Project-owned result is explicit
+- **WHEN** an executed test resolves an initialized project without an environment
+- **THEN** every format has `owner_kind="project"`, the canonical `project_id`, null environment fields, and the project worktree/runtime context
+
+#### Scenario: Owner fields have parity in non-executed states
+- **WHEN** changed selection returns either a no-addon no-op or a dry-run plan for either owner kind
+- **THEN** JSON, strict-decoded TOON, and Rich expose the same owner/common context while execution-only fields and progress remain absent
+
+### Requirement: `odcli db` command group
+
+The Click adapter SHALL expose `db refresh`, `db reset-admin-password`, and `db drop DATABASE [--force-default] [--force-connections] [--yes] [--dry-run]`. It SHALL parse options, resolve project/environment context, render typed results, and map typed exceptions without duplicating SDK or transport logic. Refresh and password reset SHALL retain their existing public-resource paths. Guarded drop SHALL use a CLI-private cluster-bound PostgreSQL operation and SHALL NOT call, replace, or change the public Odoo HTTP `DatabaseResource.drop/drop_command` methods.
+
+#### Scenario: Help exposes all database commands
+- **WHEN** `odcli db --help` runs
+- **THEN** it lists `refresh`, `reset-admin-password`, and `drop` with their documented options
+
 ### Requirement: `eval` and `exec`
 
 ```bash
