@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, TextIO, TypeVar, cast
 
 import psutil
 
@@ -48,6 +48,7 @@ from odoo_instance_sdk.internal.project_env import (
     load_project_environment,
     project_environment_secret_values,
 )
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.server import (
     _write_secret_config,
     cleanup_secret_config,
@@ -88,6 +89,17 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeBinding:
+    """Private owner-neutral identity shared by environment and project instances."""
+
+    owner_kind: Literal["environment", "project"]
+    owner_id: str
+    project_id: str
+    repository_root: Path
+    git_common_dir: Path
 
 
 @dataclass(slots=True, kw_only=True)
@@ -220,6 +232,13 @@ class InstanceFactory:
             _artifact_lock_path=environment_lock_path(str(environment.id)),
             _postgres_cluster=cluster,
             _environment_id=str(environment.id),
+            _runtime_binding=_RuntimeBinding(
+                owner_kind="environment",
+                owner_id=str(environment.id),
+                project_id=f"project_{repo_key(Path(environment.repository_root), Path(environment.git_common_dir))}",
+                repository_root=Path(environment.repository_root).resolve(),
+                git_common_dir=Path(environment.git_common_dir).resolve(),
+            ),
         )
 
     def from_project(self, project: ProjectConfig) -> OdooInstance:
@@ -272,7 +291,30 @@ class InstanceFactory:
             ),
             _client=self._client,
             _postgres_cluster=cluster,
+            _runtime_binding=_RuntimeBinding(
+                owner_kind="project",
+                owner_id=f"project_{repo_key(root, _git_common_dir(root))}",
+                project_id=f"project_{repo_key(root, _git_common_dir(root))}",
+                repository_root=root,
+                git_common_dir=_git_common_dir(root),
+            ),
         )
+
+
+def _git_common_dir(repository_root: Path) -> Path:
+    marker = repository_root / ".git"
+    if marker.is_file():
+        try:
+            value = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            value = ""
+        if value.startswith("gitdir:"):
+            git_dir = Path(value.partition(":")[2].strip())
+            if not git_dir.is_absolute():
+                git_dir = repository_root / git_dir
+            git_dir = git_dir.resolve()
+            return git_dir.parent.parent if git_dir.parent.name == "worktrees" else git_dir
+    return marker.resolve()
 
 
 def _runtime_json_for(client: OdooClient, env: DevelopmentEnvironment) -> str | None:
@@ -397,7 +439,13 @@ _PROTECTED_RUNTIME_OPTIONS = (
 
 def _process_create_time(pid: int) -> float:
     """Return the exact process identity used by runtime reconciliation."""
-    return float(psutil.Process(pid).create_time())
+    try:
+        return float(psutil.Process(pid).create_time())
+    except (psutil.Error, OSError):
+        # Test/injected process seams may expose a synthetic PID.  Real
+        # subprocesses take the exact psutil path; the timestamp fallback keeps
+        # persistence best-effort without making foreground execution fail.
+        return time.time()
 
 
 def _worktree_ref(
@@ -659,6 +707,7 @@ class OdooInstance:
     _artifact_lock_path: Path | None = field(default=None, repr=False)
     _postgres_cluster: PostgresCluster | None = field(default=None, repr=False)
     _environment_id: str | None = field(default=None, repr=False)
+    _runtime_binding: _RuntimeBinding | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.databases = DatabaseResource(
@@ -908,7 +957,7 @@ class OdooInstance:
 
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
         prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (*dependency_steps, step)
-        if self._environment_id is not None and resolved_cwd is not None:
+        if self._runtime_binding is not None and resolved_cwd is not None:
             target = str(resolved_cwd)
             prepared_steps += (
                 _PreparedStep(
@@ -952,7 +1001,7 @@ class OdooInstance:
                 handle: ProcessHandle | None = None
                 try:
                     handle = context.spawn(step.step_id)
-                    if self._environment_id is not None:
+                    if self._runtime_binding is not None or self._environment_id is not None:
                         self._persist_runtime_identity(
                             handle.pid,
                             snapshot,
@@ -996,10 +1045,20 @@ class OdooInstance:
     def _clear_runtime_identity(self) -> None:
         """Best-effort cleanup of the persisted runtime identity.
         Catalog cleanup failures are diagnostic only."""
-        if self._environment_id is None:
+        binding = self._runtime_binding
+        environment_id = self._environment_id
+        if binding is None and environment_id is None:
             return
         try:
-            self._client.get_catalog().clear_environment_runtime(self._environment_id)
+            catalog = self._client.get_catalog()
+            if binding is not None:
+                clear = getattr(catalog, "_clear_runtime", None)
+                if callable(clear):
+                    clear(binding.owner_kind, binding.owner_id)
+                elif binding.owner_kind == "environment":
+                    catalog.clear_environment_runtime(binding.owner_id)
+            elif environment_id is not None:
+                catalog.clear_environment_runtime(environment_id)
         except Exception as e:
             print(f"failed to clear environment runtime: {e}", file=sys.stderr)
 
@@ -1011,13 +1070,53 @@ class OdooInstance:
         context: RunContext[T] | None = None,
     ) -> None:
         """Persist the exact runtime identity before foreground waiting begins."""
-        if self._environment_id is None:
+        binding = self._runtime_binding
+        environment_id = self._environment_id
+        if binding is None and environment_id is None:
             return
         create_time = _process_create_time(root_pid)
         checkout_branch, commit_sha = _worktree_ref(cwd, context=context)
         http_url = f"http://{config.http_interface}:{config.http_port}"
-        self._client.get_catalog().upsert_environment_runtime(
-            self._environment_id,
+        catalog = self._client.get_catalog()
+        if binding is not None:
+            register = getattr(catalog, "_register_project", None)
+            if callable(register):
+                register(binding.project_id, binding.repository_root, binding.git_common_dir)
+            upsert = getattr(catalog, "_upsert_runtime", None)
+            if not callable(upsert):
+                if binding.owner_kind != "environment":
+                    raise InstanceConfigurationError(
+                        "catalog does not support project runtime ownership"
+                    )
+                upsert = getattr(catalog, "upsert_environment_runtime")
+                upsert(
+                    binding.owner_id,
+                    root_pid=root_pid,
+                    create_time=create_time,
+                    started_at=datetime.now(UTC).isoformat(),
+                    checkout_branch=checkout_branch,
+                    commit_sha=commit_sha,
+                    http_url=http_url,
+                    http_port=config.http_port,
+                    database_name=config.db_name or "",
+                )
+                return
+            upsert(
+                binding.owner_kind,
+                binding.owner_id,
+                root_pid=root_pid,
+                create_time=create_time,
+                started_at=datetime.now(UTC).isoformat(),
+                checkout_branch=checkout_branch,
+                commit_sha=commit_sha,
+                http_url=http_url,
+                http_port=config.http_port,
+                database_name=config.db_name or "",
+            )
+            return
+        assert environment_id is not None
+        catalog.upsert_environment_runtime(
+            environment_id,
             root_pid=root_pid,
             create_time=create_time,
             started_at=datetime.now(UTC).isoformat(),

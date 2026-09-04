@@ -65,6 +65,8 @@ from odoo_instance_sdk.internal.automation import (
     update_modules_command,
     verify_deps_command,
 )
+from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
+from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.server import parse_payload
@@ -379,10 +381,9 @@ def init(
     status, _ = run_or_preview(
         lambda: action_command(
             "init",
-            lambda: (
-                write_manifest(resolved_project, config),
-                _manifest_dict(config, postgres_allocated=postgres_allocated),
-            )[1],
+            lambda: _write_initialized_project(
+                resolved_project, config, postgres_allocated=postgres_allocated
+            ),
             description="Write project manifest",
             mutating=True,
         ),
@@ -402,6 +403,23 @@ def init(
         ),
     )
     sys.exit(status)
+
+
+def _write_initialized_project(
+    project_path: Path, config: ProjectConfig, *, postgres_allocated: bool
+) -> dict[str, JsonValue]:
+    """Write init artifacts, then register the canonical project transactionally."""
+    write_manifest(project_path, config)
+    root, common, identity = _planned_project_identity(project_path)
+    project_id = f"project_{identity}"
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    try:
+        catalog._register_project(project_id, root, common)
+    finally:
+        catalog.close()
+    return _manifest_dict(config, postgres_allocated=postgres_allocated)
 
 
 def _resolve_postgres_state(

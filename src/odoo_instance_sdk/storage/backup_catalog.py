@@ -16,6 +16,7 @@ from odoo_instance_sdk.exceptions import (
     BackupNotAvailableError,
     BackupNotFoundError,
 )
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
 from odoo_instance_sdk.models import (
     Backup,
@@ -33,7 +34,7 @@ type CatalogValue = JsonValue | Path | datetime | uuid.UUID | tuple[str, ...]
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 
 class CopyJournalStage(StrEnum):
@@ -60,6 +61,12 @@ def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
 class BackupCatalog:
     db_path: Path
     _conn: sqlite3.Connection = field(init=False, repr=False)
+    # Filled by the atomic monitor read and consumed by the monitor collector.
+    # Keeping this private preserves the long-standing environment-only API.
+    _last_monitor_projects: list[sqlite3.Row] = field(init=False, repr=False, default_factory=list)
+    _last_monitor_project_runtimes: list[sqlite3.Row] = field(
+        init=False, repr=False, default_factory=list
+    )
 
     def __post_init__(self) -> None:
         try:
@@ -122,7 +129,7 @@ class BackupCatalog:
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
         self._run_migrations(conn, user_version)
 
-    def _run_migrations(self, conn: sqlite3.Connection, user_version: int) -> None:
+    def _run_migrations(self, conn: sqlite3.Connection, user_version: int) -> None:  # noqa: C901
         if user_version < 2:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS restores (
@@ -275,6 +282,11 @@ class BackupCatalog:
             self._migrate_v10_backup_source_branch(conn)
             conn.execute("PRAGMA user_version = 10")
             conn.commit()
+            user_version = 10
+        if user_version < 11:
+            self._migrate_v11_project_runtime_ownership(conn)
+            conn.execute("PRAGMA user_version = 11")
+            conn.commit()
 
     def _migrate_v10_backup_source_branch(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(backups)")}
@@ -296,6 +308,195 @@ class BackupCatalog:
                 updated_at TEXT NOT NULL
             );
         """)
+
+    def _migrate_v11_project_runtime_ownership(  # noqa: C901
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Install project registration and migrate runtime ownership atomically.
+
+        The old ``environment_runtime`` table is retained only as a read-only
+        compatibility view.  Runtime writes go through the polymorphic table,
+        whose owner columns are deliberately non-null and constrained to the
+        two supported owner kinds.
+        """
+        with conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS projects (
+                    project_id TEXT PRIMARY KEY,
+                    repository_root TEXT NOT NULL,
+                    git_common_dir TEXT NOT NULL,
+                    registered_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS projects_identity_idx ON projects(repository_root, git_common_dir)"
+            )
+
+            # Backfill canonical registrations before moving runtime rows so
+            # every migrated environment owner has a project to join.
+            environment_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(environments)")
+            }
+            environments = (
+                conn.execute(
+                    "SELECT repository_root, git_common_dir FROM environments "
+                    "GROUP BY repository_root, git_common_dir"
+                ).fetchall()
+                if {"repository_root", "git_common_dir"} <= environment_columns
+                else []
+            )
+            for row in environments:
+                repository_root = Path(str(row["repository_root"])).resolve()
+                git_common_dir = Path(str(row["git_common_dir"])).resolve()
+                project_id = f"project_{repo_key(repository_root, git_common_dir)}"
+                conn.execute(
+                    """INSERT INTO projects
+                       (project_id, repository_root, git_common_dir, registered_at, updated_at)
+                       VALUES (?, ?, ?, datetime('now'), datetime('now'))
+                       ON CONFLICT(project_id) DO UPDATE SET
+                         repository_root=excluded.repository_root,
+                         git_common_dir=excluded.git_common_dir,
+                         updated_at=excluded.updated_at""",
+                    (project_id, str(repository_root), str(git_common_dir)),
+                )
+
+            runtime_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime'"
+            ).fetchone()
+            legacy_runtime_name: str | None = None
+            if runtime_exists is not None:
+                columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(runtime)")}
+                if {"environment_id", "project_id"} <= columns:
+                    for row in conn.execute("SELECT environment_id, project_id FROM runtime"):
+                        environment_owner = str(row[0]).strip() if row[0] is not None else ""
+                        project_owner = str(row[1]).strip() if row[1] is not None else ""
+                        if bool(environment_owner) == bool(project_owner):
+                            raise BackupCatalogError(
+                                "catalog runtime row must have exactly one owner"
+                            )
+                if {"owner_kind", "owner_id"} <= columns:
+                    for row in conn.execute("SELECT owner_kind, owner_id FROM runtime"):
+                        if (
+                            row[0] not in {"environment", "project"}
+                            or row[1] is None
+                            or not str(row[1]).strip()
+                        ):
+                            raise BackupCatalogError(
+                                "catalog runtime row must have exactly one valid owner"
+                            )
+                elif not {"environment_id", "project_id"} <= columns:
+                    raise BackupCatalogError("catalog runtime table has an unsupported shape")
+                legacy_runtime_name = "runtime_legacy_v10"
+                conn.execute("ALTER TABLE runtime RENAME TO runtime_legacy_v10")
+
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS runtime (
+                    owner_kind TEXT NOT NULL CHECK (owner_kind IN ('environment', 'project')),
+                    owner_id TEXT NOT NULL CHECK (length(trim(owner_id)) > 0),
+                    root_pid INTEGER NOT NULL,
+                    create_time REAL NOT NULL,
+                    started_at TEXT NOT NULL,
+                    checkout_branch TEXT NOT NULL,
+                    commit_sha TEXT NOT NULL,
+                    http_url TEXT NOT NULL,
+                    http_port INTEGER NOT NULL,
+                    database_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (owner_kind, owner_id)
+                )"""
+            )
+
+            if legacy_runtime_name is not None:
+                columns = {
+                    str(row[1]) for row in conn.execute("PRAGMA table_info(runtime_legacy_v10)")
+                }
+                if {"owner_kind", "owner_id"} <= columns:
+                    conn.execute(
+                        """INSERT INTO runtime
+                           SELECT owner_kind, owner_id, root_pid, create_time, started_at,
+                                  checkout_branch, commit_sha, http_url, http_port,
+                                  database_name, updated_at
+                           FROM runtime_legacy_v10"""
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO runtime
+                           SELECT CASE WHEN environment_id IS NOT NULL THEN 'environment' ELSE 'project' END,
+                                  COALESCE(environment_id, project_id), root_pid, create_time,
+                                  started_at, checkout_branch, commit_sha, http_url, http_port,
+                                  database_name, updated_at
+                           FROM runtime_legacy_v10"""
+                    )
+                conn.execute("DROP TABLE runtime_legacy_v10")
+
+            legacy_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='environment_runtime'"
+            ).fetchone()
+            if legacy_exists is not None:
+                legacy_columns = {
+                    str(row[1]) for row in conn.execute("PRAGMA table_info(environment_runtime)")
+                }
+                if {
+                    "environment_id",
+                    "root_pid",
+                    "create_time",
+                    "started_at",
+                    "checkout_branch",
+                    "commit_sha",
+                    "http_url",
+                    "http_port",
+                    "database_name",
+                    "updated_at",
+                } <= legacy_columns:
+                    for row in conn.execute("SELECT environment_id FROM environment_runtime"):
+                        if row[0] is None or not str(row[0]).strip():
+                            raise BackupCatalogError(
+                                "catalog runtime row must have exactly one owner"
+                            )
+                    conn.execute(
+                        """INSERT INTO runtime
+                           (owner_kind, owner_id, root_pid, create_time, started_at,
+                            checkout_branch, commit_sha, http_url, http_port, database_name, updated_at)
+                           SELECT 'environment', environment_id, root_pid, create_time, started_at,
+                                  checkout_branch, commit_sha, http_url, http_port, database_name, updated_at
+                           FROM environment_runtime"""
+                    )
+                conn.execute("DROP TABLE environment_runtime")
+
+            conn.execute(
+                """CREATE VIEW environment_runtime AS
+                   SELECT owner_id AS environment_id, root_pid, create_time, started_at,
+                          checkout_branch, commit_sha, http_url, http_port, database_name, updated_at
+                   FROM runtime WHERE owner_kind = 'environment'"""
+            )
+
+    @_translate_sqlite_error
+    def _register_project(
+        self, project_id: str, repository_root: str | Path, git_common_dir: str | Path
+    ) -> None:
+        """Register a canonical initialized project at an authorized write point."""
+        root = Path(repository_root).resolve()
+        common = Path(git_common_dir).resolve()
+        expected = f"project_{repo_key(root, common)}"
+        if project_id != expected:
+            raise BackupCatalogError(
+                "project registration identity does not match repository metadata"
+            )
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO projects
+                   (project_id, repository_root, git_common_dir, registered_at, updated_at)
+                   VALUES (?, ?, ?, datetime('now'), datetime('now'))
+                   ON CONFLICT(project_id) DO UPDATE SET
+                     repository_root=excluded.repository_root,
+                     git_common_dir=excluded.git_common_dir,
+                     updated_at=excluded.updated_at""",
+                (project_id, str(root), str(common)),
+            )
+
+    def _list_monitor_projects(self) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+        return self._last_monitor_projects, self._last_monitor_project_runtimes
 
     def _migrate_v7_one_active_port(self, conn: sqlite3.Connection) -> None:
         # A port is a global host resource.  Never silently mark a live
@@ -927,7 +1128,13 @@ class BackupCatalog:
     def list_environments_with_runtimes(
         self, *, include_removed: bool = False
     ) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
-        """Read monitor rows, backup metadata, and runtime identities atomically."""
+        """Read monitor rows, backup metadata, and runtime identities atomically.
+
+        The private project rows captured during this same transaction are
+        available to the monitor through ``_list_monitor_projects``.  The
+        return value intentionally remains the historic environment-only
+        shape for compatibility.
+        """
         self._conn.execute("BEGIN")
         try:
             state_clause = "" if include_removed else " WHERE e.state != 'removed'"
@@ -937,14 +1144,82 @@ class BackupCatalog:
                 f"{state_clause} ORDER BY e.created_at DESC, e.id DESC"
             ).fetchall()
             runtimes = self._conn.execute(
-                "SELECT * FROM environment_runtime ORDER BY environment_id"
+                "SELECT * FROM runtime WHERE owner_kind = 'environment' ORDER BY owner_id"
+            ).fetchall()
+            self._last_monitor_projects = self._conn.execute(
+                "SELECT * FROM projects ORDER BY project_id"
+            ).fetchall()
+            self._last_monitor_project_runtimes = self._conn.execute(
+                "SELECT * FROM runtime WHERE owner_kind = 'project' ORDER BY owner_id"
             ).fetchall()
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")
             raise
-        by_environment = {str(runtime["environment_id"]): runtime for runtime in runtimes}
+        by_environment = {str(runtime["owner_id"]): runtime for runtime in runtimes}
         return [(row, by_environment.get(str(row["id"]))) for row in environments]
+
+    @_translate_sqlite_error
+    def _upsert_runtime(
+        self,
+        owner_kind: str,
+        owner_id: str,
+        *,
+        root_pid: int,
+        create_time: float,
+        started_at: str,
+        checkout_branch: str,
+        commit_sha: str,
+        http_url: str,
+        http_port: int,
+        database_name: str,
+    ) -> None:
+        if owner_kind not in {"environment", "project"} or not owner_id.strip():
+            raise BackupCatalogError("runtime owner must be exactly environment or project")
+        if owner_kind == "environment":
+            if self.get_environment(owner_id) is None:
+                raise BackupCatalogError(f"runtime environment does not exist: {owner_id}")
+        else:
+            registered = self._conn.execute(
+                "SELECT 1 FROM projects WHERE project_id = ?", (owner_id,)
+            ).fetchone()
+            if registered is None:
+                raise BackupCatalogError(f"runtime project is not registered: {owner_id}")
+        self._conn.execute(
+            """INSERT INTO runtime
+               (owner_kind, owner_id, root_pid, create_time, started_at, checkout_branch,
+                commit_sha, http_url, http_port, database_name, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
+                 root_pid=excluded.root_pid, create_time=excluded.create_time,
+                 started_at=excluded.started_at, checkout_branch=excluded.checkout_branch,
+                 commit_sha=excluded.commit_sha, http_url=excluded.http_url,
+                 http_port=excluded.http_port, database_name=excluded.database_name,
+                 updated_at=excluded.updated_at""",
+            (
+                owner_kind,
+                owner_id,
+                root_pid,
+                create_time,
+                started_at,
+                checkout_branch,
+                commit_sha,
+                http_url,
+                http_port,
+                database_name,
+            ),
+        )
+        self._conn.commit()
+
+    @_translate_sqlite_error
+    def _clear_runtime(self, owner_kind: str, owner_id: str) -> None:
+        if owner_kind not in {"environment", "project"}:
+            raise BackupCatalogError("runtime owner must be exactly environment or project")
+        self._conn.execute(
+            "DELETE FROM runtime WHERE owner_kind = ? AND owner_id = ?",
+            (owner_kind, owner_id),
+        )
+        self._conn.commit()
 
     @_translate_sqlite_error
     def upsert_environment_runtime(
@@ -960,38 +1235,22 @@ class BackupCatalog:
         http_port: int,
         database_name: str,
     ) -> None:
-        self._conn.execute(
-            """INSERT INTO environment_runtime
-               (environment_id, root_pid, create_time, started_at, checkout_branch,
-                commit_sha, http_url, http_port, database_name, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-               ON CONFLICT(environment_id) DO UPDATE SET
-                 root_pid=excluded.root_pid, create_time=excluded.create_time,
-                 started_at=excluded.started_at, checkout_branch=excluded.checkout_branch,
-                 commit_sha=excluded.commit_sha, http_url=excluded.http_url,
-                 http_port=excluded.http_port, database_name=excluded.database_name,
-                 updated_at=excluded.updated_at""",
-            (
-                environment_id,
-                root_pid,
-                create_time,
-                started_at,
-                checkout_branch,
-                commit_sha,
-                http_url,
-                http_port,
-                database_name,
-            ),
+        self._upsert_runtime(
+            "environment",
+            environment_id,
+            root_pid=root_pid,
+            create_time=create_time,
+            started_at=started_at,
+            checkout_branch=checkout_branch,
+            commit_sha=commit_sha,
+            http_url=http_url,
+            http_port=http_port,
+            database_name=database_name,
         )
-        self._conn.commit()
 
     @_translate_sqlite_error
     def clear_environment_runtime(self, environment_id: str) -> None:
-        self._conn.execute(
-            "DELETE FROM environment_runtime WHERE environment_id = ?",
-            (environment_id,),
-        )
-        self._conn.commit()
+        self._clear_runtime("environment", environment_id)
 
     def _add_event(
         self,

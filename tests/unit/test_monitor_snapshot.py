@@ -22,6 +22,7 @@ from odoo_instance_sdk.internal.proc import (
     SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.process_metrics import ProcessTreeResult
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import (
     ClusterContainer,
     ClusterMetrics,
@@ -105,6 +106,27 @@ def test_multi_project_discovery(tmp_path: Path) -> None:
     assert all(p.id.startswith("project_") for p in snap.projects)
     assert {p.environment_count for p in snap.projects} == {1}
     assert len(snap.environments) == 2
+
+
+def test_registered_project_without_environment_is_discovered(tmp_path: Path) -> None:
+    catalog = _make_catalog(tmp_path)
+    root = tmp_path / "project-only"
+    common = root / ".git"
+    common.mkdir(parents=True)
+    project_id = f"project_{repo_key(root, common)}"
+    catalog._register_project(project_id, root, common)
+    catalog.close()
+
+    monkeypatch = pytest.MonkeyPatch()
+    _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
+    try:
+        snap = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3").snapshot()
+    finally:
+        monkeypatch.undo()
+
+    assert [project.id for project in snap.projects] == [project_id]
+    assert snap.projects[0].environment_count == 0
+    assert snap.environments == ()
 
 
 def test_stopped_odoo_no_runtime_record(tmp_path: Path) -> None:
