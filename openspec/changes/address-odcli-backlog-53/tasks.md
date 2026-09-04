@@ -28,8 +28,8 @@
 - [x] 4.2 Replace the implementation-heavy default Rich plan rendering with one shared semantic projection and add JSON/TOON equality tests proving full snapshots remain unchanged.
 - [x] 4.3 Move HTTP-port inspection into foreground run planning and execution revalidation so dry-run emits a failed precondition while normal execution still performs no spawn or use update on conflict.
 - [x] 4.4 Extend the existing `Command`/`RunContext` and process executor with an optional typed step observer for start/completion/failure and opt-in sanitized stdout/stderr chunks, preserving final capture and exit behavior.
-- [ ] 4.5 Wire restore to TTY Rich `Live` progress and non-TTY Rich step-prefixed sanitized lines; make `--show-command-output` Rich-only, reject it with JSON/TOON/`--json` as exit-2 usage before SDK work, and associate every visible chunk with its plan step.
-- [ ] 4.6 Add tests for ordered restore events, TTY `Live`, non-TTY line output without cursor control, Rich-only stream chunks, machine-mode stream-flag usage errors and single-document output without the flag, split-chunk redaction, unchanged subprocess results, and existing execution exit codes.
+- [x] 4.5 Wire restore to TTY Rich `Live` progress and non-TTY Rich step-prefixed sanitized lines; make `--show-command-output` Rich-only, reject it with JSON/TOON/`--json` as exit-2 usage before SDK work, and associate every visible chunk with its plan step.
+- [x] 4.6 Add tests for ordered restore events, TTY `Live`, non-TTY line output without cursor control, Rich-only stream chunks, machine-mode stream-flag usage errors and single-document output without the flag, split-chunk redaction, unchanged subprocess results, and existing execution exit codes.
 
 ## 5. Safe project-cluster database drop
 

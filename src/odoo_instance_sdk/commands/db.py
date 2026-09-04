@@ -20,10 +20,12 @@ from odoo_instance_sdk.commands.context import (
     resolve_project_path,
 )
 from odoo_instance_sdk.commands.output import (
+    OutputMode,
     fail,
     model_to_dict,
     output_options,
     resolve_output_mode,
+    rich_step_observer,
     run_or_preview,
 )
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
@@ -36,6 +38,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
 
@@ -47,6 +50,12 @@ def db_group() -> None:
 
 @db_group.command("refresh", help="Download and optionally restore a project test backup.")
 @click.option("--restore", is_flag=True, default=False, help="Restore a fresh local copy.")
+@click.option(
+    "--show-command-output",
+    is_flag=True,
+    default=False,
+    help="Show sanitized subprocess output (Rich only).",
+)
 @click.option(
     "--reset-admin-password",
     "reset_admin_password",
@@ -61,6 +70,7 @@ def db_group() -> None:
 def db_refresh(
     ctx: CliContext,
     restore: bool,
+    show_command_output: bool,
     reset_admin_password: bool,
     source_branch: str | None,
     dry_run: bool,
@@ -69,6 +79,10 @@ def db_refresh(
 ) -> None:
     """Download a project test backup, optionally restoring it locally."""
     output_mode = resolve_output_mode(output_format, json_output)
+    if show_command_output and not restore:
+        raise click.UsageError("--show-command-output requires --restore")
+    if show_command_output and output_mode is not OutputMode.RICH:
+        raise click.UsageError("--show-command-output is only available with Rich output")
     if reset_admin_password and not restore:
         raise click.UsageError("--reset-admin-password requires --restore")
     try:
@@ -85,8 +99,10 @@ def db_refresh(
     except Exception as exc:
         fail(output_mode, "db.refresh", exc)
 
-    try:
-        status, _result = run_or_preview(
+    runner = run_or_preview
+
+    def run(observer: StepObserver | None = None) -> tuple[int, DatabasePreparationResult | None]:
+        return runner(
             lambda: command,
             command_name="db.refresh",
             mode=output_mode,
@@ -96,7 +112,16 @@ def db_refresh(
             ),
             provenance={"project_source": project_provenance(ctx)},
             rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
+            observer=observer,
+            observe_output=show_command_output,
         )
+
+    try:
+        if restore and output_mode is OutputMode.RICH and not dry_run:
+            with rich_step_observer(show_command_output=show_command_output) as observer:
+                status, _result = run(observer)
+        else:
+            status, _result = run()
     except Exception as exc:
         fail(output_mode, "db.refresh", exc)
     raise click.exceptions.Exit(status)
