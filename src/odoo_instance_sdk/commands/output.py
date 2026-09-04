@@ -9,7 +9,6 @@ from contextlib import contextmanager
 from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
-    Any,
     Generic,
     Never,
     ParamSpec,
@@ -27,6 +26,7 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 from rich.console import Console
+from rich.text import Text
 from toon import encode
 
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
@@ -35,6 +35,12 @@ from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_te
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
+
+
+class _RichLive(Protocol):
+    """Minimal typed surface consumed from Rich's optional live renderer."""
+
+    def update(self, renderable: Text, *, refresh: bool = False) -> None: ...
 
 
 def __getattr__(name: str) -> TypeAliasType:
@@ -107,6 +113,14 @@ class _InspectableCommand(Protocol, Generic[_ResultT_co]):
     def plan(self) -> msgspec.Struct: ...
 
     def run(self) -> _ResultT_co: ...
+
+
+class _ObservableCommand(Protocol, Generic[_ResultT_co]):
+    """Minimal typed surface for commands supporting lifecycle observation."""
+
+    def run(
+        self, *, observer: StepObserver | None = None, observe_output: bool = False
+    ) -> _ResultT_co: ...
 
 
 @overload
@@ -207,7 +221,7 @@ def rich_print(
 class RichStepObserver:
     """Render typed process events as deterministic Rich step lines."""
 
-    def __init__(self, *, live: Any = None, show_command_output: bool = False) -> None:
+    def __init__(self, *, live: _RichLive | None = None, show_command_output: bool = False) -> None:
         self._live = live
         self._show_command_output = show_command_output
         self._lines: list[str] = []
@@ -242,8 +256,6 @@ class RichStepObserver:
             ]
         self._lines.extend(rendered_lines)
         if self._live is not None:
-            from rich.text import Text
-
             self._live.update(Text("\n".join(self._lines)), refresh=True)
         else:
             for rendered_line in rendered_lines:
@@ -534,9 +546,8 @@ def run_or_preview(
     if observer is None:
         value = command.run()
     else:
-        value = cast(
-            "_ResultT",
-            cast("Any", command).run(observer=observer, observe_output=observe_output),
+        value = cast("_ObservableCommand[_ResultT]", command).run(
+            observer=observer, observe_output=observe_output
         )
     if not emit_normal:
         return 0, value

@@ -13,6 +13,7 @@ from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import (
     Command,
     ExecutionPlan,
+    JsonValue,
     PlanPrecondition,
     SemanticPlanObservation,
 )
@@ -111,7 +112,7 @@ def _verify_sql(database: str) -> str:
     return f"SELECT NOT EXISTS (SELECT 1 FROM pg_database WHERE datname={literal});"
 
 
-def _safe_session_value(value: object) -> str | None:
+def _safe_session_value(value: JsonValue) -> str | None:
     if value is None:
         return None
     value = sanitize_last_error(str(value))

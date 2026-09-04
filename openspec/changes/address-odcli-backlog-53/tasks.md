@@ -65,7 +65,7 @@
 
 ## 9. Acceptance and delivery
 
-- [ ] 9.1 Run strict OpenSpec validation, Ruff, strict mypy, the full Python test suite, frontend tests/build, architecture inventory gates, and package build/install smoke tests.
-- [ ] 9.2 Exercise restore progress, project-context commands, monitoring, and eval against disposable fixtures or one-time test environments only; record commands and outcomes without exposing secrets.
-- [ ] 9.3 Update user documentation and release notes for new flags, project-context behavior, dotenv policy, runtime monitoring, eval output, and safe database deletion.
+- [x] 9.1 Run strict OpenSpec validation, Ruff, strict mypy, the full Python test suite, frontend tests/build, architecture inventory gates, and package build/install smoke tests.
+- [x] 9.2 Exercise restore progress, project-context commands, monitoring, and eval against disposable fixtures or one-time test environments only; record commands and outcomes without exposing secrets.
+- [x] 9.3 Update user documentation and release notes for new flags, project-context behavior, dotenv policy, runtime monitoring, eval output, and safe database deletion.
 - [ ] 9.4 Open a feature-branch PR referencing GitHub #53, map each backlog acceptance criterion to tests/evidence, and report local verification while GitHub CI runs; do not modify the user's working instance or database.

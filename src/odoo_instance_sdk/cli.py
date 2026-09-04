@@ -68,7 +68,6 @@ from odoo_instance_sdk.internal.automation import (
 from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
-from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.internal.vscode_generate import (
@@ -154,6 +153,8 @@ class _ShellCommandFailure(RuntimeError):
 
 def _shell_payload(value: CommandResult) -> dict[str, JsonValue]:
     """Project the framed shell payload without exposing startup logs."""
+    from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
     payload = parse_payload(value.stdout) or {}
     user_stdout = payload.get("user_stdout", "")
     if not isinstance(user_stdout, str):

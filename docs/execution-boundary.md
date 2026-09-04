@@ -98,22 +98,22 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:708-709` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:838-839` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
 - `src/odoo_instance_sdk/commands/env.py:377` — existing Rich-live inventory
   transport; remove when Rich live output is supplied by a distinct transport
   adapter rather than the live command callback.
-- `src/odoo_instance_sdk/commands/output.py:194` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:218` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:304` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:402` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:306` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:404` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:313` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:411` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:315` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:413` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:899` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance.py:1063` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
