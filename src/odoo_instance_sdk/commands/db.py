@@ -20,7 +20,9 @@ from odoo_instance_sdk.commands.context import (
     resolve_project_path,
 )
 from odoo_instance_sdk.commands.output import (
+    OutputDocument,
     OutputMode,
+    emit_json_envelope,
     fail,
     model_to_dict,
     output_options,
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
     from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -168,6 +171,96 @@ def db_reset_admin_password(
     if not dry_run:
         assert isinstance(result, AdminPasswordResetResult)
     raise click.exceptions.Exit(status)
+
+
+@db_group.command("drop", help="Safely drop one database from the project PostgreSQL cluster.")
+@click.argument("database")
+@click.option(
+    "--force-default", is_flag=True, default=False, help="Allow dropping the project default."
+)
+@click.option(
+    "--force-connections",
+    is_flag=True,
+    default=False,
+    help="Terminate active sessions attached to the exact target.",
+)
+@click.option("--yes", is_flag=True, default=False, help="Skip interactive confirmation.")
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
+@output_options
+@pass_cli_context
+def db_drop(
+    ctx: CliContext,
+    database: str,
+    force_default: bool,
+    force_connections: bool,
+    yes: bool,
+    dry_run: bool,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    """Safely drop one exact database from the resolved project cluster."""
+    output_mode = resolve_output_mode(output_format, json_output)
+    if not dry_run and not yes and output_mode is not OutputMode.RICH:
+        emit_json_envelope(
+            ok=False,
+            command="db.drop",
+            error_code="confirmation_required",
+            error_message="db drop requires --yes in machine output mode",
+            mode=output_mode,
+        )
+        raise click.exceptions.Exit(1)
+    try:
+        from odoo_instance_sdk.commands.pg import _database_instance
+        from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
+
+        project_root = resolve_project_path(ctx)
+        _environment, instance = _database_instance(ctx)
+        command = build_database_drop_command(
+            instance,
+            project_root,
+            database,
+            force_default=force_default,
+            force_connections=force_connections,
+        )
+        cluster = getattr(instance, "_postgres_cluster", None)
+        cluster_endpoint = getattr(cluster, "endpoint", "bound cluster")
+
+        def confirm() -> None:
+            click.confirm(
+                f"Drop database {database!r} on cluster {cluster_endpoint}?",
+                default=False,
+                abort=True,
+            )
+
+        status, _result = run_or_preview(
+            lambda: command,
+            command_name="db.drop",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=cast(
+                "Callable[[DatabaseDropResult | None], dict[str, JsonValue]]", model_to_dict
+            ),
+            context={"database": database, "cluster": str(cluster_endpoint)},
+            provenance={"project_source": project_provenance(ctx)},
+            confirm=None if yes or dry_run else confirm,
+            rich=_drop_rich,
+        )
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        fail(output_mode, "db.drop", exc)
+    raise click.exceptions.Exit(status)
+
+
+def _drop_rich(document: OutputDocument) -> str:
+    payload = document.result if isinstance(document.result, dict) else {}
+    if "database" not in payload:
+        return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    database = payload.get("database", "database")
+    cluster = payload.get("cluster", "bound cluster")
+    if payload.get("dropped") is False:
+        return f"Database {database} was not dropped on {cluster}"
+    return f"Dropped database {database} on {cluster}"
 
 
 def _validate_recorded_database_binding(
