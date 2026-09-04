@@ -943,7 +943,7 @@ def module_update(
     output_mode = resolve_output_mode(output_format, json_output)
     try:
         runtime_context = cli_context.ready_instance(ctx)
-        env_obj = runtime_context.require_environment()
+        runtime_context.runtime
         instance = runtime_context.instance
     except SystemExit:
         raise
@@ -953,7 +953,7 @@ def module_update(
         selected_modules = tuple(modules)
 
         def build_command() -> Command[CommandResult]:
-            return update_modules_command(instance, selected_modules, env_id=str(env_obj.id))
+            return update_modules_command(instance, selected_modules)
 
         status, _outcome = run_or_preview(
             build_command,
@@ -1019,16 +1019,11 @@ def module_test(
     output_mode = resolve_output_mode(output_format, json_output)
     try:
         runtime_context = cli_context.ready_instance(ctx)
-        env_obj = runtime_context.require_environment()
+        runtime = runtime_context.runtime
         instance = runtime_context.instance
-        start_config = instance.config.start_config
-        if start_config is None:
-            raise RuntimeError(  # noqa: TRY301
-                "selected environment has no generated Odoo config"
-            )
         selection = resolve_module_test_selection(
-            env_obj.worktree_path,
-            start_config,
+            runtime.root,
+            runtime.start_config,
             tuple(modules),
             test_tags,
         )
@@ -1042,14 +1037,14 @@ def module_test(
             lambda: module_tests_command(
                 instance,
                 spec,
-                http_interface=env_obj.http_interface,
-                http_port=env_obj.http_port,
+                http_interface=runtime.http_interface,
+                http_port=runtime.http_port,
             ),
             command_name="module.test",
             mode=output_mode,
             dry_run=dry_run,
             result=lambda value: (
-                project_execution_result(env_obj, selection, spec, value[0])
+                project_execution_result(runtime, selection, spec, value[0])
                 if value is not None
                 else {}
             ),
@@ -1203,13 +1198,12 @@ def vscode_generate(
     output_mode = resolve_output_mode(output_format, json_output)
     try:
         runtime_context = cli_context.ready_instance(ctx)
-        client = runtime_context.client
-        env_obj = runtime_context.require_environment()
+        runtime = runtime_context.runtime
 
         def operation() -> dict[str, JsonValue]:
-            profile = build_launch_profile(client, env_obj)
+            profile = build_launch_profile(runtime)
             if write_file:
-                project_path = runtime_context.project_root
+                project_path = runtime.repository_root
                 written = write_launch_json(project_path, launch_json(profile))
                 return {"profile": profile, "written": str(written)}
             return {"profile": profile}
