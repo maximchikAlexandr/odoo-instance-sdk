@@ -4,21 +4,34 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 from click.testing import CliRunner
 
+from odoo_instance_sdk import OdooClient
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeSource
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentState
+from odoo_instance_sdk.resources.instance import OdooInstance
 from tests.unit.monitor_support import FakeProcessProvider
 
 
 def _stub_command(callback: Callable[[], int]) -> Command[int]:
     return Command.create(ExecutionPlan(), lambda _context: callback(), ())
+
+
+def _resolved_context(client: object, source: object, instance: object) -> ResolvedContext:
+    return ResolvedContext(
+        client=cast("OdooClient", client),
+        source=cast("RuntimeSource", source),
+        instance=cast("OdooInstance", instance),
+        provenance="explicit",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -183,9 +196,12 @@ def test_run_records_use_once_before_foreground_start() -> None:
     calls.attach_mock(instance.run_foreground_command, "run_foreground_command")
     with (
         patch(
-            "odoo_instance_sdk.cli.cli_context.ready_instance", return_value=(client, env, instance)
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=_resolved_context(client, env, instance),
         ),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
     ):
         result = CliRunner().invoke(cli, ["run", "--", "--dev=reload"])
 
@@ -204,9 +220,11 @@ def test_project_run_never_records_environment_use(tmp_path: Path) -> None:
     with (
         patch(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
-            return_value=(client, project, instance),
+            return_value=_resolved_context(client, project, instance),
         ),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
     ):
         result = CliRunner().invoke(cli, ["run", "--", "--dev=reload"])
 
@@ -221,7 +239,7 @@ def test_environment_owned_command_rejects_project_context(tmp_path: Path) -> No
     project = ProjectConfig(repository_root=tmp_path)
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
-        return_value=(client, project, instance),
+        return_value=_resolved_context(client, project, instance),
     ):
         result = CliRunner().invoke(cli, ["module", "update", "sale", "--yes"])
 
@@ -256,9 +274,12 @@ def test_run_captures_then_records_use_then_executes_the_same_command() -> None:
     client.environments.record_use.side_effect = record_use
     with (
         patch(
-            "odoo_instance_sdk.cli.cli_context.ready_instance", return_value=(client, env, instance)
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=_resolved_context(client, env, instance),
         ),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
     ):
         result = CliRunner().invoke(
             cli,
@@ -305,7 +326,9 @@ def test_ready_instance_resolves_environment_before_creating_instance() -> None:
             side_effect=resolve_environment,
         ),
         patch("odoo_instance_sdk.internal.context._verify_env_runtime"),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
     ):
         result = CliRunner().invoke(cli, ["run", "--", "--stop-after-init"])
 
@@ -320,9 +343,12 @@ def test_port_conflict_does_not_record_use_or_start_foreground() -> None:
     env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
     with (
         patch(
-            "odoo_instance_sdk.cli.cli_context.ready_instance", return_value=(client, env, instance)
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=_resolved_context(client, env, instance),
         ),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=False),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=False
+        ),
     ):
         result = CliRunner().invoke(cli, ["run"])
 
@@ -337,17 +363,20 @@ def test_port_conflict_after_instance_creation_skips_capture_use_and_launch() ->
     instance = MagicMock()
     env = SimpleNamespace(http_interface="127.0.0.1", http_port=8069)
 
-    def ready(_ctx: object) -> tuple[MagicMock, SimpleNamespace, MagicMock]:
+    def ready(_ctx: object) -> ResolvedContext:
         events.append("ready")
-        return client, env, instance
+        return _resolved_context(client, env, instance)
 
-    def port_free(_env: object) -> bool:
+    def port_free() -> bool:
         events.append("port")
         return False
 
     with (
         patch("odoo_instance_sdk.cli.cli_context.ready_instance", side_effect=ready),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", side_effect=port_free),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free",
+            side_effect=port_free,
+        ),
     ):
         result = CliRunner().invoke(cli, ["run", "--", "--dev=reload"])
 
@@ -368,9 +397,11 @@ def test_protected_native_argument_is_rejected_at_sdk_boundary_without_machine_d
     with (
         patch(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
-            return_value=(client, env, instance),
+            return_value=_resolved_context(client, env, instance),
         ),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
     ):
         result = CliRunner().invoke(
             cli,
@@ -393,7 +424,7 @@ def test_shell_does_not_record_use() -> None:
     instance.shell_command.return_value = _stub_command(lambda: 0)
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
-        return_value=(client, SimpleNamespace(), instance),
+        return_value=_resolved_context(client, SimpleNamespace(), instance),
     ):
         result = CliRunner().invoke(cli, ["shell"])
 

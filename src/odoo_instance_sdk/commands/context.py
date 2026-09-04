@@ -5,11 +5,12 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import click
 
 from odoo_instance_sdk.exceptions import EnvironmentResolutionError
+from odoo_instance_sdk.internal.project_runtime import resolve_project_runtime
 from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentState
 from odoo_instance_sdk.project import ProjectConfig
 
@@ -19,45 +20,135 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
+ContextProvenance = Literal["explicit", "worktree", "cwd"]
+RuntimeSource = DevelopmentEnvironment | ProjectConfig
+
+
 @dataclass(slots=True)
 class CliContext:
-    """Values selected by the root command and their resolution provenance."""
+    """Selectors supplied to the root command.
+
+    Resolution results deliberately do not live here. Keeping the Click
+    object as input-only state prevents a command from observing stale
+    provenance left by an earlier resolver call.
+    """
 
     project: str | None = None
     env: str | None = None
-    project_source: str = "null"
-    environment_source: str = "null"
-    resolved_project: Path | None = None
-    resolved_environment: DevelopmentEnvironment | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ResolvedContext:
+    """The one resolved runtime context consumed by instance commands."""
+
+    client: OdooClient
+    instance: OdooInstance
+    source: RuntimeSource
+    provenance: ContextProvenance
+
+    @property
+    def is_environment(self) -> bool:
+        return not isinstance(self.source, ProjectConfig)
+
+    @property
+    def project_root(self) -> Path:
+        if isinstance(self.source, ProjectConfig):
+            return self.source.repository_root
+        return Path(self.source.repository_root)
+
+    @property
+    def output_provenance(self) -> dict[str, str]:
+        """Preserve the CLI envelope's two-field provenance projection."""
+        if self.is_environment:
+            return {
+                "project_source": "worktree" if self.provenance == "worktree" else "null",
+                "environment_source": "cwd" if self.provenance == "worktree" else "explicit",
+            }
+        return {
+            "project_source": (
+                "explicit"
+                if self.provenance == "explicit"
+                else "worktree"
+                if self.provenance == "worktree"
+                else "cwd"
+            ),
+            "environment_source": "null",
+        }
+
+    def require_environment(self) -> DevelopmentEnvironment:
+        if isinstance(self.source, ProjectConfig):
+            raise EnvironmentResolutionError(
+                "This command requires a development environment; pass --env or cd into its worktree"
+            )
+        return self.source
+
+    def worktree_path(self) -> Path:
+        if isinstance(self.source, ProjectConfig):
+            return self.source.repository_root
+        return Path(self.source.worktree_path)
+
+    def python_path(self) -> Path:
+        if isinstance(self.source, ProjectConfig):
+            return resolve_project_runtime(
+                self.source.repository_root, self.source.python, field="python"
+            )
+        path = Path(self.source.python_environment_path)
+        return path / "bin" / "python" if path.is_dir() else path
+
+    def instance_address(self) -> tuple[str, int]:
+        if isinstance(self.source, DevelopmentEnvironment):
+            return self.source.http_interface, self.source.http_port
+        start_config = self.instance.config.start_config
+        if start_config is None:
+            raise RuntimeError("resolved project instance has no Odoo start configuration")
+        return start_config.http_interface, start_config.http_port
+
+    def check_port_free(self) -> bool:
+        from odoo_instance_sdk.internal import context as _resolution
+
+        if self.is_environment:
+            return _resolution._check_port_free(cast("DevelopmentEnvironment", self.source))
+        start_config = self.instance.config.start_config
+        if start_config is None:
+            raise RuntimeError("resolved project instance has no Odoo start configuration")
+        from odoo_instance_sdk.internal.address import AddressState, probe_address
+
+        return (
+            probe_address(start_config.http_interface, start_config.http_port) is AddressState.FREE
+        )
 
 
 pass_cli_context = click.make_pass_decorator(CliContext, ensure=True)
 
 
+def project_provenance(cli_context: CliContext) -> Literal["explicit", "worktree", "cwd", "null"]:
+    """Return project provenance without mutating the Click context."""
+    from odoo_instance_sdk.internal import context as _resolution
+
+    if cli_context.project is not None:
+        return "explicit"
+    cwd = Path.cwd()
+    if _resolution._project_from_registered_worktree(cwd) is not None:
+        return "worktree"
+    if _resolution._find_nearest_manifest(cwd, None) is not None:
+        return "cwd"
+    return "null"
+
+
+def environment_provenance(cli_context: CliContext) -> Literal["explicit", "cwd"]:
+    """Return the selector provenance used by legacy environment commands."""
+    return "explicit" if cli_context.env is not None else "cwd"
+
+
 def resolve_project_path(cli_context: CliContext) -> Path:
-    """Resolve the project selector while recording its source."""
+    """Resolve the explicit or nearest initialized project."""
     from odoo_instance_sdk.internal import context as _resolution
 
     raw = cli_context.project
-    project = _resolution.resolve_project(Path(raw) if raw is not None else None)
-    if raw is not None:
-        cli_context.project_source = "explicit"
-    else:
-        cwd = Path.cwd()
-        cli_context.project_source = (
-            "cwd"
-            if _resolution._find_nearest_manifest(cwd, None) is not None
-            else "worktree"
-            if _resolution._project_from_registered_worktree(cwd) is not None
-            else "null"
-        )
-    if hasattr(project, "repository_root"):
-        repository_root = project.repository_root
-        assert repository_root is not None
-    else:
-        repository_root = Path(project)
-    cli_context.resolved_project = repository_root
-    return repository_root
+    project = _resolution.resolve_project(Path(raw) if raw is not None else None, cwd=Path.cwd())
+    if isinstance(project, ProjectConfig):
+        return project.repository_root
+    return Path(project)
 
 
 def resolve_environment(
@@ -65,123 +156,71 @@ def resolve_environment(
     explicit: str | None,
     *,
     cwd: Path | None = None,
-    cli_context: CliContext | None = None,
 ) -> DevelopmentEnvironment:
     """Resolve an environment from typed selectors and an optional cwd."""
     from odoo_instance_sdk.internal import context as _resolution
 
-    environment = _resolution.resolve_environment(client, explicit, cwd=cwd)
-    if cli_context is not None:
-        cli_context.resolved_environment = environment
-        cli_context.environment_source = "explicit" if explicit is not None else "cwd"
-    return environment
+    return _resolution.resolve_environment(client, explicit, cwd=cwd)
 
 
-def _check_port_free(
-    context: DevelopmentEnvironment | ProjectConfig,
-) -> bool:
-    from odoo_instance_sdk.internal import context as _resolution
+def ready_instance(cli_context: CliContext) -> ResolvedContext:
+    """Resolve one runtime source and construct its immutable context.
 
-    if not isinstance(context, ProjectConfig):
-        return _resolution._check_port_free(context)
-    from odoo_instance_sdk.models import StartConfig
-
-    config_path = context.source_config
-    if config_path is None:
-        raise RuntimeError("resolved project has no source_config")
-    if not config_path.is_absolute():
-        config_path = context.repository_root / config_path
-    start_config = StartConfig.from_odoo_config(config_path)
-    interface = start_config.http_interface
-    port = context.preferred_http_port or start_config.http_port
-    from odoo_instance_sdk.internal.address import AddressState, probe_address
-
-    return probe_address(interface, port) is AddressState.FREE
-
-
-def ready_instance(
-    cli_context: CliContext,
-) -> tuple[OdooClient, DevelopmentEnvironment | ProjectConfig, OdooInstance]:
-    """Resolve an environment or initialized project and construct its instance."""
+    Precedence is intentionally visible here: explicit ``--env``, an exact
+    registered worktree, explicit ``--project``, then the nearest project.
+    """
     from odoo_instance_sdk.internal import context as _resolution
 
     client = _client_class()(config=_client_config_class()(executable="odoo"))
-    project: ProjectConfig | None = None
-    project_root: Path | None = None
-    if cli_context.project is not None:
-        project_root = resolve_project_path(cli_context).resolve()
     try:
         env_obj = resolve_environment(
             client,
             cli_context.env,
             cwd=Path.cwd(),
-            cli_context=cli_context,
         )
     except EnvironmentResolutionError:
         if cli_context.env is not None:
             raise
-        if project_root is not None:
-            project = ProjectConfig.load(project_root)
-        else:
-            resolved = _resolution.resolve_project(None, cwd=Path.cwd())
-            project = (
-                resolved
-                if isinstance(resolved, ProjectConfig)
-                else ProjectConfig.load(Path(resolved))
+        project = _project_for_context(cli_context)
+        instance = client.instance.from_project(project)
+        provenance: ContextProvenance = "explicit"
+        if cli_context.project is None:
+            provenance = (
+                "worktree"
+                if _resolution._project_from_registered_worktree(Path.cwd()) is not None
+                else "cwd"
             )
-            project_root = project.repository_root.resolve()
-            cli_context.resolved_project = project_root
-            cli_context.project_source = "cwd"
-        return client, project, client.instance.from_project(project)
-    if project_root is not None and Path(env_obj.repository_root).resolve() != project_root:
-        raise EnvironmentResolutionError(
-            f"Environment {env_obj.name} ({env_obj.id}) does not belong to project {project_root}"
+        return ResolvedContext(
+            client=client,
+            instance=instance,
+            source=project,
+            provenance=provenance,
         )
+
     if env_obj.state != EnvironmentState.READY:
         raise RuntimeError(
             f"Environment {env_obj.name} ({env_obj.id}) is not ready (state={env_obj.state})"
         )
     _resolution._verify_env_runtime(env_obj)
     instance = client.instance.from_environment(env_obj)
-    return client, env_obj, instance
+    return ResolvedContext(
+        client=client,
+        instance=instance,
+        source=env_obj,
+        provenance="explicit" if cli_context.env is not None else "worktree",
+    )
 
 
-def require_environment(
-    context: DevelopmentEnvironment | ProjectConfig,
-) -> DevelopmentEnvironment:
-    """Narrow shared runtime context for environment-owned operations."""
-    if isinstance(context, ProjectConfig):
-        raise EnvironmentResolutionError(
-            "This command requires a development environment; pass --env or cd into its worktree"
-        )
-    return context
+def _project_for_context(cli_context: CliContext) -> ProjectConfig:
+    """Load the project only after environment/worktree resolution failed."""
+    from odoo_instance_sdk.internal import context as _resolution
 
-
-def instance_address(
-    context: DevelopmentEnvironment | ProjectConfig, instance: OdooInstance
-) -> tuple[str, int]:
-    if not isinstance(context, ProjectConfig):
-        return context.http_interface, context.http_port
-    start_config = instance.config.start_config
-    if start_config is None:
-        raise RuntimeError("resolved project instance has no Odoo start configuration")
-    return start_config.http_interface, start_config.http_port
-
-
-def worktree_path(context: DevelopmentEnvironment | ProjectConfig) -> Path:
-    if isinstance(context, ProjectConfig):
-        return context.repository_root
-    return Path(context.worktree_path)
-
-
-def python_path(context: DevelopmentEnvironment | ProjectConfig) -> Path:
-    if isinstance(context, ProjectConfig):
-        if context.python is None:
-            raise RuntimeError("Project manifest requires python")
-        path = Path(context.python)
-        return path if path.is_absolute() else context.repository_root / path
-    path = Path(context.python_environment_path)
-    return path / "bin" / "python" if path.is_dir() else path
+    if cli_context.project is not None:
+        return ProjectConfig.load(resolve_project_path(cli_context))
+    resolved = _resolution.resolve_project(None, cwd=Path.cwd())
+    if isinstance(resolved, ProjectConfig):
+        return resolved
+    return ProjectConfig.load(Path(resolved))
 
 
 def _client_class() -> type[OdooClient]:
@@ -209,12 +248,11 @@ def __getattr__(name: str) -> type[OdooClient | OdooClientConfig]:
 
 __all__ = [
     "CliContext",
-    "instance_address",
+    "ResolvedContext",
+    "environment_provenance",
     "pass_cli_context",
-    "python_path",
+    "project_provenance",
     "ready_instance",
-    "require_environment",
     "resolve_environment",
     "resolve_project_path",
-    "worktree_path",
 ]

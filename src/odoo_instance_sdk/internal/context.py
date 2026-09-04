@@ -57,15 +57,15 @@ def resolve_project(explicit: Path | None, cwd: Path | None = None) -> ProjectCo
         boundary = git_worktree.rev_parse_toplevel(base)
     except Exception:
         boundary = None
+    registered = _project_from_registered_worktree(base)
+    if registered is not None:
+        return ProjectConfig.load(registered)
     manifest = _find_nearest_manifest(base, boundary)
     if manifest is not None:
         try:
             return ProjectConfig.load(manifest.parent.parent)
         except ProjectManifestNotFoundError as e:
             raise ProjectContextError(str(e)) from e
-    registered = _project_from_registered_worktree(base)
-    if registered is not None:
-        return ProjectConfig.load(registered)
     raise ProjectContextError(
         "No .odcli/project.toml found upward from cwd; run odcli init or pass --project PATH"
     )

@@ -3,10 +3,11 @@ from __future__ import annotations
 import ast
 import base64
 import json
+import shutil
 import textwrap
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -654,6 +655,96 @@ class TestTranslationsExport:
 
 
 class TestDepsVerify:
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
+    def test_uv_selector_captures_native_argv_before_execution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from odoo_instance_sdk.internal.automation import verify_deps_command
+
+        resolver = MagicMock(side_effect=AssertionError("uv python find must not run"))
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.server.run_command",
+            resolver,
+        )
+        command = verify_deps_command(recorded_python="3.12", worktree_root=tmp_path)
+
+        uv_path = shutil.which("uv")
+        assert uv_path is not None
+        assert command.plan.process_steps[0].step_id == "deps.verify.pip-check"
+        assert command.plan.process_steps[0].argv[:6] == (
+            str(Path(uv_path).absolute()),
+            "pip",
+            "check",
+            "--python",
+            "3.12",
+        )
+        assert all(
+            step.step_id != "deps.verify.resolve-project-runtime" for step in command.plan.steps
+        )
+        resolver.assert_not_called()
+
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
+    def test_uv_selector_executes_the_captured_probe_steps(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from odoo_instance_sdk.internal.automation import verify_deps_command
+        from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RecordingExecutor
+
+        worktree = tmp_path / "wt"
+        manifest = worktree / "myaddon"
+        manifest.mkdir(parents=True)
+        (manifest / "__manifest__.py").write_text(
+            "{'external_dependencies': {'python': ['requests']}}"
+        )
+
+        def result_for(step: object) -> ProcessResult:
+            prepared = cast("PreparedStep", step)
+            return ProcessResult(
+                argv=prepared.argv,
+                returncode=0,
+                stdout="",
+                stderr="",
+                duration=0.0,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+
+        executor = RecordingExecutor(result_factory=result_for)
+
+        command = verify_deps_command(
+            recorded_python="3.12",
+            worktree_root=worktree,
+            executor=executor,
+        )
+        planned = command.plan.process_steps
+
+        assert tuple(step.step_id for step in planned) == (
+            "deps.verify.pip-check",
+            "deps.verify.import.0",
+        )
+        uv_path = shutil.which("uv")
+        assert uv_path is not None
+        assert planned[1].argv[:8] == (
+            str(Path(uv_path).absolute()),
+            "run",
+            "--no-project",
+            "--python",
+            "3.12",
+            "--",
+            "python",
+            "-c",
+        )
+        command.run()
+        from odoo_instance_sdk.internal.proc.redaction import project_process_step
+
+        assert tuple(step.step_id for step in executor.executed) == tuple(
+            step.step_id for step in planned
+        )
+        assert all(
+            project_process_step(actual) == expected
+            for actual, expected in zip(executor.executed, planned, strict=True)
+        )
+
     def test_missing_import_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         worktree = tmp_path / "wt"
         mod_dir = worktree / "myaddon"

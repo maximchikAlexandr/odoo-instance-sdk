@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.context import ResolvedContext
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
 from odoo_instance_sdk.models import (
@@ -17,6 +18,10 @@ from odoo_instance_sdk.models import (
     DatabasePreparationAction,
     DatabasePreparationResult,
 )
+
+
+def _resolved_context(client: object, source: object, instance: object) -> ResolvedContext:
+    return ResolvedContext(client=client, source=source, instance=instance, provenance="explicit")  # type: ignore[arg-type]
 
 
 def _command(value: object = None, *, error: BaseException | None = None) -> Command[object]:
@@ -110,7 +115,7 @@ def test_reset_delegates_only_for_exact_recorded_local_binding(
     environment = SimpleNamespace(id="env-1", source_db_name=None, target_db_name="demo_copy")
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.db.ready_instance",
-        lambda _ctx: (MagicMock(), environment, instance),
+        lambda _ctx: _resolved_context(MagicMock(), environment, instance),
     )
 
     result = CliRunner().invoke(cli, ["db", "reset-admin-password", "--json"])

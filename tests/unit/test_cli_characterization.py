@@ -9,14 +9,16 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import click
 import pytest
 from click.testing import CliRunner, Result
 
+from odoo_instance_sdk import OdooClient
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands.context import CliContext
+from odoo_instance_sdk.commands.context import CliContext, ResolvedContext, RuntimeSource
 from odoo_instance_sdk.commands.output import OutputMode, build_envelope
 from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
 from odoo_instance_sdk.internal.context import resolve_environment, resolve_project
@@ -108,9 +110,18 @@ def _passthrough_instance(
 ) -> Result:
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
-        return_value=(MagicMock(), SimpleNamespace(), instance),
+        return_value=_resolved_context(MagicMock(), SimpleNamespace(), instance),
     ):
         return CliRunner().invoke(cli, args, input=input_text)
+
+
+def _resolved_context(client: object, source: object, instance: object) -> ResolvedContext:
+    return ResolvedContext(
+        client=cast("OdooClient", client),
+        source=cast("RuntimeSource", source),
+        instance=cast("OdooInstance", instance),
+        provenance="explicit",
+    )
 
 
 def _stub_command(callback: Callable[[], int]) -> Command[int]:
@@ -168,17 +179,7 @@ def test_cli_import_and_console_script_surface_are_stable() -> None:
 
 
 def test_typed_cli_seam_and_reusable_resolvers_have_no_click_context_parameter() -> None:
-    assert CliContext.__slots__ == (
-        "project",
-        "env",
-        "project_source",
-        "environment_source",
-        "resolved_project",
-        "resolved_environment",
-    )
-    context = CliContext()
-    assert context.resolved_project is None
-    assert context.resolved_environment is None
+    assert CliContext.__slots__ == ("project", "env")
     assert set(OutputMode) == {OutputMode.RICH, OutputMode.JSON, OutputMode.TOON}
     assert "click.Context" not in str(inspect.signature(resolve_project))
     assert "click.Context" not in str(inspect.signature(resolve_environment))
@@ -347,9 +348,11 @@ def test_raw_stream_dry_run_emits_one_captured_command_without_running(
     with (
         patch(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
-            return_value=(MagicMock(), SimpleNamespace(), instance),
+            return_value=_resolved_context(MagicMock(), SimpleNamespace(), instance),
         ),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
     ):
         result = CliRunner().invoke(cli, [leaf, "--dry-run", *option])
     assert result.exit_code == 0, result.output
@@ -378,9 +381,12 @@ def test_raw_stream_json_alias_matches_format_json_on_one_captured_command(leaf:
         with (
             patch(
                 "odoo_instance_sdk.cli.cli_context.ready_instance",
-                return_value=(MagicMock(), SimpleNamespace(), instance),
+                return_value=_resolved_context(MagicMock(), SimpleNamespace(), instance),
             ),
-            patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+            patch(
+                "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free",
+                return_value=True,
+            ),
         ):
             return CliRunner().invoke(cli, [leaf, *options, *suffix])
 
@@ -420,9 +426,11 @@ def test_raw_stream_dry_run_option_order_is_stable_and_preserves_shell_args(
     with (
         patch(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
-            return_value=(MagicMock(), SimpleNamespace(), instance),
+            return_value=_resolved_context(MagicMock(), SimpleNamespace(), instance),
         ),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
     ):
         result = CliRunner().invoke(cli, [leaf, *options, *suffix])
 
@@ -674,7 +682,9 @@ def test_run_delimiter_preserves_native_values_repetition_and_order() -> None:
     instance.run_foreground_command.return_value = _stub_command(lambda: 0)
     native_args = ("--dev=reload", "--log-level", "debug", "--dev=xml")
 
-    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+    with patch(
+        "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+    ):
         result = _passthrough_instance(instance, ["run", "--", *native_args])
 
     assert result.exit_code == 0, result.output
@@ -700,7 +710,9 @@ def test_passthrough_commands_forward_child_exit_code(command: str) -> None:
     method = instance.run_foreground_command if command == "run" else instance.shell_command
     method.return_value = _stub_command(lambda: child_exit)
 
-    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+    with patch(
+        "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+    ):
         result = _passthrough_instance(
             instance, [command, "--", "--dev"] if command == "shell" else [command]
         )
@@ -722,7 +734,9 @@ def test_passthrough_commands_map_keyboard_interrupt_to_130(command: str) -> Non
     method = instance.run_foreground_command if command == "run" else instance.shell_command
     method.return_value = _stub_command(raise_interrupt)
 
-    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+    with patch(
+        "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+    ):
         result = _passthrough_instance(instance, [command])
 
     assert result.exit_code == 130
@@ -737,7 +751,9 @@ def test_run_native_interrupt_maps_to_130_after_delimiter() -> None:
         raise KeyboardInterrupt
 
     instance.run_foreground_command.return_value = _stub_command(raise_interrupt)
-    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+    with patch(
+        "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+    ):
         result = _passthrough_instance(instance, ["run", "--", "--dev=reload"])
 
     assert result.exit_code == 130
@@ -753,7 +769,9 @@ def test_run_native_exit_code_and_streams_remain_unwrapped() -> None:
         return 17
 
     instance.run_foreground_command.return_value = _stub_command(run_foreground)
-    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+    with patch(
+        "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+    ):
         result = _passthrough_instance(instance, ["run", "--", "--workers=2"])
 
     assert result.exit_code == 17
@@ -801,9 +819,11 @@ def test_run_dry_run_formats_use_single_shared_rich_projection(
     with (
         patch(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
-            return_value=(client, SimpleNamespace(), instance),
+            return_value=_resolved_context(client, SimpleNamespace(), instance),
         ),
-        patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
     ):
         result = CliRunner().invoke(cli, ["run", "--dry-run", *output, "--", *native_args])
 
@@ -836,7 +856,9 @@ def test_passthrough_run_and_shell_preserve_native_streams() -> None:
         return 0
 
     run_instance.run_foreground_command.return_value = _stub_command(run_foreground)
-    with patch("odoo_instance_sdk.cli.cli_context._check_port_free", return_value=True):
+    with patch(
+        "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+    ):
         run_result = _passthrough_instance(run_instance, ["run"])
     assert run_result.stdout == "run stdout"
     assert run_result.stderr == "run stderr"

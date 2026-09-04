@@ -58,29 +58,54 @@ odcli vscode generate [OPTIONS]
 
 ### Requirement: Context-aware command resolution
 
-The following resolution rules MUST apply.
+Instance commands MUST resolve one runtime context in this order:
 
-Два правила:
+1. An explicit `--env SELECTOR`; failure to resolve it MUST be terminal and MUST NOT fall back.
+2. The exact registered worktree containing the current directory.
+3. An explicit `--project PATH`, or otherwise the nearest initialized project manifest found upward from the current directory to the Git/filesystem boundary.
+4. Otherwise an actionable context-resolution error.
 
-1. Если current directory находится внутри exact registered worktree, project и environment выводятся из этой записи.
-2. Иначе нужны явные флаги: `--project PATH` для project commands; `--env SELECTOR` или positional `ENVIRONMENT` по типу команды. Ближайший `.odcli/project.toml` вверх до Git/filesystem boundary считается explicit project discovery, не угадыванием environment.
+The first two cases produce an environment context; the third produces a project context. Resolution MUST NOT select an environment by recency or because it is the only ready environment. Project fallback MUST NOT create or catalogue a synthetic environment.
 
-Запрещено: выбирать «последний использованный» environment; молча брать единственный `ready` environment проекта, если cwd не является его worktree; резолвить global default project.
+#### Scenario: Explicit environment wins
+
+- **WHEN** an instance command receives a valid explicit `--env` while current directory is inside an initialized project
+- **THEN** it uses the selected environment and does not fall back to project context
+
+#### Scenario: Invalid explicit environment does not fall back
+
+- **WHEN** an instance command receives an unknown or ambiguous explicit `--env`
+- **THEN** it fails with the environment resolution error before project resolution or runtime work
+
+#### Scenario: Exact worktree wins over project
+
+- **WHEN** an instance command runs inside an exact registered worktree with no explicit environment
+- **THEN** project and environment are inferred from that worktree record
+
+#### Scenario: Main checkout uses project context
+
+- **WHEN** `odcli run` executes in an initialized main checkout with no explicit environment and no exact worktree match
+- **THEN** it resolves the nearest project manifest and uses project context
+
+#### Scenario: Project is not an environment
+
+- **WHEN** an instance command resolves project context
+- **THEN** no environment record is created, selected, or added to `odcli env list`
 
 #### Scenario: Inside registered worktree
 
-- **WHEN** `odcli run` executed inside exact registered worktree
-- **THEN** project + environment inferred from worktree record
+- **WHEN** `odcli run` executes inside an exact registered worktree
+- **THEN** project and environment are inferred from the worktree record
 
 #### Scenario: Outside worktree without flags
 
-- **WHEN** `odcli run` executed outside worktree without `--env`
-- **THEN** error: either `cd` в worktree, либо `--env`, со списком candidates
+- **WHEN** `odcli run` executes outside an initialized project and registered worktree without `--env` or `--project`
+- **THEN** it fails with guidance to initialize/select a project or select/cd into an environment
 
 #### Scenario: Single ready not silently selected
 
-- **WHEN** project has exactly one `ready` environment, cwd not in its worktree, no `--env`
-- **THEN** error, never silently select
+- **WHEN** a project has exactly one ready environment, current directory is not in its worktree, and no `--env` is supplied
+- **THEN** that environment is never selected implicitly and project fallback is used only when the project itself is initialized
 
 ### Requirement: Project resolution order
 
@@ -103,23 +128,34 @@ Project resolution MUST follow this order.
 
 ### Requirement: Environment resolution for instance commands
 
-Для instance commands (`run`, `logs`, `shell`, `eval`, `exec`, `test`, `module`, `translations`, `deps verify`):
+Instance commands (`run`, `logs`, `shell`, `eval`, `exec`, `test`, `module`, `translations`, `deps verify`, and `vscode generate`) MUST consume the shared `environment | project` resolver. Commands whose required state is available from either context MUST operate on both. A command that requires environment-owned state or lifecycle metadata MUST reject project context with an actionable error and MUST NOT fabricate an environment.
 
-1. Explicit root `--env SELECTOR` — UUID либо однозначное имя; option допустим только для instance commands.
-2. Exact registered worktree containing current directory.
-3. Иначе — ошибка: либо `cd` в worktree, либо `--env`, со списком candidates если их несколько.
+Test target, working-directory, and addon resolution MUST begin only after runtime context is resolved and MUST NOT select a different environment or project.
 
-Никогда не выбирать единственный `ready` молча и никогда не выбирать по recency. Test target/cwd/addon resolution begins only after this environment is resolved and SHALL NOT select a different environment.
+#### Scenario: Explicit environment precedes addon selection
+
+- **WHEN** `odcli --env <uuid> test sale` runs
+- **THEN** environment resolution completes before addon selection
+
+#### Scenario: Project-capable command accepts main checkout
+
+- **WHEN** a project-capable instance command runs under an initialized main checkout without `--env`
+- **THEN** it uses the project runtime configuration
+
+#### Scenario: Environment-only command rejects project context
+
+- **WHEN** a command requiring environment-owned artifacts resolves only a project context
+- **THEN** it returns an actionable error without catalog mutation or subprocess launch
 
 #### Scenario: Explicit --env
 
 - **WHEN** `odcli --env <uuid> test sale` runs
-- **THEN** environment is resolved from the explicit selector before addon selection
+- **THEN** the environment is resolved from the explicit selector before addon selection
 
 #### Scenario: Ambiguous name
 
-- **WHEN** `odcli --env "feat" test sale` matches 2 environments
-- **THEN** error with candidate list and no addon/Git/preflight/Odoo work
+- **WHEN** `odcli --env "feat" test sale` matches two environments
+- **THEN** it fails with the candidate list and performs no addon, Git, preflight, project fallback, or Odoo work
 
 ### Requirement: Command-specific context rules
 
@@ -255,49 +291,54 @@ Raw run/shell передают Odoo streams как есть.
 
 ### Requirement: `odcli run`
 
-```bash
-odcli run
-odcli --env <environment-id> run
-odcli run -- --dev=reload --log-level=debug
-odcli run --dry-run -- --stop-after-init -u sale
-```
+`odcli run` SHALL launch the resolved Odoo runtime from either a ready environment or an initialized project. For project context, it SHALL derive the Python executable, Odoo entry point, source Odoo config, runtime working directory, preferred HTTP port, default database, default run arguments, and project PostgreSQL binding from `.odcli/project.toml` and the referenced config. Missing required runtime fields or files SHALL fail before process construction with a sanitized actionable error.
 
-The command SHALL:
+The command SHALL preserve the existing literal `--` delimiter rule, exact passthrough argument order, protected runtime-identity validation, free-port preflight, dry-run rendering, inherited native streams, foreground process-group cleanup, and exit-code behavior. Project context has no environment use metadata, so it SHALL NOT call `EnvironmentResource.record_use()`; environment context SHALL retain its existing record-use behavior after successful preflight and before execution.
 
-1. Accept zero or more unprocessed Odoo arguments only after the Click `--` delimiter. It SHALL preserve each argument value, repetition, and order and SHALL not interpret or reconstruct Odoo options.
-2. Call the existing shared `ready_instance()` contract, which resolves a ready environment, validates its worktree/config plus recorded Python and Odoo entry point without invoking `sync_python`, creates the instance through `client.instance.from_environment(environment)`, and returns client, environment, and instance.
-3. Check the bound port through standard-library `socket.bind((http_interface, http_port))`; when occupied, perform only the existing observational HTTP health check for diagnostics.
-4. On an occupied port, return deterministic `port-conflict`/ownership-unknown without changing generated config, updating use metadata, validating into a command, or launching a second process.
-5. After a free-port preflight, call the instance already returned by `ready_instance()` through `instance.run_foreground_command(args=<exact delimiter args>)` exactly once.
-6. For normal execution only, after command capture and before execution, update `last_used_at` and the generic `use/succeeded` event exactly once. Dry-run SHALL NOT update use metadata.
-7. For normal execution, run that command with native inherited stdin/stdout/stderr and return the Odoo exit code without a Rich/JSON/TOON document wrapper.
-8. For `--dry-run`, emit the same command's bounded plan through the existing Rich/JSON/TOON output boundary without invoking `.run()`; the plan SHALL contain the exact validated native argv in its original order.
-9. On Ctrl+C, rely on the foreground command to stop only the process group created by that call and exit `130`.
+#### Scenario: Project run needs no runtime path arguments
 
-The CLI SHALL use a run-specific Click command boundary that inspects the raw argument list before Click discards the `--` marker and rejects every non-empty variadic `odoo_args` tuple unless a literal `--` preceded it. The CLI SHALL not change or bypass shared `ready_instance()`, duplicate the SDK protected-override validator, construct subprocess argv, acquire the artifact lock, or rebuild the command between preview and execution. `--format`/`--json` SHALL retain their existing rule that they are accepted for `run` only with `--dry-run` and fail with Click exit `2` before SDK resolution otherwise.
+- **WHEN** `odcli run` executes from an initialized main checkout whose manifest references valid Python, Odoo entry point, and config
+- **THEN** it constructs and launches the foreground command without requiring those paths as CLI arguments
+
+#### Scenario: Project defaults and passthrough compose deterministically
+
+- **WHEN** project context defines default run arguments and the caller supplies allowed arguments after `--`
+- **THEN** the captured command contains project defaults followed by the exact caller arguments in their original order
+
+#### Scenario: Project dry-run has no side effects
+
+- **WHEN** `odcli run --dry-run` resolves project context
+- **THEN** it emits the bounded execution plan without starting Odoo, mutating the environment catalogue, or writing use metadata
+
+#### Scenario: Environment run retains metadata behavior
+
+- **WHEN** `odcli run` resolves a ready environment and the port preflight succeeds
+- **THEN** it records environment use exactly once before executing the captured foreground command
+
+#### Scenario: Native process contract is context-independent
+
+- **WHEN** an environment-based or project-based foreground run exits non-zero or is interrupted
+- **THEN** native streams are preserved, the actual exit code is returned, and interrupt cleanup returns exit `130`
 
 #### Scenario: Port conflict deterministic error
 
-- **WHEN** `odcli run -- --dev=reload` finds the bound port occupied
-- **THEN** `ready_instance()` has already completed SDK/environment resolution and instance creation, but the command returns `port-conflict`/ownership-unknown with no foreground command construction, use update, config change, or process launch
+- **WHEN** `odcli run -- --dev=reload` finds the effective bound port occupied
+- **THEN** it returns `port-conflict` with ownership unknown and performs no foreground command construction, use update, config change, or process launch
 
 #### Scenario: Free port starts Odoo
 
-- **WHEN** `odcli run -- --dev=reload --log-level debug --dev=xml` finds the port free
-- **THEN** it uses the instance returned by `ready_instance()`, captures `run_foreground_command(args=("--dev=reload", "--log-level", "debug", "--dev=xml"))` once, and then records use once before execution
-- **AND** normal execution returns the foreground Odoo exit code on native streams
+- **WHEN** `odcli run -- --dev=reload --log-level debug --dev=xml` finds the effective port free
+- **THEN** it captures `run_foreground_command` once with the exact delimiter arguments and executes that captured command
 
 #### Scenario: Delimiter is required for native arguments
 
 - **WHEN** a caller invokes `odcli run --dev=reload` without the `--` delimiter
-- **THEN** Click reports an unknown-option usage error with exit code `2`
-- **AND** no SDK resolution or process launch occurs
+- **THEN** Click reports an unknown-option usage error with exit code `2` before SDK resolution or launch
 
 #### Scenario: Bare positional input is rejected
 
 - **WHEN** a caller invokes `odcli run sale` without a literal `--`
-- **THEN** the run-specific Click boundary reports a usage error with exit code `2`
-- **AND** no SDK resolution, use update, command construction, or process launch occurs
+- **THEN** the command reports a usage error with exit code `2` and performs no SDK resolution, use update, command construction, or launch
 
 #### Scenario: Protected override is rejected before spawn
 
@@ -306,15 +347,13 @@ The CLI SHALL use a run-specific Click command boundary that inspects the raw ar
 
 #### Scenario: Dry-run and execution use one captured argv
 
-- **WHEN** the same allowed delimiter args are supplied to dry-run and normal execution under a recording executor
-- **THEN** dry-run displays their exact ordered elements in the captured foreground `ProcessStep`
-- **AND** normal execution consumes that captured step without reconstructing argv
-- **AND** dry-run performs no use-metadata write, while normal execution records use once between command capture and execution
+- **WHEN** the same allowed delimiter arguments are supplied to dry-run and normal execution under a recording executor
+- **THEN** dry-run displays the exact captured foreground step and normal execution consumes it without reconstructing argv
 
 #### Scenario: Native TTY and exit behavior remain unchanged
 
-- **WHEN** `odcli run -- --workers=2` executes normally, writes to inherited streams, exits non-zero, or is interrupted
-- **THEN** stdin/stdout/stderr remain native, the real exit code is returned, and interrupt cleanup preserves exit `130`
+- **WHEN** `odcli run -- --workers=2` executes normally, exits non-zero, or is interrupted
+- **THEN** inherited stdin/stdout/stderr remain native, the real exit code is returned, and interrupt cleanup preserves exit `130`
 
 ### Requirement: `odcli logs`
 
@@ -535,14 +574,19 @@ odcli vscode generate --write
 
 ### Requirement: Instance commands share one ready path
 
-`run`, `logs`, `shell`, `eval`, `exec`, `module`, `translations`, `deps verify` и `vscode generate` MUST получать `OdooClient`, ready environment и `OdooInstance` через один internal `ready_instance` path. Command bodies MUST NOT копировать resolve/verify/`from_environment()` и MUST NOT конструировать `OdooClient` сами.
+Project-capable instance commands MUST obtain the client, resolved `environment | project` context, and `OdooInstance` through one shared internal path. Command bodies MUST NOT duplicate context precedence, runtime verification, instance construction, or client construction. Environment-only commands MUST narrow the shared result explicitly and reject project context.
 
-`ready_instance` MUST использовать already-specified two-rule context. Port preflight остаётся только у `run`.
+Port preflight remains specific to `run`.
 
 #### Scenario: Eval and run share resolve
 
-- **WHEN** `odcli eval 1` and `odcli run` execute inside a registered worktree
-- **THEN** both resolve the same environment through `ready_instance`, not through per-command helpers
+- **WHEN** `odcli eval 1` and `odcli run` execute under the same supported context
+- **THEN** both resolve that context through the shared path rather than command-specific helpers
+
+#### Scenario: Lifecycle remains environment-only
+
+- **WHEN** an environment lifecycle operation is invoked from only the main project checkout without an environment selector
+- **THEN** it does not treat the project as a development environment
 
 ### Requirement: CLI does not open the catalog
 
@@ -1079,4 +1123,18 @@ Pure read-only `db locks`, `db stats`, `db bloat`, and `postgres status` SHALL N
 
 - **WHEN** `odcli psql --dry-run -c 'SELECT 1'` is invoked
 - **THEN** the shared plan shows the exact sanitized native psql step that normal execution would consume and does not spawn it
+
+### Requirement: Project restore postconditions use the database authority
+
+When `odcli db refresh --restore` targets a project PostgreSQL cluster, existence checks before and after restore MUST query that PostgreSQL endpoint directly when a PostgreSQL probe is available. The checks MUST NOT infer absence solely from the running Odoo database-manager list because an Odoo process constrained by `--database` can omit a newly restored database. An inconclusive PostgreSQL probe MUST fail closed rather than silently converting the result into confirmed absence.
+
+#### Scenario: Running Odoo is restricted to the previous database
+
+- **WHEN** restore creates the target in the project PostgreSQL cluster but `/web/database/list` only returns the database selected when Odoo started
+- **THEN** the post-restore check confirms the target through PostgreSQL and the refresh proceeds to its remaining steps
+
+#### Scenario: Direct probe confirms absence
+
+- **WHEN** the planned PostgreSQL post-restore probe completes successfully with no matching database
+- **THEN** restore fails with the retained-backup and retained-database safety context
 

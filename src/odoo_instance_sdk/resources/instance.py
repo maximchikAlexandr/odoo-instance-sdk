@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, ExecutionPlan
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
+    from odoo_instance_sdk.internal.project_runtime import DeferredProjectRuntime
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
     from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -216,7 +217,7 @@ class InstanceFactory:
         root = project.repository_root.resolve()
         config_path = _project_path(root, project.source_config, field="source_config")
         odoo_bin = _project_path(root, project.odoo_bin, field="odoo_bin")
-        python_bin = _project_path(root, project.python, field="python")
+        python_bin, deferred_runtime = _project_runtime_binding(root, project, odoo_bin)
         default_cwd = (
             _project_path(root, project.runtime_cwd, field="runtime_cwd", directory=True)
             if project.runtime_cwd is not None
@@ -246,7 +247,8 @@ class InstanceFactory:
                 master_password=None,
                 configured_database_names=parse_db_names(start_cfg.db_name),
                 start_config=start_cfg,
-                command_prefix=(str(python_bin), str(odoo_bin)),
+                command_prefix=(str(python_bin), str(odoo_bin)) if python_bin is not None else None,
+                deferred_runtime=deferred_runtime,
                 default_cwd=default_cwd,
                 default_run_args=project.default_run_args,
                 db_host=start_cfg.db_host,
@@ -642,6 +644,8 @@ class OdooInstance:
     def _executable_prefix(self) -> tuple[str, ...]:
         if self.config.command_prefix is not None:
             return self.config.command_prefix
+        if self.config.deferred_runtime is not None:
+            return self.config.deferred_runtime.command_prefix()
         return (self._client.config.executable,)
 
     def run(
@@ -884,6 +888,16 @@ class OdooInstance:
             executor=SubprocessExecutor(),
         )
 
+    def _clear_runtime_identity(self) -> None:
+        """Best-effort cleanup of the persisted runtime identity.
+        Catalog cleanup failures are diagnostic only."""
+        if self._environment_id is None:
+            return
+        try:
+            self._client.get_catalog().clear_environment_runtime(self._environment_id)
+        except Exception as e:
+            print(f"failed to clear environment runtime: {e}", file=sys.stderr)
+
     def _persist_runtime_identity(
         self,
         root_pid: int,
@@ -908,14 +922,6 @@ class OdooInstance:
             http_port=config.http_port,
             database_name=config.db_name or "",
         )
-
-    def _clear_runtime_identity(self) -> None:
-        if self._environment_id is None:
-            return
-        try:
-            self._client.get_catalog().clear_environment_runtime(self._environment_id)
-        except Exception as e:
-            print(f"failed to clear environment runtime: {e}", file=sys.stderr)
 
     def iter_logs(self, *, tail: int = 100, follow: bool = False) -> Iterator[str]:
         """Yield the last ``tail`` lines of the bound logfile, optionally following appends."""
@@ -1299,3 +1305,20 @@ class OdooInstance:
             timeout=timeout,
             alive_check=alive_check,
         )
+
+
+def _resolve_project_python(root: Path, value: str | Path | None) -> Path:
+    from odoo_instance_sdk.internal.project_runtime import resolve_project_runtime
+
+    return resolve_project_runtime(root, value, field="python")
+
+
+def _project_runtime_binding(
+    root: Path, project: ProjectConfig, odoo_bin: Path
+) -> tuple[Path | None, DeferredProjectRuntime | None]:
+    from odoo_instance_sdk.internal.project_runtime import defer_project_runtime
+
+    deferred = defer_project_runtime(root, project.python, field="python", odoo_bin=odoo_bin)
+    if deferred is not None:
+        return None, deferred
+    return _resolve_project_python(root, project.python), None

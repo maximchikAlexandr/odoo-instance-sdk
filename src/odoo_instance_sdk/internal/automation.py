@@ -19,7 +19,12 @@ from odoo_instance_sdk.models import CommandResult, OdooTestResult, OdooTestSpec
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
-    from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RunContext
+    from odoo_instance_sdk.internal.proc import (
+        PreparedStep,
+        ProcessExecutor,
+        ProcessResult,
+        RunContext,
+    )
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -812,7 +817,7 @@ class DepsVerifyResult:
 
 def verify_deps(
     *,
-    recorded_python: Path,
+    recorded_python: Path | str,
     worktree_root: Path,
     uv_executable: str = "uv",
 ) -> DepsVerifyResult:
@@ -825,19 +830,33 @@ def verify_deps(
 
 def verify_deps_command(
     *,
-    recorded_python: Path,
+    recorded_python: Path | str,
     worktree_root: Path,
     uv_executable: str = "uv",
+    executor: ProcessExecutor | None = None,
 ) -> Command[DepsVerifyResult]:
     """Capture dependency verification probes in one command ledger."""
     from odoo_instance_sdk.execution import Command, ExecutionPlan
     from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
+    from odoo_instance_sdk.internal.project_runtime import (
+        is_uv_python_selector,
+        uv_run_prefix,
+    )
 
     imports = _scan_external_python_deps(worktree_root)
+    python_prefix = (
+        uv_run_prefix(
+            str(recorded_python),
+            uv_executable=uv_executable,
+            command=("python",),
+        )
+        if is_uv_python_selector(recorded_python)
+        else (str(recorded_python),)
+    )
     steps = [
         PreparedStep(
             step_id="deps.verify.pip-check",
-            argv=(uv_executable, "pip", "check", "--python", str(recorded_python)),
+            argv=(python_prefix[0], "pip", "check", "--python", str(recorded_python)),
             read_only=True,
             text=True,
         )
@@ -846,7 +865,7 @@ def verify_deps_command(
         steps.append(
             PreparedStep(
                 step_id=f"deps.verify.import.{index}",
-                argv=(str(recorded_python), "-c", f"import {import_name}"),
+                argv=(*python_prefix, "-c", f"import {import_name}"),
                 cwd=str(worktree_root),
                 read_only=True,
                 text=True,
@@ -870,7 +889,7 @@ def verify_deps_command(
         return result
 
     plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-    return Command.create(plan, run, tuple(steps), executor=SubprocessExecutor())
+    return Command.create(plan, run, tuple(steps), executor=executor or SubprocessExecutor())
 
 
 def _scan_external_python_deps(worktree_root: Path) -> list[tuple[str, str]]:

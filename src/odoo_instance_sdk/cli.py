@@ -697,21 +697,21 @@ def run(
 ) -> None:
     output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
     try:
-        client, runtime_context, instance = cli_context.ready_instance(ctx)
-        if not cli_context._check_port_free(runtime_context):
-            http_interface, http_port = cli_context.instance_address(runtime_context, instance)
+        runtime_context = cli_context.ready_instance(ctx)
+        if not runtime_context.check_port_free():
+            http_interface, http_port = runtime_context.instance_address()
             fail(
                 output_mode,
                 "run",
                 f"port-conflict: {http_interface}:{http_port} is occupied (ownership unknown)",
             )
-        command = instance.run_foreground_command(args=odoo_args)
+        command = runtime_context.instance.run_foreground_command(args=odoo_args)
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "run", e)
-    if not dry_run and not isinstance(runtime_context, ProjectConfig):
-        client.environments.record_use(runtime_context)
+    if not dry_run and runtime_context.is_environment:
+        runtime_context.client.environments.record_use(runtime_context.require_environment())
     try:
         _status, value = run_or_preview(
             lambda: command,
@@ -735,8 +735,8 @@ def run(
 @pass_cli_context
 def logs(ctx: CliContext, tail: int, follow: bool) -> None:
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
-        for line in instance.iter_logs(tail=tail, follow=follow):
+        runtime_context = cli_context.ready_instance(ctx)
+        for line in runtime_context.instance.iter_logs(tail=tail, follow=follow):
             sys.stdout.write(line)
             sys.stdout.flush()
     except KeyboardInterrupt:
@@ -762,8 +762,8 @@ def shell(
 ) -> None:
     output_mode = resolve_command_options(output_format, json_output, dry_run, command="shell")
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
-        command = instance.shell_command(args=list(odoo_args))
+        runtime_context = cli_context.ready_instance(ctx)
+        command = runtime_context.instance.shell_command(args=list(odoo_args))
     except SystemExit:
         raise
     except Exception as e:
@@ -803,7 +803,8 @@ def eval_cmd(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        instance = runtime_context.instance
 
         def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
             if value is None:
@@ -865,7 +866,8 @@ def exec_cmd(
         except OSError as e:
             fail(output_mode, "exec", f"cannot read script: {e}")
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        instance = runtime_context.instance
 
         def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
             if value is None:
@@ -923,7 +925,8 @@ def module_list(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, _env, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        instance = runtime_context.instance
         status, _records = run_or_preview(
             lambda: list_modules_command(instance, names=tuple(modules), state=state),
             command_name="module.list",
@@ -971,8 +974,9 @@ def module_update(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, runtime_context, instance = cli_context.ready_instance(ctx)
-        env_obj = cli_context.require_environment(runtime_context)
+        runtime_context = cli_context.ready_instance(ctx)
+        env_obj = runtime_context.require_environment()
+        instance = runtime_context.instance
     except SystemExit:
         raise
     except Exception as e:
@@ -1046,8 +1050,9 @@ def module_test(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, runtime_context, instance = cli_context.ready_instance(ctx)
-        env_obj = cli_context.require_environment(runtime_context)
+        runtime_context = cli_context.ready_instance(ctx)
+        env_obj = runtime_context.require_environment()
+        instance = runtime_context.instance
         start_config = instance.config.start_config
         if start_config is None:
             raise RuntimeError(  # noqa: TRY301
@@ -1110,13 +1115,14 @@ def translations_export(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, runtime_context, instance = cli_context.ready_instance(ctx)
+        runtime_context = cli_context.ready_instance(ctx)
+        instance = runtime_context.instance
         status, _results = run_or_preview(
             lambda: export_translations_command(
                 instance,
                 tuple(modules),
                 tuple(languages),
-                worktree_root=cli_context.worktree_path(runtime_context),
+                worktree_root=runtime_context.worktree_path(),
             ),
             command_name="translations.export",
             mode=output_mode,
@@ -1161,14 +1167,25 @@ def deps_group() -> None:
 def deps_verify(
     ctx: CliContext, dry_run: bool, output_format: str | None, json_output: bool
 ) -> None:
+    from odoo_instance_sdk.internal.project_runtime import is_uv_python_selector
+
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        _client, runtime_context, _instance = cli_context.ready_instance(ctx)
-        recorded_python = cli_context.python_path(runtime_context)
+        runtime_context = cli_context.ready_instance(ctx)
+        project_python = (
+            runtime_context.source.python
+            if isinstance(runtime_context.source, ProjectConfig)
+            else None
+        )
+        recorded_python = (
+            cast("str", project_python)
+            if is_uv_python_selector(project_python)
+            else runtime_context.python_path()
+        )
         status, _result = run_or_preview(
             lambda: verify_deps_command(
                 recorded_python=recorded_python,
-                worktree_root=cli_context.worktree_path(runtime_context),
+                worktree_root=runtime_context.worktree_path(),
             ),
             command_name="deps.verify",
             mode=output_mode,
@@ -1217,13 +1234,14 @@ def vscode_generate(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        client, runtime_context, _instance = cli_context.ready_instance(ctx)
-        env_obj = cli_context.require_environment(runtime_context)
+        runtime_context = cli_context.ready_instance(ctx)
+        client = runtime_context.client
+        env_obj = runtime_context.require_environment()
 
         def operation() -> dict[str, JsonValue]:
             profile = build_launch_profile(client, env_obj)
             if write_file:
-                project_path = cli_context.resolve_project_path(ctx)
+                project_path = runtime_context.project_root
                 written = write_launch_json(project_path, launch_json(profile))
                 return {"profile": profile, "written": str(written)}
             return {"profile": profile}

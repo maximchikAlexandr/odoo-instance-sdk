@@ -18,6 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.context import ResolvedContext
 from odoo_instance_sdk.commands.output import (
     JsonValue,
     OutputDocument,
@@ -60,6 +61,15 @@ from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, Env
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 T = TypeVar("T")
+
+
+def _resolved_context(client: object, source: object, instance: object) -> ResolvedContext:
+    return ResolvedContext(
+        client=cast("Any", client),
+        source=cast("DevelopmentEnvironment", source),
+        instance=cast("Any", instance),
+        provenance="explicit",
+    )
 
 
 def _emit_plan(command: Command[T], *, command_name: str, mode: OutputMode) -> int:
@@ -419,7 +429,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.db.ready_instance",
-            lambda _ctx: (MagicMock(), _matrix_environment(), instance),
+            lambda _ctx: _resolved_context(MagicMock(), _matrix_environment(), instance),
         )
         return
 
@@ -476,7 +486,7 @@ def _patch_leaf_external(  # noqa: C901
         env = _matrix_environment()
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
-            lambda _ctx: (MagicMock(), env, instance),
+            lambda _ctx: _resolved_context(MagicMock(), env, instance),
         )
 
     if path == ("eval",):

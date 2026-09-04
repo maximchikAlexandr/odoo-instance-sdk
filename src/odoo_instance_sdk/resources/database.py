@@ -957,7 +957,12 @@ class DatabaseResource:
     def reset_admin_password(self) -> AdminPasswordResetResult:
         from odoo_instance_sdk.internal.proc import active_context
 
-        if active_context() is not None and self._instance.config.start_config is not None:
+        context = active_context()
+        if (
+            context is not None
+            and context.planned("instance.shell_script")
+            and self._instance.config.start_config is not None
+        ):
             configured = self._instance.config.configured_database_names
             if len(configured) != 1 or not configured[0].strip():
                 raise InstanceConfigurationError(
