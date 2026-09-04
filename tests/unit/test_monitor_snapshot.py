@@ -54,6 +54,9 @@ from tests.unit.monitor_support import (
     patch_from_project as _patch_from_project,
 )
 from tests.unit.monitor_support import (
+    runtime_kwargs as _runtime_kwargs,
+)
+from tests.unit.monitor_support import (
     seed_env as _seed_env,
 )
 from tests.unit.monitor_support import (
@@ -127,6 +130,115 @@ def test_registered_project_without_environment_is_discovered(tmp_path: Path) ->
     assert [project.id for project in snap.projects] == [project_id]
     assert snap.projects[0].environment_count == 0
     assert snap.environments == ()
+
+
+def test_project_runtime_is_collected_with_shared_runtime_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    root = tmp_path / "project-only"
+    common = root / ".git"
+    common.mkdir(parents=True)
+    project_id = f"project_{repo_key(root, common)}"
+    catalog._register_project(project_id, root, common)
+    catalog._upsert_runtime("project", project_id, **_runtime_kwargs(root_pid=4242))  # type: ignore[arg-type]
+    catalog.close()
+
+    provider = FakeProcessProvider(
+        result=ProcessTreeResult(
+            child_pids=(4243,), process_count=2, cpu_percent=1.25, rss_bytes=99
+        )
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.monitor.EnvironmentMonitor._probe_readiness",
+        lambda self, url: RuntimeState.READY,
+    )
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        process_provider=provider,
+        git_provider=FakeGitProvider(),
+        docker_provider=FakeDockerProvider(),
+    )
+
+    runtime = monitor.snapshot().projects[0].runtime
+
+    assert runtime is not None
+    assert runtime.state is RuntimeState.READY
+    assert runtime.root_pid == 4242
+    assert runtime.child_pids == (4243,)
+    assert runtime.process_count == 2
+    assert runtime.cpu_percent == 1.25
+    assert runtime.rss_bytes == 99
+    assert runtime.http_url == "http://127.0.0.1:8069"
+    assert runtime.database_name == "mydb"
+    assert provider.calls == 1
+
+
+def test_project_runtime_absent_differs_from_stale_stopped_runtime(tmp_path: Path) -> None:
+    catalog = _make_catalog(tmp_path)
+    projects: list[str] = []
+    for name in ("absent", "stale"):
+        root = tmp_path / name
+        common = root / ".git"
+        common.mkdir(parents=True)
+        project_id = f"project_{repo_key(root, common)}"
+        projects.append(project_id)
+        catalog._register_project(project_id, root, common)
+        if name == "stale":
+            catalog._upsert_runtime("project", project_id, **_runtime_kwargs(root_pid=5252))  # type: ignore[arg-type]
+    catalog.close()
+
+    snapshot = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        git_provider=FakeGitProvider(),
+        docker_provider=FakeDockerProvider(),
+    ).snapshot()
+    by_id = {project.id: project for project in snapshot.projects}
+
+    assert by_id[projects[0]].runtime is None
+    stopped = by_id[projects[1]].runtime
+    assert stopped is not None
+    assert stopped.state is RuntimeState.STOPPED
+    assert stopped.root_pid is None
+    assert stopped.child_pids == ()
+    assert stopped.process_count == 0
+
+
+def test_mixed_project_and_environment_runtime_ownership_is_combined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    project_id = f"project_{repo_key(Path('/repo'), Path('/repo/.git'))}"
+    catalog._register_project(project_id, "/repo", "/repo/.git")
+    _seed_env(catalog, _make_env(env_id))
+    _seed_runtime(catalog, env_id, root_pid=1111)
+    catalog._upsert_runtime("project", project_id, **_runtime_kwargs(root_pid=2222))  # type: ignore[arg-type]
+    catalog.close()
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.monitor.EnvironmentMonitor._probe_readiness",
+        lambda self, url: RuntimeState.READY,
+    )
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        process_provider=FakeProcessProvider(
+            result=ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.5, rss_bytes=8)
+        ),
+        git_provider=FakeGitProvider(),
+        docker_provider=FakeDockerProvider(),
+    )
+
+    snapshot = monitor.snapshot()
+
+    assert len(snapshot.projects) == 1
+    assert snapshot.projects[0].id == project_id
+    assert snapshot.projects[0].environment_count == 1
+    assert snapshot.projects[0].runtime is not None
+    assert snapshot.projects[0].runtime.root_pid == 2222
+    assert len(snapshot.environments) == 1
+    assert snapshot.environments[0].project_id == project_id
+    assert snapshot.environments[0].runtime.root_pid == 1111
 
 
 def test_stopped_odoo_no_runtime_record(tmp_path: Path) -> None:

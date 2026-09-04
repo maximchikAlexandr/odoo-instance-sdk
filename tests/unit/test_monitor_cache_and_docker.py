@@ -335,7 +335,7 @@ def test_snapshot_schema_version_and_ordering(
     monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
     snap = monitor.snapshot()
 
-    assert snap.schema_version == 3
+    assert snap.schema_version == 4
     assert snap.generated_at.tzinfo is not None
     env_ids = [env.id for env in snap.environments]
     assert env_ids == sorted(env_ids)

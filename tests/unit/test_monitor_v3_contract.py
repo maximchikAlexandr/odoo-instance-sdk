@@ -193,7 +193,7 @@ def test_snapshot_v3_eligibility_precedence_is_read_only(
         docker_provider=docker,
     ).snapshot()
 
-    assert snapshot.schema_version == 3
+    assert snapshot.schema_version == 4
     assert snapshot.environments[0].pgadmin.state is expected
     assert snapshot.environments[0].observed_port is None
     assert docker.calls == (
@@ -221,7 +221,7 @@ def test_snapshot_v3_missing_cluster_is_not_owned_without_lifecycle_mutation(
         docker_provider=docker,
     ).snapshot()
 
-    assert snapshot.schema_version == 3
+    assert snapshot.schema_version == 4
     assert snapshot.environments[0].pgadmin.state is PgAdminEligibilityState.CLUSTER_NOT_OWNED
     assert docker.calls == 0
 

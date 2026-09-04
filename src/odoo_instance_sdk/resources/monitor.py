@@ -70,7 +70,7 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _PROBE_TIMEOUT_SECONDS = 5.0
 
 
@@ -765,6 +765,9 @@ class EnvironmentMonitor:
             if runtime is not None:
                 with contextlib.suppress(TypeError, ValueError):
                     cpu_points.add((int(runtime["root_pid"]), float(runtime["create_time"])))
+        for runtime in project_runtimes:
+            with contextlib.suppress(TypeError, ValueError):
+                cpu_points.add((int(runtime["root_pid"]), float(runtime["create_time"])))
         plans: list[_ProjectPlan] = []
         statuses: set[str] = set()
         for resolved_project_id, environments in groups.items():
@@ -862,6 +865,12 @@ class EnvironmentMonitor:
         projects: list[ProjectSummary] = []
         environments: list[EnvironmentSnapshot] = []
         for plan in plans:
+            project_runtime = None
+            if plan.project_runtime is not None:
+                try:
+                    project_runtime = self._collect_runtime(plan.project_runtime)
+                except Exception:
+                    project_runtime = _stopped_runtime()
             projects.append(
                 ProjectSummary(
                     id=plan.project_id,
@@ -869,6 +878,7 @@ class EnvironmentMonitor:
                     display_hint=plan.project_id.removeprefix("project_"),
                     environment_count=len(plan.environments),
                     cluster=self._cluster_snapshot(plan, resources.get(plan.project_id)),
+                    runtime=project_runtime,
                 )
             )
             environments.extend(
