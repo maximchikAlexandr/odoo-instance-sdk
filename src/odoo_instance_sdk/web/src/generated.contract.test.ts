@@ -11,6 +11,8 @@ import {
   type PgAdminEligibility,
   type PgAdminOpenRequest,
   type PgAdminOpenResult,
+  type ProjectSummary,
+  type RuntimeMetrics,
 } from "./generated";
 import client from "./client-config";
 
@@ -59,6 +61,7 @@ it("preserves the exact generated enum values and required nullable boundaries",
   expectTypeOf<PgAdminOpenRequest["environment_id"]>().toEqualTypeOf<string>();
   expectTypeOf<PgAdminOpenResult["url"]>().toEqualTypeOf<string>();
   expectTypeOf<PgAdminOpenResult["state"]>().toEqualTypeOf<PgAdminOpenState>();
+  expectTypeOf<ProjectSummary["runtime"]>().toEqualTypeOf<RuntimeMetrics | null>();
 });
 
 it("uses the generated client boundary without handwritten endpoint contracts", () => {

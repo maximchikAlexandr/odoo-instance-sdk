@@ -38,7 +38,7 @@ Object.defineProperty(globalThis, "ResizeObserver", { writable: true, value: Res
 Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { value: () => {} });
 
 const snapshot: Snapshot = {
-  schema_version: 3,
+  schema_version: 4,
   generated_at: "2026-08-24T00:00:00Z",
   projects: [
     {
@@ -49,14 +49,18 @@ const snapshot: Snapshot = {
         metrics: { cpu_percent: 1, memory_usage_bytes: 1024, memory_limit_bytes: 2048, volume_usage_bytes: null, sampled_at: "2026-08-24T00:00:00Z" },
         unavailability_reason: null, sampled_at: "2026-08-24T00:00:00Z",
       },
+      runtime: null,
     },
-    { id: "project_b", name: "beta", display_hint: "b", environment_count: 1, cluster: null },
+    { id: "project_b", name: "beta", display_hint: "b", environment_count: 1, cluster: null, runtime: null },
     {
       id: "project_c", name: "gamma", display_hint: "c", environment_count: 0,
       cluster: {
         mode: "compose", owned: true, state: PostgresClusterState.STARTING, endpoint: { host: "127.0.0.1", port: 5433 },
         container: null, metrics: null, unavailability_reason: "stats_failed", sampled_at: null,
       },
+      runtime: { state: RuntimeState.READY, root_pid: 31, child_pids: [], process_count: 1,
+        cpu_percent: 2.5, rss_bytes: 4096, started_at: null, http_url: "http://127.0.0.1:8071",
+        http_port: 8071, database_name: "project_c", commit_sha: "def", branch: "main" },
     },
   ],
   environments: [
@@ -136,6 +140,7 @@ describe("App", () => {
     expect(screen.getAllByTestId("cluster-card")[1].textContent).toContain("PostgreSQL: unavailable (manifest missing)");
     expect(screen.getAllByTestId("cluster-card")[2].textContent).toContain("container: —");
     expect(screen.getAllByTestId("cluster-card")[2].textContent).toContain("stats_failed");
+    expect(screen.getAllByTestId("project-runtime")[2].textContent).toContain("database: project_c · port: 8071");
     expect(screen.getAllByText(/↑— ↓—/)).toHaveLength(2);
     expect(screen.getAllByTestId("environment-card")).toHaveLength(2);
     expect(screen.getByTestId("worker-pids").textContent).toContain("workers 12, 13");

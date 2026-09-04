@@ -52,9 +52,9 @@
 
 ## 7. HTTP and dashboard project-runtime support
 
-- [ ] 7.1 Publish schema-version-4 `ProjectSummary.runtime` through the existing msgspec-to-OpenAPI bridge and verify null/stopped/live/mixed/filtered/redacted JSON, preserved `PostgresServerInfo` and both typed unavailability fields/reason sets, plus v3 migration fixtures against the generated schema.
-- [ ] 7.2 Regenerate the TypeScript client from the canonical OpenAPI schema and update the project card/empty-state logic to render live project-owned runtime metrics when no environments exist.
-- [ ] 7.3 Add FastAPI serialization and React tests for project-only, mixed, stopped/stale, filtered, and redacted snapshots without adding an endpoint or handwritten DTO.
+- [x] 7.1 Publish schema-version-4 `ProjectSummary.runtime` through the existing msgspec-to-OpenAPI bridge and verify null/stopped/live/mixed/filtered/redacted JSON, preserved `PostgresServerInfo` and both typed unavailability fields/reason sets, plus v3 migration fixtures against the generated schema.
+- [x] 7.2 Regenerate the TypeScript client from the canonical OpenAPI schema and update the project card/empty-state logic to render live project-owned runtime metrics when no environments exist.
+- [x] 7.3 Add FastAPI serialization and React tests for project-only, mixed, stopped/stale, filtered, and redacted snapshots without adding an endpoint or handwritten DTO.
 
 ## 8. Eval diagnostics and captured output
 

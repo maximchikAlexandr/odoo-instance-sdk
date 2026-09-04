@@ -263,6 +263,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                             unavailability_reason=None,
                             sampled_at=None,
                         ),
+                        runtime=None,
                     ),
                 ),
                 environments=(
@@ -342,6 +343,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                 "name": "x",
                 "display_hint": "x",
                 "environment_count": 1,
+                "runtime": None,
                 "cluster": {
                     "mode": "compose",
                     "owned": True,
