@@ -54,7 +54,7 @@ Rich `odcli db refresh --restore` SHALL show logical step progress. On an intera
 
 ### Requirement: Safe database-drop command
 
-The CLI SHALL expose `odcli db drop DATABASE [--force-default] [--force-connections] [--yes] [--dry-run]`. It SHALL require an exact database name, resolve only the current project PostgreSQL cluster, reject system/template databases, display the cluster and database before mutation, require interactive confirmation by default, and require `--yes` for noninteractive execution. Dropping the configured project default SHALL additionally require `--force-default`; terminating active sessions SHALL additionally require `--force-connections`. Rich, JSON, and TOON SHALL use the shared output and confirmation contracts.
+The CLI SHALL expose `odcli db drop DATABASE [--force-default] [--force-connections] [--yes] [--dry-run]`. It SHALL require an exact database name, resolve only the current project PostgreSQL cluster, reject system/template databases, display the cluster and database before mutation, require interactive Rich confirmation by default, and require `--yes` for machine execution. JSON, TOON, and the `--json` alias SHALL always be noninteractive and SHALL never call `click.confirm`. A normal machine-mode drop without `--yes` SHALL perform zero SDK/transport/catalogue work, emit exactly one sanitized CLI envelope v1 with `error.code="confirmation_required"`, and exit `1`; with `--yes` it SHALL execute through the normal renderer-independent path. Dry-run in every format SHALL require neither confirmation nor `--yes` and SHALL remain side-effect-free. Dropping the configured project default SHALL additionally require `--force-default`; terminating active sessions SHALL additionally require `--force-connections`. Rich, JSON, and TOON SHALL otherwise use the shared output and confirmation contracts.
 
 #### Scenario: Protected default database is refused
 - **WHEN** the exact target is the configured project default and `--force-default` is absent
@@ -63,6 +63,14 @@ The CLI SHALL expose `odcli db drop DATABASE [--force-default] [--force-connecti
 #### Scenario: Dry-run needs no confirmation
 - **WHEN** a valid drop target is invoked with `--dry-run` without force or yes flags unrelated to observed conditions
 - **THEN** the command emits the resolved guarded plan without prompt, connection termination, database mutation, or catalogue write
+
+#### Scenario: Machine drop requires explicit confirmation
+- **WHEN** normal `db drop` is invoked with JSON, TOON, or `--json` without `--yes`
+- **THEN** no prompt or SDK work occurs, stdout contains exactly one sanitized `confirmation_required` envelope, and the command exits `1`
+
+#### Scenario: Explicit machine confirmation executes
+- **WHEN** normal `db drop` is invoked in a machine format with `--yes` and all safety preconditions pass
+- **THEN** the guarded operation executes once and emits exactly one success or failure envelope under the normal exit mapping
 
 ## MODIFIED Requirements
 
