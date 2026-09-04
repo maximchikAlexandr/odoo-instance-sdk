@@ -42,6 +42,7 @@ from odoo_instance_sdk.internal.automation import (
     DepsVerifyResult,
 )
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
+from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
 from odoo_instance_sdk.internal.proc import StepEvent
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
@@ -212,6 +213,9 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(("db", "refresh"), ("db", "refresh"), "mutating-or-spawning", True),
     PublicLeafCase(
         ("db", "reset-admin-password"), ("db", "reset-admin-password"), "mutating-or-spawning", True
+    ),
+    PublicLeafCase(
+        ("db", "drop"), ("db", "drop", "demo", "--dry-run"), "mutating-or-spawning", True
     ),
     PublicLeafCase(("eval",), ("eval", "1"), "process-previewable-read-only", True),
     PublicLeafCase(("exec",), ("exec", "-"), "mutating-or-spawning", True),
@@ -503,6 +507,26 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.db.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), _matrix_environment(), instance),
+        )
+        return
+
+    if path == ("db", "drop"):
+        instance = MagicMock()
+        instance._postgres_cluster = SimpleNamespace(endpoint="127.0.0.1:5432")
+        drop_command = _matrix_command(
+            DatabaseDropResult(database="demo", cluster="127.0.0.1:5432"),
+            error=RuntimeError("isolated external operation failed") if failing else None,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.pg._database_instance",
+            lambda _ctx: (None, instance),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.drop.build_database_drop_command",
+            fail_operation if failing else lambda *_args, **_kwargs: drop_command,
         )
         return
 
