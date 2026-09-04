@@ -25,6 +25,8 @@ def sanitized_child_environment(
 
 def captured_child_environment(
     overrides: Mapping[str, str] | None = None,
+    *,
+    project_environment: Mapping[str, str] | None = None,
 ) -> tuple[tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]]:
     """Capture exact child inputs and keep explicit overrides separately.
 
@@ -33,8 +35,15 @@ def captured_child_environment(
     """
     explicit = sanitized_child_environment(overrides or {})
     child = sanitized_child_environment(None)
+    if project_environment:
+        for key, value in project_environment.items():
+            child.setdefault(key, value)
+    public_overrides = dict(project_environment or {})
+    public_overrides.update(explicit)
+    public_overrides = sanitized_child_environment(public_overrides)
     child.update(explicit)
-    return tuple(sorted(child.items())), tuple(sorted(explicit.items()))
+    child.pop(_REMOTE_MASTER_PASSWORD, None)
+    return tuple(sorted(child.items())), tuple(sorted(public_overrides.items()))
 
 
 __all__ = ["captured_child_environment", "sanitized_child_environment"]

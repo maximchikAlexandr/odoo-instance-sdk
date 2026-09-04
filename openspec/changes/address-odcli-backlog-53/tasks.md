@@ -16,11 +16,11 @@
 
 ## 3. Project-local environment variables
 
-- [ ] 3.1 Implement the exact UTF-8/BOM line grammar, key regex, whitespace/comment rules, unquoted/literal-single-quote/bounded-double-quote escape rules, and empty values; reject duplicates, multiline/trailing syntax, interpolation/substitution, unknown escapes, NULs, invalid UTF-8, and paths outside the resolved project.
-- [ ] 3.2 Enforce per-key process precedence, owner-only POSIX permissions, immutable scoped mappings, no `os.environ` mutation, and path/line-only missing/unreadable/malformed diagnostics before mutation.
-- [ ] 3.3 Propagate ordinary file values only to Odoo runtime children; preserve purpose-built Git/PostgreSQL/Docker/editor/browser/package/other child environments; consume and strip `ODCLI_TEST_MASTER_PASSWORD` before every spawn.
-- [ ] 3.4 Ensure init ignore rules and documentation cover `.odcli/.env`, owner-only permissions, exact grammar, process precedence, child propagation/deny matrix, secret classification, missing-file behavior, and non-exported lifetime.
-- [ ] 3.5 Add acceptance/security tests for every grammar form/rejection, project-boundary discovery, per-key process overrides, permissions, each Odoo/denied child class, master-password consumption, and plans/fingerprints/errors/logs/Rich/JSON/TOON redaction.
+- [x] 3.1 Implement the exact UTF-8/BOM line grammar, key regex, whitespace/comment rules, unquoted/literal-single-quote/bounded-double-quote escape rules, and empty values; reject duplicates, multiline/trailing syntax, interpolation/substitution, unknown escapes, NULs, invalid UTF-8, and paths outside the resolved project.
+- [x] 3.2 Enforce per-key process precedence, owner-only POSIX permissions, immutable scoped mappings, no `os.environ` mutation, and path/line-only missing/unreadable/malformed diagnostics before mutation.
+- [x] 3.3 Propagate ordinary file values only to Odoo runtime children; preserve purpose-built Git/PostgreSQL/Docker/editor/browser/package/other child environments; consume and strip `ODCLI_TEST_MASTER_PASSWORD` before every spawn.
+- [x] 3.4 Ensure init ignore rules and documentation cover `.odcli/.env`, owner-only permissions, exact grammar, process precedence, child propagation/deny matrix, secret classification, missing-file behavior, and non-exported lifetime.
+- [x] 3.5 Add acceptance/security tests for every grammar form/rejection, project-boundary discovery, per-key process overrides, permissions, each Odoo/denied child class, master-password consumption, and plans/fingerprints/errors/logs/Rich/JSON/TOON redaction.
 
 ## 4. Shared plan presentation and execution observation
 

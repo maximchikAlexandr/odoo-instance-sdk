@@ -58,6 +58,7 @@ def test_roundtrip_write_read_secrets_free(tmp_path: Path) -> None:
     write_manifest(tmp_path, cfg)
     loaded = ProjectConfig.load(tmp_path)
     assert loaded.to_manifest() == cfg.to_manifest()
+    assert ".odcli/.env" in (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert loaded.repository_root == tmp_path.resolve()
 
 

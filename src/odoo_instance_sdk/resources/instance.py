@@ -9,7 +9,7 @@ import tempfile
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +42,11 @@ from odoo_instance_sdk.internal.proc import (
 from odoo_instance_sdk.internal.process_env import (
     captured_child_environment,
     sanitized_child_environment,
+)
+from odoo_instance_sdk.internal.project_env import (
+    MASTER_PASSWORD_KEY,
+    load_project_environment,
+    project_environment_secret_values,
 )
 from odoo_instance_sdk.internal.server import (
     _write_secret_config,
@@ -174,6 +179,7 @@ class InstanceFactory:
         if start_cfg.db_host and db_port is None:
             db_port = 5432
         db_names = parse_db_names(cfg.get("db_name"))
+        project_environment = load_project_environment(Path(environment.repository_root))
 
         # Bind the project-level PostgresCluster for dependency preflight.
         # Bind does not start the cluster; readiness is checked in preflight.
@@ -203,6 +209,7 @@ class InstanceFactory:
                 db_port=db_port,
                 db_user=start_cfg.db_user,
                 db_password=start_cfg.db_password,
+                project_environment=project_environment,
             ),
             _client=self._client,
             _artifact_lock_path=environment_lock_path(str(environment.id)),
@@ -215,6 +222,7 @@ class InstanceFactory:
         from odoo_instance_sdk.resources.postgres import PostgresCluster
 
         root = project.repository_root.resolve()
+        project_environment = load_project_environment(root)
         config_path = _project_path(root, project.source_config, field="source_config")
         odoo_bin = _project_path(root, project.odoo_bin, field="odoo_bin")
         python_bin, deferred_runtime = _project_runtime_binding(root, project, odoo_bin)
@@ -255,6 +263,7 @@ class InstanceFactory:
                 db_port=db_port,
                 db_user=start_cfg.db_user,
                 db_password=start_cfg.db_password,
+                project_environment=project_environment,
             ),
             _client=self._client,
             _postgres_cluster=cluster,
@@ -530,6 +539,16 @@ def _snapshot_start_inputs(
     return snapshot, args, secret_path, secrets
 
 
+def _child_secret_values(
+    project_environment: Mapping[str, str], overrides: Mapping[str, str] | None = None
+) -> tuple[str, ...]:
+    values = list(project_environment_secret_values(project_environment))
+    for key, value in (overrides or {}).items():
+        if key == MASTER_PASSWORD_KEY and value:
+            values.append(value)
+    return tuple(dict.fromkeys(values))
+
+
 def _build_shell_script_step(
     config: StartConfig,
     *,
@@ -541,17 +560,20 @@ def _build_shell_script_step(
     commit: bool = False,
     nonce: str | None = None,
     secret_config_path: str | None = None,
+    project_environment: Mapping[str, str] | None = None,
 ) -> tuple[PreparedStep, StartConfig, str | None, tuple[str, ...]]:
     """Capture one shell script's complete private process input."""
     snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(
         config, secret_config_path=secret_config_path
     )
-    secrets = (*secrets, source)
+    secrets = (*secrets, source, *_child_secret_values(project_environment or {}))
     from odoo_instance_sdk.internal.server import _build_shell_wrapper
 
     wrapper_nonce = nonce or uuid.uuid4().hex
     wrapper = _build_shell_wrapper(source, list(argv), commit=commit, nonce=wrapper_nonce)
-    environment_snapshot, environment_overrides = captured_child_environment(None)
+    environment_snapshot, environment_overrides = captured_child_environment(
+        None, project_environment=project_environment
+    )
     step = PreparedStep(
         step_id="instance.shell_script",
         argv=(*executable_prefix, "shell", *cli_args),
@@ -668,7 +690,10 @@ class OdooInstance:
     ) -> Command[CommandResult]:
 
         argv = (*self._executable_prefix(), *tuple(args))
-        environment_snapshot, environment_overrides = captured_child_environment(env)
+        environment_snapshot, environment_overrides = captured_child_environment(
+            env, project_environment=self.config.project_environment
+        )
+        child_secrets = _child_secret_values(self.config.project_environment, env)
         step = PreparedStep(
             step_id="instance.run",
             argv=argv,
@@ -676,6 +701,7 @@ class OdooInstance:
             environment=environment_overrides,
             environment_snapshot=environment_snapshot,
             environment_overrides=environment_overrides,
+            secret_values=child_secrets,
             timeout=timeout,
             read_only=True,
         )
@@ -717,7 +743,10 @@ class OdooInstance:
                 )
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         argv = (*self._executable_prefix(), *cli_args)
-        environment_snapshot, environment_overrides = captured_child_environment(env)
+        environment_snapshot, environment_overrides = captured_child_environment(
+            env, project_environment=self.config.project_environment
+        )
+        secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
         step = PreparedStep(
             step_id="instance.start",
             argv=argv,
@@ -799,7 +828,10 @@ class OdooInstance:
         validated_args = _validate_runtime_args((*self.config.default_run_args, *args))
         resolved_cwd = cwd if cwd is not None else self.config.default_cwd
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
-        environment_snapshot, environment_overrides = captured_child_environment(env)
+        environment_snapshot, environment_overrides = captured_child_environment(
+            env, project_environment=self.config.project_environment
+        )
+        secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
         step = PreparedStep(
             step_id="instance.foreground",
             argv=(*self._executable_prefix(), *cli_args, *validated_args),
@@ -953,7 +985,10 @@ class OdooInstance:
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         full_args = (*self._executable_prefix(), "shell", *cli_args, *validated_args)
         resolved_cwd = self.config.default_cwd
-        environment_snapshot, environment_overrides = captured_child_environment(None)
+        environment_snapshot, environment_overrides = captured_child_environment(
+            None, project_environment=self.config.project_environment
+        )
+        secrets = (*secrets, *_child_secret_values(self.config.project_environment))
         step = PreparedStep(
             step_id="instance.shell",
             argv=full_args,
@@ -1057,6 +1092,7 @@ class OdooInstance:
             argv=argv,
             timeout=timeout,
             commit=commit,
+            project_environment=self.config.project_environment,
         )
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
         action = PreparedAction(
@@ -1157,6 +1193,7 @@ class OdooInstance:
             commit=commit,
             nonce=captured.wrapper_nonce,
             secret_config_path=captured.secret_config_path,
+            project_environment=self.config.project_environment,
         )
         # The active command owns the complete immutable process input.  Even
         # seemingly harmless late binding (argv, cwd, environment, stdin,
