@@ -4,14 +4,13 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-import click
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
+if TYPE_CHECKING:
+    import click
+else:
+    import rich_click as click
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
@@ -176,54 +175,31 @@ def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject
     return {"modules": [record.to_dict() for record in records]}
 
 
-class _RichHelpGroup(click.Group):
-    """Render the root command inventory as a compact Rich reference."""
-
-    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
-        stream = StringIO()
-        console = Console(
-            file=stream,
-            force_terminal=True,
-            color_system="standard",
-            width=formatter.width,
-        )
-        console.print(
-            Panel(
-                "Manage local Odoo projects, environments, databases, and tooling.",
-                title=f"[bold cyan]{ctx.command_path}[/]",
-                border_style="cyan",
-                padding=(0, 1),
-            )
-        )
-        console.print("[bold cyan]Usage[/]")
-        console.print(f"  {ctx.command_path} [OPTIONS] COMMAND [ARGS]...")
-
-        options = Table(box=None, show_header=False, pad_edge=False, padding=(0, 2))
-        options.add_column(style="green", no_wrap=True)
-        options.add_column()
-        for param in self.get_params(ctx):
-            record = param.get_help_record(ctx)
-            if record is not None:
-                options.add_row(*record)
-        console.print()
-        console.print("[bold cyan]Options[/]")
-        console.print(options)
-
-        commands = Table(box=None, show_header=False, pad_edge=False, padding=(0, 2))
-        commands.add_column(style="bold green", no_wrap=True)
-        commands.add_column()
-        for name in self.list_commands(ctx):
-            command = self.get_command(ctx, name)
-            if command is not None and not command.hidden:
-                commands.add_row(name, command.get_short_help_str(limit=60))
-        console.print()
-        console.print("[bold cyan]Commands[/]")
-        console.print(commands)
-
-        formatter.write(stream.getvalue())
-
-
-@click.group(cls=_RichHelpGroup)
+@click.rich_config(  # type: ignore[operator]
+    {
+        "commands_before_options": True,
+        "command_groups": {
+            "cli": [
+                {"name": "Project", "commands": ["init", "doctor"]},
+                {"name": "Runtime", "commands": ["run", "shell", "logs", "monitor"]},
+                {"name": "Data", "commands": ["env", "db", "postgres", "psql"]},
+                {
+                    "name": "Development",
+                    "commands": [
+                        "test",
+                        "module",
+                        "translations",
+                        "deps",
+                        "vscode",
+                        "eval",
+                        "exec",
+                    ],
+                },
+            ]
+        },
+    }
+)
+@click.group()
 @click.version_option(package_name="odoo-instance-sdk")
 @click.option(
     "--project",
@@ -235,6 +211,7 @@ class _RichHelpGroup(click.Group):
 @click.option("--env", "env_selector", default=None, help="Environment selector (UUID or name).")
 @click.pass_context
 def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> None:
+    """Manage local Odoo projects, environments, databases, and tooling."""
     ctx.obj = CliContext(project=project, env=env_selector)
 
 
@@ -246,19 +223,10 @@ register_database_commands(db_group)
 cli.add_command(_psql, name="psql")
 
 
-class _RunCommand(click.Command):
-    def get_short_help_str(self, limit: int = 45) -> str:
-        return super().get_short_help_str(limit)
-
-    def format_help_text(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
-        del ctx
-        if self.help is not None:
-            formatter.write_paragraph()
-            formatter.write_text(self.help)
-
+class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         raw_args = tuple(args)
-        parsed_args = super().parse_args(ctx, args)
+        parsed_args = cast("list[str]", super().parse_args(ctx, args))
         odoo_args = tuple(ctx.params.get("odoo_args", ()))
         if odoo_args:
             try:
@@ -909,7 +877,7 @@ def module_group() -> None:
     pass
 
 
-@module_group.command("list")
+@module_group.command("list", help="List installed or available Odoo modules.")
 @click.argument("modules", nargs=-1)
 @click.option("--state", "state", default=None, help="Filter by state.")
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
@@ -958,7 +926,7 @@ def module_list(
     sys.exit(status)
 
 
-@module_group.command("update")
+@module_group.command("update", help="Upgrade selected Odoo modules.")
 @click.argument("modules", nargs=-1, required=True)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Plan only.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Confirm execution.")
@@ -1030,7 +998,7 @@ def module_update(
     sys.exit(status)
 
 
-@module_group.command("test")
+@module_group.command("test", help="Run tests for selected Odoo modules.")
 @click.argument("modules", nargs=-1, required=True)
 @click.option("--test-tags", "test_tags", required=True, help="Test tags.")
 @click.option("--reload-tests", "reload_tests", is_flag=True, default=False)
@@ -1099,7 +1067,7 @@ def translations_group() -> None:
     pass
 
 
-@translations_group.command("export")
+@translations_group.command("export", help="Export selected module translations.")
 @click.option("--module", "modules", multiple=True, required=True, help="Module name.")
 @click.option("--language", "languages", multiple=True, required=True, help="Language code.")
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
@@ -1160,7 +1128,7 @@ def deps_group() -> None:
     pass
 
 
-@deps_group.command("verify")
+@deps_group.command("verify", help="Check Python and add-on dependencies.")
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
@@ -1218,7 +1186,7 @@ def vscode_group() -> None:
     pass
 
 
-@vscode_group.command("generate")
+@vscode_group.command("generate", help="Generate a VS Code debugpy launch profile.")
 @click.option(
     "--write", "write_file", is_flag=True, default=False, help="Write .vscode/launch.json."
 )

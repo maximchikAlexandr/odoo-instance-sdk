@@ -69,8 +69,8 @@ pre-existing shared or intentionally native transports already pinned by
 
 - `src/odoo_instance_sdk/cli.py:650-651` — the documented `logs --follow`
   JSONL stream;
-- `src/odoo_instance_sdk/commands/env.py:373` — existing Rich-live inventory;
-- `src/odoo_instance_sdk/commands/output.py:190,300,302,309,311` — shared
+- `src/odoo_instance_sdk/commands/env.py:377` — existing Rich-live inventory;
+- `src/odoo_instance_sdk/commands/output.py:194,304,306,313,315` — shared
   Rich/JSON/TOON/diagnostic emitters;
 - `src/odoo_instance_sdk/resources/instance.py:812` — existing lifecycle
   cleanup diagnostic transport.

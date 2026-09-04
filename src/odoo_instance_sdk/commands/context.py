@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-import click
+if TYPE_CHECKING:
+    import click
+else:
+    import rich_click as click
 
 from odoo_instance_sdk.exceptions import EnvironmentResolutionError
 from odoo_instance_sdk.internal.project_runtime import resolve_project_runtime

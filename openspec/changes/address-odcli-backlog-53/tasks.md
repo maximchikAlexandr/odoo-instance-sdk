@@ -1,9 +1,9 @@
 ## 1. Help and packaging boundary
 
-- [ ] 1.1 Add exactly `rich-click>=1.9,<2` alongside all nine existing dependencies including `expression>=5,<6`, refresh the lockfile, and update wheel assertions to require exactly ten core dependencies with those bounds and the sole existing `dashboard` extra.
-- [ ] 1.2 Replace `_RichHelpGroup` with `rich-click` command/group integration at the existing Click entry point without routing command results through it.
-- [ ] 1.3 Add missing one-line help text and at most four stable task-oriented panels across the root and nested command tree.
-- [ ] 1.4 Add characterization tests for root help, a nested group, a typed leaf, required/default/type metadata, validation errors, narrow width, redirected/color-disabled output, shell completion, and lightweight startup imports.
+- [x] 1.1 Add exactly `rich-click>=1.9,<2` alongside all nine existing dependencies including `expression>=5,<6`, refresh the lockfile, and update wheel assertions to require exactly ten core dependencies with those bounds and the sole existing `dashboard` extra.
+- [x] 1.2 Replace `_RichHelpGroup` with `rich-click` command/group integration at the existing Click entry point without routing command results through it.
+- [x] 1.3 Add missing one-line help text and at most four stable task-oriented panels across the root and nested command tree.
+- [x] 1.4 Add characterization tests for root help, a nested group, a typed leaf, required/default/type metadata, validation errors, narrow width, redirected/color-disabled output, shell completion, and lightweight startup imports.
 
 ## 2. Owner-neutral project command context
 

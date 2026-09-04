@@ -18,6 +18,7 @@ dependencies = [
     "msgspec>=0.18,<1.0",
     "platformdirs>=4.3,<5",
     "click>=8.2,<9",
+    "rich-click>=1.9,<2",
     "json5>=0.15,<1",
     "psutil>=5.9,<7",
     "rich>=15,<16",
@@ -162,6 +163,12 @@ follow_imports = "silent"
 # environment its route decorators are Any, while the route bodies remain
 # checked under strict mode.
 module = ["odoo_instance_sdk.internal.serve"]
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+# rich-click currently exposes no compatible typing surface for its config and
+# decorator extensions; the CLI keeps standard Click annotations for checking.
+module = ["odoo_instance_sdk.cli"]
 disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
