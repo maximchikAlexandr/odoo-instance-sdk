@@ -25,6 +25,8 @@ from . import (
     ExecutionDeadline,
     PreparedProcess,
     PreparedStep,
+    StepEvent,
+    StepObserver,
     bounded_process_inputs,
 )
 
@@ -179,18 +181,39 @@ def _captured_error_secrets(step: PreparedStep) -> tuple[str, ...]:
 class SubprocessExecutor:
     """Real executor for already-captured process steps."""
 
-    def execute(self, step: PreparedProcess) -> ProcessResult:
-        prepared = cast("PreparedStep", step)
-        return self._execute(prepared)
-
-    def execute_with_deadline(
-        self, step: PreparedProcess, deadline: ExecutionDeadline
+    def execute(
+        self,
+        step: PreparedProcess,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
     ) -> ProcessResult:
         prepared = cast("PreparedStep", step)
-        return self._execute(prepared, deadline=deadline)
+        return self._execute(prepared, observer=observer, observe_output=observe_output)
+
+    def execute_with_deadline(
+        self,
+        step: PreparedProcess,
+        deadline: ExecutionDeadline,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        return self._execute(
+            prepared,
+            deadline=deadline,
+            observer=observer,
+            observe_output=observe_output,
+        )
 
     def _execute(
-        self, prepared: PreparedStep, *, deadline: ExecutionDeadline | None = None
+        self,
+        prepared: PreparedStep,
+        *,
+        deadline: ExecutionDeadline | None = None,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
     ) -> ProcessResult:
         bounded: BoundedProcessInputs | None = None
         if deadline is not None:
@@ -200,6 +223,7 @@ class SubprocessExecutor:
             prepared.environment_snapshot if bounded is None else bounded.environment_snapshot
         )
         started = time.perf_counter()
+        _notify(observer, StepEvent(step_id=prepared.step_id, kind="started"))
         try:
             text_mode = prepared.text and prepared.stdin is None
             completed = subprocess.run(
@@ -218,6 +242,10 @@ class SubprocessExecutor:
                 shell=False,
             )
         except subprocess.TimeoutExpired:
+            _notify(
+                observer,
+                StepEvent(step_id=prepared.step_id, kind="failed", error="timeout"),
+            )
             raise ProcessTimeoutError(
                 prepared.argv,
                 timeout if timeout is not None else 0.0,
@@ -226,6 +254,14 @@ class SubprocessExecutor:
                 sensitive_indices=prepared.sensitive_argv_indices,
             ) from None
         except OSError as error:
+            _notify(
+                observer,
+                StepEvent(
+                    step_id=prepared.step_id,
+                    kind="failed",
+                    error=_safe_error(prepared, error),
+                ),
+            )
             raise ProcessSpawnError(
                 prepared.argv,
                 str(error),
@@ -233,6 +269,16 @@ class SubprocessExecutor:
                 secrets=_captured_error_secrets(prepared),
                 sensitive_indices=prepared.sensitive_argv_indices,
             ) from error
+        except Exception as error:
+            _notify(
+                observer,
+                StepEvent(
+                    step_id=prepared.step_id,
+                    kind="failed",
+                    error=_safe_error(prepared, error),
+                ),
+            )
+            raise
         stdout = getattr(completed, "stdout", "")
         stderr = getattr(completed, "stderr", "")
         if prepared.text:
@@ -240,7 +286,7 @@ class SubprocessExecutor:
                 stdout = stdout.decode()
             if isinstance(stderr, bytes):
                 stderr = stderr.decode()
-        return ProcessResult(
+        result = ProcessResult(
             argv=prepared.argv,
             returncode=getattr(completed, "returncode", 0),
             stdout=stdout,
@@ -249,10 +295,29 @@ class SubprocessExecutor:
             cwd=prepared.cwd,
             environment=prepared.environment,
         )
+        if observe_output:
+            _notify_output(observer, prepared, stdout, "stdout")
+            _notify_output(observer, prepared, stderr, "stderr")
+        _notify(
+            observer,
+            StepEvent(
+                step_id=prepared.step_id,
+                kind="completed",
+                returncode=result.returncode,
+            ),
+        )
+        return result
 
-    def spawn(self, step: PreparedStep) -> ProcessHandle:
+    def spawn(
+        self,
+        step: PreparedStep,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessHandle:
         inherited = step.inherit_stdio
         started = time.perf_counter()
+        _notify(observer, StepEvent(step_id=step.step_id, kind="started"))
         try:
             process = subprocess.Popen(
                 list(step.argv),
@@ -269,6 +334,10 @@ class SubprocessExecutor:
                 shell=False,
             )
         except OSError as error:
+            _notify(
+                observer,
+                StepEvent(step_id=step.step_id, kind="failed", error=_safe_error(step, error)),
+            )
             raise ProcessSpawnError(
                 step.argv,
                 str(error),
@@ -284,6 +353,49 @@ class SubprocessExecutor:
             session_id=group_id,
             inherited_stdio=inherited,
         )
+
+
+def _notify(observer: StepObserver | None, event: StepEvent) -> None:
+    """Observers are diagnostics and must never change process semantics."""
+    if observer is None:
+        return
+    try:
+        observer(event)
+    except Exception:
+        return
+
+
+def _notify_output(
+    observer: StepObserver | None,
+    step: PreparedStep,
+    value: str | bytes | None,
+    stream: str,
+) -> None:
+    if observer is None or value in (None, "", b""):
+        return
+    from .redaction import redacted_projection
+
+    text = value.decode(errors="replace") if isinstance(value, bytes) else value
+    safe = cast(
+        "str", redacted_projection(text, secrets=_captured_error_secrets(step), field=stream)
+    )
+    if stream == "stdout":
+        _notify(observer, StepEvent(step_id=step.step_id, kind="stdout", chunk=safe))
+    else:
+        _notify(observer, StepEvent(step_id=step.step_id, kind="stderr", chunk=safe))
+
+
+def _safe_error(step: PreparedStep, error: BaseException) -> str:
+    from .redaction import redacted_projection
+
+    return cast(
+        "str",
+        redacted_projection(
+            str(error),
+            secrets=_captured_error_secrets(step),
+            field="error",
+        ),
+    )
 
 
 def prepared_step(

@@ -24,10 +24,10 @@
 
 ## 4. Shared plan presentation and execution observation
 
-- [ ] 4.1 Add typed semantic plan observations for goal, targets, mutations, precondition status, and warnings without changing the private executable snapshot or public machine plan fields.
-- [ ] 4.2 Replace the implementation-heavy default Rich plan rendering with one shared semantic projection and add JSON/TOON equality tests proving full snapshots remain unchanged.
-- [ ] 4.3 Move HTTP-port inspection into foreground run planning and execution revalidation so dry-run emits a failed precondition while normal execution still performs no spawn or use update on conflict.
-- [ ] 4.4 Extend the existing `Command`/`RunContext` and process executor with an optional typed step observer for start/completion/failure and opt-in sanitized stdout/stderr chunks, preserving final capture and exit behavior.
+- [x] 4.1 Add typed semantic plan observations for goal, targets, mutations, precondition status, and warnings without changing the private executable snapshot or public machine plan fields.
+- [x] 4.2 Replace the implementation-heavy default Rich plan rendering with one shared semantic projection and add JSON/TOON equality tests proving full snapshots remain unchanged.
+- [x] 4.3 Move HTTP-port inspection into foreground run planning and execution revalidation so dry-run emits a failed precondition while normal execution still performs no spawn or use update on conflict.
+- [x] 4.4 Extend the existing `Command`/`RunContext` and process executor with an optional typed step observer for start/completion/failure and opt-in sanitized stdout/stderr chunks, preserving final capture and exit behavior.
 - [ ] 4.5 Wire restore to TTY Rich `Live` progress and non-TTY Rich step-prefixed sanitized lines; make `--show-command-output` Rich-only, reject it with JSON/TOON/`--json` as exit-2 usage before SDK work, and associate every visible chunk with its plan step.
 - [ ] 4.6 Add tests for ordered restore events, TTY `Live`, non-TTY line output without cursor control, Rich-only stream chunks, machine-mode stream-flag usage errors and single-document output without the flag, split-chunk redaction, unchanged subprocess results, and existing execution exit codes.
 

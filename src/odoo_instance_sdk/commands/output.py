@@ -601,6 +601,14 @@ def _rich_plan_projection(document: OutputDocument) -> str:
     if not isinstance(result, dict):
         return json.dumps(result, ensure_ascii=False, default=str, indent=2)
 
+    semantic = _semantic_plan_projection(
+        result,
+        command=document.command,
+        document_warnings=document.warnings,
+    )
+    if semantic is not None:
+        return semantic
+
     lines = [f"Plan: {document.command}"]
     steps = result.get("steps")
     if isinstance(steps, list):
@@ -611,6 +619,50 @@ def _rich_plan_projection(document: OutputDocument) -> str:
             for line in _rich_step_lines(number, item)
         )
     lines.extend(_rich_plan_metadata(result, document.warnings))
+    return "\n".join(lines)
+
+
+def _semantic_plan_projection(
+    result: dict[str, JsonValue],
+    *,
+    command: str,
+    document_warnings: tuple[str, ...] = (),
+) -> str | None:
+    """Render the single decision-oriented semantic plan observation."""
+    observations = result.get("observations")
+    if not isinstance(observations, list):
+        return None
+    semantic = next(
+        (
+            item
+            for item in observations
+            if isinstance(item, dict) and item.get("kind") == "semantic"
+        ),
+        None,
+    )
+    if not isinstance(semantic, dict):
+        return None
+    lines = [f"Plan: {command}", f"Goal: {semantic.get('goal', '')}"]
+    for field, label in (("targets", "Targets"), ("mutations", "Mutations")):
+        values = semantic.get(field)
+        if isinstance(values, list) and values:
+            lines.append(f"{label}:")
+            lines.extend(f"  - {value}" for value in values)
+    preconditions = semantic.get("preconditions")
+    if isinstance(preconditions, list) and preconditions:
+        lines.append("Preconditions:")
+        for item in preconditions:
+            if isinstance(item, dict):
+                lines.append(
+                    f"  - {item.get('name', 'precondition')}: "
+                    f"{item.get('status', 'unknown')} — {item.get('detail', '')}"
+                )
+    warnings = semantic.get("warnings")
+    warning_values = list(warnings) if isinstance(warnings, list) else []
+    warning_values.extend(warning for warning in document_warnings if warning not in warning_values)
+    if warning_values:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in warning_values)
     return "\n".join(lines)
 
 

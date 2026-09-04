@@ -10,6 +10,7 @@ from odoo_instance_sdk.exceptions import DuplicateStepError, UnplannedStepError
 from odoo_instance_sdk.internal.proc import (
     DeadlineExceeded,
     ExecutionDeadline,
+    PreparedCommand,
     PreparedStep,
     ProcessExecutionError,
     ProcessResult,
@@ -17,6 +18,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessTimeoutError,
     RecordingExecutor,
     RunContext,
+    StepEvent,
     SubprocessExecutor,
     prepared_command,
     prepared_step,
@@ -28,6 +30,29 @@ from odoo_instance_sdk.internal.proc import (
 
 def _python(source: str) -> tuple[str, ...]:
     return (sys.executable, "-c", source)
+
+
+def test_optional_step_observer_preserves_result_and_redacts_output() -> None:
+    secret = "observer-secret"
+    step = PreparedStep(
+        step_id="observer.step",
+        argv=_python(f"print({secret!r}); print('failure', file=__import__('sys').stderr)"),
+        secret_values=(secret,),
+    )
+    command: PreparedCommand[ProcessResult] = prepared_command(
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=SubprocessExecutor(),
+    )
+    events: list[StepEvent] = []
+
+    result = command.run(observer=events.append, observe_output=True)
+
+    assert isinstance(result, ProcessResult)
+    assert result.returncode == 0
+    assert [event.kind for event in events] == ["started", "stdout", "stderr", "completed"]
+    assert all(secret not in (event.chunk or "") for event in events)
+    assert events[0].step_id == events[-1].step_id == step.step_id
 
 
 def test_captured_text_preserves_argv_cwd_stdin_and_sanitized_environment(

@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Sequence
-from typing import Generic, Protocol, TypeVar, cast
+from typing import Generic, Literal, Protocol, TypeVar, cast
 
 import msgspec
 
@@ -29,6 +29,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResult,
     RunContext,
     Step,
+    StepEvent,
     prepared_command,
 )
 
@@ -44,7 +45,32 @@ class _PlanObservation(msgspec.Struct, frozen=True, forbid_unknown_fields=True, 
     budget_seconds: float
 
 
-type PlanObservation = JsonValue | _PlanObservation
+class PlanPrecondition(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """A decision-level safety check retained alongside an execution plan."""
+
+    name: str
+    status: Literal["passed", "failed", "unknown"]
+    detail: str
+
+
+class SemanticPlanObservation(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    """Typed human-facing intent for a plan.
+
+    This lives in the existing ``observations`` slot so the private prepared
+    process snapshot and the public step fields remain untouched.
+    """
+
+    kind: Literal["semantic"]
+    goal: str
+    targets: tuple[str, ...] = ()
+    mutations: tuple[str, ...] = ()
+    preconditions: tuple[PlanPrecondition, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+type PlanObservation = JsonValue | _PlanObservation | SemanticPlanObservation
 
 
 class ProcessStep(
@@ -144,7 +170,12 @@ T = TypeVar("T")
 
 
 class _StoredCommand(Protocol):
-    def run(self) -> ProcessResult: ...
+    def run(
+        self,
+        *,
+        observer: Callable[[StepEvent], None] | None = None,
+        observe_output: bool = False,
+    ) -> ProcessResult: ...
 
     @property
     def private_projection(self) -> PrivateProjection | None: ...
@@ -198,13 +229,18 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
 
         return self.plan.process_steps
 
-    def run(self) -> T:
+    def run(
+        self,
+        *,
+        observer: Callable[[StepEvent], None] | None = None,
+        observe_output: bool = False,
+    ) -> T:
         """Execute the captured snapshot with a fresh ledger for this call."""
 
         prepared = _COMMANDS.get(id(self))
         if prepared is None:
             raise PlanError("command has no prepared executable snapshot")
-        return cast("T", prepared.run())
+        return cast("T", prepared.run(observer=observer, observe_output=observe_output))
 
     def _private_projection(self) -> PrivateProjection | None:
         """Read resource compatibility data without exposing it publicly."""
@@ -226,8 +262,10 @@ __all__ = [
     "JsonValue",
     "OmittedStepError",
     "PlanError",
+    "PlanPrecondition",
     "PlanValidationError",
     "ProcessStep",
+    "SemanticPlanObservation",
     "StalePlanError",
     "UnplannedStepError",
     "canonical_plan_bytes",

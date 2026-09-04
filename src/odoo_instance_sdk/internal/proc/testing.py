@@ -32,19 +32,21 @@ class RecordingExecutor:
     def execute(self, step: PreparedProcess) -> ProcessResultLike:
         prepared = cast("PreparedStep", step)
         self.executed.append(prepared)
+        result: ProcessResultLike | None
         if self.result_factory is not None:
-            return self.result_factory(prepared)
-        result = self.results.get(prepared.step_id, self.default_result)
-        if result is None:
-            return ProcessResult(
-                argv=prepared.argv,
-                returncode=0,
-                stdout=b"" if not prepared.text else "",
-                stderr=b"" if not prepared.text else "",
-                duration=0.0,
-                cwd=prepared.cwd,
-                environment=prepared.environment,
-            )
+            result = self.result_factory(prepared)
+        else:
+            result = self.results.get(prepared.step_id, self.default_result)
+            if result is None:
+                result = ProcessResult(
+                    argv=prepared.argv,
+                    returncode=0,
+                    stdout=b"" if not prepared.text else "",
+                    stderr=b"" if not prepared.text else "",
+                    duration=0.0,
+                    cwd=prepared.cwd,
+                    environment=prepared.environment,
+                )
         return result
 
     def execute_with_deadline(

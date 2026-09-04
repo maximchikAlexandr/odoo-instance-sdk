@@ -1122,6 +1122,44 @@ def test_plan_machine_transports_are_equal_for_one_frozen_redacted_plan(
     assert decode(toon_document, DecodeOptions(indent=2, strict=True)) == json.loads(json_document)
 
 
+def test_semantic_plan_projection_hides_private_execution_details(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from odoo_instance_sdk.execution import (
+        Command,
+        ExecutionPlan,
+        PlanPrecondition,
+        SemanticPlanObservation,
+    )
+
+    plan = ExecutionPlan(
+        observations=(
+            SemanticPlanObservation(
+                kind="semantic",
+                goal="Update the module",
+                targets=("demo",),
+                mutations=("write module files",),
+                preconditions=(
+                    PlanPrecondition(
+                        name="http-port-free",
+                        status="failed",
+                        detail="127.0.0.1:8069 is occupied",
+                    ),
+                ),
+                warnings=("preview only",),
+            ),
+        ),
+    ).with_fingerprint()
+    command = Command.create(plan, lambda _context: None)
+
+    assert _emit_plan(command, command_name="module.update", mode=OutputMode.RICH) == 0
+    rendered = capsys.readouterr().out
+    assert "Goal: Update the module" in rendered
+    assert "Preconditions:" in rendered
+    assert "127.0.0.1:8069 is occupied" in rendered
+    assert "fingerprint" not in rendered
+
+
 def test_capture_boundary_corpus_is_secret_free_in_all_public_surfaces(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
