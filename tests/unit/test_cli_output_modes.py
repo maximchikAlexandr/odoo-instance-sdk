@@ -56,7 +56,9 @@ from odoo_instance_sdk.models import (
     OdooTestResult,
     PostgresClusterState,
     Snapshot,
+    StartConfig,
 )
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -1348,6 +1350,54 @@ def test_output_options_is_a_click_option_composition_helper() -> None:
     conflict = runner.invoke(command, ["--json", "--format", "toon"])
     assert conflict.exit_code == 2
     assert "conflicts" in conflict.output
+
+
+@pytest.mark.parametrize("mode", ["rich", "json", "toon"])
+def test_project_module_update_keeps_confirmation_and_output_contract(
+    mode: str, tmp_path: Path
+) -> None:
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        python=sys.executable,
+        odoo_bin=Path(sys.executable),
+    )
+    instance = SimpleNamespace(
+        config=SimpleNamespace(
+            start_config=StartConfig(db_name="project_db"),
+            command_prefix=(sys.executable, str(tmp_path / "odoo-bin")),
+        )
+    )
+    resolved = ResolvedContext(
+        client=cast("Any", object()),
+        source=cast("Any", project),
+        instance=cast("Any", instance),
+        provenance="cwd",
+    )
+    command = _matrix_command(_command_result(0, {"result": {"updated": ["sale"]}}))
+    with (
+        patch("odoo_instance_sdk.cli.cli_context.ready_instance", return_value=resolved),
+        patch("odoo_instance_sdk.cli.update_modules_command", return_value=command) as update,
+    ):
+        result = CliRunner().invoke(
+            cli,
+            ["module", "update", "sale", "--yes", "--format", mode],
+        )
+
+    assert result.exit_code == 0, result.output
+    update.assert_called_once_with(instance, ("sale",))
+    if mode == "rich":
+        assert "Updated modules:" in result.output
+        assert "sale" in result.output
+    else:
+        if mode == "json":
+            payload = json.loads(result.stdout)
+        else:
+            from toon import DecodeOptions, decode
+
+            payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+        assert payload["result"] == payload["data"]
+        assert payload["result"]["modules"] == ["sale"]
+        assert payload["result"]["updated"] == ["sale"]
 
 
 def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) -> None:

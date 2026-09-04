@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 SelectionKind = Literal["module", "cwd", "file"]
+ChangedBaseSource = Literal["explicit", "environment", "project"]
+ContextKind = Literal["environment", "project"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +57,7 @@ class _TestSelection:
 class _ChangedSelection:
     """Private changed-test plan and its complete local Git provenance."""
 
-    base_source: Literal["explicit", "environment"]
+    base_source: ChangedBaseSource
     requested_base: str
     resolved_base: str | None
     merge_base: str | None
@@ -490,19 +492,22 @@ def _git_revision(
 
 
 def _selected_base(
-    base: str | None, environment_base: str | None
-) -> tuple[Literal["explicit", "environment"], str, str]:
+    base: str | None,
+    configured_base: str | None,
+    *,
+    context_kind: ContextKind,
+) -> tuple[ChangedBaseSource, str, str]:
     if base is not None:
         requested = base
         ref = base.strip()
-        source: Literal["explicit", "environment"] = "explicit"
+        source: ChangedBaseSource = "explicit"
     else:
-        requested = environment_base or ""
+        requested = configured_base or ""
         ref = requested.strip()
-        source = "environment"
+        source = context_kind
     if not ref or ref == "HEAD":
         raise ConfigError(
-            "changed test selection requires --base REF (environment base is unavailable)"
+            "changed test selection requires --base REF (configured checkout base is empty or HEAD)"
         )
     return source, requested, ref
 
@@ -550,7 +555,7 @@ def _map_changed_path(
 def _changed_plan(
     roots: _EligibleRoots,
     *,
-    base_source: Literal["explicit", "environment"],
+    base_source: ChangedBaseSource,
     requested_base: str,
     resolved_base: str | None = None,
     merge_base: str | None = None,
@@ -594,7 +599,7 @@ def _raise_changed_error(
     error: ConfigError,
     roots: _EligibleRoots,
     *,
-    base_source: Literal["explicit", "environment"],
+    base_source: ChangedBaseSource,
     requested_base: str,
     resolved_base: str | None = None,
     merge_base: str | None = None,
@@ -624,6 +629,7 @@ def resolve_changed_selection(
     *,
     base: str | None = None,
     environment_base: str | None = None,
+    context_kind: ContextKind = "environment",
     tags: str | None = None,
     start_config: StartConfig | None = None,
     timeout: float = _GIT_TIMEOUT_SECONDS,
@@ -638,14 +644,18 @@ def resolve_changed_selection(
         addons_path = start_config
 
     roots = _normalize_root_set(worktree_root, addons_path)
-    source: Literal["explicit", "environment"] = "explicit" if base is not None else "environment"
+    source: ChangedBaseSource = "explicit" if base is not None else context_kind
     requested_base = base if base is not None else environment_base or ""
     resolved_base: str | None = None
     merge_base: str | None = None
     head: str | None = None
     changed: set[str] = set()
     try:
-        source, requested_base, base_ref = _selected_base(base, environment_base)
+        source, requested_base, base_ref = _selected_base(
+            base,
+            environment_base,
+            context_kind=context_kind,
+        )
         resolved_base_value = _git_revision(
             base_ref, roots.worktree, timeout=timeout, max_output_bytes=max_output_bytes
         )

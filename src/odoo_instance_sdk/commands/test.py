@@ -13,7 +13,6 @@ else:
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, RuntimeView, pass_cli_context
 from odoo_instance_sdk.commands.output import (
-    OutputDocument,
     OutputMode,
     emit,
     fail,
@@ -164,44 +163,6 @@ def _emit_result(
     dry_run: bool,
     diagnostic: str | None = None,
 ) -> None:
-    def rich_projection(_document: OutputDocument) -> str:
-        selection = result.get("selection")
-        selection_kind = (
-            str(selection.get("kind", "unknown")) if isinstance(selection, dict) else "unknown"
-        )
-        modules = result.get("modules")
-        module_text = (
-            ", ".join(str(item) for item in modules) if isinstance(modules, list) else "none"
-        )
-        environment_id = result.get("environment_id")
-        environment_name = result.get("environment_name")
-        lines = [
-            f"owner={result['owner_kind']} project={result['project_id']}",
-            (
-                f"environment={environment_name} ({environment_id})"
-                if environment_id is not None and environment_name is not None
-                else "environment=none"
-            ),
-            f"selection={selection_kind}",
-            f"modules={module_text or 'none'}",
-        ]
-        if "test_tags" in result:
-            counts = result.get("counts")
-            counts = counts if isinstance(counts, dict) else {}
-            lines.append(
-                f"tests={counts.get('tests', 0)} "
-                f"ok={counts.get('successful', 0)} "
-                f"failed={counts.get('failed', 0)} "
-                f"errors={counts.get('errors', 0)} "
-                f"skipped={counts.get('skipped', 0)}"
-            )
-        elif result.get("reason") == "no_addon_changes":
-            lines.append("reason=no_addon_changes")
-        elif result.get("dry_run"):
-            lines.append("dry_run=true")
-        lines.append(f"exit_code={result['exit_code']}")
-        return "\n".join(lines)
-
     emit(
         success_document(
             command=command,
@@ -209,9 +170,47 @@ def _emit_result(
             dry_run=dry_run,
         ),
         mode,
-        rich=rich_projection,
+        rich=lambda _document: rich_test_result(result),
         diagnostic=diagnostic,
     )
+
+
+def rich_test_result(result: dict[str, JsonValue]) -> str:
+    """Render the shared owner-neutral test result for Rich output."""
+    selection = result.get("selection")
+    selection_kind = (
+        str(selection.get("kind", "unknown")) if isinstance(selection, dict) else "unknown"
+    )
+    modules = result.get("modules")
+    module_text = ", ".join(str(item) for item in modules) if isinstance(modules, list) else "none"
+    environment_id = result.get("environment_id")
+    environment_name = result.get("environment_name")
+    lines = [
+        f"owner={result['owner_kind']} project={result['project_id']}",
+        (
+            f"environment={environment_name} ({environment_id})"
+            if environment_id is not None and environment_name is not None
+            else "environment=none"
+        ),
+        f"selection={selection_kind}",
+        f"modules={module_text or 'none'}",
+    ]
+    if "test_tags" in result:
+        counts = result.get("counts")
+        counts = counts if isinstance(counts, dict) else {}
+        lines.append(
+            f"tests={counts.get('tests', 0)} "
+            f"ok={counts.get('successful', 0)} "
+            f"failed={counts.get('failed', 0)} "
+            f"errors={counts.get('errors', 0)} "
+            f"skipped={counts.get('skipped', 0)}"
+        )
+    elif result.get("reason") == "no_addon_changes":
+        lines.append("reason=no_addon_changes")
+    elif result.get("dry_run"):
+        lines.append("dry_run=true")
+    lines.append(f"exit_code={result['exit_code']}")
+    return "\n".join(lines)
 
 
 def _execute_selection(
@@ -298,6 +297,7 @@ def test_command(
                 start_config,
                 base=base,
                 environment_base=runtime.base_ref,
+                context_kind=runtime.owner_kind,
                 tags=tags,
             )
             result = _common_result(
@@ -355,6 +355,7 @@ def test_command(
                     mode=mode,
                     dry_run=True,
                     preview=lambda _command: result,
+                    rich=lambda _document: rich_test_result(result),
                 )
                 raise click.exceptions.Exit(0)  # noqa: TRY301
             typed, diagnostic = command.run()
@@ -427,6 +428,7 @@ def run_module_tests(
 __all__ = [
     "project_execution_result",
     "resolve_module_test_selection",
+    "rich_test_result",
     "run_module_tests",
     "test_command",
 ]

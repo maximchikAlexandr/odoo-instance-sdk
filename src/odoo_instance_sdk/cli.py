@@ -44,6 +44,7 @@ from odoo_instance_sdk.commands.pg import (
 from odoo_instance_sdk.commands.test import (
     project_execution_result,
     resolve_module_test_selection,
+    rich_test_result,
     test_command,
 )
 from odoo_instance_sdk.config import OdooClientConfig
@@ -1048,7 +1049,7 @@ def module_test(
                 if value is not None
                 else {}
             ),
-            rich=lambda document: json.dumps(document.result, default=str, indent=2),
+            rich=lambda document: rich_test_result(cast("dict[str, JsonValue]", document.result)),
         )
     except SystemExit:
         raise

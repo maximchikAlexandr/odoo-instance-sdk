@@ -173,6 +173,60 @@ def test_changed_selection_requires_non_head_base(tmp_path: Path, base: str | No
         resolve_changed_selection(repo, ["addons"], base=base, environment_base="HEAD")
 
 
+def test_project_changed_selection_uses_configured_non_head_base(tmp_path: Path) -> None:
+    repo, sale, _stock = _repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD")
+    (sale / "tests" / "test_change.py").write_text("# change\n")
+
+    selection = resolve_changed_selection(
+        repo,
+        ["addons"],
+        environment_base=base,
+        context_kind="project",
+    )
+
+    assert selection.base_source == "project"
+    assert selection.requested_base == base
+    assert selection.resolved_base == base
+    assert selection.modules == ("sale",)
+
+
+@pytest.mark.parametrize("configured_base", [None, "", "HEAD", " HEAD "])
+def test_project_changed_selection_requires_explicit_base_without_usable_default(
+    tmp_path: Path,
+    configured_base: str | None,
+) -> None:
+    repo, _sale, _stock = _repo(tmp_path)
+    with (
+        patch("odoo_instance_sdk.internal.test_selection._run_git_bytes") as run_git,
+        pytest.raises(ConfigError, match="requires --base REF"),
+    ):
+        resolve_changed_selection(
+            repo,
+            ["addons"],
+            environment_base=configured_base,
+            context_kind="project",
+        )
+
+    run_git.assert_not_called()
+
+
+def test_project_explicit_base_has_explicit_provenance(tmp_path: Path) -> None:
+    repo, _sale, _stock = _repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD")
+
+    selection = resolve_changed_selection(
+        repo,
+        ["addons"],
+        base=base,
+        environment_base="HEAD",
+        context_kind="project",
+    )
+
+    assert selection.base_source == "explicit"
+    assert selection.requested_base == base
+
+
 def test_changed_selection_rejects_missing_base_ref(tmp_path: Path) -> None:
     repo, _sale, _stock = _repo(tmp_path)
 

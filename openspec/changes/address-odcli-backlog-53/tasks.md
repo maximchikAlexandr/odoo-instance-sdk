@@ -11,8 +11,8 @@
 - [x] 2.2 Refactor VS Code profile construction to consume the owner-neutral runtime view and preserve environment behavior, default print, atomic `--write`, `--dry-run`, output formats, and existing-JSONC refusal.
 - [x] 2.3 Refactor `module update` to use the resolved project database/runtime without its unused environment ID and preserve `--env`, `--yes`, dry-run, and output contracts.
 - [x] 2.4 Refactor top-level and compatibility Odoo test paths to use the owner-neutral runtime view and one result/runner implementation without environment fabrication.
-- [ ] 2.5 Implement project-context changed-test base precedence as explicit `--base`, then configured non-`HEAD` effective checkout base, otherwise actionable failure; add local-only Git provenance tests.
-- [ ] 2.6 Add CLI regressions for VS Code print/write/dry-run, module update, direct test, module-test alias, explicit-environment precedence, and exact owner/common-context result fields for executed, changed no-op, and dry-run states with Rich/JSON/TOON parity in both owner contexts.
+- [x] 2.5 Implement project-context changed-test base precedence as explicit `--base`, then configured non-`HEAD` effective checkout base, otherwise actionable failure; add local-only Git provenance tests.
+- [x] 2.6 Add CLI regressions for VS Code print/write/dry-run, module update, direct test, module-test alias, explicit-environment precedence, and exact owner/common-context result fields for executed, changed no-op, and dry-run states with Rich/JSON/TOON parity in both owner contexts.
 
 ## 3. Project-local environment variables
 
