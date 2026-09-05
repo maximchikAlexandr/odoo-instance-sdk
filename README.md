@@ -62,6 +62,22 @@ project run reads Python, `odoo-bin`, source config, working directory, port,
 database, and default run arguments from `.odcli/project.toml`; it does not
 create an environment or add the main checkout to `odcli env list`.
 
+Project-local child variables may be placed in `.odcli/.env`. The file is
+ignored by Git, must be owner-readable only (`0600` or another mode with no
+group/other bits), and uses a deliberately small grammar: `KEY=value`,
+literal single quotes, or double quotes with only `\\`, `\"`, `\n`, `\r`, and
+`\t` escapes. Blank/comment lines and empty values are supported; shell
+expansion, `export`, duplicate keys, and malformed quoting are rejected. The
+invoking process wins per key and `os.environ` is never changed. Ordinary
+values are scoped to Odoo children; Git, PostgreSQL, Docker, editors, package
+tools, and other children retain their purpose-built environments.
+
+`ODCLI_TEST_MASTER_PASSWORD` is a restore-only secret input. It is consumed
+before child creation, removed from every child environment, and never written
+to plans, logs, diagnostics, fingerprints, or structured output. A missing
+`.odcli/.env` is valid; unreadable, insecure, or malformed files fail before
+work and report only the path (and parser line where applicable).
+
 Global selectors such as `--project` and `--env` belong before the subcommand.
 Exact flags are intentionally delegated to executable help, for example
 `odcli env checkout --help`. Structured output is leaf-local, not a root command
@@ -145,6 +161,21 @@ signals, and native exit status.  Do not pass document-format options to a
 normal interactive `psql`; `--dry-run` is the plan-only exception and redacts
 credentials.
 
+To remove a database, use the CLI-private, cluster-bound operation:
+
+```bash
+odcli db drop feature_customer_credit --dry-run
+odcli db drop feature_customer_credit --yes
+odcli db drop feature_customer_credit --force-connections --yes
+```
+
+The dry-run checks the exact database name, protected `postgres`/`template0`/
+`template1` names, template/default status, and active sessions without
+connecting to Odoo or mutating the catalogue.  A normal Rich invocation asks
+for confirmation; JSON/TOON and `--json` require `--yes` and never prompt.
+`--force-connections` terminates sessions belonging only to the exact target.
+Remote instances, configured defaults, and template databases remain refused.
+
 ### Prepare a project database
 
 Database refresh can use a pinned remote test instance while keeping its
@@ -208,6 +239,15 @@ port, and logfile option families. Dry-run captures and redacts the same argv
 without recording use or starting Odoo; normal `run` forwards native stdin,
 stdout, and stderr and returns Odoo's exit code.
 
+`eval` and `exec` are finite shell-boundary operations and can use Rich, JSON,
+or TOON output.  Their successful document keeps the expression/script result
+separate from captured `user_stdout`; print-only execution reports a `null`
+result.  A framed user-code exception exits `1` with a failure envelope whose
+`error.details` retains the bounded output, structured exception/source
+context, and truncation flag.  Startup failures use a command-specific
+startup code and do not invent user-code details.  All result, output, source,
+and diagnostic fields are secret-redacted.
+
 ## Complete CLI command reference
 
 This is the complete shipped command-path inventory. The Click object
@@ -244,6 +284,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db init-monitoring` — Idempotently initialize supported monitoring extensions on an owned cluster.
 - `odcli db refresh` — Refresh an environment database from its configured source policy.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
+- `odcli db drop` — Safely remove one exact local cluster database after guarded checks.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
 <!-- cli-command-inventory:end -->
 
@@ -304,9 +345,13 @@ headless server does not require its static assets. Stable routes are:
 - `POST /api/v1/pgadmin/open` — UI-only pgAdmin launch, protected by same-origin,
   CSRF, and JSON request checks.
 
-The default environment inventory is active-only. Use explicit include-removed
-options where supported. Monitor snapshots isolate component failures and never
-publish stored secrets or absolute catalog paths.
+The default environment inventory is active-only. Registered projects are also
+visible when they have no environment; a project-owned runtime is reported
+directly on that project rather than through a synthetic environment.  A
+missing runtime is `null`, while a recorded stopped runtime retains its typed
+metrics with null/empty live values. Use explicit include-removed options where
+supported. Monitor snapshots isolate component failures and never publish
+stored secrets or absolute catalog paths.
 
 ## Security and data location
 

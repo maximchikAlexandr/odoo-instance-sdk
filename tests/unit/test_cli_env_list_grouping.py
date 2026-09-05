@@ -172,7 +172,7 @@ def _snapshot(
     environments: tuple[EnvironmentSnapshot, ...],
 ) -> Snapshot:
     return Snapshot(
-        schema_version=3,
+        schema_version=4,
         generated_at=datetime.now(UTC),
         projects=projects,
         environments=environments,
@@ -203,6 +203,7 @@ def test_env_list_human_shows_project_header_and_cluster_summary(
         display_hint="comerta_abc12345",
         environment_count=1,
         cluster=cluster,
+        runtime=None,
     )
     env = _env()
     _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
@@ -226,6 +227,7 @@ def test_env_list_human_env_row_columns(monkeypatch: pytest.MonkeyPatch) -> None
         display_hint="comerta_abc12345",
         environment_count=1,
         cluster=cluster,
+        runtime=None,
     )
     env = _env(name="myenv", branch="feat/x")
     _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
@@ -256,6 +258,7 @@ def test_env_list_human_table_uses_rich_columns_and_json_is_sanitized(
         display_hint="comerta_abc12345",
         environment_count=1,
         cluster=_healthy_cluster(),
+        runtime=None,
     )
     original_name = "very-long\r\nname-that-must-stay-in-json"
     env = _env(name=original_name)
@@ -284,6 +287,7 @@ def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> N
         display_hint="comerta_abc12345",
         environment_count=1,
         cluster=_healthy_cluster(),
+        runtime=None,
     )
     env = _env(
         name="stopped-env",
@@ -321,6 +325,7 @@ def test_env_list_json_emits_snapshot_contract(monkeypatch: pytest.MonkeyPatch) 
         display_hint="comerta_abc12345",
         environment_count=1,
         cluster=cluster,
+        runtime=None,
     )
     env = _env()
     _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
@@ -332,7 +337,7 @@ def test_env_list_json_emits_snapshot_contract(monkeypatch: pytest.MonkeyPatch) 
     assert envelope["command"] == "env.list"
     payload = envelope["result"]
     # Snapshot contract parity.
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert "generated_at" in payload
     assert "projects" in payload and "environments" in payload
     proj = payload["projects"][0]
@@ -359,6 +364,7 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
         display_hint="comerta_abc12345",
         environment_count=1,
         cluster=_healthy_cluster(),
+        runtime=None,
     )
     env = _env()
     removed_env = _env(
@@ -411,6 +417,7 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
         display_hint="a",
         environment_count=1,
         cluster=_healthy_cluster(),
+        runtime=None,
     )
     project_b = ProjectSummary(
         id="project_b",
@@ -418,6 +425,7 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
         display_hint="b",
         environment_count=1,
         cluster=_healthy_cluster(),
+        runtime=None,
     )
     active_a = _env(
         env_id="11111111-1111-1111-1111-111111111111", project_id="project_a", name="a-active"
@@ -523,6 +531,7 @@ def test_env_list_external_cluster_summary(monkeypatch: pytest.MonkeyPatch) -> N
         display_hint="comerta_abc12345",
         environment_count=1,
         cluster=cluster,
+        runtime=None,
     )
     env = _env()
     _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
@@ -545,6 +554,7 @@ def test_rich_renderer_is_pure_sorted_and_retains_all_columns(
         display_hint="b",
         environment_count=1,
         cluster=None,
+        runtime=None,
     )
     project_a = ProjectSummary(
         id="project_a",
@@ -552,6 +562,7 @@ def test_rich_renderer_is_pure_sorted_and_retains_all_columns(
         display_hint="a",
         environment_count=1,
         cluster=None,
+        runtime=None,
     )
     env_b = _env(
         env_id="22222222-2222-2222-2222-222222222222",
@@ -801,6 +812,7 @@ def test_rich_renderer_neutralizes_tty_control_sequences() -> None:
         display_hint="malicious",
         environment_count=1,
         cluster=_healthy_cluster(),
+        runtime=None,
     )
     env = _env(name=f"env-{payload}", branch=f"branch-{payload}", database=f"db-{payload}")
 

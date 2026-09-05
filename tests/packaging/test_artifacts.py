@@ -205,6 +205,7 @@ def test_wheel_metadata_has_strict_core_and_dashboard_dependency_contract() -> N
         ("psutil", ("<7", ">=5.9")),
         ("python-toon", ("==0.1.3",)),
         ("rich", ("<16", ">=15")),
+        ("rich-click", ("<2", ">=1.9")),
     }
     assert dashboard == {
         ("fastapi", ("<1.0", ">=0.141")),

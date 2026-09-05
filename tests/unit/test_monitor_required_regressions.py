@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import uuid
 from pathlib import Path
 
@@ -112,10 +111,10 @@ def test_catalog_paths_are_redacted_from_public_monitor_error(
     catalog = make_catalog(tmp_path)
     catalog.close()
 
-    def boom(self: BackupCatalog, **_: object) -> list[sqlite3.Row]:
+    def boom(self: BackupCatalog, **_: object) -> object:
         raise BackupCatalogError("cannot open /secret/catalog.sqlite3")
 
-    monkeypatch.setattr(BackupCatalog, "list_environments_with_runtimes", boom)
+    monkeypatch.setattr(BackupCatalog, "_monitor_snapshot_rows", boom)
     with pytest.raises(MonitorError) as caught:
         EnvironmentMonitor(
             catalog_path=tmp_path / "catalog.sqlite3", process_provider=FakeProcessProvider()

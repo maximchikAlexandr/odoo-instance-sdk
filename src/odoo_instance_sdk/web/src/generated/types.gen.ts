@@ -275,6 +275,7 @@ export type ProjectSummary = {
     environment_count: number;
     id: string;
     name: string;
+    runtime: null | RuntimeMetrics;
 };
 
 /**

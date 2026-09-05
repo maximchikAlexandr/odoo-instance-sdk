@@ -137,6 +137,12 @@ def test_openapi_uses_stable_msgspec_components_and_resolvable_refs() -> None:
         "$ref": "#/components/schemas/PgAdminEligibility"
     }
     assert {"type": "null"} in components["ProjectSummary"]["properties"]["cluster"]["anyOf"]
+    project_schema = components["ProjectSummary"]
+    assert project_schema["properties"]["runtime"]["anyOf"] == [
+        {"type": "null"},
+        {"$ref": "#/components/schemas/RuntimeMetrics"},
+    ]
+    assert "runtime" in project_schema["required"]
     assert components["PgAdminEligibilityState"]["enum"] == [
         "cluster_not_owned",
         "cluster_unhealthy",

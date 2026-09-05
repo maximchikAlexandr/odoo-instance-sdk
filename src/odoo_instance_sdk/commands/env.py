@@ -6,8 +6,12 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-import click
 import msgspec
+
+if TYPE_CHECKING:
+    import click
+else:
+    import rich_click as click
 from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
@@ -91,7 +95,7 @@ def env_group() -> None:
     pass
 
 
-@env_group.command("checkout")
+@env_group.command("checkout", help="Create an isolated environment from a Git branch.")
 @click.argument("branch")
 @click.option("--base", "base_ref", default=None, help="Base ref (default HEAD).")
 @click.option(
@@ -232,7 +236,7 @@ def env_checkout(
     )
 
 
-@env_group.command("list")
+@env_group.command("list", help="List initialized environments and their runtime state.")
 @click.option("--all", "all_envs", is_flag=True, default=False, help="Include removed.")
 @click.option(
     "--all-projects", "all_projects", is_flag=True, default=False, help="List all projects."
@@ -626,7 +630,7 @@ def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
     raise click.exceptions.Exit(1)
 
 
-@env_group.command("remove")
+@env_group.command("remove", help="Remove an isolated development environment.")
 @click.argument("environment", required=False)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation.")
@@ -704,7 +708,7 @@ def env_remove(
     return
 
 
-@env_group.command("sync")
+@env_group.command("sync", help="Synchronize an environment's Python dependencies.")
 @click.argument("environment", required=False)
 @click.option("--upgrade", "upgrade", is_flag=True, default=False)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")

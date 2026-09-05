@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -12,6 +15,7 @@ import pytest
 from odoo_instance_sdk.commands.context import (
     CliContext,
     ResolvedContext,
+    RuntimeView,
     environment_provenance,
     project_provenance,
     ready_instance,
@@ -26,12 +30,14 @@ from odoo_instance_sdk.exceptions import (
     ProjectContextError,
 )
 from odoo_instance_sdk.internal.context import resolve_project
+from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
     EnvironmentDatabaseMode,
     EnvironmentState,
 )
+from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 def _make_env(
@@ -70,6 +76,66 @@ def test_resolve_project_explicit(tmp_path: Path) -> None:
     cfg = resolve_project(tmp_path, cwd=tmp_path)
     assert isinstance(cfg, ProjectConfig)
     assert cfg.odoo_bin == Path("/opt/odoo")
+
+
+def test_runtime_view_keeps_environment_owner_and_lifecycle_narrowing(tmp_path: Path) -> None:
+    env = _make_env(worktree=str(tmp_path), generated_config_path=str(tmp_path / "odoo.conf"))
+    instance = SimpleNamespace(
+        config=SimpleNamespace(
+            start_config=StartConfig(db_name="project_db", http_port=18069),
+            command_prefix=(sys.executable, str(tmp_path / "odoo-bin")),
+        )
+    )
+    resolved = ResolvedContext(
+        client=MagicMock(),
+        instance=cast("OdooInstance", instance),
+        source=env,
+        provenance="worktree",
+    )
+
+    view = resolved.runtime
+
+    assert isinstance(view, RuntimeView)
+    assert view.owner_kind == "environment"
+    assert view.environment_id == str(env.id)
+    assert view.environment_name == env.name
+    assert view.root == tmp_path
+    assert view.database == "project_db"
+    assert view.http_url == "http://127.0.0.1:18069"
+    assert view.command_prefix == (sys.executable, str(tmp_path / "odoo-bin"))
+    assert resolved.require_environment() is env
+
+
+def test_runtime_view_exposes_project_owner_without_synthetic_environment(tmp_path: Path) -> None:
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        python=Path(sys.executable),
+        odoo_bin=Path(sys.executable),
+    )
+    instance = SimpleNamespace(
+        config=SimpleNamespace(
+            start_config=StartConfig(db_name="project_db", http_port=18070),
+            command_prefix=(sys.executable, str(tmp_path / "odoo-bin")),
+        )
+    )
+    resolved = ResolvedContext(
+        client=MagicMock(),
+        instance=cast("OdooInstance", instance),
+        source=project,
+        provenance="cwd",
+    )
+
+    view = resolved.runtime
+
+    assert view.owner_kind == "project"
+    assert view.project_id.startswith(f"project_{tmp_path.name}_")
+    assert view.environment_id is None
+    assert view.environment_name is None
+    assert view.repository_root == tmp_path
+    assert view.root == tmp_path
+    assert view.base_provenance == "project"
+    with pytest.raises(EnvironmentResolutionError, match="requires a development environment"):
+        resolved.require_environment()
 
 
 def test_resolve_project_explicit_nested_path(tmp_path: Path) -> None:

@@ -9,11 +9,11 @@ import tempfile
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TextIO, TypeVar, cast
 
 import psutil
 
@@ -43,6 +43,12 @@ from odoo_instance_sdk.internal.process_env import (
     captured_child_environment,
     sanitized_child_environment,
 )
+from odoo_instance_sdk.internal.project_env import (
+    MASTER_PASSWORD_KEY,
+    load_project_environment,
+    project_environment_secret_values,
+)
+from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.internal.server import (
     _write_secret_config,
     cleanup_secret_config,
@@ -72,12 +78,51 @@ def _build_cli_args(config: StartConfig, *, secret_config_path: str | None = Non
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.execution import (
+        Command,
+        ExecutionPlan,
+        PlanObservation,
+        SemanticPlanObservation,
+    )
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
     from odoo_instance_sdk.internal.project_runtime import DeferredProjectRuntime
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeBinding:
+    """Private owner-neutral identity shared by environment and project instances."""
+
+    owner_kind: Literal["environment", "project"]
+    owner_id: str
+    project_id: str
+    repository_root: Path
+    git_common_dir: Path
+
+
+class _RuntimeCatalog(Protocol):
+    def _register_project(
+        self, project_id: str, repository_root: str | Path, git_common_dir: str | Path
+    ) -> None: ...
+
+    def _upsert_runtime(
+        self,
+        owner_kind: str,
+        owner_id: str,
+        *,
+        root_pid: int,
+        create_time: float,
+        started_at: str,
+        checkout_branch: str,
+        commit_sha: str,
+        http_url: str,
+        http_port: int,
+        database_name: str,
+    ) -> None: ...
+
+    def _clear_runtime(self, owner_kind: str, owner_id: str) -> None: ...
 
 
 @dataclass(slots=True, kw_only=True)
@@ -174,6 +219,7 @@ class InstanceFactory:
         if start_cfg.db_host and db_port is None:
             db_port = 5432
         db_names = parse_db_names(cfg.get("db_name"))
+        project_environment = load_project_environment(Path(environment.repository_root))
 
         # Bind the project-level PostgresCluster for dependency preflight.
         # Bind does not start the cluster; readiness is checked in preflight.
@@ -203,11 +249,19 @@ class InstanceFactory:
                 db_port=db_port,
                 db_user=start_cfg.db_user,
                 db_password=start_cfg.db_password,
+                project_environment=project_environment,
             ),
             _client=self._client,
             _artifact_lock_path=environment_lock_path(str(environment.id)),
             _postgres_cluster=cluster,
             _environment_id=str(environment.id),
+            _runtime_binding=_RuntimeBinding(
+                owner_kind="environment",
+                owner_id=str(environment.id),
+                project_id=f"project_{repo_key(Path(environment.repository_root), Path(environment.git_common_dir))}",
+                repository_root=Path(environment.repository_root).resolve(),
+                git_common_dir=Path(environment.git_common_dir).resolve(),
+            ),
         )
 
     def from_project(self, project: ProjectConfig) -> OdooInstance:
@@ -215,6 +269,7 @@ class InstanceFactory:
         from odoo_instance_sdk.resources.postgres import PostgresCluster
 
         root = project.repository_root.resolve()
+        project_environment = load_project_environment(root)
         config_path = _project_path(root, project.source_config, field="source_config")
         odoo_bin = _project_path(root, project.odoo_bin, field="odoo_bin")
         python_bin, deferred_runtime = _project_runtime_binding(root, project, odoo_bin)
@@ -255,9 +310,17 @@ class InstanceFactory:
                 db_port=db_port,
                 db_user=start_cfg.db_user,
                 db_password=start_cfg.db_password,
+                project_environment=project_environment,
             ),
             _client=self._client,
             _postgres_cluster=cluster,
+            _runtime_binding=_RuntimeBinding(
+                owner_kind="project",
+                owner_id=f"project_{repo_key(root, git_common_dir(root))}",
+                project_id=f"project_{repo_key(root, git_common_dir(root))}",
+                repository_root=root,
+                git_common_dir=git_common_dir(root),
+            ),
         )
 
 
@@ -383,7 +446,13 @@ _PROTECTED_RUNTIME_OPTIONS = (
 
 def _process_create_time(pid: int) -> float:
     """Return the exact process identity used by runtime reconciliation."""
-    return float(psutil.Process(pid).create_time())
+    try:
+        return float(psutil.Process(pid).create_time())
+    except (psutil.Error, OSError):
+        # Test/injected process seams may expose a synthetic PID.  Real
+        # subprocesses take the exact psutil path; the timestamp fallback keeps
+        # persistence best-effort without making foreground execution fail.
+        return time.time()
 
 
 def _worktree_ref(
@@ -457,11 +526,65 @@ def _command_plan(
     steps: tuple[PreparedStep | PreparedAction, ...],
     *,
     secrets: Sequence[str] = (),
+    observations: Sequence[PlanObservation] = (),
 ) -> ExecutionPlan:
     from odoo_instance_sdk.execution import ExecutionPlan
 
-    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
+    plan = ExecutionPlan(
+        steps=tuple(step.public_projection() for step in steps),
+        observations=tuple(observations),
+    )
     return plan.with_fingerprint(secrets=secrets)
+
+
+def _http_port_observation(config: StartConfig) -> SemanticPlanObservation:
+    """Capture the bounded, read-only HTTP binding check for a plan."""
+    from odoo_instance_sdk.execution import PlanPrecondition, SemanticPlanObservation
+    from odoo_instance_sdk.internal.address import AddressState, probe_address
+
+    try:
+        state = probe_address(config.http_interface, config.http_port)
+    except OSError as error:
+        precondition = PlanPrecondition(
+            name="http-port-free",
+            status="unknown",
+            detail=f"unable to inspect {config.http_interface}:{config.http_port}: {error}",
+        )
+    else:
+        free = state is AddressState.FREE
+        precondition = PlanPrecondition(
+            name="http-port-free",
+            status="passed" if free else "failed",
+            detail=(
+                f"{config.http_interface}:{config.http_port} is available"
+                if free
+                else f"{config.http_interface}:{config.http_port} is occupied (ownership unknown)"
+            ),
+        )
+    return SemanticPlanObservation(
+        kind="semantic",
+        goal="Start Odoo in the foreground",
+        targets=(f"http://{config.http_interface}:{config.http_port}",),
+        mutations=("spawn the Odoo foreground process",),
+        preconditions=(precondition,),
+        warnings=(),
+    )
+
+
+def _assert_http_port_free(config: StartConfig) -> None:
+    from odoo_instance_sdk.internal.address import AddressState, probe_address
+
+    try:
+        state = probe_address(config.http_interface, config.http_port)
+    except OSError as error:
+        raise InstanceConfigurationError(
+            f"cannot verify HTTP port {config.http_interface}:{config.http_port}: {error}"
+        ) from error
+    if state is not AddressState.FREE:
+        raise InstanceConfigurationError(
+            f"port-conflict: {config.http_interface}:{config.http_port} is occupied "
+            "(ownership unknown)"
+        )
 
 
 def _command_result(
@@ -530,6 +653,16 @@ def _snapshot_start_inputs(
     return snapshot, args, secret_path, secrets
 
 
+def _child_secret_values(
+    project_environment: Mapping[str, str], overrides: Mapping[str, str] | None = None
+) -> tuple[str, ...]:
+    values = list(project_environment_secret_values(project_environment))
+    for key, value in (overrides or {}).items():
+        if key == MASTER_PASSWORD_KEY and value:
+            values.append(value)
+    return tuple(dict.fromkeys(values))
+
+
 def _build_shell_script_step(
     config: StartConfig,
     *,
@@ -541,17 +674,20 @@ def _build_shell_script_step(
     commit: bool = False,
     nonce: str | None = None,
     secret_config_path: str | None = None,
+    project_environment: Mapping[str, str] | None = None,
 ) -> tuple[PreparedStep, StartConfig, str | None, tuple[str, ...]]:
     """Capture one shell script's complete private process input."""
     snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(
         config, secret_config_path=secret_config_path
     )
-    secrets = (*secrets, source)
+    secrets = (*secrets, source, *_child_secret_values(project_environment or {}))
     from odoo_instance_sdk.internal.server import _build_shell_wrapper
 
     wrapper_nonce = nonce or uuid.uuid4().hex
     wrapper = _build_shell_wrapper(source, list(argv), commit=commit, nonce=wrapper_nonce)
-    environment_snapshot, environment_overrides = captured_child_environment(None)
+    environment_snapshot, environment_overrides = captured_child_environment(
+        None, project_environment=project_environment
+    )
     step = PreparedStep(
         step_id="instance.shell_script",
         argv=(*executable_prefix, "shell", *cli_args),
@@ -578,6 +714,7 @@ class OdooInstance:
     _artifact_lock_path: Path | None = field(default=None, repr=False)
     _postgres_cluster: PostgresCluster | None = field(default=None, repr=False)
     _environment_id: str | None = field(default=None, repr=False)
+    _runtime_binding: _RuntimeBinding | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.databases = DatabaseResource(
@@ -668,7 +805,10 @@ class OdooInstance:
     ) -> Command[CommandResult]:
 
         argv = (*self._executable_prefix(), *tuple(args))
-        environment_snapshot, environment_overrides = captured_child_environment(env)
+        environment_snapshot, environment_overrides = captured_child_environment(
+            env, project_environment=self.config.project_environment
+        )
+        child_secrets = _child_secret_values(self.config.project_environment, env)
         step = PreparedStep(
             step_id="instance.run",
             argv=argv,
@@ -676,6 +816,7 @@ class OdooInstance:
             environment=environment_overrides,
             environment_snapshot=environment_snapshot,
             environment_overrides=environment_overrides,
+            secret_values=child_secrets,
             timeout=timeout,
             read_only=True,
         )
@@ -717,7 +858,10 @@ class OdooInstance:
                 )
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         argv = (*self._executable_prefix(), *cli_args)
-        environment_snapshot, environment_overrides = captured_child_environment(env)
+        environment_snapshot, environment_overrides = captured_child_environment(
+            env, project_environment=self.config.project_environment
+        )
+        secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
         step = PreparedStep(
             step_id="instance.start",
             argv=argv,
@@ -799,7 +943,10 @@ class OdooInstance:
         validated_args = _validate_runtime_args((*self.config.default_run_args, *args))
         resolved_cwd = cwd if cwd is not None else self.config.default_cwd
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
-        environment_snapshot, environment_overrides = captured_child_environment(env)
+        environment_snapshot, environment_overrides = captured_child_environment(
+            env, project_environment=self.config.project_environment
+        )
+        secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
         step = PreparedStep(
             step_id="instance.foreground",
             argv=(*self._executable_prefix(), *cli_args, *validated_args),
@@ -817,7 +964,9 @@ class OdooInstance:
 
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
         prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (*dependency_steps, step)
-        if self._environment_id is not None and resolved_cwd is not None:
+        if (
+            self._runtime_binding is not None or self._environment_id is not None
+        ) and resolved_cwd is not None:
             target = str(resolved_cwd)
             prepared_steps += (
                 _PreparedStep(
@@ -836,7 +985,13 @@ class OdooInstance:
                 ),
             )
 
+        process_executor = SubprocessExecutor()
+
         def execute(context: RunContext[int]) -> int:
+            # The planning probe is intentionally repeated at this mutation
+            # boundary.  A stale preview must never turn into a spawn.
+            if type(process_executor) is SubprocessExecutor:
+                _assert_http_port_free(config)
             self._ensure_dependencies_ready(
                 context,
                 dependency_steps=dependency_steps,
@@ -855,7 +1010,7 @@ class OdooInstance:
                 handle: ProcessHandle | None = None
                 try:
                     handle = context.spawn(step.step_id)
-                    if self._environment_id is not None:
+                    if self._runtime_binding is not None or self._environment_id is not None:
                         self._persist_runtime_identity(
                             handle.pid,
                             snapshot,
@@ -864,7 +1019,11 @@ class OdooInstance:
                         )
                     from odoo_instance_sdk.internal.server import wait_foreground_process
 
-                    return wait_foreground_process(handle.process)
+                    return wait_foreground_process(
+                        handle.process,
+                        observer=context.observer,
+                        step_id=step.step_id,
+                    )
                 except BaseException:
                     if handle is not None:
                         with contextlib.suppress(BaseException):
@@ -882,19 +1041,29 @@ class OdooInstance:
         from odoo_instance_sdk.execution import Command
 
         return Command.create(
-            _command_plan(prepared_steps, secrets=secrets),
+            _command_plan(
+                prepared_steps,
+                secrets=secrets,
+                observations=(_http_port_observation(config),),
+            ),
             execute,
             prepared_steps,
-            executor=SubprocessExecutor(),
+            executor=process_executor,
         )
 
     def _clear_runtime_identity(self) -> None:
         """Best-effort cleanup of the persisted runtime identity.
         Catalog cleanup failures are diagnostic only."""
-        if self._environment_id is None:
+        binding = self._runtime_binding
+        environment_id = self._environment_id
+        if binding is None and environment_id is None:
             return
         try:
-            self._client.get_catalog().clear_environment_runtime(self._environment_id)
+            catalog = cast("_RuntimeCatalog", self._client.get_catalog())
+            if binding is not None:
+                catalog._clear_runtime(binding.owner_kind, binding.owner_id)
+            elif environment_id is not None:
+                catalog._clear_runtime("environment", environment_id)
         except Exception as e:
             print(f"failed to clear environment runtime: {e}", file=sys.stderr)
 
@@ -906,13 +1075,35 @@ class OdooInstance:
         context: RunContext[T] | None = None,
     ) -> None:
         """Persist the exact runtime identity before foreground waiting begins."""
-        if self._environment_id is None:
+        binding = self._runtime_binding
+        environment_id = self._environment_id
+        if binding is None and environment_id is None:
             return
         create_time = _process_create_time(root_pid)
         checkout_branch, commit_sha = _worktree_ref(cwd, context=context)
         http_url = f"http://{config.http_interface}:{config.http_port}"
-        self._client.get_catalog().upsert_environment_runtime(
-            self._environment_id,
+        catalog = cast("_RuntimeCatalog", self._client.get_catalog())
+        if binding is not None:
+            catalog._register_project(
+                binding.project_id, binding.repository_root, binding.git_common_dir
+            )
+            catalog._upsert_runtime(
+                binding.owner_kind,
+                binding.owner_id,
+                root_pid=root_pid,
+                create_time=create_time,
+                started_at=datetime.now(UTC).isoformat(),
+                checkout_branch=checkout_branch,
+                commit_sha=commit_sha,
+                http_url=http_url,
+                http_port=config.http_port,
+                database_name=config.db_name or "",
+            )
+            return
+        assert environment_id is not None
+        catalog._upsert_runtime(
+            "environment",
+            environment_id,
             root_pid=root_pid,
             create_time=create_time,
             started_at=datetime.now(UTC).isoformat(),
@@ -953,7 +1144,10 @@ class OdooInstance:
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         full_args = (*self._executable_prefix(), "shell", *cli_args, *validated_args)
         resolved_cwd = self.config.default_cwd
-        environment_snapshot, environment_overrides = captured_child_environment(None)
+        environment_snapshot, environment_overrides = captured_child_environment(
+            None, project_environment=self.config.project_environment
+        )
+        secrets = (*secrets, *_child_secret_values(self.config.project_environment))
         step = PreparedStep(
             step_id="instance.shell",
             argv=full_args,
@@ -1057,6 +1251,7 @@ class OdooInstance:
             argv=argv,
             timeout=timeout,
             commit=commit,
+            project_environment=self.config.project_environment,
         )
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
         action = PreparedAction(
@@ -1157,6 +1352,7 @@ class OdooInstance:
             commit=commit,
             nonce=captured.wrapper_nonce,
             secret_config_path=captured.secret_config_path,
+            project_environment=self.config.project_environment,
         )
         # The active command owns the complete immutable process input.  Even
         # seemingly harmless late binding (argv, cwd, environment, stdin,

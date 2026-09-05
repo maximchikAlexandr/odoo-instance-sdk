@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import click
 import pytest
+import rich_click
 from click.testing import CliRunner, Result
 
 from odoo_instance_sdk import OdooClient
@@ -52,42 +53,6 @@ ROOT_HELP_DESCRIPTIONS = (
     "Export Odoo module translations.",
     "Generate VS Code launch configuration.",
 )
-
-MODULE_HELP_SNAPSHOT = """Usage: cli module [OPTIONS] COMMAND [ARGS]...
-
-  Discover, test, and upgrade Odoo modules.
-
-Options:
-  --help  Show this message and exit.
-
-Commands:
-  list
-  test
-  update
-"""
-
-MODULE_TEST_HELP_SNAPSHOT = """Usage: cli module test [OPTIONS] MODULES...
-
-Options:
-  --test-tags TEXT           Test tags.  [required]
-  --reload-tests
-  --allow-empty
-  --dry-run                  Plan only.
-  --format [rich|json|toon]  Output format (default: rich).
-  --json                     Emit JSON envelope.
-  --help                     Show this message and exit.
-"""
-
-RUN_HELP_SNAPSHOT = """Usage: cli run [OPTIONS] [ODOO_ARGS]...
-
-Native Odoo arguments must follow a literal `--` delimiter.
-
-Options:
-  --dry-run                  Inspect without starting.
-  --format [rich|json|toon]  Output format (default: rich).
-  --json                     Emit JSON envelope.
-  --help                     Show this message and exit.
-"""
 
 
 def _command(path: tuple[str, ...]) -> click.Command:
@@ -225,28 +190,91 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
     assert "--env" in result.output
 
 
-def test_prechange_root_and_module_help_snapshots_are_stable() -> None:
+def test_rich_click_help_covers_root_nested_and_typed_leaf() -> None:
     runner = CliRunner()
     root_help = runner.invoke(cli, ["--help"]).output
     assert "\x1b[" not in root_help
+    assert "Manage local Odoo projects, environments, databases, and tooling." in root_help
     assert all(description in root_help for description in ROOT_HELP_DESCRIPTIONS)
-    assert runner.invoke(cli, ["module", "--help"]).output == MODULE_HELP_SNAPSHOT
-    assert runner.invoke(cli, ["module", "test", "--help"]).output == MODULE_TEST_HELP_SNAPSHOT
+    nested_help = runner.invoke(cli, ["module", "--help"]).output
+    assert "Discover, test, and upgrade Odoo modules." in nested_help
+    assert all(leaf in nested_help for leaf in ("list", "test", "update"))
+    typed_help = runner.invoke(cli, ["module", "test", "--help"]).output
+    assert "Run tests for selected Odoo modules." in typed_help
+    assert "--test-tags" in typed_help
+    assert "TEXT" in typed_help
+    assert "[required]" in typed_help
+    assert "--format" in typed_help
+    assert "[rich|json|toon]" in typed_help
+    assert "--json" in typed_help
 
 
-def test_root_help_uses_rich_terminal_layout() -> None:
+def test_rich_click_help_uses_bounded_panels_without_ansi_when_redirected() -> None:
     result = CliRunner().invoke(cli, ["--help"], color=True)
 
     assert result.exit_code == 0
     assert "╭" in result.output
-    assert "\x1b[" in result.output
+    assert "Project" in result.output
+    assert "Runtime" in result.output
+    assert "Data" in result.output
+    assert "Development" in result.output
+    assert "Options" in result.output
+    assert "\x1b[" not in result.output
 
 
-def test_run_help_snapshot_documents_delimiter_passthrough() -> None:
+def test_rich_click_run_help_documents_delimiter_passthrough() -> None:
     result = CliRunner().invoke(cli, ["run", "--help"])
 
     assert result.exit_code == 0
-    assert result.output == RUN_HELP_SNAPSHOT
+    assert "Usage: cli run [OPTIONS] [ODOO_ARGS]..." in result.output
+    assert "Native Odoo arguments must follow a literal `--` delimiter." in result.output
+
+
+def test_typed_help_remains_readable_at_narrow_width() -> None:
+    result = CliRunner().invoke(cli, ["module", "test", "--help"], terminal_width=40)
+
+    assert result.exit_code == 0
+    assert "Run tests for selected Odoo modules." in result.output
+    assert "--test-" in result.output
+    assert "[required]" in result.output
+    assert "--format" in result.output
+
+
+def test_rich_click_validation_error_preserves_click_exit_and_is_sanitized() -> None:
+    result = CliRunner().invoke(cli, ["eval", "1", "--not-an-option"], color=False)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "No such option '--not-an-option'." in result.stderr
+    assert "Usage:" in result.stderr
+    assert "\x1b[" not in result.stderr
+
+
+def test_cli_command_tree_uses_rich_click_commands_and_groups() -> None:
+    def walk(command: click.Command) -> None:
+        assert isinstance(command, rich_click.RichCommand)
+        if isinstance(command, click.Group):
+            for child in command.commands.values():
+                walk(child)
+
+    walk(cli)
+
+
+def test_shell_completion_still_discovers_nested_commands() -> None:
+    result = CliRunner().invoke(
+        cli,
+        [],
+        env={
+            "_CLI_COMPLETE": "bash_complete",
+            "COMP_WORDS": "cli module ",
+            "COMP_CWORD": "2",
+        },
+    )
+
+    assert result.exit_code == 0
+    assert "plain,list" in result.stdout
+    assert "plain,test" in result.stdout
+    assert "plain,update" in result.stdout
 
 
 def test_command_local_json_placement_is_stable() -> None:
@@ -673,7 +701,7 @@ def test_click_parse_failure_remains_native_usage_error() -> None:
 
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert "Error: No such option" in result.stderr
+    assert "No such option '--not-an-option'." in result.stderr
     assert "Usage:" in result.stderr
 
 

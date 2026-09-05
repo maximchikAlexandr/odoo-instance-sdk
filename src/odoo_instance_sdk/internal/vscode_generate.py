@@ -11,63 +11,34 @@ from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import StartConfig
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.commands.context import RuntimeView
     from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
 _MUTATING_FLAGS = {"-u", "-i", "--update", "--init", "--stop-after-init"}
 
 
-def build_launch_profile(client: OdooClient, env: DevelopmentEnvironment) -> dict[str, JsonValue]:
-    from odoo_instance_sdk.resources.environment import (
-        EnvironmentDatabaseMode,
-    )
-
-    odoo_bin = _resolve_odoo_bin(client, env)
-    python_bin = _resolve_python_binary(env)
-    start_cfg, bound_db = _resolve_start_config(env, env.db_mode == EnvironmentDatabaseMode.SHARED)
-    args = _build_profile_args(start_cfg, bound_db)
+def build_launch_profile(runtime: RuntimeView) -> dict[str, JsonValue]:
+    """Build one debugpy profile from the resolved owner-neutral runtime."""
+    odoo_bin = _odoo_bin_from_prefix(runtime.command_prefix)
+    args = _build_profile_args(runtime.start_config, runtime.database or "")
 
     return {
-        "name": f"Odoo {env.name}",
+        "name": f"Odoo {runtime.environment_name or runtime.project_id}",
         "type": "python",
         "request": "launch",
-        "python": python_bin,
+        "python": str(runtime.python_path),
         "program": odoo_bin,
-        "cwd": env.worktree_path,
+        "cwd": str(runtime.root),
         "args": list(args),
         "justMyCode": False,
         "console": "integratedTerminal",
     }
 
 
-def _resolve_odoo_bin(client: OdooClient, env: DevelopmentEnvironment) -> str:
-    from odoo_instance_sdk.resources.environment import _decode_runtime_json
-
-    row = client.get_catalog().get_environment(str(env.id))
-    runtime_raw: str | None = None
-    if row is not None:
-        try:
-            raw = row["runtime_json"]
-            runtime_raw = raw if isinstance(raw, str) else None
-        except (KeyError, IndexError):
-            runtime_raw = None
-    runtime = _decode_runtime_json(runtime_raw)
-    odoo_bin = runtime.get("odoo_bin")
-    if odoo_bin is None:
-        raise RuntimeError(f"No odoo_bin recorded for environment {env.id}")
-    return odoo_bin
-
-
-def _resolve_start_config(env: DevelopmentEnvironment, shared: bool) -> tuple[StartConfig, str]:
-    config_path = Path(env.generated_config_path)
-    if not config_path.is_file():
-        raise RuntimeError(f"generated config missing: {config_path}")
-    start_cfg = StartConfig.from_odoo_config(config_path)
-    bound_db = env.source_db_name if shared else env.target_db_name
-    if bound_db is None:
-        bound_db = start_cfg.db_name or ""
-    return start_cfg, bound_db
+def _odoo_bin_from_prefix(command_prefix: tuple[str, ...]) -> str:
+    if not command_prefix:
+        raise RuntimeError("resolved runtime has no command prefix")
+    return command_prefix[-1]
 
 
 def _build_profile_args(start_cfg: StartConfig, bound_db: str) -> list[str]:
@@ -111,10 +82,3 @@ def write_launch_json(project_path: Path, content: str) -> Path:
             os.unlink(tmp)
         raise
     return target
-
-
-def _resolve_python_binary(env: DevelopmentEnvironment) -> str:
-    py_path = Path(env.python_environment_path)
-    if py_path.is_dir():
-        return str(py_path / "bin" / "python")
-    return str(py_path)

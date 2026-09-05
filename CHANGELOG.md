@@ -14,9 +14,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment database refresh and administrator-password reset workflows
 - Typed multi-project monitor snapshots, local headless API, optional dashboard, and pgAdmin launch
 - Complete shipped CLI command inventory and public Python SDK examples
+- Project-local `.odcli/.env` support with owner-only permissions, bounded parsing,
+  child-process scoping, and master-password consumption before spawn
+- Project-owned runtime summaries in monitor snapshots and the existing dashboard
+- Structured Rich/JSON/TOON output for `eval` and `exec`, including captured user output,
+  bounded source-aware errors, and truncation state
+- Guarded cluster-bound `odcli db drop` with dry-run planning, exact-target session
+  termination, confirmation, and post-drop catalogue reconciliation
 
 ### Changed
 - Documentation now treats executable command help as the source of truth for exact flags
+- Project-context commands resolve registered project runtime data directly without
+  fabricating an environment; explicit environment selectors retain precedence
+- Bounded CLI failures preserve one v1 envelope across Rich, JSON, and TOON while
+  redacting result, output, source, and diagnostic fields
+
+### Security
+- `.odcli/.env` values never mutate the parent process environment, are scoped only
+  to permitted Odoo children, and are never persisted in plans, logs, or fingerprints
+- Database deletion refuses protected/default/template targets, revalidates safety
+  immediately before mutation, and requires explicit machine-mode consent
 
 ## [0.1.0] - 2026-07-15
 

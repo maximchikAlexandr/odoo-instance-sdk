@@ -13,7 +13,12 @@ from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     MasterPasswordRequiredError,
 )
-from odoo_instance_sdk.internal.proc import ProcessHandle, ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    ProcessHandle,
+    ProcessResult,
+    RecordingExecutor,
+    StepObserver,
+)
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import CommandResult, OdooProcess, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
@@ -440,7 +445,14 @@ class TestInstancePrefix:
         instance = env_client.instance.from_environment(env)
 
         class EventExecutor(RecordingExecutor):
-            def spawn(self, step: object) -> ProcessHandle:
+            def spawn(
+                self,
+                step: object,
+                *,
+                observer: StepObserver | None = None,
+                observe_output: bool = False,
+            ) -> ProcessHandle:
+                del observer, observe_output
                 events.append("spawn")
                 return super().spawn(step)  # type: ignore[arg-type]
 

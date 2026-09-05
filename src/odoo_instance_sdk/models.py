@@ -1072,6 +1072,7 @@ class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
     display_hint: str
     environment_count: int
     cluster: ClusterSnapshot | None
+    runtime: RuntimeMetrics | None
 
 
 class Snapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

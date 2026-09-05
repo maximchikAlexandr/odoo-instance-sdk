@@ -324,30 +324,25 @@ def update_modules(
     instance: OdooInstance,
     modules: tuple[str, ...],
     *,
-    env_id: str,
+    env_id: str | None = None,
 ) -> ShellOutcome:
     plan = plan_module_update(instance, modules)
     if plan.not_installed:
         raise ConfigError(f"modules not installed: {', '.join(plan.not_installed)}")
     if not plan.modules:
         raise ConfigError("no installed modules to update")
-    _ = env_id
-    return _shell_outcome(
-        update_modules_command(instance, tuple(plan.modules), env_id=env_id).run()
-    )
+    _ = env_id  # compatibility with the pre-owner-neutral helper signature
+    return _shell_outcome(update_modules_command(instance, tuple(plan.modules)).run())
 
 
 def update_modules_command(
     instance: OdooInstance,
     modules: tuple[str, ...],
-    *,
-    env_id: str,
 ) -> Command[CommandResult]:
     """Capture one exact module-upgrade child after selection is frozen."""
     if not modules:
         raise ConfigError("no installed modules to update")
     source = _update_modules_source(modules)
-    _ = env_id
     return instance._shell_script_command(source, commit=True, exclusive=True)
 
 

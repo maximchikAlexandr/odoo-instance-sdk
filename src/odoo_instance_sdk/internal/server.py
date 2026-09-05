@@ -12,6 +12,7 @@ from msgspec import structs
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.proc import StepObserver
 from odoo_instance_sdk.models import (
     CommandResult,
     ProcessStatus,
@@ -136,19 +137,35 @@ def run_command(
     )
 
 
-def wait_foreground_process(proc: subprocess.Popen[bytes]) -> int:
+def wait_foreground_process(
+    proc: subprocess.Popen[bytes],
+    *,
+    observer: StepObserver | None = None,
+    step_id: str | None = None,
+) -> int:
     """Block until ``proc`` exits, terminating its owned group on Ctrl+C.
 
     Ctrl+C uses the same bounded TERM/KILL/reap cleanup as exceptional wait
     failures, then returns 130. Restores the previous SIGINT handler on return.
     """
-    from odoo_instance_sdk.internal.proc import owned_handle, wait_foreground
+    from odoo_instance_sdk.internal.proc import StepEvent, owned_handle, wait_foreground
 
-    return wait_foreground(owned_handle(proc, process_group_id=proc.pid))
+    try:
+        returncode = wait_foreground(owned_handle(proc, process_group_id=proc.pid))
+    except BaseException as error:
+        if observer is not None and step_id is not None:
+            with contextlib.suppress(Exception):
+                observer(StepEvent(step_id=step_id, kind="failed", error=str(error)))
+        raise
+    if observer is not None and step_id is not None:
+        with contextlib.suppress(Exception):
+            observer(StepEvent(step_id=step_id, kind="completed", returncode=returncode))
+    return returncode
 
 
 _RESULT_SNIPPET = (
     "import json as _odcli_rj\n"
+    "import traceback as _odcli_traceback\n"
     "def _odcli_serialize_result(_r):\n"
     "    if _r is None or isinstance(_r, (bool, int, float, str)):\n"
     "        return _r\n"
@@ -171,12 +188,8 @@ _RESULT_SNIPPET = (
     "        except Exception:\n"
     "            return _odcli_sanitize(_r)\n"
     "    return _odcli_sanitize(_r)\n"
-    "def _odcli_sanitize(_o, _max=500):\n"
-    "    try:\n"
-    "        _t = repr(_o)\n"
-    "    except Exception:\n"
-    "        _t = '<unrepresentable>'\n"
-    "    _t = ' '.join(str(_t).split())\n"
+    "def _odcli_sanitize_text(_text, _max=500):\n"
+    "    _t = ' '.join(str(_text).split())\n"
     "    if len(_t) > _max:\n"
     "        _t = _t[:_max] + '...<truncated>'\n"
     "    for _kw in ('password', 'passwd', 'token', 'secret', 'api_key', 'apikey'):\n"
@@ -184,6 +197,29 @@ _RESULT_SNIPPET = (
     "            _t = '<redacted>'\n"
     "            break\n"
     "    return _t\n"
+    "def _odcli_sanitize(_o, _max=500):\n"
+    "    try:\n"
+    "        _t = repr(_o)\n"
+    "    except Exception:\n"
+    "        _t = '<unrepresentable>'\n"
+    "    return _odcli_sanitize_text(_t, _max)\n"
+    "def _odcli_error_payload(_e, _source_text):\n"
+    "    _source = None\n"
+    "    try:\n"
+    "        _frames = _odcli_traceback.extract_tb(_e.__traceback__)\n"
+    "        if _frames:\n"
+    "            _frame = _frames[-1]\n"
+    "            _line = _frame.line or ''\n"
+    "            if not _line:\n"
+    "                _lines = str(_source_text).splitlines()\n"
+    "                if 0 < _frame.lineno <= len(_lines):\n"
+    "                    _line = _lines[_frame.lineno - 1]\n"
+    "            _source = {'file': _odcli_sanitize_text(_frame.filename), 'line': _frame.lineno,\n"
+    "                       'text': _odcli_sanitize_text(_line)}\n"
+    "    except Exception:\n"
+    "        _source = None\n"
+    "    return {'type': type(_e).__name__,\n"
+    "            'message': _odcli_sanitize_text(str(_e)), 'source': _source}\n"
 )
 
 
@@ -194,27 +230,48 @@ def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: s
 
     source_repr = json.dumps(source)
     argv_repr = json.dumps(argv)
-    payload_dict = "{'ok': True, 'commit': " + repr(commit) + "}"
+    payload_dict = (
+        "{'ok': True, 'commit': "
+        + repr(commit)
+        + ", 'result': None, 'user_stdout': '', 'user_error': None, 'truncated': False}"
+    )
     result_emit = (
-        "    if 'result' in globals() and result is not None:\n"
+        "    if _odcli_user_exception is None and 'result' in globals():\n"
         "        _payload.update({'result': _odcli_serialize_result(result)})\n"
     )
     return (
+        "import io as _odcli_io\n"
+        "from contextlib import redirect_stdout as _odcli_redirect_stdout\n"
         "import json as _json, sys as _sys\n"
         f"_sys.argv = [_sys.argv[0], *_json.loads({argv_repr!r})]\n"
         f"_source = _json.loads({source_repr!r})\n"
         f"{_RESULT_SNIPPET}"
+        "_odcli_user_stdout = _odcli_io.StringIO()\n"
+        "_odcli_user_exception = None\n"
+        "_odcli_user_error = None\n"
         "try:\n"
-        "    exec(compile(_source, '<odcli-shell-script>', 'exec'), globals())\n"
+        "    with _odcli_redirect_stdout(_odcli_user_stdout):\n"
+        "        exec(compile(_source, '<odcli-shell-script>', 'exec'), globals())\n"
+        "except BaseException as _odcli_exc:\n"
+        "    _odcli_user_exception = _odcli_exc\n"
+        "    _odcli_user_error = _odcli_error_payload(_odcli_exc, _source)\n"
         "finally:\n"
         "    try:\n"
         "        if env is not None and hasattr(env, 'cr') and env.cr is not None:\n"
         f"            env.cr.commit() if {commit!r} else env.cr.rollback()\n"
         "    except Exception:\n"
         "        pass\n"
+        "    _odcli_output = _odcli_user_stdout.getvalue()\n"
+        "    _odcli_truncated = len(_odcli_output) > 32768\n"
+        "    if _odcli_truncated:\n"
+        "        _odcli_output = _odcli_output[:32768]\n"
         f"    _payload = {payload_dict}\n"
+        "    _payload.update({'user_stdout': _odcli_output, 'user_error': _odcli_user_error,\n"
+        "                     'truncated': _odcli_truncated, 'ok': _odcli_user_exception is None})\n"
         f"{result_emit}"
         f"    print({marker_open!r}, _json.dumps(_payload), {marker_close!r})\n"
+        "if _odcli_user_exception is not None:\n"
+        "    raise _odcli_user_exception\n"
     )
 
 

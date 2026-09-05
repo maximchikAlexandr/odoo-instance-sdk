@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -43,8 +44,11 @@ def test_foreground_sigint_terminates_child_group_and_restores_handler(
         "odoo_instance_sdk.internal.server._build_cli_args", lambda _config: ["-c", child]
     )
     monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._CLEANUP_TIMEOUT", 0.2)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        http_port = int(sock.getsockname()[1])
     instance = OdooClient(config=OdooClientConfig(executable=sys.executable)).instance(
-        base_url="http://127.0.0.1:8069"
+        base_url=f"http://127.0.0.1:{http_port}"
     )
 
     def interrupt_when_ready() -> None:
@@ -56,7 +60,7 @@ def test_foreground_sigint_terminates_child_group_and_restores_handler(
 
     timer = threading.Thread(target=interrupt_when_ready, daemon=True)
     timer.start()
-    result = instance.run_foreground(StartConfig(http_port=8069, http_interface="127.0.0.1"))
+    result = instance.run_foreground(StartConfig(http_port=http_port, http_interface="127.0.0.1"))
     timer.join(timeout=2)
 
     assert result == 130

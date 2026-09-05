@@ -12,8 +12,12 @@ from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-import click
 import msgspec
+
+if TYPE_CHECKING:
+    import click
+else:
+    import rich_click as click
 
 from odoo_instance_sdk.commands.context import (
     CliContext,
@@ -428,7 +432,7 @@ def postgres_group() -> None:
     """Project-level PostgreSQL cluster lifecycle (read-only / idempotent)."""
 
 
-@postgres_group.command("approve-image")
+@postgres_group.command("approve-image", help="Approve the current local PostgreSQL image digest.")
 @click.option("--image-digest", required=True, help="Exact OCI RepoDigest shown by Docker.")
 @click.option(
     "--timeout",
@@ -483,7 +487,7 @@ def postgres_approve_image(
     sys.exit(status)
 
 
-@postgres_group.command("status")
+@postgres_group.command("status", help="Show the project PostgreSQL cluster status.")
 @output_options
 @pass_cli_context
 def postgres_status(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
@@ -540,7 +544,7 @@ def postgres_status(ctx: CliContext, output_format: str | None, json_output: boo
     sys.exit(status)
 
 
-@postgres_group.command("up")
+@postgres_group.command("up", help="Start or inspect the project PostgreSQL cluster.")
 @click.option(
     "--wait-timeout",
     "wait_timeout",
@@ -585,7 +589,7 @@ def postgres_up(
     sys.exit(status)
 
 
-@postgres_group.command("stop")
+@postgres_group.command("stop", help="Stop the project PostgreSQL cluster.")
 @click.option(
     "--timeout",
     "timeout",

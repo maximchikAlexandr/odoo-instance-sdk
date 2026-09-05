@@ -163,6 +163,7 @@ function ClusterCard({
       <Card data-testid="cluster-card" withBorder padding="md" radius="sm">
         <Text fw={600}>Cluster — {project.name}</Text>
         <Text size="sm" c="dimmed">PostgreSQL: unavailable (manifest missing)</Text>
+        <ProjectRuntime runtime={project.runtime} />
       </Card>
     );
   }
@@ -211,7 +212,35 @@ function ClusterCard({
           color="violet"
         />
       ) : null}
+      <ProjectRuntime runtime={project.runtime} />
     </Card>
+  );
+}
+
+function ProjectRuntime({ runtime }: { runtime: RuntimeMetrics | null }) {
+  const live = runtime?.state === "ready" || runtime?.state === "not_ready";
+  return (
+    <Stack gap={2} mt="sm" data-testid="project-runtime">
+      <Group gap="xs">
+        <Text fw={600} size="sm">Project runtime</Text>
+        <Badge variant="light" color={runtimeStateColor(runtime?.state)}>
+          {runtime?.state ?? "not recorded"}
+        </Badge>
+      </Group>
+      {live && runtime ? (
+        <>
+          <Text size="sm" c="dimmed">
+            Odoo PID {runtime.root_pid ?? "—"}
+            {runtime.child_pids.length > 0 ? ` · workers ${runtime.child_pids.join(", ")}` : ""}
+            {" · CPU "}{formatPercent(runtime.cpu_percent)}
+            {" · RAM "}{formatBytes(runtime.rss_bytes)}
+          </Text>
+          <Text size="sm" c="dimmed">
+            database: {runtime.database_name ?? "—"} · port: {runtime.http_port ?? "—"}
+          </Text>
+        </>
+      ) : null}
+    </Stack>
   );
 }
 

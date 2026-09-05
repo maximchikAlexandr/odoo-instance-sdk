@@ -36,6 +36,27 @@ class PgAdminEligibilityState(enum.StrEnum):
     CLUSTER_NOT_OWNED = "cluster_not_owned"
     CLUSTER_UNHEALTHY = "cluster_unhealthy"
 
+type ClusterUnavailabilityReason = Literal[
+    "external_not_owned",
+    "stopped",
+    "missing",
+    "docker_unavailable",
+    "inspect_failed",
+    "stats_failed",
+]
+
+type ServerUnavailabilityReason = Literal[
+    "psql_missing",
+    "credentials_missing",
+    "server_unreachable",
+    "maintenance_database_unavailable",
+    "authentication_failed",
+    "privilege_denied",
+    "timeout",
+    "query_failed",
+    "invalid_response",
+]
+
 class PgAdminEligibility:
     state: PgAdminEligibilityState
 
@@ -103,6 +124,16 @@ class ClusterEndpoint:
     host: str
     port: int
 
+class PostgresServerInfo:
+    version: str
+    postmaster_started_at: datetime
+    uptime_seconds: int
+    connections_total: int
+    connections_active: int
+    connections_idle: int
+    max_connections: int
+    connectable_databases: int
+
 class ClusterResourceSnapshot:
     container: ClusterContainer | None
     metrics: ClusterMetrics | None
@@ -116,8 +147,10 @@ class ClusterSnapshot:
     endpoint: ClusterEndpoint | None
     container: ClusterContainer | None
     metrics: ClusterMetrics | None
-    unavailability_reason: str | None
+    unavailability_reason: ClusterUnavailabilityReason | None
     sampled_at: datetime | None
+    server: PostgresServerInfo | None
+    server_unavailability_reason: ServerUnavailabilityReason | None
 
 class EnvironmentArtifacts:
     worktree_exists: bool
@@ -151,6 +184,7 @@ class ProjectSummary:
     display_hint: str
     environment_count: int
     cluster: ClusterSnapshot | None
+    runtime: RuntimeMetrics | None
 
 class Snapshot:
     schema_version: int
@@ -159,7 +193,9 @@ class Snapshot:
     environments: tuple[EnvironmentSnapshot, ...]
 ```
 
-`unavailability_reason` allowed values: `external_not_owned`, `stopped`, `missing`, `docker_unavailable`, `inspect_failed`, `stats_failed`.
+`ProjectSummary.runtime` SHALL be `None` when no project-owned runtime record exists. A recorded but non-live or stale project runtime SHALL be present with `state="stopped"`, `root_pid=None`, `child_pids=()`, `process_count=0`, and every CPU/RAM/start/HTTP/database/commit/branch field null. Live project runtime SHALL use the same collection and redaction rules as environment runtime. No other public field SHALL be added.
+
+`ClusterUnavailabilityReason` allowed values SHALL remain `external_not_owned`, `stopped`, `missing`, `docker_unavailable`, `inspect_failed`, and `stats_failed`. `ServerUnavailabilityReason` allowed values SHALL remain `psql_missing`, `credentials_missing`, `server_unreachable`, `maintenance_database_unavailable`, `authentication_failed`, `privilege_denied`, `timeout`, `query_failed`, and `invalid_response`. `ClusterSnapshot.server` and `server_unavailability_reason` SHALL preserve the existing PostgreSQL diagnostics collection, validation, nullability, redaction, and serialization contract.
 
 Collector MUST populate `EnvironmentSnapshot` as:
 
@@ -188,6 +224,16 @@ UI lifecycle badge uses `lifecycle_state`. UI/CLI port uses `runtime.http_port` 
 
 - **WHEN** an environment is non-ready and also lacks a database on an external cluster
 - **THEN** `environment.pgadmin.state=="environment_not_ready"`
+
+#### Scenario: Project runtime null and stopped states differ
+
+- **WHEN** one registered project has no runtime record and another has a stale project-owned record
+- **THEN** the first has `runtime is None` and the second has the canonical present stopped/null `RuntimeMetrics` without unrelated process data
+
+#### Scenario: PostgreSQL diagnostics remain in schema version 4
+
+- **WHEN** a cluster snapshot contains PostgreSQL server diagnostics or a typed server unavailability reason
+- **THEN** `PostgresServerInfo`, `ClusterSnapshot.server`, `ClusterSnapshot.server_unavailability_reason`, and both exact reason aliases remain present and serialize unchanged alongside the additive project runtime field
 
 ### Requirement: One `EnvironmentMonitor` collector
 
@@ -242,19 +288,19 @@ async for snapshot in monitor.watch(
 
 ### Requirement: Snapshot top-level contract
 
-`Snapshot.schema_version` MUST always be `3`. Version 3 is an additive migration from mandatory MYL-55 version 2: every `EnvironmentSnapshot` gains only required `pgadmin`; required `observed_port` and `artifacts`, all earlier fields, and all v2 collection/filter/removed-row meanings remain unchanged. `generated_at` MUST be tz-aware UTC. `projects` ordered by `project_id` ascending; `environments` ordered by `id` ascending. `GET /api/v1/snapshot` returns the default non-removed version-3 JSON (msgspec encode). `odcli env list --json` wraps the same `Snapshot` object in CLI envelope v1 `result`/`data` (`command="env.list"`); CLI envelope version remains `1` and is independent of snapshot schema version.
+`Snapshot.schema_version` MUST always be `4`. Version 4 is an additive migration from version 3: every `ProjectSummary` gains only required `runtime: RuntimeMetrics | None`; every environment field including `pgadmin`, required `observed_port` and `artifacts`, and all v3 collection/filter/removed-row meanings remain unchanged. `generated_at` MUST be tz-aware UTC. `projects` ordered by `project_id` ascending; `environments` ordered by `id` ascending. `GET /api/v1/snapshot` returns the default non-removed version-4 JSON (msgspec encode). `odcli env list --json` wraps the same `Snapshot` object in CLI envelope v1 `result`/`data` (`command="env.list"`); CLI envelope version remains `1` and is independent of snapshot schema version.
 
-`project_id` filter: `None` MUST select all discovered projects; an opaque id matching a discovered project MUST select that project and its environments; an unknown id MUST return `projects == ()` and `environments == ()` without raising. With `include_removed=False`, a project exists only if it has at least one non-removed environment. With `include_removed=True`, a project containing only removed environments MUST appear with those rows, all from the single atomic catalog selection. `ProjectSummary.environment_count` MUST count the environments included in the returned snapshot; project counts and partial-result behavior remain unchanged. pgAdmin eligibility for an included removed row MUST be `environment_not_ready` without adding a database, port, health, or Docker probe.
+`project_id` filter: `None` MUST select all discovered projects; an opaque id matching a discovered project MUST select that project and its environments; an unknown id MUST return `projects == ()` and `environments == ()` without raising. A registered project exists even with no environment rows. `include_removed` SHALL govern environment rows only: with `include_removed=False`, removed rows are omitted while their registered project remains; with `include_removed=True`, a project containing only removed environments MUST appear with those rows, all from the single atomic catalog selection. `ProjectSummary.environment_count` MUST count the environments included in the returned snapshot; project counts and partial-result behavior remain unchanged. pgAdmin eligibility for an included removed row MUST be `environment_not_ready` without adding a database, port, health, or Docker probe.
 
 #### Scenario: Full snapshot shape
 
 - **WHEN** `monitor.snapshot()` runs with two projects each having environments
-- **THEN** `schema_version==3`, `projects` contains two `ProjectSummary`, and `environments` contains all non-removed environments of both projects with MYL-55 v2 fields plus pgAdmin eligibility
+- **THEN** `schema_version==4`, `projects` contains two `ProjectSummary`, and `environments` contains all non-removed environments of both projects with MYL-55 v2 fields plus pgAdmin eligibility
 
 #### Scenario: Default full snapshot shape
 
 - **WHEN** `monitor.snapshot()` runs with two projects each having active environments
-- **THEN** `schema_version==3`, `projects` contains two `ProjectSummary`, and `environments` contains all non-removed environments with version-2 fields plus pgAdmin eligibility
+- **THEN** `schema_version==4`, `projects` contains two `ProjectSummary`, and `environments` contains all non-removed environments with version-2 fields plus pgAdmin eligibility
 
 #### Scenario: Removed-only project is conditional
 
@@ -264,7 +310,7 @@ async for snapshot in monitor.watch(
 #### Scenario: Removed environment keeps v2 behavior in v3
 
 - **WHEN** `monitor.snapshot(include_removed=True)` includes a removed environment
-- **THEN** its MYL-55 stopped/null runtime, artifact, and no-port-probe semantics are unchanged, `observed_port is None`, and `pgadmin.state=="environment_not_ready"`
+- **THEN** its MYL-55 stopped/null runtime, artifact, and no-port-probe semantics are unchanged in the additive v4 snapshot, `observed_port is None`, and `pgadmin.state=="environment_not_ready"`
 
 #### Scenario: Project filter narrows result
 
@@ -275,6 +321,16 @@ async for snapshot in monitor.watch(
 
 - **WHEN** `monitor.snapshot(project_id="project_unknown", include_removed=True)` runs
 - **THEN** `projects == ()` and `environments == ()`, no exception
+
+#### Scenario: Version 3 migrates additively to version 4
+
+- **WHEN** a frozen version-3 fixture is collected with no project-owned runtime
+- **THEN** the version is 4, every prior field and ordering is unchanged, and each project adds only `runtime=null`
+
+#### Scenario: Version 4 preserves cache, redaction, and consumers
+
+- **WHEN** live, stopped, null, mixed-owner, filtered, cached, or redacted snapshots pass through JSON/TOON, API, generated OpenAPI/client, and dashboard tests
+- **THEN** the same atomic selection, ordering, filter, partial-result, cache-key/TTL/single-flight, invalidation, and redaction contracts apply to the canonical version-4 field without a parallel DTO or endpoint
 
 ### Requirement: Project discovery from canonical repository provenance
 
@@ -748,4 +804,28 @@ For every included catalog environment, `EnvironmentMonitor` SHALL compute artif
 - **WHEN** the consumer cancels or closes `watch()` after one emitted snapshot
 - **THEN** no later snapshot command is built or run
 - **AND** the existing no-background-task cleanup contract remains intact
+
+### Requirement: Project-only monitoring plans
+
+Monitor planning SHALL include initialized projects from canonical project registration even when they have no environment catalogue rows. For each live project-owned runtime it SHALL validate stale-process identity and collect the same PID, worker PID, process count, CPU, RAM, readiness, URL, database, and applicable PostgreSQL cluster metrics used for environment-owned runtimes. Project filtering and deterministic ordering SHALL include both ownership kinds without creating synthetic environments.
+
+#### Scenario: Initialized project without environments is visible
+- **WHEN** the catalogue contains an initialized project and no environments
+- **THEN** the snapshot includes the project and an empty environment list rather than returning an empty project list
+
+#### Scenario: Live project runtime has metrics
+- **WHEN** that project has a valid live runtime identity
+- **THEN** its runtime/process/readiness/database fields and applicable cluster metrics appear in the typed snapshot
+
+#### Scenario: Stale project PID is not reused
+- **WHEN** the stored project PID exists but its create time does not match
+- **THEN** it is reported as stale/stopped under the existing identity rules and unrelated process metrics are not exposed
+
+### Requirement: Snapshot preserves environment compatibility
+
+The snapshot SHALL represent project-owned runtimes additively while preserving existing environment arrays, environment runtime states, filtering, redaction, JSON serialization, and cache boundaries. Project runtime collection SHALL reuse the existing typed collector and process provider rather than adding a second monitor implementation.
+
+#### Scenario: Mixed ownership snapshot
+- **WHEN** one project-owned runtime and existing environment-owned runtimes are live
+- **THEN** all are represented deterministically and current environment consumers retain their existing fields
 
