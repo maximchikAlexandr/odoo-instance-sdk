@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
+    Any,
     Generic,
     Never,
     ParamSpec,
@@ -32,6 +34,7 @@ from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_te
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
 
 
 def __getattr__(name: str) -> TypeAliasType:
@@ -192,6 +195,68 @@ def rich_print(
     """Print human output safely, optionally preserving document line feeds."""
     rendered = sanitize_terminal_text(str(value), preserve_newlines=preserve_newlines)
     Console().print(rendered, markup=False, soft_wrap=True, end=end)
+
+
+class RichStepObserver:
+    """Render typed process events as deterministic Rich step lines."""
+
+    def __init__(self, *, live: Any = None, show_command_output: bool = False) -> None:
+        self._live = live
+        self._show_command_output = show_command_output
+        self._lines: list[str] = []
+
+    def __call__(self, event: StepEvent) -> None:
+        if event.kind in {"stdout", "stderr"} and not self._show_command_output:
+            return
+        stream = event.kind in {"stdout", "stderr"}
+        if stream:
+            suffix = f": {event.chunk or ''}"
+        elif event.error:
+            suffix = f": {event.error}"
+        elif event.returncode is not None:
+            suffix = f" (exit {event.returncode})"
+        else:
+            suffix = ""
+        from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
+        line = cast(
+            "str",
+            redacted_projection(
+                f"[{event.step_id}] {event.kind}{suffix}",
+                field="error" if event.error else (event.kind if stream else "event"),
+            ),
+        )
+        rendered_lines = line.splitlines() or [line]
+        if stream and len(rendered_lines) > 1:
+            prefix = f"[{event.step_id}] {event.kind}: "
+            rendered_lines = [
+                rendered_lines[0],
+                *(prefix + item for item in rendered_lines[1:]),
+            ]
+        self._lines.extend(rendered_lines)
+        if self._live is not None:
+            from rich.text import Text
+
+            self._live.update(Text("\n".join(self._lines)), refresh=True)
+        else:
+            for rendered_line in rendered_lines:
+                rich_print(rendered_line)
+
+
+@contextmanager
+def rich_step_observer(
+    *,
+    show_command_output: bool = False,
+) -> Iterator[RichStepObserver]:
+    """Own TTY ``Live`` only for Rich restore execution."""
+    console = Console()
+    if not console.is_terminal:
+        yield RichStepObserver(show_command_output=show_command_output)
+        return
+    from rich.live import Live
+
+    with Live("", console=console, transient=True) as live:
+        yield RichStepObserver(live=live, show_command_output=show_command_output)
 
 
 def _sanitize_envelope_value(value: JsonValue, *, preserve_newlines: bool = True) -> JsonValue:
@@ -417,6 +482,8 @@ def run_or_preview(
     rich: Callable[[OutputDocument], str] | None = None,
     preview: Callable[[_InspectableCommand[_ResultT]], JsonObject] | None = None,
     emit_normal: bool = True,
+    observer: StepObserver | None = None,
+    observe_output: bool = False,
 ) -> tuple[int, _ResultT | None]:
     """Build one command, then either inspect it or run that same instance.
 
@@ -441,7 +508,13 @@ def run_or_preview(
         )
     if confirm is not None:
         confirm()
-    value = command.run()
+    if observer is None:
+        value = command.run()
+    else:
+        value = cast(
+            "_ResultT",
+            cast("Any", command).run(observer=observer, observe_output=observe_output),
+        )
     if not emit_normal:
         return 0, value
     payload = result(value) if result is not None else {}
@@ -571,6 +644,7 @@ __all__ = [
     "OutputDocument",
     "OutputError",
     "OutputMode",
+    "RichStepObserver",
     "action_command",
     "build_envelope",
     "command_options",
@@ -583,6 +657,7 @@ __all__ = [
     "resolve_command_options",
     "resolve_output_mode",
     "rich_print",
+    "rich_step_observer",
     "run_or_preview",
     "sanitize_diagnostic",
     "sanitize_terminal_text",
@@ -601,6 +676,14 @@ def _rich_plan_projection(document: OutputDocument) -> str:
     if not isinstance(result, dict):
         return json.dumps(result, ensure_ascii=False, default=str, indent=2)
 
+    semantic = _semantic_plan_projection(
+        result,
+        command=document.command,
+        document_warnings=document.warnings,
+    )
+    if semantic is not None:
+        return semantic
+
     lines = [f"Plan: {document.command}"]
     steps = result.get("steps")
     if isinstance(steps, list):
@@ -611,6 +694,50 @@ def _rich_plan_projection(document: OutputDocument) -> str:
             for line in _rich_step_lines(number, item)
         )
     lines.extend(_rich_plan_metadata(result, document.warnings))
+    return "\n".join(lines)
+
+
+def _semantic_plan_projection(
+    result: dict[str, JsonValue],
+    *,
+    command: str,
+    document_warnings: tuple[str, ...] = (),
+) -> str | None:
+    """Render the single decision-oriented semantic plan observation."""
+    observations = result.get("observations")
+    if not isinstance(observations, list):
+        return None
+    semantic = next(
+        (
+            item
+            for item in observations
+            if isinstance(item, dict) and item.get("kind") == "semantic"
+        ),
+        None,
+    )
+    if not isinstance(semantic, dict):
+        return None
+    lines = [f"Plan: {command}", f"Goal: {semantic.get('goal', '')}"]
+    for field, label in (("targets", "Targets"), ("mutations", "Mutations")):
+        values = semantic.get(field)
+        if isinstance(values, list) and values:
+            lines.append(f"{label}:")
+            lines.extend(f"  - {value}" for value in values)
+    preconditions = semantic.get("preconditions")
+    if isinstance(preconditions, list) and preconditions:
+        lines.append("Preconditions:")
+        for item in preconditions:
+            if isinstance(item, dict):
+                lines.append(
+                    f"  - {item.get('name', 'precondition')}: "
+                    f"{item.get('status', 'unknown')} — {item.get('detail', '')}"
+                )
+    warnings = semantic.get("warnings")
+    warning_values = list(warnings) if isinstance(warnings, list) else []
+    warning_values.extend(warning for warning in document_warnings if warning not in warning_values)
+    if warning_values:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in warning_values)
     return "\n".join(lines)
 
 

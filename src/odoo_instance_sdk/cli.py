@@ -667,7 +667,10 @@ def run(
     output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
     try:
         runtime_context = cli_context.ready_instance(ctx)
-        if not runtime_context.check_port_free():
+        # Preview must retain the captured plan even when this read-only
+        # precondition fails; normal execution keeps the early diagnostic
+        # compatibility path in addition to the command-boundary recheck.
+        if not dry_run and not runtime_context.check_port_free():
             http_interface, http_port = runtime_context.instance_address()
             fail(
                 output_mode,

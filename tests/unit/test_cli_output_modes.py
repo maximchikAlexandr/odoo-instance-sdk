@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, ClassVar, Literal, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
@@ -24,6 +24,7 @@ from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputError,
     OutputMode,
+    RichStepObserver,
     build_envelope,
     emit,
     emit_json_envelope,
@@ -32,6 +33,7 @@ from odoo_instance_sdk.commands.output import (
     output_options,
     resolve_output_mode,
     rich_print,
+    rich_step_observer,
     run_or_preview,
     success_document,
 )
@@ -40,6 +42,7 @@ from odoo_instance_sdk.internal.automation import (
     DepsVerifyResult,
 )
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
+from odoo_instance_sdk.internal.proc import StepEvent
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     BackupFreshness,
@@ -63,6 +66,74 @@ from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, Env
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 T = TypeVar("T")
+
+
+def test_rich_step_observer_non_tty_is_step_prefixed_and_streaming_is_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rendered: list[str] = []
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.output.rich_print",
+        lambda value, **_: rendered.append(value),
+    )
+
+    observer = RichStepObserver()
+    observer(StepEvent(step_id="restore.copy", kind="started"))
+    observer(
+        StepEvent(
+            step_id="restore.copy",
+            kind="stdout",
+            chunk="ignored\x1b[2K\ncontinuation",
+        )
+    )
+    assert rendered == ["[restore.copy] started"]
+
+    stream_observer = RichStepObserver(show_command_output=True)
+    stream_observer(StepEvent(step_id="restore.copy", kind="stdout", chunk="line\x1b[2K\nnext"))
+    assert rendered[1:] == [
+        r"[restore.copy] stdout: line\x1b[2K",
+        "[restore.copy] stdout: next",
+    ]
+    assert all("\x1b" not in line for line in rendered)
+
+
+def test_rich_step_observer_uses_live_only_for_tty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConsole:
+        is_terminal = True
+
+    class FakeLive:
+        instances: ClassVar[list[FakeLive]] = []
+
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.updates: list[str] = []
+            self.instances.append(self)
+
+        def __enter__(self) -> FakeLive:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def update(self, value: object, *, refresh: bool = False) -> None:
+            assert refresh is True
+            self.updates.append(str(value))
+
+    monkeypatch.setattr("odoo_instance_sdk.commands.output.Console", FakeConsole)
+    monkeypatch.setattr("rich.live.Live", FakeLive)
+
+    with rich_step_observer() as observer:
+        observer(StepEvent(step_id="restore.plan", kind="started"))
+        observer(StepEvent(step_id="restore.plan", kind="completed", returncode=0))
+
+    live = FakeLive.instances[0]
+    assert live.kwargs["transient"] is True
+    assert live.updates[-1].splitlines() == [
+        "[restore.plan] started",
+        "[restore.plan] completed (exit 0)",
+    ]
 
 
 def _resolved_context(client: object, source: object, instance: object) -> ResolvedContext:
@@ -1120,6 +1191,44 @@ def test_plan_machine_transports_are_equal_for_one_frozen_redacted_plan(
     from toon import DecodeOptions, decode
 
     assert decode(toon_document, DecodeOptions(indent=2, strict=True)) == json.loads(json_document)
+
+
+def test_semantic_plan_projection_hides_private_execution_details(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from odoo_instance_sdk.execution import (
+        Command,
+        ExecutionPlan,
+        PlanPrecondition,
+        SemanticPlanObservation,
+    )
+
+    plan = ExecutionPlan(
+        observations=(
+            SemanticPlanObservation(
+                kind="semantic",
+                goal="Update the module",
+                targets=("demo",),
+                mutations=("write module files",),
+                preconditions=(
+                    PlanPrecondition(
+                        name="http-port-free",
+                        status="failed",
+                        detail="127.0.0.1:8069 is occupied",
+                    ),
+                ),
+                warnings=("preview only",),
+            ),
+        ),
+    ).with_fingerprint()
+    command = Command.create(plan, lambda _context: None)
+
+    assert _emit_plan(command, command_name="module.update", mode=OutputMode.RICH) == 0
+    rendered = capsys.readouterr().out
+    assert "Goal: Update the module" in rendered
+    assert "Preconditions:" in rendered
+    assert "127.0.0.1:8069 is occupied" in rendered
+    assert "fingerprint" not in rendered
 
 
 def test_capture_boundary_corpus_is_secret_free_in_all_public_surfaces(

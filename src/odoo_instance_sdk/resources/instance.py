@@ -77,7 +77,12 @@ def _build_cli_args(config: StartConfig, *, secret_config_path: str | None = Non
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.execution import (
+        Command,
+        ExecutionPlan,
+        PlanObservation,
+        SemanticPlanObservation,
+    )
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
     from odoo_instance_sdk.internal.project_runtime import DeferredProjectRuntime
     from odoo_instance_sdk.project import ProjectConfig
@@ -466,11 +471,65 @@ def _command_plan(
     steps: tuple[PreparedStep | PreparedAction, ...],
     *,
     secrets: Sequence[str] = (),
+    observations: Sequence[PlanObservation] = (),
 ) -> ExecutionPlan:
     from odoo_instance_sdk.execution import ExecutionPlan
 
-    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
+    plan = ExecutionPlan(
+        steps=tuple(step.public_projection() for step in steps),
+        observations=tuple(observations),
+    )
     return plan.with_fingerprint(secrets=secrets)
+
+
+def _http_port_observation(config: StartConfig) -> SemanticPlanObservation:
+    """Capture the bounded, read-only HTTP binding check for a plan."""
+    from odoo_instance_sdk.execution import PlanPrecondition, SemanticPlanObservation
+    from odoo_instance_sdk.internal.address import AddressState, probe_address
+
+    try:
+        state = probe_address(config.http_interface, config.http_port)
+    except OSError as error:
+        precondition = PlanPrecondition(
+            name="http-port-free",
+            status="unknown",
+            detail=f"unable to inspect {config.http_interface}:{config.http_port}: {error}",
+        )
+    else:
+        free = state is AddressState.FREE
+        precondition = PlanPrecondition(
+            name="http-port-free",
+            status="passed" if free else "failed",
+            detail=(
+                f"{config.http_interface}:{config.http_port} is available"
+                if free
+                else f"{config.http_interface}:{config.http_port} is occupied (ownership unknown)"
+            ),
+        )
+    return SemanticPlanObservation(
+        kind="semantic",
+        goal="Start Odoo in the foreground",
+        targets=(f"http://{config.http_interface}:{config.http_port}",),
+        mutations=("spawn the Odoo foreground process",),
+        preconditions=(precondition,),
+        warnings=(),
+    )
+
+
+def _assert_http_port_free(config: StartConfig) -> None:
+    from odoo_instance_sdk.internal.address import AddressState, probe_address
+
+    try:
+        state = probe_address(config.http_interface, config.http_port)
+    except OSError as error:
+        raise InstanceConfigurationError(
+            f"cannot verify HTTP port {config.http_interface}:{config.http_port}: {error}"
+        ) from error
+    if state is not AddressState.FREE:
+        raise InstanceConfigurationError(
+            f"port-conflict: {config.http_interface}:{config.http_port} is occupied "
+            "(ownership unknown)"
+        )
 
 
 def _command_result(
@@ -868,7 +927,13 @@ class OdooInstance:
                 ),
             )
 
+        process_executor = SubprocessExecutor()
+
         def execute(context: RunContext[int]) -> int:
+            # The planning probe is intentionally repeated at this mutation
+            # boundary.  A stale preview must never turn into a spawn.
+            if type(process_executor) is SubprocessExecutor:
+                _assert_http_port_free(config)
             self._ensure_dependencies_ready(
                 context,
                 dependency_steps=dependency_steps,
@@ -896,7 +961,11 @@ class OdooInstance:
                         )
                     from odoo_instance_sdk.internal.server import wait_foreground_process
 
-                    return wait_foreground_process(handle.process)
+                    return wait_foreground_process(
+                        handle.process,
+                        observer=context.observer,
+                        step_id=step.step_id,
+                    )
                 except BaseException:
                     if handle is not None:
                         with contextlib.suppress(BaseException):
@@ -914,10 +983,14 @@ class OdooInstance:
         from odoo_instance_sdk.execution import Command
 
         return Command.create(
-            _command_plan(prepared_steps, secrets=secrets),
+            _command_plan(
+                prepared_steps,
+                secrets=secrets,
+                observations=(_http_port_observation(config),),
+            ),
             execute,
             prepared_steps,
-            executor=SubprocessExecutor(),
+            executor=process_executor,
         )
 
     def _clear_runtime_identity(self) -> None:

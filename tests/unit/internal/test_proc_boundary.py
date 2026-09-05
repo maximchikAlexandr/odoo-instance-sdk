@@ -10,6 +10,7 @@ from odoo_instance_sdk.exceptions import DuplicateStepError, UnplannedStepError
 from odoo_instance_sdk.internal.proc import (
     DeadlineExceeded,
     ExecutionDeadline,
+    PreparedCommand,
     PreparedStep,
     ProcessExecutionError,
     ProcessResult,
@@ -17,6 +18,8 @@ from odoo_instance_sdk.internal.proc import (
     ProcessTimeoutError,
     RecordingExecutor,
     RunContext,
+    StepEvent,
+    StepObserver,
     SubprocessExecutor,
     prepared_command,
     prepared_step,
@@ -28,6 +31,69 @@ from odoo_instance_sdk.internal.proc import (
 
 def _python(source: str) -> tuple[str, ...]:
     return (sys.executable, "-c", source)
+
+
+def test_optional_step_observer_preserves_result_and_redacts_output() -> None:
+    secret = "observer-secret"
+    step = PreparedStep(
+        step_id="observer.step",
+        argv=_python(f"print({secret!r}); print('failure', file=__import__('sys').stderr)"),
+        secret_values=(secret,),
+    )
+    command: PreparedCommand[ProcessResult] = prepared_command(
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=SubprocessExecutor(),
+    )
+    events: list[StepEvent] = []
+
+    result = command.run(observer=events.append, observe_output=True)
+
+    assert isinstance(result, ProcessResult)
+    assert result.returncode == 0
+    assert [event.kind for event in events] == ["started", "stdout", "stderr", "completed"]
+    assert all(secret not in (event.chunk or "") for event in events)
+    assert events[0].step_id == events[-1].step_id == step.step_id
+
+
+def test_observer_redacts_a_secret_split_across_output_chunks() -> None:
+    secret = "split-secret"
+    step = PreparedStep(
+        step_id="observer.split",
+        argv=_python("print('captured')"),
+        secret_values=(secret,),
+    )
+
+    class SplitChunkExecutor:
+        def execute(
+            self,
+            prepared: PreparedStep,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessResult:
+            assert prepared is step
+            assert observer is not None
+            observer(StepEvent(step_id=step.step_id, kind="started"))
+            if observe_output:
+                observer(StepEvent(step_id=step.step_id, kind="stdout", chunk="split-"))
+                observer(StepEvent(step_id=step.step_id, kind="stdout", chunk="secret"))
+            observer(StepEvent(step_id=step.step_id, kind="completed", returncode=0))
+            return ProcessResult(step.argv, 0, secret, "", 0.0, None, ())
+
+    command: PreparedCommand[ProcessResult] = prepared_command(
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=SplitChunkExecutor(),  # type: ignore[arg-type]
+    )
+    events: list[StepEvent] = []
+
+    result = command.run(observer=events.append, observe_output=True)
+
+    assert result.stdout == secret
+    assert [event.kind for event in events] == ["started", "stdout", "completed"]
+    assert events[1].chunk == "<redacted>"
+    assert secret not in repr(events)
 
 
 def test_captured_text_preserves_argv_cwd_stdin_and_sanitized_environment(

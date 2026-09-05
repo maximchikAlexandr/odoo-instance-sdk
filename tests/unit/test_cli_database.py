@@ -13,6 +13,7 @@ from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.context import ResolvedContext
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
+from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     DatabasePreparationAction,
@@ -46,6 +47,7 @@ def test_db_help_registers_both_commands_without_password_option() -> None:
     assert refresh_help.exit_code == 0
     assert reset_help.exit_code == 0
     assert "--password" not in refresh_help.output
+    assert "--show-command-output" in refresh_help.output
     assert "--password" not in reset_help.output
     assert "[y/n]" not in refresh_help.output.lower()
     assert "[y/n]" not in reset_help.output.lower()
@@ -62,6 +64,26 @@ def test_refresh_reset_option_is_click_usage_error_before_sdk_invocation(
     assert result.exit_code == 2
     assert "requires --restore" in result.stderr
     client.environments.refresh_database.assert_not_called()
+
+
+@pytest.mark.parametrize("format_args", [["--json"], ["--format", "json"], ["--format", "toon"]])
+def test_refresh_show_command_output_is_rich_only_before_sdk_work(
+    monkeypatch: pytest.MonkeyPatch, format_args: list[str]
+) -> None:
+    client = MagicMock()
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.db.resolve_project_path",
+        lambda _ctx: pytest.fail("machine stream validation must precede project resolution"),
+    )
+
+    result = CliRunner().invoke(
+        cli, ["db", "refresh", "--restore", "--show-command-output", *format_args]
+    )
+
+    assert result.exit_code == 2
+    assert "only available with Rich output" in result.stderr
+    client.environments.refresh_database_command.assert_not_called()
 
 
 def test_refresh_uses_project_context_options_and_typed_machine_result(
@@ -102,6 +124,50 @@ def test_refresh_uses_project_context_options_and_typed_machine_result(
     assert options.restore is True
     assert options.reset_admin_password is True
     assert options.source_branch == "release/19"
+
+
+def test_rich_restore_wires_step_observer_without_changing_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class ObservedCommand:
+        plan = ExecutionPlan()
+
+        def __init__(self) -> None:
+            self.observer: StepObserver | None = None
+            self.observe_output = False
+
+        def run(
+            self,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> DatabasePreparationResult:
+            self.observer = observer
+            self.observe_output = observe_output
+            assert observer is not None
+            observer(StepEvent(step_id="restore.copy", kind="started"))
+            observer(StepEvent(step_id="restore.copy", kind="completed", returncode=0))
+            return DatabasePreparationResult(
+                mode=DatabasePreparationAction.RESTORE,
+                restored_database="demo_copy",
+                retained_artifacts=(),
+            )
+
+    client = MagicMock()
+    command = ObservedCommand()
+    client.environments.refresh_database_command.return_value = command
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+
+    result = CliRunner().invoke(cli, ["db", "refresh", "--restore"])
+
+    assert result.exit_code == 0, result.output
+    assert command.observer is not None
+    assert command.observe_output is False
+    assert "[restore.copy] started" in result.output
+    assert "[restore.copy] completed (exit 0)" in result.output
+    assert "demo_copy" in result.output
 
 
 def test_reset_delegates_only_for_exact_recorded_local_binding(

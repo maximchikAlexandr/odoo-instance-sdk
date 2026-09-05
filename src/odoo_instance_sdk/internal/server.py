@@ -12,6 +12,7 @@ from msgspec import structs
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.proc import StepObserver
 from odoo_instance_sdk.models import (
     CommandResult,
     ProcessStatus,
@@ -136,15 +137,30 @@ def run_command(
     )
 
 
-def wait_foreground_process(proc: subprocess.Popen[bytes]) -> int:
+def wait_foreground_process(
+    proc: subprocess.Popen[bytes],
+    *,
+    observer: StepObserver | None = None,
+    step_id: str | None = None,
+) -> int:
     """Block until ``proc`` exits, terminating its owned group on Ctrl+C.
 
     Ctrl+C uses the same bounded TERM/KILL/reap cleanup as exceptional wait
     failures, then returns 130. Restores the previous SIGINT handler on return.
     """
-    from odoo_instance_sdk.internal.proc import owned_handle, wait_foreground
+    from odoo_instance_sdk.internal.proc import StepEvent, owned_handle, wait_foreground
 
-    return wait_foreground(owned_handle(proc, process_group_id=proc.pid))
+    try:
+        returncode = wait_foreground(owned_handle(proc, process_group_id=proc.pid))
+    except BaseException as error:
+        if observer is not None and step_id is not None:
+            with contextlib.suppress(Exception):
+                observer(StepEvent(step_id=step_id, kind="failed", error=str(error)))
+        raise
+    if observer is not None and step_id is not None:
+        with contextlib.suppress(Exception):
+            observer(StepEvent(step_id=step_id, kind="completed", returncode=returncode))
+    return returncode
 
 
 _RESULT_SNIPPET = (
