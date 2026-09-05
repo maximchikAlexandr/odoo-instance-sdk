@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
@@ -19,6 +20,12 @@ from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
 pytestmark = [pytest.mark.integration, pytest.mark.serial]
+
+
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def _wait_for_ready_pid(pid_file: Path) -> int:
@@ -55,10 +62,11 @@ def test_wait_error_kills_sigterm_ignoring_descendant_after_leader_exit(
         "import pathlib, subprocess, sys\n"
         f"subprocess.Popen([sys.executable, '-c', {child_code!r}, sys.argv[1]])\n"
     )
-    config = StartConfig(http_port=8069, http_interface="127.0.0.1")
+    http_port = _free_loopback_port()
+    config = StartConfig(http_port=http_port, http_interface="127.0.0.1")
     instance = OdooInstance(
         config=InstanceConfig(
-            base_url="http://127.0.0.1:8069",
+            base_url=f"http://127.0.0.1:{http_port}",
             start_config=config,
             command_prefix=(sys.executable, "-c", leader_code, str(child_pid_file)),
             default_cwd=tmp_path,
@@ -73,7 +81,7 @@ def test_wait_error_kills_sigterm_ignoring_descendant_after_leader_exit(
     child_pid: int | None = None
     process_group_id: int | None = None
 
-    def leader_exits_then_wait_fails(proc: Any) -> int:
+    def leader_exits_then_wait_fails(proc: Any, **_kwargs: object) -> int:
         nonlocal child_pid, process_group_id
         child_pid = _wait_for_ready_pid(child_pid_file)
         process_group_id = proc.pid
@@ -134,10 +142,11 @@ def test_manual_wait_error_kills_ready_sigterm_ignoring_descendant(
         "import subprocess, sys\n"
         f"subprocess.Popen([sys.executable, '-c', {child_code!r}, sys.argv[1]])\n"
     )
+    http_port = _free_loopback_port()
     instance = OdooInstance(
         config=InstanceConfig(
-            base_url="http://127.0.0.1:8069",
-            start_config=StartConfig(http_port=8069, http_interface="127.0.0.1"),
+            base_url=f"http://127.0.0.1:{http_port}",
+            start_config=StartConfig(http_port=http_port, http_interface="127.0.0.1"),
             command_prefix=(sys.executable, "-c", leader_code, str(child_pid_file)),
             default_cwd=tmp_path,
         ),
@@ -147,7 +156,7 @@ def test_manual_wait_error_kills_ready_sigterm_ignoring_descendant(
     child_pid: int | None = None
     process_group_id: int | None = None
 
-    def wait_then_fail(proc: Any) -> int:
+    def wait_then_fail(proc: Any, **_kwargs: object) -> int:
         nonlocal child_pid, process_group_id
         child_pid = _wait_for_ready_pid(child_pid_file)
         process_group_id = proc.pid

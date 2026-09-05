@@ -281,10 +281,10 @@ UI lifecycle badge uses `lifecycle_state`. UI/CLI port uses `runtime.http_port` 
 - **WHEN** one project has only removed environments
 - **THEN** it is absent from `snapshot()` and present with those rows in `snapshot(include_removed=True)`; each included removed environment retains the v2 stopped/null runtime, artifact, and no-port-probe semantics and has `pgadmin.state=="environment_not_ready"`
 
-#### Scenario: Removed environment keeps v2 behavior in v4
+#### Scenario: Removed environment keeps v2 behavior in v3
 
 - **WHEN** `monitor.snapshot(include_removed=True)` includes a removed environment
-- **THEN** its MYL-55 stopped/null runtime, artifact, and no-port-probe semantics are unchanged, `observed_port is None`, and `pgadmin.state=="environment_not_ready"`
+- **THEN** its MYL-55 stopped/null runtime, artifact, and no-port-probe semantics are unchanged in the additive v4 snapshot, `observed_port is None`, and `pgadmin.state=="environment_not_ready"`
 
 #### Scenario: Project filter narrows result
 

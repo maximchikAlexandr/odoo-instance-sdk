@@ -14,7 +14,7 @@ else:
 
 from odoo_instance_sdk.exceptions import EnvironmentResolutionError
 from odoo_instance_sdk.internal.project_runtime import resolve_project_runtime
-from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 
@@ -63,35 +63,8 @@ class RuntimeView:
     base_provenance: BaseProvenance
 
     @property
-    def worktree_root(self) -> Path:
-        return self.root
-
-    @property
     def http_url(self) -> str:
         return f"http://{self.http_interface}:{self.http_port}"
-
-
-# ``RuntimeContext`` is a readable compatibility name for callers that use
-# the context module as the command-input boundary.
-RuntimeContext = RuntimeView
-
-
-def _git_common_dir(repository_root: Path) -> Path:
-    """Resolve a worktree's shared Git directory from its local marker."""
-    marker = repository_root / ".git"
-    if marker.is_file():
-        try:
-            value = marker.read_text(encoding="utf-8").strip()
-        except OSError:
-            value = ""
-        if value.startswith("gitdir:"):
-            git_dir = Path(value.partition(":")[2].strip())
-            if not git_dir.is_absolute():
-                git_dir = repository_root / git_dir
-            if git_dir.parent.name == "worktrees":
-                return git_dir.parent.parent.resolve()
-            return git_dir.resolve()
-    return marker.resolve()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -178,7 +151,7 @@ class ResolvedContext:
 
         if isinstance(self.source, ProjectConfig):
             repository_root = self.source.repository_root.resolve()
-            project_id = f"project_{repo_key(repository_root, _git_common_dir(repository_root))}"
+            project_id = f"project_{repo_key(repository_root, git_common_dir(repository_root))}"
             return RuntimeView(
                 owner_kind="project",
                 project_id=project_id,
@@ -198,8 +171,10 @@ class ResolvedContext:
 
         environment = self.source
         repository_root = Path(getattr(environment, "repository_root", root)).resolve()
-        git_common_dir = Path(getattr(environment, "git_common_dir", repository_root / ".git"))
-        project_id = f"project_{repo_key(repository_root, git_common_dir)}"
+        environment_git_common = Path(
+            getattr(environment, "git_common_dir", repository_root / ".git")
+        )
+        project_id = f"project_{repo_key(repository_root, environment_git_common)}"
         if not database:
             database = getattr(environment, "target_db_name", None) or getattr(
                 environment, "source_db_name", None
@@ -404,7 +379,6 @@ __all__ = [
     "CliContext",
     "OwnerKind",
     "ResolvedContext",
-    "RuntimeContext",
     "RuntimeView",
     "environment_provenance",
     "pass_cli_context",

@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from enum import StrEnum
 from typing import (
     TYPE_CHECKING,
-    Any,
     Generic,
     Never,
     ParamSpec,
@@ -34,7 +32,7 @@ from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_te
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
+    from odoo_instance_sdk.internal.proc import StepObserver
 
 
 def __getattr__(name: str) -> TypeAliasType:
@@ -59,11 +57,18 @@ type JsonObject = dict[str, JsonValue]
 type DiagnosticValue = str | BaseException
 
 
-class OutputError(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+class OutputError(
+    msgspec.Struct,
+    frozen=True,
+    forbid_unknown_fields=True,
+    kw_only=True,
+    omit_defaults=True,
+):
     """The stable, machine-readable error part of a CLI document."""
 
     code: str
     message: str
+    details: JsonObject | None = msgspec.field(default=None)
 
 
 class OutputDocument(
@@ -99,7 +104,9 @@ class _InspectableCommand(Protocol, Generic[_ResultT_co]):
     @property
     def plan(self) -> msgspec.Struct: ...
 
-    def run(self) -> _ResultT_co: ...
+    def run(
+        self, *, observer: StepObserver | None = None, observe_output: bool = False
+    ) -> _ResultT_co: ...
 
 
 @overload
@@ -171,7 +178,9 @@ def model_to_dict(value: msgspec.Struct) -> JsonObject:
 def _failure_context(error: BaseException | None) -> JsonObject:
     """Project only the typed, secret-free retained-artifact context."""
     context = getattr(error, "failure_context", None) if error is not None else None
-    if not isinstance(context, DatabasePreparationFailureContext):
+    from odoo_instance_sdk.internal.pg.drop import DatabaseDropFailureContext
+
+    if not isinstance(context, (DatabasePreparationFailureContext, DatabaseDropFailureContext)):
         return {}
     return model_to_dict(context)
 
@@ -183,6 +192,11 @@ def _failure_message(message: DiagnosticValue, context: JsonObject) -> str:
         details.append(f"retained backup {context['retained_backup_id']}")
     if context.get("retained_database") is not None:
         details.append(f"retained database {context['retained_database']}")
+    sessions = context.get("active_sessions")
+    if isinstance(sessions, (list, tuple)) and sessions:
+        details.append(
+            "active sessions " + json.dumps(sessions, ensure_ascii=False, separators=(",", ":"))
+        )
     return f"{rendered}; {'; '.join(details)}" if details else rendered
 
 
@@ -195,68 +209,6 @@ def rich_print(
     """Print human output safely, optionally preserving document line feeds."""
     rendered = sanitize_terminal_text(str(value), preserve_newlines=preserve_newlines)
     Console().print(rendered, markup=False, soft_wrap=True, end=end)
-
-
-class RichStepObserver:
-    """Render typed process events as deterministic Rich step lines."""
-
-    def __init__(self, *, live: Any = None, show_command_output: bool = False) -> None:
-        self._live = live
-        self._show_command_output = show_command_output
-        self._lines: list[str] = []
-
-    def __call__(self, event: StepEvent) -> None:
-        if event.kind in {"stdout", "stderr"} and not self._show_command_output:
-            return
-        stream = event.kind in {"stdout", "stderr"}
-        if stream:
-            suffix = f": {event.chunk or ''}"
-        elif event.error:
-            suffix = f": {event.error}"
-        elif event.returncode is not None:
-            suffix = f" (exit {event.returncode})"
-        else:
-            suffix = ""
-        from odoo_instance_sdk.internal.proc.redaction import redacted_projection
-
-        line = cast(
-            "str",
-            redacted_projection(
-                f"[{event.step_id}] {event.kind}{suffix}",
-                field="error" if event.error else (event.kind if stream else "event"),
-            ),
-        )
-        rendered_lines = line.splitlines() or [line]
-        if stream and len(rendered_lines) > 1:
-            prefix = f"[{event.step_id}] {event.kind}: "
-            rendered_lines = [
-                rendered_lines[0],
-                *(prefix + item for item in rendered_lines[1:]),
-            ]
-        self._lines.extend(rendered_lines)
-        if self._live is not None:
-            from rich.text import Text
-
-            self._live.update(Text("\n".join(self._lines)), refresh=True)
-        else:
-            for rendered_line in rendered_lines:
-                rich_print(rendered_line)
-
-
-@contextmanager
-def rich_step_observer(
-    *,
-    show_command_output: bool = False,
-) -> Iterator[RichStepObserver]:
-    """Own TTY ``Live`` only for Rich restore execution."""
-    console = Console()
-    if not console.is_terminal:
-        yield RichStepObserver(show_command_output=show_command_output)
-        return
-    from rich.live import Live
-
-    with Live("", console=console, transient=True) as live:
-        yield RichStepObserver(live=live, show_command_output=show_command_output)
 
 
 def _sanitize_envelope_value(value: JsonValue, *, preserve_newlines: bool = True) -> JsonValue:
@@ -302,10 +254,13 @@ def _document_payload(document: OutputDocument, *, preserve_newlines: bool = Tru
         payload["result"] = document.result
         payload["data"] = document.data
     elif document.error is not None:
-        payload["error"] = {
+        error_payload: JsonObject = {
             "code": document.error.code,
             "message": document.error.message,
         }
+        if document.error.details is not None:
+            error_payload["details"] = document.error.details
+        payload["error"] = error_payload
     return cast(
         "JsonObject",
         _sanitize_envelope_value(payload, preserve_newlines=preserve_newlines),
@@ -323,6 +278,7 @@ def _document(
     warnings: tuple[str, ...] = (),
     error_code: str | None = None,
     error_message: DiagnosticValue | None = None,
+    error_details: JsonObject | None = None,
 ) -> OutputDocument:
     safe_result = _sanitize_envelope_value(result or {}) if ok else None
     message = (
@@ -334,6 +290,11 @@ def _document(
         else OutputError(
             code=error_code or command.replace(".", "_") + "_failed",
             message=message,
+            details=(
+                cast("JsonObject", _sanitize_envelope_value(error_details))
+                if error_details is not None
+                else None
+            ),
         )
     )
     return OutputDocument(
@@ -416,6 +377,7 @@ def failure_document(
     warnings: tuple[str, ...] = (),
     error_code: str | None = None,
     error_message: DiagnosticValue | None = None,
+    error_details: JsonObject | None = None,
 ) -> OutputDocument:
     """Construct a typed failed v1 document for the shared emitter."""
     return _document(
@@ -427,6 +389,7 @@ def failure_document(
         warnings=warnings,
         error_code=error_code,
         error_message=error_message,
+        error_details=error_details,
     )
 
 
@@ -516,10 +479,7 @@ def run_or_preview(
     if observer is None:
         value = command.run()
     else:
-        value = cast(
-            "_ResultT",
-            cast("Any", command).run(observer=observer, observe_output=observe_output),
-        )
+        value = command.run(observer=observer, observe_output=observe_output)
     if not emit_normal:
         return 0, value
     payload = result(value) if result is not None else {}
@@ -546,6 +506,7 @@ def build_envelope(
     dry_run: bool = False,
     error_code: str | None = None,
     error_message: DiagnosticValue | None = None,
+    error_details: JsonObject | None = None,
 ) -> JsonObject:
     """Build the existing v1 envelope without selecting an output transport."""
     document = (
@@ -564,6 +525,7 @@ def build_envelope(
             dry_run=dry_run,
             error_code=error_code,
             error_message=error_message,
+            error_details=error_details,
         )
     )
     return _document_payload(
@@ -582,6 +544,7 @@ def emit_json_envelope(
     dry_run: bool = False,
     error_code: str | None = None,
     error_message: DiagnosticValue | None = None,
+    error_details: JsonObject | None = None,
     mode: OutputMode = OutputMode.JSON,
 ) -> None:
     """Emit the v1 envelope as exactly one JSON or TOON stdout document."""
@@ -601,6 +564,7 @@ def emit_json_envelope(
             dry_run=dry_run,
             error_code=error_code,
             error_message=error_message,
+            error_details=error_details,
         ),
         mode,
     )
@@ -613,6 +577,7 @@ def fail(
     *,
     usage: bool = False,
     error_code: str | None = None,
+    details: JsonObject | None = None,
 ) -> Never:
     mode = (
         output_mode
@@ -622,6 +587,10 @@ def fail(
         else OutputMode.RICH
     )
     context = _failure_context(message if isinstance(message, BaseException) else None)
+    from odoo_instance_sdk.internal.pg.drop import DatabaseDropSafetyError
+
+    if isinstance(message, DatabaseDropSafetyError) and details is None:
+        details = context
     rendered_message = _failure_message(message, context)
     if mode is not OutputMode.RICH:
         emit(
@@ -631,12 +600,17 @@ def fail(
                 error_code=error_code
                 or ("usage_error" if usage else command.replace(".", "_") + "_failed"),
                 error_message=rendered_message,
+                error_details=details,
             ),
             mode,
         )
     else:
         emit(
-            failure_document(command=command, error_message=rendered_message),
+            failure_document(
+                command=command,
+                error_message=rendered_message,
+                error_details=details,
+            ),
             mode,
         )
     if usage:
@@ -649,7 +623,6 @@ __all__ = [
     "OutputDocument",
     "OutputError",
     "OutputMode",
-    "RichStepObserver",
     "action_command",
     "build_envelope",
     "command_options",
@@ -662,7 +635,6 @@ __all__ = [
     "resolve_command_options",
     "resolve_output_mode",
     "rich_print",
-    "rich_step_observer",
     "run_or_preview",
     "sanitize_diagnostic",
     "sanitize_terminal_text",
@@ -737,6 +709,9 @@ def _semantic_plan_projection(
                     f"  - {item.get('name', 'precondition')}: "
                     f"{item.get('status', 'unknown')} — {item.get('detail', '')}"
                 )
+    sessions = semantic.get("active_sessions")
+    if isinstance(sessions, list) and sessions:
+        lines.extend(_rich_active_session_lines(sessions))
     warnings = semantic.get("warnings")
     warning_values = list(warnings) if isinstance(warnings, list) else []
     warning_values.extend(warning for warning in document_warnings if warning not in warning_values)
@@ -744,6 +719,19 @@ def _semantic_plan_projection(
         lines.append("Warnings:")
         lines.extend(f"  - {warning}" for warning in warning_values)
     return "\n".join(lines)
+
+
+def _rich_active_session_lines(sessions: list[JsonValue]) -> list[str]:
+    lines = ["Active sessions:"]
+    for session in sessions:
+        if isinstance(session, dict):
+            identity = ", ".join(
+                f"{key}={session[key]}"
+                for key in ("pid", "user", "client", "application")
+                if session.get(key) is not None
+            )
+            lines.append(f"  - {identity}")
+    return lines
 
 
 def _rich_step_lines(number: int, item: dict[str, JsonValue]) -> list[str]:

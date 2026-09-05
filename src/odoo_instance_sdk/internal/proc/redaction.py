@@ -206,6 +206,8 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
         "stdin",
         "script",
         "error",
+        "message",
+        "text",
         "result",
         "user_stdout",
     }:

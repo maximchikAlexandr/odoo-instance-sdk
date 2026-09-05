@@ -1,9 +1,7 @@
 ## Purpose
 
 Restoring a catalog Backup onto a local Odoo instance with postcondition checks and restore tracking.
-
 ## Requirements
-
 ### Requirement: Восстановление базы
 
 `instance.databases.restore()` MUST принимать существующий доступный `Backup`, target database name и параметры Odoo 19.0 `copy` и `neutralize_database`.
@@ -108,3 +106,15 @@ SDK MUST NOT предоставлять создание пустой базы, 
 
 - **WHEN** `instance.databases.list()` и `master_password is None`
 - **THEN** list succeeds (no password needed for read)
+
+### Requirement: Observable restore-plan execution
+
+Restore execution SHALL emit typed lifecycle events for logical plan-step start, completion, and failure. When explicitly requested, process-backed steps SHALL also emit sanitized stdout/stderr chunks associated with that step. Event observation SHALL not change plan contents, execution order, return values, exit codes, or captured subprocess output, and secrets SHALL be redacted before an event reaches a consumer.
+
+#### Scenario: Step lifecycle is observable
+- **WHEN** a multi-step restore executes with an observer
+- **THEN** each executed logical step produces ordered start and terminal events with stable step identity
+
+#### Scenario: Streaming is opt-in and redacted
+- **WHEN** command-output streaming is enabled and a restore child writes stdout or stderr containing a secret
+- **THEN** the consumer receives step-associated sanitized chunks while the final captured result preserves its existing contract

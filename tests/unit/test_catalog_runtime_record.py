@@ -233,3 +233,64 @@ def test_project_runtime_uses_exclusive_owner_and_registration(tmp_path: Path) -
         == 0
     )
     catalog.close()
+
+
+@pytest.mark.parametrize(
+    ("runtime_schema", "runtime_row", "message"),
+    [
+        ("CREATE TABLE runtime (unexpected TEXT)", None, "unsupported shape"),
+        (
+            """CREATE TABLE runtime (
+                environment_id TEXT, project_id TEXT, root_pid INTEGER,
+                create_time REAL, started_at TEXT, checkout_branch TEXT,
+                commit_sha TEXT, http_url TEXT, http_port INTEGER,
+                database_name TEXT, updated_at TEXT
+            )""",
+            "INSERT INTO runtime VALUES (NULL, NULL, 1, 1.0, '', '', '', '', 1, '', '')",
+            "exactly one owner",
+        ),
+        (
+            """CREATE TABLE runtime (
+                owner_kind TEXT, owner_id TEXT, root_pid INTEGER,
+                create_time REAL, started_at TEXT, checkout_branch TEXT,
+                commit_sha TEXT, http_url TEXT, http_port INTEGER,
+                database_name TEXT, updated_at TEXT
+            )""",
+            "INSERT INTO runtime VALUES ('invalid', '', 1, 1.0, '', '', '', '', 1, '', '')",
+            "exactly one valid owner",
+        ),
+    ],
+)
+def test_v11_migration_rejects_invalid_runtime_ownership(
+    tmp_path: Path, runtime_schema: str, runtime_row: str | None, message: str
+) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=db)
+    catalog.close()
+    conn = sqlite3.connect(db)
+    conn.execute("DROP VIEW environment_runtime")
+    conn.execute("DROP TABLE runtime")
+    conn.execute(runtime_schema)
+    if runtime_row is not None:
+        conn.execute(runtime_row)
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(BackupCatalogError, match=message):
+        BackupCatalog(db_path=db)
+
+
+def test_runtime_owner_validation_rejects_invalid_and_missing_owners(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+
+    with pytest.raises(BackupCatalogError, match="exactly environment or project"):
+        catalog._upsert_runtime("invalid", "owner", **_runtime_kwargs())
+    with pytest.raises(BackupCatalogError, match="exactly environment or project"):
+        catalog._upsert_runtime("environment", " ", **_runtime_kwargs())
+    with pytest.raises(BackupCatalogError, match="not registered"):
+        catalog._upsert_runtime("project", "project_missing", **_runtime_kwargs())
+    with pytest.raises(BackupCatalogError, match="exactly environment or project"):
+        catalog._clear_runtime("invalid", "owner")
+
+    catalog.close()

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 
 import pytest
 
 from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError
+from odoo_instance_sdk.internal import project_manifest as project_manifest_module
 from odoo_instance_sdk.internal.project_manifest import assert_no_secrets, write_manifest
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
@@ -60,6 +62,97 @@ def test_roundtrip_write_read_secrets_free(tmp_path: Path) -> None:
     assert loaded.to_manifest() == cfg.to_manifest()
     assert ".odcli/.env" in (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert loaded.repository_root == tmp_path.resolve()
+
+
+def test_manifest_ignore_refuses_outward_symlink_without_mutating_target(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.gitignore"
+    outside.write_text("keep-me\n", encoding="utf-8")
+    (tmp_path / ".gitignore").symlink_to(outside)
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
+
+    with pytest.raises(OSError):
+        write_manifest(tmp_path, cfg)
+
+    assert outside.read_text(encoding="utf-8") == "keep-me\n"
+    assert not (tmp_path / ".odcli" / "project.toml").exists()
+
+
+def test_manifest_ignore_refuses_check_write_race_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ignore = tmp_path / ".gitignore"
+    ignore.write_text("keep-me\n", encoding="utf-8")
+    outside = tmp_path / "outside.gitignore"
+    outside.write_text("outside\n", encoding="utf-8")
+    real_read = project_manifest_module._read_regular_ignore
+
+    def race(root_fd: int, display_path: Path) -> tuple[str, os.stat_result | None]:
+        content, target_stat = real_read(root_fd, display_path)
+        ignore.unlink()
+        ignore.symlink_to(outside)
+        return content, target_stat
+
+    monkeypatch.setattr(project_manifest_module, "_read_regular_ignore", race)
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
+
+    with pytest.raises(OSError):
+        write_manifest(tmp_path, cfg)
+
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+    assert ignore.is_symlink()
+
+
+def test_manifest_ignore_cleans_temp_after_injected_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_fchmod(_fd: int, _mode: int) -> None:
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(os, "fchmod", fail_fchmod)
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
+
+    with pytest.raises(OSError, match="injected write failure"):
+        write_manifest(tmp_path, cfg)
+
+    assert list(tmp_path.glob(".gitignore.*.tmp")) == []
+    assert not (tmp_path / ".gitignore").exists()
+
+
+def test_manifest_ignore_cleans_temp_after_injected_stream_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_fdopen = os.fdopen
+
+    class FailingWriter:
+        def __init__(self, fd: int) -> None:
+            self._stream = real_fdopen(fd, "wb")
+
+        def __enter__(self) -> FailingWriter:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self._stream.close()
+
+        def write(self, _content: bytes) -> int:
+            raise OSError("injected stream write failure")
+
+        def flush(self) -> None:
+            self._stream.flush()
+
+        def fileno(self) -> int:
+            return self._stream.fileno()
+
+    def fail_fdopen(fd: int, _mode: str) -> FailingWriter:
+        return FailingWriter(fd)
+
+    monkeypatch.setattr(os, "fdopen", fail_fdopen)
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
+
+    with pytest.raises(OSError, match="injected stream write failure"):
+        write_manifest(tmp_path, cfg)
+
+    assert list(tmp_path.glob(".gitignore.*.tmp")) == []
+    assert not (tmp_path / ".gitignore").exists()
 
 
 def test_manifest_refuses_secrets() -> None:

@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.context import ResolvedContext
+from odoo_instance_sdk.commands.db import _run_rich_restore
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
@@ -168,6 +169,49 @@ def test_rich_restore_wires_step_observer_without_changing_result(
     assert "[restore.copy] started" in result.output
     assert "[restore.copy] completed (exit 0)" in result.output
     assert "demo_copy" in result.output
+
+
+def test_rich_restore_uses_live_only_for_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeConsole:
+        is_terminal = True
+
+    instances: list[object] = []
+
+    class FakeLive:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.updates: list[str] = []
+            instances.append(self)
+
+        def __enter__(self) -> FakeLive:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def update(self, value: object, *, refresh: bool = False) -> None:
+            assert refresh is True
+            self.updates.append(str(value))
+
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.Console", FakeConsole)
+    monkeypatch.setattr("rich.live.Live", FakeLive)
+
+    def run(observer: StepObserver) -> tuple[int, DatabasePreparationResult | None]:
+        observer(StepEvent(step_id="restore.plan", kind="started"))
+        observer(StepEvent(step_id="restore.plan", kind="completed", returncode=0))
+        return 0, None
+
+    status, result = _run_rich_restore(run, show_command_output=False)
+
+    assert status == 0
+    assert result is None
+    live = instances[0]
+    assert isinstance(live, FakeLive)
+    assert live.kwargs["transient"] is True
+    assert live.updates[-1].splitlines() == [
+        "[restore.plan] started",
+        "[restore.plan] completed (exit 0)",
+    ]
 
 
 def test_reset_delegates_only_for_exact_recorded_local_binding(

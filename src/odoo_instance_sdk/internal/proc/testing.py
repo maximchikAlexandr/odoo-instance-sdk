@@ -11,9 +11,11 @@ from . import (
     PreparedProcess,
     PreparedStep,
     ProcessResultLike,
+    StepEvent,
+    StepObserver,
     bounded_process_inputs,
 )
-from .executor import ProcessHandle, ProcessResult
+from .executor import ProcessHandle, ProcessResult, _notify, _notify_output, _safe_error
 
 
 @dataclass(slots=True)
@@ -29,28 +31,60 @@ class RecordingExecutor:
     effective_timeouts: list[float] = field(default_factory=list)
     effective_environment_snapshots: list[tuple[tuple[str, str], ...]] = field(default_factory=list)
 
-    def execute(self, step: PreparedProcess) -> ProcessResultLike:
+    def execute(
+        self,
+        step: PreparedProcess,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessResultLike:
         prepared = cast("PreparedStep", step)
         self.executed.append(prepared)
-        result: ProcessResultLike | None
-        if self.result_factory is not None:
-            result = self.result_factory(prepared)
+        _notify(observer, StepEvent(step_id=prepared.step_id, kind="started"))
+        try:
+            result: ProcessResultLike | None
+            if self.result_factory is not None:
+                result = self.result_factory(prepared)
+            else:
+                result = self.results.get(prepared.step_id, self.default_result)
+                if result is None:
+                    result = ProcessResult(
+                        argv=prepared.argv,
+                        returncode=0,
+                        stdout=b"" if not prepared.text else "",
+                        stderr=b"" if not prepared.text else "",
+                        duration=0.0,
+                        cwd=prepared.cwd,
+                        environment=prepared.environment,
+                    )
+        except Exception as error:
+            _notify(
+                observer,
+                StepEvent(
+                    step_id=prepared.step_id, kind="failed", error=_safe_error(prepared, error)
+                ),
+            )
+            raise
+        if isinstance(result, ProcessResult):
+            if observe_output:
+                _notify_output(observer, prepared, result.stdout, "stdout")
+                _notify_output(observer, prepared, result.stderr, "stderr")
+            returncode = result.returncode
         else:
-            result = self.results.get(prepared.step_id, self.default_result)
-            if result is None:
-                result = ProcessResult(
-                    argv=prepared.argv,
-                    returncode=0,
-                    stdout=b"" if not prepared.text else "",
-                    stderr=b"" if not prepared.text else "",
-                    duration=0.0,
-                    cwd=prepared.cwd,
-                    environment=prepared.environment,
-                )
+            returncode = None
+        _notify(
+            observer,
+            StepEvent(step_id=prepared.step_id, kind="completed", returncode=returncode),
+        )
         return result
 
     def execute_with_deadline(
-        self, step: PreparedProcess, deadline: ExecutionDeadline
+        self,
+        step: PreparedProcess,
+        deadline: ExecutionDeadline,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
     ) -> ProcessResultLike:
         prepared = cast("PreparedStep", step)
         bounded = bounded_process_inputs(prepared, deadline)
@@ -59,12 +93,28 @@ class RecordingExecutor:
         # Keep the result factory and executed ledger entry on the exact
         # captured step.  The bounded values are separate transport inputs,
         # never a substituted PreparedStep.
-        return self.execute(prepared)
+        return self.execute(prepared, observer=observer, observe_output=observe_output)
 
-    def spawn(self, step: PreparedProcess) -> ProcessHandle:
+    def spawn(
+        self,
+        step: PreparedProcess,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessHandle:
         prepared = cast("PreparedStep", step)
         self.spawned.append(prepared)
-        return self.handles[prepared.step_id]
+        _notify(observer, StepEvent(step_id=prepared.step_id, kind="started"))
+        try:
+            return self.handles[prepared.step_id]
+        except Exception as error:
+            _notify(
+                observer,
+                StepEvent(
+                    step_id=prepared.step_id, kind="failed", error=_safe_error(prepared, error)
+                ),
+            )
+            raise
 
 
 __all__ = ["RecordingExecutor"]

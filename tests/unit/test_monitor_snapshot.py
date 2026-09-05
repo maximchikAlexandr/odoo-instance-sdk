@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import sqlite3
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -540,10 +539,10 @@ def test_catalog_error_raises_monitor_error(
     from odoo_instance_sdk.exceptions import BackupCatalogError
     from odoo_instance_sdk.storage import backup_catalog as bc_mod
 
-    def _boom(self: BackupCatalog, **_: object) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
+    def _boom(self: BackupCatalog, **_: object) -> object:
         raise BackupCatalogError("sqlite boom")
 
-    monkeypatch.setattr(bc_mod.BackupCatalog, "list_environments_with_runtimes", _boom)
+    monkeypatch.setattr(bc_mod.BackupCatalog, "_monitor_snapshot_rows", _boom)
 
     catalog = _make_catalog(tmp_path)
     catalog.close()
@@ -565,10 +564,10 @@ def test_catalog_atomic_read_error_aborts_snapshot(
     _seed_env(catalog, _make_env(env_id, worktree_path=str(worktree)))
     catalog.close()
 
-    def boom(self: BackupCatalog, **_: object) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
+    def boom(self: BackupCatalog, **_: object) -> object:
         raise BackupCatalogError("sqlite unavailable")
 
-    monkeypatch.setattr(BackupCatalog, "list_environments_with_runtimes", boom)
+    monkeypatch.setattr(BackupCatalog, "_monitor_snapshot_rows", boom)
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=FakeProcessProvider()
     )

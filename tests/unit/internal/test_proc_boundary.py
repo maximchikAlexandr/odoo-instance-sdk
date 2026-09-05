@@ -11,6 +11,7 @@ from odoo_instance_sdk.internal.proc import (
     DeadlineExceeded,
     ExecutionDeadline,
     PreparedCommand,
+    PreparedProcess,
     PreparedStep,
     ProcessExecutionError,
     ProcessResult,
@@ -251,6 +252,67 @@ def test_recording_executor_returns_typed_result_and_exact_private_step() -> Non
     assert executor.executed == [step]
     assert executor.executed[0].stdin == b"secret input"
     assert executor.executed[0].timeout == 2.0
+
+
+def test_recording_executor_emits_production_lifecycle_and_redacted_output() -> None:
+    secret = "recording-secret"
+    step = PreparedStep(
+        step_id="recording-observed",
+        argv=("tool",),
+        secret_values=(secret,),
+    )
+    expected = ProcessResult(
+        argv=step.argv,
+        returncode=3,
+        stdout=f"out={secret}",
+        stderr="failure",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    events: list[StepEvent] = []
+
+    RecordingExecutor(results={step.step_id: expected}).execute(
+        step, observer=events.append, observe_output=True
+    )
+
+    assert [event.kind for event in events] == ["started", "stdout", "stderr", "completed"]
+    assert events[1].chunk == "out=<redacted>"
+    assert events[2].chunk == "failure"
+    assert events[-1].returncode == 3
+
+
+def test_recording_executor_emits_failed_lifecycle_when_factory_raises() -> None:
+    step = PreparedStep(step_id="recording-failed", argv=("tool",))
+
+    def fail(_step: PreparedProcess) -> ProcessResult:
+        raise RuntimeError("factory failed")
+
+    events: list[StepEvent] = []
+    with pytest.raises(RuntimeError, match="factory failed"):
+        RecordingExecutor(result_factory=fail).execute(step, observer=events.append)
+
+    assert [event.kind for event in events] == ["started", "failed"]
+    assert events[-1].error == "factory failed"
+
+
+def test_recording_executor_emits_failed_lifecycle_when_spawn_handle_is_missing() -> None:
+    secret = "spawn-secret-sentinel"
+    step = PreparedStep(
+        step_id=f"recording-spawn-failed-{secret}",
+        argv=("tool",),
+        secret_values=(secret,),
+    )
+    events: list[StepEvent] = []
+
+    with pytest.raises(KeyError) as raised:
+        RecordingExecutor().spawn(step, observer=events.append)
+
+    assert [event.kind for event in events] == ["started", "failed"]
+    assert events[-1].error is not None
+    assert secret in str(raised.value)
+    assert secret not in events[-1].error
+    assert "<redacted>" in events[-1].error
 
 
 def test_deadline_context_records_exact_step_and_bounded_transport_inputs() -> None:

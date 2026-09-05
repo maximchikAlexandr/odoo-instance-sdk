@@ -68,7 +68,6 @@ from odoo_instance_sdk.internal.automation import (
 from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
-from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.internal.vscode_generate import (
@@ -137,25 +136,143 @@ def __getattr__(name: str) -> CliLazyExport:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def _shell_payload(value: CommandResult) -> dict[str, JsonValue]:
+class _ShellCommandFailure(RuntimeError):
+    """Carry a classified shell failure into the shared CLI envelope."""
+
+    def __init__(
+        self,
+        error_code: str,
+        message: str,
+        *,
+        details: JsonObject | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.details = details
+
+
+def _shell_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
     """Project the framed shell payload without exposing startup logs."""
-    payload = parse_payload(value.stdout) or {}
+    from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
+    user_stdout = payload.get("user_stdout", "")
+    if not isinstance(user_stdout, str):
+        user_stdout = ""
+    truncated = payload.get("truncated") is True
+    if len(user_stdout) > 32768:
+        user_stdout = user_stdout[:32768]
+        truncated = True
     return {
         "result": redacted_projection(payload.get("result"), field="result"),
-        "user_stdout": redacted_projection(payload.get("user_stdout", ""), field="user_stdout"),
+        "user_stdout": redacted_projection(user_stdout, field="user_stdout"),
         "user_error": redacted_projection(payload.get("user_error"), field="error"),
-        "truncated": payload.get("truncated") is True,
+        "truncated": truncated,
     }
+
+
+def _framed_shell_error(payload: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
+    """Return details only for a complete, valid framed user-code error."""
+    if payload is None:
+        return None
+    user_error = payload.get("user_error")
+    if (
+        "result" not in payload
+        or payload["result"] is not None
+        or not isinstance(payload.get("user_stdout"), str)
+        or not isinstance(payload.get("truncated"), bool)
+        or not isinstance(user_error, dict)
+        or not isinstance(user_error.get("type"), str)
+        or not isinstance(user_error.get("message"), str)
+    ):
+        return None
+    details = _shell_payload(payload)
+    if not isinstance(details["user_error"], dict):
+        return None
+    return details
+
+
+def _shell_failure(
+    value: CommandResult,
+    command: str,
+    payload: dict[str, JsonValue] | None,
+) -> _ShellCommandFailure:
+    """Classify a non-zero shell result as user-code or startup failure."""
+    details = _framed_shell_error(payload)
+    if details is not None:
+        error = details["user_error"]
+        assert isinstance(error, dict)
+        error_type = error.get("type", "UserCodeError")
+        error_message = error.get("message", "user code failed")
+        return _ShellCommandFailure(
+            f"{command}_user_code_failed",
+            f"{error_type}: {error_message}",
+            details=details,
+        )
+    stderr = value.stderr.strip()
+    message = f"shell exited {value.returncode}"
+    if stderr:
+        message += f": {stderr}"
+    return _ShellCommandFailure(f"{command}_startup_failed", message)
+
+
+def _run_shell_command(
+    *,
+    command_name: str,
+    build_command: Callable[[], Command[CommandResult]],
+    mode: OutputMode,
+    dry_run: bool,
+    project_result: Callable[[CommandResult, dict[str, JsonValue]], JsonObject],
+    commit: bool,
+) -> int:
+    """Run one captured shell leaf with nonce-bound framing and shared output."""
+    command = build_command()
+
+    def checked_result(value: CommandResult | None) -> JsonObject:
+        if value is None:
+            raise _ShellCommandFailure(
+                f"{command_name}_startup_failed",
+                f"{command_name} did not return a command result",
+            )
+        nonce = command._private_wrapper_nonce()
+        if nonce is None:
+            raise _ShellCommandFailure(
+                f"{command_name}_startup_failed",
+                f"{command_name} wrapper did not provide a nonce-bound frame",
+            )
+        payload = parse_payload(value.stdout, nonce=nonce)
+        if value.returncode != 0:
+            raise _shell_failure(value, command_name, payload)
+        if payload is None:
+            raise _shell_failure(value, command_name, None)
+        return {**project_result(value, _shell_payload(payload)), "commit": commit}
+
+    status, _ = run_or_preview(
+        lambda: command,
+        command_name=command_name,
+        mode=mode,
+        dry_run=dry_run,
+        result=checked_result,
+        rich=_rich_shell_projection,
+    )
+    return status
 
 
 def _rich_shell_projection(document: OutputDocument) -> str:
     """Render eval/exec result, user output, and errors as separate sections."""
-    if not isinstance(document.result, dict):
+    if document.ok:
+        details = document.result
+    elif document.error is not None:
+        details = document.error.details
+    else:
+        details = None
+    if not isinstance(details, dict):
+        if document.error is not None:
+            return document.error.message
         return json.dumps(document.result, ensure_ascii=False, default=str, indent=2)
-    result = document.result.get("result")
-    output = document.result.get("user_stdout", "")
-    error = document.result.get("user_error")
-    truncated = document.result.get("truncated") is True
+    result = details.get("result")
+    output = details.get("user_stdout", "")
+    error = details.get("user_error")
+    truncated = details.get("truncated") is True
     lines = [f"Result: {json.dumps(result, ensure_ascii=False, default=str)}"]
     if isinstance(output, str) and output:
         lines.extend(["Output:", output])
@@ -216,6 +333,8 @@ def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject
 @click.rich_config(  # type: ignore[operator]
     {
         "commands_before_options": True,
+        "color_system": None,
+        "force_terminal": False,
         "command_groups": {
             "cli": [
                 {"name": "Project", "commands": ["init", "doctor"]},
@@ -409,7 +528,7 @@ def init(
 
     existing = manifest_path(resolved_project)
     if existing.is_file() and _handle_existing_manifest(
-        existing, resolved_project, config, no_input, output_mode
+        existing, resolved_project, config, no_input, output_mode, dry_run=dry_run
     ):
         return
 
@@ -445,6 +564,12 @@ def _write_initialized_project(
 ) -> dict[str, JsonValue]:
     """Write init artifacts, then register the canonical project transactionally."""
     write_manifest(project_path, config)
+    _register_initialized_project(project_path)
+    return _manifest_dict(config, postgres_allocated=postgres_allocated)
+
+
+def _register_initialized_project(project_path: Path) -> None:
+    """Idempotently register a project after its valid manifest is available."""
     root, common, identity = _planned_project_identity(project_path)
     project_id = f"project_{identity}"
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -454,7 +579,6 @@ def _write_initialized_project(
         catalog._register_project(project_id, root, common)
     finally:
         catalog.close()
-    return _manifest_dict(config, postgres_allocated=postgres_allocated)
 
 
 def _resolve_postgres_state(
@@ -588,6 +712,8 @@ def _handle_existing_manifest(
     config: ProjectConfig,
     no_input: bool,
     output_mode: OutputMode,
+    *,
+    dry_run: bool,
 ) -> bool:
     try:
         existing_cfg = ProjectConfig.load(resolved_project)
@@ -596,6 +722,8 @@ def _handle_existing_manifest(
     # Comparison excludes ``postgres_allocated`` (dry-run-only flag); both
     # sides default to False here.
     if _manifest_dict(existing_cfg) == _manifest_dict(config):
+        if not dry_run:
+            _register_initialized_project(resolved_project)
         if output_mode is not OutputMode.RICH:
             emit_json_envelope(
                 ok=True,
@@ -830,33 +958,18 @@ def eval_cmd(
     try:
         runtime_context = cli_context.ready_instance(ctx)
         instance = runtime_context.instance
-
-        def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
-            if value is None:
-                return {}
-            returncode = value.returncode
-            shell_payload = _shell_payload(value)
-            if returncode != 0 and shell_payload["user_error"] is None:
-                raise RuntimeError(  # noqa: TRY301
-                    f"shell exited {returncode}: {value.stderr.strip()}"
-                )
-            return {**shell_payload, "returncode": returncode, "commit": commit}
-
-        def build_command() -> Command[CommandResult]:
-            return eval_expression_command(instance, expression, commit=commit)
-
-        status, _outcome = run_or_preview(
-            build_command,
+        status = _run_shell_command(
             command_name="eval",
+            build_command=lambda: eval_expression_command(instance, expression, commit=commit),
             mode=output_mode,
             dry_run=dry_run,
-            result=checked_result,
-            rich=_rich_shell_projection,
+            project_result=lambda _value, payload: {**payload, "returncode": 0},
+            commit=commit,
         )
-        if _outcome is not None and _outcome.returncode != 0:
-            status = 1
     except SystemExit:
         raise
+    except _ShellCommandFailure as e:
+        fail(output_mode, "eval", e, error_code=e.error_code, details=e.details)
     except Exception as e:
         fail(output_mode, "eval", e)
     sys.exit(status)
@@ -871,7 +984,7 @@ def eval_cmd(
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
-def exec_cmd(  # noqa: C901
+def exec_cmd(
     ctx: CliContext,
     script: str,
     script_args: tuple[str, ...],
@@ -894,39 +1007,25 @@ def exec_cmd(  # noqa: C901
     try:
         runtime_context = cli_context.ready_instance(ctx)
         instance = runtime_context.instance
-
-        def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
-            if value is None:
-                return {}
-            returncode = value.returncode
-            shell_payload = _shell_payload(value)
-            if returncode != 0 and shell_payload["user_error"] is None:
-                raise RuntimeError(  # noqa: TRY301
-                    f"shell exited {returncode}: {value.stderr.strip()}"
-                )
-            return {
-                "returncode": returncode,
-                "stdout": shell_payload["user_stdout"],
-                "stderr": sanitize_diagnostic(value.stderr) if value.stderr else "",
-                **shell_payload,
-                "commit": commit,
-            }
-
-        def build_command() -> Command[CommandResult]:
-            return exec_script_command(instance, source, argv=tuple(script_args), commit=commit)
-
-        status, _outcome = run_or_preview(
-            build_command,
+        status = _run_shell_command(
             command_name="exec",
+            build_command=lambda: exec_script_command(
+                instance, source, argv=tuple(script_args), commit=commit
+            ),
             mode=output_mode,
             dry_run=dry_run,
-            result=checked_result,
-            rich=_rich_shell_projection,
+            project_result=lambda value, payload: {
+                "returncode": 0,
+                "stdout": payload["user_stdout"],
+                "stderr": sanitize_diagnostic(value.stderr) if value.stderr else "",
+                **payload,
+            },
+            commit=commit,
         )
-        if _outcome is not None and _outcome.returncode != 0:
-            status = 1
     except SystemExit:
         raise
+    except _ShellCommandFailure as e:
+        fail(output_mode, "exec", e, error_code=e.error_code, details=e.details)
     except Exception as e:
         fail(output_mode, "exec", e)
     sys.exit(status)

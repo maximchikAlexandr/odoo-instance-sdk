@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import (
     DuplicateStepError,
@@ -115,16 +115,33 @@ type PrivateProjection = EnvironmentCheckoutPlan
 
 
 class ProcessExecutor(Protocol):
-    def execute(self, step: PreparedStep) -> ProcessResultLike:
+    def execute(
+        self,
+        step: PreparedStep,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessResultLike:
         """Execute one already-captured step."""
 
-    def spawn(self, step: PreparedStep) -> ProcessHandle:
+    def spawn(
+        self,
+        step: PreparedStep,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessHandle:
         """Spawn one already-captured long-running step."""
 
 
 class DeadlineProcessExecutor(ProcessExecutor, Protocol):
     def execute_with_deadline(
-        self, step: PreparedStep, deadline: ExecutionDeadline
+        self,
+        step: PreparedStep,
+        deadline: ExecutionDeadline,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
     ) -> ProcessResultLike:
         """Execute the exact captured step under a shared monotonic deadline."""
 
@@ -351,22 +368,14 @@ class RunContext(Generic[T]):
     def process_prepared(self, requested: PreparedStep) -> ProcessResultLike:
         """Consume the exact immutable captured step, never a substituted request."""
         captured = self._capture_prepared(requested)
-        if self._observer is None:
-            result = self._executor.execute(captured)
-        else:
-            observer = _BufferedStepObserver(self._observer, captured)
-            try:
-                result = cast("Any", self._executor).execute(
-                    captured,
-                    observer=observer,
-                    observe_output=self._observe_output,
-                )
-            except TypeError as error:
-                if "observer" not in str(error):
-                    raise
-                _notify_fallback(observer, captured, started=True)
-                result = self._executor.execute(captured)
-                _notify_fallback_result(observer, captured, result, self._observe_output)
+        observer = (
+            _BufferedStepObserver(self._observer, captured) if self._observer is not None else None
+        )
+        result = self._executor.execute(
+            captured,
+            observer=observer,
+            observe_output=self._observe_output,
+        )
         self._results[requested.step_id] = result
         return result
 
@@ -382,23 +391,15 @@ class RunContext(Generic[T]):
         """
         deadline_executor = require_deadline_executor(self._executor)
         captured = self._capture_prepared(requested)
-        if self._observer is None:
-            result = deadline_executor.execute_with_deadline(captured, deadline)
-        else:
-            observer = _BufferedStepObserver(self._observer, captured)
-            try:
-                result = cast("Any", deadline_executor).execute_with_deadline(
-                    captured,
-                    deadline,
-                    observer=observer,
-                    observe_output=self._observe_output,
-                )
-            except TypeError as error:
-                if "observer" not in str(error):
-                    raise
-                _notify_fallback(observer, captured, started=True)
-                result = deadline_executor.execute_with_deadline(captured, deadline)
-                _notify_fallback_result(observer, captured, result, self._observe_output)
+        observer = (
+            _BufferedStepObserver(self._observer, captured) if self._observer is not None else None
+        )
+        result = deadline_executor.execute_with_deadline(
+            captured,
+            deadline,
+            observer=observer,
+            observe_output=self._observe_output,
+        )
         self._results[requested.step_id] = result
         return result
 
@@ -415,23 +416,14 @@ class RunContext(Generic[T]):
         step = self._consume(step_id)
         if not isinstance(step, PreparedStep):
             raise UnplannedStepError(step_id, reason="requested step is not a process")
-        if self._observer is None:
-            return self._executor.spawn(step)
-        observer = _BufferedStepObserver(self._observer, step)
-        try:
-            return cast(
-                "ProcessHandle",
-                cast("Any", self._executor).spawn(
-                    step,
-                    observer=observer,
-                    observe_output=self._observe_output,
-                ),
-            )
-        except TypeError as error:
-            if "observer" not in str(error):
-                raise
-            _notify(observer, StepEvent(step_id=step.step_id, kind="started"))
-            return self._executor.spawn(step)
+        observer = (
+            _BufferedStepObserver(self._observer, step) if self._observer is not None else None
+        )
+        return self._executor.spawn(
+            step,
+            observer=observer,
+            observe_output=self._observe_output,
+        )
 
     def action(self, step_id: str) -> PreparedAction:
         step = self._consume(step_id)
@@ -524,50 +516,6 @@ def _notify(observer: StepObserver | None, event: StepEvent) -> None:
         observer(event)
     except Exception:
         return
-
-
-def _notify_fallback(
-    observer: StepObserver,
-    step: PreparedStep,
-    *,
-    started: bool = False,
-) -> None:
-    if started:
-        _notify(observer, StepEvent(step_id=step.step_id, kind="started"))
-
-
-def _notify_fallback_result(
-    observer: StepObserver,
-    step: PreparedStep,
-    result: ProcessResultLike,
-    observe_output: bool,
-) -> None:
-    if observe_output:
-        from .redaction import captured_secret_values, redacted_projection
-
-        for name in ("stdout", "stderr"):
-            value = getattr(result, name, None)
-            if value in (None, "", b""):
-                continue
-            text = value.decode(errors="replace") if isinstance(value, bytes) else str(value)
-            safe = cast(
-                "str",
-                redacted_projection(
-                    text,
-                    secrets=captured_secret_values(step),
-                    field=name,
-                ),
-            )
-            kind: Literal["stdout", "stderr"] = "stdout" if name == "stdout" else "stderr"
-            _notify(observer, StepEvent(step_id=step.step_id, kind=kind, chunk=safe))
-    _notify(
-        observer,
-        StepEvent(
-            step_id=step.step_id,
-            kind="completed",
-            returncode=getattr(result, "returncode", None),
-        ),
-    )
 
 
 def active_context() -> RunContext[PrivateJsonValue] | None:

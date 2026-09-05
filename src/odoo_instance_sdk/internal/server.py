@@ -236,7 +236,7 @@ def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: s
         + ", 'result': None, 'user_stdout': '', 'user_error': None, 'truncated': False}"
     )
     result_emit = (
-        "    if 'result' in globals():\n"
+        "    if _odcli_user_exception is None and 'result' in globals():\n"
         "        _payload.update({'result': _odcli_serialize_result(result)})\n"
     )
     return (

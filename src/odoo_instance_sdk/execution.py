@@ -24,6 +24,7 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.proc import (
     PreparedCommand,
+    PreparedStep,
     PrivateProjection,
     ProcessExecutor,
     ProcessResult,
@@ -36,13 +37,21 @@ from odoo_instance_sdk.internal.proc import (
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
 
-class _PlanObservation(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+class _PlanObservation(
+    msgspec.Struct,
+    frozen=True,
+    forbid_unknown_fields=True,
+    kw_only=True,
+    omit_defaults=True,
+):
     """Immutable, serializable metadata attached to an execution plan."""
 
     kind: str
     scope: str
     step_ids: tuple[str, ...]
     budget_seconds: float
+    read_only: bool = False
+    executed_during_planning: bool = False
 
 
 class PlanPrecondition(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -68,6 +77,7 @@ class SemanticPlanObservation(
     mutations: tuple[str, ...] = ()
     preconditions: tuple[PlanPrecondition, ...] = ()
     warnings: tuple[str, ...] = ()
+    active_sessions: tuple[dict[str, JsonValue], ...] = ()
 
 
 type PlanObservation = JsonValue | _PlanObservation | SemanticPlanObservation
@@ -170,6 +180,8 @@ T = TypeVar("T")
 
 
 class _StoredCommand(Protocol):
+    steps: tuple[Step, ...]
+
     def run(
         self,
         *,
@@ -248,6 +260,16 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
         if prepared is None or prepared.private_projection is None:
             return None
         return prepared.private_projection
+
+    def _private_wrapper_nonce(self) -> str | None:
+        """Return the nonce captured by the command's shell process step."""
+        prepared = _COMMANDS.get(id(self))
+        if prepared is None:
+            raise PlanError("command has no prepared executable snapshot")
+        for step in prepared.steps:
+            if isinstance(step, PreparedStep) and step.wrapper_nonce is not None:
+                return step.wrapper_nonce
+        return None
 
     def __del__(self) -> None:
         _COMMANDS.pop(id(self), None)

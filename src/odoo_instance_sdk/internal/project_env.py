@@ -140,13 +140,7 @@ def _parse(text: str, path: Path) -> dict[str, str]:
 
 def _physical_lines(text: str) -> list[str]:
     """Split only LF/CRLF physical lines."""
-    lines: list[str] = []
-    for line in text.split("\n"):
-        if line.endswith("\r"):
-            lines.append(line[:-1])
-        else:
-            lines.append(line)
-    return lines
+    return [line.removesuffix("\r") for line in text.split("\n")]
 
 
 def _parse_value(value: str, path: Path, line_number: int) -> str:

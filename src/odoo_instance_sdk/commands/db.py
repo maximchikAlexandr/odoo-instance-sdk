@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
+from rich.console import Console
+from rich.text import Text
+
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
@@ -22,12 +25,13 @@ from odoo_instance_sdk.commands.context import (
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputMode,
+    _rich_plan_projection,
     emit_json_envelope,
     fail,
     model_to_dict,
     output_options,
     resolve_output_mode,
-    rich_step_observer,
+    rich_print,
     run_or_preview,
 )
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
@@ -41,9 +45,64 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
-    from odoo_instance_sdk.internal.proc import StepObserver
+    from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
+
+
+def _run_rich_restore(
+    run: Callable[[StepObserver], tuple[int, DatabasePreparationResult | None]],
+    *,
+    show_command_output: bool,
+) -> tuple[int, DatabasePreparationResult | None]:
+    """Render restore lifecycle events without a reusable observer abstraction."""
+    console = Console()
+    lines: list[str] = []
+    update: Callable[[Text], None] | None = None
+
+    def observe(event: StepEvent) -> None:
+        if event.kind in {"stdout", "stderr"} and not show_command_output:
+            return
+        stream = event.kind in {"stdout", "stderr"}
+        suffix = f": {event.chunk or ''}" if stream else ""
+        if event.error:
+            suffix = f": {event.error}"
+        elif event.returncode is not None and not stream:
+            suffix = f" (exit {event.returncode})"
+        from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
+        line = cast(
+            "str",
+            redacted_projection(
+                f"[{event.step_id}] {event.kind}{suffix}",
+                field="error" if event.error else (event.kind if stream else "event"),
+            ),
+        )
+        rendered_lines = line.splitlines() or [line]
+        if stream and len(rendered_lines) > 1:
+            prefix = f"[{event.step_id}] {event.kind}: "
+            rendered_lines = [
+                rendered_lines[0],
+                *(prefix + item for item in rendered_lines[1:]),
+            ]
+        lines.extend(rendered_lines)
+        if update is not None:
+            update(Text("\n".join(lines)))
+        else:
+            for rendered_line in rendered_lines:
+                rich_print(rendered_line)
+
+    if console.is_terminal:
+        from rich.live import Live
+
+        with Live("", console=console, transient=True) as live:
+
+            def update_live(value: Text) -> None:
+                live.update(value, refresh=True)
+
+            update = update_live
+            return run(observe)
+    return run(observe)
 
 
 @click.group(help="Prepare and reset project databases.")
@@ -121,8 +180,10 @@ def db_refresh(
 
     try:
         if restore and output_mode is OutputMode.RICH and not dry_run:
-            with rich_step_observer(show_command_output=show_command_output) as observer:
-                status, _result = run(observer)
+            status, _result = _run_rich_restore(
+                run,
+                show_command_output=show_command_output,
+            )
         else:
             status, _result = run()
     except Exception as exc:
@@ -254,13 +315,9 @@ def db_drop(
 
 def _drop_rich(document: OutputDocument) -> str:
     payload = document.result if isinstance(document.result, dict) else {}
-    if "database" not in payload:
-        return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-    database = payload.get("database", "database")
-    cluster = payload.get("cluster", "bound cluster")
-    if payload.get("dropped") is False:
-        return f"Database {database} was not dropped on {cluster}"
-    return f"Dropped database {database} on {cluster}"
+    if "observations" in payload:
+        return _rich_plan_projection(document)
+    return f"Dropped database {payload['database']} on {payload['cluster']}"
 
 
 def _validate_recorded_database_binding(

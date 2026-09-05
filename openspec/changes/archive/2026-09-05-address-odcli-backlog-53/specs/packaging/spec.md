@@ -50,6 +50,11 @@ React SPA assets SHALL ship in sdist + wheel; Node.js SHALL NOT be required for 
 - **WHEN** installed metadata and CLI imports are inspected
 - **THEN** Rich renders command results, `rich-click>=1.9,<2` renders only Click help/errors, and no Textual or alternate CLI framework is present
 
+#### Scenario: Rich is the sole terminal renderer
+
+- **WHEN** installed metadata and CLI imports are inspected
+- **THEN** Rich provides Table/Live/Status/Progress for command results, `rich-click>=1.9,<2` is confined to Click help/errors, and no Textual or alternate parser/rendering framework is present
+
 #### Scenario: Dashboard extra remains bounded
 
 - **WHEN** `pip install odoo-instance-sdk[dashboard]` is run
@@ -59,3 +64,13 @@ React SPA assets SHALL ship in sdist + wheel; Node.js SHALL NOT be required for 
 
 - **WHEN** `odcli monitor` runs and `fastapi`/`uvicorn` are not installed
 - **THEN** exits `1` with message containing `pip install odoo-instance-sdk[dashboard]`
+
+#### Scenario: metrics extra contains psutil only
+
+- **WHEN** `pip install odoo-instance-sdk[metrics]` is run
+- **THEN** installed extra dependencies are exactly `psutil>=5.9,<7` (plus existing core deps); no FastAPI/Uvicorn
+
+#### Scenario: dashboard extra pulls metrics + fastapi + uvicorn
+
+- **WHEN** `pip install odoo-instance-sdk[dashboard]` is run
+- **THEN** installed extra dependencies include `psutil`, `fastapi`, `uvicorn` (via `metrics` + dashboard-specific)

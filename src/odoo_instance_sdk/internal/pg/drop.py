@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 
 import msgspec
 
@@ -13,8 +13,10 @@ from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import (
     Command,
     ExecutionPlan,
+    JsonValue,
     PlanPrecondition,
     SemanticPlanObservation,
+    _PlanObservation,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
@@ -28,6 +30,7 @@ from odoo_instance_sdk.internal.proc import (
     SubprocessExecutor,
     prepared_command,
 )
+from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 
 if TYPE_CHECKING:
@@ -36,6 +39,7 @@ if TYPE_CHECKING:
 
 _DENIED_DATABASES = frozenset({"postgres", "template0", "template1"})
 _ROOT_STEP = "database.drop"
+_PLANNING_INSPECT_STEP = "database.drop.planning-inspect"
 _INSPECT_STEP = "database.drop.inspect"
 _REVALIDATE_TERMINATE_STEP = "database.drop.revalidate-terminate"
 _TERMINATE_STEP = "database.drop.terminate"
@@ -61,7 +65,22 @@ class DatabaseDropResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     cluster: str
     active_sessions: tuple[DatabaseDropSession, ...] = ()
     terminated_sessions: int = 0
-    dropped: bool = True
+
+
+class DatabaseDropFailureContext(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    """Secret-free active-session identities retained on a safety refusal."""
+
+    active_sessions: tuple[DatabaseDropSession, ...] = ()
+
+
+class DatabaseDropSafetyError(ConfigError):
+    """A database drop was refused because active sessions made it unsafe."""
+
+    def __init__(self, message: str, sessions: tuple[DatabaseDropSession, ...]) -> None:
+        self.failure_context = DatabaseDropFailureContext(active_sessions=sessions)
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,11 +130,19 @@ def _verify_sql(database: str) -> str:
     return f"SELECT NOT EXISTS (SELECT 1 FROM pg_database WHERE datname={literal});"
 
 
-def _safe_session_value(value: object) -> str | None:
+def _safe_session_value(value: JsonValue) -> str | None:
     if value is None:
         return None
-    value = sanitize_last_error(str(value))
-    return value or None
+    if not isinstance(value, str):
+        raise ConfigError("database safety inspection returned invalid session identity")
+    projected = redacted_projection(value, field="error")
+    if not isinstance(projected, str):
+        raise ConfigError("database safety inspection returned invalid session identity")
+    return sanitize_last_error(projected) or None
+
+
+def _session_projection(session: DatabaseDropSession) -> dict[str, JsonValue]:
+    return cast("dict[str, JsonValue]", msgspec.to_builtins(session))
 
 
 def _decode_inspection(result: ProcessResult, database: str) -> _DropInspection:
@@ -137,7 +164,12 @@ def _decode_inspection(result: ProcessResult, database: str) -> _DropInspection:
         raise ConfigError("database safety inspection returned invalid sessions")
     sessions: list[DatabaseDropSession] = []
     for raw in raw_sessions:
-        if not isinstance(raw, dict) or not isinstance(raw.get("pid"), int):
+        if (
+            not isinstance(raw, dict)
+            or not isinstance(raw.get("pid"), int)
+            or isinstance(raw.get("pid"), bool)
+            or raw["pid"] <= 0
+        ):
             raise ConfigError("database safety inspection returned invalid session identity")
         sessions.append(
             DatabaseDropSession(
@@ -240,9 +272,10 @@ def _assert_safe(
     if project_default == database and not force_default:
         raise ConfigError("configured project default requires --force-default")
     if inspection.sessions and (require_no_sessions or not force_connections):
-        raise ConfigError(
+        raise DatabaseDropSafetyError(
             f"database {database!r} has {len(inspection.sessions)} active session(s); "
-            "pass --force-connections to terminate only target sessions"
+            "pass --force-connections to terminate only target sessions",
+            inspection.sessions,
         )
 
 
@@ -283,7 +316,11 @@ def build_database_drop_command(  # noqa: C901
     executor: ProcessExecutor | None = None,
 ) -> Command[DatabaseDropResult]:
     """Build and inspect one exact project-cluster drop command."""
-    database = database_name.strip() if isinstance(database_name, str) else database_name
+    database = database_name
+    if isinstance(database, str) and database != database.strip():
+        raise ConfigError(
+            "database drop requires an exact name without leading or trailing whitespace"
+        )
     validate_db_name(database)
     if database in _DENIED_DATABASES:
         raise ConfigError(f"database {database!r} is protected and cannot be dropped")
@@ -299,10 +336,10 @@ def build_database_drop_command(  # noqa: C901
     if cluster is None:
         raise ConfigError("database drop requires the resolved project's PostgreSQL cluster")
     process_executor = executor or SubprocessExecutor()
-    inspect_step = _inspect_command_step(
-        binding, database=database, step_id=_INSPECT_STEP, timeout=timeout
+    planning_step = _inspect_command_step(
+        binding, database=database, step_id=_PLANNING_INSPECT_STEP, timeout=timeout
     )
-    planning_result = process_executor.execute(inspect_step)
+    planning_result = process_executor.execute(planning_step)
     if not isinstance(planning_result, ProcessResult):
         raise ConfigError("database safety inspection returned no process result")
     inspection = _decode_inspection(planning_result, database)
@@ -324,11 +361,24 @@ def build_database_drop_command(  # noqa: C901
             "record dropped database after absence verification",
         ),
         preconditions=preconditions,
+        active_sessions=tuple(_session_projection(session) for session in inspection.sessions),
         warnings=(
             (f"{len(inspection.sessions)} active target session(s) require force",)
             if inspection.sessions and not force_connections
             else ()
         ),
+    )
+    planning_observation = _PlanObservation(
+        kind="planning-inspection",
+        scope=f"database={database}",
+        step_ids=(_PLANNING_INSPECT_STEP,),
+        budget_seconds=timeout,
+        read_only=True,
+        executed_during_planning=True,
+    )
+
+    inspect_step = _inspect_command_step(
+        binding, database=database, step_id=_INSPECT_STEP, timeout=timeout
     )
 
     revalidate_terminate_step = _inspect_command_step(
@@ -440,7 +490,7 @@ def build_database_drop_command(  # noqa: C901
 
     plan = ExecutionPlan(
         steps=tuple(step.public_projection() for step in prepared_steps),
-        observations=(semantic,),
+        observations=(semantic, planning_observation),
     )
     return Command.from_prepared(
         plan,

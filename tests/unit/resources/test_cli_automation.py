@@ -45,8 +45,18 @@ def _payload_stdout(payload: dict[str, Any], nonce: str = "deadbeefdeadbeef") ->
     return f"noise\n{marker_open} {json.dumps(payload)} {marker_close}\nmore\n"
 
 
-def _command_result(value: CommandResult) -> Command[CommandResult]:
-    return Command.create(ExecutionPlan(), lambda _context: value)
+def _command_result(
+    value: CommandResult, nonce: str = "deadbeefdeadbeef"
+) -> Command[CommandResult]:
+    from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
+
+    step = PreparedStep(step_id="instance.shell_script", argv=("odoo",), wrapper_nonce=nonce)
+    return Command.create(
+        ExecutionPlan(steps=(step.public_projection(),)),
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=RecordingExecutor(results={step.step_id: value}),
+    )
 
 
 def _make_instance(tmp_path: Path) -> OdooInstance:
@@ -107,7 +117,7 @@ def _stub_run_shell_script(
             )
         converter = kwargs.get("result_converter")
         value = converter(result) if converter is not None else result
-        return Command.create(ExecutionPlan(), lambda _context: value)
+        return _command_result(value)
 
     return _impl
 
@@ -767,7 +777,13 @@ class TestDepsVerify:
 
         from odoo_instance_sdk.internal.proc import ProcessResult
 
-        def fake_execute(_executor: Any, step: Any) -> ProcessResult:
+        def fake_execute(
+            _executor: Any,
+            step: Any,
+            *,
+            observer: Any = None,
+            observe_output: bool = False,
+        ) -> ProcessResult:
             rc = 1 if "-c" in step.argv and "import requests" in " ".join(step.argv) else 0
             return ProcessResult(
                 argv=step.argv,
@@ -854,18 +870,19 @@ class TestShellWrapper:
 
     def test_wrapper_retains_structured_user_error_after_long_startup_output(self) -> None:
         payload = self._run(
-            "print('before')\nraise ValueError('failure')\n",
+            "result = 1\nprint('before')\nraise ValueError('failure')\n",
             startup="startup log\n" * 10000,
         )
 
         assert payload["ok"] is False
+        assert payload["result"] is None
         assert payload["user_stdout"] == "before\n"
         assert payload["user_error"] == {
             "type": "ValueError",
             "message": "failure",
             "source": {
                 "file": "<odcli-shell-script>",
-                "line": 2,
+                "line": 3,
                 "text": "raise ValueError('failure')",
             },
         }
@@ -884,7 +901,11 @@ class TestShellWrapper:
                 {
                     "result": {"password": "secret", "safe": "ok"},
                     "user_stdout": "password=secret\n",
-                    "user_error": None,
+                    "user_error": {
+                        "type": "ValueError",
+                        "message": "password=secret",
+                        "source": {"text": "token=secret"},
+                    },
                     "truncated": False,
                 }
             ),
@@ -892,10 +913,17 @@ class TestShellWrapper:
             duration=0.0,
         )
 
-        projected = _shell_payload(value)
+        payload = parse_payload(value.stdout, nonce="deadbeefdeadbeef")
+        assert payload is not None
+        projected = _shell_payload(payload)
 
         assert projected["result"] == {"password": "<redacted>", "safe": "ok"}
         assert projected["user_stdout"] == "password=<redacted>\n"
+        assert projected["user_error"] == {
+            "type": "ValueError",
+            "message": "password=<redacted>",
+            "source": {"text": "token=<redacted>"},
+        }
 
 
 class TestCliEval:
@@ -998,11 +1026,181 @@ class TestCliEval:
 
         assert result.exit_code == 1
         envelope = json.loads(result.output)
-        assert envelope["ok"] is True
-        assert envelope["data"]["result"] is None
-        assert envelope["data"]["user_stdout"] == "before\n"
-        assert envelope["data"]["user_error"]["type"] == "ValueError"
-        assert envelope["data"]["user_error"]["message"] == "failure"
+        assert envelope["ok"] is False
+        assert "result" not in envelope
+        assert "data" not in envelope
+        assert envelope["error"]["code"] == "eval_user_code_failed"
+        assert set(envelope["error"]["details"]) == {
+            "result",
+            "user_stdout",
+            "user_error",
+            "truncated",
+        }
+        assert envelope["error"]["details"]["result"] is None
+        assert envelope["error"]["details"]["user_stdout"] == "before\n"
+        assert envelope["error"]["details"]["user_error"]["type"] == "ValueError"
+        assert envelope["error"]["details"]["user_error"]["message"] == "failure"
+        assert envelope["error"]["details"]["truncated"] is False
+
+    def test_cli_eval_startup_failure_has_no_fabricated_details(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from click.testing import CliRunner
+
+        from odoo_instance_sdk.resources import environment as environment_module
+
+        monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18087)
+        opts = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
+        )
+        env = env_client.environments.checkout(project_manifest, "feat/eval-startup", options=opts)
+        with (
+            patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script_command",
+                return_value=_command_result(
+                    CommandResult(
+                        args=[],
+                        returncode=1,
+                        stdout="startup output without a nonce frame",
+                        stderr="Odoo failed to start: token=secret",
+                        duration=0.0,
+                    )
+                ),
+            ),
+        ):
+            result = CliRunner().invoke(cli, ["--env", str(env.id), "eval", "1", "--json"])
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is False
+        assert "result" not in envelope
+        assert "data" not in envelope
+        assert envelope["error"]["code"] == "eval_startup_failed"
+        assert "details" not in envelope["error"]
+        assert "<redacted>" in envelope["error"]["message"]
+
+    def test_cli_exec_user_error_uses_command_specific_failure_envelope(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from click.testing import CliRunner
+
+        from odoo_instance_sdk.resources import environment as environment_module
+
+        monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18088)
+        opts = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
+        )
+        env = env_client.environments.checkout(project_manifest, "feat/exec-error", options=opts)
+        script = tmp_path / "failing.py"
+        script.write_text("print('before')\nraise ValueError('failure')\n")
+        with (
+            patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script_command",
+                return_value=_command_result(
+                    CommandResult(
+                        args=[],
+                        returncode=1,
+                        stdout=_payload_stdout(
+                            {
+                                "ok": False,
+                                "result": None,
+                                "user_stdout": "before\n",
+                                "user_error": {
+                                    "type": "ValueError",
+                                    "message": "failure",
+                                    "source": {
+                                        "file": "<odcli-shell-script>",
+                                        "line": 2,
+                                        "text": "raise ValueError('failure')",
+                                    },
+                                },
+                                "truncated": False,
+                            }
+                        ),
+                        stderr="Traceback: startup noise",
+                        duration=0.0,
+                    )
+                ),
+            ),
+        ):
+            result = CliRunner().invoke(
+                cli,
+                ["--env", str(env.id), "exec", "--json", str(script), "--", "arg1"],
+            )
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is False
+        assert "result" not in envelope
+        assert "data" not in envelope
+        assert envelope["error"]["code"] == "exec_user_code_failed"
+        assert set(envelope["error"]["details"]) == {
+            "result",
+            "user_stdout",
+            "user_error",
+            "truncated",
+        }
+
+    def test_cli_exec_startup_failure_has_no_details(self) -> None:
+        from odoo_instance_sdk.cli import _shell_failure
+
+        value = CommandResult(
+            args=[],
+            returncode=1,
+            stdout="not framed",
+            stderr="startup failed",
+            duration=0.0,
+        )
+        failure = _shell_failure(
+            value, "exec", parse_payload(value.stdout, nonce="deadbeefdeadbeef")
+        )
+
+        assert failure.error_code == "exec_startup_failed"
+        assert failure.details is None
+
+    @pytest.mark.parametrize("command", ["eval", "exec"])
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            _payload_stdout({"ok": False, "result": None}, nonce="foreignnonce1234"),
+            "__ODCLI_PAYLOAD__deadbeefdeadbeef__ {malformed} __END_PAYLOAD__deadbeefdeadbeef__",
+        ],
+    )
+    def test_foreign_or_malformed_frames_are_startup_failures_without_details(
+        self, command: str, stdout: str
+    ) -> None:
+        from odoo_instance_sdk.cli import _shell_failure
+
+        value = CommandResult(
+            args=[],
+            returncode=1,
+            stdout=stdout,
+            stderr="startup noise",
+            duration=0.0,
+        )
+        failure = _shell_failure(
+            value, command, parse_payload(value.stdout, nonce="deadbeefdeadbeef")
+        )
+
+        assert failure.error_code == f"{command}_startup_failed"
+        assert failure.details is None
 
 
 class TestCliModuleUpdate:
@@ -1122,20 +1320,80 @@ class TestCliExecStdin:
                 CommandResult(
                     args=[],
                     returncode=0,
-                    stdout=_payload_stdout({"ok": True, "commit": False}),
+                    stdout=_payload_stdout(
+                        {
+                            "ok": True,
+                            "commit": False,
+                            "result": None,
+                            "user_stdout": "hi\n",
+                            "user_error": None,
+                            "truncated": False,
+                        }
+                    ),
                     stderr="",
                     duration=0.0,
                 )
             )
             result = runner.invoke(
                 cli,
-                ["--env", str(env.id), "exec", "-", "--", "arg1"],
+                ["--env", str(env.id), "exec", "--json", "-", "--", "arg1"],
                 input="print('hi')\n",
             )
         assert result.exit_code == 0
+        envelope = json.loads(result.output)
+        assert envelope["data"]["result"] is None
+        assert envelope["data"]["user_stdout"] == "hi\n"
         _src, kwargs = mock_run.call_args
         assert _src[0] == "print('hi')\n"
         assert list(kwargs["argv"]) == ["arg1"]
+
+    def test_exec_startup_failure_is_classified_without_details(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from click.testing import CliRunner
+
+        from odoo_instance_sdk.resources import environment as environment_module
+
+        monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18089)
+        opts = EnvironmentCheckoutOptions(
+            python=str(fake_python),
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            odoo_bin=fake_python.parent / "odoo-bin",
+            source_database="comerta",
+        )
+        env = env_client.environments.checkout(project_manifest, "feat/exec-startup", options=opts)
+        script = tmp_path / "startup.py"
+        script.write_text("print('never reached')\n")
+        with (
+            patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
+            patch(
+                "odoo_instance_sdk.resources.instance.OdooInstance.run_shell_script_command",
+                return_value=_command_result(
+                    CommandResult(
+                        args=[],
+                        returncode=1,
+                        stdout="startup output without a nonce frame",
+                        stderr="startup failed",
+                        duration=0.0,
+                    )
+                ),
+            ),
+        ):
+            result = CliRunner().invoke(
+                cli,
+                ["--env", str(env.id), "exec", "--json", str(script)],
+            )
+
+        assert result.exit_code == 1
+        envelope = json.loads(result.output)
+        assert envelope["ok"] is False
+        assert envelope["error"]["code"] == "exec_startup_failed"
+        assert "details" not in envelope["error"]
 
 
 class TestCliModuleList:

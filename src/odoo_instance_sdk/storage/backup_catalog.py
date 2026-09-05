@@ -46,6 +46,15 @@ class CopyJournalStage(StrEnum):
     BACKUP_DELETED = "backup_deleted"
 
 
+@dataclass(frozen=True, slots=True)
+class MonitorCatalogSnapshot:
+    """One transactionally consistent monitor catalog read."""
+
+    environments: tuple[tuple[sqlite3.Row, sqlite3.Row | None], ...]
+    projects: tuple[sqlite3.Row, ...]
+    project_runtimes: tuple[sqlite3.Row, ...]
+
+
 def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
@@ -61,12 +70,6 @@ def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
 class BackupCatalog:
     db_path: Path
     _conn: sqlite3.Connection = field(init=False, repr=False)
-    # Filled by the atomic monitor read and consumed by the monitor collector.
-    # Keeping this private preserves the long-standing environment-only API.
-    _last_monitor_projects: list[sqlite3.Row] = field(init=False, repr=False, default_factory=list)
-    _last_monitor_project_runtimes: list[sqlite3.Row] = field(
-        init=False, repr=False, default_factory=list
-    )
 
     def __post_init__(self) -> None:
         try:
@@ -494,9 +497,6 @@ class BackupCatalog:
                      updated_at=excluded.updated_at""",
                 (project_id, str(root), str(common)),
             )
-
-    def _list_monitor_projects(self) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
-        return self._last_monitor_projects, self._last_monitor_project_runtimes
 
     def _migrate_v7_one_active_port(self, conn: sqlite3.Connection) -> None:
         # A port is a global host resource.  Never silently mark a live
@@ -1128,13 +1128,12 @@ class BackupCatalog:
     def list_environments_with_runtimes(
         self, *, include_removed: bool = False
     ) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
-        """Read monitor rows, backup metadata, and runtime identities atomically.
+        """Return the historic environment-only projection of the monitor read."""
+        return list(self._monitor_snapshot_rows(include_removed=include_removed).environments)
 
-        The private project rows captured during this same transaction are
-        available to the monitor through ``_list_monitor_projects``.  The
-        return value intentionally remains the historic environment-only
-        shape for compatibility.
-        """
+    @_translate_sqlite_error
+    def _monitor_snapshot_rows(self, *, include_removed: bool = False) -> MonitorCatalogSnapshot:
+        """Read all monitor catalog inputs in one transactionally typed snapshot."""
         self._conn.execute("BEGIN")
         try:
             state_clause = "" if include_removed else " WHERE e.state != 'removed'"
@@ -1146,10 +1145,8 @@ class BackupCatalog:
             runtimes = self._conn.execute(
                 "SELECT * FROM runtime WHERE owner_kind = 'environment' ORDER BY owner_id"
             ).fetchall()
-            self._last_monitor_projects = self._conn.execute(
-                "SELECT * FROM projects ORDER BY project_id"
-            ).fetchall()
-            self._last_monitor_project_runtimes = self._conn.execute(
+            projects = self._conn.execute("SELECT * FROM projects ORDER BY project_id").fetchall()
+            project_runtimes = self._conn.execute(
                 "SELECT * FROM runtime WHERE owner_kind = 'project' ORDER BY owner_id"
             ).fetchall()
             self._conn.execute("COMMIT")
@@ -1157,7 +1154,11 @@ class BackupCatalog:
             self._conn.execute("ROLLBACK")
             raise
         by_environment = {str(runtime["owner_id"]): runtime for runtime in runtimes}
-        return [(row, by_environment.get(str(row["id"]))) for row in environments]
+        return MonitorCatalogSnapshot(
+            environments=tuple((row, by_environment.get(str(row["id"]))) for row in environments),
+            projects=tuple(projects),
+            project_runtimes=tuple(project_runtimes),
+        )
 
     @_translate_sqlite_error
     def _upsert_runtime(
