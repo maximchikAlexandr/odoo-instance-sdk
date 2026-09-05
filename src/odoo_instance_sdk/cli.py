@@ -151,11 +151,12 @@ class _ShellCommandFailure(RuntimeError):
         self.details = details
 
 
-def _shell_payload(value: CommandResult) -> dict[str, JsonValue]:
+def _shell_payload(value: CommandResult, nonce: str) -> dict[str, JsonValue]:
     """Project the framed shell payload without exposing startup logs."""
     from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 
-    payload = parse_payload(value.stdout) or {}
+    payload = parse_payload(value.stdout, nonce=nonce)
+    payload = payload or {}
     user_stdout = payload.get("user_stdout", "")
     if not isinstance(user_stdout, str):
         user_stdout = ""
@@ -171,9 +172,9 @@ def _shell_payload(value: CommandResult) -> dict[str, JsonValue]:
     }
 
 
-def _framed_shell_error(value: CommandResult) -> dict[str, JsonValue] | None:
+def _framed_shell_error(value: CommandResult, nonce: str) -> dict[str, JsonValue] | None:
     """Return details only for a complete, valid framed user-code error."""
-    payload = parse_payload(value.stdout)
+    payload = parse_payload(value.stdout, nonce=nonce)
     if payload is None:
         return None
     user_error = payload.get("user_error")
@@ -187,15 +188,15 @@ def _framed_shell_error(value: CommandResult) -> dict[str, JsonValue] | None:
         or not isinstance(user_error.get("message"), str)
     ):
         return None
-    details = _shell_payload(value)
+    details = _shell_payload(value, nonce)
     if not isinstance(details["user_error"], dict):
         return None
     return details
 
 
-def _shell_failure(value: CommandResult, command: str) -> _ShellCommandFailure:
+def _shell_failure(value: CommandResult, command: str, nonce: str) -> _ShellCommandFailure:
     """Classify a non-zero shell result as user-code or startup failure."""
-    details = _framed_shell_error(value)
+    details = _framed_shell_error(value, nonce)
     if details is not None:
         error = details["user_error"]
         assert isinstance(error, dict)
@@ -211,6 +212,53 @@ def _shell_failure(value: CommandResult, command: str) -> _ShellCommandFailure:
     if stderr:
         message += f": {stderr}"
     return _ShellCommandFailure(f"{command}_startup_failed", message)
+
+
+def _run_shell_command(
+    *,
+    command_name: str,
+    build_command: Callable[[], Command[CommandResult]],
+    mode: OutputMode,
+    dry_run: bool,
+    project_result: Callable[[CommandResult, dict[str, JsonValue]], JsonObject],
+    commit: bool,
+) -> int:
+    """Run one captured shell leaf with nonce-bound framing and shared output."""
+    command: Command[CommandResult] | None = None
+
+    def build() -> Command[CommandResult]:
+        nonlocal command
+        command = build_command()
+        return command
+
+    def checked_result(value: CommandResult | None) -> JsonObject:
+        if value is None:
+            raise _ShellCommandFailure(
+                f"{command_name}_startup_failed",
+                f"{command_name} did not return a command result",
+            )
+        assert command is not None
+        nonce = command._private_wrapper_nonce()
+        if nonce is None:
+            raise _ShellCommandFailure(
+                f"{command_name}_startup_failed",
+                f"{command_name} wrapper did not provide a nonce-bound frame",
+            )
+        if parse_payload(value.stdout, nonce=nonce) is None:
+            raise _shell_failure(value, command_name, nonce)
+        if value.returncode != 0:
+            raise _shell_failure(value, command_name, nonce)
+        return {**project_result(value, _shell_payload(value, nonce)), "commit": commit}
+
+    status, _ = run_or_preview(
+        build,
+        command_name=command_name,
+        mode=mode,
+        dry_run=dry_run,
+        result=checked_result,
+        rich=_rich_shell_projection,
+    )
+    return status
 
 
 def _rich_shell_projection(document: OutputDocument) -> str:
@@ -482,7 +530,7 @@ def init(
 
     existing = manifest_path(resolved_project)
     if existing.is_file() and _handle_existing_manifest(
-        existing, resolved_project, config, no_input, output_mode
+        existing, resolved_project, config, no_input, output_mode, dry_run=dry_run
     ):
         return
 
@@ -518,6 +566,12 @@ def _write_initialized_project(
 ) -> dict[str, JsonValue]:
     """Write init artifacts, then register the canonical project transactionally."""
     write_manifest(project_path, config)
+    _register_initialized_project(project_path)
+    return _manifest_dict(config, postgres_allocated=postgres_allocated)
+
+
+def _register_initialized_project(project_path: Path) -> None:
+    """Idempotently register a project after its valid manifest is available."""
     root, common, identity = _planned_project_identity(project_path)
     project_id = f"project_{identity}"
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -527,7 +581,6 @@ def _write_initialized_project(
         catalog._register_project(project_id, root, common)
     finally:
         catalog.close()
-    return _manifest_dict(config, postgres_allocated=postgres_allocated)
 
 
 def _resolve_postgres_state(
@@ -661,6 +714,8 @@ def _handle_existing_manifest(
     config: ProjectConfig,
     no_input: bool,
     output_mode: OutputMode,
+    *,
+    dry_run: bool,
 ) -> bool:
     try:
         existing_cfg = ProjectConfig.load(resolved_project)
@@ -669,6 +724,8 @@ def _handle_existing_manifest(
     # Comparison excludes ``postgres_allocated`` (dry-run-only flag); both
     # sides default to False here.
     if _manifest_dict(existing_cfg) == _manifest_dict(config):
+        if not dry_run:
+            _register_initialized_project(resolved_project)
         if output_mode is not OutputMode.RICH:
             emit_json_envelope(
                 ok=True,
@@ -903,29 +960,14 @@ def eval_cmd(
     try:
         runtime_context = cli_context.ready_instance(ctx)
         instance = runtime_context.instance
-
-        def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
-            if value is None:
-                return {}
-            returncode = value.returncode
-            shell_payload = _shell_payload(value)
-            if returncode != 0:
-                raise _shell_failure(value, "eval")  # noqa: TRY301
-            return {**shell_payload, "returncode": returncode, "commit": commit}
-
-        def build_command() -> Command[CommandResult]:
-            return eval_expression_command(instance, expression, commit=commit)
-
-        status, _outcome = run_or_preview(
-            build_command,
+        status = _run_shell_command(
             command_name="eval",
+            build_command=lambda: eval_expression_command(instance, expression, commit=commit),
             mode=output_mode,
             dry_run=dry_run,
-            result=checked_result,
-            rich=_rich_shell_projection,
+            project_result=lambda _value, payload: {**payload, "returncode": 0},
+            commit=commit,
         )
-        if _outcome is not None and _outcome.returncode != 0:
-            status = 1
     except SystemExit:
         raise
     except _ShellCommandFailure as e:
@@ -944,7 +986,7 @@ def eval_cmd(
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
-def exec_cmd(  # noqa: C901
+def exec_cmd(
     ctx: CliContext,
     script: str,
     script_args: tuple[str, ...],
@@ -967,35 +1009,21 @@ def exec_cmd(  # noqa: C901
     try:
         runtime_context = cli_context.ready_instance(ctx)
         instance = runtime_context.instance
-
-        def checked_result(value: CommandResult | None) -> dict[str, JsonValue]:
-            if value is None:
-                return {}
-            returncode = value.returncode
-            shell_payload = _shell_payload(value)
-            if returncode != 0:
-                raise _shell_failure(value, "exec")  # noqa: TRY301
-            return {
-                "returncode": returncode,
-                "stdout": shell_payload["user_stdout"],
-                "stderr": sanitize_diagnostic(value.stderr) if value.stderr else "",
-                **shell_payload,
-                "commit": commit,
-            }
-
-        def build_command() -> Command[CommandResult]:
-            return exec_script_command(instance, source, argv=tuple(script_args), commit=commit)
-
-        status, _outcome = run_or_preview(
-            build_command,
+        status = _run_shell_command(
             command_name="exec",
+            build_command=lambda: exec_script_command(
+                instance, source, argv=tuple(script_args), commit=commit
+            ),
             mode=output_mode,
             dry_run=dry_run,
-            result=checked_result,
-            rich=_rich_shell_projection,
+            project_result=lambda value, payload: {
+                "returncode": 0,
+                "stdout": payload["user_stdout"],
+                "stderr": sanitize_diagnostic(value.stderr) if value.stderr else "",
+                **payload,
+            },
+            commit=commit,
         )
-        if _outcome is not None and _outcome.returncode != 0:
-            status = 1
     except SystemExit:
         raise
     except _ShellCommandFailure as e:

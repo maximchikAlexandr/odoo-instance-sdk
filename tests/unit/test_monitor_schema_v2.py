@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import uuid
 from pathlib import Path
 
@@ -271,16 +270,14 @@ def test_monitor_planning_calls_atomic_catalog_once(
     seed_env(catalog, make_env(str(uuid.uuid4())))
     catalog.close()
     patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-    original = BackupCatalog.list_environments_with_runtimes
+    original = BackupCatalog._monitor_snapshot_rows
     calls: list[bool] = []
 
-    def list_once(
-        self: BackupCatalog, *, include_removed: bool = False
-    ) -> list[tuple[sqlite3.Row, sqlite3.Row | None]]:
+    def list_once(self: BackupCatalog, *, include_removed: bool = False) -> object:
         calls.append(include_removed)
         return original(self, include_removed=include_removed)
 
-    monkeypatch.setattr(BackupCatalog, "list_environments_with_runtimes", list_once)
+    monkeypatch.setattr(BackupCatalog, "_monitor_snapshot_rows", list_once)
     EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3").snapshot(include_removed=True)
 
     assert calls == [True]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 
@@ -60,6 +61,53 @@ def test_roundtrip_write_read_secrets_free(tmp_path: Path) -> None:
     assert loaded.to_manifest() == cfg.to_manifest()
     assert ".odcli/.env" in (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert loaded.repository_root == tmp_path.resolve()
+
+
+def test_manifest_ignore_refuses_outward_symlink_without_mutating_target(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.gitignore"
+    outside.write_text("keep-me\n", encoding="utf-8")
+    (tmp_path / ".gitignore").symlink_to(outside)
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
+
+    with pytest.raises(OSError):
+        write_manifest(tmp_path, cfg)
+
+    assert outside.read_text(encoding="utf-8") == "keep-me\n"
+    assert not (tmp_path / ".odcli" / "project.toml").exists()
+
+
+def test_manifest_ignore_refuses_check_write_race_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ignore = tmp_path / ".gitignore"
+    ignore.write_text("keep-me\n", encoding="utf-8")
+    outside = tmp_path / "outside.gitignore"
+    outside.write_text("outside\n", encoding="utf-8")
+    real_stat = os.stat
+    calls = 0
+
+    def race(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal calls
+        if path == ".gitignore" and follow_symlinks is False:
+            calls += 1
+            if calls == 2:
+                ignore.unlink()
+                ignore.symlink_to(outside)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(os, "stat", race)
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
+
+    with pytest.raises(OSError):
+        write_manifest(tmp_path, cfg)
+
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+    assert ignore.is_symlink()
 
 
 def test_manifest_refuses_secrets() -> None:

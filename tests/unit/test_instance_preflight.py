@@ -15,8 +15,10 @@ from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
     ProcessHandle,
+    ProcessResultLike,
     ProcessSpawnError,
     RecordingExecutor,
+    StepObserver,
 )
 from odoo_instance_sdk.models import PostgresClusterState, StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
@@ -185,7 +187,14 @@ def test_foreground_spawn_failure_preserves_typed_error_and_cleans_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FailingExecutor(RecordingExecutor):
-        def spawn(self, step: PreparedProcess) -> ProcessHandle:
+        def spawn(
+            self,
+            step: PreparedProcess,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessHandle:
+            del observer, observe_output
             self.spawned.append(cast("PreparedStep", step))
             raise ProcessSpawnError(step.argv, "spawn denied", duration=0.0)
 
@@ -211,11 +220,25 @@ def test_preflight_event_precedes_foreground_shell_and_script_spawn() -> None:
     instance = _make_instance(cluster=_EventCluster(events))
 
     class EventExecutor(RecordingExecutor):
-        def spawn(self, step: PreparedProcess) -> ProcessHandle:
+        def spawn(
+            self,
+            step: PreparedProcess,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessHandle:
+            del observer, observe_output
             events.append("spawn")
             return super().spawn(step)
 
-        def execute(self, step: PreparedProcess) -> object:
+        def execute(
+            self,
+            step: PreparedProcess,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessResultLike:
+            del observer, observe_output
             events.append("shell-spawn")
             return super().execute(step)
 
@@ -239,7 +262,14 @@ def test_preflight_event_precedes_exclusive_script_operation() -> None:
     instance = _make_instance(cluster=_EventCluster(events))
 
     class EventExecutor(RecordingExecutor):
-        def execute(self, step: object) -> object:
+        def execute(
+            self,
+            step: object,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessResultLike:
+            del observer, observe_output
             events.append("exclusive-spawn")
             return super().execute(step)  # type: ignore[arg-type]
 

@@ -68,6 +68,13 @@ def _executor(
     template: bool = False,
     sessions: list[dict[str, object]] | None = None,
     revalidation_sessions: list[dict[str, object]] | None = None,
+    revalidate_terminate_stdout: str | None = None,
+    revalidate_terminate_returncode: int = 0,
+    revalidate_drop_stdout: str | None = None,
+    revalidate_drop_returncode: int = 0,
+    drop_returncode: int = 0,
+    verify_stdout: str = "t\n",
+    verify_returncode: int = 0,
 ) -> RecordingExecutor:
     initial = _inspection(exists=exists, template=template, sessions=sessions)
     checked = _inspection(
@@ -78,16 +85,26 @@ def _executor(
 
     def result_factory(step: object) -> ProcessResult:
         step_id = step.step_id  # type: ignore[attr-defined]
-        if step_id.endswith("inspect"):
+        if step_id in {"database.drop.planning-inspect", "database.drop.inspect"}:
             return _result(step, stdout=initial)
         if step_id.endswith("revalidate-terminate"):
-            return _result(step, stdout=initial)
+            return _result(
+                step,
+                stdout=revalidate_terminate_stdout or initial,
+                returncode=revalidate_terminate_returncode,
+            )
         if step_id.endswith("revalidate-drop"):
-            return _result(step, stdout=checked)
+            return _result(
+                step,
+                stdout=revalidate_drop_stdout or checked,
+                returncode=revalidate_drop_returncode,
+            )
         if step_id.endswith("verify"):
-            return _result(step, stdout="t\n")
+            return _result(step, stdout=verify_stdout, returncode=verify_returncode)
         if step_id.endswith("terminate"):
             return _result(step, stdout="1\n")
+        if step_id.endswith("execute"):
+            return _result(step, returncode=drop_returncode)
         return _result(step)
 
     return RecordingExecutor(result_factory=result_factory)
@@ -107,6 +124,14 @@ def test_drop_plan_is_maintenance_bound_and_redacts_credentials(
     public = repr(command.plan)
     assert "private-password" not in public
     assert command.plan.observations[0].preconditions[0].status == "passed"  # type: ignore[union-attr]
+    planning = next(
+        observation
+        for observation in command.plan.observations
+        if getattr(observation, "kind", None) == "planning-inspection"
+    )
+    assert planning.read_only is True  # type: ignore[union-attr]
+    assert planning.executed_during_planning is True  # type: ignore[union-attr]
+    assert planning.step_ids == ("database.drop.planning-inspect",)  # type: ignore[union-attr]
     assert [step.step_id for step in command.plan.steps] == [
         "database.drop",
         "database.drop.inspect",
@@ -134,7 +159,7 @@ def test_drop_records_catalogue_only_after_verified_absence(
     assert result.terminated_sessions == 0
     catalog.record_database_dropped.assert_called_once_with("127.0.0.1", 5432, "feature_db")
     assert [step.step_id for step in executor.executed] == [
-        "database.drop.inspect",
+        "database.drop.planning-inspect",
         "database.drop.inspect",
         "database.drop.revalidate-drop",
         "database.drop.execute",
@@ -158,7 +183,7 @@ def test_drop_requires_connection_force_and_never_mutates_on_refusal(
     with pytest.raises(ConfigError, match="active session"):
         command.run()
     assert [step.step_id for step in executor.executed] == [
-        "database.drop.inspect",
+        "database.drop.planning-inspect",
         "database.drop.inspect",
     ]
     catalog.record_database_dropped.assert_not_called()
@@ -214,7 +239,7 @@ def test_forced_drop_terminates_only_target_and_revalidates_before_drop(
 
     assert result.terminated_sessions == 1
     assert [step.step_id for step in executor.executed] == [
-        "database.drop.inspect",
+        "database.drop.planning-inspect",
         "database.drop.inspect",
         "database.drop.revalidate-terminate",
         "database.drop.terminate",
@@ -231,7 +256,7 @@ def test_forced_drop_terminates_only_target_and_revalidates_before_drop(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("database", ["", "*", "postgres", "template0", "template1"])
+@pytest.mark.parametrize("database", ["", "*", " demo ", "postgres", "template0", "template1"])
 def test_drop_rejects_invalid_or_protected_names(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path, database: str
 ) -> None:
@@ -255,4 +280,140 @@ def test_drop_fails_closed_when_pre_drop_revalidation_changes(
     with pytest.raises(ConfigError, match="active session"):
         command.run()
     assert not any(step.step_id.endswith("execute") for step in executor.executed)
+    catalog.record_database_dropped.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "message"),
+    [
+        (_inspection(exists=False), 0, "does not exist"),
+        (_inspection(template=True), 0, "template"),
+        ("not-json", 0, "invalid data"),
+        ("", 1, "inspection failed"),
+    ],
+)
+def test_drop_refuses_every_termination_revalidation_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    stdout: str,
+    returncode: int,
+    message: str,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    sessions = [{"pid": 7, "user": "odoo"}]
+    instance = _instance(project_manifest)
+    catalog = cast("Any", instance._client.get_catalog())
+    executor = _executor(
+        sessions=sessions,
+        revalidate_terminate_stdout=stdout,
+        revalidate_terminate_returncode=returncode,
+    )
+    command = build_database_drop_command(
+        instance,
+        project_manifest,
+        "feature_db",
+        force_connections=True,
+        executor=executor,
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        command.run()
+    assert not any(step.step_id == "database.drop.terminate" for step in executor.executed)
+    assert not any(step.step_id.endswith("execute") for step in executor.executed)
+    catalog.record_database_dropped.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "message"),
+    [
+        (_inspection(exists=False), 0, "does not exist"),
+        (_inspection(template=True), 0, "template"),
+        (_inspection(sessions=[{"pid": 9, "user": "other"}]), 0, "active session"),
+        ("not-json", 0, "invalid data"),
+        ("", 1, "inspection failed"),
+    ],
+)
+def test_drop_refuses_every_drop_revalidation_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    stdout: str,
+    returncode: int,
+    message: str,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    instance = _instance(project_manifest)
+    catalog = cast("Any", instance._client.get_catalog())
+    executor = _executor(
+        revalidate_drop_stdout=stdout,
+        revalidate_drop_returncode=returncode,
+    )
+    command = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=executor
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        command.run()
+    assert not any(step.step_id.endswith("execute") for step in executor.executed)
+    catalog.record_database_dropped.assert_not_called()
+
+
+@pytest.mark.unit
+def test_drop_fails_closed_when_configured_default_changes_before_execution(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    manifest = project_manifest / ".odcli" / "project.toml"
+    content = manifest.read_text(encoding="utf-8").replace(
+        'default_source_database = "comerta"', 'default_source_database = "feature_db"'
+    )
+    manifest.write_text(content, encoding="utf-8")
+    instance = _instance(project_manifest)
+    catalog = cast("Any", instance._client.get_catalog())
+    executor = _executor()
+    command = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=executor
+    )
+
+    with pytest.raises(ConfigError, match="force-default"):
+        command.run()
+    assert not any(step.step_id.endswith("execute") for step in executor.executed)
+    catalog.record_database_dropped.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("drop_returncode", "verify_stdout", "verify_returncode", "message"),
+    [
+        (1, "", 0, "DROP DATABASE failed"),
+        (0, "f\n", 0, "still exists"),
+        (0, "", 1, "absence verification failed"),
+        (0, "not-bool\n", 0, "still exists"),
+    ],
+)
+def test_drop_does_not_record_failed_mutation_or_postcondition(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    drop_returncode: int,
+    verify_stdout: str,
+    verify_returncode: int,
+    message: str,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    instance = _instance(project_manifest)
+    catalog = cast("Any", instance._client.get_catalog())
+    executor = _executor(
+        drop_returncode=drop_returncode,
+        verify_stdout=verify_stdout,
+        verify_returncode=verify_returncode,
+    )
+    command = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=executor
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        command.run()
+    if drop_returncode:
+        assert not any(step.step_id.endswith("verify") for step in executor.executed)
     catalog.record_database_dropped.assert_not_called()

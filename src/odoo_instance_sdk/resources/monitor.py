@@ -66,7 +66,7 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.resources.environment import EnvironmentState
 from odoo_instance_sdk.resources.postgres import PostgresCluster
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, MonitorCatalogSnapshot
 
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
@@ -146,13 +146,6 @@ class _SnapshotPlan:
     worktrees: frozenset[Path]
     statuses: frozenset[str]
     cpu_points: frozenset[tuple[int, float]]
-
-
-@dataclass(frozen=True, slots=True)
-class _CatalogRows:
-    environments: list[tuple[sqlite3.Row, sqlite3.Row | None]]
-    projects: list[sqlite3.Row]
-    project_runtimes: list[sqlite3.Row]
 
 
 def _orphan_git() -> GitActivity:
@@ -414,7 +407,7 @@ class EnvironmentMonitor:
 
     def _capture_probe_steps(  # noqa: C901
         self, *, project_id: str | None, include_removed: bool
-    ) -> tuple[tuple[PreparedStep, ...], _CatalogRows]:
+    ) -> tuple[tuple[PreparedStep, ...], MonitorCatalogSnapshot]:
         """Capture the finite process probe manifest for one snapshot command.
 
         Catalog discovery is deliberately best-effort here: it is construction
@@ -429,13 +422,14 @@ class EnvironmentMonitor:
         try:
             catalog = BackupCatalog(db_path=db_path)
             try:
-                rows = catalog.list_environments_with_runtimes(include_removed=include_removed)
-                registered_projects, project_runtimes = catalog._list_monitor_projects()
+                catalog_rows = catalog._monitor_snapshot_rows(include_removed=include_removed)
             finally:
                 catalog.close()
         except (BackupCatalogError, sqlite3.Error, OSError):
-            return (), _CatalogRows([], [], [])
+            return (), MonitorCatalogSnapshot((), (), ())
 
+        rows = catalog_rows.environments
+        registered_projects = catalog_rows.projects
         steps: list[PreparedStep] = []
         projects: set[tuple[Path, str]] = set()
         repositories: set[tuple[Path, str]] = set()
@@ -677,7 +671,7 @@ class EnvironmentMonitor:
                     text=True,
                 )
             )
-        return tuple(steps), _CatalogRows(rows, list(registered_projects), list(project_runtimes))
+        return tuple(steps), catalog_rows
 
     def _snapshot_impl(
         self,
@@ -685,7 +679,7 @@ class EnvironmentMonitor:
         *,
         include_removed: bool = False,
         probe_results: dict[str, ProcessResult] | None = None,
-        catalog_rows: _CatalogRows | None = None,
+        catalog_rows: MonitorCatalogSnapshot | None = None,
     ) -> Snapshot:
         """Perform one coherent collection pass and return an immutable snapshot."""
         generated_at = datetime.now(UTC)
@@ -732,19 +726,19 @@ class EnvironmentMonitor:
         project_id: str | None = None,
         include_removed: bool = False,
         probe_results: dict[str, ProcessResult] | None = None,
-        catalog_rows: _CatalogRows | None = None,
+        catalog_rows: MonitorCatalogSnapshot | None = None,
     ) -> _SnapshotPlan:
         """Read catalog runtime once and derive deterministic project plans."""
         if catalog_rows is None:
             try:
-                rows = catalog.list_environments_with_runtimes(include_removed=include_removed)
-                registered_projects, project_runtimes = catalog._list_monitor_projects()
+                snapshot_rows = catalog._monitor_snapshot_rows(include_removed=include_removed)
             except (BackupCatalogError, sqlite3.Error) as exc:
                 raise MonitorError("monitor catalog unavailable") from exc
         else:
-            rows = catalog_rows.environments
-            registered_projects = catalog_rows.projects
-            project_runtimes = catalog_rows.project_runtimes
+            snapshot_rows = catalog_rows
+        rows = snapshot_rows.environments
+        registered_projects = snapshot_rows.projects
+        project_runtimes = snapshot_rows.project_runtimes
         groups: dict[str, list[_EnvironmentPlan]] = {}
         project_details: dict[str, Path] = {
             str(row["project_id"]): Path(str(row["repository_root"])).resolve()

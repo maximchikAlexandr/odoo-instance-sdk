@@ -15,7 +15,12 @@ import pytest
 
 from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
-from odoo_instance_sdk.internal.proc import ProcessHandle, RecordingExecutor, SubprocessExecutor
+from odoo_instance_sdk.internal.proc import (
+    ProcessHandle,
+    RecordingExecutor,
+    StepObserver,
+    SubprocessExecutor,
+)
 from odoo_instance_sdk.internal.process_metrics import collect_process_tree
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
@@ -35,8 +40,16 @@ class _FakeCatalog:
         if self._upsert_raises is not None:
             raise self._upsert_raises
 
+    def _upsert_runtime(self, owner_kind: str, owner_id: str, **kw: object) -> None:
+        assert owner_kind == "environment"
+        self.upsert_environment_runtime(owner_id, **kw)
+
     def clear_environment_runtime(self, environment_id: str) -> None:
         self.clear_calls.append(environment_id)
+
+    def _clear_runtime(self, owner_kind: str, owner_id: str) -> None:
+        assert owner_kind == "environment"
+        self.clear_environment_runtime(owner_id)
 
     def get_environment_runtime(self, environment_id: str) -> None:
         return None
@@ -350,7 +363,14 @@ def test_foreground_artifact_lock_wraps_secret_write_spawn_wait_and_cleanup(
     handle = ProcessHandle(process, (), 4242, 4242, True)
 
     class EventRecordingExecutor(RecordingExecutor):
-        def spawn(self, step: object) -> ProcessHandle:
+        def spawn(
+            self,
+            step: object,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessHandle:
+            del observer, observe_output
             events.append("spawn")
             return super().spawn(step)  # type: ignore[arg-type]
 

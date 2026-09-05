@@ -49,7 +49,7 @@ from odoo_instance_sdk.internal.project_runtime import (
     resolve_uv_executable,
     uv_run_prefix,
 )
-from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.internal.test_instance_trust import require_test_instance_origin_approval
 from odoo_instance_sdk.internal.urls import assert_local, normalize_base_url
 from odoo_instance_sdk.models import (
@@ -334,19 +334,7 @@ def canonical_project_identity(project_path: str | Path) -> tuple[Path, Path, st
 def _planned_project_identity(project_path: str | Path) -> tuple[Path, Path, str]:
     """Resolve the Git identity from local metadata without launching Git."""
     root = Path(project_path).resolve()
-    git_marker = root / ".git"
-    common = git_marker
-    if git_marker.is_file():
-        try:
-            marker = git_marker.read_text(encoding="utf-8").strip()
-        except OSError:
-            marker = ""
-        if marker.startswith("gitdir:"):
-            git_dir = Path(marker.partition(":")[2].strip())
-            if not git_dir.is_absolute():
-                git_dir = root / git_dir
-            git_dir = git_dir.resolve()
-            common = git_dir.parent.parent if git_dir.parent.name == "worktrees" else git_dir
+    common = git_common_dir(root)
     return root, common.resolve(), repo_key(root, common)
 
 

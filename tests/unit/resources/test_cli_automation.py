@@ -45,8 +45,18 @@ def _payload_stdout(payload: dict[str, Any], nonce: str = "deadbeefdeadbeef") ->
     return f"noise\n{marker_open} {json.dumps(payload)} {marker_close}\nmore\n"
 
 
-def _command_result(value: CommandResult) -> Command[CommandResult]:
-    return Command.create(ExecutionPlan(), lambda _context: value)
+def _command_result(
+    value: CommandResult, nonce: str = "deadbeefdeadbeef"
+) -> Command[CommandResult]:
+    from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
+
+    step = PreparedStep(step_id="instance.shell_script", argv=("odoo",), wrapper_nonce=nonce)
+    return Command.create(
+        ExecutionPlan(steps=(step.public_projection(),)),
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=RecordingExecutor(results={step.step_id: value}),
+    )
 
 
 def _make_instance(tmp_path: Path) -> OdooInstance:
@@ -107,7 +117,7 @@ def _stub_run_shell_script(
             )
         converter = kwargs.get("result_converter")
         value = converter(result) if converter is not None else result
-        return Command.create(ExecutionPlan(), lambda _context: value)
+        return _command_result(value)
 
     return _impl
 
@@ -854,18 +864,19 @@ class TestShellWrapper:
 
     def test_wrapper_retains_structured_user_error_after_long_startup_output(self) -> None:
         payload = self._run(
-            "print('before')\nraise ValueError('failure')\n",
+            "result = 1\nprint('before')\nraise ValueError('failure')\n",
             startup="startup log\n" * 10000,
         )
 
         assert payload["ok"] is False
+        assert payload["result"] is None
         assert payload["user_stdout"] == "before\n"
         assert payload["user_error"] == {
             "type": "ValueError",
             "message": "failure",
             "source": {
                 "file": "<odcli-shell-script>",
-                "line": 2,
+                "line": 3,
                 "text": "raise ValueError('failure')",
             },
         }
@@ -896,7 +907,7 @@ class TestShellWrapper:
             duration=0.0,
         )
 
-        projected = _shell_payload(value)
+        projected = _shell_payload(value, "deadbeefdeadbeef")
 
         assert projected["result"] == {"password": "<redacted>", "safe": "ok"}
         assert projected["user_stdout"] == "password=<redacted>\n"
@@ -1151,9 +1162,38 @@ class TestCliEval:
                 duration=0.0,
             ),
             "exec",
+            "deadbeefdeadbeef",
         )
 
         assert failure.error_code == "exec_startup_failed"
+        assert failure.details is None
+
+    @pytest.mark.parametrize("command", ["eval", "exec"])
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            _payload_stdout({"ok": False, "result": None}, nonce="foreignnonce1234"),
+            "__ODCLI_PAYLOAD__deadbeefdeadbeef__ {malformed} __END_PAYLOAD__deadbeefdeadbeef__",
+        ],
+    )
+    def test_foreign_or_malformed_frames_are_startup_failures_without_details(
+        self, command: str, stdout: str
+    ) -> None:
+        from odoo_instance_sdk.cli import _shell_failure
+
+        failure = _shell_failure(
+            CommandResult(
+                args=[],
+                returncode=1,
+                stdout=stdout,
+                stderr="startup noise",
+                duration=0.0,
+            ),
+            command,
+            "deadbeefdeadbeef",
+        )
+
+        assert failure.error_code == f"{command}_startup_failed"
         assert failure.details is None
 
 

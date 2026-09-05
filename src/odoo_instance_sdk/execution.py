@@ -24,6 +24,7 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.proc import (
     PreparedCommand,
+    PreparedStep,
     PrivateProjection,
     ProcessExecutor,
     ProcessResult,
@@ -43,6 +44,19 @@ class _PlanObservation(msgspec.Struct, frozen=True, forbid_unknown_fields=True, 
     scope: str
     step_ids: tuple[str, ...]
     budget_seconds: float
+
+
+class PlanningInspectionObservation(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    """Typed read-only observation executed while a plan is being built."""
+
+    kind: Literal["planning-inspection"]
+    scope: str
+    step_ids: tuple[str, ...]
+    budget_seconds: float
+    read_only: Literal[True] = True
+    executed_during_planning: Literal[True] = True
 
 
 class PlanPrecondition(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
@@ -70,7 +84,9 @@ class SemanticPlanObservation(
     warnings: tuple[str, ...] = ()
 
 
-type PlanObservation = JsonValue | _PlanObservation | SemanticPlanObservation
+type PlanObservation = (
+    JsonValue | _PlanObservation | PlanningInspectionObservation | SemanticPlanObservation
+)
 
 
 class ProcessStep(
@@ -170,6 +186,8 @@ T = TypeVar("T")
 
 
 class _StoredCommand(Protocol):
+    steps: tuple[Step, ...]
+
     def run(
         self,
         *,
@@ -248,6 +266,16 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
         if prepared is None or prepared.private_projection is None:
             return None
         return prepared.private_projection
+
+    def _private_wrapper_nonce(self) -> str | None:
+        """Return the nonce captured by the command's shell process step."""
+        prepared = _COMMANDS.get(id(self))
+        if prepared is None:
+            raise PlanError("command has no prepared executable snapshot")
+        for step in prepared.steps:
+            if isinstance(step, PreparedStep) and step.wrapper_nonce is not None:
+                return step.wrapper_nonce
+        return None
 
     def __del__(self) -> None:
         _COMMANDS.pop(id(self), None)

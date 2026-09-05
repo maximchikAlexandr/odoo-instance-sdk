@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     import click
 else:
     import rich_click as click
+
+from rich.console import Console
+from rich.text import Text
 
 from odoo_instance_sdk.commands.context import (
     CliContext,
@@ -27,7 +31,7 @@ from odoo_instance_sdk.commands.output import (
     model_to_dict,
     output_options,
     resolve_output_mode,
-    rich_step_observer,
+    rich_print,
     run_or_preview,
 )
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
@@ -41,9 +45,67 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
-    from odoo_instance_sdk.internal.proc import StepObserver
+    from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
+
+
+class _RichLive(Protocol):
+    def update(self, renderable: Text, *, refresh: bool = False) -> None: ...
+
+
+class _RestoreStepObserver:
+    """Rich lifecycle rendering used only by the restore command."""
+
+    def __init__(self, *, live: _RichLive | None = None, show_command_output: bool = False) -> None:
+        self._live = live
+        self._show_command_output = show_command_output
+        self._lines: list[str] = []
+
+    def __call__(self, event: StepEvent) -> None:
+        if event.kind in {"stdout", "stderr"} and not self._show_command_output:
+            return
+        stream = event.kind in {"stdout", "stderr"}
+        if stream:
+            suffix = f": {event.chunk or ''}"
+        elif event.error:
+            suffix = f": {event.error}"
+        elif event.returncode is not None:
+            suffix = f" (exit {event.returncode})"
+        else:
+            suffix = ""
+        from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
+        line = cast(
+            "str",
+            redacted_projection(
+                f"[{event.step_id}] {event.kind}{suffix}",
+                field="error" if event.error else (event.kind if stream else "event"),
+            ),
+        )
+        rendered_lines = line.splitlines() or [line]
+        if stream and len(rendered_lines) > 1:
+            prefix = f"[{event.step_id}] {event.kind}: "
+            rendered_lines = [rendered_lines[0], *(prefix + item for item in rendered_lines[1:])]
+        self._lines.extend(rendered_lines)
+        if self._live is not None:
+            self._live.update(Text("\n".join(self._lines)), refresh=True)
+        else:
+            for rendered_line in rendered_lines:
+                rich_print(rendered_line)
+
+
+@contextmanager
+def _restore_step_observer(*, show_command_output: bool = False) -> Iterator[_RestoreStepObserver]:
+    """Own TTY ``Live`` only for Rich restore execution."""
+    console = Console()
+    if not console.is_terminal:
+        yield _RestoreStepObserver(show_command_output=show_command_output)
+        return
+    from rich.live import Live
+
+    with Live("", console=console, transient=True) as live:
+        yield _RestoreStepObserver(live=live, show_command_output=show_command_output)
 
 
 @click.group(help="Prepare and reset project databases.")
@@ -121,7 +183,7 @@ def db_refresh(
 
     try:
         if restore and output_mode is OutputMode.RICH and not dry_run:
-            with rich_step_observer(show_command_output=show_command_output) as observer:
+            with _restore_step_observer(show_command_output=show_command_output) as observer:
                 status, _result = run(observer)
         else:
             status, _result = run()

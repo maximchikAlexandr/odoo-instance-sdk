@@ -14,6 +14,7 @@ from odoo_instance_sdk.execution import (
     Command,
     ExecutionPlan,
     JsonValue,
+    PlanningInspectionObservation,
     PlanPrecondition,
     SemanticPlanObservation,
 )
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 
 _DENIED_DATABASES = frozenset({"postgres", "template0", "template1"})
 _ROOT_STEP = "database.drop"
+_PLANNING_INSPECT_STEP = "database.drop.planning-inspect"
 _INSPECT_STEP = "database.drop.inspect"
 _REVALIDATE_TERMINATE_STEP = "database.drop.revalidate-terminate"
 _TERMINATE_STEP = "database.drop.terminate"
@@ -284,7 +286,11 @@ def build_database_drop_command(  # noqa: C901
     executor: ProcessExecutor | None = None,
 ) -> Command[DatabaseDropResult]:
     """Build and inspect one exact project-cluster drop command."""
-    database = database_name.strip() if isinstance(database_name, str) else database_name
+    database = database_name
+    if isinstance(database, str) and database != database.strip():
+        raise ConfigError(
+            "database drop requires an exact name without leading or trailing whitespace"
+        )
     validate_db_name(database)
     if database in _DENIED_DATABASES:
         raise ConfigError(f"database {database!r} is protected and cannot be dropped")
@@ -300,10 +306,10 @@ def build_database_drop_command(  # noqa: C901
     if cluster is None:
         raise ConfigError("database drop requires the resolved project's PostgreSQL cluster")
     process_executor = executor or SubprocessExecutor()
-    inspect_step = _inspect_command_step(
-        binding, database=database, step_id=_INSPECT_STEP, timeout=timeout
+    planning_step = _inspect_command_step(
+        binding, database=database, step_id=_PLANNING_INSPECT_STEP, timeout=timeout
     )
-    planning_result = process_executor.execute(inspect_step)
+    planning_result = process_executor.execute(planning_step)
     if not isinstance(planning_result, ProcessResult):
         raise ConfigError("database safety inspection returned no process result")
     inspection = _decode_inspection(planning_result, database)
@@ -330,6 +336,18 @@ def build_database_drop_command(  # noqa: C901
             if inspection.sessions and not force_connections
             else ()
         ),
+    )
+    planning_observation = PlanningInspectionObservation(
+        kind="planning-inspection",
+        scope=f"database={database}",
+        step_ids=(_PLANNING_INSPECT_STEP,),
+        budget_seconds=timeout,
+        read_only=True,
+        executed_during_planning=True,
+    )
+
+    inspect_step = _inspect_command_step(
+        binding, database=database, step_id=_INSPECT_STEP, timeout=timeout
     )
 
     revalidate_terminate_step = _inspect_command_step(
@@ -441,7 +459,7 @@ def build_database_drop_command(  # noqa: C901
 
     plan = ExecutionPlan(
         steps=tuple(step.public_projection() for step in prepared_steps),
-        observations=(semantic,),
+        observations=(semantic, planning_observation),
     )
     return Command.from_prepared(
         plan,

@@ -21,6 +21,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResult,
     ProcessSpawnError,
     RecordingExecutor,
+    StepObserver,
     SubprocessExecutor,
     active_context,
 )
@@ -770,7 +771,14 @@ def test_open_pgadmin_lifecycle_uses_backend_identity_and_secret_free_docker_arg
             self.calls: list[list[str]] = []
             self.pgadmin_inspect: dict[str, object] | None = None
 
-        def execute(self, step: PreparedStep) -> ProcessResult:
+        def execute(
+            self,
+            step: PreparedStep,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessResult:
+            del observer, observe_output
             result = self.run(list(step.argv), timeout=step.timeout)
             return ProcessResult(
                 step.argv,
@@ -782,7 +790,14 @@ def test_open_pgadmin_lifecycle_uses_backend_identity_and_secret_free_docker_arg
                 step.environment,
             )
 
-        def spawn(self, step: PreparedStep) -> ProcessHandle:
+        def spawn(
+            self,
+            step: PreparedStep,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessHandle:
+            del observer, observe_output
             del step
             raise AssertionError("pgAdmin does not spawn finite Docker steps")
 
@@ -935,7 +950,14 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
             self._container: dict[str, object] | None = None
             self._lock = threading.Lock()
 
-        def execute(self, step: PreparedStep) -> ProcessResult:
+        def execute(
+            self,
+            step: PreparedStep,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessResult:
+            del observer, observe_output
             result = self.run(list(step.argv), timeout=step.timeout)
             return ProcessResult(
                 step.argv,
@@ -947,7 +969,14 @@ def test_concurrent_lifecycle_calls_create_one_container_at_boundary(  # noqa: C
                 step.environment,
             )
 
-        def spawn(self, step: PreparedStep) -> ProcessHandle:
+        def spawn(
+            self,
+            step: PreparedStep,
+            *,
+            observer: StepObserver | None = None,
+            observe_output: bool = False,
+        ) -> ProcessHandle:
+            del observer, observe_output
             del step
             raise AssertionError("pgAdmin does not spawn finite Docker steps")
 

@@ -27,6 +27,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessResultLike,
     RecordingExecutor,
     RunContext,
+    StepObserver,
 )
 from odoo_instance_sdk.models import PostgresClusterState
 
@@ -179,10 +180,24 @@ def test_summary_does_not_start_next_attempt_after_shared_deadline(
 
 
 class _LegacyExecutor:
-    def execute(self, _step: PreparedProcess) -> ProcessResult:
+    def execute(
+        self,
+        _step: PreparedProcess,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessResult:
+        del observer, observe_output
         raise AssertionError("server summary must not execute")
 
-    def spawn(self, _step: PreparedProcess) -> ProcessHandle:
+    def spawn(
+        self,
+        _step: PreparedProcess,
+        *,
+        observer: StepObserver | None = None,
+        observe_output: bool = False,
+    ) -> ProcessHandle:
+        del observer, observe_output
         raise AssertionError("server summary must not spawn")
 
 

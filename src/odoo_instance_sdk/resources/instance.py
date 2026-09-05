@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TextIO, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TextIO, TypeVar, cast
 
 import psutil
 
@@ -48,7 +48,7 @@ from odoo_instance_sdk.internal.project_env import (
     load_project_environment,
     project_environment_secret_values,
 )
-from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.internal.server import (
     _write_secret_config,
     cleanup_secret_config,
@@ -100,6 +100,29 @@ class _RuntimeBinding:
     project_id: str
     repository_root: Path
     git_common_dir: Path
+
+
+class _RuntimeCatalog(Protocol):
+    def _register_project(
+        self, project_id: str, repository_root: str | Path, git_common_dir: str | Path
+    ) -> None: ...
+
+    def _upsert_runtime(
+        self,
+        owner_kind: str,
+        owner_id: str,
+        *,
+        root_pid: int,
+        create_time: float,
+        started_at: str,
+        checkout_branch: str,
+        commit_sha: str,
+        http_url: str,
+        http_port: int,
+        database_name: str,
+    ) -> None: ...
+
+    def _clear_runtime(self, owner_kind: str, owner_id: str) -> None: ...
 
 
 @dataclass(slots=True, kw_only=True)
@@ -293,28 +316,12 @@ class InstanceFactory:
             _postgres_cluster=cluster,
             _runtime_binding=_RuntimeBinding(
                 owner_kind="project",
-                owner_id=f"project_{repo_key(root, _git_common_dir(root))}",
-                project_id=f"project_{repo_key(root, _git_common_dir(root))}",
+                owner_id=f"project_{repo_key(root, git_common_dir(root))}",
+                project_id=f"project_{repo_key(root, git_common_dir(root))}",
                 repository_root=root,
-                git_common_dir=_git_common_dir(root),
+                git_common_dir=git_common_dir(root),
             ),
         )
-
-
-def _git_common_dir(repository_root: Path) -> Path:
-    marker = repository_root / ".git"
-    if marker.is_file():
-        try:
-            value = marker.read_text(encoding="utf-8").strip()
-        except OSError:
-            value = ""
-        if value.startswith("gitdir:"):
-            git_dir = Path(value.partition(":")[2].strip())
-            if not git_dir.is_absolute():
-                git_dir = repository_root / git_dir
-            git_dir = git_dir.resolve()
-            return git_dir.parent.parent if git_dir.parent.name == "worktrees" else git_dir
-    return marker.resolve()
 
 
 def _runtime_json_for(client: OdooClient, env: DevelopmentEnvironment) -> str | None:
@@ -1052,15 +1059,11 @@ class OdooInstance:
         if binding is None and environment_id is None:
             return
         try:
-            catalog = self._client.get_catalog()
+            catalog = cast("_RuntimeCatalog", self._client.get_catalog())
             if binding is not None:
-                clear = getattr(catalog, "_clear_runtime", None)
-                if callable(clear):
-                    clear(binding.owner_kind, binding.owner_id)
-                elif binding.owner_kind == "environment":
-                    catalog.clear_environment_runtime(binding.owner_id)
+                catalog._clear_runtime(binding.owner_kind, binding.owner_id)
             elif environment_id is not None:
-                catalog.clear_environment_runtime(environment_id)
+                catalog._clear_runtime("environment", environment_id)
         except Exception as e:
             print(f"failed to clear environment runtime: {e}", file=sys.stderr)
 
@@ -1079,31 +1082,12 @@ class OdooInstance:
         create_time = _process_create_time(root_pid)
         checkout_branch, commit_sha = _worktree_ref(cwd, context=context)
         http_url = f"http://{config.http_interface}:{config.http_port}"
-        catalog = self._client.get_catalog()
+        catalog = cast("_RuntimeCatalog", self._client.get_catalog())
         if binding is not None:
-            register = getattr(catalog, "_register_project", None)
-            if callable(register):
-                register(binding.project_id, binding.repository_root, binding.git_common_dir)
-            upsert = getattr(catalog, "_upsert_runtime", None)
-            if not callable(upsert):
-                if binding.owner_kind != "environment":
-                    raise InstanceConfigurationError(
-                        "catalog does not support project runtime ownership"
-                    )
-                upsert = getattr(catalog, "upsert_environment_runtime")
-                upsert(
-                    binding.owner_id,
-                    root_pid=root_pid,
-                    create_time=create_time,
-                    started_at=datetime.now(UTC).isoformat(),
-                    checkout_branch=checkout_branch,
-                    commit_sha=commit_sha,
-                    http_url=http_url,
-                    http_port=config.http_port,
-                    database_name=config.db_name or "",
-                )
-                return
-            upsert(
+            catalog._register_project(
+                binding.project_id, binding.repository_root, binding.git_common_dir
+            )
+            catalog._upsert_runtime(
                 binding.owner_kind,
                 binding.owner_id,
                 root_pid=root_pid,
@@ -1117,7 +1101,8 @@ class OdooInstance:
             )
             return
         assert environment_id is not None
-        catalog.upsert_environment_runtime(
+        catalog._upsert_runtime(
+            "environment",
             environment_id,
             root_pid=root_pid,
             create_time=create_time,

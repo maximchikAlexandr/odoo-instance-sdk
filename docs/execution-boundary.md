@@ -35,6 +35,7 @@ classification is bounded and whose contract requires `--dry-run`:
 | `env remove` | mutating-or-spawning |
 | `env sync` | mutating-or-spawning |
 | `db refresh` | mutating-or-spawning |
+| `db drop` | guarded mutating-or-spawning |
 | `db reset-admin-password` | mutating-or-spawning |
 | `eval` | process-previewable-read-only |
 | `exec` | mutating-or-spawning |
@@ -59,6 +60,12 @@ is a native inherited-stream transport; its passthrough arguments are checked
 by the private grammar, but document formatting is rejected on normal runs.
 All four diagnostics and native `psql` preserve the instance-bound cluster
 identity and do not accept replacement host/user/password flags.
+
+`db drop` is a guarded database mutation. Its plan records the bounded,
+read-only planning inspection as an observation; execution retains separate
+revalidation, optional target-session termination, drop, and absence-verification
+steps. Dry-run performs only the planning inspection and never mutates the
+cluster or catalogue.
 
 The complete shipped CLI also contains `doctor` and `env list` as bounded
 read-only leaves, plus `run`, `shell`, `logs`, and `monitor` native/stream
@@ -98,22 +105,22 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:838-839` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:895-896` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
 - `src/odoo_instance_sdk/commands/env.py:377` — existing Rich-live inventory
   transport; remove when Rich live output is supplied by a distinct transport
   adapter rather than the live command callback.
-- `src/odoo_instance_sdk/commands/output.py:218` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:204` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:402` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:328` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:404` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:330` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:411` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:337` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:413` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:339` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:1065` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance.py:1068` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 

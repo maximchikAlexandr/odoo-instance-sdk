@@ -19,12 +19,17 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import _rich_shell_projection, cli
 from odoo_instance_sdk.commands.context import ResolvedContext
+from odoo_instance_sdk.commands.db import (
+    _restore_step_observer as rich_step_observer,
+)
+from odoo_instance_sdk.commands.db import (
+    _RestoreStepObserver as RichStepObserver,
+)
 from odoo_instance_sdk.commands.output import (
     JsonValue,
     OutputDocument,
     OutputError,
     OutputMode,
-    RichStepObserver,
     build_envelope,
     emit,
     emit_json_envelope,
@@ -33,7 +38,6 @@ from odoo_instance_sdk.commands.output import (
     output_options,
     resolve_output_mode,
     rich_print,
-    rich_step_observer,
     run_or_preview,
     success_document,
 )
@@ -74,7 +78,7 @@ def test_rich_step_observer_non_tty_is_step_prefixed_and_streaming_is_opt_in(
 ) -> None:
     rendered: list[str] = []
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.output.rich_print",
+        "odoo_instance_sdk.commands.db.rich_print",
         lambda value, **_: rendered.append(value),
     )
 
@@ -122,7 +126,7 @@ def test_rich_step_observer_uses_live_only_for_tty(
             assert refresh is True
             self.updates.append(str(value))
 
-    monkeypatch.setattr("odoo_instance_sdk.commands.output.Console", FakeConsole)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.Console", FakeConsole)
     monkeypatch.setattr("rich.live.Live", FakeLive)
 
     with rich_step_observer() as observer:
@@ -368,7 +372,7 @@ def test_every_eligible_leaf_uses_the_shared_preview_or_run_helper() -> None:
         callback = _command(case.path).callback
         assert callback is not None
         callback = inspect.unwrap(callback)
-        assert "run_or_preview" in callback.__code__.co_names, case.path
+        assert {"run_or_preview", "_run_shell_command"} & set(callback.__code__.co_names), case.path
 
 
 def _matrix_checkout_plan(*, name: str = "demo") -> EnvironmentCheckoutPlan:
@@ -431,15 +435,38 @@ def _matrix_command(
     *,
     error: BaseException | None = None,
     private_projection: EnvironmentCheckoutPlan | None = None,
+    wrapper_nonce: str | None = None,
 ) -> Command[T]:
-    def run(_context: object) -> T:
+    if wrapper_nonce is not None:
+        from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
+
+        step = PreparedStep(
+            step_id="instance.shell_script",
+            argv=("odoo",),
+            wrapper_nonce=wrapper_nonce,
+        )
+
+        def run(context: object) -> T:
+            if error is not None:
+                raise error
+            return cast("T", cast("Any", context).process(step.step_id))
+
+        return Command.create(
+            ExecutionPlan(steps=(step.public_projection(),)),
+            run,
+            steps=(step,),
+            executor=RecordingExecutor(results={step.step_id: value}),
+            private_projection=private_projection,
+        )
+
+    def simple_run(_context: object) -> T:
         if error is not None:
             raise error
         return value
 
     return Command.create(
         ExecutionPlan(),
-        run,
+        simple_run,
         private_projection=private_projection,
     )
 
@@ -591,7 +618,9 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.cli.eval_expression_command",
             fail_operation
             if failing
-            else lambda *_args, **_kwargs: _matrix_command(_command_result(0, {"result": 42})),
+            else lambda *_args, **_kwargs: _matrix_command(
+                _command_result(0, {"result": 42}), wrapper_nonce="deadbeefdeadbeef"
+            ),
         )
         return
 
@@ -601,7 +630,8 @@ def _patch_leaf_external(  # noqa: C901
             fail_operation
             if failing
             else lambda *_args, **_kwargs: _matrix_command(
-                _command_result(0, {"returncode": 0, "stdout": "", "stderr": ""})
+                _command_result(0, {"returncode": 0, "stdout": "", "stderr": ""}),
+                wrapper_nonce="deadbeefdeadbeef",
             ),
         )
         return
@@ -907,6 +937,33 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     assert failure_documents[0] == failure_documents[1]
     assert success_documents[0][0]["ok"] is True  # type: ignore[index]
     assert failure_documents[0][0]["ok"] is False  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "__ODCLI_PAYLOAD__foreignnonce1234__ {} __END_PAYLOAD__foreignnonce1234__",
+        "__ODCLI_PAYLOAD__deadbeefdeadbeef__ {malformed} __END_PAYLOAD__deadbeefdeadbeef__",
+    ],
+)
+def test_shell_zero_exit_without_valid_bound_frame_is_startup_failure(stdout: str) -> None:
+    from odoo_instance_sdk.cli import _run_shell_command, _ShellCommandFailure
+
+    command = _matrix_command(
+        CommandResult(args=[], returncode=0, stdout=stdout, stderr="", duration=0.0),
+        wrapper_nonce="deadbeefdeadbeef",
+    )
+    with pytest.raises(_ShellCommandFailure) as caught:
+        _run_shell_command(
+            command_name="eval",
+            build_command=lambda: command,
+            mode=OutputMode.JSON,
+            dry_run=False,
+            project_result=lambda _value, payload: payload,
+            commit=False,
+        )
+    assert caught.value.error_code == "eval_startup_failed"
+    assert caught.value.details is None
 
 
 def test_public_cli_leaf_matrix_rejects_env_list_watch_json(
