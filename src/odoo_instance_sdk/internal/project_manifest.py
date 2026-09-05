@@ -9,6 +9,7 @@ from odoo_instance_sdk.project import ProjectConfig
 
 _MANIFEST_DIR = ".odcli"
 _MANIFEST_FILE = "project.toml"
+_PROJECT_ENV_IGNORE = ".odcli/.env"
 
 _SECRET_KEYS = frozenset(
     {
@@ -29,6 +30,7 @@ def manifest_path(project_path: str | Path) -> Path:
 
 
 def write_manifest(project_path: str | Path, config: ProjectConfig) -> Path:
+    ensure_project_ignore(project_path)
     dest = manifest_path(project_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     content = config.to_manifest()
@@ -44,6 +46,17 @@ def write_manifest(project_path: str | Path, config: ProjectConfig) -> Path:
             os.unlink(tmp_name)
         raise
     return dest
+
+
+def ensure_project_ignore(project_path: str | Path) -> Path:
+    """Ensure init's project-local dotenv is explicitly ignored by Git."""
+    ignore = Path(project_path).resolve() / ".gitignore"
+    content = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+    if _PROJECT_ENV_IGNORE in content.splitlines():
+        return ignore
+    prefix = "" if not content or content.endswith("\n") else "\n"
+    ignore.write_text(f"{content}{prefix}{_PROJECT_ENV_IGNORE}\n", encoding="utf-8")
+    return ignore
 
 
 def assert_no_secrets(content: str) -> None:

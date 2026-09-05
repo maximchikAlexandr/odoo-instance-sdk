@@ -1,5 +1,8 @@
 .devlocal/*
 
+# Project-local dotenv contains owner-readable secrets and is never committed.
+.odcli/.env
+
 # Python
 __pycache__/
 *.py[cod]

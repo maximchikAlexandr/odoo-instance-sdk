@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.models import StartConfig
@@ -35,12 +37,18 @@ class InstanceConfig:
     db_port: int | None = field(default=None)
     db_user: str | None = field(default=None)
     db_password: str | None = field(default=None, repr=False)
+    project_environment: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "project_environment", MappingProxyType(dict(self.project_environment))
+        )
 
     def __repr__(self) -> str:
         parts: list[str] = []
         for f in fields(self):
             val = getattr(self, f.name)
-            if f.name in ("master_password", "db_password") and val is not None:
+            if f.name in ("master_password", "db_password", "project_environment") and val:
                 parts.append(f"{f.name}=<redacted>")
             else:
                 parts.append(f"{f.name}={val!r}")

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+import sys
 import textwrap
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeView
+from odoo_instance_sdk.internal.vscode_generate import build_launch_profile
+from odoo_instance_sdk.models import StartConfig
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
     EnvironmentCheckoutOptions,
@@ -20,6 +26,7 @@ if TYPE_CHECKING:
     from click.testing import Result
 
     from odoo_instance_sdk import OdooClient
+    from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 def _checkout_ready_env(
@@ -43,6 +50,87 @@ def _invoke(runner: CliRunner, env_client: OdooClient, args: list[str]) -> Resul
 
 
 class TestVscodeGenerateProfile:
+    def test_project_view_builds_profile_without_environment(self, tmp_path: Path) -> None:
+        view = RuntimeView(
+            owner_kind="project",
+            project_id="demo-project",
+            environment_id=None,
+            environment_name=None,
+            repository_root=tmp_path,
+            root=tmp_path,
+            start_config=StartConfig(
+                http_port=18069,
+                http_interface="127.0.0.1",
+                config_path=str(tmp_path / "odoo.conf"),
+                db_name="project_db",
+            ),
+            command_prefix=(sys.executable, str(tmp_path / "odoo-bin")),
+            python_path=Path(sys.executable),
+            database="project_db",
+            http_interface="127.0.0.1",
+            http_port=18069,
+            base_ref="main",
+            base_provenance="project",
+        )
+
+        profile = build_launch_profile(view)
+
+        assert profile["name"] == "Odoo demo-project"
+        assert profile["python"] == sys.executable
+        assert profile["program"] == str(tmp_path / "odoo-bin")
+        assert profile["cwd"] == str(tmp_path)
+        args = cast("list[object]", profile["args"])
+        assert "--database" in args
+        assert "project_db" in args
+
+    @pytest.mark.parametrize("mode", ["rich", "json", "toon"])
+    def test_project_cli_uses_runtime_view_for_each_output_mode(
+        self, mode: str, tmp_path: Path
+    ) -> None:
+        project = ProjectConfig(
+            repository_root=tmp_path,
+            python=sys.executable,
+            odoo_bin=Path(sys.executable),
+        )
+        instance = SimpleNamespace(
+            config=SimpleNamespace(
+                start_config=StartConfig(
+                    config_path=str(tmp_path / "odoo.conf"),
+                    db_name="project_db",
+                ),
+                command_prefix=(sys.executable, str(tmp_path / "odoo-bin")),
+            )
+        )
+        resolved = ResolvedContext(
+            client=cast("OdooClient", object()),
+            instance=cast("OdooInstance", instance),
+            source=project,
+            provenance="cwd",
+        )
+        with (
+            patch("odoo_instance_sdk.cli.cli_context.ready_instance", return_value=resolved),
+            patch(
+                "odoo_instance_sdk.cli.build_launch_profile", wraps=build_launch_profile
+            ) as build,
+        ):
+            result = CliRunner().invoke(cli, ["vscode", "generate", "--format", mode])
+
+        assert result.exit_code == 0, result.output
+        runtime = build.call_args.args[0]
+        assert isinstance(runtime, RuntimeView)
+        assert runtime.owner_kind == "project"
+        if mode == "rich":
+            assert "Odoo project_" in result.output
+        else:
+            if mode == "json":
+                payload = json.loads(result.stdout)
+            else:
+                from toon import DecodeOptions, decode
+
+                payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+            assert payload["result"]["profile"]["args"]
+            assert "project_db" in payload["result"]["profile"]["args"]
+
     def test_prints_profile_fields(
         self,
         env_client: OdooClient,

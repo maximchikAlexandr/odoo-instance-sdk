@@ -7,7 +7,10 @@ import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
-import click
+if TYPE_CHECKING:
+    import click
+else:
+    import rich_click as click
 
 from odoo_instance_sdk.commands.context import (
     CliContext,
@@ -37,12 +40,12 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
-@click.group()
+@click.group(help="Prepare and reset project databases.")
 def db_group() -> None:
     """Prepare and reset project databases."""
 
 
-@db_group.command("refresh")
+@db_group.command("refresh", help="Download and optionally restore a project test backup.")
 @click.option("--restore", is_flag=True, default=False, help="Restore a fresh local copy.")
 @click.option(
     "--reset-admin-password",
@@ -99,7 +102,9 @@ def db_refresh(
     raise click.exceptions.Exit(status)
 
 
-@db_group.command("reset-admin-password")
+@db_group.command(
+    "reset-admin-password", help="Reset the administrator on the ready environment database."
+)
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context

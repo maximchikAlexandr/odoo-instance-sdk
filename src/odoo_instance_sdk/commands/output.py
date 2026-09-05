@@ -18,8 +18,12 @@ from typing import (
     overload,
 )
 
-import click
 import msgspec
+
+if TYPE_CHECKING:
+    import click
+else:
+    import rich_click as click
 from rich.console import Console
 from toon import encode
 

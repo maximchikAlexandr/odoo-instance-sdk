@@ -18,29 +18,29 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 741),
-        ("src/odoo_instance_sdk/cli.py", 740),
-        ("src/odoo_instance_sdk/commands/env.py", 373),
-        ("src/odoo_instance_sdk/commands/output.py", 190),
-        ("src/odoo_instance_sdk/commands/output.py", 300),
-        ("src/odoo_instance_sdk/commands/output.py", 302),
-        ("src/odoo_instance_sdk/commands/output.py", 309),
-        ("src/odoo_instance_sdk/commands/output.py", 311),
-        ("src/odoo_instance_sdk/resources/instance.py", 899),
+        ("src/odoo_instance_sdk/cli.py", 709),
+        ("src/odoo_instance_sdk/cli.py", 710),
+        ("src/odoo_instance_sdk/commands/env.py", 377),
+        ("src/odoo_instance_sdk/commands/output.py", 194),
+        ("src/odoo_instance_sdk/commands/output.py", 304),
+        ("src/odoo_instance_sdk/commands/output.py", 306),
+        ("src/odoo_instance_sdk/commands/output.py", 313),
+        ("src/odoo_instance_sdk/commands/output.py", 315),
+        ("src/odoo_instance_sdk/resources/instance.py", 931),
     }
 )
 
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
-    ("src/odoo_instance_sdk/commands/env.py", 373): "existing Rich live inventory transport",
-    ("src/odoo_instance_sdk/commands/output.py", 190): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 300): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 302): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 309): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 311): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/cli.py", 741): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 740): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/resources/instance.py", 899): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/commands/env.py", 377): "existing Rich live inventory transport",
+    ("src/odoo_instance_sdk/commands/output.py", 194): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 304): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 306): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 313): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 315): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/cli.py", 709): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 710): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/resources/instance.py", 931): "lifecycle cleanup diagnostic transport",
 }
 
 

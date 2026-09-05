@@ -39,6 +39,10 @@ from odoo_instance_sdk.internal.locks import (
     exclusive_lock_until,
 )
 from odoo_instance_sdk.internal.odoo_config import infer_base_url, parse_odoo_config
+from odoo_instance_sdk.internal.project_env import (
+    effective_project_environment,
+    load_project_environment,
+)
 from odoo_instance_sdk.internal.project_runtime import (
     is_uv_python_selector,
     resolve_project_runtime,
@@ -505,6 +509,7 @@ def build_target_instance(
     runtime: ProjectRuntimeBinding,
     postgres_cluster: PostgresCluster,
     project_id: str,
+    project_environment: Mapping[str, str] | None = None,
     target_config_path: Path | None = None,
 ) -> Iterator[OdooInstance]:
     """Build a target-only instance and remove its ephemeral config on exit."""
@@ -535,6 +540,7 @@ def build_target_instance(
                 db_port=db_port,
                 db_user=start_config.db_user,
                 db_password=start_config.db_password,
+                project_environment=project_environment or {},
             ),
             _client=client,
             _artifact_lock_path=database_preparation_artifact_lock_path(
@@ -709,7 +715,9 @@ def prepare_restore(
     """Run the full restore preparation while retaining the project lock."""
     if not options.restore:
         raise ConfigError("restore preparation requires restore=True")
-    remote_password = _remote_password()
+    _initial, root = _load_project(project)
+    project_environment = load_project_environment(root)
+    remote_password = _remote_password(effective_project_environment(project_environment))
     try:
         with _restore_preflight(
             client,
@@ -746,6 +754,7 @@ def prepare_restore(
                         runtime=preflight.runtime,
                         postgres_cluster=preflight.postgres_cluster,
                         project_id=preflight.project_id,
+                        project_environment=project_environment,
                         target_config_path=restore_inputs[1]
                         if restore_inputs is not None
                         else None,
@@ -813,8 +822,8 @@ def prepare_download(
 ) -> DatabasePreparationResult:
     if options.restore:
         raise ConfigError("restore preparation is not available in download-only mode")
-    password = _remote_password()
     initial, root = _load_project(project)
+    password = _remote_password()
     source = resolve_test_source(initial, options)
     require_test_instance_origin_approval(source.config.base_url)
     _, _, project_id = canonical_project_identity(root)
@@ -905,6 +914,8 @@ def _preparation_process_steps(
     from odoo_instance_sdk.internal.pg.builder import build_psql_specification
     from odoo_instance_sdk.resources.database import _RESET_ADMIN_PASSWORD_SCRIPT
     from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    project_environment = load_project_environment(root)
 
     # The real Git identity is captured by the two process steps above and
     # resolved by the callback under the active ledger.  Planning must not
@@ -1004,6 +1015,7 @@ def _preparation_process_steps(
             source=_RESET_ADMIN_PASSWORD_SCRIPT,
             commit=True,
             secret_config_path=secret_config_path,
+            project_environment=project_environment,
         )
         steps.append(shell_step)
     return tuple(steps)

@@ -377,6 +377,33 @@ def test_expression_dependency_is_bounded_and_locked() -> None:
     assert "from expression" not in source_imports
 
 
+def test_runtime_dependency_inventory_is_exact_and_bounded() -> None:
+    project = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert project["dependencies"] == [
+        "httpx>=0.27,<1.0",
+        "msgspec>=0.18,<1.0",
+        "platformdirs>=4.3,<5",
+        "click>=8.2,<9",
+        "rich-click>=1.9,<2",
+        "json5>=0.15,<1",
+        "psutil>=5.9,<7",
+        "rich>=15,<16",
+        "python-toon==0.1.3",
+        "expression>=5,<6",
+    ]
+    assert len(project["dependencies"]) == 10
+    assert project["optional-dependencies"] == {
+        "dashboard": [
+            "fastapi>=0.141,<1.0",
+            "starlette>=1.3.1,<2.0",
+            "uvicorn>=0.30,<1.0",
+        ]
+    }
+    lock = (_REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
+    assert 'name = "rich-click"' in lock
+    assert '{ name = "rich-click", specifier = ">=1.9,<2" }' in lock
+
+
 def test_expression_assessment_records_both_checkpoints() -> None:
     record = (
         (_REPO_ROOT / "docs/adr/0002-bounded-expression-checkout-assessment.md")

@@ -1,26 +1,26 @@
 ## 1. Help and packaging boundary
 
-- [ ] 1.1 Add exactly `rich-click>=1.9,<2` alongside all nine existing dependencies including `expression>=5,<6`, refresh the lockfile, and update wheel assertions to require exactly ten core dependencies with those bounds and the sole existing `dashboard` extra.
-- [ ] 1.2 Replace `_RichHelpGroup` with `rich-click` command/group integration at the existing Click entry point without routing command results through it.
-- [ ] 1.3 Add missing one-line help text and at most four stable task-oriented panels across the root and nested command tree.
-- [ ] 1.4 Add characterization tests for root help, a nested group, a typed leaf, required/default/type metadata, validation errors, narrow width, redirected/color-disabled output, shell completion, and lightweight startup imports.
+- [x] 1.1 Add exactly `rich-click>=1.9,<2` alongside all nine existing dependencies including `expression>=5,<6`, refresh the lockfile, and update wheel assertions to require exactly ten core dependencies with those bounds and the sole existing `dashboard` extra.
+- [x] 1.2 Replace `_RichHelpGroup` with `rich-click` command/group integration at the existing Click entry point without routing command results through it.
+- [x] 1.3 Add missing one-line help text and at most four stable task-oriented panels across the root and nested command tree.
+- [x] 1.4 Add characterization tests for root help, a nested group, a typed leaf, required/default/type metadata, validation errors, narrow width, redirected/color-disabled output, shell completion, and lightweight startup imports.
 
 ## 2. Owner-neutral project command context
 
-- [ ] 2.1 Extend `ResolvedContext` with one typed owner-neutral runtime view exposing owner identity, root, start config, command prefix, database, HTTP binding, and base provenance while retaining `require_environment()` for lifecycle-only commands.
-- [ ] 2.2 Refactor VS Code profile construction to consume the owner-neutral runtime view and preserve environment behavior, default print, atomic `--write`, `--dry-run`, output formats, and existing-JSONC refusal.
-- [ ] 2.3 Refactor `module update` to use the resolved project database/runtime without its unused environment ID and preserve `--env`, `--yes`, dry-run, and output contracts.
-- [ ] 2.4 Refactor top-level and compatibility Odoo test paths to use the owner-neutral runtime view and one result/runner implementation without environment fabrication.
-- [ ] 2.5 Implement project-context changed-test base precedence as explicit `--base`, then configured non-`HEAD` effective checkout base, otherwise actionable failure; add local-only Git provenance tests.
-- [ ] 2.6 Add CLI regressions for VS Code print/write/dry-run, module update, direct test, module-test alias, explicit-environment precedence, and exact owner/common-context result fields for executed, changed no-op, and dry-run states with Rich/JSON/TOON parity in both owner contexts.
+- [x] 2.1 Extend `ResolvedContext` with one typed owner-neutral runtime view exposing owner identity, root, start config, command prefix, database, HTTP binding, and base provenance while retaining `require_environment()` for lifecycle-only commands.
+- [x] 2.2 Refactor VS Code profile construction to consume the owner-neutral runtime view and preserve environment behavior, default print, atomic `--write`, `--dry-run`, output formats, and existing-JSONC refusal.
+- [x] 2.3 Refactor `module update` to use the resolved project database/runtime without its unused environment ID and preserve `--env`, `--yes`, dry-run, and output contracts.
+- [x] 2.4 Refactor top-level and compatibility Odoo test paths to use the owner-neutral runtime view and one result/runner implementation without environment fabrication.
+- [x] 2.5 Implement project-context changed-test base precedence as explicit `--base`, then configured non-`HEAD` effective checkout base, otherwise actionable failure; add local-only Git provenance tests.
+- [x] 2.6 Add CLI regressions for VS Code print/write/dry-run, module update, direct test, module-test alias, explicit-environment precedence, and exact owner/common-context result fields for executed, changed no-op, and dry-run states with Rich/JSON/TOON parity in both owner contexts.
 
 ## 3. Project-local environment variables
 
-- [ ] 3.1 Implement the exact UTF-8/BOM line grammar, key regex, whitespace/comment rules, unquoted/literal-single-quote/bounded-double-quote escape rules, and empty values; reject duplicates, multiline/trailing syntax, interpolation/substitution, unknown escapes, NULs, invalid UTF-8, and paths outside the resolved project.
-- [ ] 3.2 Enforce per-key process precedence, owner-only POSIX permissions, immutable scoped mappings, no `os.environ` mutation, and path/line-only missing/unreadable/malformed diagnostics before mutation.
-- [ ] 3.3 Propagate ordinary file values only to Odoo runtime children; preserve purpose-built Git/PostgreSQL/Docker/editor/browser/package/other child environments; consume and strip `ODCLI_TEST_MASTER_PASSWORD` before every spawn.
-- [ ] 3.4 Ensure init ignore rules and documentation cover `.odcli/.env`, owner-only permissions, exact grammar, process precedence, child propagation/deny matrix, secret classification, missing-file behavior, and non-exported lifetime.
-- [ ] 3.5 Add acceptance/security tests for every grammar form/rejection, project-boundary discovery, per-key process overrides, permissions, each Odoo/denied child class, master-password consumption, and plans/fingerprints/errors/logs/Rich/JSON/TOON redaction.
+- [x] 3.1 Implement the exact UTF-8/BOM line grammar, key regex, whitespace/comment rules, unquoted/literal-single-quote/bounded-double-quote escape rules, and empty values; reject duplicates, multiline/trailing syntax, interpolation/substitution, unknown escapes, NULs, invalid UTF-8, and paths outside the resolved project.
+- [x] 3.2 Enforce per-key process precedence, owner-only POSIX permissions, immutable scoped mappings, no `os.environ` mutation, and path/line-only missing/unreadable/malformed diagnostics before mutation.
+- [x] 3.3 Propagate ordinary file values only to Odoo runtime children; preserve purpose-built Git/PostgreSQL/Docker/editor/browser/package/other child environments; consume and strip `ODCLI_TEST_MASTER_PASSWORD` before every spawn.
+- [x] 3.4 Ensure init ignore rules and documentation cover `.odcli/.env`, owner-only permissions, exact grammar, process precedence, child propagation/deny matrix, secret classification, missing-file behavior, and non-exported lifetime.
+- [x] 3.5 Add acceptance/security tests for every grammar form/rejection, project-boundary discovery, per-key process overrides, permissions, each Odoo/denied child class, master-password consumption, and plans/fingerprints/errors/logs/Rich/JSON/TOON redaction.
 
 ## 4. Shared plan presentation and execution observation
 

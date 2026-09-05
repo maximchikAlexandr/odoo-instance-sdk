@@ -7,11 +7,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-import click
+if TYPE_CHECKING:
+    import click
+else:
+    import rich_click as click
 
 from odoo_instance_sdk.exceptions import EnvironmentResolutionError
 from odoo_instance_sdk.internal.project_runtime import resolve_project_runtime
-from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentState
+from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
@@ -22,6 +26,8 @@ if TYPE_CHECKING:
 
 ContextProvenance = Literal["explicit", "worktree", "cwd"]
 RuntimeSource = DevelopmentEnvironment | ProjectConfig
+OwnerKind = Literal["environment", "project"]
+BaseProvenance = Literal["environment", "project"]
 
 
 @dataclass(slots=True)
@@ -35,6 +41,57 @@ class CliContext:
 
     project: str | None = None
     env: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeView:
+    """Owner-neutral runtime inputs shared by project-capable commands."""
+
+    owner_kind: OwnerKind
+    project_id: str
+    environment_id: str | None
+    environment_name: str | None
+    repository_root: Path
+    root: Path
+    start_config: StartConfig
+    command_prefix: tuple[str, ...]
+    python_path: Path
+    database: str | None
+    http_interface: str
+    http_port: int
+    base_ref: str | None
+    base_provenance: BaseProvenance
+
+    @property
+    def worktree_root(self) -> Path:
+        return self.root
+
+    @property
+    def http_url(self) -> str:
+        return f"http://{self.http_interface}:{self.http_port}"
+
+
+# ``RuntimeContext`` is a readable compatibility name for callers that use
+# the context module as the command-input boundary.
+RuntimeContext = RuntimeView
+
+
+def _git_common_dir(repository_root: Path) -> Path:
+    """Resolve a worktree's shared Git directory from its local marker."""
+    marker = repository_root / ".git"
+    if marker.is_file():
+        try:
+            value = marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            value = ""
+        if value.startswith("gitdir:"):
+            git_dir = Path(value.partition(":")[2].strip())
+            if not git_dir.is_absolute():
+                git_dir = repository_root / git_dir
+            if git_dir.parent.name == "worktrees":
+                return git_dir.parent.parent.resolve()
+            return git_dir.resolve()
+    return marker.resolve()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -75,6 +132,95 @@ class ResolvedContext:
             "environment_source": "null",
         }
 
+    @property
+    def runtime(self) -> RuntimeView:
+        """Return the single owner-neutral input for project-capable commands."""
+        if isinstance(self.source, ProjectConfig) and self.source.python is None:
+            raise EnvironmentResolutionError(
+                "This command requires a development environment; initialize the project first"
+            )
+        config = self.instance.config
+        candidate_start_config = getattr(config, "start_config", None)
+        if isinstance(candidate_start_config, StartConfig):
+            start_config = candidate_start_config
+        else:
+            interface = getattr(self.source, "http_interface", "127.0.0.1")
+            port = getattr(self.source, "http_port", 8069)
+            start_config = StartConfig(
+                http_interface=str(interface),
+                http_port=port if isinstance(port, int) else 8069,
+            )
+        if start_config is None:
+            raise RuntimeError("resolved instance has no Odoo start configuration")
+
+        root = self.worktree_path()
+        raw_command_prefix = getattr(config, "command_prefix", None)
+        command_prefix = (
+            tuple(str(item) for item in raw_command_prefix)
+            if isinstance(raw_command_prefix, (tuple, list))
+            else None
+        )
+        deferred_runtime = getattr(config, "deferred_runtime", None)
+        if command_prefix is None and deferred_runtime is not None:
+            command_prefix = tuple(deferred_runtime.command_prefix())
+        if command_prefix is None:
+            executable = getattr(getattr(self.client, "config", None), "executable", "odoo")
+            command_prefix = (str(executable),)
+
+        database = start_config.db_name
+        configured_databases = getattr(config, "configured_database_names", ())
+        if (
+            not database
+            and isinstance(configured_databases, (tuple, list))
+            and configured_databases
+        ):
+            database = str(configured_databases[0])
+
+        if isinstance(self.source, ProjectConfig):
+            repository_root = self.source.repository_root.resolve()
+            project_id = f"project_{repo_key(repository_root, _git_common_dir(repository_root))}"
+            return RuntimeView(
+                owner_kind="project",
+                project_id=project_id,
+                environment_id=None,
+                environment_name=None,
+                repository_root=repository_root,
+                root=root,
+                start_config=start_config,
+                command_prefix=command_prefix,
+                python_path=self.python_path(),
+                database=database,
+                http_interface=start_config.http_interface,
+                http_port=start_config.http_port,
+                base_ref=self.source.default_base_ref,
+                base_provenance="project",
+            )
+
+        environment = self.source
+        repository_root = Path(getattr(environment, "repository_root", root)).resolve()
+        git_common_dir = Path(getattr(environment, "git_common_dir", repository_root / ".git"))
+        project_id = f"project_{repo_key(repository_root, git_common_dir)}"
+        if not database:
+            database = getattr(environment, "target_db_name", None) or getattr(
+                environment, "source_db_name", None
+            )
+        return RuntimeView(
+            owner_kind="environment",
+            project_id=project_id,
+            environment_id=str(environment.id),
+            environment_name=str(environment.name),
+            repository_root=repository_root,
+            root=root,
+            start_config=start_config,
+            command_prefix=command_prefix,
+            python_path=self.python_path(),
+            database=database,
+            http_interface=start_config.http_interface,
+            http_port=start_config.http_port,
+            base_ref=getattr(environment, "base_ref", None),
+            base_provenance="environment",
+        )
+
     def require_environment(self) -> DevelopmentEnvironment:
         if isinstance(self.source, ProjectConfig):
             raise EnvironmentResolutionError(
@@ -92,7 +238,14 @@ class ResolvedContext:
             return resolve_project_runtime(
                 self.source.repository_root, self.source.python, field="python"
             )
-        path = Path(self.source.python_environment_path)
+        path_value = getattr(self.source, "python_environment_path", None)
+        if path_value is None:
+            config_prefix = getattr(self.instance.config, "command_prefix", None)
+            if isinstance(config_prefix, (tuple, list)) and config_prefix:
+                return Path(str(config_prefix[0]))
+            executable = getattr(getattr(self.client, "config", None), "executable", "odoo")
+            return Path(str(executable))
+        path = Path(path_value)
         return path / "bin" / "python" if path.is_dir() else path
 
     def instance_address(self) -> tuple[str, int]:
@@ -247,8 +400,12 @@ def __getattr__(name: str) -> type[OdooClient | OdooClientConfig]:
 
 
 __all__ = [
+    "BaseProvenance",
     "CliContext",
+    "OwnerKind",
     "ResolvedContext",
+    "RuntimeContext",
+    "RuntimeView",
     "environment_provenance",
     "pass_cli_context",
     "project_provenance",

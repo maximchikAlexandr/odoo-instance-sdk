@@ -62,6 +62,22 @@ project run reads Python, `odoo-bin`, source config, working directory, port,
 database, and default run arguments from `.odcli/project.toml`; it does not
 create an environment or add the main checkout to `odcli env list`.
 
+Project-local child variables may be placed in `.odcli/.env`. The file is
+ignored by Git, must be owner-readable only (`0600` or another mode with no
+group/other bits), and uses a deliberately small grammar: `KEY=value`,
+literal single quotes, or double quotes with only `\\`, `\"`, `\n`, `\r`, and
+`\t` escapes. Blank/comment lines and empty values are supported; shell
+expansion, `export`, duplicate keys, and malformed quoting are rejected. The
+invoking process wins per key and `os.environ` is never changed. Ordinary
+values are scoped to Odoo children; Git, PostgreSQL, Docker, editors, package
+tools, and other children retain their purpose-built environments.
+
+`ODCLI_TEST_MASTER_PASSWORD` is a restore-only secret input. It is consumed
+before child creation, removed from every child environment, and never written
+to plans, logs, diagnostics, fingerprints, or structured output. A missing
+`.odcli/.env` is valid; unreadable, insecure, or malformed files fail before
+work and report only the path (and parser line where applicable).
+
 Global selectors such as `--project` and `--env` belong before the subcommand.
 Exact flags are intentionally delegated to executable help, for example
 `odcli env checkout --help`. Structured output is leaf-local, not a root command
