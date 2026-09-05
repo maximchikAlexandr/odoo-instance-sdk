@@ -200,7 +200,15 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
     for secret in secrets:
         if secret:
             text = text.replace(secret, REDACTION_MARKER)
-    if _SECRET_KEY.search(field) or field in {"argv", "environment", "stdin", "script", "error"}:
+    if _SECRET_KEY.search(field) or field in {
+        "argv",
+        "environment",
+        "stdin",
+        "script",
+        "error",
+        "result",
+        "user_stdout",
+    }:
         text = _ASSIGNMENT.sub(r"\g<prefix>" + REDACTION_MARKER, text)
     text = _SENSITIVE_HEADER.sub(
         lambda match: match.group(0).split(":", 1)[0] + ": " + REDACTION_MARKER, text
@@ -209,7 +217,16 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
     text = _JWT_VALUE.sub(REDACTION_MARKER, text)
     text = _URI_USERINFO.sub(r"\g<prefix>" + REDACTION_MARKER + "@", text)
     return sanitize_terminal_text(
-        text, preserve_newlines=field in {"stdin", "script", "stdout", "stderr"}
+        text,
+        preserve_newlines=field
+        in {
+            "stdin",
+            "script",
+            "stdout",
+            "stderr",
+            "result",
+            "user_stdout",
+        },
     )
 
 

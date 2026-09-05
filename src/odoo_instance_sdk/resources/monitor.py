@@ -70,7 +70,7 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 _EXPENSIVE_TTL = 15.0
 _CLUSTER_STATUS_TTL = 5.0
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _PROBE_TIMEOUT_SECONDS = 5.0
 
 
@@ -121,6 +121,7 @@ class _ProjectPlan:
     cluster: PostgresCluster | None
     state: PostgresClusterState | None
     environments: tuple[_EnvironmentPlan, ...]
+    project_runtime: sqlite3.Row | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,13 @@ class _SnapshotPlan:
     worktrees: frozenset[Path]
     statuses: frozenset[str]
     cpu_points: frozenset[tuple[int, float]]
+
+
+@dataclass(frozen=True, slots=True)
+class _CatalogRows:
+    environments: list[tuple[sqlite3.Row, sqlite3.Row | None]]
+    projects: list[sqlite3.Row]
+    project_runtimes: list[sqlite3.Row]
 
 
 def _orphan_git() -> GitActivity:
@@ -406,7 +414,7 @@ class EnvironmentMonitor:
 
     def _capture_probe_steps(  # noqa: C901
         self, *, project_id: str | None, include_removed: bool
-    ) -> tuple[tuple[PreparedStep, ...], list[tuple[sqlite3.Row, sqlite3.Row | None]]]:
+    ) -> tuple[tuple[PreparedStep, ...], _CatalogRows]:
         """Capture the finite process probe manifest for one snapshot command.
 
         Catalog discovery is deliberately best-effort here: it is construction
@@ -422,10 +430,11 @@ class EnvironmentMonitor:
             catalog = BackupCatalog(db_path=db_path)
             try:
                 rows = catalog.list_environments_with_runtimes(include_removed=include_removed)
+                registered_projects, project_runtimes = catalog._list_monitor_projects()
             finally:
                 catalog.close()
         except (BackupCatalogError, sqlite3.Error, OSError):
-            return (), []
+            return (), _CatalogRows([], [], [])
 
         steps: list[PreparedStep] = []
         projects: set[tuple[Path, str]] = set()
@@ -596,7 +605,13 @@ class EnvironmentMonitor:
             if (repository / ".git").exists():
                 repositories.add((repository, resolved_project))
 
-        for repository, project in sorted(projects, key=lambda item: (str(item[0]), item[1])):
+        for project in registered_projects:
+            repository = Path(str(project["repository_root"])).resolve()
+            resolved_project = str(project["project_id"])
+            if project_id is None or resolved_project == project_id:
+                projects.add((repository, resolved_project))
+
+        for repository, project_name in sorted(projects, key=lambda item: (str(item[0]), item[1])):
             if self.docker_provider is not None:
                 continue
             from odoo_instance_sdk.internal.proc import SubprocessExecutor
@@ -623,14 +638,14 @@ class EnvironmentMonitor:
                 pass
             steps.append(
                 PreparedStep(
-                    step_id=f"monitor.{project}.docker.resources",
+                    step_id=f"monitor.{project_name}.docker.resources",
                     argv=(
                         "docker",
                         "compose",
                         "-f",
                         str(compose_file),
                         "-p",
-                        project,
+                        project_name,
                         "ps",
                         "--format",
                         "json",
@@ -641,10 +656,12 @@ class EnvironmentMonitor:
                     text=True,
                 )
             )
-        for repository, project in sorted(repositories, key=lambda item: (str(item[0]), item[1])):
+        for repository, project_name in sorted(
+            repositories, key=lambda item: (str(item[0]), item[1])
+        ):
             steps.append(
                 PreparedStep(
-                    step_id=f"monitor.{project}.git.worktrees",
+                    step_id=f"monitor.{project_name}.git.worktrees",
                     argv=(
                         "git",
                         "-C",
@@ -660,7 +677,7 @@ class EnvironmentMonitor:
                     text=True,
                 )
             )
-        return tuple(steps), rows
+        return tuple(steps), _CatalogRows(rows, list(registered_projects), list(project_runtimes))
 
     def _snapshot_impl(
         self,
@@ -668,7 +685,7 @@ class EnvironmentMonitor:
         *,
         include_removed: bool = False,
         probe_results: dict[str, ProcessResult] | None = None,
-        catalog_rows: list[tuple[sqlite3.Row, sqlite3.Row | None]] | None = None,
+        catalog_rows: _CatalogRows | None = None,
     ) -> Snapshot:
         """Perform one coherent collection pass and return an immutable snapshot."""
         generated_at = datetime.now(UTC)
@@ -708,40 +725,54 @@ class EnvironmentMonitor:
             environments=environments,
         )
 
-    def _plan_snapshot(
+    def _plan_snapshot(  # noqa: C901
         self,
         catalog: BackupCatalog,
         *,
         project_id: str | None = None,
         include_removed: bool = False,
         probe_results: dict[str, ProcessResult] | None = None,
-        catalog_rows: list[tuple[sqlite3.Row, sqlite3.Row | None]] | None = None,
+        catalog_rows: _CatalogRows | None = None,
     ) -> _SnapshotPlan:
         """Read catalog runtime once and derive deterministic project plans."""
         if catalog_rows is None:
             try:
                 rows = catalog.list_environments_with_runtimes(include_removed=include_removed)
+                registered_projects, project_runtimes = catalog._list_monitor_projects()
             except (BackupCatalogError, sqlite3.Error) as exc:
                 raise MonitorError("monitor catalog unavailable") from exc
         else:
-            rows = catalog_rows
+            rows = catalog_rows.environments
+            registered_projects = catalog_rows.projects
+            project_runtimes = catalog_rows.project_runtimes
         groups: dict[str, list[_EnvironmentPlan]] = {}
+        project_details: dict[str, Path] = {
+            str(row["project_id"]): Path(str(row["repository_root"])).resolve()
+            for row in registered_projects
+        }
+        project_runtime_by_id = {str(row["owner_id"]): row for row in project_runtimes}
         environment_ids: set[str] = set()
         worktrees: set[Path] = set()
         cpu_points: set[tuple[int, float]] = set()
         for row, runtime in rows:
-            groups.setdefault(str(row["git_common_dir"]), []).append(_EnvironmentPlan(row, runtime))
+            repository = Path(str(row["repository_root"])).resolve()
+            git_common = Path(str(row["git_common_dir"])).resolve()
+            resolved_project_id = f"project_{repo_key(repository, git_common)}"
+            groups.setdefault(resolved_project_id, []).append(_EnvironmentPlan(row, runtime))
+            project_details.setdefault(resolved_project_id, repository)
             environment_ids.add(str(row["id"]))
             worktrees.add(Path(str(row["worktree_path"])).resolve())
             if runtime is not None:
                 with contextlib.suppress(TypeError, ValueError):
                     cpu_points.add((int(runtime["root_pid"]), float(runtime["create_time"])))
+        for runtime in project_runtimes:
+            with contextlib.suppress(TypeError, ValueError):
+                cpu_points.add((int(runtime["root_pid"]), float(runtime["create_time"])))
         plans: list[_ProjectPlan] = []
         statuses: set[str] = set()
-        for git_common, environments in groups.items():
+        for resolved_project_id, environments in groups.items():
             first = environments[0].row
             repo_root = Path(str(first["repository_root"]))
-            resolved_project_id = f"project_{repo_key(repo_root, Path(git_common))}"
             # Filtering is intentionally before manifest/status/Docker work.
             # The catalog grouping and cache-pruning inputs remain cheap.
             if project_id is not None and resolved_project_id != project_id:
@@ -764,6 +795,28 @@ class EnvironmentMonitor:
                     cluster,
                     state,
                     tuple(environments),
+                    project_runtime=project_runtime_by_id.get(resolved_project_id),
+                )
+            )
+        for resolved_project_id, repo_root in project_details.items():
+            if resolved_project_id in groups:
+                continue
+            if project_id is not None and resolved_project_id != project_id:
+                continue
+            cluster, state = self._project_cluster(
+                repo_root,
+                statuses,
+                project_id=resolved_project_id,
+                probe_results=probe_results,
+            )
+            plans.append(
+                _ProjectPlan(
+                    resolved_project_id,
+                    repo_root,
+                    cluster,
+                    state,
+                    (),
+                    project_runtime=project_runtime_by_id.get(resolved_project_id),
                 )
             )
         return _SnapshotPlan(
@@ -812,6 +865,12 @@ class EnvironmentMonitor:
         projects: list[ProjectSummary] = []
         environments: list[EnvironmentSnapshot] = []
         for plan in plans:
+            project_runtime = None
+            if plan.project_runtime is not None:
+                try:
+                    project_runtime = self._collect_runtime(plan.project_runtime)
+                except Exception:
+                    project_runtime = _stopped_runtime()
             projects.append(
                 ProjectSummary(
                     id=plan.project_id,
@@ -819,6 +878,7 @@ class EnvironmentMonitor:
                     display_hint=plan.project_id.removeprefix("project_"),
                     environment_count=len(plan.environments),
                     cluster=self._cluster_snapshot(plan, resources.get(plan.project_id)),
+                    runtime=project_runtime,
                 )
             )
             environments.extend(

@@ -1073,6 +1073,34 @@ def test_json_and_toon_emit_the_same_sanitized_envelope(capsys: pytest.CaptureFi
     assert failure["error"]["message"] == "<redacted>"
 
 
+def test_eval_payload_fields_round_trip_in_json_and_toon(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result: dict[str, JsonValue] = {
+        "result": None,
+        "user_stdout": "\u0434\u043e\n\u043f\u043e\u0441\u043b\u0435\n",
+        "user_error": {
+            "type": "ValueError",
+            "message": "failure",
+            "source": {"file": "<odcli-shell-script>", "line": 1, "text": "raise ValueError()"},
+        },
+        "truncated": True,
+    }
+    emit_json_envelope(ok=True, command="eval", result=result, mode=OutputMode.JSON)
+    json_document = capsys.readouterr().out
+    emit_json_envelope(ok=True, command="eval", result=result, mode=OutputMode.TOON)
+    toon_document = capsys.readouterr().out
+
+    from toon import DecodeOptions, decode
+
+    json_value = json.loads(json_document)
+    toon_value = decode(toon_document, DecodeOptions(indent=2, strict=True))
+    assert toon_value == json_value
+    assert json_value["data"]["result"] is None
+    assert json_value["data"]["user_stdout"] == "\u0434\u043e\n\u043f\u043e\u0441\u043b\u0435\n"
+    assert json_value["data"]["truncated"] is True
+
+
 def test_typed_output_documents_are_frozen_and_keep_v1_shape() -> None:
     success = success_document(
         command="typed",

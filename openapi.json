@@ -757,6 +757,16 @@
           },
           "name": {
             "type": "string"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RuntimeMetrics"
+              }
+            ]
           }
         },
         "required": [
@@ -764,7 +774,8 @@
           "name",
           "display_hint",
           "environment_count",
-          "cluster"
+          "cluster",
+          "runtime"
         ],
         "title": "ProjectSummary",
         "type": "object"

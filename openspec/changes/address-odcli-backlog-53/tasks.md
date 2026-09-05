@@ -43,25 +43,25 @@
 
 ## 6. Project runtime persistence and monitoring
 
-- [ ] 6.1 Add a transactional catalogue migration that registers canonical initialized projects, backfills them from environment rows, migrates environment runtime records to an exclusive `environment|project` owner table, and rejects invalid dual/no-owner records.
-- [ ] 6.2 Upsert registration only after successful non-preview init and before permitted normal foreground runtime persistence; keep resolution/read-only/monitor/dry-run inert and test failed init, legacy project-only normal-run discovery, preview non-discovery, idempotency, backfill, and rollback.
-- [ ] 6.3 Attach one private runtime binding from both `InstanceFactory.from_environment()` and `from_project()` and make foreground spawn/finally persistence owner-neutral while leaving manual/shell/background operations unpersisted.
-- [ ] 6.4 Refactor monitor planning to start from registered projects, join optional environments and both runtime owners, and reuse existing process/readiness/Git/storage/PostgreSQL collectors and stale-PID checks.
-- [ ] 6.5 Bump snapshot schema to 4 and add exactly `ProjectSummary.runtime: RuntimeMetrics | None`, implementing distinct absent-null and present-stopped/null semantics while preserving v3 environment fields and the existing `PostgresServerInfo`, `ClusterSnapshot.server`, `ClusterSnapshot.server_unavailability_reason`, `ClusterUnavailabilityReason`, and `ServerUnavailabilityReason` diagnostics contracts; preserve filtering, ordering, cache/invalidation, partial results, redaction, and JSON/TOON behavior and add v3-to-v4 migration assertions.
-- [ ] 6.6 Add unit and integration coverage for project-only catalogue state, live/stale project runtimes, mixed ownership, worker/process/CPU/RAM/readiness/URL/database/cluster metrics, preserved PostgreSQL server diagnostics and every cluster/server unavailability reason, and no synthetic environments.
+- [x] 6.1 Add a transactional catalogue migration that registers canonical initialized projects, backfills them from environment rows, migrates environment runtime records to an exclusive `environment|project` owner table, and rejects invalid dual/no-owner records.
+- [x] 6.2 Upsert registration only after successful non-preview init and before permitted normal foreground runtime persistence; keep resolution/read-only/monitor/dry-run inert and test failed init, legacy project-only normal-run discovery, preview non-discovery, idempotency, backfill, and rollback.
+- [x] 6.3 Attach one private runtime binding from both `InstanceFactory.from_environment()` and `from_project()` and make foreground spawn/finally persistence owner-neutral while leaving manual/shell/background operations unpersisted.
+- [x] 6.4 Refactor monitor planning to start from registered projects, join optional environments and both runtime owners, and reuse existing process/readiness/Git/storage/PostgreSQL collectors and stale-PID checks.
+- [x] 6.5 Bump snapshot schema to 4 and add exactly `ProjectSummary.runtime: RuntimeMetrics | None`, implementing distinct absent-null and present-stopped/null semantics while preserving v3 environment fields and the existing `PostgresServerInfo`, `ClusterSnapshot.server`, `ClusterSnapshot.server_unavailability_reason`, `ClusterUnavailabilityReason`, and `ServerUnavailabilityReason` diagnostics contracts; preserve filtering, ordering, cache/invalidation, partial results, redaction, and JSON/TOON behavior and add v3-to-v4 migration assertions.
+- [x] 6.6 Add unit and integration coverage for project-only catalogue state, live/stale project runtimes, mixed ownership, worker/process/CPU/RAM/readiness/URL/database/cluster metrics, preserved PostgreSQL server diagnostics and every cluster/server unavailability reason, and no synthetic environments.
 
 ## 7. HTTP and dashboard project-runtime support
 
-- [ ] 7.1 Publish schema-version-4 `ProjectSummary.runtime` through the existing msgspec-to-OpenAPI bridge and verify null/stopped/live/mixed/filtered/redacted JSON, preserved `PostgresServerInfo` and both typed unavailability fields/reason sets, plus v3 migration fixtures against the generated schema.
-- [ ] 7.2 Regenerate the TypeScript client from the canonical OpenAPI schema and update the project card/empty-state logic to render live project-owned runtime metrics when no environments exist.
-- [ ] 7.3 Add FastAPI serialization and React tests for project-only, mixed, stopped/stale, filtered, and redacted snapshots without adding an endpoint or handwritten DTO.
+- [x] 7.1 Publish schema-version-4 `ProjectSummary.runtime` through the existing msgspec-to-OpenAPI bridge and verify null/stopped/live/mixed/filtered/redacted JSON, preserved `PostgresServerInfo` and both typed unavailability fields/reason sets, plus v3 migration fixtures against the generated schema.
+- [x] 7.2 Regenerate the TypeScript client from the canonical OpenAPI schema and update the project card/empty-state logic to render live project-owned runtime metrics when no environments exist.
+- [x] 7.3 Add FastAPI serialization and React tests for project-only, mixed, stopped/stale, filtered, and redacted snapshots without adding an endpoint or handwritten DTO.
 
-## 8. Eval diagnostics and captured output
+## 8. Eval and exec diagnostics and captured output
 
-- [ ] 8.1 Extend the existing nonce-framed eval wrapper payload with separate typed result, captured user stdout, structured user-code error, and truncation state while leaving startup output outside the frame.
-- [ ] 8.2 Implement bounded exception/source-context retention that distinguishes startup failure from user-code failure and preferentially retains exception type/message after long startup logs.
-- [ ] 8.3 Update Rich and machine projections to display/store user output separately, keep print-only results null, preserve non-zero failure exits, and redact every result/output/diagnostic field.
-- [ ] 8.4 Add regressions for scalar success, print-only exec, print-then-exception, multiline Unicode, startup failure, exception after a long startup log, truncation signaling, JSON/TOON parsing, and secret redaction.
+- [x] 8.1 Extend the existing nonce-framed eval wrapper payload with separate typed result, captured user stdout, structured user-code error, and truncation state while leaving startup output outside the frame.
+- [x] 8.2 Implement bounded exception/source-context retention that distinguishes startup failure from user-code failure and preferentially retains exception type/message after long startup logs.
+- [ ] 8.3 Map a valid framed user-code exception from eval or exec to exit `1` and envelope v1 `ok=false` with no top-level `result`/`data`, command-specific `error.code` (`eval_user_code_failed` or `exec_user_code_failed`), sanitized `error.message`, and `error.details` containing exactly `result=null`, bounded `user_stdout`, non-null structured `user_error`, and boolean `truncated`; add optional JSON-safe `OutputError.details` without changing failures that omit it, classify non-framed non-zero commands as `eval_startup_failed` or `exec_startup_failed`, render Rich from the same details, and redact every field.
+- [ ] 8.4 Add regressions for eval scalar success, exec print-only success, eval and exec print-then-exception with their exact command-specific failure-envelope shapes and exit `1`, eval and exec startup failures without fabricated details, multiline Unicode, exception after a long startup log, truncation signaling, JSON/TOON semantic equality, Rich parity, unchanged failures without details, and secret redaction.
 
 ## 9. Acceptance and delivery
 
