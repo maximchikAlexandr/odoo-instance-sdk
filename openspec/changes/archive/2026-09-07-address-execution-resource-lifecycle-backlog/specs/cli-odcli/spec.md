@@ -53,6 +53,16 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 - **WHEN** a supported mutating lifecycle leaf is invoked with `--yes` in JSON/TOON mode
 - **THEN** the same operation runs once and its result is emitted under the normal renderer-independent exit mapping
 
+#### Scenario: Machine remove requires explicit confirmation
+
+- **WHEN** `odcli env remove ENV --format json`, `--format toon`, or `--json` is invoked without `--yes`
+- **THEN** no prompt is rendered, removal is not called, stdout contains one failure envelope with `error.code="confirmation_required"`, and the command exits `1`
+
+#### Scenario: Explicit machine remove executes
+
+- **WHEN** `odcli env remove ENV --yes --format json`, `--format toon`, or `--json` is invoked
+- **THEN** the same removal operation runs once and its result is emitted as one document under the normal renderer-independent exit mapping
+
 #### Scenario: Secrets redacted
 
 - **WHEN** an error occurs during checkout or resource lifecycle execution
@@ -91,6 +101,12 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 - **WHEN** the characterization gate exercises `backup delete`, `db restore`, or `db drop` with `--dry-run` in every shared format
 - **THEN** each appears exactly once in canonical `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
 - **AND** no file, database, configuration, process, or catalogue mutation occurs
+
+#### Scenario: Database drop is a canonical bounded leaf
+
+- **WHEN** the stable machine-output characterization gate exercises `db drop DATABASE --dry-run` in every shared format
+- **THEN** `db drop` appears exactly once in canonical `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
+- **AND** no database, session, or catalogue mutation occurs
 
 ## ADDED Requirements
 

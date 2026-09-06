@@ -988,3 +988,27 @@ def test_has_tracked_database_normalizes_socket(tmp_path: Path) -> None:
     catalog.record_restore(None, 5432, "mydb", bid)
     assert catalog.has_tracked_database(None, 5432, "mydb") is True
     catalog.close()
+
+
+def test_postgres_claim_validation_is_fail_closed_and_idempotent(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+
+    with pytest.raises(BackupCatalogError, match="complete UUID"):
+        catalog._get_postgres_cluster_by_id("not-a-uuid")
+    with pytest.raises(BackupCatalogError, match="non-empty text"):
+        catalog._ensure_postgres_cluster_pending("bad\nproject", "compose", "volume")
+
+    claim = catalog._ensure_postgres_cluster_pending("project", "compose", "volume")
+    with pytest.raises(BackupCatalogError, match="does not match"):
+        catalog._ensure_postgres_cluster_pending("project", "other-compose", "volume")
+    with pytest.raises(BackupCatalogError, match="does not exist"):
+        catalog._activate_postgres_cluster(uuid.uuid4(), "project", "compose", "volume")
+    with pytest.raises(BackupCatalogError, match="does not match"):
+        catalog._activate_postgres_cluster(claim.cluster_id, "other", "compose", "volume")
+
+    active = catalog._activate_postgres_cluster(claim.cluster_id, "project", "compose", "volume")
+    assert (
+        catalog._activate_postgres_cluster(active.cluster_id, "project", "compose", "volume").state
+        == "active"
+    )
+    catalog.close()

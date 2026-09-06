@@ -434,6 +434,18 @@ class PostgresCluster:
         pull_step_id: str | None = None,
         inspect_step_id: str | None = None,
     ) -> str:
+        expected = self._approved_image_digest()
+        resolved = self._resolve_image_digest(
+            timeout, pull_step_id=pull_step_id, inspect_step_id=inspect_step_id
+        )
+        if expected != resolved:
+            raise PostgresImageNotTrustedError(
+                "postgres image digest changed since explicit approval"
+            )
+        return resolved
+
+    def _approved_image_digest(self) -> str:
+        """Read the immutable local approval without probing Docker."""
         trust_file = self._trust_file()
         try:
             data = json.loads(trust_file.read_text(encoding="utf-8"))
@@ -447,14 +459,7 @@ class PostgresCluster:
             raise PostgresImageNotTrustedError(
                 "postgres image digest is not approved for this user; run 'odcli postgres approve-image --image-digest <resolved-digest>'"
             )
-        resolved = self._resolve_image_digest(
-            timeout, pull_step_id=pull_step_id, inspect_step_id=inspect_step_id
-        )
-        if expected != resolved:
-            raise PostgresImageNotTrustedError(
-                "postgres image digest changed since explicit approval"
-            )
-        return resolved
+        return expected
 
     def _ensure_artifacts(
         self,
@@ -464,8 +469,10 @@ class PostgresCluster:
         temporary_path: Path | None = None,
         step_id: str | None = None,
         cluster_id: str | None = None,
+        validate: bool = True,
+        publish: bool = True,
     ) -> None:
-        """Lazily create compose artifacts (idempotent)."""
+        """Validate or atomically publish the compose artifacts."""
         if not self.owned:
             return
         compose_dir = self._compose_dir()
@@ -489,6 +496,8 @@ class PostgresCluster:
             timeout=timeout,
             temporary_path=temporary_path,
             step_id=step_id,
+            validate=validate,
+            publish=publish,
         )
 
     def status(self) -> PostgresClusterState:
@@ -937,17 +946,28 @@ class PostgresCluster:
                     return
                 claim = self._ensure_pending_cluster_claim()
                 remaining = max(0.0, deadline - time.monotonic())
+                # Validate the generated compose document before resolving the
+                # image digest.  Syntax/configuration failures are local and
+                # deterministic; they must not lose the entire lifecycle
+                # budget to the two image probes first.
+                approved = self._approved_image_digest()
+                self._ensure_artifacts(
+                    approved,
+                    timeout=remaining,
+                    temporary_path=temporary_path,
+                    step_id=(step_ids or {}).get("postgres.ensure.config"),
+                    cluster_id=str(claim.cluster_id),
+                    publish=False,
+                )
                 image = self._require_trusted_image(
-                    remaining,
+                    max(0.0, deadline - time.monotonic()),
                     pull_step_id=(step_ids or {}).get("postgres.ensure.image.pull"),
                     inspect_step_id=(step_ids or {}).get("postgres.ensure.image.inspect"),
                 )
                 self._ensure_artifacts(
                     image,
-                    timeout=max(0.0, deadline - time.monotonic()),
-                    temporary_path=temporary_path,
-                    step_id=(step_ids or {}).get("postgres.ensure.config"),
                     cluster_id=str(claim.cluster_id),
+                    validate=False,
                 )
                 if state is PostgresClusterState.UNHEALTHY:
                     raise PostgresClusterUnhealthyError(

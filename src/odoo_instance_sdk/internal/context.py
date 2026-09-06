@@ -73,7 +73,7 @@ def resolve_project(explicit: Path | None, cwd: Path | None = None) -> ProjectCo
 
 def _project_from_registered_worktree(cwd: Path) -> Path | None:
     """Resolve nested registered worktrees without creating/opening a catalog."""
-    catalog = get_catalog_path()
+    catalog = get_catalog_path(ensure_exists=False)
     if not catalog.is_file():
         return None
     try:

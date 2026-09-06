@@ -474,10 +474,11 @@ def _patch_leaf_external(  # noqa: C901
 
     if path[:1] == ("resource",):
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.resource._inventory",
-            fail_operation
-            if failing
-            else lambda: ResourceInventory(resources=(), findings=(), complete=True),
+            "odoo_instance_sdk.commands.resource._resource_command",
+            lambda: _matrix_command(
+                ResourceInventory(resources=(), findings=(), complete=True),
+                error=RuntimeError("isolated external operation failed") if failing else None,
+            ),
         )
         return
 
@@ -2129,7 +2130,7 @@ def test_resource_machine_projection_is_read_only_and_one_document(
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.resource.get_backups_dir",
-        lambda: tmp_path / "backups",
+        lambda **_kwargs: tmp_path / "backups",
     )
 
     result = CliRunner().invoke(cli, ["resource", "list", "--format", mode])
@@ -2147,7 +2148,9 @@ def test_resource_rich_projections_are_bounded_and_deterministic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     empty = ResourceInventory(resources=(), findings=(), complete=True)
-    monkeypatch.setattr("odoo_instance_sdk.commands.resource._inventory", lambda: empty)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.resource._resource_command", lambda: _matrix_command(empty)
+    )
     runner = CliRunner()
 
     first = runner.invoke(cli, ["resource", "list"])

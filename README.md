@@ -201,6 +201,40 @@ odcli --env feature/customer-credit db reset-admin-password
 Refresh follows the environment's configured database policy. Destructive
 database operations are local-only and validate provenance before mutation.
 
+### Backups, restores, and retained-resource diagnosis
+
+Backup point commands use the exact full UUID and do not require an Odoo
+worktree context. List or inspect retained records before a mutation:
+
+```bash
+odcli backup list --format toon
+odcli backup show 01234567-89ab-cdef-0123-456789abcdef --format json
+odcli backup validate 01234567-89ab-cdef-0123-456789abcdef --format json
+odcli backup delete 01234567-89ab-cdef-0123-456789abcdef --dry-run --format json
+```
+
+Restore previews are immutable. Rich mode confirms only after all preflight
+checks; machine formats require `--yes` and never prompt. A restore switches
+the project default only after the database, postcondition, audit, and
+optional administrator reset succeed. On interruption or a later failure, the
+backup and any already-confirmed database are retained; failure documents
+include sanitized UUID/target/state context and Ctrl-C exits with `130`.
+
+The read-only resource projections inspect retained backups, databases,
+environments, logs, filestores, and owned volumes without reconciliation or
+deletion:
+
+```bash
+odcli resource list
+odcli resource list --format json
+odcli resource doctor --format toon
+```
+
+Logical database bytes are not host-reclamation claims. Unknown ownership,
+unavailable probes, crash-left `.part` files, and cleanup failures remain
+visible with sanitized paths and recommendations. `resource list` and
+`resource doctor` never add, repair, delete, or reclassify lifecycle state.
+
 ### Automation and shell access
 
 ```bash

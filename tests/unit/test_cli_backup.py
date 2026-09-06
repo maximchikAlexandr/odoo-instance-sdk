@@ -50,7 +50,7 @@ def _invoke(
     *,
     input: str | None = None,
 ) -> Result:
-    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda: db_path)
+    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda **_kwargs: db_path)
     return CliRunner().invoke(cli, args, input=input)
 
 

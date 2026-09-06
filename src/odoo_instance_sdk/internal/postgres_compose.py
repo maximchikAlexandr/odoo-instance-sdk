@@ -283,8 +283,10 @@ def write_compose_file_atomic(
     timeout: float | None = None,
     temporary_path: Path | None = None,
     step_id: str | None = None,
+    validate: bool = True,
+    publish: bool = True,
 ) -> None:
-    """Validate then atomically publish ``compose.yaml`` with mode 0600."""
+    """Validate and optionally publish a compose file with mode 0600."""
     compose_path.parent.mkdir(parents=True, exist_ok=True)
     if temporary_path is None:
         fd, tmp_name = tempfile.mkstemp(
@@ -299,13 +301,18 @@ def write_compose_file_atomic(
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.chmod(tmp_path, 0o600)
-        compose_config(runner, tmp_path, project_name, timeout=timeout, step_id=step_id)
-        os.replace(tmp_path, compose_path)
+        if validate:
+            compose_config(runner, tmp_path, project_name, timeout=timeout, step_id=step_id)
+        if publish:
+            os.replace(tmp_path, compose_path)
+        else:
+            os.unlink(tmp_path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)
         raise
-    os.chmod(compose_path, 0o600)
+    if publish:
+        os.chmod(compose_path, 0o600)
 
 
 def _compose_base_args(

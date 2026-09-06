@@ -27,6 +27,7 @@ from odoo_instance_sdk.internal.postgres_compose import docker_ready
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from tests.integration.postgres_cleanup import cleanup_postgres_project
 
 pytestmark = pytest.mark.integration
 
@@ -91,8 +92,14 @@ def _psql_process(
 def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # noqa: C901
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
+    docker_visible_postgres_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     psql = _require_tools()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
+    )
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "config", "user.email", "integration@example.test"], cwd=tmp_path, check=True
@@ -139,10 +146,11 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
     assert init_result.exit_code == 0, init_result.output
 
     cluster = PostgresCluster.from_project(tmp_path)
-    primary_failure: BaseException | None = None
     blocker: subprocess.Popen[str] | None = None
     waiter: subprocess.Popen[str] | None = None
+    compose_file = cluster.compose_file
     volume_name = f"pgdata_{cluster.to_diagnostic_dict()['project_id']}"
+    primary_failure: BaseException | None = None
     try:
         try:
             digest = cluster.resolve_image_digest(timeout=60.0)
@@ -378,34 +386,35 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
         primary_failure = exc
         raise
     finally:
+        cleanup_failures: list[BaseException] = []
         for cleanup_child in (waiter, blocker):
             if cleanup_child is not None and cleanup_child.poll() is None:
-                cleanup_child.terminate()
                 try:
+                    cleanup_child.terminate()
                     cleanup_child.wait(timeout=5.0)
                 except subprocess.TimeoutExpired:
-                    cleanup_child.kill()
-                    cleanup_child.wait(timeout=5.0)
-        cleanup = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "--project-name",
-                cluster.compose_project_name,
-                "-f",
-                str(cluster.compose_file),
-                "down",
-                "--volumes",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if primary_failure is None:
-            assert cleanup.returncode == 0, cleanup.stderr
-            assert (
-                subprocess.run(
-                    ["docker", "volume", "inspect", volume_name], capture_output=True, check=False
-                ).returncode
-                != 0
+                    try:
+                        cleanup_child.kill()
+                        cleanup_child.wait(timeout=5.0)
+                    except BaseException as exc:
+                        cleanup_failures.append(exc)
+                except BaseException as exc:
+                    cleanup_failures.append(exc)
+        try:
+            cleanup_postgres_project(
+                compose_file=compose_file,
+                compose_project_name=cluster.compose_project_name,
+                volume_name=volume_name,
+                primary_failure=None,
             )
+        except BaseException as exc:
+            cleanup_failures.append(exc)
+        if primary_failure is not None and cleanup_failures:
+            raise BaseExceptionGroup(
+                "primary test failure and PostgreSQL cleanup failures",
+                [primary_failure, *cleanup_failures],
+            )
+        if primary_failure is not None:
+            raise primary_failure
+        if cleanup_failures:
+            raise BaseExceptionGroup("PostgreSQL cleanup failures", cleanup_failures)

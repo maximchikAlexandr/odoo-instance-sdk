@@ -15,13 +15,17 @@ from odoo_instance_sdk.internal.paths import get_backups_dir
 
 def _patch_catalog(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db_path = tmp_path / "catalog.sqlite3"
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: db_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: db_path
+    )
 
 
 def test_successful_download(
     instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+    )
     _patch_catalog(monkeypatch, tmp_path)
     instance._client._catalog = None
     from tests.fixtures.odoo_database_server import BACKUP_ZIP_CONTENT
@@ -45,7 +49,9 @@ def test_successful_download(
 def test_backup_round_trips_through_catalog(
     instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+    )
     _patch_catalog(monkeypatch, tmp_path)
     instance._client._catalog = None
     from tests.fixtures.odoo_database_server import BACKUP_ZIP_CONTENT
@@ -77,7 +83,9 @@ def test_backup_round_trips_through_catalog(
 def test_interrupted_download(
     instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+    )
 
     httpx_mock.add_exception(
         OSError("Connection lost"),
@@ -98,7 +106,9 @@ def test_interrupted_download(
 def test_interrupted_download_audited_as_failed(
     instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+    )
     _patch_catalog(monkeypatch, tmp_path)
     instance._client._catalog = None
 
@@ -128,7 +138,9 @@ def test_interrupted_download_audited_as_failed(
 def test_missing_content_disposition(
     instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+    )
     from tests.fixtures.odoo_database_server import BACKUP_ZIP_CONTENT
 
     httpx_mock.add_response(
@@ -145,7 +157,9 @@ def test_missing_content_disposition(
 def test_unsafe_filename(
     instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+    )
     from tests.fixtures.odoo_database_server import BACKUP_ZIP_CONTENT
 
     httpx_mock.add_response(
@@ -165,7 +179,9 @@ def test_unsafe_filename(
 def test_server_error(
     instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, httpx_mock: HTTPXMock
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+    )
     httpx_mock.add_response(
         url="http://localhost:8069/web/database/backup",
         method="POST",

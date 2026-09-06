@@ -438,7 +438,7 @@ def _backup_catalog_path() -> Path:
 
 
 configure_catalog_path_provider(_backup_catalog_path)
-configure_resource_catalog_path_provider(_backup_catalog_path)
+configure_resource_catalog_path_provider(lambda: get_catalog_path(ensure_exists=False))
 
 
 class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]

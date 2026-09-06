@@ -11,7 +11,8 @@ import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.config import InstanceConfig
-from odoo_instance_sdk.exceptions import BackupCatalogError, ConfigError
+from odoo_instance_sdk.exceptions import BackupCatalogError, ConfigError, LockConflictError
+from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.drop import (
     DatabaseDropPartialError,
     DatabaseDropSafetyError,
@@ -204,7 +205,11 @@ def test_drop_plan_is_maintenance_bound_and_redacts_credentials(
         _instance(project_manifest), project_manifest, "feature_db", executor=executor
     )
 
-    assert all(step.argv[step.argv.index("-d") + 1] == "postgres" for step in command.commands)
+    assert all(
+        step.argv[step.argv.index("-d") + 1] == "postgres"
+        for step in command.commands
+        if "-d" in step.argv
+    )
     public = repr(command.plan)
     assert "private-password" not in public
     assert command.plan.observations[0].preconditions[0].status == "passed"  # type: ignore[union-attr]
@@ -218,6 +223,8 @@ def test_drop_plan_is_maintenance_bound_and_redacts_credentials(
     assert planning.step_ids == ("database.drop.planning-inspect",)  # type: ignore[union-attr]
     assert [step.step_id for step in command.plan.steps] == [
         "database.drop",
+        "database.drop.ownership.volume",
+        "database.drop.ownership.container",
         "database.drop.inspect",
         "database.drop.revalidate-terminate",
         "database.drop.terminate",
@@ -555,6 +562,49 @@ def test_drop_fails_closed_when_configured_default_changes_before_execution(
 
 
 @pytest.mark.unit
+def test_drop_rechecks_ownership_and_serializes_against_cluster_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    import odoo_instance_sdk.internal.pg.drop as drop_module
+
+    instance = _instance(project_manifest)
+    executor = _executor()
+    checks: list[str] = []
+    original = drop_module._drop_ownership_evidence
+
+    def record_check(*args: Any, **kwargs: Any) -> object:
+        checks.append("ownership")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(drop_module, "_drop_ownership_evidence", record_check)
+    command = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=executor
+    )
+
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    lock_path = postgres_cluster_lock_path(cluster._project_id)
+    command.run()
+    assert checks == ["ownership", "ownership"]
+
+    competing_executor = _executor()
+    competing = build_database_drop_command(
+        instance, project_manifest, "feature_db", timeout=0.05, executor=competing_executor
+    )
+    with exclusive_lock(lock_path), pytest.raises(LockConflictError):
+        competing.run()
+
+    # A competing lifecycle owns the same lock and blocks before the second
+    # command can reach its execution-time ownership proof or any PostgreSQL
+    # inspection/mutation.
+    assert checks == ["ownership", "ownership", "ownership"]
+    assert [step.step_id for step in competing_executor.executed] == [
+        "database.drop.planning-inspect"
+    ]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("drop_returncode", "verify_stdout", "verify_returncode", "message"),
     [
@@ -600,6 +650,11 @@ def test_drop_ownership_matrix_fails_before_any_postgres_effect(
     failure: str,
 ) -> None:
     monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    # Ownership is a planning-time, execution-owned boundary.  Keep this
+    # matrix independent of a host Docker daemon: the real Compose probe is
+    # exercised by integration coverage, while this test proves the refusal
+    # happens before any PostgreSQL effect.
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
     catalog = BackupCatalog(db_path=tmp_path / f"{failure}.sqlite3")
     instance = _compose_instance(project_manifest, catalog)
     cluster = instance._postgres_cluster

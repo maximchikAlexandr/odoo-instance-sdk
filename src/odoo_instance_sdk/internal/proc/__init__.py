@@ -499,21 +499,33 @@ class RunContext(Generic[T]):
 
     def fail_actions(self, error: BaseException) -> None:
         """Close logical actions with a sanitized failure when execution aborts."""
+        for step_id in tuple(self._started_actions):
+            self.fail_action(step_id, error)
+
+    def fail_action(self, step_id: str, error: BaseException) -> bool:
+        """Close one started action after a nested effect fails.
+
+        Nested prepared commands may recover a failed optional probe and return
+        a partial result.  They must close only the child action that failed;
+        the enclosing action remains eligible to complete after its fallback
+        projection succeeds.
+        """
+        started = self._started_actions.pop(step_id, None)
+        if started is None:
+            return False
         from odoo_instance_sdk.internal.sanitize import sanitize_event_message
 
-        message = sanitize_event_message(str(error))
-        for step_id, started in tuple(self._started_actions.items()):
-            self._action_progress.pop(step_id, None)
-            _notify(
-                self._observer,
-                StepEvent(
-                    step_id=step_id,
-                    kind="failed",
-                    error=message or "interrupted",
-                    elapsed=max(0.0, time.monotonic() - started),
-                ),
-            )
-        self._started_actions.clear()
+        self._action_progress.pop(step_id, None)
+        _notify(
+            self._observer,
+            StepEvent(
+                step_id=step_id,
+                kind="failed",
+                error=sanitize_event_message(str(error)) or "interrupted",
+                elapsed=max(0.0, time.monotonic() - started),
+            ),
+        )
+        return True
 
     def skip(self, step_id: str) -> None:
         """Consume a captured step when its guarded effect is intentionally omitted.

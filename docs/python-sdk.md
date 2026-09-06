@@ -186,6 +186,32 @@ signals, and exit code. Native `psql` does not accept document formatting;
 the SDK removes ambient `PGOPTIONS` and never exposes the password in plans or
 errors.
 
+## CLI resource diagnosis and lifecycle safety
+
+Resource inventory and doctor are intentionally CLI-private read-only
+projections; no `ResourceInventory` method is added to the public SDK. Use the
+CLI from an initialized project when local ownership and storage evidence is
+needed:
+
+```bash
+odcli resource list --format json
+odcli resource doctor --format toon
+```
+
+Both commands combine typed observations without reconciling catalogue state,
+deleting files, or stopping processes. Paths and diagnostics are sanitized;
+logical PostgreSQL size is labeled separately from measured host bytes, and
+unknown ownership stays retained. For remote backup acquisition, the CLI
+streams into an exclusive temporary file and publishes only after checksum,
+size, fsync, and close succeed. A failed or interrupted transfer closes its
+handles and retains any already-published backup.
+
+Use `db restore UUID --dry-run` to inspect a local restore before confirmation.
+The default changes only after restore, neutralization, postcondition, audit,
+and optional admin reset complete. Ctrl-C returns exit `130`; JSON/TOON keep
+one progress-free document on stdout and put sanitized diagnostics on stderr.
+The public SDK method inventory remains unchanged.
+
 ## Snapshot monitoring
 
 ```python

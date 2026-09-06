@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import platformdirs
 import pytest
 from click.testing import CliRunner
 
@@ -14,36 +13,8 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
 def test_init_catalogue_access_is_worker_local_and_not_production(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_cli_catalogue: Path
+    tmp_path: Path, isolated_cli_catalogue: Path, production_catalogue_path: Path
 ) -> None:
-    production_catalogue = (
-        Path(platformdirs.user_data_dir("odoo-instance-sdk", ensure_exists=False))
-        / "catalog.sqlite3"
-    )
-    guarded_methods = (
-        "open",
-        "exists",
-        "is_file",
-        "stat",
-        "read_text",
-        "read_bytes",
-        "write_text",
-        "write_bytes",
-        "replace",
-        "unlink",
-    )
-    for method_name in guarded_methods:
-        original = getattr(Path, method_name)
-
-        def guarded(
-            path: Path, *args: object, _original: object = original, **kwargs: object
-        ) -> object:
-            if path == production_catalogue:
-                raise AssertionError(f"production catalogue accessed: {path}")
-            return _original(path, *args, **kwargs)  # type: ignore[operator]
-
-        monkeypatch.setattr(Path, method_name, guarded)
-
     result = CliRunner().invoke(
         cli,
         [
@@ -59,7 +30,7 @@ def test_init_catalogue_access_is_worker_local_and_not_production(
     )
 
     assert result.exit_code == 0, result.output
-    assert isolated_cli_catalogue.parent != production_catalogue.parent
+    assert isolated_cli_catalogue.parent != production_catalogue_path.parent
 
 
 def test_worker_local_catalogues_do_not_cross_contaminate_monitor_projects(

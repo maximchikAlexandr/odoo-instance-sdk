@@ -89,6 +89,27 @@ Age-based backup pruning, log rotation, and `postgres destroy` remain separate
 evidence-gated future changes: each needs its own immutable preview, ownership
 proof, active-reference protection, and postcondition-tested cleanup policy.
 
+## Migration and failure notes
+
+The catalogue migration is additive and preserves legacy rows with nullable
+cluster and restore provenance. Older rows remain readable as unknown; no
+second store is introduced. Deployments should retain the existing catalogue
+backup before applying a schema migration and restore that backup before
+running older code. No migration deletes backups, restores, databases,
+filestores, volumes, or audit history.
+
+Streaming failures retain the exact backup UUID and sanitized state context.
+The `.part` file is removed only for a handled pre-publication failure; a
+published backup is retained. Restore and drop failures retain confirmed
+artifacts and return typed partial outcomes rather than claiming rollback of
+remote or filesystem effects. Ctrl-C closes owned progress, locks, response,
+and file handles and returns `130` where the command owns the interruption.
+
+These notes describe the shipped boundary, not an authorization for automatic
+cleanup. Prune, log rotation, and `postgres destroy` require separate
+evidence-gated changes with their own preview, ownership proof, active-reference
+checks, and postcondition tests.
+
 ## Reasoned native and stream exceptions
 
 | leaf | canonical exception | removal condition |

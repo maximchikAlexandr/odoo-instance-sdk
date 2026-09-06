@@ -14,8 +14,8 @@ from odoo_instance_sdk.internal.resource_inventory import (
     ResourceType,
     VolumeResourceSource,
     build_resource_inventory,
-    build_resource_inventory_command,
     collect_resource_inventory,
+    stable_resource_identity,
 )
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -132,6 +132,116 @@ def test_database_projection_keeps_logical_bytes_distinct_from_reclamation() -> 
     assert item.reclaimable is False
 
 
+def test_project_edges_use_the_canonical_cluster_qualified_database_identity(
+    tmp_path: Path,
+) -> None:
+    cluster_id = str(uuid.uuid4())
+    database = DatabaseInventoryItem(
+        cluster="127.0.0.1:5432",
+        cluster_id=cluster_id,
+        name="demo",
+        logical_size_bytes=1,
+        active_sessions=0,
+        is_default=True,
+    )
+
+    result = build_resource_inventory(
+        databases=(database,),
+        projects=(
+            ProjectResourceSource(
+                project_id="project-one",
+                repository_root=tmp_path,
+                runtime_database="demo",
+                database_cluster=cluster_id,
+            ),
+        ),
+    )
+
+    project = next(item for item in result.resources if item.type is ResourceType.PROJECT)
+    database_item = next(item for item in result.resources if item.type is ResourceType.DATABASE)
+    assert project.relationships == (database_item.stable_identity,)
+
+
+def test_mixed_claim_and_unknown_database_graph_edges_all_resolve(
+    tmp_path: Path,
+) -> None:
+    endpoint = "127.0.0.1:5432"
+    claim_id = str(uuid.uuid4())
+    proven_database = DatabaseInventoryItem(
+        cluster=endpoint,
+        cluster_id=claim_id,
+        name="restored",
+        logical_size_bytes=1,
+        active_sessions=0,
+        is_default=True,
+        origin="restore",
+    )
+    unknown_database = DatabaseInventoryItem(
+        cluster=endpoint,
+        cluster_id=None,
+        name="external",
+        logical_size_bytes=2,
+        active_sessions=0,
+        is_default=False,
+        origin="unknown",
+    )
+    proven_identity = stable_resource_identity("database", f"{claim_id}\x00restored")
+    unknown_identity = stable_resource_identity("database", f"{endpoint}\x00external")
+
+    result = build_resource_inventory(
+        databases=(proven_database, unknown_database),
+        projects=(
+            ProjectResourceSource(
+                project_id="project-one",
+                repository_root=tmp_path,
+                runtime_database="external",
+                database_cluster=endpoint,
+            ),
+        ),
+        files=(
+            FileResourceSource(
+                path=tmp_path / "filestore" / "restored",
+                kind="filestore",
+                owner_identity=proven_identity,
+                ownership=OwnershipConfidence.PROVEN,
+            ),
+            FileResourceSource(
+                path=tmp_path / "filestore" / "external",
+                kind="filestore",
+                owner_identity=unknown_identity,
+                ownership=OwnershipConfidence.UNKNOWN,
+            ),
+        ),
+        volumes=(
+            VolumeResourceSource(
+                project_id="project-one",
+                volume_name="odcli_pg_data",
+                cluster_id=claim_id,
+                owned=True,
+                available=False,
+                usage_bytes=None,
+            ),
+        ),
+    )
+
+    identities = {item.stable_identity for item in result.resources}
+    assert all(
+        relationship in identities
+        for item in result.resources
+        for relationship in item.relationships
+    )
+    project = next(item for item in result.resources if item.type is ResourceType.PROJECT)
+    filestores = [item for item in result.resources if item.type is ResourceType.FILESTORE]
+    assert project.relationships == (unknown_identity,)
+    assert {filestore.relationships[0] for filestore in filestores} == {
+        proven_identity,
+        unknown_identity,
+    }
+    assert claim_id not in {
+        relationship for item in result.resources for relationship in item.relationships
+    }
+
+
 def test_catalogue_source_reads_without_writes(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     backup_id = str(uuid.uuid4())
@@ -154,8 +264,7 @@ def test_resource_command_is_read_only_and_discovers_owned_directory_files(
     owned.mkdir()
     (owned / "unknown.bin").write_bytes(b"unknown")
     (owned / "crash.zip.part").write_bytes(b"partial")
-    command = build_resource_inventory_command(owned_directories=(owned,), roots=(tmp_path,))
-    result = command.run()
+    result = collect_resource_inventory(owned_directories=(owned,), roots=(tmp_path,))
     codes = {finding.code for finding in result.findings}
     assert "unknown_owned_directory_file" in codes
     assert "crash_left_partial_backup" in codes

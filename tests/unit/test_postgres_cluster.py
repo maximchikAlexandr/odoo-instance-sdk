@@ -560,9 +560,43 @@ def test_ensure_running_compose_invalid_config_raises(
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: 1000.0)
     with pytest.raises(PostgresComposeInvalidError):
         cluster.ensure_running(timeout=1.0)
     assert not cluster._compose_file().is_file()
+
+
+@pytest.mark.unit
+def test_ensure_running_validates_config_before_image_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ConfigFirstRunner(FakeComposeRunner):
+        reject_image = False
+
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            if self.reject_image and " image " in f" {' '.join(args)} ":
+                raise AssertionError("image resolution must follow compose config validation")
+            return super().run(args, cwd=cwd, timeout=timeout)
+
+    root = _write_compose_project(tmp_path)
+    fake = ConfigFirstRunner(config_rc=1)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    fake.calls.clear()
+    fake.reject_image = True
+    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: 1000.0)
+
+    with pytest.raises(PostgresComposeInvalidError):
+        cluster.ensure_running(timeout=1.0)
+
+    assert not any(" image " in f" {' '.join(call)} " for call in fake.calls)
 
 
 @pytest.mark.unit
@@ -676,7 +710,9 @@ def test_ensure_unhealthy_before_up_is_typed(tmp_path: Path) -> None:
     cluster._compose_file().write_text("services: {}\n")
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     with pytest.raises(PostgresClusterUnhealthyError):
-        cluster.ensure_running(timeout=1.0)
+        # Leave room for the filesystem-backed claim/artifact setup when this
+        # test shares a loaded xdist worker; the fake runner itself is instant.
+        cluster.ensure_running(timeout=5.0)
     assert not any(" up " in f" {' '.join(call)} " for call in fake.calls)
 
 
@@ -701,7 +737,9 @@ def test_ensure_unhealthy_after_up_is_typed(tmp_path: Path) -> None:
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     with pytest.raises(PostgresClusterUnhealthyError):
-        cluster.ensure_running(timeout=1.0)
+        # Leave room for the filesystem-backed claim/artifact setup when this
+        # test shares a loaded xdist worker; the fake runner itself is instant.
+        cluster.ensure_running(timeout=5.0)
 
 
 @pytest.mark.unit
@@ -886,7 +924,8 @@ def test_compose_claim_labels_and_retry_reuse_pending_identity(
     catalog_path = tmp_path / "catalog.sqlite3"
     compose_root = tmp_path / "postgres"
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_catalog_path", lambda: catalog_path
+        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        lambda **_kwargs: catalog_path,
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
@@ -916,7 +955,8 @@ def test_compose_claim_mismatch_fails_closed_then_exact_retry_activates(
     catalog_path = tmp_path / "catalog.sqlite3"
     compose_root = tmp_path / "postgres"
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_catalog_path", lambda: catalog_path
+        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        lambda **_kwargs: catalog_path,
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
@@ -957,7 +997,8 @@ def test_compose_claim_survives_failure_before_volume_and_reuses_identity(
     catalog_path = tmp_path / "catalog.sqlite3"
     compose_root = tmp_path / "postgres"
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_catalog_path", lambda: catalog_path
+        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        lambda **_kwargs: catalog_path,
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",

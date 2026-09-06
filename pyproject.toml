@@ -83,6 +83,7 @@ markers = [
     "serial: must run without xdist parallelism",
     "real_odoo: opt-in disposable lifecycle test requiring explicit local Odoo prerequisites",
     "dashboard: requires dashboard extra; mandatory in dashboard CI job",
+    "unpatched_xdg: exercise platformdirs against a fresh test-local XDG root",
 ]
 filterwarnings = [
     "error",

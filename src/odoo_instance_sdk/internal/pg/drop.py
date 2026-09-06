@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -21,6 +22,7 @@ from odoo_instance_sdk.execution import (
     _PlanObservation,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
+from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 from odoo_instance_sdk.internal.pg.context import DatabaseContext, resolve_database_context
 from odoo_instance_sdk.internal.proc import (
@@ -44,6 +46,8 @@ if TYPE_CHECKING:
 _DENIED_DATABASES = frozenset({"postgres", "template0", "template1"})
 _ROOT_STEP = "database.drop"
 _PLANNING_INSPECT_STEP = "database.drop.planning-inspect"
+_OWNERSHIP_VOLUME_STEP = "database.drop.ownership.volume"
+_OWNERSHIP_CONTAINER_STEP = "database.drop.ownership.container"
 _INSPECT_STEP = "database.drop.inspect"
 _REVALIDATE_TERMINATE_STEP = "database.drop.revalidate-terminate"
 _TERMINATE_STEP = "database.drop.terminate"
@@ -332,10 +336,13 @@ def _assert_safe(
         )
 
 
-def _drop_ownership_evidence(
+def _drop_ownership_evidence(  # noqa: C901
     instance: OdooInstance,
     cluster: PostgresCluster,
     database: str,
+    *,
+    volume_step_id: str | None = None,
+    container_step_id: str | None = None,
 ) -> _DropOwnershipEvidence | None:
     """Require exact active managed evidence when the real catalogue is available."""
     from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
@@ -361,8 +368,18 @@ def _drop_ownership_evidence(
     if _catalog_database_in_use(catalog, database):
         raise ConfigError("database is bound to an active environment or process")
     inspected = cluster._inspect_cluster_volume(
-        claim, timeout=30.0, step_id=None, container_step_id=None
+        claim,
+        timeout=30.0,
+        step_id=volume_step_id,
+        container_step_id=container_step_id,
     )
+    from odoo_instance_sdk.internal.proc import active_context
+
+    context = active_context()
+    if context is not None:
+        for step_id in (volume_step_id, container_step_id):
+            if step_id is not None and context.planned(step_id) and not context.consumed(step_id):
+                context.skip(step_id)
     if inspected is not True:
         raise ConfigError("database drop volume identity or attachment evidence is unavailable")
     binding = catalog._latest_restore_binding(
@@ -460,6 +477,7 @@ def build_database_drop_command(  # noqa: C901
         raise ConfigError("database drop timeout must be greater than zero")
 
     project_path = Path(project_root).resolve()
+    from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
     from odoo_instance_sdk.project import ProjectConfig
 
     project = ProjectConfig.load(project_path)
@@ -514,6 +532,34 @@ def build_database_drop_command(  # noqa: C901
         binding, database=database, step_id=_INSPECT_STEP, timeout=timeout
     )
 
+    ownership_volume_step = PreparedStep(
+        step_id=_OWNERSHIP_VOLUME_STEP,
+        argv=(
+            "docker",
+            "volume",
+            "inspect",
+            "--format",
+            "{{json .}}",
+            compose_volume_name(cluster._project_id),
+        ),
+        timeout=timeout,
+        mode="captured",
+        read_only=True,
+    )
+    ownership_container_step = PreparedStep(
+        step_id=_OWNERSHIP_CONTAINER_STEP,
+        argv=(
+            "docker",
+            "inspect",
+            "--format",
+            "{{json .}}",
+            f"{cluster.compose_project_name}-postgres-1",
+        ),
+        timeout=timeout,
+        mode="captured",
+        read_only=True,
+    )
+
     revalidate_terminate_step = _inspect_command_step(
         binding,
         database=database,
@@ -556,6 +602,8 @@ def build_database_drop_command(  # noqa: C901
             description="Drop one exact database from the bound project cluster",
             mutating=True,
         ),
+        ownership_volume_step,
+        ownership_container_step,
         inspect_step,
         revalidate_terminate_step,
         terminate_step,
@@ -567,9 +615,18 @@ def build_database_drop_command(  # noqa: C901
     def current_default() -> str | None:
         return ProjectConfig.load(project_path).default_source_database
 
-    def execute(context: RunContext[DatabaseDropResult]) -> DatabaseDropResult:
-        context.action(_ROOT_STEP)
-        current_ownership = _drop_ownership_evidence(instance, cluster, database)
+    def _execute_locked(context: RunContext[DatabaseDropResult]) -> DatabaseDropResult:  # noqa: C901
+        current_ownership = _drop_ownership_evidence(
+            instance,
+            cluster,
+            database,
+            volume_step_id=_OWNERSHIP_VOLUME_STEP,
+            container_step_id=_OWNERSHIP_CONTAINER_STEP,
+        )
+        if current_ownership is None:
+            for step_id in (_OWNERSHIP_VOLUME_STEP, _OWNERSHIP_CONTAINER_STEP):
+                if context.planned(step_id) and not context.consumed(step_id):
+                    context.skip(step_id)
         if ownership is not None and current_ownership != ownership:
             raise ConfigError("database drop ownership evidence changed before mutation")
         current_project_default = current_default()
@@ -641,6 +698,15 @@ def build_database_drop_command(  # noqa: C901
             filestore_state=filestore_state,
             filestore_path=filestore_path,
         )
+
+    def execute(context: RunContext[DatabaseDropResult]) -> DatabaseDropResult:
+        context.action(_ROOT_STEP)
+        # Cluster up/stop use this same lock.  Keep ownership revalidation,
+        # PostgreSQL mutation, audit reconciliation, and filestore disposition
+        # in one critical section so lifecycle changes cannot race the proof.
+        deadline = time.monotonic() + timeout
+        with exclusive_lock_until(postgres_cluster_lock_path(cluster._project_id), deadline):
+            return _execute_locked(context)
 
     plan = ExecutionPlan(
         steps=tuple(step.public_projection() for step in prepared_steps),

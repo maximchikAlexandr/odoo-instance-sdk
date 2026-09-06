@@ -27,6 +27,13 @@ if TYPE_CHECKING:
 
 
 _INVENTORY_STEP = "database.list.inventory"
+
+
+class _CatalogUnset:
+    """Sentinel for preserving the legacy lazy-catalog behavior."""
+
+
+_CATALOG_UNSET = _CatalogUnset()
 _INVENTORY_SQL = """
 SELECT COALESCE(json_agg(row ORDER BY row->>'name'), '[]'::json)
 FROM (
@@ -149,6 +156,7 @@ def build_database_inventory_command(
     project_root: str | Path,
     *,
     tracked: bool = False,
+    catalog: BackupCatalog | None | _CatalogUnset = _CATALOG_UNSET,
     executor: ProcessExecutor | None = None,
 ) -> Command[DatabaseInventoryResult]:
     """Capture a direct PostgreSQL inventory without Odoo reconciliation."""
@@ -177,25 +185,30 @@ def build_database_inventory_command(
         if not isinstance(result, ProcessResult):
             raise ConfigError("database inventory query returned no process result")
         rows = _decode_rows(result)
-        catalog = instance._client.get_catalog()
-        if not isinstance(catalog, BackupCatalog):
+        source_catalog = catalog
+        relationships: dict[
+            str, tuple[tuple[str, ...], tuple[str, ...], Literal["restore", "unknown"]]
+        ]
+        if source_catalog is _CATALOG_UNSET:
+            source_catalog = instance._client.get_catalog()
+        if not isinstance(source_catalog, BackupCatalog):
             relationships = {str(row["name"]): ((), (), "unknown") for row in rows}
             environment_rows: tuple[sqlite3.Row, ...] = ()
         else:
-            claim = catalog._get_postgres_cluster(str(getattr(cluster, "_project_id", "")))
+            claim = source_catalog._get_postgres_cluster(str(getattr(cluster, "_project_id", "")))
             active_id = (
                 str(claim.cluster_id)
                 if claim is not None and claim.state == "active" and cluster.mode == "compose"
                 else None
             )
             relationships = _relationships(
-                catalog,
+                source_catalog,
                 host=host,
                 port=port,
                 cluster_id=active_id,
                 names={str(row["name"]) for row in rows},
             )
-            environment_rows = tuple(catalog.list_environments(include_removed=False))
+            environment_rows = tuple(source_catalog.list_environments(include_removed=False))
         endpoint = str(getattr(cluster, "endpoint", f"{host}:{port}"))
         items: list[DatabaseInventoryItem] = []
         default = project.default_source_database

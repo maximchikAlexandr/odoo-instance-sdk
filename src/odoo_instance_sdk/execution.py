@@ -261,6 +261,13 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
             return None
         return prepared.private_projection
 
+    def _prepared(self) -> PreparedCommand[T]:
+        """Return the private snapshot for composing CLI-internal commands."""
+        prepared = _COMMANDS.get(id(self))
+        if prepared is None:
+            raise PlanError("command has no prepared executable snapshot")
+        return cast("PreparedCommand[T]", prepared)
+
     def _private_wrapper_nonce(self) -> str | None:
         """Return the nonce captured by the command's shell process step."""
         prepared = _COMMANDS.get(id(self))

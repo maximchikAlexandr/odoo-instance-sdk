@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -24,12 +24,10 @@ from odoo_instance_sdk.internal.sanitize import sanitize_event_message
 from odoo_instance_sdk.models import StorageFootprint
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command
     from odoo_instance_sdk.internal.pg.inventory import (
         DatabaseInventoryItem,
         DatabaseInventoryResult,
     )
-    from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, BackupProjection
 
 
@@ -99,16 +97,6 @@ class ResourceInventoryItem(msgspec.Struct, frozen=True, forbid_unknown_fields=T
         if self.reclaimable and self.ownership_confidence is not OwnershipConfidence.PROVEN:
             raise ValueError("only proven resources can be reclaimable")
 
-    @property
-    def resource_type(self) -> ResourceType:
-        """Descriptive alias used by non-CLI callers without a second field."""
-        return self.type
-
-    @property
-    def path(self) -> str | None:
-        """Sanitized path alias; the absolute source path is never retained."""
-        return self.sanitized_path
-
 
 class ResourceFinding(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     """A typed doctor observation; creating one never changes lifecycle state."""
@@ -159,6 +147,7 @@ class ProjectResourceSource:
     project_id: str
     repository_root: Path
     runtime_database: str | None = None
+    database_cluster: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +174,6 @@ class FileResourceSource:
     path: Path
     kind: Literal["log", "filestore", "owned_file", "part"]
     owner_identity: str | None = None
-    known: bool = False
     ownership: OwnershipConfidence = OwnershipConfidence.UNKNOWN
 
 
@@ -247,8 +235,39 @@ def _database_identity(cluster: str, name: str) -> str:
     return stable_resource_identity("database", f"{cluster}\x00{name}")
 
 
+def _database_identity_maps(
+    databases: Sequence[DatabaseInventoryItem],
+) -> tuple[dict[tuple[str, str], str], dict[str, tuple[str, ...]]]:
+    by_cluster_name: dict[tuple[str, str], str] = {}
+    by_name: dict[str, list[str]] = {}
+    for database in databases:
+        cluster = str(database.cluster_id or database.cluster)
+        identity = _database_identity(cluster, database.name)
+        by_cluster_name[(database.cluster, database.name)] = identity
+        by_name.setdefault(database.name, []).append(identity)
+    return by_cluster_name, {name: tuple(dict.fromkeys(values)) for name, values in by_name.items()}
+
+
+def _database_edge(
+    name: str,
+    *,
+    cluster: str | None,
+    by_cluster_name: Mapping[tuple[str, str], str],
+    by_name: Mapping[str, tuple[str, ...]],
+) -> str | None:
+    if cluster is not None:
+        identity = by_cluster_name.get((cluster, name))
+        if identity is not None:
+            return identity
+        return _database_identity(cluster, name)
+    matches = by_name.get(name, ())
+    return matches[0] if len(matches) == 1 else None
+
+
 def _backup_item(
-    projection: BackupProjection, roots: Sequence[Path]
+    projection: BackupProjection,
+    roots: Sequence[Path],
+    database_identities: Mapping[tuple[str, str], str],
 ) -> tuple[ResourceInventoryItem, ResourceFinding | None]:
     backup_id = str(projection.backup.id)
     identity = f"backup:{backup_id}"
@@ -279,7 +298,10 @@ def _backup_item(
             f"backup delete {backup_id}" if projection.state.value == "available" else None
         ),
         relationships=tuple(
-            _database_identity(f"{link.db_host}:{link.db_port}", link.database_name)
+            database_identities.get(
+                (f"{link.db_host}:{link.db_port}", link.database_name),
+                _database_identity(f"{link.db_host}:{link.db_port}", link.database_name),
+            )
             for link in projection.restore_links
         )
         + tuple(f"environment:{link.environment_id}" for link in projection.environment_links),
@@ -394,8 +416,7 @@ def _volume_item(source: VolumeResourceSource) -> ResourceInventoryItem:
         stable_identity=identity,
         type=ResourceType.VOLUME,
         name=identity,
-        relationships=(f"project:{source.project_id}",)
-        + ((f"cluster:{source.cluster_id}",) if source.cluster_id else ()),
+        relationships=(f"project:{source.project_id}",),
         ownership_confidence=ownership,
         active_use=(
             ActiveUse.ACTIVE
@@ -490,6 +511,8 @@ def build_resource_inventory(  # noqa: C901
     """Compose deterministic resource records from already captured inputs."""
     resources: dict[str, ResourceInventoryItem] = {}
     findings: dict[tuple[str, str], ResourceFinding] = {}
+    database_items = tuple(databases)
+    by_cluster_name, by_name = _database_identity_maps(database_items)
 
     def add(item: ResourceInventoryItem) -> None:
         current = resources.get(item.stable_identity)
@@ -502,12 +525,11 @@ def build_resource_inventory(  # noqa: C901
         )
 
     for projection in backups:
-        item, finding = _backup_item(projection, roots)
+        item, finding = _backup_item(projection, roots, by_cluster_name)
         add(item)
         if finding is not None:
             findings[(finding.code, finding.stable_identity)] = finding
 
-    database_items = tuple(databases)
     for database in database_items:
         cluster = str(database.cluster_id or database.cluster)
         identity = _database_identity(cluster, database.name)
@@ -548,7 +570,14 @@ def build_resource_inventory(  # noqa: C901
         identity = f"project:{project.project_id}"
         relationships: tuple[str, ...] = ()
         if project.runtime_database:
-            relationships = (_database_identity("project", project.runtime_database),)
+            database_edge = _database_edge(
+                project.runtime_database,
+                cluster=project.database_cluster,
+                by_cluster_name=by_cluster_name,
+                by_name=by_name,
+            )
+            if database_edge is not None:
+                relationships = (database_edge,)
         add(
             ResourceInventoryItem(
                 stable_identity=identity,
@@ -657,6 +686,7 @@ def collect_resource_inventory(
     roots: Sequence[Path] = (),
     backup_root: Path | None = None,
     owned_directories: Sequence[Path] = (),
+    database_measurement_reason: str | None = None,
 ) -> ResourceInventory:
     """Read existing catalogue projections, then build the same pure graph.
 
@@ -715,57 +745,10 @@ def collect_resource_inventory(
         roots=roots,
         database_measurement_complete=database_inventory is not None,
         database_measurement_reason=(
-            None if database_inventory is not None else "PostgreSQL inventory was not collected"
+            None
+            if database_inventory is not None
+            else database_measurement_reason or "PostgreSQL inventory was not collected"
         ),
-    )
-
-
-def build_resource_inventory_command(
-    *,
-    catalog: BackupCatalog | None = None,
-    database_inventory: DatabaseInventoryResult | None = None,
-    environments: Iterable[EnvironmentResourceSource] = (),
-    projects: Iterable[ProjectResourceSource] = (),
-    volumes: Iterable[VolumeResourceSource] = (),
-    files: Iterable[FileResourceSource] = (),
-    roots: Sequence[Path] = (),
-    backup_root: Path | None = None,
-    owned_directories: Sequence[Path] = (),
-    executor: ProcessExecutor | None = None,
-) -> Command[ResourceInventory]:
-    """Return the bounded read-only command used by future resource leaves."""
-    from odoo_instance_sdk.execution import Command, ExecutionPlan
-    from odoo_instance_sdk.internal.proc import PreparedAction, prepared_command
-
-    action = PreparedAction(
-        step_id="resource.inventory",
-        action="collect-resource-inventory",
-        description="Collect read-only local resource inventory",
-        read_only=True,
-    )
-
-    def run(context: RunContext[ResourceInventory]) -> ResourceInventory:
-        # The concrete RunContext is intentionally not part of the public
-        # surface.  Keep this command's only effect as action accounting and
-        # the same read-only projection used by direct callers.
-        context.action(action.step_id)
-        result = collect_resource_inventory(
-            catalog=catalog,
-            database_inventory=database_inventory,
-            environments=environments,
-            projects=projects,
-            volumes=volumes,
-            files=files,
-            roots=roots,
-            backup_root=backup_root,
-            owned_directories=owned_directories,
-        )
-        context.complete_action(action.step_id)
-        return result
-
-    return Command.from_prepared(
-        ExecutionPlan(steps=(action.public_projection(),)),
-        prepared_command(run, (action,), executor=executor),
     )
 
 
@@ -782,7 +765,6 @@ __all__ = [
     "ResourceType",
     "VolumeResourceSource",
     "build_resource_inventory",
-    "build_resource_inventory_command",
     "collect_resource_inventory",
     "open_catalog_read_only",
     "stable_resource_identity",
