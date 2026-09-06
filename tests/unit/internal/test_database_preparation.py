@@ -1211,6 +1211,106 @@ def test_restore_admin_reset_failure_retains_target_and_removes_config(
     local.databases.restore.assert_called_once()
 
 
+def test_catalogue_source_preflight_validates_exact_published_artifact(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk.internal.database_preparation import (
+        _catalogue_backup_preflight,
+        _CatalogueRestoreSource,
+    )
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    archive = tmp_path / "registered.zip"
+    archive.write_bytes(b"registered backup")
+    backup_id = str(uuid.uuid4())
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    catalog.start_download(
+        backup_id,
+        "https://example.test",
+        "remote_test",
+        "zip",
+        True,
+        archive,
+    )
+    catalog.success_download(backup_id, archive.name, archive.stat().st_size, "")
+    project = _project(tmp_path)
+
+    assert _catalogue_backup_preflight(
+        catalog, _CatalogueRestoreSource(uuid.UUID(backup_id)), project
+    ).id == uuid.UUID(backup_id)
+    catalog.close()
+
+
+def test_catalogue_restore_uses_common_restore_stages_without_remote_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.database_preparation import (
+        ProjectRuntimeBinding,
+        RestorePreflight,
+        _CatalogueRestoreSource,
+    )
+
+    source_config = tmp_path / "odoo.conf"
+    source_config.write_text(
+        "[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8069\n"
+        "db_name = source\nadmin_passwd = local-secret\n"
+    )
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        source_config=source_config,
+        default_source_database="old",
+        test_instance=ConfigTestInstance(base_url="https://example.test", database="remote_test"),
+    )
+    backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    local = MagicMock()
+    local.databases.names.return_value = ("source",)
+    local.databases.exists.return_value = False
+    cluster = MagicMock()
+    preflight = RestorePreflight(
+        project=project,
+        project_id="project",
+        source=None,
+        source_config=source_config,
+        local_instance=local,
+        runtime=ProjectRuntimeBinding(
+            python_executable="/usr/bin/python3",
+            odoo_bin="/usr/bin/odoo-bin",
+            runtime_cwd=tmp_path,
+        ),
+        postgres_cluster=cluster,
+        target_database="restored_target",
+        restore_source=_CatalogueRestoreSource(backup.id),
+        catalogue_backup=backup,
+    )
+
+    @contextlib.contextmanager
+    def fake_preflight(*_args: object, **_kwargs: object) -> Iterator[RestorePreflight]:
+        yield preflight
+
+    client = MagicMock()
+    monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
+    monkeypatch.setattr(preparation, "_manifest_after_preparation", lambda *_args: project)
+    monkeypatch.setattr(preparation, "write_manifest", MagicMock(), raising=False)
+
+    result = preparation.prepare_restore(
+        client,
+        project,
+        restore_source=_CatalogueRestoreSource(backup.id),
+    )
+
+    assert result.backup == backup
+    assert result.source_git_branch == backup.source_git_branch
+    assert result.default_switched is True
+    client.instance.assert_not_called()
+    local.databases.restore.assert_called_once_with(
+        backup,
+        "restored_target",
+        copy=True,
+        neutralize_database=True,
+    )
+
+
 def test_pinned_http_download_reaches_remote_database_operation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

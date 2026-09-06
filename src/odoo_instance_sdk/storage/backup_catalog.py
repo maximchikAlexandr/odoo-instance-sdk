@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, ParamSpec, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -37,7 +37,7 @@ type CatalogValue = JsonValue | Path | datetime | uuid.UUID | tuple[str, ...]
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 
 
 class CopyJournalStage(StrEnum):
@@ -74,8 +74,21 @@ class BackupEnvironmentLink:
 
     environment_id: str
     name: str
-    state: str
+    state: Literal["pending", "active"]
     target_database: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PostgresClusterClaim:
+    """Persisted identity for one project-owned Compose cluster."""
+
+    cluster_id: uuid.UUID
+    project_id: str
+    compose_project: str
+    volume_name: str
+    state: str
+    created_at: datetime
+    activated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +354,11 @@ class BackupCatalog:
             self._migrate_v12_backup_point_order(conn)
             conn.execute("PRAGMA user_version = 12")
             conn.commit()
+            user_version = 12
+        if user_version < 13:
+            self._migrate_v13_cluster_ownership(conn)
+            conn.execute("PRAGMA user_version = 13")
+            conn.commit()
 
     def _migrate_v12_backup_point_order(self, conn: sqlite3.Connection) -> None:
         """Index the immutable ordering key used by point-query pagination."""
@@ -354,6 +372,72 @@ class BackupCatalog:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS backups_point_order_idx "
                 f"ON backups ({order_expression} DESC, id ASC)"
+            )
+
+    def _migrate_v13_cluster_ownership(self, conn: sqlite3.Connection) -> None:
+        """Add the single transactional source of cluster ownership evidence."""
+        with conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS restores (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    db_host TEXT NOT NULL,
+                    db_port INTEGER NOT NULL,
+                    database_name TEXT NOT NULL,
+                    backup_id TEXT NOT NULL REFERENCES backups(id),
+                    restored_at TEXT NOT NULL
+                )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS database_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    db_host TEXT NOT NULL,
+                    db_port INTEGER NOT NULL,
+                    database_name TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    backup_id TEXT REFERENCES backups(id)
+                )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS postgres_clusters (
+                    cluster_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    compose_project TEXT NOT NULL,
+                    volume_name TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN ('pending', 'active')),
+                    created_at TEXT NOT NULL,
+                    activated_at TEXT
+                )"""
+            )
+            required = {
+                "cluster_id",
+                "project_id",
+                "compose_project",
+                "volume_name",
+                "state",
+                "created_at",
+                "activated_at",
+            }
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(postgres_clusters)")}
+            if not required <= columns:
+                raise BackupCatalogError("postgres_clusters table has an unsupported shape")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS postgres_clusters_project_idx "
+                "ON postgres_clusters(project_id)"
+            )
+            for table in ("restores", "database_events"):
+                columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+                if "cluster_id" not in columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN cluster_id TEXT")
+                if "data_directory" not in columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN data_directory TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS restores_cluster_identity_idx "
+                "ON restores(cluster_id, db_host, db_port, database_name, restored_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS database_events_cluster_identity_idx "
+                "ON database_events(cluster_id, db_host, db_port, database_name, sequence DESC)"
             )
 
     def _migrate_v10_backup_source_branch(self, conn: sqlite3.Connection) -> None:
@@ -1041,6 +1125,117 @@ class BackupCatalog:
                     f"Backup {backup.id} content hash mismatch (tampered or modified)"
                 )
 
+    @staticmethod
+    def _cluster_uuid(value: uuid.UUID | str) -> str:
+        try:
+            parsed = value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise BackupCatalogError("cluster_id must be a complete UUID") from exc
+        return str(parsed)
+
+    @staticmethod
+    def _cluster_text(value: str, label: str) -> str:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or any(ord(char) < 0x20 for char in value)
+        ):
+            raise BackupCatalogError(f"{label} must be non-empty text")
+        return value.strip()
+
+    @_translate_sqlite_error
+    def _get_postgres_cluster(self, project_id: str) -> PostgresClusterClaim | None:
+        """Return the one persisted claim for a project, if it exists."""
+        project = self._cluster_text(project_id, "project_id")
+        row = self._conn.execute(
+            "SELECT * FROM postgres_clusters WHERE project_id = ?", (project,)
+        ).fetchone()
+        return _row_to_cluster_claim(row) if row is not None else None
+
+    @_translate_sqlite_error
+    def _get_postgres_cluster_by_id(
+        self, cluster_id: uuid.UUID | str
+    ) -> PostgresClusterClaim | None:
+        identifier = self._cluster_uuid(cluster_id)
+        row = self._conn.execute(
+            "SELECT * FROM postgres_clusters WHERE cluster_id = ?", (identifier,)
+        ).fetchone()
+        return _row_to_cluster_claim(row) if row is not None else None
+
+    @_translate_sqlite_error
+    def _ensure_postgres_cluster_pending(
+        self,
+        project_id: str,
+        compose_project: str,
+        volume_name: str,
+    ) -> PostgresClusterClaim:
+        """Create or reuse a pending claim without replacing its identity."""
+        project = self._cluster_text(project_id, "project_id")
+        compose = self._cluster_text(compose_project, "compose_project")
+        volume = self._cluster_text(volume_name, "volume_name")
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM postgres_clusters WHERE project_id = ?", (project,)
+            ).fetchone()
+            if row is not None:
+                claim = _row_to_cluster_claim(row)
+                if claim.compose_project != compose or claim.volume_name != volume:
+                    raise BackupCatalogError("existing postgres cluster claim does not match")
+                return claim
+            identifier = str(uuid.uuid4())
+            self._conn.execute(
+                """INSERT INTO postgres_clusters
+                   (cluster_id, project_id, compose_project, volume_name, state, created_at)
+                   VALUES (?, ?, ?, ?, 'pending', datetime('now'))""",
+                (identifier, project, compose, volume),
+            )
+            created = self._conn.execute(
+                "SELECT * FROM postgres_clusters WHERE cluster_id = ?", (identifier,)
+            ).fetchone()
+            assert created is not None
+            return _row_to_cluster_claim(created)
+
+    @_translate_sqlite_error
+    def _activate_postgres_cluster(
+        self,
+        cluster_id: uuid.UUID | str,
+        project_id: str,
+        compose_project: str,
+        volume_name: str,
+    ) -> PostgresClusterClaim:
+        """Promote only the exact pending claim after external inspection."""
+        identifier = self._cluster_uuid(cluster_id)
+        project = self._cluster_text(project_id, "project_id")
+        compose = self._cluster_text(compose_project, "compose_project")
+        volume = self._cluster_text(volume_name, "volume_name")
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM postgres_clusters WHERE cluster_id = ?", (identifier,)
+            ).fetchone()
+            if row is None:
+                raise BackupCatalogError("postgres cluster claim does not exist")
+            claim = _row_to_cluster_claim(row)
+            if (
+                claim.project_id != project
+                or claim.compose_project != compose
+                or claim.volume_name != volume
+            ):
+                raise BackupCatalogError("postgres cluster claim identity does not match")
+            if claim.state == "active":
+                return claim
+            if claim.state != "pending":
+                raise BackupCatalogError("postgres cluster claim has an invalid state")
+            self._conn.execute(
+                "UPDATE postgres_clusters SET state='active', activated_at=datetime('now') "
+                "WHERE cluster_id = ? AND state='pending'",
+                (identifier,),
+            )
+            activated = self._conn.execute(
+                "SELECT * FROM postgres_clusters WHERE cluster_id = ?", (identifier,)
+            ).fetchone()
+            assert activated is not None
+            return _row_to_cluster_claim(activated)
+
     @_translate_sqlite_error
     def record_restore(
         self,
@@ -1048,17 +1243,32 @@ class BackupCatalog:
         db_port: int,
         database_name: str,
         backup_id: str,
+        *,
+        cluster_id: uuid.UUID | str | None = None,
+        data_directory: str | Path | None = None,
     ) -> None:
         host = normalize_db_host(db_host)
-        self._conn.execute(
-            "INSERT INTO restores (db_host, db_port, database_name, backup_id, restored_at) VALUES (?, ?, ?, ?, datetime('now'))",
-            (host, db_port, database_name, backup_id),
-        )
-        self._conn.execute(
-            "INSERT INTO database_events (db_host, db_port, database_name, event_type, occurred_at, backup_id) VALUES (?, ?, ?, 'restored', datetime('now'), ?)",
-            (host, db_port, database_name, backup_id),
-        )
-        self._conn.commit()
+        identity = None if cluster_id is None else self._cluster_uuid(cluster_id)
+        data_dir = None if data_directory is None else str(data_directory)
+        if data_dir is not None and not data_dir.strip():
+            raise BackupCatalogError("data_directory must not be empty")
+        if identity is not None:
+            claim = self._get_postgres_cluster_by_id(identity)
+            if claim is None or claim.state != "active":
+                raise BackupCatalogError("restore provenance requires an active cluster claim")
+        with self._conn:
+            self._conn.execute(
+                """INSERT INTO restores
+                   (db_host, db_port, database_name, backup_id, restored_at, cluster_id, data_directory)
+                   VALUES (?, ?, ?, ?, datetime('now'), ?, ?)""",
+                (host, db_port, database_name, backup_id, identity, data_dir),
+            )
+            self._conn.execute(
+                """INSERT INTO database_events
+                   (db_host, db_port, database_name, event_type, occurred_at, backup_id, cluster_id, data_directory)
+                   VALUES (?, ?, ?, 'restored', datetime('now'), ?, ?, ?)""",
+                (host, db_port, database_name, backup_id, identity, data_dir),
+            )
 
     @_translate_sqlite_error
     def record_database_dropped(
@@ -1529,6 +1739,32 @@ def _row_to_backup(row: sqlite3.Row, *, require_file: bool = True) -> Backup | N
         sha256=row["sha256"] or "",
         downloaded_at=datetime.fromisoformat(downloaded_at),
         source_git_branch=row["source_git_branch"],
+    )
+
+
+def _row_to_cluster_claim(row: sqlite3.Row) -> PostgresClusterClaim:
+    """Decode a persisted claim without silently repairing malformed evidence."""
+    try:
+        cluster_id = uuid.UUID(str(row["cluster_id"]))
+        created_at = datetime.fromisoformat(str(row["created_at"]))
+        activated_at = (
+            None
+            if row["activated_at"] is None
+            else datetime.fromisoformat(str(row["activated_at"]))
+        )
+    except (ValueError, TypeError, AttributeError, KeyError) as exc:
+        raise BackupCatalogError("postgres cluster claim contains malformed identity") from exc
+    state = str(row["state"])
+    if state not in {"pending", "active"}:
+        raise BackupCatalogError("postgres cluster claim contains invalid state")
+    return PostgresClusterClaim(
+        cluster_id=cluster_id,
+        project_id=str(row["project_id"]),
+        compose_project=str(row["compose_project"]),
+        volume_name=str(row["volume_name"]),
+        state=cast("Literal['pending', 'active']", state),
+        created_at=created_at,
+        activated_at=activated_at,
     )
 
 

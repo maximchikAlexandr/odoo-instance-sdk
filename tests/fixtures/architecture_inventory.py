@@ -21,11 +21,11 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/cli.py", 946),
         ("src/odoo_instance_sdk/cli.py", 945),
         ("src/odoo_instance_sdk/commands/env.py", 378),
-        ("src/odoo_instance_sdk/commands/output.py", 230),
-        ("src/odoo_instance_sdk/commands/output.py", 354),
-        ("src/odoo_instance_sdk/commands/output.py", 356),
-        ("src/odoo_instance_sdk/commands/output.py", 363),
-        ("src/odoo_instance_sdk/commands/output.py", 365),
+        ("src/odoo_instance_sdk/commands/output.py", 234),
+        ("src/odoo_instance_sdk/commands/output.py", 358),
+        ("src/odoo_instance_sdk/commands/output.py", 360),
+        ("src/odoo_instance_sdk/commands/output.py", 367),
+        ("src/odoo_instance_sdk/commands/output.py", 369),
         ("src/odoo_instance_sdk/resources/instance.py", 1068),
     }
 )
@@ -33,11 +33,11 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/env.py", 378): "existing Rich live inventory transport",
-    ("src/odoo_instance_sdk/commands/output.py", 230): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 354): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 356): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 363): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 365): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 234): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 358): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 360): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 367): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 369): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/cli.py", 946): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/cli.py", 945): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/resources/instance.py", 1068): "lifecycle cleanup diagnostic transport",

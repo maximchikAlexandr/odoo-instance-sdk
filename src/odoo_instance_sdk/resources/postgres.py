@@ -28,17 +28,20 @@ from odoo_instance_sdk.internal.git_worktree import (
     rev_parse_toplevel,
 )
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
-from odoo_instance_sdk.internal.paths import get_project_postgres_dir
+from odoo_instance_sdk.internal.paths import get_catalog_path, get_project_postgres_dir
 from odoo_instance_sdk.internal.postgres_compose import (
     ComposeRunner,
     SubprocessComposeRunner,
     compose_project_name,
     compose_stop,
     compose_up,
+    compose_volume_name,
     derive_state,
     docker_available,
     ensure_docker_or_raise,
     ensure_password_file,
+    inspect_container_identity,
+    inspect_volume_identity,
     is_oci_digest,
     render_compose_yaml,
     resolve_image_digest,
@@ -47,6 +50,7 @@ from odoo_instance_sdk.internal.postgres_compose import (
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import ClusterResourceSnapshot, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, PostgresClusterClaim
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue, PlanObservation
@@ -222,6 +226,55 @@ class PostgresCluster:
     def _trust_file(self) -> Path:
         """User-owned approval store; it is intentionally outside the repository."""
         return self._compose_dir().parent / "approved-images.json"
+
+    def _cluster_claim(self) -> PostgresClusterClaim | None:
+        """Read this project's claim; an absent row denotes legacy/external state."""
+        catalog = BackupCatalog(db_path=get_catalog_path())
+        try:
+            return catalog._get_postgres_cluster(self._project_id)
+        finally:
+            catalog.close()
+
+    def _ensure_pending_cluster_claim(self) -> PostgresClusterClaim:
+        catalog = BackupCatalog(db_path=get_catalog_path())
+        try:
+            return catalog._ensure_postgres_cluster_pending(
+                self._project_id,
+                self.compose_project_name,
+                compose_volume_name(self._project_id),
+            )
+        finally:
+            catalog.close()
+
+    def _activate_cluster_claim(self, claim: PostgresClusterClaim) -> None:
+        catalog = BackupCatalog(db_path=get_catalog_path())
+        try:
+            catalog._activate_postgres_cluster(
+                claim.cluster_id,
+                self._project_id,
+                self.compose_project_name,
+                compose_volume_name(self._project_id),
+            )
+        finally:
+            catalog.close()
+
+    def _restore_provenance(self) -> tuple[str | None, str | None]:
+        """Return verified ownership/data-dir context for a completed restore."""
+        if not self.owned:
+            return None, None
+        claim = self._cluster_claim()
+        if claim is None:
+            return None, None
+        if claim.state != "active":
+            raise PostgresClusterError("postgres cluster claim is not active")
+        if (
+            claim.project_id != self._project_id
+            or claim.compose_project != self.compose_project_name
+            or claim.volume_name != compose_volume_name(self._project_id)
+        ):
+            raise PostgresClusterError("postgres cluster claim identity does not match target")
+        data_dir = None
+        return str(claim.cluster_id), data_dir
 
     def _resolve_image_digest(
         self,
@@ -410,6 +463,7 @@ class PostgresCluster:
         timeout: float | None = None,
         temporary_path: Path | None = None,
         step_id: str | None = None,
+        cluster_id: str | None = None,
     ) -> None:
         """Lazily create compose artifacts (idempotent)."""
         if not self.owned:
@@ -425,6 +479,7 @@ class PostgresCluster:
             user=self._user,
             project_id=self._project_id,
             password_file=str(password_path),
+            cluster_id=cluster_id,
         )
         write_compose_file_atomic(
             self._compose_file(),
@@ -635,6 +690,8 @@ class PostgresCluster:
                     "postgres.ensure.up",
                     "postgres.ensure.final.ps",
                     "postgres.ensure.final.health",
+                    "postgres.ensure.identity.volume",
+                    "postgres.ensure.identity.container",
                 )
                 if context.planned(step_id)
             }
@@ -764,6 +821,31 @@ class PostgresCluster:
                 timeout=timeout,
                 read_only=True,
             ),
+            PreparedStep(
+                step_id="postgres.ensure.identity.volume",
+                argv=(
+                    "docker",
+                    "volume",
+                    "inspect",
+                    "--format",
+                    "{{json .}}",
+                    compose_volume_name(self._project_id),
+                ),
+                timeout=timeout,
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="postgres.ensure.identity.container",
+                argv=(
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{json .}}",
+                    f"{self.compose_project_name}-postgres-1",
+                ),
+                timeout=timeout,
+                read_only=True,
+            ),
         )
 
     def ensure_running_command(
@@ -812,7 +894,7 @@ class PostgresCluster:
             f"(mode={self._mode}, state={state.value})"
         )
 
-    def _ensure_running_compose(
+    def _ensure_running_compose(  # noqa: C901
         self,
         timeout: float,
         *,
@@ -826,25 +908,46 @@ class PostgresCluster:
             with lock:
                 if self._compose_runner.requires_docker:
                     ensure_docker_or_raise()
+                state = self._status_compose(
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    ps_step_id=(step_ids or {}).get("postgres.ensure.status.ps"),
+                    health_step_id=(step_ids or {}).get("postgres.ensure.status.health"),
+                )
+                if state is PostgresClusterState.HEALTHY:
+                    # A healthy target without a claim is supported legacy
+                    # Compose. An existing claim must still be re-inspected;
+                    # declarative mode alone is never ownership evidence.
+                    existing = self._cluster_claim()
+                    if existing is None:
+                        return
+                    inspected = self._inspect_cluster_volume(
+                        existing,
+                        timeout=max(0.0, deadline - time.monotonic()),
+                        step_id=(step_ids or {}).get("postgres.ensure.identity.volume"),
+                        container_step_id=(step_ids or {}).get(
+                            "postgres.ensure.identity.container"
+                        ),
+                    )
+                    if inspected is False:
+                        raise PostgresClusterError(
+                            "managed postgres volume identity or attachment inspection failed"
+                        )
+                    if existing.state == "pending" and inspected is True:
+                        self._activate_cluster_claim(existing)
+                    return
+                claim = self._ensure_pending_cluster_claim()
                 remaining = max(0.0, deadline - time.monotonic())
                 image = self._require_trusted_image(
                     remaining,
                     pull_step_id=(step_ids or {}).get("postgres.ensure.image.pull"),
                     inspect_step_id=(step_ids or {}).get("postgres.ensure.image.inspect"),
                 )
-                state = self._status_compose(
-                    timeout=max(0.0, deadline - time.monotonic()),
-                    ps_step_id=(step_ids or {}).get("postgres.ensure.status.ps"),
-                    health_step_id=(step_ids or {}).get("postgres.ensure.status.health"),
-                )
-                # Do not rewrite secret/config artifacts on a healthy fast path.
-                if state is PostgresClusterState.HEALTHY:
-                    return
                 self._ensure_artifacts(
                     image,
                     timeout=max(0.0, deadline - time.monotonic()),
                     temporary_path=temporary_path,
                     step_id=(step_ids or {}).get("postgres.ensure.config"),
+                    cluster_id=str(claim.cluster_id),
                 )
                 if state is PostgresClusterState.UNHEALTHY:
                     raise PostgresClusterUnhealthyError(
@@ -868,6 +971,20 @@ class PostgresCluster:
                     health_step_id=(step_ids or {}).get("postgres.ensure.final.health"),
                 )
                 if current is PostgresClusterState.HEALTHY:
+                    inspected = self._inspect_cluster_volume(
+                        claim,
+                        timeout=max(0.0, deadline - time.monotonic()),
+                        step_id=(step_ids or {}).get("postgres.ensure.identity.volume"),
+                        container_step_id=(step_ids or {}).get(
+                            "postgres.ensure.identity.container"
+                        ),
+                    )
+                    if inspected is False:
+                        raise PostgresClusterError(
+                            "managed postgres volume identity or attachment inspection failed"
+                        )
+                    if inspected is True:
+                        self._activate_cluster_claim(claim)
                     return
                 if current is PostgresClusterState.UNHEALTHY:
                     raise PostgresClusterUnhealthyError(
@@ -877,6 +994,56 @@ class PostgresCluster:
                 raise PostgresClusterTimeoutError(timeout)
         except LockConflictError as exc:
             raise PostgresClusterTimeoutError(timeout) from exc
+
+    def _inspect_cluster_volume(
+        self,
+        claim: PostgresClusterClaim,
+        *,
+        timeout: float | None,
+        step_id: str | None,
+        container_step_id: str | None,
+    ) -> bool | None:
+        """Return exact inspection, or ``None`` for non-Docker test runners."""
+        attachment = getattr(self._compose_runner, "inspect_cluster_attachment", None)
+        if callable(attachment):
+            return bool(
+                attachment(
+                    self.compose_project_name,
+                    compose_volume_name(self._project_id),
+                    str(claim.cluster_id),
+                    self._project_id,
+                )
+            )
+        custom = getattr(self._compose_runner, "inspect_volume_identity", None)
+        if callable(custom):
+            return bool(
+                custom(
+                    compose_volume_name(self._project_id),
+                    str(claim.cluster_id),
+                    self._project_id,
+                )
+            )
+        if not isinstance(self._compose_runner, SubprocessComposeRunner):
+            return None
+        volume_ok = inspect_volume_identity(
+            self._compose_runner,
+            compose_volume_name(self._project_id),
+            str(claim.cluster_id),
+            project_id=self._project_id,
+            timeout=timeout,
+            step_id=step_id,
+        )
+        if not volume_ok:
+            return False
+        return inspect_container_identity(
+            self._compose_runner,
+            f"{self.compose_project_name}-postgres-1",
+            str(claim.cluster_id),
+            project_id=self._project_id,
+            volume_name=compose_volume_name(self._project_id),
+            timeout=timeout,
+            step_id=container_step_id,
+        )
 
     def stop(self, timeout: float = _DEFAULT_STOP_TIMEOUT) -> None:
         return self.stop_command(timeout).run()

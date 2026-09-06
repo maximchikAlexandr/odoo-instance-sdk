@@ -211,6 +211,10 @@ def _failure_message(message: DiagnosticValue, context: JsonObject) -> str:
         details.append(f"retained backup {context['retained_backup_id']}")
     if context.get("retained_database") is not None:
         details.append(f"retained database {context['retained_database']}")
+    if context.get("database_confirmed") is not None:
+        details.append(f"database confirmed {context['database_confirmed']}")
+    if context.get("default_switch_confirmed") is not None:
+        details.append(f"default switch confirmed {context['default_switch_confirmed']}")
     sessions = context.get("active_sessions")
     if isinstance(sessions, (list, tuple)) and sessions:
         details.append(
@@ -586,7 +590,7 @@ def action_command(
     )
 
 
-def run_or_preview(
+def run_or_preview(  # noqa: C901
     build_command: Callable[[], _InspectableCommand[_ResultT]],
     *,
     command_name: str,
@@ -602,6 +606,7 @@ def run_or_preview(
     observer: StepObserver | None = None,
     observe_output: bool = False,
     progress: bool = False,
+    on_interrupt: Callable[[KeyboardInterrupt], None] | None = None,
 ) -> tuple[int, _ResultT | None]:
     """Build one command, then either inspect it or run that same instance.
 
@@ -639,9 +644,19 @@ def run_or_preview(
                 show_command_output=observe_output,
             )
         except KeyboardInterrupt as exc:
+            if on_interrupt is not None:
+                on_interrupt(exc)
             raise click.exceptions.Exit(130) from exc
     else:
-        value = execute(observer)
+        try:
+            value = execute(observer)
+        except KeyboardInterrupt as exc:
+            if on_interrupt is not None:
+                on_interrupt(exc)
+                raise click.exceptions.Exit(130) from exc
+            if progress:
+                raise click.exceptions.Exit(130) from exc
+            raise
     if not emit_normal:
         return 0, value
     payload = result(value) if result is not None else {}

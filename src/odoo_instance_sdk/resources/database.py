@@ -1247,7 +1247,7 @@ class DatabaseResource:
                 after_step_id=after_step_id,
             )
 
-    def _restore_impl_locked(
+    def _restore_impl_locked(  # noqa: C901
         self,
         backup: Backup,
         target_database_name: str,
@@ -1263,6 +1263,20 @@ class DatabaseResource:
 
         catalog = self._instance._client.get_catalog()
         catalog.verify_identity(backup)
+
+        # Classify the target before the remote effect.  A pending or malformed
+        # managed claim is never downgraded to nullable legacy provenance.
+        cluster_identity: str | None = None
+        postgres_cluster = self._instance._postgres_cluster
+        provenance = (
+            None
+            if postgres_cluster is None
+            else getattr(postgres_cluster, "_restore_provenance", None)
+        )
+        if callable(provenance):
+            cluster_identity, _ = provenance()
+        start_config = self._instance.config.start_config
+        data_directory = None if start_config is None else start_config.data_dir
 
         backup_path = Path(backup.path)
         if not backup_path.is_file() or not os.access(backup_path, os.R_OK):
@@ -1317,12 +1331,22 @@ class DatabaseResource:
         ck = self._cluster
         if ck is not None:
             db_host, db_port = ck
-            catalog.record_restore(
-                db_host,
-                db_port,
-                target_database_name,
-                str(backup.id),
-            )
+            if cluster_identity is None and data_directory is None:
+                catalog.record_restore(
+                    db_host,
+                    db_port,
+                    target_database_name,
+                    str(backup.id),
+                )
+            else:
+                catalog.record_restore(
+                    db_host,
+                    db_port,
+                    target_database_name,
+                    str(backup.id),
+                    cluster_id=cluster_identity,
+                    data_directory=data_directory,
+                )
 
         return RestoreResult(new_db=target_database_name, source=backup)
 

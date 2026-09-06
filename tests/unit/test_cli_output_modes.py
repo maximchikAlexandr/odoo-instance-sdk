@@ -175,6 +175,17 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     ),
     PublicLeafCase(("db", "refresh"), ("db", "refresh"), "mutating-or-spawning", True),
     PublicLeafCase(
+        ("db", "restore"),
+        (
+            "db",
+            "restore",
+            "00000000-0000-0000-0000-000000000007",
+            "--dry-run",
+        ),
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(
         ("db", "reset-admin-password"), ("db", "reset-admin-password"), "mutating-or-spawning", True
     ),
     PublicLeafCase(
@@ -528,6 +539,23 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.commands.db.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), _matrix_environment(), instance),
         )
+        return
+
+    if path == ("db", "restore"):
+        client = MagicMock()
+        if failing:
+            client.environments.refresh_database_command.side_effect = fail_operation
+        else:
+            client.environments.refresh_database_command.return_value = _matrix_command(
+                DatabasePreparationResult(
+                    mode=DatabasePreparationAction.RESTORE,
+                    restored_database="demo_copy",
+                )
+            )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
+        )
+        monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_kwargs: client)
         return
 
     if path == ("db", "drop"):

@@ -54,6 +54,95 @@ def test_db_help_registers_both_commands_without_password_option() -> None:
     assert "[y/n]" not in reset_help.output.lower()
 
 
+def test_restore_is_registered_with_exact_uuid_and_target_options() -> None:
+    result = CliRunner().invoke(cli, ["db", "restore", "--help"])
+
+    assert result.exit_code == 0
+    assert "--target" in result.output
+    assert "--reset-admin-password" in result.output
+    assert "--dry-run" in result.output
+    assert "--yes" in result.output
+
+
+def test_restore_machine_confirmation_precedes_project_or_catalogue_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock()
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.db.resolve_project_path",
+        lambda _ctx: pytest.fail("confirmation must precede project resolution"),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["db", "restore", "00000000-0000-0000-0000-000000000007", "--json"],
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"]["code"] == "confirmation_required"
+    client.environments.refresh_database_command.assert_not_called()
+
+
+def test_restore_dry_run_uses_registered_source_and_emits_one_document(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_id = "00000000-0000-0000-0000-000000000007"
+    client = MagicMock()
+    client.environments.refresh_database_command.return_value = _command(
+        DatabasePreparationResult(
+            mode=DatabasePreparationAction.RESTORE,
+            restored_database="demo_copy",
+        )
+    )
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+
+    result = CliRunner().invoke(
+        cli,
+        ["db", "restore", backup_id, "--target", "demo_copy", "--dry-run", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["dry_run"] is True
+    call = client.environments.refresh_database_command.call_args
+    assert str(call.kwargs["restore_source"].backup_id) == backup_id
+    assert call.kwargs["target_database"] == "demo_copy"
+
+
+def test_restore_interrupt_emits_sanitized_context_and_exit_130(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    backup_id = uuid.UUID("00000000-0000-0000-0000-000000000007")
+    interrupted = KeyboardInterrupt()
+    interrupted.failure_context = DatabasePreparationFailureContext(  # type: ignore[attr-defined]
+        backup_id=backup_id,
+        retained_backup_id=backup_id,
+        retained_database="demo_copy",
+        database_confirmed=True,
+        default_switch_confirmed=False,
+    )
+    client = MagicMock()
+    client.environments.refresh_database_command.return_value = _command(error=interrupted)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+
+    result = CliRunner().invoke(
+        cli,
+        ["db", "restore", str(backup_id), "--yes", "--json"],
+    )
+
+    assert result.exit_code == 130
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "db_restore_interrupted"
+    assert payload["context"]["backup_id"] == str(backup_id)
+    assert payload["context"]["retained_database"] == "demo_copy"
+    assert payload["context"]["database_confirmed"] is True
+    assert payload["context"]["default_switch_confirmed"] is False
+
+
 def test_refresh_reset_option_is_click_usage_error_before_sdk_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -90,6 +90,7 @@ from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+    from odoo_instance_sdk.internal.database_preparation import _RestoreSource
     from odoo_instance_sdk.internal.pgadmin import _PgAdminReconciliationCarrier
     from odoo_instance_sdk.internal.pgadmin_files import (
         PgAdminFingerprintInputs,
@@ -429,14 +430,23 @@ class EnvironmentResource:
         project: ProjectConfig | Path,
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
+        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        target_database: str | None = None,
     ) -> DatabasePreparationResult:
-        return self.refresh_database_command(project, options=options).run()
+        return self.refresh_database_command(
+            project,
+            options=options,
+            restore_source=restore_source,
+            target_database=target_database,
+        ).run()
 
     def refresh_database_command(
         self,
         project: ProjectConfig | Path,
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
+        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        target_database: str | None = None,
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
         from odoo_instance_sdk.internal.database_preparation import (
@@ -446,6 +456,8 @@ class EnvironmentResource:
         return DatabasePreparationCoordinator(self._client).refresh_database_command(
             project,
             options=options,
+            restore_source=restore_source,
+            target_database=target_database,
             executor=executor,
         )
 

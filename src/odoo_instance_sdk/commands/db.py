@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
@@ -25,8 +26,10 @@ from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputMode,
     _rich_plan_projection,
+    emit,
     emit_json_envelope,
     fail,
+    failure_document,
     model_to_dict,
     output_options,
     resolve_output_mode,
@@ -141,6 +144,126 @@ def db_refresh(
         status, _result = run()
     except Exception as exc:
         fail(output_mode, "db.refresh", exc)
+    raise click.exceptions.Exit(status)
+
+
+@db_group.command("restore", help="Restore one retained backup into a new database.")
+@click.argument("backup_uuid")
+@click.option("--target", "target_database", default=None, help="Exact new database name.")
+@click.option(
+    "--reset-admin-password",
+    "reset_admin_password",
+    is_flag=True,
+    default=False,
+    help="Reset base.user_admin after restoring.",
+)
+@click.option("--yes", is_flag=True, default=False, help="Skip interactive confirmation.")
+@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
+@output_options
+@pass_cli_context
+def db_restore(
+    ctx: CliContext,
+    backup_uuid: str,
+    target_database: str | None,
+    reset_admin_password: bool,
+    yes: bool,
+    dry_run: bool,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    """Restore one exact catalogue backup without downloading it again."""
+    output_mode = resolve_output_mode(output_format, json_output)
+    if not dry_run and not yes and output_mode is not OutputMode.RICH:
+        emit_json_envelope(
+            ok=False,
+            command="db.restore",
+            error_code="confirmation_required",
+            error_message="db restore requires --yes in machine output mode",
+            mode=output_mode,
+        )
+        raise click.exceptions.Exit(1)
+
+    try:
+        backup_id = uuid.UUID(backup_uuid)
+    except (ValueError, TypeError, AttributeError) as exc:
+        fail(output_mode, "db.restore", "backup identifier must be a complete UUID")
+        raise AssertionError from exc
+
+    try:
+        from odoo_instance_sdk.internal.database_preparation import _CatalogueRestoreSource
+
+        project_path = resolve_project_path(ctx)
+        client = _client_class()(config=_client_config_class()(executable="odoo"))
+        command = client.environments.refresh_database_command(
+            project_path,
+            options=DatabaseRefreshOptions(
+                restore=True,
+                reset_admin_password=reset_admin_password,
+            ),
+            restore_source=_CatalogueRestoreSource(backup_id),
+            target_database=target_database,
+        )
+    except Exception as exc:
+        fail(output_mode, "db.restore", exc)
+
+    def confirm() -> None:
+        click.confirm(
+            f"Restore backup {backup_id}"
+            + (f" into {target_database!r}" if target_database else "")
+            + "?",
+            default=False,
+            abort=True,
+        )
+
+    def interrupted(error: KeyboardInterrupt) -> None:
+        from odoo_instance_sdk.internal.database_preparation import (
+            DatabasePreparationFailureContext,
+        )
+
+        context = getattr(error, "failure_context", None)
+        safe_context: dict[str, JsonValue] = (
+            model_to_dict(context)
+            if isinstance(context, DatabasePreparationFailureContext)
+            else cast(
+                "dict[str, JsonValue]",
+                {
+                    "backup_id": str(backup_id),
+                    "retained_database": target_database,
+                    "database_confirmed": False,
+                    "default_switch_confirmed": False,
+                },
+            )
+        )
+        emit(
+            failure_document(
+                command="db.restore",
+                context=safe_context,
+                error_code="db_restore_interrupted",
+                error_message="database restore interrupted",
+            ),
+            output_mode,
+        )
+
+    try:
+        status, _result = run_or_preview(
+            lambda: command,
+            command_name="db.restore",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=cast(
+                "Callable[[DatabasePreparationResult | None], dict[str, JsonValue]]", model_to_dict
+            ),
+            context={"backup_id": str(backup_id), "target_database": target_database},
+            provenance={"project_source": project_provenance(ctx)},
+            confirm=None if yes or dry_run else confirm,
+            rich=_restore_rich,
+            progress=True,
+            on_interrupt=interrupted,
+        )
+    except click.exceptions.Exit:
+        raise
+    except Exception as exc:
+        fail(output_mode, "db.restore", exc)
     raise click.exceptions.Exit(status)
 
 
@@ -271,6 +394,21 @@ def _drop_rich(document: OutputDocument) -> str:
     if "observations" in payload:
         return _rich_plan_projection(document)
     return f"Dropped database {payload['database']} on {payload['cluster']}"
+
+
+def _restore_rich(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    payload = document.result if isinstance(document.result, dict) else {}
+    if "steps" in payload:
+        return _rich_plan_projection(document)
+    database = payload.get("restored_database", "")
+    backup = payload.get("backup")
+    backup_id = backup.get("id") if isinstance(backup, dict) else backup
+    details = f"Restored database {database}"
+    if backup_id:
+        details += f" from backup {backup_id}"
+    return details
 
 
 def _validate_recorded_database_binding(
