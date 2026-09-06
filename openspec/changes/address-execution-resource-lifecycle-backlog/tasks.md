@@ -41,13 +41,13 @@
 
 ## 5. Streaming backup and interruption lifecycle
 
-- [ ] 5.1 Change remote backup acquisition to `httpx.Client.stream("POST", ...)`, validate status/headers before transfer, and preserve password-safe HTTP exception conversion without retaining request graphs.
-- [ ] 5.2 Extend the existing exclusive `.part` writer to emit received-byte progress while incrementally enforcing the size limit and SHA-256, then fsync/close and atomically publish only a complete stream.
-- [ ] 5.3 Parse only trustworthy byte `Content-Length` values, verify final count equality, and suppress percentage for missing, invalid, encoded, or inconsistent totals.
-- [ ] 5.4 Separate remote-response waiting and transfer action events and propagate backup UUID/state through typed failure and interrupt context.
-- [ ] 5.5 Make interruption close response/file handles and apply existing cleanup/failed policy while preserving any already-published backup and avoiding claims about remote cancellation.
-- [ ] 5.6 Add tests for no full response buffering, chunked success, checksum/count, response wait, absent/valid/invalid/inconsistent content length, stream break, over-limit stop, atomic publication, cleanup, and interrupt before/during/after publication.
-- [ ] 5.7 Commit the backup-streaming slice and push the feature branch before adding point-management commands.
+- [x] 5.1 Change remote backup acquisition to `httpx.Client.stream("POST", ...)`, validate status/headers before transfer, and preserve password-safe HTTP exception conversion without retaining request graphs.
+- [x] 5.2 Extend the existing exclusive `.part` writer to emit received-byte progress while incrementally enforcing the size limit and SHA-256, then fsync/close and atomically publish only a complete stream.
+- [x] 5.3 Parse only trustworthy byte `Content-Length` values, verify final count equality, and suppress percentage for missing, invalid, encoded, or inconsistent totals.
+- [x] 5.4 Separate remote-response waiting and transfer action events and propagate backup UUID/state through typed failure and interrupt context.
+- [x] 5.5 Make interruption close response/file handles and apply existing cleanup/failed policy while preserving any already-published backup and avoiding claims about remote cancellation.
+- [x] 5.6 Add tests for no full response buffering, chunked success, checksum/count, response wait, absent/valid/invalid/inconsistent content length, stream break, over-limit stop, atomic publication, cleanup, and interrupt before/during/after publication.
+- [x] 5.7 Commit the backup-streaming slice and push the feature branch before adding point-management commands.
 
 ## 6. Backup catalogue point operations
 

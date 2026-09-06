@@ -28,11 +28,13 @@ def test_backup_audit_row_precedes_http_request(instance: OdooInstance, tmp_path
 
     http = MagicMock(spec=httpx.Client)
 
-    def post(*_args: object, **_kwargs: object) -> MagicMock:
+    def stream(*_args: object, **_kwargs: object) -> MagicMock:
         calls.append("http")
-        return response
+        context = MagicMock()
+        context.__enter__.return_value = response
+        return context
 
-    http.post.side_effect = post
+    http.stream.side_effect = stream
     http_context = MagicMock()
     http_context.__enter__.return_value = http
 

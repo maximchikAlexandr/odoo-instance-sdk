@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import httpx
 import pytest
@@ -43,9 +44,27 @@ def _mock_http(json_data: object) -> MagicMock:
     mock_resp.raise_for_status.return_value = None
     mock_http = MagicMock(spec=httpx.Client)
     mock_http.post.return_value = mock_resp
+
+    def stream(*args: object, **kwargs: object) -> MagicMock:
+        response = mock_http.post(*args, **kwargs)
+        stream_cm = MagicMock()
+        stream_cm.__enter__.return_value = response
+        return stream_cm
+
+    mock_http.stream.side_effect = stream
     mock_cm = MagicMock()
     mock_cm.__enter__.return_value = mock_http
     return mock_cm
+
+
+def _stream_http(response: MagicMock) -> tuple[MagicMock, MagicMock]:
+    http_cm = _mock_http({})
+    http = http_cm.__enter__.return_value
+    stream_cm = MagicMock()
+    stream_cm.__enter__.return_value = response
+    http.stream.side_effect = None
+    http.stream.return_value = stream_cm
+    return http_cm, http
 
 
 def _patch_captured_process(monkeypatch: pytest.MonkeyPatch, fake_run: Any) -> None:
@@ -720,6 +739,234 @@ class TestVerifyPsql:
 
 
 class TestBackupProvenance:
+    @pytest.mark.parametrize(
+        ("headers", "expected_total"),
+        [
+            ({"content-length": "6"}, 6),
+            ({}, None),
+            ({"content-length": "6", "content-encoding": "gzip"}, None),
+            ({"content-length": "invalid"}, None),
+        ],
+        ids=["reliable", "absent", "encoded", "invalid"],
+    )
+    def test_backup_streams_and_reports_only_trustworthy_lengths(
+        self,
+        instance: OdooInstance,
+        tmp_path: Path,
+        headers: dict[str, str],
+        expected_total: int | None,
+    ) -> None:
+        from odoo_instance_sdk.internal.proc import StepEvent
+
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {"content-disposition": 'attachment; filename="demo.zip"', **headers}
+        response.iter_bytes.return_value = [b"back", b"up"]
+        response.raise_for_status.return_value = None
+        content = PropertyMock(side_effect=AssertionError("response content must not be buffered"))
+        type(response).content = content
+        http_cm, http = _stream_http(response)
+        catalog = MagicMock()
+        events: list[StepEvent] = []
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+        ):
+            backup = instance.databases.backup_command("testdb", destination=tmp_path).run(
+                observer=events.append
+            )
+
+        assert http.stream.call_count == 1
+        http.post.assert_not_called()
+        assert backup.size_bytes == 6
+        assert backup.sha256 == hashlib.sha256(b"backup").hexdigest()
+        assert response.raise_for_status.call_count == 1
+        assert response.iter_bytes.call_count == 1
+        content.assert_not_called()
+        transfer_progress = [
+            event
+            for event in events
+            if event.step_id == "database.backup.transfer" and event.kind == "progress"
+        ]
+        assert transfer_progress
+        assert transfer_progress[-1].completed_units == 6
+        assert transfer_progress[-1].total_units == expected_total
+        wait_completed = next(
+            index
+            for index, event in enumerate(events)
+            if event.step_id == "database.backup.wait" and event.kind == "completed"
+        )
+        transfer_started = next(
+            index
+            for index, event in enumerate(events)
+            if event.step_id == "database.backup.transfer" and event.kind == "started"
+        )
+        assert wait_completed < transfer_started
+
+    def test_backup_rejects_trustworthy_length_mismatch_without_publishing(
+        self, instance: OdooInstance, tmp_path: Path
+    ) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {
+            "content-disposition": 'attachment; filename="demo.zip"',
+            "content-length": "7",
+        }
+        response.iter_bytes.return_value = [b"backup"]
+        response.raise_for_status.return_value = None
+        http_cm, _http = _stream_http(response)
+        catalog = MagicMock()
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+            pytest.raises(BackupDownloadError) as raised,
+        ):
+            instance.databases.backup("testdb", destination=tmp_path)
+
+        context = getattr(raised.value, "failure_context")
+        assert context.state.value == "failed"
+        assert context.published is False
+        assert uuid.UUID(str(context.backup_id))
+        catalog.fail_download.assert_called_once()
+        assert list(tmp_path.glob("*.part")) == []
+        assert list(tmp_path.glob("*.zip")) == []
+
+    def test_backup_stream_break_is_safe_and_cleans_partial_file(
+        self, instance: OdooInstance, tmp_path: Path
+    ) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {"content-disposition": 'attachment; filename="demo.zip"'}
+        response.raise_for_status.return_value = None
+
+        def chunks(**_: object) -> Any:
+            yield b"partial"
+            raise httpx.ReadError("stream broke")
+
+        response.iter_bytes.side_effect = chunks
+        http_cm, _http = _stream_http(response)
+        catalog = MagicMock()
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+            pytest.raises(BackupDownloadError, match="Backup request failed"),
+        ):
+            instance.databases.backup("testdb", destination=tmp_path)
+
+        assert list(tmp_path.glob("*.part")) == []
+        assert list(tmp_path.glob("*.zip")) == []
+        catalog.fail_download.assert_called_once()
+
+    def test_backup_limit_stops_iteration_before_requesting_another_chunk(
+        self, tmp_path: Path
+    ) -> None:
+        from odoo_instance_sdk.resources.database import _stream_response_to_file
+
+        class Chunks:
+            calls = 0
+
+            def __iter__(self) -> Any:
+                self.calls += 1
+                yield b"1234"
+                self.calls += 1
+                yield b"56"
+                self.calls += 1
+                raise AssertionError("iterator advanced after the over-limit chunk")
+
+        response = MagicMock(spec=httpx.Response)
+        chunks = Chunks()
+        response.iter_bytes.return_value = chunks
+
+        with pytest.raises(BackupDownloadError, match="exceeded"):
+            _stream_response_to_file(response, tmp_path / "backup.part", max_bytes=5)
+
+        assert chunks.calls == 2
+        assert (tmp_path / "backup.part").read_bytes() == b"1234"
+
+    def test_backup_interrupt_closes_stream_and_retains_known_failed_context(
+        self, instance: OdooInstance, tmp_path: Path
+    ) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {"content-disposition": 'attachment; filename="demo.zip"'}
+
+        def chunks(**_: object) -> Any:
+            yield b"partial"
+            raise KeyboardInterrupt
+
+        response.iter_bytes.side_effect = chunks
+        response.raise_for_status.return_value = None
+        http_cm, _http = _stream_http(response)
+        stream_cm = http_cm.__enter__.return_value.stream.return_value
+        catalog = MagicMock()
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+            pytest.raises(KeyboardInterrupt) as raised,
+        ):
+            instance.databases.backup("testdb", destination=tmp_path)
+
+        context = getattr(raised.value, "failure_context")
+        assert context.state.value == "failed"
+        assert context.published is False
+        assert stream_cm.__exit__.call_count == 1
+        catalog.fail_download.assert_called_once()
+        assert list(tmp_path.glob("*.part")) == []
+
+    def test_backup_interrupt_before_publication_closes_response_and_cleans(
+        self, instance: OdooInstance, tmp_path: Path
+    ) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {"content-disposition": 'attachment; filename="demo.zip"'}
+        response.raise_for_status.side_effect = KeyboardInterrupt
+        response.iter_bytes.return_value = []
+        http_cm, _http = _stream_http(response)
+        stream_cm = http_cm.__enter__.return_value.stream.return_value
+        catalog = MagicMock()
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+            pytest.raises(KeyboardInterrupt) as raised,
+        ):
+            instance.databases.backup("testdb", destination=tmp_path)
+
+        context = getattr(raised.value, "failure_context")
+        assert context.published is False
+        assert context.state.value == "failed"
+        assert stream_cm.__exit__.call_count == 1
+        catalog.fail_download.assert_called_once()
+        assert list(tmp_path.glob("*.part")) == []
+
+    def test_backup_interrupt_after_publication_retains_backup_and_available_state(
+        self, instance: OdooInstance, tmp_path: Path
+    ) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {"content-disposition": 'attachment; filename="demo.zip"'}
+        response.raise_for_status.return_value = None
+        response.iter_bytes.return_value = [b"backup"]
+        http_cm, _http = _stream_http(response)
+        catalog = MagicMock()
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+            patch(
+                "odoo_instance_sdk.resources.database.Backup",
+                side_effect=KeyboardInterrupt,
+            ),
+            pytest.raises(KeyboardInterrupt) as raised,
+        ):
+            instance.databases.backup("testdb", destination=tmp_path)
+
+        context = getattr(raised.value, "failure_context")
+        assert context.published is True
+        assert context.state.value == "available"
+        catalog.success_download.assert_called_once()
+        catalog.fail_download.assert_not_called()
+        assert len(list(tmp_path.glob("*.zip"))) == 1
+        assert list(tmp_path.glob("*.part")) == []
+
     @pytest.mark.parametrize(("timeout", "expected"), [(None, 600.0), (12.5, 12.5)])
     def test_backup_uses_long_default_timeout_and_honors_override(
         self,

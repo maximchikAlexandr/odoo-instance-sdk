@@ -189,6 +189,14 @@ class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     source_git_branch: str | None = None
 
 
+class BackupDownloadFailureContext(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """Secret-free identity and catalogue state retained after a download failure."""
+
+    backup_id: uuid.UUID
+    state: BackupState
+    published: bool
+
+
 class NoBackup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     id: uuid.UUID = uuid.UUID(int=0)
     source_base_url: str = ""

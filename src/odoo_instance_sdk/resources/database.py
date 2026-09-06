@@ -5,7 +5,7 @@ import hashlib
 import os
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +39,9 @@ from odoo_instance_sdk.internal.urls import assert_local, warn_if_cleartext_secr
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     Backup,
+    BackupDownloadFailureContext,
     BackupFormat,
+    BackupState,
     Database,
     DropResult,
     LocksResult,
@@ -97,18 +99,67 @@ def _stream_response_to_file(
     dest: Path,
     *,
     max_bytes: int = _MAX_DOWNLOAD_BYTES,
+    expected_bytes: int | None = None,
+    progress: Callable[[int], None] | None = None,
 ) -> tuple[int, str]:
+    if expected_bytes is not None and expected_bytes > max_bytes:
+        raise BackupDownloadError(f"Download exceeded {max_bytes} bytes")
     sha = hashlib.sha256()
     written = 0
     fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as f:
         for chunk in resp.iter_bytes(chunk_size=8192):
-            written += len(chunk)
-            if written > max_bytes:
+            next_written = written + len(chunk)
+            if next_written > max_bytes:
                 raise BackupDownloadError(f"Download exceeded {max_bytes} bytes")
             f.write(chunk)
+            written = next_written
             sha.update(chunk)
+            if progress is not None:
+                progress(written)
+        if expected_bytes is not None and written != expected_bytes:
+            raise BackupDownloadError(
+                f"Download size {written} does not match Content-Length {expected_bytes}"
+            )
+        f.flush()
+        os.fsync(f.fileno())
     return written, sha.hexdigest()
+
+
+def _trustworthy_content_length(headers: Mapping[str, str]) -> int | None:
+    """Return a byte total only when transfer headers make it trustworthy."""
+    raw = next(
+        (value for name, value in headers.items() if name.lower() == "content-length"),
+        None,
+    )
+    if raw is None or not raw.strip().isdigit():
+        return None
+    if any(
+        value.strip().lower() not in {"", "identity"}
+        for name, value in headers.items()
+        if name.lower() in {"content-encoding", "transfer-encoding"}
+    ):
+        return None
+    return int(raw.strip())
+
+
+def _annotate_backup_failure(
+    error: BaseException,
+    backup_id: str,
+    *,
+    published: bool,
+) -> None:
+    """Attach only the known backup identity and catalogue state to failures."""
+    with contextlib.suppress(ValueError):
+        context = BackupDownloadFailureContext(
+            backup_id=uuid.UUID(backup_id),
+            state=BackupState.AVAILABLE if published else BackupState.FAILED,
+            published=published,
+        )
+        setattr(error, "failure_context", context)
+        error.add_note(
+            f"backup {context.backup_id} state={context.state.value} published={context.published}"
+        )
 
 
 def _verify_database_via_psql(
@@ -810,6 +861,8 @@ class DatabaseResource:
         source_git_branch: str | None = None,
         executor: ProcessExecutor | None = None,
     ) -> Command[Backup]:
+        from odoo_instance_sdk.internal.proc import PreparedAction
+
         return self._action_command(
             "database.backup",
             "Create a database backup",
@@ -823,9 +876,23 @@ class DatabaseResource:
             ),
             executor=executor,
             mutating=True,
+            action_steps=(
+                PreparedAction(
+                    step_id="database.backup.wait",
+                    action="database.backup.wait",
+                    description="Wait for backup response headers",
+                    mutating=True,
+                ),
+                PreparedAction(
+                    step_id="database.backup.transfer",
+                    action="database.backup.transfer",
+                    description="Transfer backup bytes",
+                    mutating=True,
+                ),
+            ),
         )
 
-    def _backup_impl(
+    def _backup_impl(  # noqa: C901
         self,
         database_name: str,
         *,
@@ -850,6 +917,7 @@ class DatabaseResource:
         backup_id = str(uuid.uuid4())
         part_path = ensure_destination(destination, f"{backup_id}.{format.value}.part")
         part_preexisted = part_path.exists()
+        published = False
         catalog = self._instance._client.get_catalog()
         catalog.start_download(
             backup_id=backup_id,
@@ -893,6 +961,7 @@ class DatabaseResource:
             catalog.success_download(
                 backup_id, final_path.name, size_bytes, sha256_hex, downloaded_at=downloaded_at
             )
+            published = True
 
             return Backup(
                 id=uuid.UUID(backup_id),
@@ -913,6 +982,16 @@ class DatabaseResource:
             if not part_preexisted and part_path.exists():
                 with contextlib.suppress(OSError):
                     part_path.unlink()
+            _annotate_backup_failure(e, backup_id, published=published)
+            raise
+        except BaseException as e:
+            if not published:
+                with contextlib.suppress(BackupCatalogError):
+                    catalog.fail_download(backup_id, type(e).__name__, format_error(e))
+                if not part_preexisted and part_path.exists():
+                    with contextlib.suppress(OSError):
+                        part_path.unlink()
+            _annotate_backup_failure(e, backup_id, published=published)
             raise
 
     def _download_backup_part(
@@ -928,8 +1007,15 @@ class DatabaseResource:
         """Fetch a backup, converting HTTPX failures without retaining them."""
         http_failure: str | None = None
         try:
-            with self._http(timeout=timeout) as http:
-                resp = http.post(
+            from odoo_instance_sdk.internal.proc import active_context
+
+            context = active_context()
+            if context is not None and context.planned("database.backup.wait"):
+                context.action("database.backup.wait")
+            with (
+                self._http(timeout=timeout) as http,
+                http.stream(
+                    "POST",
                     self._url("backup"),
                     data={
                         "master_pwd": password,
@@ -937,10 +1023,29 @@ class DatabaseResource:
                         "backup_format": format.value,
                         "filestore": "true" if filestore else "false",
                     },
-                )
+                ) as resp,
+            ):
                 resp.raise_for_status()
                 server_filename = extract_server_filename(resp.headers.get("content-disposition"))
-                size_bytes, sha256_hex = _stream_response_to_file(resp, part_path)
+                expected_bytes = _trustworthy_content_length(resp.headers)
+                if context is not None and context.planned("database.backup.wait"):
+                    context.complete_action("database.backup.wait")
+                if context is not None and context.planned("database.backup.transfer"):
+                    context.action("database.backup.transfer")
+                size_bytes, sha256_hex = _stream_response_to_file(
+                    resp,
+                    part_path,
+                    expected_bytes=expected_bytes,
+                    progress=(
+                        lambda received: (
+                            context.progress("database.backup.transfer", received, expected_bytes)
+                            if context is not None and context.planned("database.backup.transfer")
+                            else None
+                        )
+                    ),
+                )
+                if context is not None and context.planned("database.backup.transfer"):
+                    context.complete_action("database.backup.transfer")
         except httpx.HTTPStatusError as exc:
             # Keep only a status-derived value. The HTTPX exception retains
             # its request/response/stream graph, including master_pwd.
@@ -1272,6 +1377,7 @@ class DatabaseResource:
         executor: ProcessExecutor | None,
         read_only: bool = False,
         mutating: bool = False,
+        action_steps: Sequence[PreparedAction] = (),
         steps: Sequence[PreparedStep] = (),
         optional_steps: Sequence[str] = (),
     ) -> Command[T]:
@@ -1294,7 +1400,7 @@ class DatabaseResource:
                     context.skip(optional_step_id)
             return result
 
-        prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (step, *steps)
+        prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (step, *action_steps, *steps)
         from odoo_instance_sdk.internal.proc import prepared_command
 
         return Command.from_prepared(
