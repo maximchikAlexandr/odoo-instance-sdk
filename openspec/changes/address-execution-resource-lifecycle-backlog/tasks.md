@@ -30,14 +30,14 @@
 
 ## 4. P0 logical progress and Rich completion
 
-- [ ] 4.1 Add explicit action progress/completion APIs to `RunContext` and additive typed event fields for elapsed time and reliable units/total; make callback failure close only still-started actions as failed.
-- [ ] 4.2 Update current action-backed commands so each logical completion is emitted immediately after its effect and postcondition rather than at overall callback return.
-- [ ] 4.3 Replace the restore-only renderer with one concrete bounded Rich runner in the existing output module: TTY live status, deterministic sparse non-TTY lines, elapsed time, byte totals when reliable, and no generic renderer registry/DSL.
-- [ ] 4.4 Wire the shared observer to `env checkout`, `env sync`, `test`, `module test`, `module update`, `exec`, `eval`, `translations export`, `db refresh --restore`, `postgres up`, and `postgres approve-image`; document measured exclusions for fast read-only leaves.
-- [ ] 4.5 Ensure every long-command dry-run renders only its immutable plan and every JSON/TOON execution emits one progress-free document with diagnostics confined to stderr.
-- [ ] 4.6 Add the common final Rich success projection from `OutputDocument` with `status=success`, applicable `database|url|backup|modules`, and `transaction=commit|rollback` for exec, without changing JSON/TOON or native commands.
-- [ ] 4.7 Add controlled slow-step tests for pre-completion visibility, TTY cleanup, non-TTY determinism, unknown-total spinner/status, reliable-total percentage, action postcondition failure, Ctrl-C exit 130, and one final completion line.
-- [ ] 4.8 Commit the progress/output slice and push the feature branch before starting resource lifecycle work.
+- [x] 4.1 Add explicit action progress/completion APIs to `RunContext` and additive typed event fields for elapsed time and reliable units/total; make callback failure close only still-started actions as failed.
+- [x] 4.2 Update current action-backed commands so each logical completion is emitted immediately after its effect and postcondition rather than at overall callback return.
+- [x] 4.3 Replace the restore-only renderer with one concrete bounded Rich runner in the existing output module: TTY live status, deterministic sparse non-TTY lines, elapsed time, byte totals when reliable, and no generic renderer registry/DSL.
+- [x] 4.4 Wire the shared observer to `env checkout`, `env sync`, `test`, `module test`, `module update`, `exec`, `eval`, `translations export`, `db refresh --restore`, `postgres up`, and `postgres approve-image`; document measured exclusions for fast read-only leaves.
+- [x] 4.5 Ensure every long-command dry-run renders only its immutable plan and every JSON/TOON execution emits one progress-free document with diagnostics confined to stderr.
+- [x] 4.6 Add the common final Rich success projection from `OutputDocument` with `status=success`, applicable `database|url|backup|modules`, and `transaction=commit|rollback` for exec, without changing JSON/TOON or native commands.
+- [x] 4.7 Add controlled slow-step tests for pre-completion visibility, TTY cleanup, non-TTY determinism, unknown-total spinner/status, reliable-total percentage, action postcondition failure, Ctrl-C exit 130, and one final completion line.
+- [x] 4.8 Commit the progress/output slice and push the feature branch before starting resource lifecycle work.
 
 ## 5. Streaming backup and interruption lifecycle
 

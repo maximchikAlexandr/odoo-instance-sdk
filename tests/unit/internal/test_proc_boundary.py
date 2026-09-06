@@ -12,6 +12,7 @@ from odoo_instance_sdk.exceptions import DuplicateStepError, UnplannedStepError
 from odoo_instance_sdk.internal.proc import (
     DeadlineExceeded,
     ExecutionDeadline,
+    PreparedAction,
     PreparedCommand,
     PreparedProcess,
     PreparedStep,
@@ -82,6 +83,50 @@ def test_optional_step_observer_preserves_result_and_redacts_output() -> None:
     assert events[-1].kind == "completed"
     assert all(secret not in (event.chunk or "") for event in events)
     assert events[0].step_id == events[-1].step_id == step.step_id
+
+
+def test_action_progress_is_explicit_and_completion_carries_elapsed_units() -> None:
+    events: list[StepEvent] = []
+    action = PreparedAction("download", action="download")
+
+    def callback(context: RunContext[None]) -> None:
+        context.action("download")
+        context.progress("download", 4, 8)
+        context.complete_action("download")
+
+    command = prepared_command(
+        callback,
+        (action,),
+    )
+
+    command.run(observer=events.append)
+
+    assert [event.kind for event in events] == ["started", "progress", "completed"]
+    assert events[0].elapsed == 0.0
+    assert (events[1].completed_units, events[1].total_units) == (4, 8)
+    assert events[2].elapsed is not None and events[2].elapsed >= 0
+    assert (events[2].completed_units, events[2].total_units) == (4, 8)
+
+
+def test_completed_actions_are_not_reclassified_when_a_later_action_fails() -> None:
+    events: list[StepEvent] = []
+    actions = (PreparedAction("first"), PreparedAction("second"))
+
+    def callback(context: RunContext[None]) -> None:
+        context.action("first")
+        context.complete_action("first")
+        context.action("second")
+        raise RuntimeError("later effect failed")
+
+    with pytest.raises(RuntimeError, match="later effect failed"):
+        prepared_command(callback, actions).run(observer=events.append)
+
+    assert [(event.step_id, event.kind) for event in events] == [
+        ("first", "started"),
+        ("first", "completed"),
+        ("second", "started"),
+        ("second", "failed"),
+    ]
 
 
 def test_observed_output_arrives_before_captured_process_completion() -> None:

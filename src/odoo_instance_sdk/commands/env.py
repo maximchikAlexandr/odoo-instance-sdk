@@ -189,6 +189,7 @@ def env_checkout(
                 )
             ),
             rich=checkout_rich,
+            progress=True,
         )
         if dry_run:
             return
@@ -755,6 +756,7 @@ def env_sync(
                 if isinstance(document.result, dict)
                 else ""
             ),
+            progress=True,
         )
     except Exception as exc:
         fail(output_mode, "env.sync", exc)

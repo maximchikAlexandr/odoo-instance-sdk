@@ -287,6 +287,7 @@ def _run_shell_command(
         dry_run=dry_run,
         result=checked_result,
         rich=_rich_shell_projection,
+        progress=True,
     )
     return status
 
@@ -1190,6 +1191,7 @@ def module_update(
                     ],
                 ]
             ),
+            progress=True,
         )
     except Exception as exc:
         fail(output_mode, "module.update", exc)
@@ -1247,6 +1249,7 @@ def module_test(
                 else {}
             ),
             rich=lambda document: rich_test_result(cast("dict[str, JsonValue]", document.result)),
+            progress=True,
         )
     except SystemExit:
         raise
@@ -1308,6 +1311,7 @@ def translations_export(
                     document.result.get("exports", []) if isinstance(document.result, dict) else [],
                 )
             ),
+            progress=True,
         )
     except SystemExit:
         raise

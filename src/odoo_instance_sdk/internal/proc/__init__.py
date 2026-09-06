@@ -44,10 +44,13 @@ class StepEvent:
     """A sanitized lifecycle event for one captured process step."""
 
     step_id: str
-    kind: Literal["started", "stdout", "stderr", "completed", "failed"]
+    kind: Literal["started", "progress", "stdout", "stderr", "completed", "failed"]
     chunk: str | None = None
     returncode: int | None = None
     error: str | None = None
+    elapsed: float | None = None
+    completed_units: int | float | None = None
+    total_units: int | float | None = None
 
 
 type StepObserver = Callable[[StepEvent], None]
@@ -367,7 +370,8 @@ class RunContext(Generic[T]):
         self._results: dict[str, ProcessResultLike] = {}
         self._observer = observer
         self._observe_output = observe_output
-        self._started_actions: list[str] = []
+        self._started_actions: dict[str, float] = {}
+        self._action_progress: dict[str, tuple[int | float, int | float | None]] = {}
 
     def process(self, step_id: str) -> T:
         """Consume a captured process by identifier through the exact path."""
@@ -437,23 +441,78 @@ class RunContext(Generic[T]):
         step = self._consume(step_id)
         if not isinstance(step, PreparedAction):
             raise UnplannedStepError(step_id, reason="requested step is not an action")
-        _notify(self._observer, StepEvent(step_id=step.step_id, kind="started"))
-        self._started_actions.append(step.step_id)
+        started = time.monotonic()
+        _notify(self._observer, StepEvent(step_id=step.step_id, kind="started", elapsed=0.0))
+        self._started_actions[step.step_id] = started
         return step
 
+    def progress(
+        self,
+        step_id: str,
+        completed_units: float,
+        total_units: float | None = None,
+    ) -> None:
+        """Report reliable work units for a started logical action."""
+        started = self._started_actions.get(step_id)
+        if started is None:
+            raise UnplannedStepError(step_id, reason="action has not started")
+        if isinstance(completed_units, bool) or completed_units < 0:
+            raise ValueError("completed_units must be a non-negative number")
+        if total_units is not None and (
+            isinstance(total_units, bool) or total_units < 0 or total_units < completed_units
+        ):
+            raise ValueError("total_units must be greater than or equal to completed_units")
+        self._action_progress[step_id] = (completed_units, total_units)
+        _notify(
+            self._observer,
+            StepEvent(
+                step_id=step_id,
+                kind="progress",
+                elapsed=max(0.0, time.monotonic() - started),
+                completed_units=completed_units,
+                total_units=total_units,
+            ),
+        )
+
+    def complete_action(self, step_id: str) -> None:
+        """Complete one action after its effect and postcondition succeed."""
+        started = self._started_actions.pop(step_id, None)
+        if started is None:
+            raise UnplannedStepError(step_id, reason="action has not started")
+        completed_units, total_units = self._action_progress.pop(step_id, (None, None))
+        _notify(
+            self._observer,
+            StepEvent(
+                step_id=step_id,
+                kind="completed",
+                returncode=0,
+                elapsed=max(0.0, time.monotonic() - started),
+                completed_units=completed_units,
+                total_units=total_units,
+            ),
+        )
+
     def finish_actions(self) -> None:
-        """Complete all logical actions after their guarded callback succeeds."""
-        for step_id in self._started_actions:
-            _notify(self._observer, StepEvent(step_id=step_id, kind="completed", returncode=0))
-        self._started_actions.clear()
+        """Complete any legacy actions after their guarded callback succeeds."""
+        for step_id in tuple(self._started_actions):
+            self.complete_action(step_id)
 
     def fail_actions(self, error: BaseException) -> None:
         """Close logical actions with a sanitized failure when execution aborts."""
         from odoo_instance_sdk.internal.sanitize import sanitize_event_message
 
         message = sanitize_event_message(str(error))
-        for step_id in self._started_actions:
-            _notify(self._observer, StepEvent(step_id=step_id, kind="failed", error=message))
+        for step_id, started in tuple(self._started_actions.items()):
+            self._action_progress.pop(step_id, None)
+            _notify(
+                self._observer,
+                StepEvent(
+                    step_id=step_id,
+                    kind="failed",
+                    error=message or "interrupted",
+                    elapsed=max(0.0, time.monotonic() - started),
+                ),
+            )
         self._started_actions.clear()
 
     def skip(self, step_id: str) -> None:

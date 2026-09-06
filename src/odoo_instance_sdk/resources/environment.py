@@ -632,7 +632,9 @@ class EnvironmentResource:
             context.action("checkout.catalog")
             catalog = self._client.get_catalog()
             self._revalidate_checkout_locked(catalog, plan)
-            return self._do_checkout(catalog, plan, context=context)
+            result = self._do_checkout(catalog, plan, context=context)
+            context.complete_action("checkout.catalog")
+            return result
 
     def _validate_checkout_snapshot(
         self,
@@ -874,6 +876,7 @@ class EnvironmentResource:
                     db_name=db_name_for_config,
                 )
                 created_paths.append(plan.generated_config)
+                context.complete_action("checkout.generated_config")
 
             if plan.options.create_venv and plan.python_selector is not None:
                 venv_result = cast("ProcessResult", context.process("checkout.venv"))
@@ -924,10 +927,13 @@ class EnvironmentResource:
             context.action("checkout.cleanup")
             if context.planned("checkout.cleanup.worktree"):
                 context.skip("checkout.cleanup.worktree")
+            context.complete_action("checkout.cleanup")
+            context.complete_action("checkout.database")
             return self._get_env_row(cat, plan.env_id)
 
         except BaseException as exc:
-            context.action("checkout.cleanup")
+            if not context.consumed("checkout.cleanup"):
+                context.action("checkout.cleanup")
             self._cleanup_on_failure(
                 cat=cat,
                 env_id=plan.env_id,
@@ -938,6 +944,7 @@ class EnvironmentResource:
                 error=exc,
                 context=context,
             )
+            context.complete_action("checkout.cleanup")
             raise
 
     def _get_env_row(self, cat: BackupCatalog, env_id: uuid.UUID) -> DevelopmentEnvironment:
@@ -1203,7 +1210,7 @@ class EnvironmentResource:
     ) -> DevelopmentEnvironment:
         return self.sync_python_command(selector, upgrade=upgrade).run()
 
-    def sync_python_command(
+    def sync_python_command(  # noqa: C901
         self,
         selector: EnvironmentSelector,
         *,
@@ -1282,7 +1289,9 @@ class EnvironmentResource:
         prepared_steps = tuple(steps)
 
         def execute(context: RunContext[DevelopmentEnvironment]) -> DevelopmentEnvironment:
+            context.action("environment.sync")
             catalog = self._client.get_catalog()
+            completed = False
             catalog.add_environment_event(str(env.id), "sync", "started")
             try:
                 with (
@@ -1306,6 +1315,7 @@ class EnvironmentResource:
                                 "failed",
                                 message="uv pip compile failed; kept existing lock",
                             )
+                            completed = True
                             return self._get_env_row(catalog, env.id)
                         install_result = cast(
                             "ProcessResult", context.process("environment.sync.install")
@@ -1315,9 +1325,14 @@ class EnvironmentResource:
                                 f"uv pip install failed: {_process_stderr(install_result)}".strip()
                             )
                     catalog.add_environment_event(str(env.id), "sync", "succeeded")
+                    completed = True
                     return self._get_env_row(catalog, env.id)
             finally:
-                context.action("environment.sync")
+                if completed:
+                    # Successful and intentionally retained-lock outcomes are
+                    # complete at this point; callback exceptions are closed
+                    # by RunContext.fail_actions.
+                    context.complete_action("environment.sync")
 
         from odoo_instance_sdk.execution import ExecutionPlan
 
@@ -1867,6 +1882,7 @@ class EnvironmentResource:
         def run(context: RunContext[T]) -> T:
             context.action(step_id)
             result = callback()
+            context.complete_action(step_id)
             for optional_step_id in optional_steps:
                 if not context.consumed(optional_step_id):
                     context.skip(optional_step_id)

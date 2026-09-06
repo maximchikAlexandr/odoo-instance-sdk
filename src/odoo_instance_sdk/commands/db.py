@@ -13,7 +13,6 @@ else:
     import rich_click as click
 
 from rich.console import Console
-from rich.text import Text
 
 from odoo_instance_sdk.commands.context import (
     CliContext,
@@ -31,8 +30,8 @@ from odoo_instance_sdk.commands.output import (
     model_to_dict,
     output_options,
     resolve_output_mode,
-    rich_print,
     run_or_preview,
+    run_rich_bounded,
 )
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.models import (
@@ -45,7 +44,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
-    from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
+    from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
 
@@ -55,54 +54,13 @@ def _run_rich_restore(
     *,
     show_command_output: bool,
 ) -> tuple[int, DatabasePreparationResult | None]:
-    """Render restore lifecycle events without a reusable observer abstraction."""
-    console = Console()
-    lines: list[str] = []
-    update: Callable[[Text], None] | None = None
-
-    def observe(event: StepEvent) -> None:
-        if event.kind in {"stdout", "stderr"} and not show_command_output:
-            return
-        stream = event.kind in {"stdout", "stderr"}
-        suffix = f": {event.chunk or ''}" if stream else ""
-        if event.error:
-            suffix = f": {event.error}"
-        elif event.returncode is not None and not stream:
-            suffix = f" (exit {event.returncode})"
-        from odoo_instance_sdk.internal.proc.redaction import redacted_projection
-
-        line = cast(
-            "str",
-            redacted_projection(
-                f"[{event.step_id}] {event.kind}{suffix}",
-                field="error" if event.error else (event.kind if stream else "event"),
-            ),
-        )
-        rendered_lines = line.splitlines() or [line]
-        if stream and len(rendered_lines) > 1:
-            prefix = f"[{event.step_id}] {event.kind}: "
-            rendered_lines = [
-                rendered_lines[0],
-                *(prefix + item for item in rendered_lines[1:]),
-            ]
-        lines.extend(rendered_lines)
-        if update is not None:
-            update(Text("\n".join(lines)))
-        else:
-            for rendered_line in rendered_lines:
-                rich_print(rendered_line)
-
-    if console.is_terminal:
-        from rich.live import Live
-
-        with Live("", console=console, transient=True) as live:
-
-            def update_live(value: Text) -> None:
-                live.update(value, refresh=True)
-
-            update = update_live
-            return run(observe)
-    return run(observe)
+    """Compatibility seam backed by the shared bounded Rich runner."""
+    return run_rich_bounded(
+        run,
+        show_command_output=show_command_output,
+        console=Console(),
+        include_elapsed=False,
+    )
 
 
 @click.group(help="Prepare and reset project databases.")
@@ -176,16 +134,11 @@ def db_refresh(
             rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
             observer=observer,
             observe_output=show_command_output,
+            progress=True,
         )
 
     try:
-        if restore and output_mode is OutputMode.RICH and not dry_run:
-            status, _result = _run_rich_restore(
-                run,
-                show_command_output=show_command_output,
-            )
-        else:
-            status, _result = run()
+        status, _result = run()
     except Exception as exc:
         fail(output_mode, "db.refresh", exc)
     raise click.exceptions.Exit(status)

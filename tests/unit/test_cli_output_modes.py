@@ -9,13 +9,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
 import msgspec
 import pytest
 from click.testing import CliRunner
+
+if TYPE_CHECKING:
+    from rich.console import Console
 
 from odoo_instance_sdk.cli import _rich_shell_projection, cli
 from odoo_instance_sdk.commands.context import ResolvedContext
@@ -24,6 +27,7 @@ from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputError,
     OutputMode,
+    action_command,
     build_envelope,
     emit,
     emit_json_envelope,
@@ -33,6 +37,7 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     rich_print,
     run_or_preview,
+    run_rich_bounded,
     success_document,
 )
 from odoo_instance_sdk.execution import Command, ExecutionPlan
@@ -1321,6 +1326,213 @@ def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
     assert value == "done"
     assert builds == 2
     assert confirmations == ["confirmed"]
+
+
+def test_rich_bounded_runner_is_sparse_and_reports_reliable_units(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    def run(observer: Callable[[StepEvent], None]) -> str:
+        observer(StepEvent(step_id="download", kind="started"))
+        observer(
+            StepEvent(
+                step_id="download",
+                kind="progress",
+                elapsed=0.25,
+                completed_units=5,
+                total_units=10,
+            )
+        )
+        observer(StepEvent(step_id="download", kind="completed", elapsed=0.5))
+        return "ok"
+
+    assert run_rich_bounded(run) == "ok"
+    output = capsys.readouterr().out
+    assert "[download] started elapsed=" in output
+    assert "[download] progress units=5/10 (50%) elapsed=0.250s" in output
+    assert "[download] completed elapsed=0.500s" in output
+
+
+def test_rich_bounded_runner_exposes_a_slow_step_before_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    emitted: list[str] = []
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.output.rich_print",
+        lambda value, **_kwargs: emitted.append(value),
+    )
+
+    class NonTerminalConsole:
+        is_terminal = False
+
+    def run(observer: Callable[[StepEvent], None]) -> str:
+        observer(StepEvent(step_id="slow", kind="started", elapsed=0.0))
+        assert emitted == ["[slow] started elapsed=0.000s"]
+        observer(StepEvent(step_id="slow", kind="progress", elapsed=0.25))
+        observer(StepEvent(step_id="slow", kind="completed", elapsed=0.5))
+        return "done"
+
+    assert run_rich_bounded(run, console=cast("Console", NonTerminalConsole())) == "done"
+    assert emitted[-1] == "[slow] completed elapsed=0.500s"
+
+
+def test_rich_bounded_runner_is_deterministic_and_omits_unknown_percentage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    class NonTerminalConsole:
+        is_terminal = False
+
+    def render() -> list[str]:
+        emitted: list[str] = []
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.output.rich_print",
+            lambda value, **_kwargs: emitted.append(value),
+        )
+
+        def run(observer: Callable[[StepEvent], None]) -> None:
+            observer(StepEvent(step_id="probe", kind="started", elapsed=0.0))
+            observer(
+                StepEvent(
+                    step_id="probe",
+                    kind="progress",
+                    elapsed=0.25,
+                    completed_units=3,
+                )
+            )
+            observer(StepEvent(step_id="probe", kind="completed", elapsed=0.5))
+
+        run_rich_bounded(run, console=cast("Console", NonTerminalConsole()))
+        return emitted
+
+    first = render()
+    second = render()
+    assert first == second
+    assert first[1] == "[probe] progress units=3 elapsed=0.250s"
+    assert "%" not in first[1]
+
+
+def test_rich_bounded_runner_closes_tty_live_on_ctrl_c(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    class TerminalConsole:
+        is_terminal = True
+
+    instances: list[object] = []
+
+    class FakeLive:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.exited = False
+            instances.append(self)
+
+        def __enter__(self) -> FakeLive:
+            return self
+
+        def __exit__(self, *_args: object) -> Literal[False]:
+            self.exited = True
+            return False
+
+        def update(self, _value: object, *, refresh: bool = False) -> None:
+            assert refresh is True
+
+    monkeypatch.setattr("rich.live.Live", FakeLive)
+
+    def run(observer: Callable[[StepEvent], None]) -> None:
+        observer(StepEvent(step_id="slow", kind="started", elapsed=0.0))
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_rich_bounded(run, console=cast("Console", TerminalConsole()))
+    assert len(instances) == 1
+    assert getattr(instances[0], "exited") is True
+
+
+@pytest.mark.parametrize(
+    ("command", "result", "expected"),
+    [
+        (
+            "exec",
+            {"database": "demo", "modules": ["sale", "stock"], "commit": True},
+            'status=success database=demo modules=["sale","stock"] transaction=commit',
+        ),
+        (
+            "exec",
+            {"commit": False},
+            "status=success transaction=rollback",
+        ),
+        (
+            "test",
+            {"database": "demo", "http_url": "http://localhost:8069", "modules": ["sale"]},
+            'status=success database=demo url=http://localhost:8069 modules=["sale"]',
+        ),
+        ("postgres.up", {"value": "done"}, "status=success"),
+    ],
+    ids=["exec-commit", "exec-rollback", "test-summary", "no-summary"],
+)
+def test_rich_success_has_one_common_completion_line(
+    command: str,
+    result: dict[str, JsonValue],
+    expected: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    emit(
+        success_document(command=command, result=result),
+        OutputMode.RICH,
+        rich=lambda _document: "existing projection",
+    )
+    lines = capsys.readouterr().out.splitlines()
+    assert lines.count(expected) == 1
+    assert sum(line.startswith("status=success") for line in lines) == 1
+
+
+@pytest.mark.parametrize("mode", [OutputMode.JSON, OutputMode.TOON])
+def test_rich_completion_does_not_change_machine_document(
+    mode: OutputMode,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result: dict[str, JsonValue] = {"database": "demo", "commit": True}
+    emit(success_document(command="exec", result=result), mode)
+    output = capsys.readouterr().out
+    document = _decode_document(output, mode.value)
+    assert document["result"] == result  # type: ignore[index]
+    assert "status=success" not in output
+
+
+def test_action_postcondition_failure_emits_failed_without_completion() -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    events: list[StepEvent] = []
+
+    def operation() -> None:
+        raise RuntimeError("postcondition failed")
+
+    with pytest.raises(RuntimeError, match="postcondition failed"):
+        action_command("restore", operation).run(observer=events.append)
+    assert [(event.step_id, event.kind) for event in events] == [
+        ("restore", "started"),
+        ("restore", "failed"),
+    ]
+
+
+def test_run_or_preview_maps_ctrl_c_to_exit_130() -> None:
+    def operation() -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(click.exceptions.Exit) as caught:
+        run_or_preview(
+            lambda: action_command("slow", operation),
+            command_name="slow",
+            mode=OutputMode.RICH,
+            dry_run=False,
+            progress=True,
+        )
+    assert caught.value.exit_code == 130
 
 
 def test_rich_plan_projection_preserves_ordered_steps_and_multiline_input(

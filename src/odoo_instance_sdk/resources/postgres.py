@@ -345,6 +345,7 @@ class PostgresCluster:
                 )
             context.action("postgres.image.approve")
             self._approve_image(resolved)
+            context.complete_action("postgres.image.approve")
             self._account_legacy_steps(context, steps)
 
         plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))

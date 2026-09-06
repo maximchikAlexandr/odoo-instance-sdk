@@ -247,7 +247,9 @@ class BackupResource:
 
         def run(context: RunContext[T]) -> T:
             context.action(step_id)
-            return callback()
+            result = callback()
+            context.complete_action(step_id)
+            return result
 
         prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (step, *steps)
         from odoo_instance_sdk.internal.proc import prepared_command

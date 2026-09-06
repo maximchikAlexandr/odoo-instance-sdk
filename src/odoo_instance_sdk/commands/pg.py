@@ -479,6 +479,7 @@ def postgres_approve_image(
                 if isinstance(document.result, dict)
                 else ""
             ),
+            progress=True,
         )
     except Exception as exc:
         from odoo_instance_sdk.commands.output import fail
@@ -581,6 +582,7 @@ def postgres_up(
                 cluster_holder["cluster"].to_diagnostic_dict() if result is not None else {},
             ),
             rich=_cluster_rich,
+            progress=True,
         )
     except Exception as exc:
         from odoo_instance_sdk.commands.output import fail

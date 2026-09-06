@@ -20,11 +20,13 @@ from odoo_instance_sdk.commands.output import (
     output_options,
     resolve_output_mode,
     run_or_preview,
+    run_rich_bounded,
     success_document,
 )
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.automation import (
@@ -221,6 +223,7 @@ def _execute_selection(
     reload_tests: bool,
     allow_empty: bool,
     tags: str | None,
+    observer: StepObserver | None = None,
 ) -> tuple[dict[str, JsonValue], str | None]:
     spec = OdooTestSpec(
         modules=selection.modules,
@@ -229,12 +232,16 @@ def _execute_selection(
         allow_empty=allow_empty,
     )
     preflight_installed_modules(instance, spec.modules)
-    typed, diagnostic = run_odoo_tests_command(
+    command = run_odoo_tests_command(
         instance,
         spec,
         http_interface=runtime.http_interface,
         http_port=runtime.http_port,
-    ).run()
+    )
+    if observer is None:
+        typed, diagnostic = command.run()
+    else:
+        typed, diagnostic = command.run(observer=observer, observe_output=True)
     return project_execution_result(runtime, selection, spec, typed), diagnostic
 
 
@@ -272,7 +279,7 @@ def resolve_module_test_selection(
 @click.option("--dry-run", is_flag=True, default=False, help="Select and report without running.")
 @output_options
 @pass_cli_context
-def test_command(
+def test_command(  # noqa: C901
     ctx: CliContext,
     target: str | None,
     tags: str | None,
@@ -358,7 +365,12 @@ def test_command(
                     rich=lambda _document: rich_test_result(result),
                 )
                 raise click.exceptions.Exit(0)  # noqa: TRY301
-            typed, diagnostic = command.run()
+            if mode is OutputMode.RICH:
+                typed, diagnostic = run_rich_bounded(
+                    lambda observer: command.run(observer=observer, observe_output=True)
+                )
+            else:
+                typed, diagnostic = command.run()
             result = project_execution_result(
                 runtime,
                 {"kind": "changed", "value": None},
@@ -378,14 +390,27 @@ def test_command(
             cwd=Path.cwd(),
             tags=tags,
         )
-        result, diagnostic = _execute_selection(
-            instance,
-            runtime,
-            selection,
-            reload_tests=reload_tests,
-            allow_empty=allow_empty,
-            tags=tags,
-        )
+        if mode is OutputMode.RICH and not dry_run:
+            result, diagnostic = run_rich_bounded(
+                lambda observer: _execute_selection(
+                    instance,
+                    runtime,
+                    selection,
+                    reload_tests=reload_tests,
+                    allow_empty=allow_empty,
+                    tags=tags,
+                    observer=observer,
+                )
+            )
+        else:
+            result, diagnostic = _execute_selection(
+                instance,
+                runtime,
+                selection,
+                reload_tests=reload_tests,
+                allow_empty=allow_empty,
+                tags=tags,
+            )
         _emit_result(mode=mode, command="test", result=result, dry_run=False, diagnostic=diagnostic)
         raise click.exceptions.Exit(cast("int", result["exit_code"]))  # noqa: TRY301
     except (click.exceptions.Exit, SystemExit):
