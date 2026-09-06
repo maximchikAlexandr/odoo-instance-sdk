@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -21,7 +22,7 @@ from odoo_instance_sdk.exceptions import (
     NonLocalInstanceError,
     RestoreFailedError,
 )
-from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.proc import ProcessResult, ProcessTimeoutError, RecordingExecutor
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     Backup,
@@ -45,6 +46,40 @@ def _mock_http(json_data: object) -> MagicMock:
     mock_cm = MagicMock()
     mock_cm.__enter__.return_value = mock_http
     return mock_cm
+
+
+def _patch_captured_process(monkeypatch: pytest.MonkeyPatch, fake_run: Any) -> None:
+    from odoo_instance_sdk.internal.proc.executor import _environment
+
+    def fake_pump(step: Any, *, timeout: float | None, **_: Any) -> tuple[int, bytes, bytes, float]:
+        try:
+            completed = fake_run(
+                list(step.argv),
+                env=_environment(
+                    step.environment,
+                    policy=step.environment_policy,
+                    snapshot=step.environment_snapshot,
+                ),
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ProcessTimeoutError(
+                step.argv,
+                timeout or 0.0,
+                duration=timeout or 0.0,
+            ) from error
+        stdout = completed.stdout
+        stderr = completed.stderr
+        return (
+            completed.returncode,
+            stdout.encode() if isinstance(stdout, str) else stdout,
+            stderr.encode() if isinstance(stderr, str) else stderr,
+            0.0,
+        )
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
 
 
 def _make_backup(**kw: Any) -> Backup:
@@ -456,7 +491,7 @@ class TestCurrent:
             proc.stderr = ""
             return proc
 
-        monkeypatch.setattr("subprocess.run", mock_psql)
+        _patch_captured_process(monkeypatch, mock_psql)
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
 
         with (
@@ -482,7 +517,7 @@ class TestCurrent:
             proc.stderr = ""
             return proc
 
-        monkeypatch.setattr("subprocess.run", mock_psql)
+        _patch_captured_process(monkeypatch, mock_psql)
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
 
         with (
@@ -509,7 +544,7 @@ class TestCurrent:
             proc.stderr = "could not connect"
             return proc
 
-        monkeypatch.setattr("subprocess.run", mock_psql)
+        _patch_captured_process(monkeypatch, mock_psql)
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
 
         with (
@@ -534,7 +569,7 @@ class TestCurrent:
         def mock_psql(*args: object, **kwargs: object) -> MagicMock:
             raise subprocess.TimeoutExpired(cmd="psql", timeout=30)
 
-        monkeypatch.setattr("subprocess.run", mock_psql)
+        _patch_captured_process(monkeypatch, mock_psql)
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
 
         with (
@@ -600,7 +635,7 @@ class TestVerifyPsql:
             return proc
 
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
-        monkeypatch.setattr("subprocess.run", fake_run)
+        _patch_captured_process(monkeypatch, fake_run)
         result = _verify_database_via_psql("localhost", 5432, "odoo", None, "mydb")
         assert result is True
         assert "PGPASSWORD" not in cast("dict[str, str]", captured["env"])
@@ -619,7 +654,7 @@ class TestVerifyPsql:
             return proc
 
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
-        monkeypatch.setattr("subprocess.run", fake_run)
+        _patch_captured_process(monkeypatch, fake_run)
         _verify_database_via_psql("localhost", 5432, "odoo", "p4ss", "mydb")
         assert cast("dict[str, str]", captured["env"])["PGPASSWORD"] == "p4ss"
 
@@ -634,7 +669,7 @@ class TestVerifyPsql:
             return proc
 
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
-        monkeypatch.setattr("subprocess.run", fake_run)
+        _patch_captured_process(monkeypatch, fake_run)
         assert _verify_database_via_psql("localhost", 5432, "odoo", None, "mydb") is None
 
     def test_psql_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -646,7 +681,7 @@ class TestVerifyPsql:
             raise subprocess.TimeoutExpired(cmd="psql", timeout=30)
 
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
-        monkeypatch.setattr("subprocess.run", fake_run)
+        _patch_captured_process(monkeypatch, fake_run)
         assert _verify_database_via_psql("localhost", 5432, "odoo", None, "mydb") is None
 
     def test_psql_empty_stdout_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -660,7 +695,7 @@ class TestVerifyPsql:
             return proc
 
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
-        monkeypatch.setattr("subprocess.run", fake_run)
+        _patch_captured_process(monkeypatch, fake_run)
         assert _verify_database_via_psql("localhost", 5432, "odoo", None, "mydb") is False
 
     def test_missing_host_preserves_unix_socket(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -678,7 +713,7 @@ class TestVerifyPsql:
             return proc
 
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
-        monkeypatch.setattr("subprocess.run", fake_run)
+        _patch_captured_process(monkeypatch, fake_run)
         result = _verify_database_via_psql(None, 5432, "odoo", None, "mydb")
         assert result is True
         assert "-h" not in cast("list[str]", captured["cmd"])

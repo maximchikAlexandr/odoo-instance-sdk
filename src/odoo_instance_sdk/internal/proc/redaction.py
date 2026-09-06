@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from shlex import join
@@ -60,6 +61,24 @@ _JWT_VALUE = re.compile(
     r"(?:^|\s)eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:$|\s)",
 )
 _SAFE_ENV_KEY = re.compile(r"^(?:LANG|LC_[A-Z0-9_]+|TERM|TZ|PYTHONUNBUFFERED)$")
+_ASSIGNMENT_TOKENS = (
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "cookie",
+    "jwt",
+    "oauth",
+    "api",
+    "dsn",
+    "authorization",
+    "bearer",
+    "credential",
+    "private",
+    "access",
+    "auth",
+)
 
 
 def capture_sensitive_argv_indices(
@@ -200,24 +219,38 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
     for secret in secrets:
         if secret:
             text = text.replace(secret, REDACTION_MARKER)
-    if _SECRET_KEY.search(field) or field in {
-        "argv",
-        "environment",
-        "stdin",
-        "script",
-        "error",
-        "message",
-        "text",
-        "result",
-        "user_stdout",
-    }:
+    lowered = text.casefold()
+    if (
+        _SECRET_KEY.search(field)
+        or field
+        in {
+            "argv",
+            "environment",
+            "stdin",
+            "script",
+            "error",
+            "message",
+            "text",
+            "result",
+            "user_stdout",
+            "stdout",
+            "stderr",
+        }
+    ) and any(token in lowered for token in _ASSIGNMENT_TOKENS):
         text = _ASSIGNMENT.sub(r"\g<prefix>" + REDACTION_MARKER, text)
-    text = _SENSITIVE_HEADER.sub(
-        lambda match: match.group(0).split(":", 1)[0] + ": " + REDACTION_MARKER, text
-    )
-    text = _BEARER_VALUE.sub(REDACTION_MARKER, text)
-    text = _JWT_VALUE.sub(REDACTION_MARKER, text)
-    text = _URI_USERINFO.sub(r"\g<prefix>" + REDACTION_MARKER + "@", text)
+    if any(
+        header in lowered
+        for header in ("authorization:", "proxy-authorization:", "cookie:", "set-cookie:")
+    ):
+        text = _SENSITIVE_HEADER.sub(
+            lambda match: match.group(0).split(":", 1)[0] + ": " + REDACTION_MARKER, text
+        )
+    if "bearer " in lowered or "basic " in lowered:
+        text = _BEARER_VALUE.sub(REDACTION_MARKER, text)
+    if "eyj" in lowered:
+        text = _JWT_VALUE.sub(REDACTION_MARKER, text)
+    if "://" in text:
+        text = _URI_USERINFO.sub(r"\g<prefix>" + REDACTION_MARKER + "@", text)
     return sanitize_terminal_text(
         text,
         preserve_newlines=field
@@ -230,6 +263,59 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
             "user_stdout",
         },
     )
+
+
+class IncrementalStreamRedactor:
+    """Redact one output stream without releasing an unresolved line.
+
+    Keeping the current line private gives structural detectors and captured
+    runtime secrets enough context across arbitrary pipe chunks.  Complete
+    lines are projected as soon as their newline makes the boundary safe;
+    the terminal flush applies the canonical whole-value projection to any
+    remaining suffix.
+    """
+
+    def __init__(self, *, secrets: Iterable[str] = (), field: str) -> None:
+        self._secrets = tuple(secret for secret in secrets if secret)
+        self._field = field
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._pending = ""
+
+    def feed(self, value: str | bytes) -> str:
+        text = self._decoder.decode(value, final=False) if isinstance(value, bytes) else value
+        self._pending += text
+        return self._emit_complete_lines()
+
+    def flush(self) -> str:
+        self._pending += self._decoder.decode(b"", final=True)
+        pending = self._pending
+        self._pending = ""
+        if not pending:
+            return ""
+        return cast("str", redacted_projection(pending, secrets=self._secrets, field=self._field))
+
+    def _emit_complete_lines(self) -> str:
+        boundary = self._pending.rfind("\n")
+        if boundary < 0:
+            return ""
+        complete = self._pending[: boundary + 1]
+        self._pending = self._pending[boundary + 1 :]
+        projected: list[str] = []
+        for line in complete.splitlines(keepends=True):
+            ending = ""
+            body = line
+            if line.endswith("\r\n"):
+                ending, body = "\r\n", line[:-2]
+            elif line.endswith(("\n", "\r")):
+                ending, body = line[-1], line[:-1]
+            projected.append(
+                cast(
+                    "str",
+                    redacted_projection(body, secrets=self._secrets, field=self._field),
+                )
+                + ending
+            )
+        return "".join(projected)
 
 
 def redacted_projection(

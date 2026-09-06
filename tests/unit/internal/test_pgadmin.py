@@ -531,7 +531,7 @@ def test_captured_and_stale_fingerprints_are_redacted_everywhere(
     def fail_spawn(*_args: object, **_kwargs: object) -> object:
         raise OSError(f"captured={old} stale={new}")
 
-    monkeypatch.setattr(subprocess, "run", fail_spawn)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fail_spawn)
     with pytest.raises(ProcessSpawnError) as exc_info:
         SubprocessExecutor().execute(run_step)
     assert old not in repr(exc_info.value)

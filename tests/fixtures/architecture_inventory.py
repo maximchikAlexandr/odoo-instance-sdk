@@ -18,8 +18,8 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 893),
-        ("src/odoo_instance_sdk/cli.py", 894),
+        ("src/odoo_instance_sdk/cli.py", 932),
+        ("src/odoo_instance_sdk/cli.py", 933),
         ("src/odoo_instance_sdk/commands/env.py", 377),
         ("src/odoo_instance_sdk/commands/output.py", 211),
         ("src/odoo_instance_sdk/commands/output.py", 335),
@@ -38,8 +38,8 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 337): "shared TOON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 344): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/commands/output.py", 346): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/cli.py", 893): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 894): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 932): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 933): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/resources/instance.py", 1068): "lifecycle cleanup diagnostic transport",
 }
 
@@ -52,26 +52,9 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("tests/unit/internal/test_pgadmin_files.py", 442),
-        ("tests/unit/internal/test_pgadmin_files.py", 501),
-        ("tests/unit/internal/test_pgadmin.py", 534),
-        ("tests/unit/resources/test_database_resource.py", 459),
-        ("tests/unit/resources/test_database_resource.py", 485),
-        ("tests/unit/resources/test_database_resource.py", 512),
-        ("tests/unit/resources/test_database_resource.py", 537),
-        ("tests/unit/resources/test_database_resource.py", 582),
-        ("tests/unit/resources/test_database_resource.py", 603),
-        ("tests/unit/resources/test_database_resource.py", 622),
-        ("tests/unit/resources/test_database_resource.py", 637),
-        ("tests/unit/resources/test_database_resource.py", 649),
-        ("tests/unit/resources/test_database_resource.py", 663),
-        ("tests/unit/resources/test_database_resource.py", 681),
-        ("tests/unit/resources/test_environment_python.py", 42),
-        ("tests/unit/resources/test_environment_python.py", 233),
-        ("tests/unit/resources/test_environment_python.py", 271),
+        ("tests/unit/resources/test_database_resource.py", 617),
         ("tests/unit/test_monitor_cache_and_docker.py", 128),
         ("tests/unit/test_cluster_resources.py", 190),
-        ("tests/unit/internal/test_proc_boundary.py", 383),
     }
 )
 

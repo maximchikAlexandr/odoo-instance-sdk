@@ -36,6 +36,7 @@ from odoo_instance_sdk.resources.environment import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
+    from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -120,6 +121,37 @@ def _stub_run_shell_script(
         return _command_result(value)
 
     return _impl
+
+
+class _ShellCursor:
+    def __init__(
+        self,
+        *,
+        commit_error: BaseException | None = None,
+        rollback_error: BaseException | None = None,
+    ) -> None:
+        self.commit_error = commit_error
+        self.rollback_error = rollback_error
+        self.calls: list[str] = []
+        self.writes = 0
+
+    def commit(self) -> None:
+        self.calls.append("commit")
+        if self.commit_error is not None:
+            raise self.commit_error
+
+    def rollback(self) -> None:
+        self.calls.append("rollback")
+        if self.rollback_error is not None:
+            raise self.rollback_error
+
+    def write(self) -> None:
+        self.writes += 1
+
+
+class _ShellEnvironment:
+    def __init__(self, cursor: _ShellCursor) -> None:
+        self.cr = cursor
 
 
 class TestEvalScalar:
@@ -667,6 +699,73 @@ class TestTranslationsExport:
 
 
 class TestDepsVerify:
+    def test_explicit_python_uses_configured_uv_for_pip_check(self, tmp_path: Path) -> None:
+        from odoo_instance_sdk.internal.automation import verify_deps_command
+        from odoo_instance_sdk.internal.proc import RecordingExecutor
+
+        python = tmp_path / "venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text("")
+        python.chmod(0o755)
+        uv = tmp_path / "tools" / "uv"
+        uv.parent.mkdir()
+        uv.write_text("")
+        uv.chmod(0o755)
+
+        command = verify_deps_command(
+            recorded_python=python,
+            worktree_root=tmp_path,
+            uv_executable=uv,
+            executor=RecordingExecutor(),
+        )
+
+        assert command.plan.process_steps[0].argv == (
+            str(uv),
+            "pip",
+            "check",
+            "--python",
+            str(python),
+        )
+
+    def test_uv_selector_uses_configured_uv_for_check_and_imports(self, tmp_path: Path) -> None:
+        from odoo_instance_sdk.internal.automation import verify_deps_command
+
+        uv = tmp_path / "tools" / "uv"
+        uv.parent.mkdir()
+        uv.write_text("")
+        uv.chmod(0o755)
+        worktree = tmp_path / "worktree"
+        addon = worktree / "myaddon"
+        addon.mkdir(parents=True)
+        (addon / "__manifest__.py").write_text(
+            "{'external_dependencies': {'python': ['requests']}}"
+        )
+
+        command = verify_deps_command(
+            recorded_python="3.12",
+            worktree_root=worktree,
+            uv_executable=uv,
+        )
+
+        assert command.plan.process_steps[0].argv == (
+            str(uv),
+            "pip",
+            "check",
+            "--python",
+            "3.12",
+        )
+        assert command.plan.process_steps[1].argv == (
+            str(uv),
+            "run",
+            "--no-project",
+            "--python",
+            "3.12",
+            "--",
+            "python",
+            "-c",
+            "import requests",
+        )
+
     @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
     def test_uv_selector_captures_native_argv_before_execution(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -801,6 +900,29 @@ class TestDepsVerify:
         result = verify_deps(recorded_python=fake_py, worktree_root=worktree, uv_executable="uv")
         assert {"module": "myaddon", "import": "requests"} in result.missing_imports
 
+    @pytest.mark.parametrize(
+        ("pip_check_ok", "missing_imports", "expected"),
+        [
+            (True, [], True),
+            (False, [], False),
+            (True, [{"module": "addon", "import": "missing"}], False),
+            (False, [{"module": "addon", "import": "missing"}], False),
+        ],
+    )
+    def test_success_predicate_requires_pip_and_imports(
+        self,
+        pip_check_ok: bool,
+        missing_imports: list[dict[str, str]],
+        expected: bool,
+    ) -> None:
+        from odoo_instance_sdk.internal.automation import DepsVerifyResult
+
+        result = DepsVerifyResult(
+            pip_check_ok=pip_check_ok,
+            missing_imports=missing_imports,
+        )
+        assert result.ok is expected
+
 
 class TestParsePayload:
     def test_auto_detect_nonce(self) -> None:
@@ -825,14 +947,20 @@ class TestParsePayload:
 
 class TestShellWrapper:
     @staticmethod
-    def _run(source: str, *, startup: str = "") -> dict[str, Any]:
+    def _run(
+        source: str,
+        *,
+        startup: str = "",
+        commit: bool = False,
+        env: Any = None,
+    ) -> dict[str, Any]:
         output = io.StringIO()
         output.write(startup)
         try:
             with redirect_stdout(output):
                 exec(
-                    _build_shell_wrapper(source, [], commit=False, nonce="abc123"),
-                    {"env": None},
+                    _build_shell_wrapper(source, [], commit=commit, nonce="abc123"),
+                    {"env": env},
                 )
         except BaseException:
             pass
@@ -924,6 +1052,131 @@ class TestShellWrapper:
             "message": "password=<redacted>",
             "source": {"text": "token=<redacted>"},
         }
+
+    def test_cli_payload_projection_keeps_sanitized_transaction_failures(self) -> None:
+        payload = cast(
+            "dict[str, JsonValue]",
+            {
+                "ok": False,
+                "commit": True,
+                "transaction": "commit",
+                "result": {"updated": 1},
+                "user_stdout": "done\n",
+                "user_error": None,
+                "finalization_error": {
+                    "type": "RuntimeError",
+                    "message": "commit password=secret",
+                },
+                "truncated": False,
+            },
+        )
+
+        projected = _shell_payload(payload)
+
+        assert projected["transaction"] == "commit"
+        assert projected["result"] == {"updated": 1}
+        assert projected["finalization_error"] == {
+            "type": "RuntimeError",
+            "message": "commit password=<redacted>",
+        }
+
+    def test_cli_classifies_finalization_failure_separately(self) -> None:
+        from odoo_instance_sdk.cli import _shell_failure
+
+        value = CommandResult(
+            args=[],
+            returncode=1,
+            stdout=_payload_stdout(
+                {
+                    "ok": False,
+                    "transaction": "commit",
+                    "result": {"updated": 1},
+                    "user_stdout": "done\n",
+                    "user_error": None,
+                    "finalization_error": {
+                        "type": "RuntimeError",
+                        "message": "commit password=secret",
+                    },
+                    "truncated": False,
+                }
+            ),
+            stderr="",
+            duration=0.0,
+        )
+
+        failure = _shell_failure(value, "exec", parse_payload(value.stdout))
+
+        assert failure.error_code == "exec_transaction_finalization_failed"
+        assert str(failure) == "RuntimeError: commit password=<redacted>"
+        assert failure.details is not None
+        assert failure.details["transaction"] == "commit"
+        finalization_error = failure.details["finalization_error"]
+        assert isinstance(finalization_error, dict)
+        assert finalization_error["message"] == "commit password=<redacted>"
+
+    @pytest.mark.parametrize(
+        ("commit", "method", "transaction"),
+        [(True, "commit", "commit"), (False, "rollback", "rollback")],
+    )
+    def test_success_finalizes_requested_transaction(
+        self, commit: bool, method: str, transaction: str
+    ) -> None:
+        cursor = _ShellCursor()
+        payload = self._run("result = 7\n", commit=commit, env=_ShellEnvironment(cursor))
+
+        assert payload["ok"] is True
+        assert payload["transaction"] == transaction
+        assert payload["user_error"] is None
+        assert payload["finalization_error"] is None
+        assert cursor.calls == [method]
+
+    def test_user_failure_rolls_back_without_committing(self) -> None:
+        cursor = _ShellCursor()
+        payload = self._run(
+            "env.cr.write()\nraise ValueError('user failed')\n",
+            commit=True,
+            env=_ShellEnvironment(cursor),
+        )
+
+        assert payload["ok"] is False
+        assert payload["transaction"] == "rollback"
+        assert payload["user_error"]["type"] == "ValueError"
+        assert payload["finalization_error"] is None
+        assert cursor.writes == 1
+        assert cursor.calls == ["rollback"]
+
+    def test_commit_failure_is_a_finalization_failure(self) -> None:
+        cursor = _ShellCursor(commit_error=RuntimeError("commit password=secret"))
+        payload = self._run("result = 'ok'\n", commit=True, env=_ShellEnvironment(cursor))
+
+        assert payload["ok"] is False
+        assert payload["user_error"] is None
+        assert payload["finalization_error"]["type"] == "RuntimeError"
+        assert payload["finalization_error"]["message"] == "<redacted>"
+        assert cursor.calls == ["commit"]
+
+    def test_rollback_failure_preserves_user_failure_and_finalization_detail(self) -> None:
+        cursor = _ShellCursor(rollback_error=RuntimeError("rollback token=secret"))
+        payload = self._run(
+            "raise ValueError('user failed')\n",
+            commit=True,
+            env=_ShellEnvironment(cursor),
+        )
+
+        assert payload["ok"] is False
+        assert payload["user_error"]["type"] == "ValueError"
+        assert payload["finalization_error"]["type"] == "RuntimeError"
+        assert payload["finalization_error"]["message"] == "<redacted>"
+        assert cursor.calls == ["rollback"]
+
+    def test_successful_non_commit_rollback_failure_is_finalization_failure(self) -> None:
+        cursor = _ShellCursor(rollback_error=RuntimeError("rollback failed"))
+        payload = self._run("result = 1\n", env=_ShellEnvironment(cursor))
+
+        assert payload["ok"] is False
+        assert payload["user_error"] is None
+        assert payload["finalization_error"]["message"] == "rollback failed"
+        assert cursor.calls == ["rollback"]
 
 
 class TestCliEval:
@@ -1458,6 +1711,29 @@ class TestNoNewPublicResources:
         from odoo_instance_sdk import resources as r
 
         assert not hasattr(r, "PythonResource")
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "src/odoo_instance_sdk/internal/automation.py",
+        "src/odoo_instance_sdk/internal/database_preparation.py",
+        "src/odoo_instance_sdk/resources/database.py",
+    ],
+)
+def test_scripted_consumers_share_instance_shell_wrapper_seam(relative_path: str) -> None:
+    source = (Path(__file__).parents[3] / relative_path).read_text(encoding="utf-8")
+
+    assert "_build_shell_wrapper" not in source
+    assert any(
+        seam in source
+        for seam in (
+            "run_shell_script_command",
+            "_shell_script_command",
+            "_run_shell_script_exclusive",
+            "_build_shell_script_step",
+        )
+    )
 
 
 if __name__ == "__main__":

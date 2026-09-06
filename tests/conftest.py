@@ -15,6 +15,16 @@ if TYPE_CHECKING:
 
 
 _DASHBOARD_MODULES = ("fastapi", "uvicorn")
+_CLI_CATALOGUE_MODULES = frozenset(
+    {
+        "test_cli_characterization.py",
+        "test_cli_init.py",
+        "test_cli_init_postgres.py",
+        "test_cli_output_modes.py",
+        "test_cli_security_contract.py",
+        "test_odcli_lifecycle.py",
+    }
+)
 
 
 def _dashboard_extra_available() -> bool:
@@ -58,6 +68,43 @@ def env_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Odoo
     finally:
         if client._catalog is not None:
             client._catalog.close()
+
+
+@pytest.fixture(autouse=True)
+def isolated_cli_catalogue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: pytest.FixtureRequest
+) -> Path:
+    """Keep CLI catalogue access in a per-test, per-worker sentinel root."""
+    if request.path.name not in _CLI_CATALOGUE_MODULES:
+        return tmp_path / "catalogue-unused" / "data" / "catalog.sqlite3"
+    worker_id = str(getattr(request.config, "workerinput", {}).get("workerid", "master"))
+    worker_root = tmp_path / f"catalogue-{worker_id}"
+    data_root = worker_root / "data"
+    state_root = worker_root / "state"
+    cache_root = worker_root / "cache"
+    catalog_path = data_root / "catalog.sqlite3"
+    data_root.mkdir(parents=True)
+    state_root.mkdir()
+    cache_root.mkdir()
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root))
+    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda: catalog_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_environments_root",
+        lambda **_kwargs: data_root / "environments",
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_state_root", lambda: state_root)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_locks_dir", lambda: state_root / "locks"
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: cache_root)
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_catalog_path", lambda: catalog_path)
+    return catalog_path
 
 
 def _git_run(args: list[str], *, cwd: Path) -> None:

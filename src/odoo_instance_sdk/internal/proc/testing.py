@@ -30,6 +30,8 @@ class RecordingExecutor:
     spawned: list[PreparedStep] = field(default_factory=list)
     effective_timeouts: list[float] = field(default_factory=list)
     effective_environment_snapshots: list[tuple[tuple[str, str], ...]] = field(default_factory=list)
+    stdout_chunks: tuple[str, ...] = ()
+    stderr_chunks: tuple[str, ...] = ()
 
     def execute(
         self,
@@ -67,8 +69,22 @@ class RecordingExecutor:
             raise
         if isinstance(result, ProcessResult):
             if observe_output:
-                _notify_output(observer, prepared, result.stdout, "stdout")
-                _notify_output(observer, prepared, result.stderr, "stderr")
+                if self.stdout_chunks:
+                    for chunk in self.stdout_chunks:
+                        _notify(
+                            observer,
+                            StepEvent(step_id=prepared.step_id, kind="stdout", chunk=chunk),
+                        )
+                else:
+                    _notify_output(observer, prepared, result.stdout, "stdout")
+                if self.stderr_chunks:
+                    for chunk in self.stderr_chunks:
+                        _notify(
+                            observer,
+                            StepEvent(step_id=prepared.step_id, kind="stderr", chunk=chunk),
+                        )
+                else:
+                    _notify_output(observer, prepared, result.stderr, "stderr")
             returncode = result.returncode
         else:
             returncode = None

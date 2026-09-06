@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -28,10 +30,33 @@ from odoo_instance_sdk.internal.proc import (
     run_captured_limited,
     spawn,
 )
+from odoo_instance_sdk.internal.proc.redaction import (
+    IncrementalStreamRedactor,
+    redacted_projection,
+)
 
 
 def _python(source: str) -> tuple[str, ...]:
     return (sys.executable, "-c", source)
+
+
+_REDACTION_CASES = (
+    pytest.param("password=assignment-secret", (), id="password-assignment"),
+    pytest.param("token: assignment-token", (), id="token-assignment"),
+    pytest.param("Bearer bearer-secret", (), id="bearer"),
+    pytest.param("Basic YWJjOnNlY3JldA==", (), id="basic"),
+    pytest.param("Authorization: header-secret", (), id="authorization-header"),
+    pytest.param("Proxy-Authorization: proxy-secret", (), id="proxy-header"),
+    pytest.param("Cookie: cookie-secret", (), id="cookie-header"),
+    pytest.param("Set-Cookie: set-cookie-secret", (), id="set-cookie-header"),
+    pytest.param("https://user:uri-secret@example.test/path", (), id="uri-userinfo"),
+    pytest.param(
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+        (),
+        id="jwt",
+    ),
+    pytest.param("runtime runtime-secret", ("runtime-secret",), id="runtime-secret"),
+)
 
 
 def test_optional_step_observer_preserves_result_and_redacts_output() -> None:
@@ -52,9 +77,361 @@ def test_optional_step_observer_preserves_result_and_redacts_output() -> None:
 
     assert isinstance(result, ProcessResult)
     assert result.returncode == 0
-    assert [event.kind for event in events] == ["started", "stdout", "stderr", "completed"]
+    assert events[0].kind == "started"
+    assert {event.kind for event in events[1:-1]} == {"stdout", "stderr"}
+    assert events[-1].kind == "completed"
     assert all(secret not in (event.chunk or "") for event in events)
     assert events[0].step_id == events[-1].step_id == step.step_id
+
+
+def test_observed_output_arrives_before_captured_process_completion() -> None:
+    ready = threading.Event()
+    events: list[StepEvent] = []
+    command: PreparedCommand[ProcessResult] = prepared_command(
+        lambda context: context.process("streaming"),
+        (
+            PreparedStep(
+                step_id="streaming",
+                argv=_python("import sys, time; print('early', flush=True); time.sleep(0.4)"),
+            ),
+        ),
+        executor=SubprocessExecutor(),
+    )
+
+    def observe(event: StepEvent) -> None:
+        events.append(event)
+        if event.kind == "stdout":
+            ready.set()
+
+    result: list[ProcessResult] = []
+    thread = threading.Thread(
+        target=lambda: result.append(command.run(observer=observe, observe_output=True))
+    )
+    thread.start()
+    assert ready.wait(timeout=0.2)
+    assert thread.is_alive()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert result[0].stdout == "early\n"
+    assert [event.kind for event in events] == ["started", "stdout", "completed"]
+
+
+def test_streaming_redaction_withholds_structural_and_runtime_candidates() -> None:
+    runtime_secret = "runtime-split-secret"
+    step = PreparedStep(
+        step_id="streaming-redaction",
+        argv=_python(
+            "import sys, time; "
+            "sys.stdout.write('Authorization: Bearer '); sys.stdout.flush(); "
+            "time.sleep(0.05); "
+            "sys.stdout.write('structural-secret\\npublic=' + 'runtime-split-'); "
+            "sys.stdout.flush(); time.sleep(0.05); "
+            "sys.stdout.write('secret\\n'); sys.stdout.flush()"
+        ),
+        secret_values=(runtime_secret,),
+    )
+    events: list[StepEvent] = []
+
+    result: ProcessResult = prepared_command(
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=SubprocessExecutor(),
+    ).run(observer=events.append, observe_output=True)
+
+    assert result.stdout is not None
+    assert "structural-secret" in result.stdout
+    projected = "".join(event.chunk or "" for event in events if event.kind == "stdout")
+    assert "structural-secret" not in projected
+    assert "runtime-split-secret" not in projected
+    assert projected == "Authorization: <redacted>\npublic=<redacted>\n"
+
+
+def test_timeout_retains_newest_bounded_sanitized_tails() -> None:
+    secret = "timeout-tail-secret"
+    step = PreparedStep(
+        step_id="timeout-tail",
+        argv=_python(
+            "import sys, time; "
+            "sys.stdout.write('o'*10000 + ' stdout-final=' + 'timeout-tail-secret\\n'); "
+            "sys.stdout.flush(); "
+            "sys.stderr.write('stderr-final=timeout-tail-secret\\n'); "
+            "sys.stderr.flush(); time.sleep(10)"
+        ),
+        timeout=0.1,
+        secret_values=(secret,),
+    )
+    with pytest.raises(ProcessTimeoutError) as raised:
+        SubprocessExecutor().execute(step)
+
+    failure = raised.value
+    assert failure.duration >= failure.timeout
+    assert failure.stdout_tail.endswith("stdout-final=<redacted>\n")
+    assert failure.stderr_tail.endswith("stderr-final=<redacted>\n")
+    assert failure.stdout_truncated is True
+    assert failure.stderr_truncated is False
+    assert len(failure.stdout_tail.encode()) <= 8192
+    assert len(failure.stderr_tail.encode()) <= 8192
+    assert secret not in str(failure)
+
+
+def test_large_stdin_is_written_exactly_while_output_is_drained() -> None:
+    payload = bytes(range(256)) * 32768
+    result = run_captured(
+        _python(
+            "import sys; "
+            "sys.stdout.buffer.write(b'x' * 131072); sys.stdout.flush(); "
+            "data = sys.stdin.buffer.read(); "
+            "sys.stdout.write('\\n' + str(len(data)) + ':' + str(data == bytes(range(256)) * 32768))"
+        ),
+        stdin=payload,
+        timeout=5.0,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout is not None
+    assert isinstance(result.stdout, str)
+    assert result.stdout.endswith(f"\n{len(payload)}:True")
+
+
+def test_stdin_write_failure_terminates_the_owned_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.proc.executor.os.write",
+        lambda *_args: (_ for _ in ()).throw(OSError("synthetic stdin failure")),
+    )
+
+    with pytest.raises(ProcessExecutionError, match="stdin write failed"):
+        run_captured(
+            _python("import time; time.sleep(10)"),
+            stdin=b"captured-input",
+            timeout=5.0,
+        )
+
+
+def test_ctrl_c_closes_the_pump_and_reports_failed_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InterruptingSelector:
+        def register(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def get_map(self) -> dict[int, object]:
+            return {1: object()}
+
+        def select(self, _timeout: float | None = None) -> list[object]:
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.proc.executor.selectors.DefaultSelector",
+        InterruptingSelector,
+    )
+    step = PreparedStep(
+        step_id="ctrl-c",
+        argv=_python("import time; time.sleep(10)"),
+    )
+    events: list[StepEvent] = []
+
+    with pytest.raises(KeyboardInterrupt):
+        SubprocessExecutor().execute(step, observer=events.append, observe_output=True)
+
+    assert [event.kind for event in events] == ["started", "failed"]
+    assert events[-1].error == "interrupted"
+
+
+def test_recording_executor_streams_chunks_and_preserves_result_parity() -> None:
+    step = PreparedStep(step_id="chunked", argv=("tool",), secret_values=("secret",))
+    expected = ProcessResult(
+        argv=step.argv,
+        returncode=7,
+        stdout="first\nsecret\n",
+        stderr="error\n",
+        duration=0.25,
+        cwd=None,
+        environment=(),
+    )
+    executor = RecordingExecutor(
+        results={step.step_id: expected},
+        stdout_chunks=("first", "\nsecret\n"),
+        stderr_chunks=("error", "\n"),
+    )
+    events: list[StepEvent] = []
+
+    command: PreparedCommand[ProcessResult] = prepared_command(
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=executor,
+    )
+    result = command.run(observer=events.append, observe_output=True)
+
+    assert result is expected
+    assert [event.kind for event in events] == [
+        "started",
+        "stdout",
+        "stderr",
+        "completed",
+    ]
+    assert "".join(event.chunk or "" for event in events if event.kind == "stdout") == (
+        "first\n<redacted>\n"
+    )
+    assert "".join(event.chunk or "" for event in events if event.kind == "stderr") == "error\n"
+
+
+def test_recording_executor_observer_failures_and_disabled_observation_are_nonsemantic() -> None:
+    step = PreparedStep(step_id="observer-isolation", argv=("tool",))
+    expected = ProcessResult(step.argv, 0, "output\n", "", 0.0, None, ())
+    executor = RecordingExecutor(
+        results={step.step_id: expected},
+        stdout_chunks=("output", "\n"),
+    )
+
+    def failing_observer(_event: StepEvent) -> None:
+        raise RuntimeError("observer failure")
+
+    command: PreparedCommand[ProcessResult] = prepared_command(
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=executor,
+    )
+    assert command.run(observer=failing_observer, observe_output=True) is expected
+
+    events: list[StepEvent] = []
+    executor = RecordingExecutor(
+        results={step.step_id: expected},
+        stdout_chunks=("output", "\n"),
+    )
+    command = prepared_command(
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=executor,
+    )
+    assert command.run(observer=events.append, observe_output=False) is expected
+    assert [event.kind for event in events] == ["started", "completed"]
+
+
+@pytest.mark.parametrize(("payload", "secrets"), _REDACTION_CASES)
+def test_incremental_redaction_matches_canonical_projection_at_every_byte_split(
+    payload: str, secrets: tuple[str, ...]
+) -> None:
+    raw = (payload + "\n").encode("utf-8")
+    expected = cast("str", redacted_projection(payload, secrets=secrets, field="stdout")) + "\n"
+
+    for split in range(1, len(raw)):
+        redactor = IncrementalStreamRedactor(secrets=secrets, field="stdout")
+        emitted = redactor.feed(raw[:split])
+        emitted += redactor.feed(raw[split:])
+        emitted += redactor.flush()
+
+        assert emitted == expected
+        for secret in secrets:
+            assert secret not in emitted
+        assert "<redacted>" in emitted
+
+
+def test_incremental_redaction_handles_multibyte_decoder_boundaries() -> None:
+    secret = "unicode-runtime-secret"
+    raw = f"префикс {secret} суффикс\n".encode()
+    expected = (
+        cast(
+            "str",
+            redacted_projection(f"префикс {secret} суффикс", secrets=(secret,), field="stdout"),
+        )
+        + "\n"
+    )
+
+    for split in range(1, len(raw)):
+        redactor = IncrementalStreamRedactor(secrets=(secret,), field="stdout")
+        emitted = redactor.feed(raw[:split]) + redactor.feed(raw[split:]) + redactor.flush()
+        assert emitted == expected
+        assert secret not in emitted
+
+
+@pytest.mark.parametrize(("payload", "secrets"), _REDACTION_CASES)
+@pytest.mark.parametrize(
+    ("terminal_kind", "terminal_error"),
+    [("completed", None), ("failed", "timeout"), ("failed", "interrupted")],
+)
+def test_incremental_redaction_terminal_flush_never_releases_incomplete_secret(
+    payload: str,
+    secrets: tuple[str, ...],
+    terminal_kind: str,
+    terminal_error: str | None,
+) -> None:
+    from odoo_instance_sdk.internal.proc import _StreamingStepObserver
+
+    step = PreparedStep(step_id="terminal-flush", argv=("tool",), secret_values=secrets)
+    events: list[StepEvent] = []
+    observer = _StreamingStepObserver(events.append, step)
+
+    observer(StepEvent(step_id=step.step_id, kind="started"))
+    split = max(1, len(payload) // 2)
+    observer(StepEvent(step_id=step.step_id, kind="stdout", chunk=payload[:split]))
+    observer(StepEvent(step_id=step.step_id, kind="stdout", chunk=payload[split:]))
+    observer(
+        StepEvent(
+            step_id=step.step_id,
+            kind=terminal_kind,  # type: ignore[arg-type]
+            returncode=0 if terminal_kind == "completed" else None,
+            error=terminal_error,
+        )
+    )
+
+    projected = "".join(event.chunk or "" for event in events if event.kind == "stdout")
+    expected = cast("str", redacted_projection(payload, secrets=secrets, field="stdout"))
+    assert projected == expected
+    for secret in secrets:
+        assert secret not in projected
+    assert "<redacted>" in projected
+
+
+def test_captured_stdin_closes_cleanly_when_child_exits_before_consuming_it() -> None:
+    result = run_captured(
+        _python("import sys; sys.exit(0)"),
+        stdin=b"x" * (1024 * 1024),
+        timeout=2.0,
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_timeout_closes_unconsumed_stdin_on_windows_process_cleanup_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor.sys.platform", "win32")
+    with pytest.raises(ProcessTimeoutError) as raised:
+        run_captured(
+            _python("import time; time.sleep(10)"),
+            stdin=b"x" * (1024 * 1024),
+            timeout=0.05,
+        )
+    assert raised.value.elapsed >= raised.value.timeout
+
+
+def test_limited_capture_delegates_to_the_common_pump(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[PreparedStep, int | None]] = []
+
+    def fake_pump(
+        step: PreparedStep,
+        *,
+        timeout: float | None,
+        environment_snapshot: tuple[tuple[str, str], ...],
+        observer: StepObserver | None,
+        observe_output: bool,
+        max_output_bytes: int | None = None,
+    ) -> tuple[int, bytes, bytes, float]:
+        del timeout, environment_snapshot, observer, observe_output
+        calls.append((step, max_output_bytes))
+        return 9, b"out", b"err", 0.5
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
+    result = run_captured_limited(("tool",), max_output_bytes=3)
+
+    assert result.returncode == 9
+    assert result.stdout == b"out"
+    assert result.stderr == b"err"
+    assert calls and calls[0][1] == 3
 
 
 def test_observer_redacts_a_secret_split_across_output_chunks() -> None:
@@ -376,11 +753,28 @@ def test_subprocess_deadline_receives_remainder_and_floored_statement_timeout(
     def clock() -> float:
         return clock_now[0]
 
-    def fake_run(argv: list[str], **kwargs: object) -> object:
-        calls.append({"argv": argv, **kwargs})
-        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    def fake_pump(
+        step: PreparedStep,
+        *,
+        timeout: float | None,
+        environment_snapshot: tuple[tuple[str, str], ...],
+        observer: StepObserver | None,
+        observe_output: bool,
+        max_output_bytes: int | None = None,
+    ) -> tuple[int, bytes, bytes, float]:
+        calls.append(
+            {
+                "argv": list(step.argv),
+                "timeout": timeout,
+                "env": dict(environment_snapshot),
+                "observer": observer,
+                "observe_output": observe_output,
+                "max_output_bytes": max_output_bytes,
+            }
+        )
+        return 0, b"", b"", 0.0
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor.subprocess.run", fake_run)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
     step = PreparedStep(
         step_id="subprocess-deadline-step",
         argv=("psql",),

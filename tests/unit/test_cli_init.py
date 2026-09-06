@@ -3,10 +3,94 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import platformdirs
 import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+
+def test_init_catalogue_access_is_worker_local_and_not_production(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_cli_catalogue: Path
+) -> None:
+    production_catalogue = (
+        Path(platformdirs.user_data_dir("odoo-instance-sdk", ensure_exists=False))
+        / "catalog.sqlite3"
+    )
+    guarded_methods = (
+        "open",
+        "exists",
+        "is_file",
+        "stat",
+        "read_text",
+        "read_bytes",
+        "write_text",
+        "write_bytes",
+        "replace",
+        "unlink",
+    )
+    for method_name in guarded_methods:
+        original = getattr(Path, method_name)
+
+        def guarded(
+            path: Path, *args: object, _original: object = original, **kwargs: object
+        ) -> object:
+            if path == production_catalogue:
+                raise AssertionError(f"production catalogue accessed: {path}")
+            return _original(path, *args, **kwargs)  # type: ignore[operator]
+
+        monkeypatch.setattr(Path, method_name, guarded)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--no-input",
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--python",
+            "python3",
+            "--project",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert isolated_cli_catalogue.parent != production_catalogue.parent
+
+
+def test_worker_local_catalogues_do_not_cross_contaminate_monitor_projects(
+    tmp_path: Path,
+) -> None:
+    catalogues: dict[str, Path] = {}
+    for worker, project_name in (("gw0", "project-a"), ("gw1", "project-b")):
+        root = tmp_path / worker / project_name
+        common = root / ".git"
+        common.mkdir(parents=True)
+        catalog_path = root.parent / "catalog.sqlite3"
+        catalogues[worker] = catalog_path
+        project_id = f"project_{repo_key(root, common)}"
+        catalog = BackupCatalog(db_path=catalog_path)
+        try:
+            catalog._register_project(project_id, root, common)
+        finally:
+            catalog.close()
+
+    snapshots = {
+        worker: EnvironmentMonitor(catalog_path=path).snapshot()
+        for worker, path in catalogues.items()
+    }
+
+    assert [project.id for project in snapshots["gw0"].projects] == [
+        f"project_{repo_key(tmp_path / 'gw0' / 'project-a', tmp_path / 'gw0' / 'project-a' / '.git')}"
+    ]
+    assert [project.id for project in snapshots["gw1"].projects] == [
+        f"project_{repo_key(tmp_path / 'gw1' / 'project-b', tmp_path / 'gw1' / 'project-b' / '.git')}"
+    ]
+    assert snapshots["gw0"].projects[0].id != snapshots["gw1"].projects[0].id
 
 
 def test_no_input_missing_odoo_bin_fails(tmp_path: Path) -> None:

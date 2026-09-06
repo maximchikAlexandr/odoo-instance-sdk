@@ -864,6 +864,109 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     assert failure_documents[0][0]["ok"] is False  # type: ignore[index]
 
 
+@pytest.mark.parametrize("mode", ["rich", "json", "toon"])
+@pytest.mark.parametrize(
+    ("case", "expected_ok", "expected_exit"),
+    [
+        (DepsVerifyResult(), True, 0),
+        (
+            DepsVerifyResult(
+                pip_check_ok=False,
+                distributions=[{"detail": "package requires password='pip-secret'"}],
+            ),
+            False,
+            1,
+        ),
+        (
+            DepsVerifyResult(
+                missing_imports=[{"module": "sale", "import": "missing_pkg"}],
+            ),
+            False,
+            1,
+        ),
+        (
+            DepsVerifyResult(
+                pip_check_ok=False,
+                distributions=[{"detail": "conflict"}],
+                missing_imports=[{"module": "sale", "import": "missing_pkg"}],
+            ),
+            False,
+            1,
+        ),
+    ],
+    ids=["success", "distribution-conflict", "missing-import", "combined-failure"],
+)
+def test_deps_verify_uses_one_success_predicate_across_formats(
+    mode: str,
+    case: DepsVerifyResult,
+    expected_ok: bool,
+    expected_exit: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = SimpleNamespace(
+        source=SimpleNamespace(python=None),
+        instance=SimpleNamespace(config=SimpleNamespace()),
+        python_path=lambda: tmp_path / "venv" / "bin" / "python",
+        worktree_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr("odoo_instance_sdk.cli.cli_context.ready_instance", lambda _ctx: context)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.cli.verify_deps_command",
+        lambda **_kwargs: _matrix_command(case),
+    )
+
+    invoked = CliRunner().invoke(cli, ["deps", "verify", "--format", mode])
+
+    assert invoked.exit_code == expected_exit, invoked.output
+    combined = invoked.stdout + invoked.stderr
+    assert "pip-secret" not in combined
+    if mode in {"json", "toon"}:
+        document = _decode_document(invoked.stdout, mode)
+        assert document["ok"] is expected_ok  # type: ignore[index]
+        if expected_ok:
+            assert document["data"]["pip_check_ok"] is True  # type: ignore[index]
+        else:
+            assert document["error"]["code"] == "deps_verify_failed"  # type: ignore[index]
+            assert document["error"]["details"]["pip_check_ok"] is case.pip_check_ok  # type: ignore[index]
+    elif expected_ok:
+        assert "pip check: ok" in combined
+    else:
+        assert "pip check: issues" in combined
+        assert "missing_pkg" in combined or "conflict" in combined or "package requires" in combined
+
+
+def test_deps_verify_dry_run_preserves_configured_uv_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    uv_executable = tmp_path / "tools" / "uv"
+    uv_executable.parent.mkdir()
+    uv_executable.write_text("")
+    uv_executable.chmod(0o755)
+    context = SimpleNamespace(
+        source=SimpleNamespace(python="3.12"),
+        instance=SimpleNamespace(
+            config=SimpleNamespace(deferred_runtime=SimpleNamespace(uv_executable=uv_executable))
+        ),
+        python_path=lambda: tmp_path / "venv" / "bin" / "python",
+        worktree_path=lambda: tmp_path,
+    )
+    captured: dict[str, object] = {}
+
+    def make_command(**kwargs: object) -> Command[DepsVerifyResult]:
+        captured.update(kwargs)
+        return _matrix_command(DepsVerifyResult())
+
+    monkeypatch.setattr("odoo_instance_sdk.cli.cli_context.ready_instance", lambda _ctx: context)
+    monkeypatch.setattr("odoo_instance_sdk.cli.verify_deps_command", make_command)
+
+    invoked = CliRunner().invoke(cli, ["deps", "verify", "--dry-run", "--format", "json"])
+
+    assert invoked.exit_code == 0, invoked.output
+    assert captured["uv_executable"] == uv_executable
+    assert json.loads(invoked.stdout)["dry_run"] is True
+
+
 @pytest.mark.parametrize(
     "stdout",
     [

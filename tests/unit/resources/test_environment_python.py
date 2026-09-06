@@ -39,7 +39,23 @@ def _patch_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
             Path(args[idx + 1]).write_text("# compiled\n")
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("odoo_instance_sdk.resources.environment.subprocess.run", fake_run)
+    def fake_pump(step: object, **kwargs: object) -> tuple[int, bytes, bytes, float]:
+        prepared = cast("Any", step)
+        completed = fake_run(
+            list(prepared.argv),
+            env=dict(prepared.environment),
+            timeout=kwargs.get("timeout"),
+            capture_output=True,
+            text=True,
+        )
+        return (
+            completed.returncode,
+            completed.stdout.encode(),
+            completed.stderr.encode(),
+            0.0,
+        )
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
     return calls
 
 
@@ -230,7 +246,18 @@ class TestFailedCompileKeepsLock:
                 )
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr("odoo_instance_sdk.resources.environment.subprocess.run", fake_run)
+        def fake_pump(step: object, **kwargs: object) -> tuple[int, bytes, bytes, float]:
+            prepared = cast("Any", step)
+            completed = fake_run(
+                list(prepared.argv),
+                env=dict(prepared.environment),
+                timeout=kwargs.get("timeout"),
+                capture_output=True,
+                text=True,
+            )
+            return completed.returncode, completed.stdout.encode(), completed.stderr.encode(), 0.0
+
+        monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
         result = env_client.environments.sync_python(str(env.id))
         assert lock_file.read_text() == original
         assert result.state == EnvironmentState.READY
@@ -268,7 +295,18 @@ class TestFlockSerialization:
                 Path(args[idx + 1]).write_text("# compiled\n")
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr("odoo_instance_sdk.resources.environment.subprocess.run", fake_run)
+        def fake_pump(step: object, **kwargs: object) -> tuple[int, bytes, bytes, float]:
+            prepared = cast("Any", step)
+            completed = fake_run(
+                list(prepared.argv),
+                env=dict(prepared.environment),
+                timeout=kwargs.get("timeout"),
+                capture_output=True,
+                text=True,
+            )
+            return completed.returncode, completed.stdout.encode(), completed.stderr.encode(), 0.0
+
+        monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
         from odoo_instance_sdk.internal.locks import python_env_lock_path
 
         lock_path = python_env_lock_path(env.python_environment_path)

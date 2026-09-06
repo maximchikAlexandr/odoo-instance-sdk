@@ -308,38 +308,46 @@ _ACTIVE_CONTEXT: ContextVar[RunContext[PrivateJsonValue] | None] = ContextVar(
 )
 
 
-class _BufferedStepObserver:
-    """Delay stream chunks until a whole captured result can be redacted."""
+class _StreamingStepObserver:
+    """Redact observer output incrementally and independently per stream."""
 
     def __init__(self, observer: StepObserver, step: PreparedStep) -> None:
+        from .redaction import IncrementalStreamRedactor, captured_secret_values
+
         self._observer = observer
         self._step = step
-        self._chunks: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        secrets = captured_secret_values(step)
+        self._redactors = {
+            stream: IncrementalStreamRedactor(secrets=secrets, field=stream)
+            for stream in ("stdout", "stderr")
+        }
 
     def __call__(self, event: StepEvent) -> None:
         if event.kind in {"stdout", "stderr"}:
             if event.chunk:
-                self._chunks[event.kind].append(event.chunk)
+                chunk = self._redactors[event.kind].feed(event.chunk)
+                if chunk:
+                    _notify(
+                        self._observer,
+                        StepEvent(step_id=self._step.step_id, kind=event.kind, chunk=chunk),
+                    )
             return
         if event.kind in {"completed", "failed"}:
-            from .redaction import captured_secret_values, redacted_projection
-
-            secrets = captured_secret_values(self._step)
             for stream in ("stdout", "stderr"):
-                chunk = "".join(self._chunks[stream])
+                chunk = self._redactors[stream].flush()
                 if not chunk:
                     continue
-                safe = cast("str", redacted_projection(chunk, secrets=secrets, field=stream))
-                self._observer(
+                _notify(
+                    self._observer,
                     StepEvent(
                         step_id=self._step.step_id,
                         kind=stream,
-                        chunk=safe,
-                    )
+                        chunk=chunk,
+                    ),
                 )
-            self._observer(event)
+            _notify(self._observer, event)
             return
-        self._observer(event)
+        _notify(self._observer, event)
 
 
 class RunContext(Generic[T]):
@@ -369,7 +377,7 @@ class RunContext(Generic[T]):
         """Consume the exact immutable captured step, never a substituted request."""
         captured = self._capture_prepared(requested)
         observer = (
-            _BufferedStepObserver(self._observer, captured) if self._observer is not None else None
+            _StreamingStepObserver(self._observer, captured) if self._observer is not None else None
         )
         result = self._executor.execute(
             captured,
@@ -392,7 +400,7 @@ class RunContext(Generic[T]):
         deadline_executor = require_deadline_executor(self._executor)
         captured = self._capture_prepared(requested)
         observer = (
-            _BufferedStepObserver(self._observer, captured) if self._observer is not None else None
+            _StreamingStepObserver(self._observer, captured) if self._observer is not None else None
         )
         result = deadline_executor.execute_with_deadline(
             captured,
@@ -417,7 +425,7 @@ class RunContext(Generic[T]):
         if not isinstance(step, PreparedStep):
             raise UnplannedStepError(step_id, reason="requested step is not a process")
         observer = (
-            _BufferedStepObserver(self._observer, step) if self._observer is not None else None
+            _StreamingStepObserver(self._observer, step) if self._observer is not None else None
         )
         return self._executor.spawn(
             step,

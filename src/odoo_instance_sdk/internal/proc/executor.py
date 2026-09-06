@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
-from typing import IO, cast
+from typing import IO, Literal, cast
 
 from odoo_instance_sdk.internal.process_env import (
     captured_child_environment,
@@ -29,8 +29,10 @@ from . import (
     StepObserver,
     bounded_process_inputs,
 )
+from .redaction import IncrementalStreamRedactor
 
 _CLEANUP_TIMEOUT = 5.0
+_TIMEOUT_TAIL_BYTES = 8192
 
 
 class ProcessExecutionError(RuntimeError):
@@ -73,11 +75,29 @@ class ProcessTimeoutError(ProcessExecutionError):
         duration: float,
         secrets: Sequence[str] = (),
         sensitive_indices: Sequence[int] = (),
+        stdout_tail: str | bytes = "",
+        stderr_tail: str | bytes = "",
+        stdout_truncated: bool = False,
+        stderr_truncated: bool = False,
     ) -> None:
         self.timeout = timeout
+        self.elapsed = duration
+        self.stdout_truncated = stdout_truncated
+        self.stderr_truncated = stderr_truncated
+        from .redaction import redacted_projection
+
+        self.stdout_tail = cast(
+            "str",
+            redacted_projection(stdout_tail, secrets=secrets, field="stdout"),
+        )
+        self.stderr_tail = cast(
+            "str",
+            redacted_projection(stderr_tail, secrets=secrets, field="stderr"),
+        )
         super().__init__(
             argv,
-            f"timeout after {timeout}s",
+            f"timeout after {timeout}s; stdout_tail={self.stdout_tail!r}; "
+            f"stderr_tail={self.stderr_tail!r}",
             duration=duration,
             secrets=secrets,
             sensitive_indices=sensitive_indices,
@@ -178,6 +198,242 @@ def _captured_error_secrets(step: PreparedStep) -> tuple[str, ...]:
     return captured_secret_values(step)
 
 
+def _run_pump(  # noqa: C901
+    prepared: PreparedStep,
+    *,
+    timeout: float | None,
+    environment_snapshot: tuple[tuple[str, str], ...],
+    observer: StepObserver | None,
+    observe_output: bool,
+    max_output_bytes: int | None = None,
+) -> tuple[int, bytes, bytes, float]:
+    """Run one captured child while pumping stdin and both output pipes."""
+    process = subprocess.Popen(
+        list(prepared.argv),
+        cwd=prepared.cwd,
+        env=_environment(
+            prepared.environment,
+            policy=prepared.environment_policy,
+            snapshot=environment_snapshot,
+        ),
+        stdin=subprocess.PIPE if prepared.stdin is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+        shell=False,
+    )
+    stdin = process.stdin
+    stdout = process.stdout
+    stderr = process.stderr
+    assert stdout is not None
+    assert stderr is not None
+    output_streams = (stdout, stderr)
+    full_output = {stream: bytearray() for stream in output_streams}
+    tail_output = {stream: bytearray() for stream in output_streams}
+    tail_truncated = dict.fromkeys(output_streams, False)
+    selector = selectors.DefaultSelector()
+    started = time.perf_counter()
+    stdin_offset = 0
+    group_cleaned = False
+    redactors: dict[str, IncrementalStreamRedactor] = {}
+    if observer is not None and observe_output:
+        secrets = _captured_error_secrets(prepared)
+        redactors = {
+            stream: IncrementalStreamRedactor(secrets=secrets, field=stream)
+            for stream in ("stdout", "stderr")
+        }
+
+    def notify_chunk(stream: str, chunk: bytes) -> None:
+        if not observe_output or observer is None:
+            return
+        redactor = redactors[stream]
+        safe = redactor.feed(chunk)
+        if safe:
+            _notify(
+                observer,
+                StepEvent(
+                    step_id=prepared.step_id,
+                    kind=cast("Literal['stdout', 'stderr']", stream),
+                    chunk=safe,
+                ),
+            )
+
+    def flush_observers() -> None:
+        if not observe_output or observer is None:
+            return
+        for stream in ("stdout", "stderr"):
+            safe = redactors[stream].flush()
+            if safe:
+                _notify(observer, StepEvent(step_id=prepared.step_id, kind=stream, chunk=safe))
+
+    def close_stream(stream: IO[bytes]) -> None:
+        with contextlib.suppress(OSError, ValueError):
+            stream.close()
+
+    def terminate_and_reap() -> None:
+        group_id = process.pid if sys.platform != "win32" else None
+        if group_id is not None:
+            with contextlib.suppress(OSError):
+                os.killpg(group_id, signal.SIGTERM)
+        elif process.poll() is None:
+            with contextlib.suppress(OSError):
+                process.terminate()
+        try:
+            process.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            if group_id is not None:
+                with contextlib.suppress(OSError):
+                    os.killpg(group_id, signal.SIGKILL)
+            else:
+                with contextlib.suppress(OSError):
+                    process.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=1.0)
+
+    def drain_after_termination() -> None:
+        for stream in output_streams:
+            with contextlib.suppress(OSError, ValueError):
+                os.set_blocking(stream.fileno(), False)
+            while True:
+                try:
+                    chunk = os.read(stream.fileno(), 64 * 1024)
+                except (BlockingIOError, OSError):
+                    break
+                if not chunk:
+                    break
+                full_output[stream].extend(chunk)
+                tail = tail_output[stream]
+                if len(tail) + len(chunk) > _TIMEOUT_TAIL_BYTES:
+                    tail_truncated[stream] = True
+                    tail[:] = (tail + chunk)[-_TIMEOUT_TAIL_BYTES:]
+                else:
+                    tail.extend(chunk)
+                notify_chunk("stdout" if stream is stdout else "stderr", chunk)
+
+    def timeout_error() -> ProcessTimeoutError:
+        flush_observers()
+        return ProcessTimeoutError(
+            prepared.argv,
+            timeout if timeout is not None else 0.0,
+            duration=time.perf_counter() - started,
+            secrets=_captured_error_secrets(prepared),
+            sensitive_indices=prepared.sensitive_argv_indices,
+            stdout_tail=bytes(tail_output[stdout]),
+            stderr_tail=bytes(tail_output[stderr]),
+            stdout_truncated=tail_truncated[stdout],
+            stderr_truncated=tail_truncated[stderr],
+        )
+
+    try:
+        for stream in output_streams:
+            os.set_blocking(stream.fileno(), False)
+            selector.register(
+                stream, selectors.EVENT_READ, data="stdout" if stream is stdout else "stderr"
+            )
+        if stdin is not None:
+            os.set_blocking(stdin.fileno(), False)
+            selector.register(stdin, selectors.EVENT_WRITE, data="stdin")
+
+        while selector.get_map():
+            if process.poll() is not None and stdin is not None:
+                with contextlib.suppress(KeyError):
+                    selector.unregister(stdin)
+                close_stream(stdin)
+                stdin = None
+            if process.poll() is not None and not group_cleaned:
+                terminate_and_reap()
+                group_cleaned = True
+            remaining = None if timeout is None else timeout - (time.perf_counter() - started)
+            if remaining is not None and remaining <= 0:
+                terminate_and_reap()
+                drain_after_termination()
+                raise timeout_error()  # noqa: TRY301
+            ready = selector.select(remaining)
+            if not ready:
+                terminate_and_reap()
+                drain_after_termination()
+                raise timeout_error()  # noqa: TRY301
+            ready.sort(key=lambda item: 0 if item[0].data == "stdout" else 1)
+            for key, mask in ready:
+                stream = cast("IO[bytes]", key.fileobj)
+                if key.data == "stdin":
+                    payload = prepared.stdin
+                    assert payload is not None
+                    try:
+                        written = os.write(stream.fileno(), payload[stdin_offset:])
+                    except (BrokenPipeError, OSError) as error:
+                        with contextlib.suppress(KeyError):
+                            selector.unregister(stream)
+                        close_stream(stream)
+                        stdin = None
+                        if process.poll() is not None and isinstance(error, BrokenPipeError):
+                            continue
+                        terminate_and_reap()
+                        drain_after_termination()
+                        raise ProcessExecutionError(
+                            prepared.argv,
+                            "stdin write failed",
+                            duration=time.perf_counter() - started,
+                            secrets=_captured_error_secrets(prepared),
+                            sensitive_indices=prepared.sensitive_argv_indices,
+                        ) from error
+                    stdin_offset += written
+                    if stdin_offset >= len(payload):
+                        with contextlib.suppress(KeyError):
+                            selector.unregister(stream)
+                        close_stream(stream)
+                        stdin = None
+                    continue
+                chunk = os.read(stream.fileno(), 64 * 1024)
+                if not chunk:
+                    with contextlib.suppress(KeyError):
+                        selector.unregister(stream)
+                    close_stream(stream)
+                    continue
+                buffer = full_output[stream]
+                if max_output_bytes is not None and len(buffer) + len(chunk) > max_output_bytes:
+                    terminate_and_reap()
+                    drain_after_termination()
+                    raise ProcessExecutionError(  # noqa: TRY301
+                        prepared.argv,
+                        "output exceeded configured limit",
+                        duration=time.perf_counter() - started,
+                        secrets=_captured_error_secrets(prepared),
+                        sensitive_indices=prepared.sensitive_argv_indices,
+                    )
+                buffer.extend(chunk)
+                tail = tail_output[stream]
+                if len(tail) + len(chunk) > _TIMEOUT_TAIL_BYTES:
+                    tail_truncated[stream] = True
+                    tail[:] = (tail + chunk)[-_TIMEOUT_TAIL_BYTES:]
+                else:
+                    tail.extend(chunk)
+                notify_chunk(key.data, chunk)
+        if stdin is not None:
+            close_stream(stdin)
+        process.wait()
+        flush_observers()
+        return (
+            process.returncode,
+            bytes(full_output[stdout]),
+            bytes(full_output[stderr]),
+            time.perf_counter() - started,
+        )
+    except BaseException:
+        if not group_cleaned:
+            terminate_and_reap()
+            group_cleaned = True
+        drain_after_termination()
+        flush_observers()
+        raise
+    finally:
+        selector.close()
+        if stdin is not None:
+            close_stream(stdin)
+        for stream in output_streams:
+            close_stream(stream)
+
+
 class SubprocessExecutor:
     """Real executor for already-captured process steps."""
 
@@ -207,7 +463,7 @@ class SubprocessExecutor:
             observe_output=observe_output,
         )
 
-    def _execute(
+    def _execute(  # noqa: C901
         self,
         prepared: PreparedStep,
         *,
@@ -224,6 +480,81 @@ class SubprocessExecutor:
         )
         started = time.perf_counter()
         _notify(observer, StepEvent(step_id=prepared.step_id, kind="started"))
+        if prepared.mode == "captured":
+            try:
+                returncode, stdout, stderr, duration = _run_pump(
+                    prepared,
+                    timeout=timeout,
+                    environment_snapshot=environment_snapshot,
+                    observer=observer,
+                    observe_output=observe_output,
+                )
+            except ProcessTimeoutError as error:
+                _notify(
+                    observer,
+                    StepEvent(
+                        step_id=prepared.step_id,
+                        kind="failed",
+                        error=str(error),
+                    ),
+                )
+                raise
+            except KeyboardInterrupt:
+                _notify(
+                    observer,
+                    StepEvent(
+                        step_id=prepared.step_id,
+                        kind="failed",
+                        error="interrupted",
+                    ),
+                )
+                raise
+            except OSError as error:
+                _notify(
+                    observer,
+                    StepEvent(
+                        step_id=prepared.step_id,
+                        kind="failed",
+                        error=_safe_error(prepared, error),
+                    ),
+                )
+                raise ProcessSpawnError(
+                    prepared.argv,
+                    str(error),
+                    duration=time.perf_counter() - started,
+                    secrets=_captured_error_secrets(prepared),
+                    sensitive_indices=prepared.sensitive_argv_indices,
+                ) from error
+            except Exception as error:
+                _notify(
+                    observer,
+                    StepEvent(
+                        step_id=prepared.step_id,
+                        kind="failed",
+                        error=_safe_error(prepared, error),
+                    ),
+                )
+                raise
+            stdout_bytes: str | bytes = stdout.decode() if prepared.text else stdout
+            stderr_bytes: str | bytes = stderr.decode() if prepared.text else stderr
+            result = ProcessResult(
+                argv=prepared.argv,
+                returncode=returncode,
+                stdout=stdout_bytes,
+                stderr=stderr_bytes,
+                duration=duration,
+                cwd=prepared.cwd,
+                environment=prepared.environment,
+            )
+            _notify(
+                observer,
+                StepEvent(
+                    step_id=prepared.step_id,
+                    kind="completed",
+                    returncode=result.returncode,
+                ),
+            )
+            return result
         try:
             text_mode = prepared.text and prepared.stdin is None
             completed = subprocess.run(
@@ -279,25 +610,29 @@ class SubprocessExecutor:
                 ),
             )
             raise
-        stdout = getattr(completed, "stdout", "")
-        stderr = getattr(completed, "stderr", "")
+        stdout_value: str | bytes | None = cast(
+            "str | bytes | None", getattr(completed, "stdout", "")
+        )
+        stderr_value: str | bytes | None = cast(
+            "str | bytes | None", getattr(completed, "stderr", "")
+        )
         if prepared.text:
-            if isinstance(stdout, bytes):
-                stdout = stdout.decode()
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode()
+            if isinstance(stdout_value, bytes):
+                stdout_value = stdout_value.decode()
+            if isinstance(stderr_value, bytes):
+                stderr_value = stderr_value.decode()
         result = ProcessResult(
             argv=prepared.argv,
             returncode=getattr(completed, "returncode", 0),
-            stdout=stdout,
-            stderr=stderr,
+            stdout=stdout_value,
+            stderr=stderr_value,
             duration=time.perf_counter() - started,
             cwd=prepared.cwd,
             environment=prepared.environment,
         )
         if observe_output:
-            _notify_output(observer, prepared, stdout, "stdout")
-            _notify_output(observer, prepared, stderr, "stderr")
+            _notify_output(observer, prepared, stdout_value, "stdout")
+            _notify_output(observer, prepared, stderr_value, "stderr")
         _notify(
             observer,
             StepEvent(
@@ -484,7 +819,7 @@ def run_captured(
     return SubprocessExecutor().execute(step)
 
 
-def run_captured_limited(  # noqa: C901
+def run_captured_limited(
     executable: str | Sequence[str],
     args: Sequence[str] = (),
     *,
@@ -501,9 +836,9 @@ def run_captured_limited(  # noqa: C901
 ) -> ProcessResult:
     """Run a captured process while bounding both output streams.
 
-    This is the one bounded exception to ``subprocess.run`` in the executor:
-    callers that consume untrusted command output can terminate a child as soon
-    as its output budget is exceeded, rather than buffering an unbounded stream.
+    Callers that consume untrusted command output can terminate a child as soon
+    as its output budget is exceeded, rather than buffering an unbounded stream;
+    the same private pump owns ordinary captured execution too.
     """
     if max_output_bytes < 0:
         raise ValueError("max_output_bytes must not be negative")
@@ -528,18 +863,13 @@ def run_captured_limited(  # noqa: C901
         return cast("ProcessResult", context.process_prepared(step))
     started = time.perf_counter()
     try:
-        process = subprocess.Popen(
-            list(step.argv),
-            cwd=step.cwd,
-            env=_environment(
-                step.environment,
-                policy=step.environment_policy,
-                snapshot=step.environment_snapshot,
-            ),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
+        returncode, stdout, stderr, duration = _run_pump(
+            step,
+            timeout=timeout,
+            environment_snapshot=step.environment_snapshot,
+            observer=None,
+            observe_output=False,
+            max_output_bytes=max_output_bytes,
         )
     except OSError as error:
         raise ProcessSpawnError(
@@ -549,81 +879,12 @@ def run_captured_limited(  # noqa: C901
             secrets=_captured_error_secrets(step),
             sensitive_indices=step.sensitive_argv_indices,
         ) from error
-
-    stdout = process.stdout
-    stderr = process.stderr
-    assert stdout is not None
-    assert stderr is not None
-    streams = {stdout: bytearray(), stderr: bytearray()}
-    selector = selectors.DefaultSelector()
-
-    def terminate_and_reap() -> None:
-        if process.poll() is None:
-            with contextlib.suppress(OSError):
-                process.terminate()
-        try:
-            process.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(OSError):
-                process.kill()
-            process.wait()
-
-    try:
-        selector.register(stdout, selectors.EVENT_READ)
-        selector.register(stderr, selectors.EVENT_READ)
-        while selector.get_map():
-            remaining = None if timeout is None else timeout - (time.perf_counter() - started)
-            if remaining is not None and remaining <= 0:
-                terminate_and_reap()
-                assert timeout is not None
-                raise ProcessTimeoutError(
-                    step.argv,
-                    timeout,
-                    duration=time.perf_counter() - started,
-                    secrets=_captured_error_secrets(step),
-                    sensitive_indices=step.sensitive_argv_indices,
-                ) from None
-            ready = selector.select(remaining)
-            if not ready:
-                terminate_and_reap()
-                raise ProcessTimeoutError(
-                    step.argv,
-                    timeout if timeout is not None else 0.0,
-                    duration=time.perf_counter() - started,
-                    secrets=_captured_error_secrets(step),
-                    sensitive_indices=step.sensitive_argv_indices,
-                ) from None
-            for key, _ in ready:
-                stream = cast("IO[bytes]", key.fileobj)
-                chunk = os.read(stream.fileno(), 64 * 1024)
-                if not chunk:
-                    selector.unregister(stream)
-                    stream.close()
-                    continue
-                buffer = streams[stream]
-                if len(buffer) + len(chunk) > max_output_bytes:
-                    terminate_and_reap()
-                    raise ProcessExecutionError(
-                        step.argv,
-                        "output exceeded configured limit",
-                        duration=time.perf_counter() - started,
-                        secrets=_captured_error_secrets(step),
-                        sensitive_indices=step.sensitive_argv_indices,
-                    )
-                buffer.extend(chunk)
-        process.wait()
-    finally:
-        selector.close()
-        for stream in (stdout, stderr):
-            if not stream.closed:
-                stream.close()
-
     return ProcessResult(
         argv=step.argv,
-        returncode=process.returncode,
-        stdout=bytes(streams[stdout]),
-        stderr=bytes(streams[stderr]),
-        duration=time.perf_counter() - started,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        duration=duration,
         cwd=step.cwd,
         environment=step.environment,
     )
