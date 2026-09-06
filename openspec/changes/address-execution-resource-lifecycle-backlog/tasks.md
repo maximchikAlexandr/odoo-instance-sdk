@@ -100,14 +100,14 @@
 
 ## 10. Resource inventory and doctor
 
-- [ ] 10.1 Define CLI-private/internal frozen typed resource inventory/finding models with stable identity, type, relationships, ownership confidence, active use, logical/measured byte semantics, completeness, reclaimability, sanitized local path, and recommendation.
-- [ ] 10.2 Implement one read-only resource command by joining the existing backup catalogue, database inventory, project/environment records, restore provenance, storage-footprint helpers, log locations, and Compose volume probes without new persistence.
-- [ ] 10.3 De-duplicate shared Python environments and volumes by stable identity, keep project-context resources without synthetic environments, and retain monitor/API path redaction unchanged.
-- [ ] 10.4 Extend owned Compose volume inspection with redacted stable identity, available usage, and retained/non-reclaimable state; prove `postgres stop` never deletes the volume or reports reclaimed bytes.
-- [ ] 10.5 Implement doctor findings for available-record/missing-file mismatches, crash-left `.part`, unknown owned-directory files, unknown/preserved filestores, cleanup-failed environments, and unavailable measurements without audit reconciliation or deletion.
-- [ ] 10.6 Register read-only `resource list` and `resource doctor` Rich/JSON/TOON leaves and add each exactly once to `PUBLIC_LEAF_CASES`.
-- [ ] 10.7 Add tests for relationship graphs, repeated restore, shared-resource de-duplication, project-only context, logical-versus-host bytes, stopped/external/unknown volumes, handled failure without `.part`, crash leftovers, recommendations, sanitization, partial probes, and zero mutations.
-- [ ] 10.8 Document why prune, log rotation, and `postgres destroy` remain separate evidence-gated future changes, then commit and push the resource slice.
+- [x] 10.1 Define CLI-private/internal frozen typed resource inventory/finding models with stable identity, type, relationships, ownership confidence, active use, logical/measured byte semantics, completeness, reclaimability, sanitized local path, and recommendation.
+- [x] 10.2 Implement one read-only resource command by joining the existing backup catalogue, database inventory, project/environment records, restore provenance, storage-footprint helpers, log locations, and Compose volume probes without new persistence.
+- [x] 10.3 De-duplicate shared Python environments and volumes by stable identity, keep project-context resources without synthetic environments, and retain monitor/API path redaction unchanged.
+- [x] 10.4 Extend owned Compose volume inspection with redacted stable identity, available usage, and retained/non-reclaimable state; prove `postgres stop` never deletes the volume or reports reclaimed bytes.
+- [x] 10.5 Implement doctor findings for available-record/missing-file mismatches, crash-left `.part`, unknown owned-directory files, unknown/preserved filestores, cleanup-failed environments, and unavailable measurements without audit reconciliation or deletion.
+- [x] 10.6 Register read-only `resource list` and `resource doctor` Rich/JSON/TOON leaves and add each exactly once to `PUBLIC_LEAF_CASES`.
+- [x] 10.7 Add tests for relationship graphs, repeated restore, shared-resource de-duplication, project-only context, logical-versus-host bytes, stopped/external/unknown volumes, handled failure without `.part`, crash leftovers, recommendations, sanitization, partial probes, and zero mutations.
+- [x] 10.8 Document why prune, log rotation, and `postgres destroy` remain separate evidence-gated future changes, then commit and push the resource slice.
 
 ## 11. Acceptance and delivery
 

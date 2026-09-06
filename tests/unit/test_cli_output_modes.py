@@ -47,6 +47,7 @@ from odoo_instance_sdk.internal.automation import (
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
 from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
 from odoo_instance_sdk.internal.pg.inventory import DatabaseInventoryItem, DatabaseInventoryResult
+from odoo_instance_sdk.internal.resource_inventory import ResourceInventory
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     BackupFreshness,
@@ -131,6 +132,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         True,
     ),
     PublicLeafCase(("doctor",), ("doctor",), "bounded-read-only", False),
+    PublicLeafCase(("resource", "list"), ("resource", "list"), "bounded-read-only", False),
+    PublicLeafCase(("resource", "doctor"), ("resource", "doctor"), "bounded-read-only", False),
     PublicLeafCase(
         ("env", "checkout"), ("env", "checkout", "main", "--dry-run"), "mutating-or-spawning", True
     ),
@@ -466,6 +469,15 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.run_doctor",
             fail_operation if failing else lambda *_args, **_kwargs: DoctorReport(),
+        )
+        return
+
+    if path[:1] == ("resource",):
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.resource._inventory",
+            fail_operation
+            if failing
+            else lambda: ResourceInventory(resources=(), findings=(), complete=True),
         )
         return
 
@@ -2094,6 +2106,59 @@ def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) 
     decoded = decode(result.stdout, DecodeOptions(indent=2, strict=True))
     assert decoded["schema_version"] == 1
     assert decoded["result"] == decoded["data"]
+
+
+@pytest.mark.parametrize("mode", ["json", "toon"])
+def test_resource_machine_projection_is_read_only_and_one_document(
+    mode: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The real resource source may inspect a catalogue but never rewrite it."""
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog_path = tmp_path / "backup-catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog.close()
+    before = catalog_path.read_bytes()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.resource._catalog_path_provider.provider",
+        lambda: catalog_path,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.resource.get_data_root",
+        lambda *, ensure_exists=False: tmp_path / "data",
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.resource.get_backups_dir",
+        lambda: tmp_path / "backups",
+    )
+
+    result = CliRunner().invoke(cli, ["resource", "list", "--format", mode])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    assert result.stdout.count("schema_version") == 1
+    document = _decode_document(result.stdout, mode)
+    assert document["ok"] is True  # type: ignore[index]
+    assert document["result"] == document["data"]  # type: ignore[index]
+    assert catalog_path.read_bytes() == before
+
+
+def test_resource_rich_projections_are_bounded_and_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = ResourceInventory(resources=(), findings=(), complete=True)
+    monkeypatch.setattr("odoo_instance_sdk.commands.resource._inventory", lambda: empty)
+    runner = CliRunner()
+
+    first = runner.invoke(cli, ["resource", "list"])
+    second = runner.invoke(cli, ["resource", "list"])
+    doctor = runner.invoke(cli, ["resource", "doctor"])
+
+    assert first.exit_code == second.exit_code == doctor.exit_code == 0
+    assert first.output == second.output
+    assert "Identity" in first.output
+    assert "No resource findings." in doctor.output
+    assert "\x1b[" not in first.output + doctor.output
 
 
 @pytest.mark.parametrize("args", [["--json"], ["--format", "json"]])

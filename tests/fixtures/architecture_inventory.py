@@ -18,8 +18,8 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 946),
-        ("src/odoo_instance_sdk/cli.py", 945),
+        ("src/odoo_instance_sdk/cli.py", 954),
+        ("src/odoo_instance_sdk/cli.py", 955),
         ("src/odoo_instance_sdk/commands/env.py", 378),
         ("src/odoo_instance_sdk/commands/output.py", 234),
         ("src/odoo_instance_sdk/commands/output.py", 358),
@@ -38,8 +38,8 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 360): "shared TOON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 367): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/commands/output.py", 369): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/cli.py", 946): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 945): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 954): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 955): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/resources/instance.py", 1068): "lifecycle cleanup diagnostic transport",
 }
 

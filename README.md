@@ -257,6 +257,8 @@ sentence; use the entry's `--help` for exact options.
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
+- `odcli resource list` — List retained local resources without lifecycle mutation.
+- `odcli resource doctor` — Diagnose retained local resource findings without deletion.
 - `odcli env checkout` — Plan or create an isolated branch worktree and environment.
 - `odcli env list` — List registered environments, active-only unless `--all` is requested.
 - `odcli env remove` — Remove a registered environment and its owned artifacts safely.

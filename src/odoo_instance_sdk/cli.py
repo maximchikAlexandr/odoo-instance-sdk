@@ -48,6 +48,12 @@ from odoo_instance_sdk.commands.pg import (
 from odoo_instance_sdk.commands.pg import (
     register_database_commands,
 )
+from odoo_instance_sdk.commands.resource import (
+    configure_catalog_path_provider as configure_resource_catalog_path_provider,
+)
+from odoo_instance_sdk.commands.resource import (
+    resource_group,
+)
 from odoo_instance_sdk.commands.test import (
     project_execution_result,
     resolve_module_test_selection,
@@ -384,6 +390,7 @@ def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject
                 {"name": "Project", "commands": ["init", "doctor"]},
                 {"name": "Runtime", "commands": ["run", "shell", "logs", "monitor"]},
                 {"name": "Data", "commands": ["env", "backup", "db", "postgres", "psql"]},
+                {"name": "Maintenance", "commands": ["resource"]},
                 {
                     "name": "Development",
                     "commands": [
@@ -423,6 +430,7 @@ cli.add_command(backup_group, name="backup")
 cli.add_command(_postgres_group, name="postgres")
 register_database_commands(db_group)
 cli.add_command(_psql, name="psql")
+cli.add_command(resource_group, name="resource")
 
 
 def _backup_catalog_path() -> Path:
@@ -430,6 +438,7 @@ def _backup_catalog_path() -> Path:
 
 
 configure_catalog_path_provider(_backup_catalog_path)
+configure_resource_catalog_path_provider(_backup_catalog_path)
 
 
 class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]
