@@ -32,6 +32,7 @@ from odoo_instance_sdk.internal.files import (
     extract_server_filename,
     make_download_filename,
 )
+from odoo_instance_sdk.internal.locks import backup_lock_path, exclusive_lock
 from odoo_instance_sdk.internal.paths import get_backups_dir
 from odoo_instance_sdk.internal.redact import format_error
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
@@ -934,6 +935,7 @@ class DatabaseResource:
                 database_name,
                 pwd,
                 part_path,
+                backup_id=backup_id,
                 timeout=(
                     timeout
                     if timeout is not None
@@ -1000,60 +1002,67 @@ class DatabaseResource:
         password: str,
         part_path: Path,
         *,
+        backup_id: str,
         timeout: float | None,
         format: BackupFormat,
         filestore: bool,
     ) -> tuple[str | None, int, str]:
         """Fetch a backup, converting HTTPX failures without retaining them."""
         http_failure: str | None = None
-        try:
-            from odoo_instance_sdk.internal.proc import active_context
+        with exclusive_lock(backup_lock_path(backup_id)):
+            try:
+                from odoo_instance_sdk.internal.proc import active_context
 
-            context = active_context()
-            if context is not None and context.planned("database.backup.wait"):
-                context.action("database.backup.wait")
-            with (
-                self._http(timeout=timeout) as http,
-                http.stream(
-                    "POST",
-                    self._url("backup"),
-                    data={
-                        "master_pwd": password,
-                        "name": database_name,
-                        "backup_format": format.value,
-                        "filestore": "true" if filestore else "false",
-                    },
-                ) as resp,
-            ):
-                resp.raise_for_status()
-                server_filename = extract_server_filename(resp.headers.get("content-disposition"))
-                expected_bytes = _trustworthy_content_length(resp.headers)
+                context = active_context()
                 if context is not None and context.planned("database.backup.wait"):
-                    context.complete_action("database.backup.wait")
-                if context is not None and context.planned("database.backup.transfer"):
-                    context.action("database.backup.transfer")
-                size_bytes, sha256_hex = _stream_response_to_file(
-                    resp,
-                    part_path,
-                    expected_bytes=expected_bytes,
-                    progress=(
-                        lambda received: (
-                            context.progress("database.backup.transfer", received, expected_bytes)
-                            if context is not None and context.planned("database.backup.transfer")
-                            else None
-                        )
-                    ),
-                )
-                if context is not None and context.planned("database.backup.transfer"):
-                    context.complete_action("database.backup.transfer")
-        except httpx.HTTPStatusError as exc:
-            # Keep only a status-derived value. The HTTPX exception retains
-            # its request/response/stream graph, including master_pwd.
-            http_failure = f"Backup request failed with HTTP status {exc.response.status_code}"
-        except httpx.HTTPError:
-            # Do not format the exception: its request may contain the remote
-            # master password and response bodies can be unbounded.
-            http_failure = "Backup request failed"
+                    context.action("database.backup.wait")
+                with (
+                    self._http(timeout=timeout) as http,
+                    http.stream(
+                        "POST",
+                        self._url("backup"),
+                        data={
+                            "master_pwd": password,
+                            "name": database_name,
+                            "backup_format": format.value,
+                            "filestore": "true" if filestore else "false",
+                        },
+                    ) as resp,
+                ):
+                    resp.raise_for_status()
+                    server_filename = extract_server_filename(
+                        resp.headers.get("content-disposition")
+                    )
+                    expected_bytes = _trustworthy_content_length(resp.headers)
+                    if context is not None and context.planned("database.backup.wait"):
+                        context.complete_action("database.backup.wait")
+                    if context is not None and context.planned("database.backup.transfer"):
+                        context.action("database.backup.transfer")
+                    size_bytes, sha256_hex = _stream_response_to_file(
+                        resp,
+                        part_path,
+                        expected_bytes=expected_bytes,
+                        progress=(
+                            lambda received: (
+                                context.progress(
+                                    "database.backup.transfer", received, expected_bytes
+                                )
+                                if context is not None
+                                and context.planned("database.backup.transfer")
+                                else None
+                            )
+                        ),
+                    )
+                    if context is not None and context.planned("database.backup.transfer"):
+                        context.complete_action("database.backup.transfer")
+            except httpx.HTTPStatusError as exc:
+                # Keep only a status-derived value. The HTTPX exception retains
+                # its request/response/stream graph, including master_pwd.
+                http_failure = f"Backup request failed with HTTP status {exc.response.status_code}"
+            except httpx.HTTPError:
+                # Do not format the exception: its request may contain the remote
+                # master password and response bodies can be unbounded.
+                http_failure = "Backup request failed"
 
         if http_failure is not None:
             raise BackupDownloadError(http_failure) from None
@@ -1217,6 +1226,28 @@ class DatabaseResource:
         )
 
     def _restore_impl(
+        self,
+        backup: Backup,
+        target_database_name: str,
+        *,
+        copy: bool,
+        neutralize_database: bool,
+        timeout: float | None,
+        before_step_id: str | None = None,
+        after_step_id: str | None = None,
+    ) -> RestoreResult:
+        with exclusive_lock(backup_lock_path(str(backup.id))):
+            return self._restore_impl_locked(
+                backup,
+                target_database_name,
+                copy=copy,
+                neutralize_database=neutralize_database,
+                timeout=timeout,
+                before_step_id=before_step_id,
+                after_step_id=after_step_id,
+            )
+
+    def _restore_impl_locked(
         self,
         backup: Backup,
         target_database_name: str,

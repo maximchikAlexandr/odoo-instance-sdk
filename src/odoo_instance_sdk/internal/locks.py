@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import os
 import time
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -116,3 +117,16 @@ def pgadmin_lock_path() -> Path:
     from odoo_instance_sdk.internal.paths import get_locks_dir
 
     return get_locks_dir() / "pgadmin.lock"
+
+
+def backup_lock_path(backup_id: str) -> Path:
+    """Return the exact UUID-scoped lock shared by backup point operations."""
+    from odoo_instance_sdk.internal.paths import get_locks_dir
+
+    try:
+        parsed = uuid.UUID(backup_id)
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("backup_id must be a complete UUID") from exc
+    if str(parsed) != backup_id.lower():
+        raise ValueError("backup_id must be a complete UUID")
+    return get_locks_dir() / f"backup-{parsed}.lock"

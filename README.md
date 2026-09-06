@@ -261,6 +261,10 @@ sentence; use the entry's `--help` for exact options.
 - `odcli env list` — List registered environments, active-only unless `--all` is requested.
 - `odcli env remove` — Remove a registered environment and its owned artifacts safely.
 - `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
+- `odcli backup list` — List retained backup records with state and file presence.
+- `odcli backup show` — Show one exact backup UUID with history and relationships.
+- `odcli backup validate` — Validate one exact backup and report invalid versus unavailable.
+- `odcli backup delete` — Preview, confirm, and delete one exact retained backup UUID.
 - `odcli run` — Start resolved Odoo in the foreground from a project or environment.
 - `odcli logs` — Read retained Odoo logs, optionally following new output.
 - `odcli shell` — Open an interactive Odoo shell in the selected environment.

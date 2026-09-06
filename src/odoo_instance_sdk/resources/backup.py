@@ -15,6 +15,7 @@ from odoo_instance_sdk.exceptions import (
     BackupValidationUnavailableError,
 )
 from odoo_instance_sdk.internal.backup_validation import validate_dump, validate_zip
+from odoo_instance_sdk.internal.locks import backup_lock_path, exclusive_lock
 from odoo_instance_sdk.internal.process_env import sanitized_child_environment
 from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import (
@@ -38,6 +39,23 @@ if TYPE_CHECKING:
     )
 
 T = TypeVar("T")
+
+
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        stat_result = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise BackupCatalogError("Unable to inspect backup file") from exc
+    return stat_result.st_dev, stat_result.st_ino
+
+
+def _is_contained_path(path: Path) -> bool:
+    try:
+        return path.resolve(strict=False).parent == path.parent.resolve(strict=False)
+    except OSError:
+        return False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -108,38 +126,59 @@ class BackupResource:
 
     def _delete_impl(self, backup: Backup) -> BackupDeletionResult:
         catalog = self._client.get_catalog()
-        existing = catalog.get_by_id(str(backup.id))
+        captured_path = Path(backup.path)
+        captured_identity = _file_identity(captured_path)
+        with exclusive_lock(backup_lock_path(str(backup.id))):
+            existing = catalog.get_by_id(str(backup.id))
 
-        if existing is None:
-            raise BackupNotFoundError(f"Backup {backup.id} not found in catalog")
+            if existing is None:
+                raise BackupNotFoundError(f"Backup {backup.id} not found in catalog")
 
-        if existing["state"] == BackupState.DELETED.value:
-            prior_deleted_at = (
-                datetime.fromisoformat(existing["deleted_at"])
-                if existing["deleted_at"]
-                else datetime.now(UTC)
-            )
+            existing_path = Path(existing["path"] or "")
+            if existing["state"] == BackupState.DELETED.value:
+                prior_deleted_at = (
+                    datetime.fromisoformat(existing["deleted_at"])
+                    if existing["deleted_at"]
+                    else datetime.now(UTC)
+                )
+                return BackupDeletionResult(
+                    file_existed=existing_path.is_file(),
+                    already_deleted=True,
+                    deleted_at=prior_deleted_at,
+                )
+            if existing["state"] == BackupState.DOWNLOADING.value:
+                raise BackupNotAvailableError(
+                    f"Backup {backup.id} is downloading and cannot be deleted"
+                )
+            if existing["state"] != BackupState.AVAILABLE.value:
+                raise BackupNotAvailableError(
+                    f"Backup {backup.id} is in state {existing['state']!r}, not available"
+                )
+
+            catalog.verify_identity(backup)
+            if existing_path != captured_path or not _is_contained_path(existing_path):
+                raise BackupNotAvailableError(
+                    f"Backup {backup.id} path changed or is outside its recorded directory"
+                )
+            if existing_path.is_symlink():
+                raise BackupNotAvailableError(f"Backup {backup.id} path must not be a symlink")
+            current_identity = _file_identity(existing_path)
+            if current_identity != captured_identity:
+                raise BackupNotAvailableError(f"Backup {backup.id} file identity changed")
+            file_existed = current_identity is not None
+            if file_existed and not existing_path.is_file():
+                raise BackupNotAvailableError(f"Backup {backup.id} path is not a regular file")
+            existing_path.unlink(missing_ok=True)
+            if existing_path.exists() or existing_path.is_symlink():
+                raise OSError(f"Backup file still exists after deletion: {existing_path}")
+
+            catalog.record_deletion(str(backup.id))
+
             return BackupDeletionResult(
-                file_existed=Path(backup.path).is_file(),
-                already_deleted=True,
-                deleted_at=prior_deleted_at,
+                file_existed=file_existed,
+                already_deleted=False,
+                deleted_at=datetime.now(UTC),
             )
-
-        catalog.verify_identity(backup)
-
-        file_path = Path(backup.path)
-        file_existed = file_path.is_file()
-        file_path.unlink(missing_ok=True)
-        if file_path.exists():
-            raise OSError(f"Backup file still exists after deletion: {file_path}")
-
-        catalog.record_deletion(str(backup.id))
-
-        return BackupDeletionResult(
-            file_existed=file_existed,
-            already_deleted=False,
-            deleted_at=datetime.now(UTC),
-        )
 
     def validate(
         self,
@@ -193,6 +232,22 @@ class BackupResource:
         )
 
     def _validate_impl(
+        self,
+        backup: Backup,
+        *,
+        raise_if_unavailable: bool,
+        timeout: float,
+        process_step_id: str | None = None,
+    ) -> BackupValidationResult:
+        with exclusive_lock(backup_lock_path(str(backup.id))):
+            return self._validate_impl_locked(
+                backup,
+                raise_if_unavailable=raise_if_unavailable,
+                timeout=timeout,
+                process_step_id=process_step_id,
+            )
+
+    def _validate_impl_locked(
         self,
         backup: Backup,
         *,

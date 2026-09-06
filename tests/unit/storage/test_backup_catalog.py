@@ -7,8 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from odoo_instance_sdk.exceptions import BackupNotAvailableError, BackupNotFoundError
-from odoo_instance_sdk.models import Backup, BackupFormat, BackupValidationStatus
+from odoo_instance_sdk.exceptions import (
+    BackupCatalogError,
+    BackupNotAvailableError,
+    BackupNotFoundError,
+)
+from odoo_instance_sdk.models import Backup, BackupFormat, BackupState, BackupValidationStatus
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.monitor_support import make_env, runtime_kwargs
 
@@ -307,6 +311,132 @@ def test_list_backups_skips_missing_files(tmp_path: Path) -> None:
     catalog.close()
 
 
+def test_point_projection_keeps_catalogue_file_and_relationship_data_distinct(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    path = _create_backup_file(tmp_path, "point.zip")
+    bid = _u("point-projection")
+    catalog.start_download(bid, "http://localhost:8069", "db", "zip", True, path)
+    catalog.success_download(bid, "point.zip", 99, "digest")
+    catalog.record_restore("localhost", 5432, "restored_db", bid)
+    catalog.create_environment(make_env(_u("point-env"), backup_id=bid))
+    path.write_bytes(b"x")
+
+    projection = catalog._resolve_backup_projection(bid)
+
+    assert projection.backup.id == uuid.UUID(bid)
+    assert projection.state is BackupState.AVAILABLE
+    assert projection.file_present is True
+    assert projection.recorded_bytes == 99
+    assert projection.occupied_bytes == 1
+    assert len(projection.history) == 2
+    assert projection.restore_links[0].database_name == "restored_db"
+    assert projection.environment_links[0].environment_id == _u("point-env")
+    path.unlink()
+    missing = catalog._resolve_backup_projection(bid)
+    assert missing.state is BackupState.AVAILABLE
+    assert missing.file_present is False
+    assert missing.recorded_bytes == 99
+    assert missing.occupied_bytes is None
+    catalog.close()
+
+
+def test_point_projection_requires_complete_known_uuid(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+
+    with pytest.raises(BackupNotFoundError):
+        catalog._resolve_backup_projection("not-a-uuid")
+    with pytest.raises(BackupNotFoundError):
+        catalog._resolve_backup_projection(_u("unknown-point"))
+    catalog.close()
+
+
+def test_point_projection_list_uses_all_states_and_opaque_keyset_cursor(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    entries: list[tuple[str, Path]] = []
+    for index, state in enumerate(("available", "failed", "deleted", "downloading")):
+        path = _create_backup_file(tmp_path, f"page-{index}.zip")
+        bid = _u(f"page-{index}")
+        catalog.start_download(bid, "http://localhost:8069", f"db-{index}", "zip", True, path)
+        if state == "available":
+            catalog.success_download(bid, path.name, 1, "")
+        elif state == "failed":
+            catalog.fail_download(bid, "OSError", "failed")
+        elif state == "deleted":
+            catalog.success_download(bid, path.name, 1, "")
+            catalog.record_deletion(bid)
+        entries.append((bid, path))
+    catalog._conn.execute(
+        "UPDATE backups SET downloaded_at = ? WHERE id = ?", ("2026-01-03T00:00:00", entries[0][0])
+    )
+    catalog._conn.execute(
+        "UPDATE backups SET failed_at = ?, started_at = ? WHERE id = ?",
+        ("2026-01-02T00:00:00", "2026-01-02T00:00:00", entries[1][0]),
+    )
+    catalog._conn.execute(
+        "UPDATE backups SET deleted_at = ?, downloaded_at = ? WHERE id = ?",
+        ("2026-01-01T00:00:00", "2026-01-01T00:00:00", entries[2][0]),
+    )
+    catalog._conn.execute(
+        "UPDATE backups SET started_at = ? WHERE id = ?",
+        ("2025-12-31T00:00:00", entries[3][0]),
+    )
+    catalog._conn.commit()
+
+    first = catalog._list_backup_projections(limit=2, include_all_states=True)
+    second = catalog._list_backup_projections(
+        limit=2, include_all_states=True, cursor=first.next_cursor
+    )
+    filtered = catalog._list_backup_projections(
+        database_name="db-0", include_all_states=True, limit=10
+    )
+
+    assert [item.backup.id for item in first.items] == [
+        uuid.UUID(entries[0][0]),
+        uuid.UUID(entries[1][0]),
+    ]
+    assert first.next_cursor is not None
+    assert [item.backup.id for item in second.items] == [
+        uuid.UUID(entries[2][0]),
+        uuid.UUID(entries[3][0]),
+    ]
+    assert {item.state for item in second.items} == {
+        BackupState.DELETED,
+        BackupState.DOWNLOADING,
+    }
+    assert [item.backup.id for item in filtered.items] == [uuid.UUID(entries[0][0])]
+    catalog.close()
+
+
+def test_point_projection_ties_are_ordered_by_uuid_and_validate_cursor_inputs(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "test.db")
+    ids: list[str] = []
+    for label in ("tie-a", "tie-b"):
+        path = _create_backup_file(tmp_path, f"{label}.zip")
+        bid = _u(label)
+        catalog.start_download(bid, "http://localhost:8069", "db", "zip", True, path)
+        catalog.success_download(bid, path.name, 1, "")
+        ids.append(bid)
+    catalog._conn.execute(
+        "UPDATE backups SET downloaded_at = ? WHERE id IN (?, ?)",
+        ("2026-02-01T00:00:00", *ids),
+    )
+    catalog._conn.commit()
+
+    page = catalog._list_backup_projections(limit=10)
+    assert [str(item.backup.id) for item in page.items] == sorted(ids)
+    with pytest.raises(BackupCatalogError, match="between 1 and 1000"):
+        catalog._list_backup_projections(limit=0)
+    with pytest.raises(BackupCatalogError, match="cursor is invalid"):
+        catalog._list_backup_projections(cursor="not-a-cursor")
+    catalog.close()
+
+
 def test_latest_backup(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     p1 = _create_backup_file(tmp_path, "old.zip")
@@ -486,7 +616,7 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
     assert "database_events" in tables
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 11
+    assert version == 12
 
     # Existing backups table still works
     path = _create_backup_file(tmp_path, "migrated.zip")
@@ -562,7 +692,7 @@ def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None
     assert event_row["event_type"] == "download_started"
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 11
+    assert version == 12
 
     catalog.close()
 
@@ -571,12 +701,12 @@ def test_schema_creation_v2_reopen(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     catalog = BackupCatalog(db_path=db)
     version1 = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version1 == 11
+    assert version1 == 12
     catalog.close()
 
     catalog2 = BackupCatalog(db_path=db)
     version2 = catalog2._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version2 == 11
+    assert version2 == 12
     tables = {
         r[0]
         for r in catalog2._conn.execute(

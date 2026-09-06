@@ -144,6 +144,35 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("env", "remove"), ("env", "remove", "env-1", "--yes"), "mutating-or-spawning", True
     ),
     PublicLeafCase(("env", "sync"), ("env", "sync", "env-1"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("backup", "list"),
+        ("backup", "list"),
+        "bounded-read-only",
+        False,
+    ),
+    PublicLeafCase(
+        ("backup", "show"),
+        ("backup", "show", "00000000-0000-0000-0000-000000000007"),
+        "bounded-read-only",
+        False,
+    ),
+    PublicLeafCase(
+        ("backup", "validate"),
+        ("backup", "validate", "00000000-0000-0000-0000-000000000007"),
+        "bounded-read-only",
+        False,
+    ),
+    PublicLeafCase(
+        ("backup", "delete"),
+        (
+            "backup",
+            "delete",
+            "00000000-0000-0000-0000-000000000007",
+            "--dry-run",
+        ),
+        "mutating-or-spawning",
+        True,
+    ),
     PublicLeafCase(("db", "refresh"), ("db", "refresh"), "mutating-or-spawning", True),
     PublicLeafCase(
         ("db", "reset-admin-password"), ("db", "reset-admin-password"), "mutating-or-spawning", True
@@ -452,6 +481,40 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
         )
         monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_kwargs: client)
+        return
+
+    if path[:1] == ("backup",):
+        from zipfile import ZipFile
+
+        from odoo_instance_sdk.commands import backup as backup_commands
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        if failing:
+            monkeypatch.setattr(backup_commands, "_catalog", fail_operation)
+            return
+        db_path = tmp_path / "backup-catalog.sqlite3"
+        backup_path = tmp_path / "backup.zip"
+        with ZipFile(backup_path, "w") as archive:
+            archive.writestr("manifest.json", '{"db_name": "demo"}')
+            archive.writestr("dump.sql", "-- test")
+        catalog = BackupCatalog(db_path=db_path)
+        backup_id = "00000000-0000-0000-0000-000000000007"
+        if catalog.get_by_id(backup_id) is None:
+            catalog.start_download(
+                backup_id,
+                "http://localhost:8069",
+                "demo",
+                "zip",
+                True,
+                backup_path,
+            )
+            catalog.success_download(backup_id, "backup.zip", backup_path.stat().st_size, "")
+        catalog.close()
+        monkeypatch.setattr(
+            backup_commands._catalog_path_provider,
+            "provider",
+            lambda: db_path,
+        )
         return
 
     if path == ("db", "reset-admin-password"):

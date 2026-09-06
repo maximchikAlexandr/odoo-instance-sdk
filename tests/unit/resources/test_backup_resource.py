@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from odoo_instance_sdk.exceptions import BackupNotFoundError
+from odoo_instance_sdk.exceptions import (
+    BackupNotAvailableError,
+    BackupNotFoundError,
+    LockConflictError,
+)
+from odoo_instance_sdk.internal.locks import backup_lock_path, exclusive_lock
 from odoo_instance_sdk.models import BackupDeletionResult
 from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -196,3 +202,207 @@ def test_delete_unknown_id_raises(
     )
     with pytest.raises(BackupNotFoundError):
         res.delete(backup)
+
+
+def test_delete_missing_file_records_explicit_idempotent_outcome(
+    client: OdooClient, sample_backup_entry: dict[str, object]
+) -> None:
+    path = cast("Path", sample_backup_entry["path"])
+    path.unlink()
+    res = BackupResource(_client=client)
+    backup = make_backup(
+        id=uuid.UUID(cast("str", sample_backup_entry["id"])),
+        source_base_url="http://localhost:8069",
+        database_name="mydb",
+        path=str(path),
+        filename=path.name,
+        size_bytes=1024,
+        sha256="abc123",
+    )
+
+    result = res.delete(backup)
+
+    assert result.file_existed is False
+    assert result.already_deleted is False
+    row = client.get_catalog().get_by_id(str(backup.id))
+    assert row is not None
+    assert row["state"] == "deleted"
+
+
+def test_delete_refuses_downloading_backup_without_mutation(
+    client: OdooClient, sample_backup_entry: dict[str, object]
+) -> None:
+    catalog = client.get_catalog()
+    path = cast("Path", sample_backup_entry["path"])
+    downloading_id = str(uuid.uuid4())
+    catalog.start_download(
+        downloading_id,
+        "http://localhost:8069",
+        "mydb",
+        "zip",
+        True,
+        path,
+    )
+    backup = make_backup(
+        id=uuid.UUID(downloading_id),
+        source_base_url="http://localhost:8069",
+        database_name="mydb",
+        path=str(path),
+        filename=path.name,
+        size_bytes=1024,
+        sha256="abc123",
+    )
+
+    with pytest.raises(BackupNotAvailableError, match="downloading"):
+        BackupResource(_client=client).delete(backup)
+
+    row = catalog.get_by_id(downloading_id)
+    assert row is not None
+    assert row["state"] == "downloading"
+    assert path.is_file()
+
+
+def test_delete_lock_is_shared_and_rejects_busy_backup(
+    client: OdooClient, sample_backup_entry: dict[str, object]
+) -> None:
+    path = cast("Path", sample_backup_entry["path"])
+    backup = make_backup(
+        id=uuid.UUID(cast("str", sample_backup_entry["id"])),
+        source_base_url="http://localhost:8069",
+        database_name="mydb",
+        path=str(path),
+        filename=path.name,
+        size_bytes=1024,
+        sha256="abc123",
+    )
+
+    with exclusive_lock(backup_lock_path(str(backup.id))), pytest.raises(LockConflictError):
+        BackupResource(_client=client).delete(backup)
+
+    assert path.is_file()
+    row = client.get_catalog().get_by_id(str(backup.id))
+    assert row is not None
+    assert row["state"] == "available"
+
+
+def test_validate_uses_the_same_backup_lock(
+    client: OdooClient, sample_backup_entry: dict[str, object]
+) -> None:
+    path = cast("Path", sample_backup_entry["path"])
+    backup = make_backup(
+        id=uuid.UUID(cast("str", sample_backup_entry["id"])),
+        source_base_url="http://localhost:8069",
+        database_name="mydb",
+        path=str(path),
+        filename=path.name,
+        size_bytes=1024,
+        sha256="abc123",
+    )
+
+    with (
+        exclusive_lock(backup_lock_path(str(backup.id))),
+        pytest.raises(LockConflictError),
+    ):
+        BackupResource(_client=client).validate(backup)
+
+
+def test_delete_rejects_symlink_without_audit_mutation(
+    client: OdooClient, sample_backup_entry: dict[str, object], tmp_path: Path
+) -> None:
+    path = cast("Path", sample_backup_entry["path"])
+    target = tmp_path / "outside.zip"
+    target.write_bytes(b"outside")
+    path.unlink()
+    path.symlink_to(target)
+    backup = make_backup(
+        id=uuid.UUID(cast("str", sample_backup_entry["id"])),
+        source_base_url="http://localhost:8069",
+        database_name="mydb",
+        path=str(path),
+        filename=path.name,
+        size_bytes=1024,
+        sha256="abc123",
+    )
+
+    with pytest.raises(BackupNotAvailableError, match="symlink"):
+        BackupResource(_client=client).delete(backup)
+
+    row = client.get_catalog().get_by_id(str(backup.id))
+    assert row is not None
+    assert row["state"] == "available"
+    assert target.is_file()
+
+
+def test_delete_rejects_replaced_file_without_audit_mutation(
+    client: OdooClient,
+    sample_backup_entry: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = cast("Path", sample_backup_entry["path"])
+    backup = make_backup(
+        id=uuid.UUID(cast("str", sample_backup_entry["id"])),
+        source_base_url="http://localhost:8069",
+        database_name="mydb",
+        path=str(path),
+        filename=path.name,
+        size_bytes=1024,
+        sha256="abc123",
+    )
+
+    original_lock = exclusive_lock
+
+    @contextmanager
+    def replace_before_lock(lock_path: Path) -> Iterator[None]:
+        replacement = path.with_name("replacement.zip")
+        replacement.write_bytes(b"replacement")
+        path.unlink()
+        replacement.rename(path)
+        with original_lock(lock_path):
+            yield
+
+    monkeypatch.setattr("odoo_instance_sdk.resources.backup.exclusive_lock", replace_before_lock)
+
+    with pytest.raises(BackupNotAvailableError, match="identity"):
+        BackupResource(_client=client).delete(backup)
+
+    row = client.get_catalog().get_by_id(str(backup.id))
+    assert row is not None
+    assert row["state"] == "available"
+    assert path.is_file()
+    assert not any(
+        event.event_type.value == "deleted"
+        for event in BackupResource(_client=client).history(backup_id=str(backup.id))
+    )
+
+
+def test_delete_filesystem_failure_does_not_record_deleted(
+    client: OdooClient, sample_backup_entry: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = cast("Path", sample_backup_entry["path"])
+    backup = make_backup(
+        id=uuid.UUID(cast("str", sample_backup_entry["id"])),
+        source_base_url="http://localhost:8069",
+        database_name="mydb",
+        path=str(path),
+        filename=path.name,
+        size_bytes=1024,
+        sha256="abc123",
+    )
+
+    def refuse_unlink(self: Path, *, missing_ok: bool = False) -> None:
+        if self == path:
+            raise PermissionError("permission denied")
+        Path.unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
+    with pytest.raises(PermissionError):
+        BackupResource(_client=client).delete(backup)
+
+    row = client.get_catalog().get_by_id(str(backup.id))
+    assert row is not None
+    assert row["state"] == "available"
+    assert path.is_file()
+    assert not any(
+        event.event_type.value == "deleted"
+        for event in BackupResource(_client=client).history(backup_id=str(backup.id))
+    )

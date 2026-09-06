@@ -13,6 +13,10 @@ else:
     import rich_click as click
 
 from odoo_instance_sdk.commands import context as cli_context
+from odoo_instance_sdk.commands.backup import (
+    backup_group,
+    configure_catalog_path_provider,
+)
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.env import env_group
@@ -379,7 +383,7 @@ def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject
             "cli": [
                 {"name": "Project", "commands": ["init", "doctor"]},
                 {"name": "Runtime", "commands": ["run", "shell", "logs", "monitor"]},
-                {"name": "Data", "commands": ["env", "db", "postgres", "psql"]},
+                {"name": "Data", "commands": ["env", "backup", "db", "postgres", "psql"]},
                 {
                     "name": "Development",
                     "commands": [
@@ -415,9 +419,17 @@ def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> No
 cli.add_command(env_group, name="env")
 cli.add_command(test_command, name="test")
 cli.add_command(db_group, name="db")
+cli.add_command(backup_group, name="backup")
 cli.add_command(_postgres_group, name="postgres")
 register_database_commands(db_group)
 cli.add_command(_psql, name="psql")
+
+
+def _backup_catalog_path() -> Path:
+    return get_catalog_path()
+
+
+configure_catalog_path_provider(_backup_catalog_path)
 
 
 class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]

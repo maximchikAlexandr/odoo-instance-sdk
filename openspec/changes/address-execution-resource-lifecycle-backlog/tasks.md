@@ -51,23 +51,23 @@
 
 ## 6. Backup catalogue point operations
 
-- [ ] 6.1 Add CLI-private/internal typed exact-UUID lookup and state-aware backup projections that keep catalogue state, actual file presence, recorded bytes, occupied bytes, history, restore links, and environment links distinct without changing the public method inventory.
-- [ ] 6.2 Add deterministic source/database/all-state list queries with validated limit and opaque `(catalogue-time, UUID)` keyset cursor executed in one read transaction.
-- [ ] 6.3 Reuse the current operation-lock implementation with a backup-UUID key across restore/validation/delete and refuse delete for downloading or actively locked backups.
-- [ ] 6.4 Add CLI-private/internal exact UUID resolution that captures identity/relationships, then reuses the existing public `BackupResource.validate_command` and `delete_command` methods; re-read state, path, regular-file identity, containment, and symlink status under lock before effect without adding public method siblings.
-- [ ] 6.5 Make deletion unlink only the exact selected file, verify absence before `record_deletion`, preserve UUID/history/restore links, return explicit already-deleted/missing-file results, and leave audit unchanged on filesystem failure.
-- [ ] 6.6 Add catalogue/resource tests for malformed/unknown UUID, filters, sort ties, cursor pages, all states, missing available file, busy restore/download, stale target, symlink escape, permission failure, idempotent retry, and retained relationships.
-- [ ] 6.7 Apply only additive backup-query catalogue fields/indexes needed by this slice transactionally with pre-change fixtures and rollback tests; leave cluster ownership provenance to the ordered substrate in section 8 and do not add a second lifecycle/event store.
-- [ ] 6.8 Add a canonical public-API regression gate proving `test_discovered_public_methods` and the public `DatabaseResource`, `BackupResource`, and cluster/resource method inventory remain unchanged.
-- [ ] 6.9 Commit the backup-resource slice and push the feature branch before CLI registration.
+- [x] 6.1 Add CLI-private/internal typed exact-UUID lookup and state-aware backup projections that keep catalogue state, actual file presence, recorded bytes, occupied bytes, history, restore links, and environment links distinct without changing the public method inventory.
+- [x] 6.2 Add deterministic source/database/all-state list queries with validated limit and opaque `(catalogue-time, UUID)` keyset cursor executed in one read transaction.
+- [x] 6.3 Reuse the current operation-lock implementation with a backup-UUID key across restore/validation/delete and refuse delete for downloading or actively locked backups.
+- [x] 6.4 Add CLI-private/internal exact UUID resolution that captures identity/relationships, then reuses the existing public `BackupResource.validate_command` and `delete_command` methods; re-read state, path, regular-file identity, containment, and symlink status under lock before effect without adding public method siblings.
+- [x] 6.5 Make deletion unlink only the exact selected file, verify absence before `record_deletion`, preserve UUID/history/restore links, return explicit already-deleted/missing-file results, and leave audit unchanged on filesystem failure.
+- [x] 6.6 Add catalogue/resource tests for malformed/unknown UUID, filters, sort ties, cursor pages, all states, missing available file, busy restore/download, stale target, symlink escape, permission failure, idempotent retry, and retained relationships.
+- [x] 6.7 Apply only additive backup-query catalogue fields/indexes needed by this slice transactionally with pre-change fixtures and rollback tests; leave cluster ownership provenance to the ordered substrate in section 8 and do not add a second lifecycle/event store.
+- [x] 6.8 Add a canonical public-API regression gate proving `test_discovered_public_methods` and the public `DatabaseResource`, `BackupResource`, and cluster/resource method inventory remain unchanged.
+- [x] 6.9 Commit the backup-resource slice and push the feature branch before CLI registration.
 
 ## 7. Backup CLI surface
 
-- [ ] 7.1 Register `backup list` with source/database/all/limit/cursor options and Rich table plus JSON/TOON projections from the same typed state-aware result.
-- [ ] 7.2 Register exact-UUID `backup show` and `backup validate`, including history/relationship detail and the invalid-versus-validator-unavailable distinction without requiring Odoo/worktree context.
-- [ ] 7.3 Register `backup delete UUID --dry-run --yes` with immutable preview, Rich confirmation, noninteractive machine confirmation failure, exact result/partial diagnostics, and no arbitrary path or abbreviated ID acceptance.
-- [ ] 7.4 Add all four backup leaves exactly once to `PUBLIC_LEAF_CASES` and add CLI tests for context independence, full UUID display, filters/pages, all formats, confirmation ordering, dry-run non-mutation, exit codes, and terminal/secret sanitization.
-- [ ] 7.5 Commit the backup-CLI slice and push the feature branch before local restore work.
+- [x] 7.1 Register `backup list` with source/database/all/limit/cursor options and Rich table plus JSON/TOON projections from the same typed state-aware result.
+- [x] 7.2 Register exact-UUID `backup show` and `backup validate`, including history/relationship detail and the invalid-versus-validator-unavailable distinction without requiring Odoo/worktree context.
+- [x] 7.3 Register `backup delete UUID --dry-run --yes` with immutable preview, Rich confirmation, noninteractive machine confirmation failure, exact result/partial diagnostics, and no arbitrary path or abbreviated ID acceptance.
+- [x] 7.4 Add all four backup leaves exactly once to `PUBLIC_LEAF_CASES` and add CLI tests for context independence, full UUID display, filters/pages, all formats, confirmation ordering, dry-run non-mutation, exit codes, and terminal/secret sanitization.
+- [x] 7.5 Commit the backup-CLI slice and push the feature branch before local restore work.
 
 ## 8. Cluster ownership substrate and registered local database restore
 

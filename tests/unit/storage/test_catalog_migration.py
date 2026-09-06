@@ -16,21 +16,21 @@ CATALOG_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 NEXT_CATALOG_SCHEMA_VERSION = CATALOG_SCHEMA_VERSION + 1
 # These are the pre-change upgrade states represented by the migration tests;
 # keeping the list explicit makes a missing intermediate fixture fail loudly.
-MIGRATION_FIXTURE_VERSIONS = (5, 6, 7, 8, 9, 10, 11)
+MIGRATION_FIXTURE_VERSIONS = (5, 6, 7, 8, 9, 10, 11, 12)
 
 
 def test_next_catalog_migration_version_and_fixtures_are_sequential() -> None:
-    assert CATALOG_SCHEMA_VERSION == 11
-    assert NEXT_CATALOG_SCHEMA_VERSION == 12
+    assert CATALOG_SCHEMA_VERSION == 12
+    assert NEXT_CATALOG_SCHEMA_VERSION == 13
     contiguous_versions = tuple(range(MIGRATION_FIXTURE_VERSIONS[0], CATALOG_SCHEMA_VERSION + 1))
     assert contiguous_versions == MIGRATION_FIXTURE_VERSIONS
 
 
-def test_fresh_install_creates_v11_directly(tmp_path: Path) -> None:
+def test_fresh_install_creates_v12_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 11
+    assert version == 12
     backup_columns = {r[1] for r in catalog._conn.execute("PRAGMA table_info(backups)").fetchall()}
     assert "source_git_branch" in backup_columns
     tables = {
@@ -43,7 +43,44 @@ def test_fresh_install_creates_v11_directly(tmp_path: Path) -> None:
     assert "environment_events" in tables
     assert "runtime" in tables
     assert "projects" in tables
+    indexes = {r[1] for r in catalog._conn.execute("PRAGMA index_list(backups)").fetchall()}
+    assert "backups_point_order_idx" in indexes
     catalog.close()
+
+
+def test_v12_backup_order_index_migration_rolls_back_on_conflict(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=db)
+    catalog._conn.execute("DROP INDEX backups_point_order_idx")
+    catalog._conn.execute("PRAGMA user_version = 11")
+    catalog._conn.execute("CREATE TABLE backups_point_order_idx (marker INTEGER)")
+    catalog._conn.commit()
+    catalog.close()
+
+    with pytest.raises(BackupCatalogError):
+        BackupCatalog(db_path=db)
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert (
+        conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='backups_point_order_idx'"
+        ).fetchone()[0]
+        == "table"
+    )
+    conn.execute("DROP TABLE backups_point_order_idx")
+    conn.commit()
+    conn.close()
+
+    reopened = BackupCatalog(db_path=db)
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert (
+        reopened._conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='backups_point_order_idx'"
+        ).fetchone()[0]
+        == "index"
+    )
+    reopened.close()
 
 
 def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_path: Path) -> None:
@@ -138,7 +175,7 @@ def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_
     conn.close()
 
     catalog = BackupCatalog(db_path=db)
-    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == 12
     assert (
         catalog._conn.execute(
             "SELECT COUNT(*) FROM backup_events WHERE backup_id=?", (backup_id,)
@@ -165,7 +202,7 @@ def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_
     provenance = reopened.latest_restore_provenance("localhost", 5432, "restored")
     assert provenance is not None
     assert provenance.source_git_branch is None
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 12
     reopened.close()
 
 
@@ -240,12 +277,12 @@ def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None
     schema = catalog._conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='environment_copy_journal'"
     ).fetchone()[0]
-    assert version == 11
+    assert version == 12
     assert "restore_pending" in schema
     catalog.close()
 
 
-def test_v8_catalog_upgrades_to_v11_environment_runtime_and_branch_column(tmp_path: Path) -> None:
+def test_v8_catalog_upgrades_to_v12_environment_runtime_and_branch_column(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 8")
@@ -269,7 +306,7 @@ def test_v8_catalog_upgrades_to_v11_environment_runtime_and_branch_column(tmp_pa
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert version == 11
+    assert version == 12
     assert "runtime" in tables
     columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(backups)")}
     assert "source_git_branch" in columns
@@ -396,7 +433,7 @@ def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
         (env_id,),
     ).fetchone()
 
-    assert version == 11
+    assert version == 12
     assert "http_port" not in columns
     assert "http_interface" not in columns
     assert "environments_one_active_branch" in indexes

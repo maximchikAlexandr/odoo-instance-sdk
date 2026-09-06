@@ -34,6 +34,7 @@ classification is bounded and whose contract requires `--dry-run`:
 | `env checkout` | mutating-or-spawning |
 | `env remove` | mutating-or-spawning |
 | `env sync` | mutating-or-spawning |
+| `backup delete` | mutating-or-spawning |
 | `db refresh` | mutating-or-spawning |
 | `db drop` | guarded mutating-or-spawning |
 | `db reset-admin-password` | mutating-or-spawning |
@@ -60,6 +61,12 @@ is a native inherited-stream transport; its passthrough arguments are checked
 by the private grammar, but document formatting is rejected on normal runs.
 All four diagnostics and native `psql` preserve the instance-bound cluster
 identity and do not accept replacement host/user/password flags.
+
+The backup catalogue leaves (`backup list`, `backup show`, and `backup validate`)
+are bounded read-only documents independent of Odoo/worktree context. They
+resolve complete UUIDs through the state-aware catalogue projection; `backup
+delete` adds the same immutable preview and explicit confirmation contract as
+the other guarded mutations.
 
 `db drop` is a guarded database mutation. Its plan records the bounded,
 read-only planning inspection as an observation; execution retains separate
@@ -105,7 +112,7 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:933-934` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:945-946` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
 - `src/odoo_instance_sdk/commands/env.py:378` — existing Rich-live inventory
   transport; remove when Rich live output is supplied by a distinct transport

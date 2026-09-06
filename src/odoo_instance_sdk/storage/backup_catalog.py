@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import functools
 import hashlib
+import json
 import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
@@ -34,7 +37,7 @@ type CatalogValue = JsonValue | Path | datetime | uuid.UUID | tuple[str, ...]
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 
 
 class CopyJournalStage(StrEnum):
@@ -53,6 +56,49 @@ class MonitorCatalogSnapshot:
     environments: tuple[tuple[sqlite3.Row, sqlite3.Row | None], ...]
     projects: tuple[sqlite3.Row, ...]
     project_runtimes: tuple[sqlite3.Row, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BackupRestoreLink:
+    """A retained restore relationship for a catalogue backup."""
+
+    db_host: str
+    db_port: int
+    database_name: str
+    restored_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class BackupEnvironmentLink:
+    """A retained environment relationship for a catalogue backup."""
+
+    environment_id: str
+    name: str
+    state: str
+    target_database: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BackupProjection:
+    """Internal state-aware view used by point-management commands."""
+
+    backup: Backup
+    state: BackupState
+    catalogue_time: datetime
+    file_present: bool
+    recorded_bytes: int | None
+    occupied_bytes: int | None
+    history: tuple[BackupEvent, ...]
+    restore_links: tuple[BackupRestoreLink, ...]
+    environment_links: tuple[BackupEnvironmentLink, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BackupProjectionPage:
+    """One deterministic keyset page from the catalogue snapshot."""
+
+    items: tuple[BackupProjection, ...]
+    next_cursor: str | None
 
 
 def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
@@ -290,6 +336,25 @@ class BackupCatalog:
             self._migrate_v11_project_runtime_ownership(conn)
             conn.execute("PRAGMA user_version = 11")
             conn.commit()
+            user_version = 11
+        if user_version < 12:
+            self._migrate_v12_backup_point_order(conn)
+            conn.execute("PRAGMA user_version = 12")
+            conn.commit()
+
+    def _migrate_v12_backup_point_order(self, conn: sqlite3.Connection) -> None:
+        """Index the immutable ordering key used by point-query pagination."""
+        with conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(backups)")}
+            order_expression = (
+                "COALESCE(downloaded_at, started_at)"
+                if "started_at" in columns
+                else "downloaded_at"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS backups_point_order_idx "
+                f"ON backups ({order_expression} DESC, id ASC)"
+            )
 
     def _migrate_v10_backup_source_branch(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(backups)")}
@@ -682,6 +747,177 @@ class BackupCatalog:
         ).fetchone()
         return row
 
+    @staticmethod
+    def _canonical_backup_id(backup_id: str) -> str:
+        if not isinstance(backup_id, str):
+            raise BackupNotFoundError("Backup identifier must be a complete UUID")
+        try:
+            parsed = uuid.UUID(backup_id)
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise BackupNotFoundError("Backup identifier must be a complete UUID") from exc
+        if str(parsed) != backup_id.lower():
+            raise BackupNotFoundError("Backup identifier must be a complete UUID")
+        return str(parsed)
+
+    @staticmethod
+    def _encode_backup_cursor(catalogue_time: str, backup_id: str) -> str:
+        payload = json.dumps(
+            {"catalogue_time": catalogue_time, "id": backup_id},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @classmethod
+    def _decode_backup_cursor(cls, cursor: str) -> tuple[str, str]:
+        if not isinstance(cursor, str) or not cursor:
+            raise BackupCatalogError("Backup cursor is invalid")
+        try:
+            payload = json.loads(
+                base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode("utf-8")
+            )
+        except (ValueError, TypeError, binascii.Error) as exc:
+            raise BackupCatalogError("Backup cursor is invalid") from exc
+        if not isinstance(payload, dict) or set(payload) != {"catalogue_time", "id"}:
+            raise BackupCatalogError("Backup cursor is invalid")
+        catalogue_time = payload["catalogue_time"]
+        if not isinstance(catalogue_time, str) or not catalogue_time:
+            raise BackupCatalogError("Backup cursor is invalid")
+        try:
+            backup_id = cls._canonical_backup_id(payload["id"])
+        except BackupNotFoundError as exc:
+            raise BackupCatalogError("Backup cursor is invalid") from exc
+        return catalogue_time, backup_id
+
+    @staticmethod
+    def _projection_file_data(path_value: str | None) -> tuple[bool, int | None]:
+        if not path_value:
+            return False, None
+        path = Path(path_value)
+        file_present = path.exists()
+        if not file_present or path.is_symlink() or not path.is_file():
+            return file_present, None
+        try:
+            return True, path.stat().st_size
+        except OSError:
+            return True, None
+
+    def _projection_from_row(self, row: sqlite3.Row) -> BackupProjection:
+        backup = _row_to_backup(row, require_file=False)
+        if backup is None:  # pragma: no cover - rows are complete catalogue records
+            raise BackupCatalogError("catalogue backup row is incomplete")
+        history_rows = self._conn.execute(
+            "SELECT * FROM backup_events WHERE backup_id=? ORDER BY sequence ASC",
+            (row["id"],),
+        ).fetchall()
+        restore_rows = self._conn.execute(
+            "SELECT db_host, db_port, database_name, restored_at FROM restores "
+            "WHERE backup_id=? ORDER BY restored_at ASC, rowid ASC",
+            (row["id"],),
+        ).fetchall()
+        environment_rows = self._conn.execute(
+            "SELECT id, name, state, target_db_name FROM environments "
+            "WHERE backup_id=? ORDER BY created_at ASC, id ASC",
+            (row["id"],),
+        ).fetchall()
+        file_present, occupied_bytes = self._projection_file_data(row["path"])
+        catalogue_raw = row["downloaded_at"] or row["started_at"]
+        return BackupProjection(
+            backup=backup,
+            state=BackupState(row["state"]),
+            catalogue_time=datetime.fromisoformat(catalogue_raw),
+            file_present=file_present,
+            recorded_bytes=row["size_bytes"],
+            occupied_bytes=occupied_bytes,
+            history=tuple(_row_to_event(item) for item in history_rows),
+            restore_links=tuple(
+                BackupRestoreLink(
+                    db_host=row_item["db_host"],
+                    db_port=row_item["db_port"],
+                    database_name=row_item["database_name"],
+                    restored_at=datetime.fromisoformat(row_item["restored_at"]),
+                )
+                for row_item in restore_rows
+            ),
+            environment_links=tuple(
+                BackupEnvironmentLink(
+                    environment_id=row_item["id"],
+                    name=row_item["name"],
+                    state=row_item["state"],
+                    target_database=row_item["target_db_name"],
+                )
+                for row_item in environment_rows
+            ),
+        )
+
+    @_translate_sqlite_error
+    def _resolve_backup_projection(self, backup_id: str) -> BackupProjection:
+        """Resolve one complete UUID without consulting the filesystem index."""
+        canonical_id = self._canonical_backup_id(backup_id)
+        self._conn.execute("BEGIN")
+        try:
+            row = self._conn.execute("SELECT * FROM backups WHERE id=?", (canonical_id,)).fetchone()
+            if row is None:
+                raise BackupNotFoundError(f"Backup {canonical_id} not found in catalog")
+            return self._projection_from_row(row)
+        finally:
+            self._conn.rollback()
+
+    @_translate_sqlite_error
+    def _list_backup_projections(
+        self,
+        *,
+        source_base_url: str | None = None,
+        database_name: str | None = None,
+        format: str | None = None,
+        include_all_states: bool = False,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> BackupProjectionPage:
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise BackupCatalogError("Backup limit must be an integer between 1 and 1000")
+        after: tuple[str, str] | None = None
+        if cursor is not None:
+            after = self._decode_backup_cursor(cursor)
+        clauses: list[str] = []
+        params: list[str | int] = []
+        if not include_all_states:
+            clauses.append("state = ?")
+            params.append(BackupState.AVAILABLE.value)
+        if source_base_url is not None:
+            clauses.append("source_base_url = ?")
+            params.append(source_base_url)
+        if database_name is not None:
+            clauses.append("database_name = ?")
+            params.append(database_name)
+        if format is not None:
+            clauses.append("format = ?")
+            params.append(format)
+        if after is not None:
+            clauses.append(
+                "(COALESCE(downloaded_at, started_at) < ? OR "
+                "(COALESCE(downloaded_at, started_at) = ? AND id > ?))"
+            )
+            params.extend((after[0], after[0], after[1]))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        query = (
+            "SELECT *, COALESCE(downloaded_at, started_at) AS catalogue_time "
+            f"FROM backups{where} ORDER BY catalogue_time DESC, id ASC LIMIT ?"
+        )
+        self._conn.execute("BEGIN")
+        try:
+            rows = self._conn.execute(query, (*params, limit + 1)).fetchall()
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            items = tuple(self._projection_from_row(row) for row in page_rows)
+            next_cursor = None
+            if has_more:
+                last = page_rows[-1]
+                next_cursor = self._encode_backup_cursor(last["catalogue_time"], last["id"])
+            return BackupProjectionPage(items=items, next_cursor=next_cursor)
+        finally:
+            self._conn.rollback()
+
     @_translate_sqlite_error
     def update_path(self, backup_id: str, path: Path) -> None:
         self._conn.execute(
@@ -781,7 +1017,9 @@ class BackupCatalog:
             ("filename", row["filename"], backup.filename),
             ("path", row["path"], backup.path),
             ("format", row["format"], backup.format.value),
+            ("filestore_requested", bool(row["filestore_requested"]), backup.filestore_requested),
             ("database_name", row["database_name"], backup.database_name),
+            ("size_bytes", row["size_bytes"], backup.size_bytes),
             ("sha256", row["sha256"], backup.sha256),
             ("source_git_branch", row["source_git_branch"], backup.source_git_branch),
         )
