@@ -88,15 +88,15 @@
 
 ## 9. Database inventory and filestore-aware drop
 
-- [ ] 9.1 Add a CLI-private/internal typed read-only project-cluster database inventory through the existing PostgreSQL transport, returning exact cluster/name, logical size, sessions, default, environment/runtime bindings, and restore/backup provenance or unknown without adding a public SDK method.
-- [ ] 9.2 Join catalogue/runtime relationships without calling side-effecting Odoo `DatabaseResource.list()`/`exists()` reconciliation, and add `--tracked` filtering over proven identities only.
-- [ ] 9.3 Register `db list --tracked` in all bounded formats and add it exactly once to `PUBLIC_LEAF_CASES` as read-only.
-- [ ] 9.4 Make drop planning and immediate pre-mutation revalidation consume the established evidence by comparing the inspected current volume label/identity, exact active project claim, and latest completed exact `(cluster_id, database)` restore binding; reject pending/missing/malformed/mismatched identity, endpoint reuse, and stale evidence before termination, drop, audit, or filestore mutation.
-- [ ] 9.5 After verified PostgreSQL deletion/audit only, evaluate filestore cleanup for an already ownership-authorized database: remove only the exact proven contained non-symlink filestore, preserve unknown filestore ownership, and return a typed non-zero partial result when filesystem cleanup fails after database success.
-- [ ] 9.6 Add read-only inventory tests for stopped Odoo, restricted dbfilter, unavailable/partial PostgreSQL, duplicate names across clusters, unknown origin, deterministic ordering, and zero catalogue writes.
-- [ ] 9.7 Add ownership-consumer tests for pending claim refusal, declarative Compose without active evidence, legacy and newly recorded external/no-claim null restore identities, endpoint reuse by another `cluster_id`, missing/changed/malformed evidence, mismatched exact restore, and allowed disposable exact active match; assert every refusal has zero session/drop/audit/filestore effects.
-- [ ] 9.8 Add remaining drop tests for active environment/process refusal, proven/unknown/symlinked filestore, partial filesystem failure, retry/audit truth, preserved source backup, confirmation, and dry-run.
-- [ ] 9.9 Commit the database-lifecycle slice and push the feature branch before resource overview work.
+- [x] 9.1 Add a CLI-private/internal typed read-only project-cluster database inventory through the existing PostgreSQL transport, returning exact cluster/name, logical size, sessions, default, environment/runtime bindings, and restore/backup provenance or unknown without adding a public SDK method.
+- [x] 9.2 Join catalogue/runtime relationships without calling side-effecting Odoo `DatabaseResource.list()`/`exists()` reconciliation, and add `--tracked` filtering over proven identities only.
+- [x] 9.3 Register `db list --tracked` in all bounded formats and add it exactly once to `PUBLIC_LEAF_CASES` as read-only.
+- [x] 9.4 Make drop planning and immediate pre-mutation revalidation consume the established evidence by comparing the inspected current volume label/identity, exact active project claim, and latest completed exact `(cluster_id, database)` restore binding; reject pending/missing/malformed/mismatched identity, endpoint reuse, and stale evidence before termination, drop, audit, or filestore mutation.
+- [x] 9.5 After verified PostgreSQL deletion/audit only, evaluate filestore cleanup for an already ownership-authorized database: remove only the exact proven contained non-symlink filestore, preserve unknown filestore ownership, and return a typed non-zero partial result when filesystem cleanup fails after database success.
+- [x] 9.6 Add read-only inventory tests for stopped Odoo, restricted dbfilter, unavailable/partial PostgreSQL, duplicate names across clusters, unknown origin, deterministic ordering, and zero catalogue writes.
+- [x] 9.7 Add ownership-consumer tests for pending claim refusal, declarative Compose without active evidence, legacy and newly recorded external/no-claim null restore identities, endpoint reuse by another `cluster_id`, missing/changed/malformed evidence, mismatched exact restore, and allowed disposable exact active match; assert every refusal has zero session/drop/audit/filestore effects.
+- [x] 9.8 Add remaining drop tests for active environment/process refusal, proven/unknown/symlinked filestore, partial filesystem failure, retry/audit truth, preserved source backup, confirmation, and dry-run.
+- [x] 9.9 Commit the database-lifecycle slice and push the feature branch before resource overview work.
 
 ## 10. Resource inventory and doctor
 

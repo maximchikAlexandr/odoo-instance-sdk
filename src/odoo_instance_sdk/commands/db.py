@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
+    from odoo_instance_sdk.internal.pg.inventory import DatabaseInventoryResult
     from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -144,6 +145,42 @@ def db_refresh(
         status, _result = run()
     except Exception as exc:
         fail(output_mode, "db.refresh", exc)
+    raise click.exceptions.Exit(status)
+
+
+@db_group.command("list", help="List databases from the bound PostgreSQL cluster.")
+@click.option("--tracked", is_flag=True, default=False, help="Show only proven restore identities.")
+@output_options
+@pass_cli_context
+def db_list(
+    ctx: CliContext,
+    tracked: bool,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    """Read the project PostgreSQL inventory without Odoo reconciliation."""
+    output_mode = resolve_output_mode(output_format, json_output)
+    try:
+        from odoo_instance_sdk.commands.pg import _database_instance
+        from odoo_instance_sdk.internal.pg.inventory import build_database_inventory_command
+
+        project_root = resolve_project_path(ctx)
+        _environment, instance = _database_instance(ctx)
+        command = build_database_inventory_command(instance, project_root, tracked=tracked)
+        status, _result = run_or_preview(
+            lambda: command,
+            command_name="db.list",
+            mode=output_mode,
+            dry_run=False,
+            result=cast(
+                "Callable[[DatabaseInventoryResult | None], dict[str, JsonValue]]", model_to_dict
+            ),
+            context={"tracked": tracked},
+            provenance={"project_source": project_provenance(ctx)},
+            rich=_list_rich,
+        )
+    except Exception as exc:
+        fail(output_mode, "db.list", exc)
     raise click.exceptions.Exit(status)
 
 
@@ -409,6 +446,21 @@ def _restore_rich(document: OutputDocument) -> str:
     if backup_id:
         details += f" from backup {backup_id}"
     return details
+
+
+def _list_rich(document: OutputDocument) -> str:
+    payload = document.result if isinstance(document.result, dict) else {}
+    rows = payload.get("databases", [])
+    if not isinstance(rows, list) or not rows:
+        return "No databases"
+    return "\n".join(
+        f"{row.get('name', '')} cluster={row.get('cluster', '')} "
+        f"size={row.get('logical_size_bytes', 'unknown')} "
+        f"sessions={row.get('active_sessions', 0)} "
+        f"default={row.get('is_default', False)} origin={row.get('origin', 'unknown')}"
+        for row in rows
+        if isinstance(row, dict)
+    )
 
 
 def _validate_recorded_database_binding(

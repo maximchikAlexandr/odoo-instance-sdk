@@ -36,6 +36,7 @@ classification is bounded and whose contract requires `--dry-run`:
 | `env sync` | mutating-or-spawning |
 | `backup delete` | mutating-or-spawning |
 | `db refresh` | mutating-or-spawning |
+| `db list` | bounded-read-only |
 | `db drop` | guarded mutating-or-spawning |
 | `db reset-admin-password` | mutating-or-spawning |
 | `eval` | process-previewable-read-only |

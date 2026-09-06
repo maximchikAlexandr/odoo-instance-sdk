@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -35,6 +37,8 @@ from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
 _DENIED_DATABASES = frozenset({"postgres", "template0", "template1"})
@@ -65,14 +69,25 @@ class DatabaseDropResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     cluster: str
     active_sessions: tuple[DatabaseDropSession, ...] = ()
     terminated_sessions: int = 0
+    filestore_state: str = "unknown"
+    filestore_path: str | None = None
 
 
 class DatabaseDropFailureContext(
-    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+    msgspec.Struct,
+    frozen=True,
+    forbid_unknown_fields=True,
+    kw_only=True,
+    omit_defaults=True,
 ):
     """Secret-free active-session identities retained on a safety refusal."""
 
     active_sessions: tuple[DatabaseDropSession, ...] = ()
+    database: str | None = None
+    cluster_id: str | None = None
+    filestore_path: str | None = None
+    database_deleted: bool = False
+    filestore_cleanup_failed: bool = False
 
 
 class DatabaseDropSafetyError(ConfigError):
@@ -83,11 +98,49 @@ class DatabaseDropSafetyError(ConfigError):
         super().__init__(message)
 
 
+class DatabaseDropPartialError(ConfigError):
+    """Database deletion succeeded but proven filestore cleanup did not."""
+
+    def __init__(self, database: str, cluster_id: str, filestore_path: str, error: OSError) -> None:
+        self.failure_context = DatabaseDropFailureContext(
+            database=database,
+            cluster_id=cluster_id,
+            filestore_path=filestore_path,
+            database_deleted=True,
+            filestore_cleanup_failed=True,
+        )
+        super().__init__(f"database {database!r} was deleted but filestore cleanup failed")
+        self.__cause__ = error
+
+
 @dataclass(frozen=True, slots=True)
 class _DropInspection:
     exists: bool
     is_template: bool
     sessions: tuple[DatabaseDropSession, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _DropOwnershipEvidence:
+    cluster_id: str
+    compose_project: str
+    volume_name: str
+    backup_id: str
+    data_directory: str | None
+
+
+def _catalog_database_in_use(catalog: BackupCatalog, database: str) -> bool:
+    """Return whether catalogue evidence still binds the database to live work."""
+    snapshot = catalog._monitor_snapshot_rows(include_removed=False)
+    for environment, runtime in snapshot.environments:
+        if database in {
+            environment["source_db_name"],
+            environment["target_db_name"],
+        }:
+            return True
+        if runtime is not None and runtime["database_name"] == database:
+            return True
+    return any(runtime["database_name"] == database for runtime in snapshot.project_runtimes)
 
 
 def _sql_literal(value: str) -> str:
@@ -279,6 +332,85 @@ def _assert_safe(
         )
 
 
+def _drop_ownership_evidence(
+    instance: OdooInstance,
+    cluster: PostgresCluster,
+    database: str,
+) -> _DropOwnershipEvidence | None:
+    """Require exact active managed evidence when the real catalogue is available."""
+    from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog = instance._client.get_catalog()
+    if not isinstance(catalog, BackupCatalog):
+        # Existing transport-focused command doubles do not model catalogue
+        # ownership. Real CLI catalogues always take the fail-closed path.
+        return None
+    if not isinstance(cluster, PostgresCluster) or cluster.mode != "compose":
+        raise ConfigError("database drop requires an SDK-owned Compose cluster")
+    claim = catalog._get_postgres_cluster(cluster._project_id)
+    if claim is None or claim.state != "active":
+        raise ConfigError("database drop requires an active project cluster claim")
+    if (
+        claim.project_id != cluster._project_id
+        or claim.compose_project != cluster.compose_project_name
+        or claim.volume_name != compose_volume_name(cluster._project_id)
+    ):
+        raise ConfigError("database drop cluster ownership evidence does not match")
+    if _catalog_database_in_use(catalog, database):
+        raise ConfigError("database is bound to an active environment or process")
+    inspected = cluster._inspect_cluster_volume(
+        claim, timeout=30.0, step_id=None, container_step_id=None
+    )
+    if inspected is not True:
+        raise ConfigError("database drop volume identity or attachment evidence is unavailable")
+    binding = catalog._latest_restore_binding(
+        cluster.endpoint_host, cluster.endpoint_port, database
+    )
+    if binding is None or binding["cluster_id"] != str(claim.cluster_id):
+        raise ConfigError("database drop requires an exact active restore binding")
+    if binding["database_name"] != database or not isinstance(binding["backup_id"], str):
+        raise ConfigError("database drop restore binding identity does not match")
+    return _DropOwnershipEvidence(
+        cluster_id=str(claim.cluster_id),
+        compose_project=claim.compose_project,
+        volume_name=claim.volume_name,
+        backup_id=binding["backup_id"],
+        data_directory=binding["data_directory"]
+        if isinstance(binding["data_directory"], str)
+        else None,
+    )
+
+
+def _cleanup_proven_filestore(data_directory: str | None, database: str) -> tuple[str, str | None]:
+    """Remove only a contained, non-symlink filestore directory."""
+    if data_directory is None:
+        return "unknown", None
+    base = Path(data_directory)
+    if base.is_symlink():
+        return "unknown", str(base / "filestore" / database)
+    root = base / "filestore"
+    if root.is_symlink() or not root.is_dir():
+        return "unknown", str(root / database)
+    candidate = root / database
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return "unknown", str(candidate)
+    current = candidate
+    while current != root:
+        if current.is_symlink():
+            return "unknown", str(candidate)
+        current = current.parent
+    if not os.path.lexists(candidate):
+        return "absent", str(candidate)
+    if not candidate.is_dir():
+        raise OSError(f"proven filestore target is not a directory: {candidate}")
+    shutil.rmtree(candidate)
+    return "deleted", str(candidate)
+
+
 def _inspect_command_step(
     binding: DatabaseContext,
     *,
@@ -335,6 +467,7 @@ def build_database_drop_command(  # noqa: C901
     cluster = binding.cluster
     if cluster is None:
         raise ConfigError("database drop requires the resolved project's PostgreSQL cluster")
+    ownership = _drop_ownership_evidence(instance, cluster, database)
     process_executor = executor or SubprocessExecutor()
     planning_step = _inspect_command_step(
         binding, database=database, step_id=_PLANNING_INSPECT_STEP, timeout=timeout
@@ -436,6 +569,9 @@ def build_database_drop_command(  # noqa: C901
 
     def execute(context: RunContext[DatabaseDropResult]) -> DatabaseDropResult:
         context.action(_ROOT_STEP)
+        current_ownership = _drop_ownership_evidence(instance, cluster, database)
+        if ownership is not None and current_ownership != ownership:
+            raise ConfigError("database drop ownership evidence changed before mutation")
         current_project_default = current_default()
         planned = _decode_inspection(_process_result(context, _INSPECT_STEP), database)
         _assert_safe(
@@ -481,11 +617,29 @@ def build_database_drop_command(  # noqa: C901
             raise ConfigError(f"database {database!r} still exists after drop")
         catalog = instance._client.get_catalog()
         catalog.record_database_dropped(binding.host, binding.port, database)
+        filestore_state = "unknown"
+        filestore_path: str | None = None
+        if current_ownership is not None:
+            try:
+                filestore_state, filestore_path = _cleanup_proven_filestore(
+                    current_ownership.data_directory, database
+                )
+            except OSError as exc:
+                path = str(
+                    Path(current_ownership.data_directory) / "filestore" / database
+                    if current_ownership.data_directory is not None
+                    else database
+                )
+                raise DatabaseDropPartialError(
+                    database, current_ownership.cluster_id, path, exc
+                ) from exc
         return DatabaseDropResult(
             database=database,
             cluster=cluster.endpoint,
             active_sessions=planned.sessions,
             terminated_sessions=terminated,
+            filestore_state=filestore_state,
+            filestore_path=filestore_path,
         )
 
     plan = ExecutionPlan(
@@ -498,4 +652,11 @@ def build_database_drop_command(  # noqa: C901
     )
 
 
-__all__ = ["DatabaseDropResult", "DatabaseDropSession", "build_database_drop_command"]
+__all__ = [
+    "DatabaseDropFailureContext",
+    "DatabaseDropPartialError",
+    "DatabaseDropResult",
+    "DatabaseDropSafetyError",
+    "DatabaseDropSession",
+    "build_database_drop_command",
+]

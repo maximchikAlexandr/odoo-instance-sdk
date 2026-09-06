@@ -287,6 +287,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db bloat` — Show estimated bloat and optional bounded exact measurements.
 - `odcli db init-monitoring` — Idempotently initialize supported monitoring extensions on an owned cluster.
 - `odcli db refresh` — Refresh an environment database from its configured source policy.
+- `odcli db list` — List databases from the bound PostgreSQL cluster and known provenance.
 - `odcli db restore` — Restore one exact retained backup into a selected database target.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
 - `odcli db drop` — Safely remove one exact local cluster database after guarded checks.

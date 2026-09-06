@@ -46,6 +46,7 @@ from odoo_instance_sdk.internal.automation import (
 )
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
 from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
+from odoo_instance_sdk.internal.pg.inventory import DatabaseInventoryItem, DatabaseInventoryResult
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     BackupFreshness,
@@ -185,6 +186,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "mutating-or-spawning",
         True,
     ),
+    PublicLeafCase(("db", "list"), ("db", "list"), "bounded-read-only", False),
     PublicLeafCase(
         ("db", "reset-admin-password"), ("db", "reset-admin-password"), "mutating-or-spawning", True
     ),
@@ -556,6 +558,37 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
         )
         monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_kwargs: client)
+        return
+
+    if path == ("db", "list"):
+        instance = MagicMock()
+        inventory = DatabaseInventoryResult(
+            cluster="127.0.0.1:5432",
+            databases=(
+                DatabaseInventoryItem(
+                    cluster="127.0.0.1:5432",
+                    cluster_id=None,
+                    name="demo",
+                    logical_size_bytes=10,
+                    active_sessions=0,
+                    is_default=True,
+                ),
+            ),
+        )
+        from odoo_instance_sdk.internal.pg import inventory as inventory_module
+
+        monkeypatch.setattr(
+            inventory_module,
+            "build_database_inventory_command",
+            fail_operation if failing else lambda *_args, **_kwargs: _matrix_command(inventory),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.pg._database_instance",
+            lambda _ctx: (None, instance),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
+        )
         return
 
     if path == ("db", "drop"):
@@ -1138,6 +1171,40 @@ def test_init_monitoring_machine_mode_requires_yes_before_resolution(
     result = CliRunner().invoke(cli, ["db", "init-monitoring", "--format", "json"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]["code"] == "confirmation_required"
+
+
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"], ["--json"]])
+def test_machine_db_drop_requires_yes_before_project_resolution(args: list[str]) -> None:
+    with patch(
+        "odoo_instance_sdk.commands.pg._database_instance",
+        side_effect=AssertionError("confirmation must precede database resolution"),
+    ):
+        result = CliRunner().invoke(cli, ["db", "drop", "demo", *args])
+
+    assert result.exit_code == 1, result.output
+    assert "confirmation_required" in result.output
+
+
+def test_db_drop_dry_run_emits_plan_without_running_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _matrix_command(None)
+    instance = MagicMock()
+    instance._postgres_cluster.endpoint = "127.0.0.1:5432"
+    builder = MagicMock(return_value=command)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.pg._database_instance", lambda _ctx: (None, instance)
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: Path.cwd()
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.drop.build_database_drop_command", builder)
+
+    result = CliRunner().invoke(cli, ["db", "drop", "demo", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["dry_run"] is True
+    builder.assert_called_once()
 
 
 def test_psql_cli_keeps_native_args_and_rejects_document_mode_without_dry_run(

@@ -1337,6 +1337,33 @@ class BackupCatalog:
         return _row_to_backup(row, require_file=False)
 
     @_translate_sqlite_error
+    def _list_restore_bindings(self, db_host: str | None, db_port: int) -> list[sqlite3.Row]:
+        """Read exact restore identities for internal database projections."""
+        host = normalize_db_host(db_host)
+        return self._conn.execute(
+            "SELECT database_name, backup_id, cluster_id, data_directory, restored_at "
+            "FROM restores WHERE db_host=? AND db_port=? "
+            "ORDER BY database_name ASC, restored_at DESC, sequence DESC",
+            (host, db_port),
+        ).fetchall()
+
+    @_translate_sqlite_error
+    def _latest_restore_binding(
+        self, db_host: str | None, db_port: int, database_name: str
+    ) -> sqlite3.Row | None:
+        """Read the latest exact restore identity for internal ownership gates."""
+        host = normalize_db_host(db_host)
+        return cast(
+            "sqlite3.Row | None",
+            self._conn.execute(
+                "SELECT database_name, backup_id, cluster_id, data_directory, restored_at "
+                "FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
+                "ORDER BY restored_at DESC, sequence DESC LIMIT 1",
+                (host, db_port, database_name),
+            ).fetchone(),
+        )
+
+    @_translate_sqlite_error
     def distinct_restored_database_names(
         self,
         db_host: str | None,

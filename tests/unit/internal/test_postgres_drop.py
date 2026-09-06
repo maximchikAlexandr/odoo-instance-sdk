@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -10,14 +11,20 @@ import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.config import InstanceConfig
-from odoo_instance_sdk.exceptions import ConfigError
+from odoo_instance_sdk.exceptions import BackupCatalogError, ConfigError
 from odoo_instance_sdk.internal.pg.drop import (
+    DatabaseDropPartialError,
     DatabaseDropSafetyError,
+    _cleanup_proven_filestore,
     build_database_drop_command,
 )
+from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
 from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from tests.unit.monitor_support import make_env
 
 
 def _instance(project: Path, *, database: str = "feature_db") -> OdooInstance:
@@ -114,6 +121,79 @@ def _executor(
     return RecordingExecutor(result_factory=result_factory)
 
 
+def _managed_instance(
+    project: Path,
+    catalog: BackupCatalog,
+    tmp_path: Path,
+    *,
+    data_directory: Path | None,
+    foreign_binding: bool = False,
+) -> tuple[OdooInstance, Path]:
+    manifest = project / ".odcli" / "project.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + '\n[postgres]\nmode = "compose"\nimage = "postgres:16"\nport = 5432\n',
+        encoding="utf-8",
+    )
+    instance = _instance(project)
+    cast("Any", instance._client).get_catalog.return_value = catalog
+    cluster = PostgresCluster.from_project(project)
+    instance._postgres_cluster = cluster
+    claim = catalog._ensure_postgres_cluster_pending(
+        cluster._project_id,
+        cluster.compose_project_name,
+        compose_volume_name(cluster._project_id),
+    )
+    active = catalog._activate_postgres_cluster(
+        claim.cluster_id,
+        cluster._project_id,
+        cluster.compose_project_name,
+        compose_volume_name(cluster._project_id),
+    )
+    backup_id = str(uuid.uuid4())
+    backup_file = tmp_path / "backup.zip"
+    backup_file.write_bytes(b"source-backup")
+    catalog.start_download(
+        backup_id,
+        "http://127.0.0.1:8069",
+        "feature_db",
+        "zip",
+        True,
+        backup_file,
+    )
+    catalog.success_download(backup_id, backup_file.name, backup_file.stat().st_size, "")
+    restore_cluster_id = active.cluster_id
+    if foreign_binding:
+        foreign = catalog._ensure_postgres_cluster_pending(
+            "foreign-project", "foreign-compose", "foreign-volume"
+        )
+        restore_cluster_id = catalog._activate_postgres_cluster(
+            foreign.cluster_id, "foreign-project", "foreign-compose", "foreign-volume"
+        ).cluster_id
+    catalog.record_restore(
+        cluster.endpoint_host,
+        cluster.endpoint_port,
+        "feature_db",
+        backup_id,
+        cluster_id=restore_cluster_id,
+        data_directory=data_directory,
+    )
+    return instance, backup_file
+
+
+def _compose_instance(project: Path, catalog: BackupCatalog) -> OdooInstance:
+    manifest = project / ".odcli" / "project.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + '\n[postgres]\nmode = "compose"\nimage = "postgres:16"\nport = 5432\n',
+        encoding="utf-8",
+    )
+    instance = _instance(project)
+    instance._postgres_cluster = PostgresCluster.from_project(project)
+    cast("Any", instance._client).get_catalog.return_value = catalog
+    return instance
+
+
 @pytest.mark.unit
 def test_drop_plan_is_maintenance_bound_and_redacts_credentials(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path
@@ -191,6 +271,31 @@ def test_drop_requires_connection_force_and_never_mutates_on_refusal(
         "database.drop.inspect",
     ]
     catalog.record_database_dropped.assert_not_called()
+
+
+@pytest.mark.unit
+def test_proven_filestore_cleanup_is_exact_and_symlink_safe(tmp_path: Path) -> None:
+    data_directory = tmp_path / "odoo-data"
+    target = data_directory / "filestore" / "feature_db"
+    target.mkdir(parents=True)
+    (target / "blob").write_bytes(b"payload")
+
+    state, path = _cleanup_proven_filestore(str(data_directory), "feature_db")
+
+    assert state == "deleted"
+    assert path == str(target)
+    assert not target.exists()
+
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "secret").write_text("retain")
+    (data_directory / "filestore" / "feature_db").symlink_to(external, target_is_directory=True)
+
+    state, path = _cleanup_proven_filestore(str(data_directory), "feature_db")
+
+    assert state == "unknown"
+    assert path == str(data_directory / "filestore" / "feature_db")
+    assert (external / "secret").read_text() == "retain"
 
 
 @pytest.mark.unit
@@ -484,3 +589,299 @@ def test_drop_does_not_record_failed_mutation_or_postcondition(
     if drop_returncode:
         assert not any(step.step_id.endswith("verify") for step in executor.executed)
     catalog.record_database_dropped.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["missing", "pending", "volume", "binding"])
+def test_drop_ownership_matrix_fails_before_any_postgres_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    catalog = BackupCatalog(db_path=tmp_path / f"{failure}.sqlite3")
+    instance = _compose_instance(project_manifest, catalog)
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    volume = compose_volume_name(cluster._project_id)
+    claim = catalog._ensure_postgres_cluster_pending(
+        cluster._project_id, cluster.compose_project_name, volume
+    )
+    if failure != "pending":
+        catalog._activate_postgres_cluster(
+            claim.cluster_id, cluster._project_id, cluster.compose_project_name, volume
+        )
+    if failure == "volume":
+        monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: False)
+    if failure == "binding":
+        foreign = catalog._ensure_postgres_cluster_pending(
+            "foreign-project", "foreign-compose", "foreign-volume"
+        )
+        foreign = catalog._activate_postgres_cluster(
+            foreign.cluster_id, "foreign-project", "foreign-compose", "foreign-volume"
+        )
+        backup_id = str(uuid.uuid4())
+        backup_file = tmp_path / "foreign.zip"
+        backup_file.write_bytes(b"backup")
+        catalog.start_download(
+            backup_id, "http://127.0.0.1:8069", "feature_db", "zip", True, backup_file
+        )
+        catalog.success_download(backup_id, backup_file.name, 6, "")
+        catalog.record_restore(
+            cluster.endpoint_host,
+            cluster.endpoint_port,
+            "feature_db",
+            backup_id,
+            cluster_id=foreign.cluster_id,
+        )
+    executor = _executor()
+    with pytest.raises(ConfigError):
+        build_database_drop_command(instance, project_manifest, "feature_db", executor=executor)
+    assert executor.executed == []
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events "
+            "WHERE database_name='feature_db' AND event_type='dropped'"
+        ).fetchone()[0]
+        == 0
+    )
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_drop_rejects_external_and_identity_null_restore_targets(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    catalog = BackupCatalog(db_path=tmp_path / "external.sqlite3")
+    external = _instance(project_manifest)
+    cast("Any", external._client).get_catalog.return_value = catalog
+    executor = _executor()
+    with pytest.raises(ConfigError, match="SDK-owned Compose"):
+        build_database_drop_command(external, project_manifest, "feature_db", executor=executor)
+    assert executor.executed == []
+
+    catalog.close()
+    catalog = BackupCatalog(db_path=tmp_path / "null.sqlite3")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    instance, _backup = _managed_instance(project_manifest, catalog, tmp_path, data_directory=None)
+    catalog._conn.execute("UPDATE restores SET cluster_id=NULL WHERE database_name='feature_db'")
+    catalog._conn.commit()
+    executor = _executor()
+    with pytest.raises(ConfigError, match="exact active restore binding"):
+        build_database_drop_command(instance, project_manifest, "feature_db", executor=executor)
+    assert executor.executed == []
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE database_name='feature_db' "
+            "AND event_type='dropped'"
+        ).fetchone()[0]
+        == 0
+    )
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_drop_rejects_malformed_cluster_identity_before_postgres_effect(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    catalog = BackupCatalog(db_path=tmp_path / "malformed.sqlite3")
+    instance = _compose_instance(project_manifest, catalog)
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    volume = compose_volume_name(cluster._project_id)
+    claim = catalog._ensure_postgres_cluster_pending(
+        cluster._project_id, cluster.compose_project_name, volume
+    )
+    catalog._activate_postgres_cluster(
+        claim.cluster_id, cluster._project_id, cluster.compose_project_name, volume
+    )
+    catalog._conn.execute(
+        "UPDATE postgres_clusters SET cluster_id='malformed-cluster-id' WHERE project_id=?",
+        (cluster._project_id,),
+    )
+    catalog._conn.commit()
+    executor = _executor()
+
+    with pytest.raises(BackupCatalogError, match="malformed identity"):
+        build_database_drop_command(instance, project_manifest, "feature_db", executor=executor)
+    assert executor.executed == []
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE event_type='dropped'"
+        ).fetchone()[0]
+        == 0
+    )
+    catalog.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("usage", ["environment", "process"])
+def test_drop_refuses_catalogue_active_environment_or_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    tmp_path: Path,
+    usage: str,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    catalog = BackupCatalog(db_path=tmp_path / f"{usage}.sqlite3")
+    data_directory = tmp_path / "data"
+    instance, _backup = _managed_instance(
+        project_manifest, catalog, tmp_path, data_directory=data_directory
+    )
+    assert isinstance(instance._client.get_catalog(), BackupCatalog)
+    if usage == "environment":
+        catalog.create_environment(make_env("active-env", source_db_name="feature_db"))
+        assert catalog.list_environments(include_removed=False)[0]["source_db_name"] == "feature_db"
+    else:
+        catalog._register_project(
+            f"project_{repo_key(project_manifest, project_manifest / '.git')}",
+            project_manifest,
+            project_manifest / ".git",
+        )
+        catalog._upsert_runtime(
+            "project",
+            f"project_{repo_key(project_manifest, project_manifest / '.git')}",
+            root_pid=123,
+            create_time=1.0,
+            started_at="2026-01-01T00:00:00",
+            checkout_branch="main",
+            commit_sha="abc",
+            http_url="http://127.0.0.1:8069",
+            http_port=8069,
+            database_name="feature_db",
+        )
+        assert catalog._monitor_snapshot_rows().project_runtimes[0]["database_name"] == "feature_db"
+    executor = _executor()
+
+    with pytest.raises(ConfigError, match="active environment or process"):
+        build_database_drop_command(instance, project_manifest, "feature_db", executor=executor)
+    assert executor.executed == []
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_verified_drop_cleans_only_filestore_and_retains_source_backup(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    data_directory = tmp_path / "data"
+    target = data_directory / "filestore" / "feature_db"
+    target.mkdir(parents=True)
+    (target / "blob").write_bytes(b"filestore")
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    instance, backup_file = _managed_instance(
+        project_manifest, catalog, tmp_path, data_directory=data_directory
+    )
+    binding = catalog._latest_restore_binding("127.0.0.1", 5432, "feature_db")
+    assert binding is not None and binding["data_directory"] == str(data_directory)
+
+    result = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=_executor()
+    ).run()
+
+    assert result.filestore_state == "deleted"
+    assert not target.exists()
+    assert backup_file.is_file()
+    assert (
+        catalog._conn.execute(
+            "SELECT event_type FROM database_events WHERE database_name='feature_db' "
+            "ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()[0]
+        == "dropped"
+    )
+    dropped_count = catalog._conn.execute(
+        "SELECT COUNT(*) FROM database_events WHERE database_name='feature_db' "
+        "AND event_type='dropped'"
+    ).fetchone()[0]
+    retry = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=_executor()
+    ).run()
+    assert retry.filestore_state == "absent"
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE database_name='feature_db' "
+            "AND event_type='dropped'"
+        ).fetchone()[0]
+        == dropped_count
+    )
+    catalog.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["unknown", "symlink"])
+def test_drop_preserves_unknown_or_symlink_filestore(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    data_directory = tmp_path / "data"
+    target = data_directory / "filestore" / "feature_db"
+    target.mkdir(parents=True)
+    (target / "retain").write_text("keep")
+    if kind == "symlink":
+        external = tmp_path / "external"
+        external.mkdir()
+        (external / "secret").write_text("keep")
+        (target / "retain").unlink()
+        target.rmdir()
+        target.symlink_to(external, target_is_directory=True)
+    catalog = BackupCatalog(db_path=tmp_path / f"{kind}.sqlite3")
+    instance, _backup = _managed_instance(
+        project_manifest,
+        catalog,
+        tmp_path,
+        data_directory=None if kind == "unknown" else data_directory,
+    )
+
+    result = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=_executor()
+    ).run()
+
+    assert result.filestore_state == "unknown"
+    if kind == "symlink":
+        assert target.is_symlink()
+        assert (tmp_path / "external" / "secret").read_text() == "keep"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_filestore_failure_is_typed_partial_after_database_audit(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    data_directory = tmp_path / "data"
+    (data_directory / "filestore" / "feature_db").mkdir(parents=True)
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    instance, backup_file = _managed_instance(
+        project_manifest, catalog, tmp_path, data_directory=data_directory
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.drop.shutil.rmtree",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("permission denied")),
+    )
+
+    with pytest.raises(DatabaseDropPartialError) as caught:
+        build_database_drop_command(
+            instance, project_manifest, "feature_db", executor=_executor()
+        ).run()
+
+    context = msgspec.to_builtins(caught.value.failure_context)
+    assert context["database_deleted"] is True
+    assert context["filestore_cleanup_failed"] is True
+    assert backup_file.is_file()
+    assert (
+        catalog._conn.execute(
+            "SELECT event_type FROM database_events WHERE database_name='feature_db' "
+            "ORDER BY sequence DESC LIMIT 1"
+        ).fetchone()[0]
+        == "dropped"
+    )
+    catalog.close()
