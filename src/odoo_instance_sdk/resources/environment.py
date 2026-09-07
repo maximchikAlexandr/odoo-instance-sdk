@@ -1044,12 +1044,11 @@ class EnvironmentResource:
             backup_id=str(backup.id),
             stage=CopyJournalStage.RESTORE_PENDING,
         )
-        instance.databases.restore(
+        instance.databases._restore_after_verified_absence(
             backup,
             target_db,
             copy=True,
             neutralize_database=True,
-            _skip_planned_probes=True,
         )
         self._consume_copy_database_probe(
             context,
@@ -1161,7 +1160,10 @@ class EnvironmentResource:
             return self._cleanup_backup(catalog, backup_id) if backup_id is not None else False
 
         stage = CopyJournalStage(str(journal["stage"]))
-        if stage in (CopyJournalStage.RESTORE_PENDING, CopyJournalStage.RESTORED):
+        if stage is CopyJournalStage.RESTORE_PENDING:
+            return True
+
+        if stage is CopyJournalStage.RESTORED:
             row = catalog.get_environment(str(env_id))
             if row is None:
                 return True
@@ -1979,13 +1981,18 @@ class EnvironmentResource:
         lock_file = Path(env.dependency_lock_path)
         venv = Path(env.python_environment_path) if env.python_environment_owned else None
 
+        if copy_plan is not None and copy_plan.stage is CopyJournalStage.RESTORE_PENDING:
+            msg = "copy restore ownership is unresolved; manual reconciliation is required"
+            cat.update_environment_state(
+                str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
+            )
+            cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
+            raise EnvironmentConflictError("cleanup_failed", msg)
+
         cleanup_failed = False
         failures: list[str] = []
 
-        if copy_plan is not None and copy_plan.stage in (
-            CopyJournalStage.RESTORE_PENDING,
-            CopyJournalStage.RESTORED,
-        ):
+        if copy_plan is not None and copy_plan.stage is CopyJournalStage.RESTORED:
             cleanup_failed = (
                 self._drop_copy_target(copy_plan, failures, context=context) or cleanup_failed
             )
@@ -2339,6 +2346,9 @@ class EnvironmentResource:
         *,
         context: RunContext[None] | None = None,
     ) -> bool:
+        if plan.stage is CopyJournalStage.RESTORE_PENDING:
+            failures.append("copy restore ownership is unresolved")
+            return True
         instance = cast("OdooInstance", plan.instance)
         try:
             if not instance.databases.exists(plan.target_database):

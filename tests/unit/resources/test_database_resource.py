@@ -31,6 +31,7 @@ from odoo_instance_sdk.models import (
     CommandResult,
     Database,
     NoBackup,
+    RestoreResult,
 )
 
 if TYPE_CHECKING:
@@ -1258,6 +1259,91 @@ def test_remote_drop_rejected(instance_remote: OdooInstance) -> None:
 
 
 class TestRestore:
+    def test_verified_restore_does_not_probe_when_database_manager_is_unavailable(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
+
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_text("fake content")
+        backup = _make_backup(path=str(backup_path))
+        inst = _make_instance_with_cluster_key(client, db_user="odoo")
+        with patch(
+            "odoo_instance_sdk.internal.pg.builder.shutil.which", return_value="/usr/bin/psql"
+        ):
+            before = inst.databases._psql_probe_for("newdb", "database.restore.exists-before")
+            after = inst.databases._psql_probe_for("newdb", "database.restore.exists-after")
+        assert before is not None
+        assert after is not None
+
+        executor = RecordingExecutor(
+            results={
+                before.step_id: ProcessResult(
+                    argv=before.argv,
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    duration=0.0,
+                    cwd=before.cwd,
+                    environment=before.environment,
+                ),
+                after.step_id: ProcessResult(
+                    argv=after.argv,
+                    returncode=0,
+                    stdout="1\n",
+                    stderr="",
+                    duration=0.0,
+                    cwd=after.cwd,
+                    environment=after.environment,
+                ),
+            }
+        )
+        action = PreparedAction("database.restore")
+
+        def callback(context: RunContext[RestoreResult]) -> RestoreResult:
+            context.action(action.step_id)
+            context.process(before.step_id)
+            result = inst.databases._restore_after_verified_absence(backup, "newdb")
+            context.process(after.step_id)
+            return result
+
+        command = Command.create(
+            ExecutionPlan(
+                steps=(
+                    action.public_projection(),
+                    before.public_projection(),
+                    after.public_projection(),
+                )
+            ),
+            callback,
+            (action, before, after),
+            executor=executor,
+        )
+        mock_catalog = MagicMock()
+        with (
+            patch.object(inst, "_client") as mock_client,
+            patch("httpx.Client", return_value=_mock_http({"result": True})),
+            patch.object(
+                inst.databases.__class__,
+                "list",
+                side_effect=DatabaseManagerUnavailableError("database manager unavailable"),
+            ) as list_method,
+        ):
+            mock_client.config = client.config
+            mock_client.get_catalog.return_value = mock_catalog
+            result = command.run()
+
+        assert result.new_db == "newdb"
+        assert [step.step_id for step in executor.executed] == [
+            before.step_id,
+            after.step_id,
+        ]
+        list_method.assert_not_called()
+        mock_catalog.record_restore.assert_called_once_with(
+            "localhost", 5432, "newdb", str(backup.id)
+        )
+
     def test_default_timeout_uses_long_running_backup_budget(
         self, client: OdooClient, tmp_path: Path
     ) -> None:

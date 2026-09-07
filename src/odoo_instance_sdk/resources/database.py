@@ -1175,7 +1175,6 @@ class DatabaseResource:
         copy: bool = False,
         neutralize_database: bool = False,
         timeout: float | None = None,
-        _skip_planned_probes: bool = False,
     ) -> RestoreResult:
         from odoo_instance_sdk.internal.proc import active_context
 
@@ -1186,7 +1185,6 @@ class DatabaseResource:
                 copy=copy,
                 neutralize_database=neutralize_database,
                 timeout=timeout,
-                skip_planned_probes=_skip_planned_probes,
             )
         return self.restore_command(
             backup,
@@ -1218,7 +1216,6 @@ class DatabaseResource:
                 copy=copy,
                 neutralize_database=neutralize_database,
                 timeout=timeout,
-                skip_planned_probes=False,
                 before_step_id=before_probe.step_id if before_probe else None,
                 after_step_id=after_probe.step_id if after_probe else None,
             ),
@@ -1226,6 +1223,29 @@ class DatabaseResource:
             mutating=True,
             steps=probes,
             optional_steps=tuple(probe.step_id for probe in probes),
+        )
+
+    def _restore_after_verified_absence(
+        self,
+        backup: Backup,
+        target_database_name: str,
+        *,
+        copy: bool = False,
+        neutralize_database: bool = False,
+        timeout: float | None = None,
+    ) -> RestoreResult:
+        """Restore after a caller consumed an authoritative absence probe."""
+        from odoo_instance_sdk.internal.proc import active_context
+
+        if active_context() is None:
+            raise RuntimeError("verified restore requires an active command context")
+        return self._restore_impl(
+            backup,
+            target_database_name,
+            copy=copy,
+            neutralize_database=neutralize_database,
+            timeout=timeout,
+            skip_existence_checks=True,
         )
 
     def _restore_impl(
@@ -1236,7 +1256,7 @@ class DatabaseResource:
         copy: bool,
         neutralize_database: bool,
         timeout: float | None,
-        skip_planned_probes: bool = False,
+        skip_existence_checks: bool = False,
         before_step_id: str | None = None,
         after_step_id: str | None = None,
     ) -> RestoreResult:
@@ -1247,7 +1267,7 @@ class DatabaseResource:
                 copy=copy,
                 neutralize_database=neutralize_database,
                 timeout=timeout,
-                skip_planned_probes=skip_planned_probes,
+                skip_existence_checks=skip_existence_checks,
                 before_step_id=before_step_id,
                 after_step_id=after_step_id,
             )
@@ -1260,7 +1280,7 @@ class DatabaseResource:
         copy: bool,
         neutralize_database: bool,
         timeout: float | None,
-        skip_planned_probes: bool = False,
+        skip_existence_checks: bool = False,
         before_step_id: str | None = None,
         after_step_id: str | None = None,
     ) -> RestoreResult:
@@ -1289,13 +1309,11 @@ class DatabaseResource:
             raise BackupNotAvailableError(f"Backup file not found or unreadable: {backup.path}")
 
         def target_exists(step_id: str | None) -> bool:
-            if skip_planned_probes:
-                return self._exists_impl(target_database_name)
             if step_id is not None:
                 return self._exists_impl(target_database_name, psql_step_id=step_id)
             return self.exists(target_database_name)
 
-        if target_exists(before_step_id):
+        if not skip_existence_checks and target_exists(before_step_id):
             raise DatabaseAlreadyExistsError(
                 f"Database {target_database_name!r} already exists on {self.base_url}"
             )
@@ -1336,7 +1354,7 @@ class DatabaseResource:
             status_code, message = http_failure
             raise DatabaseError(status_code=status_code or 0, message=message, body=b"") from None
 
-        if not target_exists(after_step_id):
+        if not skip_existence_checks and not target_exists(after_step_id):
             raise RestoreFailedError(
                 f"Database {target_database_name!r} was not created after restore"
             )

@@ -7,11 +7,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import msgspec
 import pytest
 
+from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
     ConfigError,
     DatabaseAlreadyExistsError,
@@ -882,7 +883,7 @@ class TestCheckoutCopy:
                 "localhost", 5432, "copy_target", str(backup.id)
             )
 
-        instance.databases.restore.side_effect = restore_with_database_audit
+        instance.databases._restore_after_verified_absence.side_effect = restore_with_database_audit
         self._checkout_copy(
             env_client, project_manifest, fake_python, "feat/copy-one-audit", instance
         )
@@ -953,12 +954,12 @@ class TestCheckoutCopy:
         assert not Path(env.worktree_path).exists()
         assert not Path(env.generated_config_path).exists()
 
-    def test_copy_restore_failure_deletes_backup_then_artifacts(
+    def test_copy_restore_failure_preserves_evidence_for_manual_reconciliation(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
         instance = _copy_instance(env_client)
         _record_backup(env_client, instance.databases.backup.return_value)
-        instance.databases.restore.side_effect = OSError("restore failed")
+        instance.databases._restore_after_verified_absence.side_effect = OSError("restore failed")
         instance.databases.exists.return_value = False
 
         with pytest.raises(OSError, match="restore failed"):
@@ -967,15 +968,89 @@ class TestCheckoutCopy:
             )
 
         env = env_client.environments.list(project=project_manifest)[0]
-        assert env.state is EnvironmentState.FAILED
-        assert not Path(env.worktree_path).exists()
-        assert not Path(env.generated_config_path).exists()
+        assert env.state is EnvironmentState.CLEANUP_FAILED
+        assert Path(env.worktree_path).exists()
+        assert Path(env.generated_config_path).exists()
         backup_row = env_client.get_catalog().get_by_id(
             str(instance.databases.backup.return_value.id)
         )
-        assert backup_row is not None and backup_row["state"] == "deleted"
+        assert backup_row is not None and backup_row["state"] == "available"
 
-    def test_restore_side_effect_then_exception_drops_exact_target_before_cleanup(
+    def test_real_database_restore_failure_after_before_probe_preserves_evidence(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.resources.instance import InstanceFactory
+
+        backup = Backup(
+            id=uuid.uuid4(),
+            source_base_url="http://127.0.0.1:8069",
+            database_name="comerta",
+            format=BackupFormat.ZIP,
+            filestore_requested=True,
+            path=str(project_manifest / "real-restore-failure.zip"),
+            filename="comerta.zip",
+            size_bytes=1,
+            sha256="a" * 64,
+            downloaded_at=datetime.now(UTC),
+        )
+        Path(backup.path).write_bytes(b"backup")
+        instance = env_client.instance("http://localhost:8069", master_password="admin")
+        object.__setattr__(
+            instance,
+            "config",
+            InstanceConfig(
+                base_url="http://localhost:8069",
+                master_password="admin",
+                db_host="localhost",
+                db_port=5432,
+                db_user="odoo",
+            ),
+        )
+        database_resource_type = type(instance.databases)
+        monkeypatch.setattr(
+            database_resource_type,
+            "list",
+            MagicMock(return_value=(Database(name="comerta", backup=NoBackup()),)),
+        )
+        monkeypatch.setattr(database_resource_type, "names", MagicMock(return_value=("comerta",)))
+        monkeypatch.setattr(database_resource_type, "backup", MagicMock(return_value=backup))
+        drop = MagicMock()
+        monkeypatch.setattr(database_resource_type, "drop", drop)
+        _record_backup(env_client, backup)
+        InstanceFactory.from_config = MagicMock(return_value=instance)  # type: ignore[method-assign]
+
+        http_cm = MagicMock()
+        http_cm.__enter__.return_value.post.side_effect = OSError("restore transport failed")
+        with (
+            patch("httpx.Client", return_value=http_cm),
+            pytest.raises(OSError, match="restore transport failed"),
+        ):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/real-copy-restore-failure",
+                options=EnvironmentCheckoutOptions(
+                    python=str(fake_python),
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    target_database="copy_target",
+                    source_database="comerta",
+                ),
+            )
+
+        env = env_client.environments.list(project=project_manifest)[0]
+        journal = env_client.get_catalog().get_copy_journal(str(env.id))
+        backup_row = env_client.get_catalog().get_by_id(str(backup.id))
+        assert env.state is EnvironmentState.CLEANUP_FAILED
+        assert Path(env.worktree_path).exists()
+        assert Path(env.generated_config_path).exists()
+        assert journal is not None and journal["stage"] == "restore_pending"
+        assert backup_row is not None and backup_row["state"] == "available"
+        drop.assert_not_called()
+
+    def test_restore_side_effect_then_exception_preserves_target_for_manual_reconciliation(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
         instance = _copy_instance(env_client)
@@ -986,7 +1061,7 @@ class TestCheckoutCopy:
             exists["target"] = True
             raise OSError("restore transport failed")
 
-        instance.databases.restore.side_effect = restore_then_raise
+        instance.databases._restore_after_verified_absence.side_effect = restore_then_raise
         instance.databases.exists.side_effect = lambda _target: exists["target"]
         instance.databases.drop.side_effect = lambda _target: exists.__setitem__("target", False)
 
@@ -995,11 +1070,11 @@ class TestCheckoutCopy:
                 env_client, project_manifest, fake_python, "feat/copy-uncertain", instance
             )
 
-        assert instance.databases.drop.call_args.args == ("copy_target",)
-        assert not exists["target"]
+        instance.databases.drop.assert_not_called()
+        assert exists["target"]
         env = env_client.environments.list(project=project_manifest)[0]
-        assert env.state is EnvironmentState.FAILED
-        assert not Path(env.generated_config_path).exists()
+        assert env.state is EnvironmentState.CLEANUP_FAILED
+        assert Path(env.generated_config_path).exists()
 
     def test_restore_postcheck_is_owned_by_database_resource(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
@@ -1013,7 +1088,7 @@ class TestCheckoutCopy:
         # canonical postcondition/audit logic.
         instance.databases.exists.assert_not_called()
 
-    def test_restore_record_failure_reconciles_target_before_cleanup(
+    def test_restore_record_failure_preserves_target_for_manual_reconciliation(
         self,
         env_client: OdooClient,
         project_manifest: Path,
@@ -1031,7 +1106,7 @@ class TestCheckoutCopy:
                 "localhost", 5432, "copy_target", str(instance.databases.backup.return_value.id)
             )
 
-        instance.databases.restore.side_effect = restore_with_audit
+        instance.databases._restore_after_verified_absence.side_effect = restore_with_audit
         monkeypatch.setattr(
             "odoo_instance_sdk.storage.backup_catalog.BackupCatalog.record_restore",
             lambda *_args: (_ for _ in ()).throw(OSError("catalog unavailable")),
@@ -1042,8 +1117,11 @@ class TestCheckoutCopy:
                 env_client, project_manifest, fake_python, "feat/copy-record-error", instance
             )
 
-        assert instance.databases.drop.call_args.args == ("copy_target",)
-        assert not exists["target"]
+        instance.databases.drop.assert_not_called()
+        assert exists["target"]
+        env = env_client.environments.list(project=project_manifest)[0]
+        assert env.state is EnvironmentState.CLEANUP_FAILED
+        assert Path(env.generated_config_path).exists()
 
     def test_copy_does_not_duplicate_database_restore_postcondition(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
@@ -1085,7 +1163,12 @@ class TestCheckoutCopy:
             "database.restore.exists-before",
             "database.restore.exists-after",
         ]
-        assert instance.databases.restore.call_args.kwargs["_skip_planned_probes"] is True
+        instance.databases._restore_after_verified_absence.assert_called_once_with(
+            instance.databases.backup.return_value,
+            "copy_target",
+            copy=True,
+            neutralize_database=True,
+        )
 
     def test_copy_rejects_failed_restore_probe_before_restore(
         self,
@@ -1103,7 +1186,7 @@ class TestCheckoutCopy:
                 env_client, project_manifest, fake_python, "feat/copy-probe-fail", instance
             )
 
-        instance.databases.restore.assert_not_called()
+        instance.databases._restore_after_verified_absence.assert_not_called()
         instance.databases.drop.assert_not_called()
         env = env_client.environments.list(project=project_manifest)[0]
         journal = env_client.get_catalog().get_copy_journal(str(env.id))
@@ -1125,7 +1208,7 @@ class TestCheckoutCopy:
                 env_client, project_manifest, fake_python, "feat/copy-probe-existing", instance
             )
 
-        instance.databases.restore.assert_not_called()
+        instance.databases._restore_after_verified_absence.assert_not_called()
         instance.databases.drop.assert_not_called()
         env = env_client.environments.list(project=project_manifest)[0]
         journal = env_client.get_catalog().get_copy_journal(str(env.id))

@@ -82,12 +82,12 @@ def _checkout_copy(
 
     backup = instance.databases.backup.return_value
     _record_backup(env_client, backup)
-    if instance.databases.restore.side_effect is None:
+    if instance.databases._restore_after_verified_absence.side_effect is None:
 
         def record_restore(_backup: Backup, target: str, **_kwargs: object) -> None:
             env_client.get_catalog().record_restore("localhost", 5432, target, str(_backup.id))
 
-        instance.databases.restore.side_effect = record_restore
+        instance.databases._restore_after_verified_absence.side_effect = record_restore
     InstanceFactory.from_config = MagicMock(return_value=instance)  # type: ignore[method-assign]
     return env_client.environments.checkout(
         project_manifest,
@@ -235,7 +235,7 @@ class TestCopyRemoveRecovery:
         assert Path(env.generated_config_path).is_file()
         assert catalog.get_copy_journal(str(env.id))["db_host"] == "other-cluster"  # type: ignore[index]
 
-    def test_restore_pending_recovers_after_catalog_reopen(
+    def test_restore_pending_requires_manual_reconciliation_after_catalog_reopen(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
         instance = _copy_instance()
@@ -256,11 +256,14 @@ class TestCopyRemoveRecovery:
         # SQLite journal state rather than process-local checkout state.
         catalog.close()
         env_client._catalog = None
-        instance.databases.exists.return_value = False
+        with pytest.raises(EnvironmentConflictError, match="manual reconciliation"):
+            env_client.environments.remove(str(env.id))
 
-        env_client.environments.remove(str(env.id))
-
-        assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED
+        assert env_client.environments.get(str(env.id)).state is EnvironmentState.CLEANUP_FAILED
+        assert Path(env.generated_config_path).is_file()
+        assert instance.databases.drop.call_count == 0
+        backup_row = env_client.get_catalog().get_by_id(str(env.backup_id))
+        assert backup_row is not None and backup_row["state"] == "available"
 
     def test_backed_up_recovers_after_catalog_reopen_without_database_drop(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
