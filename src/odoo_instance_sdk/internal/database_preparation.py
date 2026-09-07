@@ -429,8 +429,8 @@ def _resolve_executable(value: str | Path | None, root: Path, label: str) -> str
     if not candidate.is_absolute():
         candidate = root / candidate
     candidate = candidate.resolve()
-    if not candidate.is_file() or not os.access(candidate, os.X_OK):
-        raise InstanceConfigurationError(f"{label} executable is missing or not executable")
+    if not candidate.is_file():
+        raise InstanceConfigurationError(f"{label} is missing or not a file")
     return str(candidate)
 
 

@@ -70,6 +70,21 @@ def _backup(tmp_path: Path, *, downloaded_at: datetime) -> Backup:
     )
 
 
+def test_runtime_binding_accepts_non_executable_odoo_bin(tmp_path: Path) -> None:
+    from odoo_instance_sdk.internal.database_preparation import resolve_runtime_binding
+
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    odoo_bin = tmp_path / "odoo-bin"
+    odoo_bin.write_text("from odoo.cli import main\nmain()\n")
+    project = ProjectConfig(repository_root=tmp_path, python=python, odoo_bin=odoo_bin)
+
+    binding = resolve_runtime_binding(project, tmp_path)
+
+    assert binding.odoo_bin == str(odoo_bin)
+
+
 def test_preparation_command_captures_restore_process_manifest_before_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

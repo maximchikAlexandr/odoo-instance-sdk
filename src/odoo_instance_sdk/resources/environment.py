@@ -2450,10 +2450,8 @@ class EnvironmentResource:
             raise ConfigError("No odoo_bin configured; pass --odoo-bin or set project.odoo_bin")
         p = Path(odoo_bin)
         candidate = (repo_root / p).resolve() if not p.is_absolute() else p
-        if not candidate.is_file() or not candidate.stat().st_mode & 0o111:
-            raise InstanceConfigurationError(
-                f"Odoo executable not found or not executable: {candidate}"
-            )
+        if not candidate.is_file():
+            raise InstanceConfigurationError(f"Odoo script is missing or not a file: {candidate}")
         return str(candidate)
 
     def _resolve_runtime_cwd(self, project: ProjectConfig, repo_root: Path, worktree: Path) -> str:

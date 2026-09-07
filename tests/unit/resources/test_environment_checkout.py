@@ -700,6 +700,20 @@ class TestCheckoutPreflight:
         with pytest.raises((InstanceConfigurationError, ConfigError)):
             env_client.environments.checkout(project_manifest, "feat/x", options=opts)
 
+    def test_checkout_accepts_non_executable_odoo_bin(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        odoo_bin = fake_python.parent / "odoo-bin"
+        odoo_bin.chmod(0o644)
+
+        plan = env_client.environments.plan_checkout(
+            project_manifest,
+            "feat/non-executable-odoo-bin",
+            options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+        )
+
+        assert plan.branch == "feat/non-executable-odoo-bin"
+
     def test_active_environment_conflict(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
