@@ -1280,17 +1280,20 @@ class OdooInstance:
                     secret_created = True
                 try:
                     if callback_override is not None:
-                        converted_result = callback_override()
                         context.action(action.step_id)
+                        converted_result = callback_override()
+                        context.complete_action(action.step_id)
                         return converted_result
-                    result = cast("ProcessResult", context.process(step.step_id))
                     context.action(action.step_id)
+                    result = cast("ProcessResult", context.process(step.step_id))
                     converted = _command_result(result, timeout, step)
-                    return (
+                    converted_result = (
                         result_converter(converted)
                         if result_converter is not None
                         else cast("T", converted)
                     )
+                    context.complete_action(action.step_id)
+                    return converted_result
                 finally:
                     if secret_created:
                         cleanup_secret_config(secret_path)

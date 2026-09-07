@@ -11,6 +11,11 @@ restore-tracking catalog — no extra HTTP needed when the mapping exists.
 
 Configure via environment variables (see .env.example). Export them or use a .env loader:
     set -a && source .env && set +a && uv run python examples/prepare_dev_instance.py
+
+Before a mutating restore, inspect its immutable plan with
+`odcli db restore <full-backup-uuid> --dry-run`. Afterward, the read-only
+maintenance views are `odcli resource list --format json` and
+`odcli resource doctor --format toon`; they do not reconcile or delete state.
 """
 
 import logging

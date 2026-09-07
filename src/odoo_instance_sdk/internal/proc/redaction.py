@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import codecs
 import re
+from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from shlex import join
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from odoo_instance_sdk.internal.sanitize import sanitize_terminal_text
 
@@ -43,6 +45,41 @@ _ASSIGNMENT = re.compile(
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE | re.DOTALL,
 )
+_ASSIGNMENT_KEY_MARKERS = (
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "cookie",
+    "jwt",
+    "oauth",
+    "api-key",
+    "api_key",
+    "api key",
+    "dsn",
+    "database-url",
+    "database_url",
+    "database url",
+    "sentry-dsn",
+    "sentry_dsn",
+    "sentry dsn",
+    "docker-auth-config",
+    "docker_auth_config",
+    "docker auth config",
+    "authorization",
+    "bearer",
+    "credential",
+    "private-key",
+    "private_key",
+    "private key",
+    "access-key",
+    "access_key",
+    "access key",
+    "auth",
+)
+_ASSIGNMENT_KEY_MARKER_ENDINGS = frozenset(marker[-1] for marker in _ASSIGNMENT_KEY_MARKERS)
+_ASSIGNMENT_KEY_MARKER_CHARACTERS = frozenset("".join(_ASSIGNMENT_KEY_MARKERS))
 _URI_USERINFO = re.compile(r"(?P<prefix>[A-Za-z][A-Za-z0-9+.-]*://)(?P<userinfo>[^/@\s]+)@")
 _SENSITIVE_ARG = re.compile(
     r"^-*(?:(?:[A-Za-z0-9]+[-_])*(?:password|passwd|pwd|secret|token|cookie|jwt|oauth|"
@@ -52,14 +89,45 @@ _SENSITIVE_ARG = re.compile(
 )
 _HEADER_OPTION = re.compile(r"^(?:-H|--headers?)$", re.IGNORECASE)
 _SENSITIVE_HEADER = re.compile(
-    r"^\s*(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*.+$",
-    re.IGNORECASE | re.DOTALL,
+    r"^\s*(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*[^\r\n]+$",
+    re.IGNORECASE | re.MULTILINE,
 )
 _BEARER_VALUE = re.compile(r"\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
 _JWT_VALUE = re.compile(
     r"(?:^|\s)eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:$|\s)",
 )
 _SAFE_ENV_KEY = re.compile(r"^(?:LANG|LC_[A-Z0-9_]+|TERM|TZ|PYTHONUNBUFFERED)$")
+_ASSIGNMENT_TOKENS = (
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "cookie",
+    "jwt",
+    "oauth",
+    "api",
+    "dsn",
+    "authorization",
+    "bearer",
+    "credential",
+    "private",
+    "access",
+    "auth",
+)
+_ASSIGNMENT_KEY_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_. -"
+)
+_ASSIGNMENT_KEY_TAIL_LIMIT = 128
+_STRUCTURAL_PENDING_LIMIT = 128
+_BEARER_PREFIX = re.compile(r"(?<![A-Za-z0-9_])(?:bearer|basic)[ \t]+$", re.IGNORECASE)
+_URI_SCHEME_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-"
+)
+_JWT_PREFIX = re.compile(r"(?:^|\s)eyJ$")
+_HEADER_ASSIGNMENT_KEY = re.compile(
+    r"(?:authorization|proxy-authorization|cookie|set-cookie)\s*$", re.IGNORECASE
+)
 
 
 def capture_sensitive_argv_indices(
@@ -200,24 +268,38 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
     for secret in secrets:
         if secret:
             text = text.replace(secret, REDACTION_MARKER)
-    if _SECRET_KEY.search(field) or field in {
-        "argv",
-        "environment",
-        "stdin",
-        "script",
-        "error",
-        "message",
-        "text",
-        "result",
-        "user_stdout",
-    }:
+    lowered = text.casefold()
+    if (
+        _SECRET_KEY.search(field)
+        or field
+        in {
+            "argv",
+            "environment",
+            "stdin",
+            "script",
+            "error",
+            "message",
+            "text",
+            "result",
+            "user_stdout",
+            "stdout",
+            "stderr",
+        }
+    ) and any(token in lowered for token in _ASSIGNMENT_TOKENS):
         text = _ASSIGNMENT.sub(r"\g<prefix>" + REDACTION_MARKER, text)
-    text = _SENSITIVE_HEADER.sub(
-        lambda match: match.group(0).split(":", 1)[0] + ": " + REDACTION_MARKER, text
-    )
-    text = _BEARER_VALUE.sub(REDACTION_MARKER, text)
-    text = _JWT_VALUE.sub(REDACTION_MARKER, text)
-    text = _URI_USERINFO.sub(r"\g<prefix>" + REDACTION_MARKER + "@", text)
+    if any(
+        header in lowered
+        for header in ("authorization:", "proxy-authorization:", "cookie:", "set-cookie:")
+    ):
+        text = _SENSITIVE_HEADER.sub(
+            lambda match: match.group(0).split(":", 1)[0] + ": " + REDACTION_MARKER, text
+        )
+    if "bearer " in lowered or "basic " in lowered:
+        text = _BEARER_VALUE.sub(REDACTION_MARKER, text)
+    if "eyj" in lowered:
+        text = _JWT_VALUE.sub(REDACTION_MARKER, text)
+    if "://" in text:
+        text = _URI_USERINFO.sub(r"\g<prefix>" + REDACTION_MARKER + "@", text)
     return sanitize_terminal_text(
         text,
         preserve_newlines=field
@@ -230,6 +312,365 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
             "user_stdout",
         },
     )
+
+
+class IncrementalStreamRedactor:
+    """Redact one output stream with bounded, single-pass detector state."""
+
+    def __init__(self, *, secrets: Iterable[str] = (), field: str) -> None:
+        self._secrets = tuple(secret for secret in secrets if secret)
+        self._field = field
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._secret_transitions: list[dict[str, int]] = [{}]
+        self._secret_failures: list[int] = [0]
+        self._secret_outputs: list[int] = [0]
+        self._secret_depths: list[int] = [0]
+        self._build_secret_automaton()
+        self._secret_state = 0
+        self._secret_candidate: deque[str] = deque()
+        self._structural_pending = ""
+        self._structural_state: Literal["bearer", "uri", "jwt"] | None = None
+        self._uri_scheme_state: Literal["scheme", "colon", "slash"] | None = None
+        self._assignment_key_tail = ""
+        self._assignment_key_sensitive = False
+        self._assignment_header = False
+        self._assignment_state: Literal["awaiting", "quoted", "unquoted", "header"] | None = None
+        self._assignment_quote: str | None = None
+
+    def feed(self, value: str | bytes) -> str:
+        text = self._decoder.decode(value, final=False) if isinstance(value, bytes) else value
+        return self._consume(self._redact_configured_secrets(text))
+
+    def flush(self) -> str:
+        text = self._decoder.decode(b"", final=True)
+        projected = self._redact_configured_secrets(text)
+        if self._secret_candidate:
+            projected += REDACTION_MARKER
+            self._secret_state = 0
+            self._secret_candidate.clear()
+        return self._consume(projected, terminal=True)
+
+    def _build_secret_automaton(self) -> None:
+        for secret in self._secrets:
+            node = 0
+            for character in secret:
+                child = self._secret_transitions[node].get(character)
+                if child is None:
+                    child = len(self._secret_transitions)
+                    self._secret_transitions[node][character] = child
+                    self._secret_transitions.append({})
+                    self._secret_failures.append(0)
+                    self._secret_outputs.append(0)
+                    self._secret_depths.append(self._secret_depths[node] + 1)
+                node = child
+            self._secret_outputs[node] = max(self._secret_outputs[node], len(secret))
+
+        pending = deque(self._secret_transitions[0].values())
+        while pending:
+            node = pending.popleft()
+            for character, child in self._secret_transitions[node].items():
+                failure = self._secret_failures[node]
+                while failure and character not in self._secret_transitions[failure]:
+                    failure = self._secret_failures[failure]
+                self._secret_failures[child] = self._secret_transitions[failure].get(character, 0)
+                self._secret_outputs[child] = max(
+                    self._secret_outputs[child],
+                    self._secret_outputs[self._secret_failures[child]],
+                )
+                pending.append(child)
+
+    def _redact_configured_secrets(self, text: str) -> str:
+        """Replace configured values with a bounded Aho-Corasick stream matcher."""
+        if not self._secrets:
+            return text
+        emitted: list[str] = []
+        for character in text:
+            state = self._secret_state
+            while state and character not in self._secret_transitions[state]:
+                state = self._secret_failures[state]
+            state = self._secret_transitions[state].get(character, 0)
+            self._secret_state = state
+            self._secret_candidate.append(character)
+            matched_length = self._secret_outputs[state]
+            if matched_length:
+                emitted.append(
+                    self._take_secret_candidate(len(self._secret_candidate) - matched_length)
+                )
+                emitted.append(REDACTION_MARKER)
+                self._secret_state = 0
+                self._secret_candidate.clear()
+                continue
+            keep_length = self._secret_depths[state]
+            if len(self._secret_candidate) > keep_length:
+                split = len(self._secret_candidate) - keep_length
+                emitted.append(self._take_secret_candidate(split))
+        return "".join(emitted)
+
+    def _take_secret_candidate(self, count: int) -> str:
+        return "".join(self._secret_candidate.popleft() for _ in range(count))
+
+    def _consume(self, text: str, *, terminal: bool = False) -> str:
+        if (
+            text
+            and not terminal
+            and self._assignment_state == "awaiting"
+            and all(character.isspace() for character in text)
+        ):
+            return self._project_stream_text(text)
+        if (
+            text
+            and not terminal
+            and self._assignment_state is None
+            and self._structural_state is None
+            and not self._structural_pending
+            and all(
+                " " <= character <= "~"
+                and character.casefold() not in _ASSIGNMENT_KEY_MARKER_CHARACTERS
+                and character not in " :=/J"
+                for character in text
+            )
+        ):
+            self._update_uri_scheme_fast_path(text)
+            return text
+        emitted: list[str] = []
+        index = 0
+        while index < len(text):
+            if self._assignment_state == "awaiting" and text[index].isspace():
+                start = index
+                while index < len(text) and text[index].isspace():
+                    index += 1
+                emitted.append(self._project_stream_text(text[start:index]))
+                continue
+            character = text[index]
+            index += 1
+            chunk = self._consume_character(character)
+            if chunk:
+                emitted.append(chunk)
+        if terminal:
+            if self._structural_state == "uri":
+                emitted.append(REDACTION_MARKER)
+            elif self._structural_state is None:
+                emitted.append(self._flush_structural_pending())
+            self._assignment_state = None
+            self._assignment_quote = None
+            self._structural_state = None
+            self._reset_assignment_key()
+        return "".join(emitted)
+
+    def _consume_character(self, character: str) -> str:
+        assignment = self._consume_assignment_character(character)
+        if assignment is not None:
+            return assignment
+        if self._track_assignment_key(character):
+            header = self._assignment_header
+            if self._structural_state is not None:
+                # Bearer/URI/JWT detection and assignment detection run over
+                # the same input.  Once an assignment marker appears inside a
+                # structural candidate, the assignment owns the remainder;
+                # the structural detector has already emitted its marker.
+                self._structural_state = None
+                self._reset_assignment_key()
+                self._assignment_header = header
+                return ""
+            pending = self._flush_structural_pending()
+            projected = self._project_stream_character(character)
+            self._reset_assignment_key()
+            self._assignment_header = header
+            return pending + projected
+        structural = self._consume_structural_character(character)
+        if structural is not None:
+            return structural
+        return self._append_structural_pending(character)
+
+    def _consume_assignment_character(self, character: str) -> str | None:
+        state = self._assignment_state
+        if state is None:
+            return None
+        if state == "quoted":
+            return self._consume_quoted_assignment_character(character)
+        if state == "unquoted":
+            return self._consume_unquoted_assignment_character(character)
+        if state == "header":
+            return self._consume_header_assignment_character(character)
+        return self._consume_awaiting_assignment_character(character)
+
+    def _consume_quoted_assignment_character(self, character: str) -> str:
+        if character == self._assignment_quote:
+            self._assignment_state = None
+            self._assignment_quote = None
+        return ""
+
+    def _consume_unquoted_assignment_character(self, character: str) -> str:
+        if character.isspace() or character in ",;":
+            self._assignment_state = None
+            return self._project_stream_character(character)
+        return ""
+
+    def _consume_header_assignment_character(self, character: str) -> str:
+        if character == "\n":
+            self._assignment_state = None
+            return character
+        if character == "\r":
+            return self._project_stream_character(character)
+        return ""
+
+    def _consume_awaiting_assignment_character(self, character: str) -> str:
+        if character.isspace():
+            return self._project_stream_character(character)
+        if character in ",;":
+            self._assignment_state = None
+            return character
+        if character in "'\"":
+            self._assignment_state = "header" if self._assignment_header else "quoted"
+            self._assignment_quote = character
+            return REDACTION_MARKER
+        self._assignment_state = "header" if self._assignment_header else "unquoted"
+        return REDACTION_MARKER
+
+    def _consume_structural_character(self, character: str) -> str | None:
+        if self._structural_state == "bearer":
+            if character.isspace() or character in ",;":
+                self._structural_state = None
+                return self._project_stream_character(character)
+            return ""
+        if self._structural_state == "uri":
+            if character == "@":
+                self._structural_state = None
+                return REDACTION_MARKER + character
+            if character.isspace():
+                self._structural_state = None
+                return self._project_stream_character(character)
+            return ""
+        if self._structural_state == "jwt":
+            if character in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-+/=":
+                return ""
+            self._structural_state = None
+            return self._project_stream_character(character)
+
+        return None
+
+    def _track_assignment_key(self, character: str) -> bool:
+        if character in ":=":
+            if not self._assignment_key_sensitive:
+                self._reset_assignment_key()
+                return False
+            self._assignment_header = (
+                _HEADER_ASSIGNMENT_KEY.search(self._assignment_key_tail) is not None
+            )
+            self._assignment_state = "awaiting"
+            return True
+        if character == "\n" or character not in _ASSIGNMENT_KEY_CHARACTERS:
+            self._reset_assignment_key()
+        else:
+            self._assignment_key_tail = (self._assignment_key_tail + character)[
+                -_ASSIGNMENT_KEY_TAIL_LIMIT:
+            ]
+        if character.casefold() in _ASSIGNMENT_KEY_MARKER_ENDINGS:
+            key_tail = self._assignment_key_tail.casefold()
+            if any(marker in key_tail for marker in _ASSIGNMENT_KEY_MARKERS):
+                self._assignment_key_sensitive = True
+        return False
+
+    @staticmethod
+    def _project_stream_character(character: str) -> str:
+        if character in " \t\n":
+            return character
+        if character == "\r":
+            return r"\x0d"
+        if " " <= character <= "~":
+            return character
+        return sanitize_terminal_text(character, preserve_newlines=True)
+
+    def _reset_assignment_key(self) -> None:
+        self._assignment_key_tail = ""
+        self._assignment_key_sensitive = False
+        self._assignment_header = False
+
+    def _append_structural_pending(self, character: str) -> str:
+        self._structural_pending += character
+        if character == "\n":
+            self._uri_scheme_state = None
+            return self._flush_structural_pending()
+        if character in " \t":
+            match = _BEARER_PREFIX.search(self._structural_pending)
+            if match is not None and match.end() == len(self._structural_pending):
+                prefix = self._structural_pending[: match.start()]
+                self._structural_pending = ""
+                self._structural_state = "bearer"
+                return self._project_stream_text(prefix) + REDACTION_MARKER
+        if self._advance_uri_scheme(character):
+            pending = self._structural_pending
+            self._structural_pending = ""
+            return self._project_stream_text(pending)
+        if character == "J":
+            match = _JWT_PREFIX.search(self._structural_pending)
+            if match is not None and match.end() == len(self._structural_pending):
+                prefix = self._structural_pending[: match.start()]
+                self._structural_pending = ""
+                self._structural_state = "jwt"
+                return self._project_stream_text(prefix) + REDACTION_MARKER
+        if len(self._structural_pending) <= _STRUCTURAL_PENDING_LIMIT:
+            return ""
+        split = len(self._structural_pending) - _STRUCTURAL_PENDING_LIMIT
+        safe = self._structural_pending[:split]
+        self._structural_pending = self._structural_pending[split:]
+        return (
+            self._project_stream_character(safe)
+            if len(safe) == 1
+            else self._project_stream_text(safe)
+        )
+
+    def _flush_structural_pending(self) -> str:
+        self._uri_scheme_state = None
+        pending = self._structural_pending
+        self._structural_pending = ""
+        return self._project_stream_text(pending)
+
+    def _advance_uri_scheme(self, character: str) -> bool:
+        state = self._uri_scheme_state
+        if state == "scheme":
+            if character in _URI_SCHEME_CHARACTERS:
+                return False
+            if character == ":":
+                self._uri_scheme_state = "colon"
+                return False
+            self._uri_scheme_state = None
+        elif state == "colon":
+            if character == "/":
+                self._uri_scheme_state = "slash"
+                return False
+            self._uri_scheme_state = None
+        elif state == "slash":
+            if character == "/":
+                self._uri_scheme_state = None
+                self._structural_state = "uri"
+                return True
+            self._uri_scheme_state = None
+        if "A" <= character <= "Z" or "a" <= character <= "z":
+            self._uri_scheme_state = "scheme"
+        return False
+
+    def _update_uri_scheme_fast_path(self, text: str) -> None:
+        """Retain only the DFA state that can cross this fast-path boundary."""
+        suffix_start = len(text)
+        while suffix_start and text[suffix_start - 1] in _URI_SCHEME_CHARACTERS:
+            suffix_start -= 1
+        if suffix_start == len(text):
+            self._uri_scheme_state = None
+            return
+        suffix = text[suffix_start:]
+        if any("A" <= character <= "Z" or "a" <= character <= "z" for character in suffix) or (
+            suffix_start == 0 and self._uri_scheme_state == "scheme"
+        ):
+            self._uri_scheme_state = "scheme"
+        else:
+            self._uri_scheme_state = None
+
+    def _project_stream_text(self, value: str) -> str:
+        return cast(
+            "str",
+            redacted_projection(value, secrets=(), field=self._field),
+        )
 
 
 def redacted_projection(

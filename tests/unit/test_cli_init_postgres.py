@@ -204,7 +204,7 @@ def test_init_retries_registration_after_catalog_failure_and_monitor_discovers_p
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog_path = tmp_path / "catalog.sqlite3"
-    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda: catalog_path)
+    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda **_kwargs: catalog_path)
     original_register = BackupCatalog._register_project
     attempts = 0
 

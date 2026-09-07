@@ -44,10 +44,13 @@ class StepEvent:
     """A sanitized lifecycle event for one captured process step."""
 
     step_id: str
-    kind: Literal["started", "stdout", "stderr", "completed", "failed"]
+    kind: Literal["started", "progress", "stdout", "stderr", "completed", "failed"]
     chunk: str | None = None
     returncode: int | None = None
     error: str | None = None
+    elapsed: float | None = None
+    completed_units: int | float | None = None
+    total_units: int | float | None = None
 
 
 type StepObserver = Callable[[StepEvent], None]
@@ -308,38 +311,46 @@ _ACTIVE_CONTEXT: ContextVar[RunContext[PrivateJsonValue] | None] = ContextVar(
 )
 
 
-class _BufferedStepObserver:
-    """Delay stream chunks until a whole captured result can be redacted."""
+class _StreamingStepObserver:
+    """Redact observer output incrementally and independently per stream."""
 
     def __init__(self, observer: StepObserver, step: PreparedStep) -> None:
+        from .redaction import IncrementalStreamRedactor, captured_secret_values
+
         self._observer = observer
         self._step = step
-        self._chunks: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        secrets = captured_secret_values(step)
+        self._redactors = {
+            stream: IncrementalStreamRedactor(secrets=secrets, field=stream)
+            for stream in ("stdout", "stderr")
+        }
 
     def __call__(self, event: StepEvent) -> None:
         if event.kind in {"stdout", "stderr"}:
             if event.chunk:
-                self._chunks[event.kind].append(event.chunk)
+                chunk = self._redactors[event.kind].feed(event.chunk)
+                if chunk:
+                    _notify(
+                        self._observer,
+                        StepEvent(step_id=self._step.step_id, kind=event.kind, chunk=chunk),
+                    )
             return
         if event.kind in {"completed", "failed"}:
-            from .redaction import captured_secret_values, redacted_projection
-
-            secrets = captured_secret_values(self._step)
             for stream in ("stdout", "stderr"):
-                chunk = "".join(self._chunks[stream])
+                chunk = self._redactors[stream].flush()
                 if not chunk:
                     continue
-                safe = cast("str", redacted_projection(chunk, secrets=secrets, field=stream))
-                self._observer(
+                _notify(
+                    self._observer,
                     StepEvent(
                         step_id=self._step.step_id,
                         kind=stream,
-                        chunk=safe,
-                    )
+                        chunk=chunk,
+                    ),
                 )
-            self._observer(event)
+            _notify(self._observer, event)
             return
-        self._observer(event)
+        _notify(self._observer, event)
 
 
 class RunContext(Generic[T]):
@@ -359,7 +370,8 @@ class RunContext(Generic[T]):
         self._results: dict[str, ProcessResultLike] = {}
         self._observer = observer
         self._observe_output = observe_output
-        self._started_actions: list[str] = []
+        self._started_actions: dict[str, float] = {}
+        self._action_progress: dict[str, tuple[int | float, int | float | None]] = {}
 
     def process(self, step_id: str) -> T:
         """Consume a captured process by identifier through the exact path."""
@@ -369,7 +381,7 @@ class RunContext(Generic[T]):
         """Consume the exact immutable captured step, never a substituted request."""
         captured = self._capture_prepared(requested)
         observer = (
-            _BufferedStepObserver(self._observer, captured) if self._observer is not None else None
+            _StreamingStepObserver(self._observer, captured) if self._observer is not None else None
         )
         result = self._executor.execute(
             captured,
@@ -392,7 +404,7 @@ class RunContext(Generic[T]):
         deadline_executor = require_deadline_executor(self._executor)
         captured = self._capture_prepared(requested)
         observer = (
-            _BufferedStepObserver(self._observer, captured) if self._observer is not None else None
+            _StreamingStepObserver(self._observer, captured) if self._observer is not None else None
         )
         result = deadline_executor.execute_with_deadline(
             captured,
@@ -417,7 +429,7 @@ class RunContext(Generic[T]):
         if not isinstance(step, PreparedStep):
             raise UnplannedStepError(step_id, reason="requested step is not a process")
         observer = (
-            _BufferedStepObserver(self._observer, step) if self._observer is not None else None
+            _StreamingStepObserver(self._observer, step) if self._observer is not None else None
         )
         return self._executor.spawn(
             step,
@@ -429,24 +441,91 @@ class RunContext(Generic[T]):
         step = self._consume(step_id)
         if not isinstance(step, PreparedAction):
             raise UnplannedStepError(step_id, reason="requested step is not an action")
-        _notify(self._observer, StepEvent(step_id=step.step_id, kind="started"))
-        self._started_actions.append(step.step_id)
+        started = time.monotonic()
+        _notify(self._observer, StepEvent(step_id=step.step_id, kind="started", elapsed=0.0))
+        self._started_actions[step.step_id] = started
         return step
 
+    def progress(
+        self,
+        step_id: str,
+        completed_units: float,
+        total_units: float | None = None,
+    ) -> None:
+        """Report reliable work units for a started logical action."""
+        started = self._started_actions.get(step_id)
+        if started is None:
+            raise UnplannedStepError(step_id, reason="action has not started")
+        if isinstance(completed_units, bool) or completed_units < 0:
+            raise ValueError("completed_units must be a non-negative number")
+        if total_units is not None and (
+            isinstance(total_units, bool) or total_units < 0 or total_units < completed_units
+        ):
+            raise ValueError("total_units must be greater than or equal to completed_units")
+        self._action_progress[step_id] = (completed_units, total_units)
+        _notify(
+            self._observer,
+            StepEvent(
+                step_id=step_id,
+                kind="progress",
+                elapsed=max(0.0, time.monotonic() - started),
+                completed_units=completed_units,
+                total_units=total_units,
+            ),
+        )
+
+    def complete_action(self, step_id: str) -> None:
+        """Complete one action after its effect and postcondition succeed."""
+        started = self._started_actions.pop(step_id, None)
+        if started is None:
+            raise UnplannedStepError(step_id, reason="action has not started")
+        completed_units, total_units = self._action_progress.pop(step_id, (None, None))
+        _notify(
+            self._observer,
+            StepEvent(
+                step_id=step_id,
+                kind="completed",
+                returncode=0,
+                elapsed=max(0.0, time.monotonic() - started),
+                completed_units=completed_units,
+                total_units=total_units,
+            ),
+        )
+
     def finish_actions(self) -> None:
-        """Complete all logical actions after their guarded callback succeeds."""
-        for step_id in self._started_actions:
-            _notify(self._observer, StepEvent(step_id=step_id, kind="completed", returncode=0))
-        self._started_actions.clear()
+        """Complete any legacy actions after their guarded callback succeeds."""
+        for step_id in tuple(self._started_actions):
+            self.complete_action(step_id)
 
     def fail_actions(self, error: BaseException) -> None:
         """Close logical actions with a sanitized failure when execution aborts."""
+        for step_id in tuple(self._started_actions):
+            self.fail_action(step_id, error)
+
+    def fail_action(self, step_id: str, error: BaseException) -> bool:
+        """Close one started action after a nested effect fails.
+
+        Nested prepared commands may recover a failed optional probe and return
+        a partial result.  They must close only the child action that failed;
+        the enclosing action remains eligible to complete after its fallback
+        projection succeeds.
+        """
+        started = self._started_actions.pop(step_id, None)
+        if started is None:
+            return False
         from odoo_instance_sdk.internal.sanitize import sanitize_event_message
 
-        message = sanitize_event_message(str(error))
-        for step_id in self._started_actions:
-            _notify(self._observer, StepEvent(step_id=step_id, kind="failed", error=message))
-        self._started_actions.clear()
+        self._action_progress.pop(step_id, None)
+        _notify(
+            self._observer,
+            StepEvent(
+                step_id=step_id,
+                kind="failed",
+                error=sanitize_event_message(str(error)) or "interrupted",
+                elapsed=max(0.0, time.monotonic() - started),
+            ),
+        )
+        return True
 
     def skip(self, step_id: str) -> None:
         """Consume a captured step when its guarded effect is intentionally omitted.

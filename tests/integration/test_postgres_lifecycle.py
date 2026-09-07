@@ -19,6 +19,7 @@ import pytest
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.internal.postgres_compose import docker_ready
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from tests.integration.postgres_cleanup import cleanup_postgres_project
 
 pytestmark = pytest.mark.integration
 
@@ -38,8 +39,16 @@ def _free_loopback_port() -> int:
 
 
 @pytest.mark.serial
-def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
+def test_init_up_preflight_stop_preserves_volume(
+    tmp_path: Path,
+    docker_visible_postgres_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _skip_if_no_docker()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
+    )
     # init a git repo so repo_key is stable.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=tmp_path, check=True)
@@ -75,6 +84,8 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
 
     cluster = PostgresCluster.from_project(tmp_path)
     assert cluster.owned is True
+    compose_file = cluster.compose_file
+    volume_name = f"pgdata_{cluster.to_diagnostic_dict()['project_id']}"
     primary_failure: BaseException | None = None
     try:
         digest = cluster.resolve_image_digest(timeout=45.0)
@@ -123,7 +134,6 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         assert stopped_state.value == "stopped"
 
         # Assert the named volume still exists after stop (preserved, not down -v).
-        volume_name = f"pgdata_{cluster.to_diagnostic_dict()['project_id']}"
         vol_inspect = subprocess.run(
             ["docker", "volume", "inspect", volume_name],
             capture_output=True,
@@ -142,27 +152,9 @@ def test_init_up_preflight_stop_preserves_volume(tmp_path: Path) -> None:
         primary_failure = exc
         raise
     finally:
-        # Clean up this exact disposable integration project and assert Docker did it.
-        cleanup = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "--project-name",
-                cluster.compose_project_name,
-                "-f",
-                str(cluster.compose_file),
-                "down",
-                "--volumes",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
+        cleanup_postgres_project(
+            compose_file=compose_file,
+            compose_project_name=cluster.compose_project_name,
+            volume_name=volume_name,
+            primary_failure=primary_failure,
         )
-        if primary_failure is None:
-            assert cleanup.returncode == 0, cleanup.stderr
-            assert (
-                subprocess.run(
-                    ["docker", "volume", "inspect", volume_name], capture_output=True, check=False
-                ).returncode
-                != 0
-            )

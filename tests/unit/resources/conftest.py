@@ -126,13 +126,18 @@ def env_client(
         "odoo_instance_sdk.internal.paths.get_environments_root",
         lambda **_kwargs: data_root / "environments",
     )
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_state_root", lambda: state_root)
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.paths.get_locks_dir", lambda: state_root / "locks"
+        "odoo_instance_sdk.internal.paths.get_state_root", lambda **_kwargs: state_root
     )
-    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: cache_root)
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda: data_root / "catalog.sqlite3"
+        "odoo_instance_sdk.internal.paths.get_locks_dir", lambda **_kwargs: state_root / "locks"
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: cache_root
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        lambda **_kwargs: data_root / "catalog.sqlite3",
     )
     worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
     port_start = 8069 + (int(worker) if worker.isdigit() else 0) * 31

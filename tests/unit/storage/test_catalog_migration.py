@@ -16,21 +16,21 @@ CATALOG_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 NEXT_CATALOG_SCHEMA_VERSION = CATALOG_SCHEMA_VERSION + 1
 # These are the pre-change upgrade states represented by the migration tests;
 # keeping the list explicit makes a missing intermediate fixture fail loudly.
-MIGRATION_FIXTURE_VERSIONS = (5, 6, 7, 8, 9, 10, 11)
+MIGRATION_FIXTURE_VERSIONS = (5, 6, 7, 8, 9, 10, 11, 12, 13)
 
 
 def test_next_catalog_migration_version_and_fixtures_are_sequential() -> None:
-    assert CATALOG_SCHEMA_VERSION == 11
-    assert NEXT_CATALOG_SCHEMA_VERSION == 12
+    assert CATALOG_SCHEMA_VERSION == 13
+    assert NEXT_CATALOG_SCHEMA_VERSION == 14
     contiguous_versions = tuple(range(MIGRATION_FIXTURE_VERSIONS[0], CATALOG_SCHEMA_VERSION + 1))
     assert contiguous_versions == MIGRATION_FIXTURE_VERSIONS
 
 
-def test_fresh_install_creates_v11_directly(tmp_path: Path) -> None:
+def test_fresh_install_creates_v13_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 11
+    assert version == 13
     backup_columns = {r[1] for r in catalog._conn.execute("PRAGMA table_info(backups)").fetchall()}
     assert "source_git_branch" in backup_columns
     tables = {
@@ -43,7 +43,117 @@ def test_fresh_install_creates_v11_directly(tmp_path: Path) -> None:
     assert "environment_events" in tables
     assert "runtime" in tables
     assert "projects" in tables
+    indexes = {r[1] for r in catalog._conn.execute("PRAGMA index_list(backups)").fetchall()}
+    assert "backups_point_order_idx" in indexes
     catalog.close()
+
+
+def test_v13_claim_and_nullable_restore_provenance_are_transactional(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    claim = catalog._ensure_postgres_cluster_pending(
+        "project-a", "odcli_pg_project-a", "pgdata_project-a"
+    )
+    assert claim.state == "pending"
+    assert (
+        catalog._ensure_postgres_cluster_pending(
+            "project-a", "odcli_pg_project-a", "pgdata_project-a"
+        ).cluster_id
+        == claim.cluster_id
+    )
+
+    with pytest.raises(BackupCatalogError, match="active cluster claim"):
+        catalog.record_restore(
+            "localhost", 5432, "pending-db", str(uuid.uuid4()), cluster_id=claim.cluster_id
+        )
+
+    active = catalog._activate_postgres_cluster(
+        claim.cluster_id, "project-a", "odcli_pg_project-a", "pgdata_project-a"
+    )
+    assert active.state == "active"
+    backup_id = str(uuid.uuid4())
+    path = tmp_path / "backup.zip"
+    path.write_bytes(b"archive")
+    catalog.start_download(backup_id, "https://example.test", "source", "zip", False, path)
+    catalog.success_download(backup_id, "backup.zip", len(b"archive"), "hash")
+    catalog.record_restore(
+        "localhost",
+        5432,
+        "managed-db",
+        backup_id,
+        cluster_id=active.cluster_id,
+        data_directory=tmp_path / "data",
+    )
+    rows = catalog._conn.execute(
+        "SELECT cluster_id, data_directory FROM restores UNION ALL "
+        "SELECT cluster_id, data_directory FROM database_events WHERE event_type='restored'"
+    ).fetchall()
+    assert len(rows) == 2
+    assert all(row["cluster_id"] == str(active.cluster_id) for row in rows)
+    assert all(row["data_directory"] == str(tmp_path / "data") for row in rows)
+    catalog.close()
+
+
+def test_v13_migration_rolls_back_on_claim_index_conflict(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=db)
+    catalog._conn.execute("DROP INDEX postgres_clusters_project_idx")
+    catalog._conn.execute("PRAGMA user_version = 12")
+    catalog._conn.execute("CREATE TABLE postgres_clusters_project_idx (marker INTEGER)")
+    catalog._conn.commit()
+    catalog.close()
+
+    with pytest.raises(BackupCatalogError):
+        BackupCatalog(db_path=db)
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert (
+        conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='postgres_clusters_project_idx'"
+        ).fetchone()[0]
+        == "table"
+    )
+    conn.execute("DROP TABLE postgres_clusters_project_idx")
+    conn.commit()
+    conn.close()
+    reopened = BackupCatalog(db_path=db)
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    reopened.close()
+
+
+def test_v12_backup_order_index_migration_rolls_back_on_conflict(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=db)
+    catalog._conn.execute("DROP INDEX backups_point_order_idx")
+    catalog._conn.execute("PRAGMA user_version = 11")
+    catalog._conn.execute("CREATE TABLE backups_point_order_idx (marker INTEGER)")
+    catalog._conn.commit()
+    catalog.close()
+
+    with pytest.raises(BackupCatalogError):
+        BackupCatalog(db_path=db)
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert (
+        conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='backups_point_order_idx'"
+        ).fetchone()[0]
+        == "table"
+    )
+    conn.execute("DROP TABLE backups_point_order_idx")
+    conn.commit()
+    conn.close()
+
+    reopened = BackupCatalog(db_path=db)
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert (
+        reopened._conn.execute(
+            "SELECT type FROM sqlite_master WHERE name='backups_point_order_idx'"
+        ).fetchone()[0]
+        == "index"
+    )
+    reopened.close()
 
 
 def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_path: Path) -> None:
@@ -138,7 +248,7 @@ def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_
     conn.close()
 
     catalog = BackupCatalog(db_path=db)
-    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == 13
     assert (
         catalog._conn.execute(
             "SELECT COUNT(*) FROM backup_events WHERE backup_id=?", (backup_id,)
@@ -165,7 +275,7 @@ def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_
     provenance = reopened.latest_restore_provenance("localhost", 5432, "restored")
     assert provenance is not None
     assert provenance.source_git_branch is None
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 13
     reopened.close()
 
 
@@ -240,12 +350,12 @@ def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None
     schema = catalog._conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='environment_copy_journal'"
     ).fetchone()[0]
-    assert version == 11
+    assert version == 13
     assert "restore_pending" in schema
     catalog.close()
 
 
-def test_v8_catalog_upgrades_to_v11_environment_runtime_and_branch_column(tmp_path: Path) -> None:
+def test_v8_catalog_upgrades_to_v13_environment_runtime_and_branch_column(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 8")
@@ -269,7 +379,7 @@ def test_v8_catalog_upgrades_to_v11_environment_runtime_and_branch_column(tmp_pa
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert version == 11
+    assert version == 13
     assert "runtime" in tables
     columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(backups)")}
     assert "source_git_branch" in columns
@@ -396,7 +506,7 @@ def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
         (env_id,),
     ).fetchone()
 
-    assert version == 11
+    assert version == 13
     assert "http_port" not in columns
     assert "http_interface" not in columns
     assert "environments_one_active_branch" in indexes

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from collections.abc import Callable
 from enum import StrEnum
 from typing import (
@@ -32,7 +33,7 @@ from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_te
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.internal.proc import StepObserver
+    from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
 
 
 def __getattr__(name: str) -> TypeAliasType:
@@ -51,6 +52,24 @@ class OutputMode(StrEnum):
     RICH = "rich"
     JSON = "json"
     TOON = "toon"
+
+
+_RICH_COMPLETION_COMMANDS = frozenset(
+    {
+        "env.checkout",
+        "env.sync",
+        "test",
+        "module.test",
+        "module.update",
+        "exec",
+        "eval",
+        "translations.export",
+        "db.refresh",
+        "db.restore",
+        "postgres.up",
+        "postgres.approve-image",
+    }
+)
 
 
 type JsonObject = dict[str, JsonValue]
@@ -192,6 +211,10 @@ def _failure_message(message: DiagnosticValue, context: JsonObject) -> str:
         details.append(f"retained backup {context['retained_backup_id']}")
     if context.get("retained_database") is not None:
         details.append(f"retained database {context['retained_database']}")
+    if context.get("database_confirmed") is not None:
+        details.append(f"database confirmed {context['database_confirmed']}")
+    if context.get("default_switch_confirmed") is not None:
+        details.append(f"default switch confirmed {context['default_switch_confirmed']}")
     sessions = context.get("active_sessions")
     if isinstance(sessions, (list, tuple)) and sessions:
         details.append(
@@ -336,15 +359,143 @@ def emit(
     elif mode is OutputMode.TOON:
         click.echo(encode(payload))
     elif document.ok:
-        rendered = (rich or _default_rich_projection)(document)
+        rendered = _rich_rendered(document, rich)
         if rendered:
             rich_print(rendered, preserve_newlines=True)
     else:
-        rendered = (rich or _default_rich_projection)(document)
+        rendered = _rich_rendered(document, rich)
         click.echo(sanitize_diagnostic(rendered), err=True)
     if diagnostic:
         click.echo(sanitize_diagnostic(diagnostic), err=True)
     return 0 if document.ok else 1
+
+
+def _rich_rendered(
+    document: OutputDocument,
+    projection: Callable[[OutputDocument], str] | None,
+) -> str:
+    """Add the one common completion line to a successful Rich document."""
+    rendered = (projection or _default_rich_projection)(document)
+    if not document.ok or document.dry_run or document.command not in _RICH_COMPLETION_COMMANDS:
+        return rendered
+    completion = _rich_success_completion(document)
+    if not completion:
+        return rendered
+    return f"{rendered}\n{completion}" if rendered else completion
+
+
+def _rich_success_completion(document: OutputDocument) -> str:
+    """Project only applicable public summary fields for a Rich success."""
+    if not document.ok or document.dry_run:
+        return ""
+    result = document.result
+    if not isinstance(result, dict):
+        result = {}
+
+    aliases = {
+        "database": ("database", "restored_database", "target_database"),
+        "url": ("url", "http_url"),
+        "backup": ("backup", "backup_id", "backup_uuid"),
+        "modules": ("modules",),
+    }
+    fields = ["status=success"]
+    for label, candidates in aliases.items():
+        value = next(
+            (result[candidate] for candidate in candidates if candidate in result),
+            None,
+        )
+        if value in (None, "", (), [], {}):
+            continue
+        if isinstance(value, (dict, list, tuple)):
+            rendered_value = json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        else:
+            rendered_value = str(value)
+        fields.append(f"{label}={rendered_value}")
+
+    if document.command == "exec":
+        transaction = result.get("transaction")
+        if transaction is None:
+            commit = result.get("commit")
+            transaction = "commit" if commit is True else "rollback" if commit is False else None
+        if transaction in {"commit", "rollback"}:
+            fields.append(f"transaction={transaction}")
+    return sanitize_terminal_text(" ".join(fields), preserve_newlines=True)
+
+
+def run_rich_bounded(  # noqa: C901
+    run: Callable[[StepObserver], _ResultT],
+    *,
+    show_command_output: bool = False,
+    console: Console | None = None,
+    include_elapsed: bool = True,
+) -> _ResultT:
+    """Run one bounded command with the single shared lifecycle observer.
+
+    Redirected Rich output is deliberately sparse and deterministic.  A TTY
+    gets the same lines through one transient ``Live`` view, so renderer
+    cleanup cannot alter the command's result or exception semantics.
+    """
+    console = console or Console()
+    lines: list[str] = []
+    started: dict[str, float] = {}
+    update: Callable[[str], None] | None = None
+
+    def render(event: StepEvent) -> None:  # noqa: C901
+        now = time.monotonic()
+        if event.kind in {"stdout", "stderr"} and not show_command_output:
+            return
+        if event.kind == "started":
+            started[event.step_id] = now
+        elapsed = event.elapsed
+        if elapsed is None and event.step_id in started:
+            elapsed = max(0.0, now - started[event.step_id])
+        parts = [f"[{event.step_id}] {event.kind}"]
+        if event.chunk and event.kind in {"stdout", "stderr"}:
+            parts[-1] += f": {event.chunk}"
+        if event.completed_units is not None:
+            units = str(event.completed_units)
+            if event.total_units is not None:
+                units += f"/{event.total_units}"
+                if event.total_units > 0:
+                    units += f" ({event.completed_units / event.total_units:.0%})"
+            parts.append(f"units={units}")
+        if event.returncode is not None and event.kind not in {"stdout", "stderr"}:
+            parts.append(f"(exit {event.returncode})")
+        if (
+            include_elapsed
+            and elapsed is not None
+            and event.kind in {"started", "progress", "completed", "failed"}
+        ):
+            parts.append(f"elapsed={elapsed:.3f}s")
+        if event.error:
+            parts.append(f"error={event.error}")
+        line = sanitize_terminal_text(" ".join(parts), preserve_newlines=True)
+        rendered = line.splitlines() or [line]
+        lines.extend(rendered)
+        if update is not None:
+            update("\n".join(lines))
+        else:
+            for item in rendered:
+                rich_print(item)
+
+    observer = render
+    if console.is_terminal:
+        from rich.live import Live
+
+        with Live("", console=console, transient=True) as live:
+
+            def update_live(value: str) -> None:
+                live.update(value, refresh=True)
+
+            update = update_live
+            return run(observer)
+    return run(observer)
 
 
 def success_document(
@@ -419,7 +570,9 @@ def action_command(
 
     def callback(context: RunContext[_ResultT]) -> _ResultT:
         context.action(step_id)
-        return operation()
+        result = operation()
+        context.complete_action(step_id)
+        return result
 
     return Command.create(
         ExecutionPlan(
@@ -437,7 +590,7 @@ def action_command(
     )
 
 
-def run_or_preview(
+def run_or_preview(  # noqa: C901
     build_command: Callable[[], _InspectableCommand[_ResultT]],
     *,
     command_name: str,
@@ -452,6 +605,8 @@ def run_or_preview(
     emit_normal: bool = True,
     observer: StepObserver | None = None,
     observe_output: bool = False,
+    progress: bool = False,
+    on_interrupt: Callable[[KeyboardInterrupt], None] | None = None,
 ) -> tuple[int, _ResultT | None]:
     """Build one command, then either inspect it or run that same instance.
 
@@ -476,10 +631,32 @@ def run_or_preview(
         )
     if confirm is not None:
         confirm()
-    if observer is None:
-        value = command.run()
+
+    def execute(active_observer: StepObserver | None) -> _ResultT:
+        if active_observer is None:
+            return command.run()
+        return command.run(observer=active_observer, observe_output=observe_output)
+
+    if progress and observer is None and mode is OutputMode.RICH:
+        try:
+            value = run_rich_bounded(
+                execute,
+                show_command_output=observe_output,
+            )
+        except KeyboardInterrupt as exc:
+            if on_interrupt is not None:
+                on_interrupt(exc)
+            raise click.exceptions.Exit(130) from exc
     else:
-        value = command.run(observer=observer, observe_output=observe_output)
+        try:
+            value = execute(observer)
+        except KeyboardInterrupt as exc:
+            if on_interrupt is not None:
+                on_interrupt(exc)
+                raise click.exceptions.Exit(130) from exc
+            if progress:
+                raise click.exceptions.Exit(130) from exc
+            raise
     if not emit_normal:
         return 0, value
     payload = result(value) if result is not None else {}
@@ -636,6 +813,7 @@ __all__ = [
     "resolve_output_mode",
     "rich_print",
     "run_or_preview",
+    "run_rich_bounded",
     "sanitize_diagnostic",
     "sanitize_terminal_text",
     "success_document",

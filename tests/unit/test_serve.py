@@ -206,6 +206,29 @@ def test_snapshot_ok() -> None:
 
 
 @pytest.mark.dashboard
+def test_snapshot_initializes_a_fresh_default_catalog_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The default monitor remains usable before any mutable root exists."""
+    data_root = tmp_path / "xdg-data"
+    from odoo_instance_sdk.internal import paths
+
+    def get_data_root(*, ensure_exists: bool = True) -> Path:
+        if ensure_exists:
+            data_root.mkdir(parents=True, exist_ok=True)
+        return data_root
+
+    monkeypatch.setattr(paths, "get_data_root", get_data_root)
+    assert not data_root.exists()
+
+    with _client(headless=True) as client:
+        response = client.get("/api/v1/snapshot")
+
+    assert response.status_code == 200, response.text
+    assert data_root.is_dir()
+
+
+@pytest.mark.dashboard
 def test_snapshot_reuses_injected_monitor_and_forwards_filter() -> None:
     class Monitor:
         def __init__(self) -> None:

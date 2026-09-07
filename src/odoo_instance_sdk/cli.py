@@ -13,6 +13,10 @@ else:
     import rich_click as click
 
 from odoo_instance_sdk.commands import context as cli_context
+from odoo_instance_sdk.commands.backup import (
+    backup_group,
+    configure_catalog_path_provider,
+)
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.env import env_group
@@ -22,8 +26,10 @@ from odoo_instance_sdk.commands.output import (
     OutputMode,
     action_command,
     command_options,
+    emit,
     emit_json_envelope,
     fail,
+    failure_document,
     model_to_dict,
     output_options,
     resolve_command_options,
@@ -31,6 +37,7 @@ from odoo_instance_sdk.commands.output import (
     rich_print,
     run_or_preview,
     sanitize_diagnostic,
+    success_document,
 )
 from odoo_instance_sdk.commands.pg import (
     postgres_group as _postgres_group,
@@ -40,6 +47,12 @@ from odoo_instance_sdk.commands.pg import (
 )
 from odoo_instance_sdk.commands.pg import (
     register_database_commands,
+)
+from odoo_instance_sdk.commands.resource import (
+    configure_catalog_path_provider as configure_resource_catalog_path_provider,
+)
+from odoo_instance_sdk.commands.resource import (
+    resource_group,
 )
 from odoo_instance_sdk.commands.test import (
     project_execution_result,
@@ -54,6 +67,7 @@ from odoo_instance_sdk.exceptions import (
     VscodeImportError,
 )
 from odoo_instance_sdk.internal.automation import (
+    DepsVerifyResult,
     ModuleRecord,
     TranslationExportResult,
     eval_expression_command,
@@ -162,33 +176,53 @@ def _shell_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
     if len(user_stdout) > 32768:
         user_stdout = user_stdout[:32768]
         truncated = True
-    return {
+    projected: dict[str, JsonValue] = {
         "result": redacted_projection(payload.get("result"), field="result"),
         "user_stdout": redacted_projection(user_stdout, field="user_stdout"),
         "user_error": redacted_projection(payload.get("user_error"), field="error"),
         "truncated": truncated,
     }
+    if "transaction" in payload:
+        projected["transaction"] = redacted_projection(
+            payload.get("transaction"), field="transaction"
+        )
+    if "finalization_error" in payload:
+        projected["finalization_error"] = redacted_projection(
+            payload.get("finalization_error"), field="finalization_error"
+        )
+    return projected
+
+
+def _valid_shell_error(value: JsonValue) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("type"), str)
+        and isinstance(value.get("message"), str)
+    )
 
 
 def _framed_shell_error(payload: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
-    """Return details only for a complete, valid framed user-code error."""
+    """Return details only for a complete, valid framed shell failure."""
     if payload is None:
         return None
     user_error = payload.get("user_error")
+    finalization_error = payload.get("finalization_error")
+    has_user_error = _valid_shell_error(user_error)
+    has_finalization_error = _valid_shell_error(finalization_error)
     if (
         "result" not in payload
-        or payload["result"] is not None
         or not isinstance(payload.get("user_stdout"), str)
         or not isinstance(payload.get("truncated"), bool)
-        or not isinstance(user_error, dict)
-        or not isinstance(user_error.get("type"), str)
-        or not isinstance(user_error.get("message"), str)
+        or (user_error is not None and not _valid_shell_error(user_error))
+        or (finalization_error is not None and not _valid_shell_error(finalization_error))
+        or (not has_user_error and not has_finalization_error)
+        # A user-code failure never exposes a partially assigned result.  A
+        # finalization failure follows a successful body, so its result is
+        # retained as useful diagnostic context.
+        or (has_user_error and payload["result"] is not None)
     ):
         return None
-    details = _shell_payload(payload)
-    if not isinstance(details["user_error"], dict):
-        return None
-    return details
+    return _shell_payload(payload)
 
 
 def _shell_failure(
@@ -196,15 +230,25 @@ def _shell_failure(
     command: str,
     payload: dict[str, JsonValue] | None,
 ) -> _ShellCommandFailure:
-    """Classify a non-zero shell result as user-code or startup failure."""
+    """Classify a non-zero shell result as user or finalization failure."""
     details = _framed_shell_error(payload)
     if details is not None:
-        error = details["user_error"]
-        assert isinstance(error, dict)
-        error_type = error.get("type", "UserCodeError")
-        error_message = error.get("message", "user code failed")
+        user_error = details.get("user_error")
+        finalization_error = details.get("finalization_error")
+        if isinstance(user_error, dict):
+            error_type = user_error.get("type", "UserCodeError")
+            error_message = user_error.get("message", "user code failed")
+            error_code = f"{command}_user_code_failed"
+        elif isinstance(finalization_error, dict):
+            error_type = finalization_error.get("type", "TransactionFinalizationError")
+            error_message = finalization_error.get("message", "transaction finalization failed")
+            error_code = f"{command}_transaction_finalization_failed"
+        else:
+            return _ShellCommandFailure(
+                f"{command}_startup_failed", f"shell exited {value.returncode}"
+            )
         return _ShellCommandFailure(
-            f"{command}_user_code_failed",
+            error_code,
             f"{error_type}: {error_message}",
             details=details,
         )
@@ -253,6 +297,7 @@ def _run_shell_command(
         dry_run=dry_run,
         result=checked_result,
         rich=_rich_shell_projection,
+        progress=True,
     )
     return status
 
@@ -272,6 +317,7 @@ def _rich_shell_projection(document: OutputDocument) -> str:
     result = details.get("result")
     output = details.get("user_stdout", "")
     error = details.get("user_error")
+    finalization_error = details.get("finalization_error")
     truncated = details.get("truncated") is True
     lines = [f"Result: {json.dumps(result, ensure_ascii=False, default=str)}"]
     if isinstance(output, str) and output:
@@ -285,6 +331,10 @@ def _rich_shell_projection(document: OutputDocument) -> str:
         source = error.get("source")
         if isinstance(source, dict) and source.get("text"):
             lines.append(f"Source: {source.get('text')}")
+    elif isinstance(finalization_error, dict):
+        error_type = finalization_error.get("type", "TransactionFinalizationError")
+        message = finalization_error.get("message", "transaction finalization failed")
+        lines.append(f"Finalization error: {error_type}: {message}")
     return "\n".join(lines)
 
 
@@ -339,7 +389,8 @@ def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject
             "cli": [
                 {"name": "Project", "commands": ["init", "doctor"]},
                 {"name": "Runtime", "commands": ["run", "shell", "logs", "monitor"]},
-                {"name": "Data", "commands": ["env", "db", "postgres", "psql"]},
+                {"name": "Data", "commands": ["env", "backup", "db", "postgres", "psql"]},
+                {"name": "Maintenance", "commands": ["resource"]},
                 {
                     "name": "Development",
                     "commands": [
@@ -375,9 +426,19 @@ def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> No
 cli.add_command(env_group, name="env")
 cli.add_command(test_command, name="test")
 cli.add_command(db_group, name="db")
+cli.add_command(backup_group, name="backup")
 cli.add_command(_postgres_group, name="postgres")
 register_database_commands(db_group)
 cli.add_command(_psql, name="psql")
+cli.add_command(resource_group, name="resource")
+
+
+def _backup_catalog_path() -> Path:
+    return get_catalog_path()
+
+
+configure_catalog_path_provider(_backup_catalog_path)
+configure_resource_catalog_path_provider(lambda: get_catalog_path(ensure_exists=False))
 
 
 class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]
@@ -1151,6 +1212,7 @@ def module_update(
                     ],
                 ]
             ),
+            progress=True,
         )
     except Exception as exc:
         fail(output_mode, "module.update", exc)
@@ -1208,6 +1270,7 @@ def module_test(
                 else {}
             ),
             rich=lambda document: rich_test_result(cast("dict[str, JsonValue]", document.result)),
+            progress=True,
         )
     except SystemExit:
         raise
@@ -1269,6 +1332,7 @@ def translations_export(
                     document.result.get("exports", []) if isinstance(document.result, dict) else [],
                 )
             ),
+            progress=True,
         )
     except SystemExit:
         raise
@@ -1304,35 +1368,75 @@ def deps_verify(
             if is_uv_python_selector(project_python)
             else runtime_context.python_path()
         )
+        deferred_runtime = getattr(runtime_context.instance.config, "deferred_runtime", None)
+        uv_executable = getattr(deferred_runtime, "uv_executable", "uv")
         status, _result = run_or_preview(
             lambda: verify_deps_command(
                 recorded_python=recorded_python,
                 worktree_root=runtime_context.worktree_path(),
+                uv_executable=uv_executable,
             ),
             command_name="deps.verify",
             mode=output_mode,
             dry_run=dry_run,
-            result=lambda value: {
-                "distributions": cast("list[JsonValue]", list(value.distributions))
-                if value is not None
-                else [],
-                "missing_imports": cast("list[JsonValue]", list(value.missing_imports))
-                if value is not None
-                else [],
-                "pip_check_ok": value.pip_check_ok if value is not None else True,
-                "pip_check_output": value.pip_check_output if value is not None else "",
-            },
-            rich=lambda document: (
-                "pip check: ok"
-                if isinstance(document.result, dict) and document.result.get("pip_check_ok")
-                else "pip check: issues"
-            ),
+            emit_normal=False,
         )
+        if dry_run:
+            sys.exit(status)
+        if _result is None:
+            fail(output_mode, "deps.verify", "dependency verification returned no result")
+        result_payload = _deps_verify_payload(_result)
+        if _result.ok:
+            document = success_document(command="deps.verify", result=result_payload)
+        else:
+            document = failure_document(
+                command="deps.verify",
+                error_code="deps_verify_failed",
+                error_message="Dependency verification failed",
+                error_details=result_payload,
+            )
+        status = emit(document, output_mode, rich=_rich_deps_projection)
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "deps.verify", e)
-    sys.exit(1 if _result is not None and getattr(_result, "missing_imports", []) else status)
+    sys.exit(status)
+
+
+def _deps_verify_payload(result: DepsVerifyResult) -> JsonObject:
+    return {
+        "distributions": [
+            {
+                "detail": sanitize_diagnostic(str(item.get("detail", ""))),
+            }
+            for item in result.distributions
+        ],
+        "missing_imports": [
+            {
+                "module": sanitize_diagnostic(str(item.get("module", ""))),
+                "import": sanitize_diagnostic(str(item.get("import", ""))),
+            }
+            for item in result.missing_imports
+        ],
+        "pip_check_ok": result.pip_check_ok,
+        "pip_check_output": sanitize_diagnostic(result.pip_check_output),
+    }
+
+
+def _rich_deps_projection(document: OutputDocument) -> str:
+    if document.ok:
+        return "pip check: ok"
+    details = document.error.details if document.error is not None else None
+    if not isinstance(details, dict):
+        return "pip check: issues"
+    lines = ["pip check: issues"]
+    for item in cast("list[JsonValue]", details.get("distributions", [])):
+        if isinstance(item, dict) and isinstance(item.get("detail"), str):
+            lines.append(f"distribution: {item['detail']}")
+    for item in cast("list[JsonValue]", details.get("missing_imports", [])):
+        if isinstance(item, dict):
+            lines.append(f"missing import: {item.get('module')} ({item.get('import')})")
+    return "\n".join(lines)
 
 
 @cli.group("vscode", help="Generate VS Code launch configuration.")

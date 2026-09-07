@@ -6,7 +6,6 @@ import os
 import shutil
 import socket
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -16,10 +15,11 @@ from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.exceptions import PostgresClusterStartError
 from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
-from odoo_instance_sdk.internal.postgres_compose import docker_ready
+from odoo_instance_sdk.internal.postgres_compose import compose_volume_name, docker_ready
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from tests.integration.postgres_cleanup import cleanup_postgres_project
 
 pytestmark = pytest.mark.integration
 
@@ -102,6 +102,17 @@ def _session_process(
     )
 
 
+def _terminate_waiter(waiter: subprocess.Popen[str]) -> None:
+    """Bound the disposable psql teardown, escalating past SIGTERM."""
+    if waiter.poll() is None:
+        waiter.terminate()
+        try:
+            waiter.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            waiter.kill()
+            waiter.wait(timeout=10)
+
+
 def _assert_absent(psql: str, *, port: int, password: str, database: str) -> None:
     result = _psql(
         psql,
@@ -120,8 +131,10 @@ def _assert_absent(psql: str, *, port: int, password: str, database: str) -> Non
 )
 @pytest.mark.serial
 @pytest.mark.timeout(240)
-def test_disposable_database_drop_success_and_forced_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_disposable_database_drop_success_and_forced_session(  # noqa: C901
+    tmp_path: Path,
+    docker_visible_postgres_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ready, diagnostic = docker_ready(timeout=3.0)
     if not ready:
@@ -143,14 +156,20 @@ def test_disposable_database_drop_success_and_forced_session(
         'user = "odoo"\n',
         encoding="utf-8",
     )
-    runtime_root = Path(tempfile.mkdtemp(prefix=".odcli-db-drop-e2e-", dir=Path.cwd()))
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
-        lambda _project_id: runtime_root,
+        lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
     )
     cluster = PostgresCluster.from_project(tmp_path)
+    volume_name = compose_volume_name(cluster._project_id)
+    compose_file = cluster.compose_file
+    primary_failure: BaseException | None = None
     waiter: subprocess.Popen[str] | None = None
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        lambda **_kwargs: catalog.db_path,
+    )
     try:
         try:
             digest = cluster.resolve_image_digest(timeout=120.0)
@@ -159,6 +178,34 @@ def test_disposable_database_drop_success_and_forced_session(
         except PostgresClusterStartError as exc:
             pytest.skip(f"disposable PostgreSQL cluster setup blocked: {exc}")
 
+        claim = catalog._ensure_postgres_cluster_pending(
+            cluster._project_id,
+            cluster.compose_project_name,
+            compose_volume_name(cluster._project_id),
+        )
+        catalog._activate_postgres_cluster(
+            claim.cluster_id,
+            cluster._project_id,
+            cluster.compose_project_name,
+            compose_volume_name(cluster._project_id),
+        )
+        source_backup = tmp_path / "source-backup.zip"
+        source_backup.write_bytes(b"disposable source backup")
+        backup_id = "00000000-0000-0000-0000-000000000099"
+        catalog.start_download(
+            backup_id,
+            "http://127.0.0.1:8069",
+            "odcli_drop_default",
+            "zip",
+            False,
+            source_backup,
+        )
+        catalog.success_download(
+            backup_id,
+            source_backup.name,
+            source_backup.stat().st_size,
+            "disposable",
+        )
         password = cluster.password_file.read_text(encoding="utf-8").strip()
         client = OdooClient(config=OdooClientConfig(executable="true"), _catalog=catalog)
         instance = OdooInstance(
@@ -186,6 +233,13 @@ def test_disposable_database_drop_success_and_forced_session(
                 sql=f'CREATE DATABASE "{name}"',
             )
             assert created.returncode == 0, created.stderr
+            catalog.record_restore(
+                cluster.endpoint_host,
+                cluster.endpoint_port,
+                name,
+                backup_id,
+                cluster_id=claim.cluster_id,
+            )
 
         build_database_drop_command(instance, tmp_path, success_name).run()
         _assert_absent(psql, port=port, password=password, database=success_name)
@@ -206,34 +260,40 @@ def test_disposable_database_drop_success_and_forced_session(
             (port,),
         ).fetchall()
         assert [(row["database_name"], row["event_type"]) for row in rows] == [
+            (forced_name, "restored"),
             (forced_name, "dropped"),
+            (success_name, "restored"),
             (success_name, "dropped"),
         ]
+    except BaseException as exc:
+        primary_failure = exc
+        raise
     finally:
+        cleanup_failures: list[BaseException] = []
         if waiter is not None and waiter.poll() is None:
-            waiter.terminate()
-            waiter.wait(timeout=10)
-        catalog.close()
+            try:
+                _terminate_waiter(waiter)
+            except BaseException as exc:
+                cleanup_failures.append(exc)
         try:
-            if cluster.compose_file.is_file():
-                cleanup = subprocess.run(
-                    [
-                        "docker",
-                        "compose",
-                        "--project-name",
-                        cluster.compose_project_name,
-                        "-f",
-                        str(cluster.compose_file),
-                        "down",
-                        "--volumes",
-                        "--remove-orphans",
-                    ],
-                    cwd=cluster.compose_file.parent,
-                    capture_output=True,
-                    check=False,
-                    timeout=60.0,
-                    text=True,
-                )
-                assert cleanup.returncode == 0, cleanup.stderr
-        finally:
-            shutil.rmtree(runtime_root)
+            catalog.close()
+        except BaseException as exc:
+            cleanup_failures.append(exc)
+        try:
+            cleanup_postgres_project(
+                compose_file=compose_file,
+                compose_project_name=cluster.compose_project_name,
+                volume_name=volume_name,
+                primary_failure=None,
+            )
+        except BaseException as exc:
+            cleanup_failures.append(exc)
+        if primary_failure is not None and cleanup_failures:
+            raise BaseExceptionGroup(
+                "primary test failure and PostgreSQL cleanup failures",
+                [primary_failure, *cleanup_failures],
+            )
+        if primary_failure is not None:
+            raise primary_failure
+        if cleanup_failures:
+            raise BaseExceptionGroup("PostgreSQL cleanup failures", cleanup_failures)

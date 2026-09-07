@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounded source-aware errors, and truncation state
 - Guarded cluster-bound `odcli db drop` with dry-run planning, exact-target session
   termination, confirmation, and post-drop catalogue reconciliation
+- Streamed backup acquisition with checksum/size verification, atomic publication,
+  interrupt-safe cleanup, and typed retained-artifact failures
+- Exact-UUID backup list/show/validate/delete and local database restore workflows,
+  including immutable previews, nullable ownership provenance, and admin reset
+- Read-only `resource list` and `resource doctor` projections for retained backups,
+  databases, environments, logs, filestores, and owned volumes
 
 ### Changed
 - Documentation now treats executable command help as the source of truth for exact flags
@@ -28,12 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fabricating an environment; explicit environment selectors retain precedence
 - Bounded CLI failures preserve one v1 envelope across Rich, JSON, and TOON while
   redacting result, output, source, and diagnostic fields
+- Process-backed commands now expose bounded progress while JSON/TOON remain one
+  progress-free document; transaction finalization and Ctrl-C/retention states are
+  represented explicitly
 
 ### Security
 - `.odcli/.env` values never mutate the parent process environment, are scoped only
   to permitted Odoo children, and are never persisted in plans, logs, or fingerprints
 - Database deletion refuses protected/default/template targets, revalidates safety
   immediately before mutation, and requires explicit machine-mode consent
+- Resource diagnosis preserves unknown ownership and incomplete measurements; backup
+  pruning, automatic log rotation, and `postgres destroy` remain separate,
+  evidence-gated future changes
 
 ## [0.1.0] - 2026-07-15
 

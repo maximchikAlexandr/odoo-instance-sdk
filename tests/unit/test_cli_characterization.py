@@ -39,6 +39,7 @@ ROOT_HELP_DESCRIPTIONS = (
     "Prepare and reset project databases.",
     "Verify Python and add-on dependencies.",
     "Diagnose project, runtime, and PostgreSQL.",
+    "Inspect retained local resources and findings.",
     "Manage isolated development environments.",
     "Evaluate a Python expression in Odoo.",
     "Execute a Python script in Odoo.",
@@ -170,6 +171,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
     assert set(cli.list_commands(click.Context(cli))) == {
         "init",
         "env",
+        "backup",
         "db",
         "run",
         "logs",
@@ -185,6 +187,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "postgres",
         "psql",
         "monitor",
+        "resource",
     }
     assert "--project" in result.output
     assert "--env" in result.output

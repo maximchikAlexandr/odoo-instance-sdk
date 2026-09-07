@@ -189,16 +189,33 @@ def render_compose_yaml(
     user: str,
     project_id: str,
     password_file: str,
+    cluster_id: str | None = None,
 ) -> str:
     assert_image_safe(image)
     assert_user_safe(user)
     volume = compose_volume_name(project_id)
+    labels = (
+        "    labels:\n"
+        f"      io.odoo-instance-sdk.cluster-id: {cluster_id}\n"
+        f"      io.odoo-instance-sdk.project-id: {project_id}\n"
+        f"      io.odoo-instance-sdk.volume-name: {volume}\n"
+        if cluster_id is not None
+        else ""
+    )
+    volume_labels = (
+        "    labels:\n"
+        f"      io.odoo-instance-sdk.cluster-id: {cluster_id}\n"
+        f"      io.odoo-instance-sdk.project-id: {project_id}\n"
+        if cluster_id is not None
+        else ""
+    )
     # Compose secret path inside container is fixed; the host file is mounted
     # by Docker via the secrets section.
     return (
         "services:\n"
         "  postgres:\n"
         f"    image: {image}\n"
+        f"{labels}"
         "    ports:\n"
         f'      - "127.0.0.1:{port}:5432"\n'
         "    environment:\n"
@@ -221,6 +238,7 @@ def render_compose_yaml(
         "volumes:\n"
         f"  pgdata:\n"
         f"    name: {volume}\n"
+        f"{volume_labels}"
     )
 
 
@@ -265,8 +283,10 @@ def write_compose_file_atomic(
     timeout: float | None = None,
     temporary_path: Path | None = None,
     step_id: str | None = None,
+    validate: bool = True,
+    publish: bool = True,
 ) -> None:
-    """Validate then atomically publish ``compose.yaml`` with mode 0600."""
+    """Validate and optionally publish a compose file with mode 0600."""
     compose_path.parent.mkdir(parents=True, exist_ok=True)
     if temporary_path is None:
         fd, tmp_name = tempfile.mkstemp(
@@ -281,13 +301,18 @@ def write_compose_file_atomic(
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.chmod(tmp_path, 0o600)
-        compose_config(runner, tmp_path, project_name, timeout=timeout, step_id=step_id)
-        os.replace(tmp_path, compose_path)
+        if validate:
+            compose_config(runner, tmp_path, project_name, timeout=timeout, step_id=step_id)
+        if publish:
+            os.replace(tmp_path, compose_path)
+        else:
+            os.unlink(tmp_path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)
         raise
-    os.chmod(compose_path, 0o600)
+    if publish:
+        os.chmod(compose_path, 0o600)
 
 
 def _compose_base_args(
@@ -503,6 +528,85 @@ def compose_health(
     except subprocess.TimeoutExpired as exc:
         raise PostgresClusterTimeoutError(timeout or 0.0) from exc
     return res.returncode, (res.stdout + res.stderr).strip()
+
+
+def inspect_volume_identity(
+    runner: ComposeRunner,
+    volume_name: str,
+    cluster_id: str,
+    *,
+    project_id: str,
+    timeout: float | None = None,
+    step_id: str | None = None,
+) -> bool:
+    """Prove the named volume carries the exact SDK claim, without adoption."""
+    _require_timeout_budget(timeout)
+    args = ["docker", "volume", "inspect", "--format", "{{json .}}", volume_name]
+    try:
+        result = _run_compose(runner, args, cwd=None, timeout=timeout, step_id=step_id)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        value = json.loads(result.stdout)
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if not isinstance(value, dict):
+            return False
+        labels = value.get("Labels")
+        return (
+            isinstance(labels, dict)
+            and labels.get("io.odoo-instance-sdk.cluster-id") == cluster_id
+            and labels.get("io.odoo-instance-sdk.project-id") == project_id
+            and value.get("Name") == volume_name
+        )
+    except (json.JSONDecodeError, IndexError, TypeError):
+        return False
+
+
+def inspect_container_identity(
+    runner: ComposeRunner,
+    container_name: str,
+    cluster_id: str,
+    *,
+    project_id: str,
+    volume_name: str,
+    timeout: float | None = None,
+    step_id: str | None = None,
+) -> bool:
+    """Prove the managed service label and its exact named-volume mount."""
+    _require_timeout_budget(timeout)
+    args = ["docker", "inspect", "--format", "{{json .}}", container_name]
+    try:
+        result = _run_compose(runner, args, cwd=None, timeout=timeout, step_id=step_id)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        value = json.loads(result.stdout)
+        if isinstance(value, list):
+            value = value[0] if value else None
+        if not isinstance(value, dict):
+            return False
+        config = value.get("Config")
+        labels = config.get("Labels") if isinstance(config, dict) else None
+        mounts = value.get("Mounts")
+        return (
+            isinstance(labels, dict)
+            and labels.get("io.odoo-instance-sdk.cluster-id") == cluster_id
+            and labels.get("io.odoo-instance-sdk.project-id") == project_id
+            and isinstance(mounts, list)
+            and any(
+                isinstance(mount, dict)
+                and mount.get("Type") == "volume"
+                and mount.get("Name") == volume_name
+                for mount in mounts
+            )
+        )
+    except (json.JSONDecodeError, IndexError, TypeError):
+        return False
 
 
 def derive_state(  # noqa: C901

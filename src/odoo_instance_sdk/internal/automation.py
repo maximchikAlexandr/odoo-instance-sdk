@@ -809,12 +809,17 @@ class DepsVerifyResult:
     pip_check_ok: bool = True
     pip_check_output: str = ""
 
+    @property
+    def ok(self) -> bool:
+        """Return the single dependency-verification success predicate."""
+        return self.pip_check_ok and not self.missing_imports
+
 
 def verify_deps(
     *,
     recorded_python: Path | str,
     worktree_root: Path,
-    uv_executable: str = "uv",
+    uv_executable: str | Path = "uv",
 ) -> DepsVerifyResult:
     return verify_deps_command(
         recorded_python=recorded_python,
@@ -827,7 +832,7 @@ def verify_deps_command(
     *,
     recorded_python: Path | str,
     worktree_root: Path,
-    uv_executable: str = "uv",
+    uv_executable: str | Path = "uv",
     executor: ProcessExecutor | None = None,
 ) -> Command[DepsVerifyResult]:
     """Capture dependency verification probes in one command ledger."""
@@ -835,10 +840,12 @@ def verify_deps_command(
     from odoo_instance_sdk.internal.proc import PreparedStep, SubprocessExecutor
     from odoo_instance_sdk.internal.project_runtime import (
         is_uv_python_selector,
+        resolve_uv_executable,
         uv_run_prefix,
     )
 
     imports = _scan_external_python_deps(worktree_root)
+    uv_path = str(resolve_uv_executable(uv_executable))
     python_prefix = (
         uv_run_prefix(
             str(recorded_python),
@@ -851,7 +858,7 @@ def verify_deps_command(
     steps = [
         PreparedStep(
             step_id="deps.verify.pip-check",
-            argv=(python_prefix[0], "pip", "check", "--python", str(recorded_python)),
+            argv=(uv_path, "pip", "check", "--python", str(recorded_python)),
             read_only=True,
             text=True,
         )

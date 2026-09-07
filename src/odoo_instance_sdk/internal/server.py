@@ -233,7 +233,10 @@ def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: s
     payload_dict = (
         "{'ok': True, 'commit': "
         + repr(commit)
-        + ", 'result': None, 'user_stdout': '', 'user_error': None, 'truncated': False}"
+        + ", 'transaction': "
+        + repr("commit" if commit else "rollback")
+        + ", 'result': None, 'user_stdout': '', 'user_error': None, "
+        + "'finalization_error': None, 'truncated': False}"
     )
     result_emit = (
         "    if _odcli_user_exception is None and 'result' in globals():\n"
@@ -249,6 +252,9 @@ def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: s
         "_odcli_user_stdout = _odcli_io.StringIO()\n"
         "_odcli_user_exception = None\n"
         "_odcli_user_error = None\n"
+        "_odcli_finalization_exception = None\n"
+        "_odcli_finalization_error = None\n"
+        "_odcli_transaction = 'rollback'\n"
         "try:\n"
         "    with _odcli_redirect_stdout(_odcli_user_stdout):\n"
         "        exec(compile(_source, '<odcli-shell-script>', 'exec'), globals())\n"
@@ -256,22 +262,29 @@ def _build_shell_wrapper(source: str, argv: list[str], *, commit: bool, nonce: s
         "    _odcli_user_exception = _odcli_exc\n"
         "    _odcli_user_error = _odcli_error_payload(_odcli_exc, _source)\n"
         "finally:\n"
+        f"    _odcli_transaction = 'commit' if {commit!r} and _odcli_user_exception is None else 'rollback'\n"
         "    try:\n"
         "        if env is not None and hasattr(env, 'cr') and env.cr is not None:\n"
-        f"            env.cr.commit() if {commit!r} else env.cr.rollback()\n"
-        "    except Exception:\n"
-        "        pass\n"
+        "            env.cr.commit() if _odcli_transaction == 'commit' else env.cr.rollback()\n"
+        "    except BaseException as _odcli_exc:\n"
+        "        _odcli_finalization_exception = _odcli_exc\n"
+        "        _odcli_finalization_error = _odcli_error_payload(_odcli_exc, _source)\n"
         "    _odcli_output = _odcli_user_stdout.getvalue()\n"
         "    _odcli_truncated = len(_odcli_output) > 32768\n"
         "    if _odcli_truncated:\n"
         "        _odcli_output = _odcli_output[:32768]\n"
         f"    _payload = {payload_dict}\n"
         "    _payload.update({'user_stdout': _odcli_output, 'user_error': _odcli_user_error,\n"
-        "                     'truncated': _odcli_truncated, 'ok': _odcli_user_exception is None})\n"
+        "                     'transaction': _odcli_transaction,\n"
+        "                     'finalization_error': _odcli_finalization_error,\n"
+        "                     'truncated': _odcli_truncated,\n"
+        "                     'ok': _odcli_user_exception is None and _odcli_finalization_exception is None})\n"
         f"{result_emit}"
         f"    print({marker_open!r}, _json.dumps(_payload), {marker_close!r})\n"
         "if _odcli_user_exception is not None:\n"
         "    raise _odcli_user_exception\n"
+        "if _odcli_finalization_exception is not None:\n"
+        "    raise _odcli_finalization_exception\n"
     )
 
 

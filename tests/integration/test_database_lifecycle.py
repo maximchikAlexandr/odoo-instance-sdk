@@ -23,7 +23,9 @@ class TestRestore:
         monkeypatch: pytest.MonkeyPatch,
         httpx_mock: HTTPXMock,
     ) -> None:
-        monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+        )
 
         from tests.fixtures.odoo_database_server import BACKUP_ZIP_CONTENT
 
@@ -76,7 +78,9 @@ class TestRestore:
     def test_forged_backup_rejected(
         self, instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+        )
 
         backup_file = tmp_path / "forged.zip"
         backup_file.write_bytes(b"forged content")
@@ -99,7 +103,9 @@ class TestRestore:
         monkeypatch: pytest.MonkeyPatch,
         httpx_mock: HTTPXMock,
     ) -> None:
-        monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+        )
 
         backup_dir = tmp_path / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -202,7 +208,9 @@ class TestValidationUnavailable:
     ) -> None:
         from odoo_instance_sdk.models import BackupState
 
-        monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.paths.get_cache_root", lambda **_kwargs: tmp_path
+        )
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.backup_validation.shutil.which",
             lambda *a, **k: None,

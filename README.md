@@ -201,6 +201,40 @@ odcli --env feature/customer-credit db reset-admin-password
 Refresh follows the environment's configured database policy. Destructive
 database operations are local-only and validate provenance before mutation.
 
+### Backups, restores, and retained-resource diagnosis
+
+Backup point commands use the exact full UUID and do not require an Odoo
+worktree context. List or inspect retained records before a mutation:
+
+```bash
+odcli backup list --format toon
+odcli backup show 01234567-89ab-cdef-0123-456789abcdef --format json
+odcli backup validate 01234567-89ab-cdef-0123-456789abcdef --format json
+odcli backup delete 01234567-89ab-cdef-0123-456789abcdef --dry-run --format json
+```
+
+Restore previews are immutable. Rich mode confirms only after all preflight
+checks; machine formats require `--yes` and never prompt. A restore switches
+the project default only after the database, postcondition, audit, and
+optional administrator reset succeed. On interruption or a later failure, the
+backup and any already-confirmed database are retained; failure documents
+include sanitized UUID/target/state context and Ctrl-C exits with `130`.
+
+The read-only resource projections inspect retained backups, databases,
+environments, logs, filestores, and owned volumes without reconciliation or
+deletion:
+
+```bash
+odcli resource list
+odcli resource list --format json
+odcli resource doctor --format toon
+```
+
+Logical database bytes are not host-reclamation claims. Unknown ownership,
+unavailable probes, crash-left `.part` files, and cleanup failures remain
+visible with sanitized paths and recommendations. `resource list` and
+`resource doctor` never add, repair, delete, or reclassify lifecycle state.
+
 ### Automation and shell access
 
 ```bash
@@ -257,10 +291,16 @@ sentence; use the entry's `--help` for exact options.
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
+- `odcli resource list` — List retained local resources without lifecycle mutation.
+- `odcli resource doctor` — Diagnose retained local resource findings without deletion.
 - `odcli env checkout` — Plan or create an isolated branch worktree and environment.
 - `odcli env list` — List registered environments, active-only unless `--all` is requested.
 - `odcli env remove` — Remove a registered environment and its owned artifacts safely.
 - `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
+- `odcli backup list` — List retained backup records with state and file presence.
+- `odcli backup show` — Show one exact backup UUID with history and relationships.
+- `odcli backup validate` — Validate one exact backup and report invalid versus unavailable.
+- `odcli backup delete` — Preview, confirm, and delete one exact retained backup UUID.
 - `odcli run` — Start resolved Odoo in the foreground from a project or environment.
 - `odcli logs` — Read retained Odoo logs, optionally following new output.
 - `odcli shell` — Open an interactive Odoo shell in the selected environment.
@@ -283,6 +323,8 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db bloat` — Show estimated bloat and optional bounded exact measurements.
 - `odcli db init-monitoring` — Idempotently initialize supported monitoring extensions on an owned cluster.
 - `odcli db refresh` — Refresh an environment database from its configured source policy.
+- `odcli db list` — List databases from the bound PostgreSQL cluster and known provenance.
+- `odcli db restore` — Restore one exact retained backup into a selected database target.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
 - `odcli db drop` — Safely remove one exact local cluster database after guarded checks.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.

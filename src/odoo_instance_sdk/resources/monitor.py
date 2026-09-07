@@ -354,6 +354,7 @@ class EnvironmentMonitor:
         captured_steps: tuple[PreparedStep | PreparedAction, ...] = (*probe_steps, action)
 
         def execute(context: RunContext[Snapshot]) -> Snapshot:
+            context.action(action.step_id)
             probe_results = cast("dict[str, ProcessResult]", context.results)
             try:
                 for probe in probe_steps:
@@ -375,23 +376,25 @@ class EnvironmentMonitor:
                             environment=probe.environment,
                         )
                 if probe_steps:
-                    return self._snapshot_impl(
+                    snapshot = self._snapshot_impl(
                         project_id=project_id,
                         include_removed=include_removed,
                         probe_results=probe_results,
                         catalog_rows=catalog_rows,
                     )
-                return self._snapshot_impl(
-                    project_id=project_id,
-                    include_removed=include_removed,
-                )
+                else:
+                    snapshot = self._snapshot_impl(
+                        project_id=project_id,
+                        include_removed=include_removed,
+                    )
+                context.complete_action(action.step_id)
+                return snapshot
             finally:
                 # Optional branches (for example an upstream Git ref that is
                 # not present) are accounted for without launching a second
                 # process.  Required probes are consumed by the collectors
                 # through the active RunContext.
                 context.skip_remaining()
-                context.action(action.step_id)
 
         plan = ExecutionPlan(
             steps=tuple(step.public_projection() for step in captured_steps)

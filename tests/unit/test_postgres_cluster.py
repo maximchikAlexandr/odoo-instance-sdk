@@ -38,6 +38,7 @@ from odoo_instance_sdk.internal.proc import (
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
 class FakeComposeRunner(ComposeRunner):
@@ -559,9 +560,43 @@ def test_ensure_running_compose_invalid_config_raises(
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: 1000.0)
     with pytest.raises(PostgresComposeInvalidError):
         cluster.ensure_running(timeout=1.0)
     assert not cluster._compose_file().is_file()
+
+
+@pytest.mark.unit
+def test_ensure_running_validates_config_before_image_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ConfigFirstRunner(FakeComposeRunner):
+        reject_image = False
+
+        def run(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            timeout: float | None = None,
+        ) -> subprocess.CompletedProcess[str]:
+            if self.reject_image and " image " in f" {' '.join(args)} ":
+                raise AssertionError("image resolution must follow compose config validation")
+            return super().run(args, cwd=cwd, timeout=timeout)
+
+    root = _write_compose_project(tmp_path)
+    fake = ConfigFirstRunner(config_rc=1)
+    cluster = PostgresCluster.from_project(root, compose_runner=fake)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    fake.calls.clear()
+    fake.reject_image = True
+    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: 1000.0)
+
+    with pytest.raises(PostgresComposeInvalidError):
+        cluster.ensure_running(timeout=1.0)
+
+    assert not any(" image " in f" {' '.join(call)} " for call in fake.calls)
 
 
 @pytest.mark.unit
@@ -675,7 +710,9 @@ def test_ensure_unhealthy_before_up_is_typed(tmp_path: Path) -> None:
     cluster._compose_file().write_text("services: {}\n")
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     with pytest.raises(PostgresClusterUnhealthyError):
-        cluster.ensure_running(timeout=1.0)
+        # Leave room for the filesystem-backed claim/artifact setup when this
+        # test shares a loaded xdist worker; the fake runner itself is instant.
+        cluster.ensure_running(timeout=5.0)
     assert not any(" up " in f" {' '.join(call)} " for call in fake.calls)
 
 
@@ -700,7 +737,9 @@ def test_ensure_unhealthy_after_up_is_typed(tmp_path: Path) -> None:
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     with pytest.raises(PostgresClusterUnhealthyError):
-        cluster.ensure_running(timeout=1.0)
+        # Leave room for the filesystem-backed claim/artifact setup when this
+        # test shares a loaded xdist worker; the fake runner itself is instant.
+        cluster.ensure_running(timeout=5.0)
 
 
 @pytest.mark.unit
@@ -877,6 +916,116 @@ def test_render_compose_rejects_unsafe_image() -> None:
             project_id="x",
             password_file="/p",
         )
+
+
+def test_compose_claim_labels_and_retry_reuse_pending_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = tmp_path / "catalog.sqlite3"
+    compose_root = tmp_path / "postgres"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        lambda **_kwargs: catalog_path,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        lambda _project_id: compose_root,
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    runner = StartingComposeRunner(ps_rows=[], health_rc=2)
+    runner.inspect_volume_identity = lambda _volume, _cluster, _project: True  # type: ignore[attr-defined]
+    cluster = PostgresCluster.from_project(_write_compose_project(project), compose_runner=runner)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    cluster.ensure_running(timeout=2.0)
+
+    catalog = BackupCatalog(db_path=catalog_path)
+    claim = catalog._get_postgres_cluster(cluster._project_id)
+    assert claim is not None and claim.state == "active"
+    content = cluster.compose_file.read_text()
+    assert f"io.odoo-instance-sdk.cluster-id: {claim.cluster_id}" in content
+    assert f"io.odoo-instance-sdk.project-id: {cluster._project_id}" in content
+    assert f"io.odoo-instance-sdk.volume-name: pgdata_{cluster._project_id}" in content
+    catalog.close()
+
+
+def test_compose_claim_mismatch_fails_closed_then_exact_retry_activates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = tmp_path / "catalog.sqlite3"
+    compose_root = tmp_path / "postgres"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        lambda **_kwargs: catalog_path,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        lambda _project_id: compose_root,
+    )
+
+    class InspectingRunner(StartingComposeRunner):
+        inspection = False
+
+        def inspect_volume_identity(self, _volume: str, _cluster_id: str, _project_id: str) -> bool:
+            return self.inspection
+
+    project = tmp_path / "project"
+    project.mkdir()
+    runner = InspectingRunner(ps_rows=[], health_rc=2)
+    cluster = PostgresCluster.from_project(_write_compose_project(project), compose_runner=runner)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    with pytest.raises(PostgresClusterError, match="identity or attachment"):
+        cluster.ensure_running(timeout=2.0)
+    catalog = BackupCatalog(db_path=catalog_path)
+    pending = catalog._get_postgres_cluster(cluster._project_id)
+    assert pending is not None and pending.state == "pending"
+    catalog.close()
+
+    runner.inspection = True
+    cluster.ensure_running(timeout=2.0)
+    catalog = BackupCatalog(db_path=catalog_path)
+    retried = catalog._get_postgres_cluster(cluster._project_id)
+    assert retried is not None
+    assert retried.cluster_id == pending.cluster_id
+    assert retried.state == "active"
+    catalog.close()
+
+
+def test_compose_claim_survives_failure_before_volume_and_reuses_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = tmp_path / "catalog.sqlite3"
+    compose_root = tmp_path / "postgres"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        lambda **_kwargs: catalog_path,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        lambda _project_id: compose_root,
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    failing = FakeComposeRunner(up_rc=1)
+    cluster = PostgresCluster.from_project(_write_compose_project(project), compose_runner=failing)
+    cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
+    with pytest.raises(PostgresClusterStartError):
+        cluster.ensure_running(timeout=2.0)
+
+    catalog = BackupCatalog(db_path=catalog_path)
+    pending = catalog._get_postgres_cluster(cluster._project_id)
+    assert pending is not None and pending.state == "pending"
+    catalog.close()
+
+    retry = StartingComposeRunner(ps_rows=[], health_rc=2)
+    retry.inspect_volume_identity = lambda _volume, _cluster, _project: True  # type: ignore[attr-defined]
+    retried_cluster = PostgresCluster.from_project(project, compose_runner=retry)
+    retried_cluster.ensure_running(timeout=2.0)
+    catalog = BackupCatalog(db_path=catalog_path)
+    active = catalog._get_postgres_cluster(cluster._project_id)
+    assert active is not None and active.state == "active"
+    assert active.cluster_id == pending.cluster_id
+    catalog.close()
 
 
 @pytest.mark.unit

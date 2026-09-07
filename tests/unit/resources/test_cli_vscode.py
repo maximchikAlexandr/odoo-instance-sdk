@@ -49,6 +49,28 @@ def _invoke(runner: CliRunner, env_client: OdooClient, args: list[str]) -> Resul
         return runner.invoke(cli, args, catch_exceptions=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_vscode_port_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep profile generation independent of whichever host ports are busy.
+
+    Port allocation itself remains covered by the real-socket integration tests;
+    this unit module only needs a stable checkout fixture.
+    """
+
+    def deterministic_port(
+        _kind: str,
+        _catalog: object,
+        *,
+        requested: int | None = None,
+        **_kwargs: object,
+    ) -> int:
+        return requested if requested is not None else 18071
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.environment.find_free_port", deterministic_port
+    )
+
+
 class TestVscodeGenerateProfile:
     def test_project_view_builds_profile_without_environment(self, tmp_path: Path) -> None:
         view = RuntimeView(

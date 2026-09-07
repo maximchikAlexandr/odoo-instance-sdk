@@ -7,12 +7,15 @@ import platformdirs
 _APP_NAME = "odoo-instance-sdk"
 
 
-def get_cache_root() -> Path:
-    return Path(platformdirs.user_cache_dir(_APP_NAME, ensure_exists=True))
+def get_cache_root(*, ensure_exists: bool = True) -> Path:
+    """Return the cache path, creating its normal mutable root by default."""
+    return Path(platformdirs.user_cache_dir(_APP_NAME, ensure_exists=ensure_exists))
 
 
-def get_backups_dir() -> Path:
-    return get_cache_root() / "backups"
+def get_backups_dir(*, ensure_exists: bool = True) -> Path:
+    """Return the backup path with explicit read-only resolution when requested."""
+    root = get_cache_root() if ensure_exists else get_cache_root(ensure_exists=False)
+    return root / "backups"
 
 
 def get_data_root(*, ensure_exists: bool = True) -> Path:
@@ -23,8 +26,9 @@ def get_state_root() -> Path:
     return Path(platformdirs.user_state_dir(_APP_NAME, ensure_exists=True))
 
 
-def get_catalog_path() -> Path:
-    return get_data_root() / "catalog.sqlite3"
+def get_catalog_path(*, ensure_exists: bool = True) -> Path:
+    """Return the catalogue path, creating its normal mutable data root by default."""
+    return get_data_root(ensure_exists=ensure_exists) / "catalog.sqlite3"
 
 
 def get_environments_root(*, ensure_exists: bool = True) -> Path:

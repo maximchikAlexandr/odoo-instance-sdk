@@ -9,13 +9,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
 import msgspec
 import pytest
 from click.testing import CliRunner
+
+if TYPE_CHECKING:
+    from rich.console import Console
 
 from odoo_instance_sdk.cli import _rich_shell_projection, cli
 from odoo_instance_sdk.commands.context import ResolvedContext
@@ -24,6 +27,7 @@ from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputError,
     OutputMode,
+    action_command,
     build_envelope,
     emit,
     emit_json_envelope,
@@ -33,6 +37,7 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     rich_print,
     run_or_preview,
+    run_rich_bounded,
     success_document,
 )
 from odoo_instance_sdk.execution import Command, ExecutionPlan
@@ -41,6 +46,8 @@ from odoo_instance_sdk.internal.automation import (
 )
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
 from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
+from odoo_instance_sdk.internal.pg.inventory import DatabaseInventoryItem, DatabaseInventoryResult
+from odoo_instance_sdk.internal.resource_inventory import ResourceInventory
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     BackupFreshness,
@@ -125,6 +132,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         True,
     ),
     PublicLeafCase(("doctor",), ("doctor",), "bounded-read-only", False),
+    PublicLeafCase(("resource", "list"), ("resource", "list"), "bounded-read-only", False),
+    PublicLeafCase(("resource", "doctor"), ("resource", "doctor"), "bounded-read-only", False),
     PublicLeafCase(
         ("env", "checkout"), ("env", "checkout", "main", "--dry-run"), "mutating-or-spawning", True
     ),
@@ -139,7 +148,48 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("env", "remove"), ("env", "remove", "env-1", "--yes"), "mutating-or-spawning", True
     ),
     PublicLeafCase(("env", "sync"), ("env", "sync", "env-1"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("backup", "list"),
+        ("backup", "list"),
+        "bounded-read-only",
+        False,
+    ),
+    PublicLeafCase(
+        ("backup", "show"),
+        ("backup", "show", "00000000-0000-0000-0000-000000000007"),
+        "bounded-read-only",
+        False,
+    ),
+    PublicLeafCase(
+        ("backup", "validate"),
+        ("backup", "validate", "00000000-0000-0000-0000-000000000007"),
+        "bounded-read-only",
+        False,
+    ),
+    PublicLeafCase(
+        ("backup", "delete"),
+        (
+            "backup",
+            "delete",
+            "00000000-0000-0000-0000-000000000007",
+            "--dry-run",
+        ),
+        "mutating-or-spawning",
+        True,
+    ),
     PublicLeafCase(("db", "refresh"), ("db", "refresh"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("db", "restore"),
+        (
+            "db",
+            "restore",
+            "00000000-0000-0000-0000-000000000007",
+            "--dry-run",
+        ),
+        "mutating-or-spawning",
+        True,
+    ),
+    PublicLeafCase(("db", "list"), ("db", "list"), "bounded-read-only", False),
     PublicLeafCase(
         ("db", "reset-admin-password"), ("db", "reset-admin-password"), "mutating-or-spawning", True
     ),
@@ -422,6 +472,16 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
+    if path[:1] == ("resource",):
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.resource._resource_command",
+            lambda: _matrix_command(
+                ResourceInventory(resources=(), findings=(), complete=True),
+                error=RuntimeError("isolated external operation failed") if failing else None,
+            ),
+        )
+        return
+
     if path[:2] == ("env", "checkout"):
         client = MagicMock()
         plan = _matrix_checkout_plan()
@@ -449,6 +509,40 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_kwargs: client)
         return
 
+    if path[:1] == ("backup",):
+        from zipfile import ZipFile
+
+        from odoo_instance_sdk.commands import backup as backup_commands
+        from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+        if failing:
+            monkeypatch.setattr(backup_commands, "_catalog", fail_operation)
+            return
+        db_path = tmp_path / "backup-catalog.sqlite3"
+        backup_path = tmp_path / "backup.zip"
+        with ZipFile(backup_path, "w") as archive:
+            archive.writestr("manifest.json", '{"db_name": "demo"}')
+            archive.writestr("dump.sql", "-- test")
+        catalog = BackupCatalog(db_path=db_path)
+        backup_id = "00000000-0000-0000-0000-000000000007"
+        if catalog.get_by_id(backup_id) is None:
+            catalog.start_download(
+                backup_id,
+                "http://localhost:8069",
+                "demo",
+                "zip",
+                True,
+                backup_path,
+            )
+            catalog.success_download(backup_id, "backup.zip", backup_path.stat().st_size, "")
+        catalog.close()
+        monkeypatch.setattr(
+            backup_commands._catalog_path_provider,
+            "provider",
+            lambda: db_path,
+        )
+        return
+
     if path == ("db", "reset-admin-password"):
         instance = MagicMock()
         instance.config.configured_database_names = ("demo",)
@@ -459,6 +553,54 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.db.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), _matrix_environment(), instance),
+        )
+        return
+
+    if path == ("db", "restore"):
+        client = MagicMock()
+        if failing:
+            client.environments.refresh_database_command.side_effect = fail_operation
+        else:
+            client.environments.refresh_database_command.return_value = _matrix_command(
+                DatabasePreparationResult(
+                    mode=DatabasePreparationAction.RESTORE,
+                    restored_database="demo_copy",
+                )
+            )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
+        )
+        monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_kwargs: client)
+        return
+
+    if path == ("db", "list"):
+        instance = MagicMock()
+        inventory = DatabaseInventoryResult(
+            cluster="127.0.0.1:5432",
+            databases=(
+                DatabaseInventoryItem(
+                    cluster="127.0.0.1:5432",
+                    cluster_id=None,
+                    name="demo",
+                    logical_size_bytes=10,
+                    active_sessions=0,
+                    is_default=True,
+                ),
+            ),
+        )
+        from odoo_instance_sdk.internal.pg import inventory as inventory_module
+
+        monkeypatch.setattr(
+            inventory_module,
+            "build_database_inventory_command",
+            fail_operation if failing else lambda *_args, **_kwargs: _matrix_command(inventory),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.pg._database_instance",
+            lambda _ctx: (None, instance),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
         )
         return
 
@@ -864,6 +1006,109 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     assert failure_documents[0][0]["ok"] is False  # type: ignore[index]
 
 
+@pytest.mark.parametrize("mode", ["rich", "json", "toon"])
+@pytest.mark.parametrize(
+    ("case", "expected_ok", "expected_exit"),
+    [
+        (DepsVerifyResult(), True, 0),
+        (
+            DepsVerifyResult(
+                pip_check_ok=False,
+                distributions=[{"detail": "package requires password='pip-secret'"}],
+            ),
+            False,
+            1,
+        ),
+        (
+            DepsVerifyResult(
+                missing_imports=[{"module": "sale", "import": "missing_pkg"}],
+            ),
+            False,
+            1,
+        ),
+        (
+            DepsVerifyResult(
+                pip_check_ok=False,
+                distributions=[{"detail": "conflict"}],
+                missing_imports=[{"module": "sale", "import": "missing_pkg"}],
+            ),
+            False,
+            1,
+        ),
+    ],
+    ids=["success", "distribution-conflict", "missing-import", "combined-failure"],
+)
+def test_deps_verify_uses_one_success_predicate_across_formats(
+    mode: str,
+    case: DepsVerifyResult,
+    expected_ok: bool,
+    expected_exit: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = SimpleNamespace(
+        source=SimpleNamespace(python=None),
+        instance=SimpleNamespace(config=SimpleNamespace()),
+        python_path=lambda: tmp_path / "venv" / "bin" / "python",
+        worktree_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr("odoo_instance_sdk.cli.cli_context.ready_instance", lambda _ctx: context)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.cli.verify_deps_command",
+        lambda **_kwargs: _matrix_command(case),
+    )
+
+    invoked = CliRunner().invoke(cli, ["deps", "verify", "--format", mode])
+
+    assert invoked.exit_code == expected_exit, invoked.output
+    combined = invoked.stdout + invoked.stderr
+    assert "pip-secret" not in combined
+    if mode in {"json", "toon"}:
+        document = _decode_document(invoked.stdout, mode)
+        assert document["ok"] is expected_ok  # type: ignore[index]
+        if expected_ok:
+            assert document["data"]["pip_check_ok"] is True  # type: ignore[index]
+        else:
+            assert document["error"]["code"] == "deps_verify_failed"  # type: ignore[index]
+            assert document["error"]["details"]["pip_check_ok"] is case.pip_check_ok  # type: ignore[index]
+    elif expected_ok:
+        assert "pip check: ok" in combined
+    else:
+        assert "pip check: issues" in combined
+        assert "missing_pkg" in combined or "conflict" in combined or "package requires" in combined
+
+
+def test_deps_verify_dry_run_preserves_configured_uv_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    uv_executable = tmp_path / "tools" / "uv"
+    uv_executable.parent.mkdir()
+    uv_executable.write_text("")
+    uv_executable.chmod(0o755)
+    context = SimpleNamespace(
+        source=SimpleNamespace(python="3.12"),
+        instance=SimpleNamespace(
+            config=SimpleNamespace(deferred_runtime=SimpleNamespace(uv_executable=uv_executable))
+        ),
+        python_path=lambda: tmp_path / "venv" / "bin" / "python",
+        worktree_path=lambda: tmp_path,
+    )
+    captured: dict[str, object] = {}
+
+    def make_command(**kwargs: object) -> Command[DepsVerifyResult]:
+        captured.update(kwargs)
+        return _matrix_command(DepsVerifyResult())
+
+    monkeypatch.setattr("odoo_instance_sdk.cli.cli_context.ready_instance", lambda _ctx: context)
+    monkeypatch.setattr("odoo_instance_sdk.cli.verify_deps_command", make_command)
+
+    invoked = CliRunner().invoke(cli, ["deps", "verify", "--dry-run", "--format", "json"])
+
+    assert invoked.exit_code == 0, invoked.output
+    assert captured["uv_executable"] == uv_executable
+    assert json.loads(invoked.stdout)["dry_run"] is True
+
+
 @pytest.mark.parametrize(
     "stdout",
     [
@@ -939,6 +1184,40 @@ def test_init_monitoring_machine_mode_requires_yes_before_resolution(
     result = CliRunner().invoke(cli, ["db", "init-monitoring", "--format", "json"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]["code"] == "confirmation_required"
+
+
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"], ["--json"]])
+def test_machine_db_drop_requires_yes_before_project_resolution(args: list[str]) -> None:
+    with patch(
+        "odoo_instance_sdk.commands.pg._database_instance",
+        side_effect=AssertionError("confirmation must precede database resolution"),
+    ):
+        result = CliRunner().invoke(cli, ["db", "drop", "demo", *args])
+
+    assert result.exit_code == 1, result.output
+    assert "confirmation_required" in result.output
+
+
+def test_db_drop_dry_run_emits_plan_without_running_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _matrix_command(None)
+    instance = MagicMock()
+    instance._postgres_cluster.endpoint = "127.0.0.1:5432"
+    builder = MagicMock(return_value=command)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.pg._database_instance", lambda _ctx: (None, instance)
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: Path.cwd()
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.drop.build_database_drop_command", builder)
+
+    result = CliRunner().invoke(cli, ["db", "drop", "demo", "--dry-run", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["dry_run"] is True
+    builder.assert_called_once()
 
 
 def test_psql_cli_keeps_native_args_and_rejects_document_mode_without_dry_run(
@@ -1218,6 +1497,213 @@ def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
     assert value == "done"
     assert builds == 2
     assert confirmations == ["confirmed"]
+
+
+def test_rich_bounded_runner_is_sparse_and_reports_reliable_units(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    def run(observer: Callable[[StepEvent], None]) -> str:
+        observer(StepEvent(step_id="download", kind="started"))
+        observer(
+            StepEvent(
+                step_id="download",
+                kind="progress",
+                elapsed=0.25,
+                completed_units=5,
+                total_units=10,
+            )
+        )
+        observer(StepEvent(step_id="download", kind="completed", elapsed=0.5))
+        return "ok"
+
+    assert run_rich_bounded(run) == "ok"
+    output = capsys.readouterr().out
+    assert "[download] started elapsed=" in output
+    assert "[download] progress units=5/10 (50%) elapsed=0.250s" in output
+    assert "[download] completed elapsed=0.500s" in output
+
+
+def test_rich_bounded_runner_exposes_a_slow_step_before_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    emitted: list[str] = []
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.output.rich_print",
+        lambda value, **_kwargs: emitted.append(value),
+    )
+
+    class NonTerminalConsole:
+        is_terminal = False
+
+    def run(observer: Callable[[StepEvent], None]) -> str:
+        observer(StepEvent(step_id="slow", kind="started", elapsed=0.0))
+        assert emitted == ["[slow] started elapsed=0.000s"]
+        observer(StepEvent(step_id="slow", kind="progress", elapsed=0.25))
+        observer(StepEvent(step_id="slow", kind="completed", elapsed=0.5))
+        return "done"
+
+    assert run_rich_bounded(run, console=cast("Console", NonTerminalConsole())) == "done"
+    assert emitted[-1] == "[slow] completed elapsed=0.500s"
+
+
+def test_rich_bounded_runner_is_deterministic_and_omits_unknown_percentage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    class NonTerminalConsole:
+        is_terminal = False
+
+    def render() -> list[str]:
+        emitted: list[str] = []
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.output.rich_print",
+            lambda value, **_kwargs: emitted.append(value),
+        )
+
+        def run(observer: Callable[[StepEvent], None]) -> None:
+            observer(StepEvent(step_id="probe", kind="started", elapsed=0.0))
+            observer(
+                StepEvent(
+                    step_id="probe",
+                    kind="progress",
+                    elapsed=0.25,
+                    completed_units=3,
+                )
+            )
+            observer(StepEvent(step_id="probe", kind="completed", elapsed=0.5))
+
+        run_rich_bounded(run, console=cast("Console", NonTerminalConsole()))
+        return emitted
+
+    first = render()
+    second = render()
+    assert first == second
+    assert first[1] == "[probe] progress units=3 elapsed=0.250s"
+    assert "%" not in first[1]
+
+
+def test_rich_bounded_runner_closes_tty_live_on_ctrl_c(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    class TerminalConsole:
+        is_terminal = True
+
+    instances: list[object] = []
+
+    class FakeLive:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.exited = False
+            instances.append(self)
+
+        def __enter__(self) -> FakeLive:
+            return self
+
+        def __exit__(self, *_args: object) -> Literal[False]:
+            self.exited = True
+            return False
+
+        def update(self, _value: object, *, refresh: bool = False) -> None:
+            assert refresh is True
+
+    monkeypatch.setattr("rich.live.Live", FakeLive)
+
+    def run(observer: Callable[[StepEvent], None]) -> None:
+        observer(StepEvent(step_id="slow", kind="started", elapsed=0.0))
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run_rich_bounded(run, console=cast("Console", TerminalConsole()))
+    assert len(instances) == 1
+    assert getattr(instances[0], "exited") is True
+
+
+@pytest.mark.parametrize(
+    ("command", "result", "expected"),
+    [
+        (
+            "exec",
+            {"database": "demo", "modules": ["sale", "stock"], "commit": True},
+            'status=success database=demo modules=["sale","stock"] transaction=commit',
+        ),
+        (
+            "exec",
+            {"commit": False},
+            "status=success transaction=rollback",
+        ),
+        (
+            "test",
+            {"database": "demo", "http_url": "http://localhost:8069", "modules": ["sale"]},
+            'status=success database=demo url=http://localhost:8069 modules=["sale"]',
+        ),
+        ("postgres.up", {"value": "done"}, "status=success"),
+    ],
+    ids=["exec-commit", "exec-rollback", "test-summary", "no-summary"],
+)
+def test_rich_success_has_one_common_completion_line(
+    command: str,
+    result: dict[str, JsonValue],
+    expected: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    emit(
+        success_document(command=command, result=result),
+        OutputMode.RICH,
+        rich=lambda _document: "existing projection",
+    )
+    lines = capsys.readouterr().out.splitlines()
+    assert lines.count(expected) == 1
+    assert sum(line.startswith("status=success") for line in lines) == 1
+
+
+@pytest.mark.parametrize("mode", [OutputMode.JSON, OutputMode.TOON])
+def test_rich_completion_does_not_change_machine_document(
+    mode: OutputMode,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result: dict[str, JsonValue] = {"database": "demo", "commit": True}
+    emit(success_document(command="exec", result=result), mode)
+    output = capsys.readouterr().out
+    document = _decode_document(output, mode.value)
+    assert document["result"] == result  # type: ignore[index]
+    assert "status=success" not in output
+
+
+def test_action_postcondition_failure_emits_failed_without_completion() -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    events: list[StepEvent] = []
+
+    def operation() -> None:
+        raise RuntimeError("postcondition failed")
+
+    with pytest.raises(RuntimeError, match="postcondition failed"):
+        action_command("restore", operation).run(observer=events.append)
+    assert [(event.step_id, event.kind) for event in events] == [
+        ("restore", "started"),
+        ("restore", "failed"),
+    ]
+
+
+def test_run_or_preview_maps_ctrl_c_to_exit_130() -> None:
+    def operation() -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(click.exceptions.Exit) as caught:
+        run_or_preview(
+            lambda: action_command("slow", operation),
+            command_name="slow",
+            mode=OutputMode.RICH,
+            dry_run=False,
+            progress=True,
+        )
+    assert caught.value.exit_code == 130
 
 
 def test_rich_plan_projection_preserves_ordered_steps_and_multiline_input(
@@ -1621,6 +2107,61 @@ def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) 
     decoded = decode(result.stdout, DecodeOptions(indent=2, strict=True))
     assert decoded["schema_version"] == 1
     assert decoded["result"] == decoded["data"]
+
+
+@pytest.mark.parametrize("mode", ["json", "toon"])
+def test_resource_machine_projection_is_read_only_and_one_document(
+    mode: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The real resource source may inspect a catalogue but never rewrite it."""
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog_path = tmp_path / "backup-catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog.close()
+    before = catalog_path.read_bytes()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.resource._catalog_path_provider.provider",
+        lambda: catalog_path,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.resource.get_data_root",
+        lambda *, ensure_exists=False: tmp_path / "data",
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.resource.get_backups_dir",
+        lambda **_kwargs: tmp_path / "backups",
+    )
+
+    result = CliRunner().invoke(cli, ["resource", "list", "--format", mode])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    assert result.stdout.count("schema_version") == 1
+    document = _decode_document(result.stdout, mode)
+    assert document["ok"] is True  # type: ignore[index]
+    assert document["result"] == document["data"]  # type: ignore[index]
+    assert catalog_path.read_bytes() == before
+
+
+def test_resource_rich_projections_are_bounded_and_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = ResourceInventory(resources=(), findings=(), complete=True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.resource._resource_command", lambda: _matrix_command(empty)
+    )
+    runner = CliRunner()
+
+    first = runner.invoke(cli, ["resource", "list"])
+    second = runner.invoke(cli, ["resource", "list"])
+    doctor = runner.invoke(cli, ["resource", "doctor"])
+
+    assert first.exit_code == second.exit_code == doctor.exit_code == 0
+    assert first.output == second.output
+    assert "Identity" in first.output
+    assert "No resource findings." in doctor.output
+    assert "\x1b[" not in first.output + doctor.output
 
 
 @pytest.mark.parametrize("args", [["--json"], ["--format", "json"]])

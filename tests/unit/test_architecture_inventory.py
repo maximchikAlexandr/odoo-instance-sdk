@@ -9,10 +9,12 @@ migration updates the checked baseline.
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 import tomllib
 from pathlib import Path
 
+from odoo_instance_sdk.internal.proc import executor as process_executor
 from tests.fixtures.architecture_inventory import (
     DIRECT_OUTPUT_WRITES,
     DIRECT_SUBPROCESS_LAUNCHES,
@@ -320,6 +322,57 @@ def test_production_imprecise_annotation_inventory_is_exact() -> None:
 
 def test_module_local_subprocess_patch_inventory_is_exact() -> None:
     assert _discover_local_subprocess_patches() == MODULE_LOCAL_SUBPROCESS_PATCHES
+
+
+def test_captured_paths_use_one_internal_pump() -> None:
+    source = inspect.getsource(process_executor)
+    tree = ast.parse(source)
+    pump = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_pump"
+    )
+    limited = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "run_captured_limited"
+    )
+    execute = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_execute"
+    )
+
+    def calls_named(node: ast.AST, name: str) -> int:
+        return sum(
+            isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == name
+            for call in ast.walk(node)
+        )
+
+    assert calls_named(limited, "_run_pump") == 1
+    assert calls_named(execute, "_run_pump") == 1
+    assert (
+        sum(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "subprocess"
+            and call.func.attr == "Popen"
+            for call in ast.walk(pump)
+        )
+        == 1
+    )
+    assert (
+        sum(
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "selectors"
+            and call.func.attr == "DefaultSelector"
+            for call in ast.walk(pump)
+        )
+        == 1
+    )
 
 
 def test_public_process_method_inventory_is_exact() -> None:

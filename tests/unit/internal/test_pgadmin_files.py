@@ -5,7 +5,6 @@ import hmac
 import json
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -439,7 +438,12 @@ def test_linux_acl_validation_rejects_extra_grants(
             )
         return SimpleResult(stdout="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    def fake_pump(step: object, **_: Any) -> tuple[int, bytes, bytes, float]:
+        prepared = getattr(step, "argv")
+        result = fake_run(list(prepared))
+        return 0, result.stdout.encode(), b"", 0.0
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
     with pytest.raises(PgAdminUnavailableError):
         pgadmin_files.prepare_files(
             paths=local_paths,
@@ -498,7 +502,12 @@ def test_linux_acl_layout_and_data_default_acl_are_exact(
             output.extend(f"default:{entry}" for entry in sorted(default))
         return SimpleResult(stdout="\n".join(output))
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    def fake_pump(step: object, **_: Any) -> tuple[int, bytes, bytes, float]:
+        prepared = getattr(step, "argv")
+        result = fake_run(list(prepared))
+        return 0, result.stdout.encode(), b"", 0.0
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
     prepared = pgadmin_files.prepare_files(
         paths=local_paths,
         servers_json="{}",

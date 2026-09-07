@@ -34,9 +34,13 @@ classification is bounded and whose contract requires `--dry-run`:
 | `env checkout` | mutating-or-spawning |
 | `env remove` | mutating-or-spawning |
 | `env sync` | mutating-or-spawning |
+| `backup delete` | mutating-or-spawning |
 | `db refresh` | mutating-or-spawning |
+| `db list` | bounded-read-only |
 | `db drop` | guarded mutating-or-spawning |
 | `db reset-admin-password` | mutating-or-spawning |
+| `resource list` | bounded-read-only |
+| `resource doctor` | bounded-read-only |
 | `eval` | process-previewable-read-only |
 | `exec` | mutating-or-spawning |
 | `test` | process-previewable-read-only |
@@ -61,6 +65,12 @@ by the private grammar, but document formatting is rejected on normal runs.
 All four diagnostics and native `psql` preserve the instance-bound cluster
 identity and do not accept replacement host/user/password flags.
 
+The backup catalogue leaves (`backup list`, `backup show`, and `backup validate`)
+are bounded read-only documents independent of Odoo/worktree context. They
+resolve complete UUIDs through the state-aware catalogue projection; `backup
+delete` adds the same immutable preview and explicit confirmation contract as
+the other guarded mutations.
+
 `db drop` is a guarded database mutation. Its plan records the bounded,
 read-only planning inspection as an observation; execution retains separate
 revalidation, optional target-session termination, drop, and absence-verification
@@ -68,9 +78,37 @@ steps. Dry-run performs only the planning inspection and never mutates the
 cluster or catalogue.
 
 The complete shipped CLI also contains `doctor` and `env list` as bounded
-read-only leaves, plus `run`, `shell`, `logs`, and `monitor` native/stream
-leaves. They remain in `PUBLIC_LEAF_CASES` with their explicit classifications
+read-only leaves, plus `resource list`, `resource doctor`, `run`, `shell`,
+`logs`, and `monitor` native/stream leaves. They remain in `PUBLIC_LEAF_CASES` with their explicit classifications
 and reasons; no parallel eligibility table is permitted.
+
+Resource inventory and doctor are observation-only projections. They report
+logical versus measured bytes, ownership confidence, retained data, and
+incomplete probes, but never turn an observation into a lifecycle mutation.
+Age-based backup pruning, log rotation, and `postgres destroy` remain separate
+evidence-gated future changes: each needs its own immutable preview, ownership
+proof, active-reference protection, and postcondition-tested cleanup policy.
+
+## Migration and failure notes
+
+The catalogue migration is additive and preserves legacy rows with nullable
+cluster and restore provenance. Older rows remain readable as unknown; no
+second store is introduced. Deployments should retain the existing catalogue
+backup before applying a schema migration and restore that backup before
+running older code. No migration deletes backups, restores, databases,
+filestores, volumes, or audit history.
+
+Streaming failures retain the exact backup UUID and sanitized state context.
+The `.part` file is removed only for a handled pre-publication failure; a
+published backup is retained. Restore and drop failures retain confirmed
+artifacts and return typed partial outcomes rather than claiming rollback of
+remote or filesystem effects. Ctrl-C closes owned progress, locks, response,
+and file handles and returns `130` where the command owns the interruption.
+
+These notes describe the shipped boundary, not an authorization for automatic
+cleanup. Prune, log rotation, and `postgres destroy` require separate
+evidence-gated changes with their own preview, ownership proof, active-reference
+checks, and postcondition tests.
 
 ## Reasoned native and stream exceptions
 
@@ -105,20 +143,20 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:893-894` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:954-955` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
-- `src/odoo_instance_sdk/commands/env.py:377` — existing Rich-live inventory
+- `src/odoo_instance_sdk/commands/env.py:378` — existing Rich-live inventory
   transport; remove when Rich live output is supplied by a distinct transport
   adapter rather than the live command callback.
-- `src/odoo_instance_sdk/commands/output.py:211` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:234` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:335` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:358` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:337` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:360` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:344` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:367` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:346` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:369` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/resources/instance.py:1068` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit

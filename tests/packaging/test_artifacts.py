@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tarfile
 import tomllib
 import zipfile
@@ -52,7 +53,7 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
     venv = tmp_path / "venv"
     empty = tmp_path / "empty"
     empty.mkdir()
-    subprocess.run(["uv", "venv", str(venv)], check=True, cwd=tmp_path)
+    subprocess.run(["uv", "venv", "--python", sys.executable, str(venv)], check=True, cwd=tmp_path)
     python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     odcli = venv / ("Scripts/odcli.exe" if os.name == "nt" else "bin/odcli")
     subprocess.run(
@@ -120,7 +121,7 @@ def test_isolated_wheel_imports_rich_toon_and_runs_toon_env_list(tmp_path: Path)
     venv = tmp_path / "venv"
     empty = tmp_path / "empty"
     empty.mkdir()
-    subprocess.run(["uv", "venv", str(venv)], check=True, cwd=tmp_path)
+    subprocess.run(["uv", "venv", "--python", sys.executable, str(venv)], check=True, cwd=tmp_path)
     python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     odcli = venv / ("Scripts/odcli.exe" if os.name == "nt" else "bin/odcli")
     subprocess.run(
