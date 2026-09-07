@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import uuid
@@ -183,6 +184,21 @@ class TestEnvRemove:
 
 
 class TestCopyRemoveRecovery:
+    @pytest.fixture(autouse=True)
+    def _fake_psql(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        executable = tmp_path / "psql"
+        marker = tmp_path / "psql-called"
+        executable.write_text(
+            "#!/bin/sh\n"
+            f'if [ -f "{marker}" ]; then\n'
+            "  printf '1\\n'\n"
+            "else\n"
+            f'  : > "{marker}"\n'
+            "fi\n"
+        )
+        executable.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
     def test_socket_cluster_copy_is_removable_without_restore_audit(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:

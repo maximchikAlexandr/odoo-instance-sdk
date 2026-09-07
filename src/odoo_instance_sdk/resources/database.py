@@ -1175,6 +1175,7 @@ class DatabaseResource:
         copy: bool = False,
         neutralize_database: bool = False,
         timeout: float | None = None,
+        _skip_planned_probes: bool = False,
     ) -> RestoreResult:
         from odoo_instance_sdk.internal.proc import active_context
 
@@ -1185,6 +1186,7 @@ class DatabaseResource:
                 copy=copy,
                 neutralize_database=neutralize_database,
                 timeout=timeout,
+                skip_planned_probes=_skip_planned_probes,
             )
         return self.restore_command(
             backup,
@@ -1216,6 +1218,7 @@ class DatabaseResource:
                 copy=copy,
                 neutralize_database=neutralize_database,
                 timeout=timeout,
+                skip_planned_probes=False,
                 before_step_id=before_probe.step_id if before_probe else None,
                 after_step_id=after_probe.step_id if after_probe else None,
             ),
@@ -1233,6 +1236,7 @@ class DatabaseResource:
         copy: bool,
         neutralize_database: bool,
         timeout: float | None,
+        skip_planned_probes: bool = False,
         before_step_id: str | None = None,
         after_step_id: str | None = None,
     ) -> RestoreResult:
@@ -1243,6 +1247,7 @@ class DatabaseResource:
                 copy=copy,
                 neutralize_database=neutralize_database,
                 timeout=timeout,
+                skip_planned_probes=skip_planned_probes,
                 before_step_id=before_step_id,
                 after_step_id=after_step_id,
             )
@@ -1255,6 +1260,7 @@ class DatabaseResource:
         copy: bool,
         neutralize_database: bool,
         timeout: float | None,
+        skip_planned_probes: bool = False,
         before_step_id: str | None = None,
         after_step_id: str | None = None,
     ) -> RestoreResult:
@@ -1282,7 +1288,14 @@ class DatabaseResource:
         if not backup_path.is_file() or not os.access(backup_path, os.R_OK):
             raise BackupNotAvailableError(f"Backup file not found or unreadable: {backup.path}")
 
-        if self.exists(target_database_name):
+        def target_exists(step_id: str | None) -> bool:
+            if skip_planned_probes:
+                return self._exists_impl(target_database_name)
+            if step_id is not None:
+                return self._exists_impl(target_database_name, psql_step_id=step_id)
+            return self.exists(target_database_name)
+
+        if target_exists(before_step_id):
             raise DatabaseAlreadyExistsError(
                 f"Database {target_database_name!r} already exists on {self.base_url}"
             )
@@ -1323,7 +1336,7 @@ class DatabaseResource:
             status_code, message = http_failure
             raise DatabaseError(status_code=status_code or 0, message=message, body=b"") from None
 
-        if not self.exists(target_database_name):
+        if not target_exists(after_step_id):
             raise RestoreFailedError(
                 f"Database {target_database_name!r} was not created after restore"
             )

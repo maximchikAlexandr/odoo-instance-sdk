@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import textwrap
 import uuid
@@ -13,6 +14,7 @@ import pytest
 
 from odoo_instance_sdk.exceptions import (
     ConfigError,
+    DatabaseAlreadyExistsError,
     EnvironmentConflictError,
     EnvironmentNotFoundError,
     InstanceConfigurationError,
@@ -810,6 +812,29 @@ class TestCheckoutShared:
 
 
 class TestCheckoutCopy:
+    @pytest.fixture(autouse=True)
+    def _fake_psql(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        executable = tmp_path / "psql"
+        marker = tmp_path / "psql-called"
+        executable.write_text(
+            "#!/bin/sh\n"
+            'if [ "${ODCLI_TEST_PSQL_FAILURE:-}" = "1" ]; then\n'
+            "  printf 'probe failed\\n' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            'if [ "${ODCLI_TEST_PSQL_EXISTS_BEFORE:-}" = "1" ]; then\n'
+            "  printf '1\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            f'if [ -f "{marker}" ]; then\n'
+            "  printf '1\\n'\n"
+            "else\n"
+            f'  : > "{marker}"\n'
+            "fi\n"
+        )
+        executable.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
     def _checkout_copy(
         self,
         env_client: OdooClient,
@@ -1032,6 +1057,80 @@ class TestCheckoutCopy:
         )
         instance.databases.exists.assert_not_called()
 
+    def test_copy_consumes_exact_restore_probes_around_restore(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.internal.proc import RunContext
+
+        instance = _copy_instance(env_client)
+        _record_backup(env_client, instance.databases.backup.return_value)
+        consumed: list[str] = []
+        original_process = RunContext.process
+
+        def process(context: RunContext[object], step_id: str) -> object:
+            if step_id.startswith("database.restore.exists-"):
+                consumed.append(step_id)
+            return original_process(context, step_id)
+
+        monkeypatch.setattr(RunContext, "process", process)
+        self._checkout_copy(
+            env_client, project_manifest, fake_python, "feat/copy-probes-run", instance
+        )
+
+        assert consumed == [
+            "database.restore.exists-before",
+            "database.restore.exists-after",
+        ]
+        assert instance.databases.restore.call_args.kwargs["_skip_planned_probes"] is True
+
+    def test_copy_rejects_failed_restore_probe_before_restore(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        instance = _copy_instance(env_client)
+        _record_backup(env_client, instance.databases.backup.return_value)
+        monkeypatch.setenv("ODCLI_TEST_PSQL_FAILURE", "1")
+
+        with pytest.raises(InstanceConfigurationError, match="existence probe failed"):
+            self._checkout_copy(
+                env_client, project_manifest, fake_python, "feat/copy-probe-fail", instance
+            )
+
+        instance.databases.restore.assert_not_called()
+        instance.databases.drop.assert_not_called()
+        env = env_client.environments.list(project=project_manifest)[0]
+        journal = env_client.get_catalog().get_copy_journal(str(env.id))
+        assert journal is not None and journal["stage"] == "backed_up"
+
+    def test_copy_existing_before_probe_never_becomes_restore_owned(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        instance = _copy_instance(env_client)
+        _record_backup(env_client, instance.databases.backup.return_value)
+        monkeypatch.setenv("ODCLI_TEST_PSQL_EXISTS_BEFORE", "1")
+
+        with pytest.raises(DatabaseAlreadyExistsError, match="already exists"):
+            self._checkout_copy(
+                env_client, project_manifest, fake_python, "feat/copy-probe-existing", instance
+            )
+
+        instance.databases.restore.assert_not_called()
+        instance.databases.drop.assert_not_called()
+        env = env_client.environments.list(project=project_manifest)[0]
+        journal = env_client.get_catalog().get_copy_journal(str(env.id))
+        assert journal is not None and journal["stage"] == "backed_up"
+
 
 class TestCheckoutDryRun:
     def test_checkout_command_captures_secret_free_snapshot(
@@ -1082,6 +1181,35 @@ class TestCheckoutDryRun:
             "checkout.database",
             "checkout.cleanup.worktree",
             "checkout.cleanup",
+        )
+
+    def test_copy_checkout_plans_authoritative_restore_probes(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk import execution as execution_module
+        from odoo_instance_sdk.internal.pg import builder as pg_builder
+        from odoo_instance_sdk.internal.proc import PreparedCommand
+
+        monkeypatch.setattr(pg_builder, "resolve_psql_executable", lambda: None)
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/copy-probes",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                source_database="comerta",
+                target_database="comerta_copy",
+            ),
+        )
+        prepared = cast("PreparedCommand[object]", execution_module._COMMANDS[id(command)])
+
+        assert tuple(step.step_id for step in prepared.steps)[-5:-3] == (
+            "database.restore.exists-before",
+            "database.restore.exists-after",
         )
 
     def test_checkout_planning_failure_uses_typed_expression_error_branch(

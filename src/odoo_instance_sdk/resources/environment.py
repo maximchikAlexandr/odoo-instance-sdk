@@ -33,6 +33,7 @@ from odoo_instance_sdk.exceptions import (
     PlanError,
     PlanValidationError,
     PostgresClusterError,
+    RestoreFailedError,
     StalePlanError,
 )
 from odoo_instance_sdk.internal.address import AddressState, probe_address
@@ -926,6 +927,7 @@ class EnvironmentResource:
                 and plan.target_database is not None
             ):
                 backup_id = self._do_copy_restore(
+                    context=context,
                     cat=cat,
                     env_id=plan.env_id,
                     source_config=plan.source_config,
@@ -970,6 +972,7 @@ class EnvironmentResource:
     def _do_copy_restore(
         self,
         *,
+        context: RunContext[DevelopmentEnvironment],
         cat: BackupCatalog,
         env_id: uuid.UUID,
         source_config: Path | None,
@@ -1023,8 +1026,15 @@ class EnvironmentResource:
             stage=CopyJournalStage.BACKED_UP,
         )
 
+        self._consume_copy_database_probe(
+            context,
+            "database.restore.exists-before",
+            target_db,
+            expected_exists=False,
+        )
         # The restore endpoint can create a database and then fail.  Persist
-        # uncertainty first so compensation never assumes it did not happen.
+        # uncertainty only after the target is proven absent, so compensation
+        # never treats a pre-existing database as restore-owned.
         catalog.upsert_copy_journal(
             str(env_id),
             target_database=target_db,
@@ -1034,7 +1044,19 @@ class EnvironmentResource:
             backup_id=str(backup.id),
             stage=CopyJournalStage.RESTORE_PENDING,
         )
-        instance.databases.restore(backup, target_db, copy=True, neutralize_database=True)
+        instance.databases.restore(
+            backup,
+            target_db,
+            copy=True,
+            neutralize_database=True,
+            _skip_planned_probes=True,
+        )
+        self._consume_copy_database_probe(
+            context,
+            "database.restore.exists-after",
+            target_db,
+            expected_exists=True,
+        )
         catalog.upsert_copy_journal(
             str(env_id),
             target_database=target_db,
@@ -1046,6 +1068,32 @@ class EnvironmentResource:
         )
 
         return backup.id
+
+    @staticmethod
+    def _consume_copy_database_probe(
+        context: RunContext[DevelopmentEnvironment],
+        step_id: str,
+        target_db: str,
+        *,
+        expected_exists: bool,
+    ) -> None:
+        result = cast("ProcessResult", context.process(step_id))
+        if result.returncode != 0:
+            detail = _process_stderr(result).strip()
+            suffix = f": {detail}" if detail else ""
+            raise InstanceConfigurationError(
+                f"PostgreSQL database existence probe failed for {target_db!r}"
+                f" (returncode={result.returncode}){suffix}"
+            )
+        stdout = result.stdout
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        exists = bool(str(stdout or "").strip())
+        if exists == expected_exists:
+            return
+        if expected_exists:
+            raise RestoreFailedError(f"Database {target_db!r} was not created after restore")
+        raise DatabaseAlreadyExistsError(f"Target database {target_db!r} already exists")
 
     def _preflight_copy_checkout(self, plan: _CheckoutPlan) -> None:
         """Perform every COPY rejection check before creating owned artifacts."""
@@ -2826,6 +2874,7 @@ def _restore_audit_backup_from_sqlite(
 
 def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
     """Return the private steps that are projected and consumed by checkout."""
+    from odoo_instance_sdk.internal.pg.builder import build_psql_specification
     from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
 
     steps: list[Step] = [
@@ -2916,6 +2965,34 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 cwd=str(plan.worktree),
                 mode="captured",
                 mutating=True,
+            )
+        )
+    if plan.db_mode is EnvironmentDatabaseMode.COPY and plan.target_database is not None:
+        raw_port = plan.config_values.get("db_port")
+        try:
+            db_port = int(raw_port) if raw_port else 5432
+        except ValueError:
+            db_port = 5432
+        escaped_database = plan.target_database.replace("'", "''")
+        steps.extend(
+            build_psql_specification(
+                step_id=step_id,
+                host=plan.config_values.get("db_host"),
+                port=db_port,
+                user=plan.config_values.get("db_user"),
+                password=plan.config_values.get("db_password"),
+                database="postgres",
+                args=(
+                    "-c",
+                    f"SELECT 1 FROM pg_database WHERE datname='{escaped_database}'",
+                ),
+                _trusted_args=("-t", "-A"),
+                timeout=30.0,
+                _require_binary=False,
+            ).prepared_step
+            for step_id in (
+                "database.restore.exists-before",
+                "database.restore.exists-after",
             )
         )
     steps.extend(
