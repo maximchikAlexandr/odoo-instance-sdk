@@ -37,7 +37,7 @@ type CatalogValue = JsonValue | Path | datetime | uuid.UUID | tuple[str, ...]
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 
 
 class CopyJournalStage(StrEnum):
@@ -359,6 +359,11 @@ class BackupCatalog:
             self._migrate_v13_cluster_ownership(conn)
             conn.execute("PRAGMA user_version = 13")
             conn.commit()
+            user_version = 13
+        if user_version < 14:
+            self._migrate_v14_environment_foreign_keys(conn)
+            conn.execute("PRAGMA user_version = 14")
+            conn.commit()
 
     def _migrate_v12_backup_point_order(self, conn: sqlite3.Connection) -> None:
         """Index the immutable ordering key used by point-query pagination."""
@@ -439,6 +444,50 @@ class BackupCatalog:
                 "CREATE INDEX IF NOT EXISTS database_events_cluster_identity_idx "
                 "ON database_events(cluster_id, db_host, db_port, database_name, sequence DESC)"
             )
+
+    def _migrate_v14_environment_foreign_keys(self, conn: sqlite3.Connection) -> None:
+        """Repair child foreign keys rewritten to the removed v8 staging table."""
+        tables = {
+            str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "environment_events" in tables:
+            conn.executescript("""
+                CREATE TABLE environment_events_v14 (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    environment_id TEXT NOT NULL,
+                    operation TEXT NOT NULL CHECK (operation IN ('checkout', 'sync', 'use', 'shell', 'remove')),
+                    outcome TEXT NOT NULL CHECK (outcome IN ('started', 'succeeded', 'failed')),
+                    occurred_at TEXT NOT NULL,
+                    message TEXT,
+                    FOREIGN KEY (environment_id) REFERENCES environments(id)
+                );
+                INSERT INTO environment_events_v14
+                    SELECT sequence, environment_id, operation, outcome, occurred_at, message
+                    FROM environment_events;
+                DROP TABLE environment_events;
+                ALTER TABLE environment_events_v14 RENAME TO environment_events;
+                CREATE INDEX environment_events_env_idx
+                    ON environment_events (environment_id, sequence DESC);
+            """)
+        if "environment_copy_journal" in tables:
+            conn.executescript("""
+                CREATE TABLE environment_copy_journal_v14 (
+                    environment_id TEXT PRIMARY KEY REFERENCES environments(id),
+                    target_database TEXT NOT NULL,
+                    db_host TEXT NOT NULL,
+                    db_port INTEGER NOT NULL,
+                    db_user TEXT,
+                    backup_id TEXT REFERENCES backups(id),
+                    stage TEXT NOT NULL CHECK (stage IN ('prepared', 'backed_up', 'restore_pending', 'restored', 'dropped', 'backup_deleted')),
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO environment_copy_journal_v14
+                    SELECT environment_id, target_database, db_host, db_port, db_user,
+                           backup_id, stage, updated_at
+                    FROM environment_copy_journal;
+                DROP TABLE environment_copy_journal;
+                ALTER TABLE environment_copy_journal_v14 RENAME TO environment_copy_journal;
+            """)
 
     def _migrate_v10_backup_source_branch(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(backups)")}
