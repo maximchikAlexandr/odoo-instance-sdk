@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
@@ -81,13 +83,17 @@ def _collect_used_ports(
     project_roots: set[Path] = set()
     exclude_resolved = exclude_project.resolve() if exclude_project is not None else None
 
-    if catalog is not None:
-        for row in catalog.list_environments():
-            repo_root = Path(str(row["repository_root"]))
-            project_roots.add(repo_root)
-            http_port = _http_port_from_generated_config(row["generated_config_path"])
-            if http_port is not None:
-                used.add(http_port)
+    rows = (
+        catalog.list_environments()
+        if catalog is not None
+        else _read_environment_paths(get_catalog_path(ensure_exists=False))
+    )
+    for row in rows:
+        repo_root = Path(str(row["repository_root"]))
+        project_roots.add(repo_root)
+        http_port = _http_port_from_generated_config(row["generated_config_path"])
+        if http_port is not None:
+            used.add(http_port)
 
     for repo_root in project_roots:
         if exclude_resolved is not None:
@@ -99,6 +105,20 @@ def _collect_used_ports(
         _add_manifest_ports(repo_root, used)
 
     return used
+
+
+def _read_environment_paths(path: Path) -> list[sqlite3.Row]:
+    if not path.is_file():
+        return []
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        return connection.execute(
+            "SELECT repository_root, generated_config_path "
+            "FROM environments WHERE state != 'removed'"
+        ).fetchall()
+    finally:
+        connection.close()
 
 
 def _add_manifest_ports(repo_root: Path, used: set[int]) -> None:
