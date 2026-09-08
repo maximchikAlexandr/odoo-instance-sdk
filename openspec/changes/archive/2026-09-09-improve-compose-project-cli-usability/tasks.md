@@ -48,6 +48,6 @@
 
 ## 7. Verify the Integrated Change
 
-- [ ] 7.1 Run the focused init/config, catalogue migration, CLI context/output, monitor Git, automation, address, and local-test suites and record all commands and exit codes.
-- [ ] 7.2 Run `openspec validate improve-compose-project-cli-usability --strict`, `make lint`, `make types`, and the repository unit/architecture/documentation checks required by the affected areas; fix failures without weakening inventories or allowlists.
-- [ ] 7.3 Run machine parity, redaction/security, dashboard/OpenAPI no-local-path, compatibility, and package checks affected by the change; confirm no new dependency, public model, direct subprocess launch, or production `Any`/bare `object` annotation.
+- [x] 7.1 Run the focused init/config, catalogue migration, CLI context/output, monitor Git, automation, address, and local-test suites and record all commands and exit codes.
+- [x] 7.2 Run `openspec validate improve-compose-project-cli-usability --strict`, `make lint`, `make types`, and the repository unit/architecture/documentation checks required by the affected areas; fix failures without weakening inventories or allowlists.
+- [x] 7.3 Run machine parity, redaction/security, dashboard/OpenAPI no-local-path, compatibility, and package checks affected by the change; confirm no new dependency, public model, direct subprocess launch, or production `Any`/bare `object` annotation.

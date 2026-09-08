@@ -14,10 +14,20 @@ An existing non-identical manifest MUST NEVER be overwritten silently. Identical
 - **WHEN** interactive Rich `odcli init` resolves a manifest different from the existing manifest and `--yes` is absent
 - **THEN** it asks for Click overwrite confirmation and performs no silent overwrite
 
+#### Scenario: Non-identical existing manifest — TTY prompt
+
+- **WHEN** `odcli init` runs in a TTY with options different from the existing manifest and `--yes` is absent
+- **THEN** Click requests overwrite confirmation and no silent overwrite occurs
+
 #### Scenario: Headless overwrite remains refused by default
 
 - **WHEN** `odcli init --no-input` resolves a different manifest without `--yes`
 - **THEN** it emits the stable refusal, does not prompt, and does not overwrite
+
+#### Scenario: Non-identical existing manifest — no-input error
+
+- **WHEN** `odcli init --no-input` resolves options different from the existing manifest without `--yes`
+- **THEN** it emits `manifest exists and differs; remove it first or adjust options`, does not prompt, and does not overwrite
 
 #### Scenario: Explicit headless overwrite
 

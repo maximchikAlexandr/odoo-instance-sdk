@@ -11,6 +11,11 @@ The collector SHALL first resolve `<base_ref>@{upstream}` when available and oth
 - **WHEN** an environment records `base_ref=dev`, has no `main`, and HEAD equals the available local or upstream `dev` tip
 - **THEN** `default_branch="dev"`, `state="clean"`, `ahead=0`, `behind=0`, and `diff={added:0,deleted:0}`
 
+#### Scenario: Clean branch
+
+- **WHEN** HEAD equals the recorded baseline tip with no divergence
+- **THEN** `state="clean"`, `ahead=0`, `behind=0`, and `diff={added:0,deleted:0}`
+
 #### Scenario: Diverged with line counts
 
 - **WHEN** HEAD is four commits ahead and one behind the recorded baseline tip
@@ -25,6 +30,16 @@ The collector SHALL first resolve `<base_ref>@{upstream}` when available and oth
 
 - **WHEN** the committed three-dot diff contains a binary file and the worktree contains uncommitted text changes
 - **THEN** the binary contributes zero and the uncommitted changes do not affect `diff`
+
+#### Scenario: Binary files skipped
+
+- **WHEN** the committed three-dot diff contains a binary file
+- **THEN** that file contributes zero to `diff.added` and `diff.deleted`
+
+#### Scenario: Stale local main falls back to upstream
+
+- **WHEN** an environment records `base_ref=main`, local `main` is behind its reachable upstream, and the upstream tip resolves successfully
+- **THEN** ahead and behind are computed against the upstream tip rather than stale local `main`
 
 #### Scenario: Recorded and direct collectors agree
 

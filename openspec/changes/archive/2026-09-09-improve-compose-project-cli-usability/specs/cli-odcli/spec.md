@@ -50,6 +50,11 @@ Default Rich dry-run output SHALL use one shared projection showing the command 
 - **WHEN** a mutating command with process steps is invoked with `--dry-run` in default Rich mode
 - **THEN** the user sees targets, mutations, preconditions, warnings, and every exact sanitized process display without the remaining low-level fields
 
+#### Scenario: Human plan is decision-oriented
+
+- **WHEN** a mutating command is invoked with `--dry-run` in default Rich mode
+- **THEN** the user sees targets, mutations, preconditions, and warnings without low-level execution fields
+
 #### Scenario: Confirmed dry-run command families are visible
 
 - **WHEN** Rich dry-run is invoked for `run`, `env checkout`, `postgres up`, `postgres stop`, `module update`, or `translations export` and its immutable plan contains a process step
