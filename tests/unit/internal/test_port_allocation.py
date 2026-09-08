@@ -101,6 +101,25 @@ def test_http_allocation_skips_other_project_preferred_port(tmp_path: Path) -> N
     catalog.close()
 
 
+def test_http_allocation_reads_existing_catalog_without_opening_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    project_a = tmp_path / "project-a"
+    generated = project_a / "odoo.conf"
+    _write_manifest(project_a, preferred_http_port=8070)
+    _write_generated_config(generated, 8069)
+    _register_env(catalog, project_a, generated)
+    catalog.close()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.port_allocation.get_catalog_path",
+        lambda **_kwargs: catalog_path,
+    )
+
+    assert find_free_port("http", None) == 8071
+
+
 def test_manual_postgres_manifest_edit_is_source_of_truth(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     project_a = tmp_path / "project-a"

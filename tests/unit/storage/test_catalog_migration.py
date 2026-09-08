@@ -20,17 +20,17 @@ MIGRATION_FIXTURE_VERSIONS = (5, 6, 7, 8, 9, 10, 11, 12, 13)
 
 
 def test_next_catalog_migration_version_and_fixtures_are_sequential() -> None:
-    assert CATALOG_SCHEMA_VERSION == 13
-    assert NEXT_CATALOG_SCHEMA_VERSION == 14
-    contiguous_versions = tuple(range(MIGRATION_FIXTURE_VERSIONS[0], CATALOG_SCHEMA_VERSION + 1))
+    assert CATALOG_SCHEMA_VERSION == 14
+    assert NEXT_CATALOG_SCHEMA_VERSION == 15
+    contiguous_versions = tuple(range(MIGRATION_FIXTURE_VERSIONS[0], CATALOG_SCHEMA_VERSION))
     assert contiguous_versions == MIGRATION_FIXTURE_VERSIONS
 
 
-def test_fresh_install_creates_v13_directly(tmp_path: Path) -> None:
+def test_fresh_install_creates_v14_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 13
+    assert version == CATALOG_SCHEMA_VERSION
     backup_columns = {r[1] for r in catalog._conn.execute("PRAGMA table_info(backups)").fetchall()}
     assert "source_git_branch" in backup_columns
     tables = {
@@ -117,8 +117,25 @@ def test_v13_migration_rolls_back_on_claim_index_conflict(tmp_path: Path) -> Non
     conn.commit()
     conn.close()
     reopened = BackupCatalog(db_path=db)
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 14
     reopened.close()
+
+
+def test_v13_migration_rejects_unsupported_cluster_table_shape(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA user_version = 12")
+    conn.execute("CREATE TABLE postgres_clusters (marker INTEGER)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(BackupCatalogError, match="unsupported shape"):
+        BackupCatalog(db_path=db)
+
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert [row[1] for row in conn.execute("PRAGMA table_info(postgres_clusters)")] == ["marker"]
+    conn.close()
 
 
 def test_v12_backup_order_index_migration_rolls_back_on_conflict(tmp_path: Path) -> None:
@@ -146,7 +163,7 @@ def test_v12_backup_order_index_migration_rolls_back_on_conflict(tmp_path: Path)
     conn.close()
 
     reopened = BackupCatalog(db_path=db)
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 14
     assert (
         reopened._conn.execute(
             "SELECT type FROM sqlite_master WHERE name='backups_point_order_idx'"
@@ -248,7 +265,7 @@ def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_
     conn.close()
 
     catalog = BackupCatalog(db_path=db)
-    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == 14
     assert (
         catalog._conn.execute(
             "SELECT COUNT(*) FROM backup_events WHERE backup_id=?", (backup_id,)
@@ -275,7 +292,7 @@ def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_
     provenance = reopened.latest_restore_provenance("localhost", 5432, "restored")
     assert provenance is not None
     assert provenance.source_git_branch is None
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 14
     reopened.close()
 
 
@@ -350,7 +367,7 @@ def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None
     schema = catalog._conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='environment_copy_journal'"
     ).fetchone()[0]
-    assert version == 13
+    assert version == 14
     assert "restore_pending" in schema
     catalog.close()
 
@@ -379,7 +396,7 @@ def test_v8_catalog_upgrades_to_v13_environment_runtime_and_branch_column(tmp_pa
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert version == 13
+    assert version == 14
     assert "runtime" in tables
     columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(backups)")}
     assert "source_git_branch" in columns
@@ -506,7 +523,7 @@ def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
         (env_id,),
     ).fetchone()
 
-    assert version == 13
+    assert version == 14
     assert "http_port" not in columns
     assert "http_interface" not in columns
     assert "environments_one_active_branch" in indexes
@@ -514,6 +531,11 @@ def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
     assert row["name"] == "test"
     assert row["branch"] == "main"
     assert event is not None
+    foreign_tables = {
+        row[2] for row in catalog._conn.execute("PRAGMA foreign_key_list(environment_events)")
+    }
+    assert foreign_tables == {"environments"}
+    catalog.add_environment_event(env_id, "use", "succeeded", message="after migration")
     catalog.close()
 
 

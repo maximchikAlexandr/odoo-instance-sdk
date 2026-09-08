@@ -58,5 +58,21 @@ the monitor.
 1. Install a release containing the updated core metadata; ordinary upgrades
    install `psutil` automatically.
 2. Remove the obsolete `metrics` extra from local install commands.
-3. Rollback is a package-version rollback; catalog identity rows already use
-   the exact create-time schema and need no data migration.
+3. Rollback is a package-version rollback. Within `require-core-psutil`,
+   catalog identity rows already use the exact create-time representation, so
+   this dependency/identity change requires no data migration.
+
+## PR #58 compatibility note
+
+PR #58 at `6841c602bc2c56f71d1e412cb62f01e05fe2d0e2` has no semantic
+impact on the core-`psutil` identity contract or on the monitor's single
+transactionally consistent environment/runtime aggregate. Its separate
+backup-catalog migration advances global SQLite `PRAGMA user_version` to 14
+and repairs foreign keys; that migration does not transform the runtime
+identity representation introduced by this change.
+
+Accordingly, “requires no data migration” above is scoped only to
+`require-core-psutil`. It is not a claim that the repository has no later or
+unrelated catalog migrations. The new read-only catalog access in checkout
+port planning is also a separate consumer and does not split or duplicate the
+monitor aggregate.

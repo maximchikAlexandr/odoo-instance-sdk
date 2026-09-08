@@ -220,9 +220,9 @@ def build_psql_specification(  # noqa: C901
     executable = _executable if _executable is not None else resolve_psql_executable()
     if _require_binary and executable is None:
         raise FileNotFoundError("psql is not available on PATH")
-    # A missing executable is only representable in a deliberately skipped
-    # diagnostic plan.  Such a step is never executed, but retaining a stable
-    # absolute-or-captured argv keeps the snapshot shape deterministic.
+    # Callers that defer capability checks can still build an inspectable plan.
+    # Execution remains honest: the process boundary will fail if ``psql`` is
+    # still unavailable when this exact argv is consumed.
     executable = os.path.abspath(executable) if executable is not None else "psql"
     native = validate_native_psql_args(args)
     statement_timeout = _statement_timeout(timeout) if _inject_timeout else None

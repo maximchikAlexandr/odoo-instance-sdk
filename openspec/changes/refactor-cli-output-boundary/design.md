@@ -161,6 +161,31 @@ Each step keeps `odoo_instance_sdk.cli:cli` importable and the test suite runnab
 
 Rollback is commit-wise: revert live/output commits first, then snapshot-v2/de-collection, then the move. No catalog schema or user data migration is involved. Reverting snapshot v2 removes only additive generated fields and restores `schema_version=1`.
 
+## PR #58 compatibility note
+
+PR #58 at `6841c602bc2c56f71d1e412cb62f01e05fe2d0e2` advances the
+SQLite backup catalog to `PRAGMA user_version = 14`, including foreign-key
+repair, and lets checkout port planning read registered environment paths from
+that catalog through a read-only SQLite connection, then derive reserved ports
+from canonical project manifests and generated configs. This is an
+operation-owned planning read performed before the immutable checkout plan is
+rendered or executed. It does not authorize `commands/env.py` or any CLI
+renderer to open the catalog, collect ports, or perform a second inventory
+pass; those adapters must still render only the canonical monitor snapshot.
+
+The version identifiers belong to separate contracts:
+
+- snapshot schema version 2 in this change describes the typed
+  `Snapshot`/`EnvironmentSnapshot` transport shape;
+- CLI envelope version 1 describes the machine-output wrapper;
+- SQLite `PRAGMA user_version = 14` describes the persisted backup-catalog
+  migration level.
+
+They are neither compared nor synchronized. PR #58 therefore affects the
+catalog/planning assumptions documented here but has no semantic impact on the
+single transactionally consistent environment/runtime aggregate owned by
+`EnvironmentMonitor`.
+
 ## Open Questions
 
 None. The output option scope, `--all` compatibility, snapshot schema migration, TOON implementation/pin, live-loop ownership, and module boundaries are fixed above.

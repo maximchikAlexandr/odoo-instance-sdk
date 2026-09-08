@@ -66,11 +66,10 @@ def _runtime_kwargs() -> RuntimeKwargs:
     }
 
 
-def test_fresh_catalog_has_schema_v13_and_runtime_table(tmp_path: Path) -> None:
-    assert CURRENT_SCHEMA_VERSION == 13
+def test_fresh_catalog_has_schema_v14_and_runtime_table(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 13
+    assert version == CURRENT_SCHEMA_VERSION
     tables = {
         r[0]
         for r in catalog._conn.execute(
@@ -88,11 +87,11 @@ def test_reopen_v10_catalog_is_idempotent(tmp_path: Path) -> None:
     catalog.close()
     reopened = BackupCatalog(db_path=db)
     version = reopened._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 13
+    assert version == 14
     reopened.close()
 
 
-def test_v8_catalog_upgrades_to_v13_on_open(tmp_path: Path) -> None:
+def test_v8_catalog_upgrades_to_v14_on_open(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 8")
@@ -116,7 +115,7 @@ def test_v8_catalog_upgrades_to_v13_on_open(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert version == 13
+    assert version == 14
     assert "runtime" in tables
     catalog.close()
 
