@@ -155,3 +155,32 @@ exit code: 0
 Importtime values remain evidence only. Acceptance is based on successful
 help/version behavior and deterministic module absence; no timing threshold is
 defined here or in CI.
+
+### Compatibility verification after PR #58
+
+The baseline revision `abf513f14325644b81208f8ec3ac47f607e2884f` and the
+measured implementation revision `d831ce1c778623108096f48de3edeeae1d49c816`
+above are immutable historical measurement points. They do not name the
+current `main` or the latest feature head and must not be interpreted as
+moving branch references.
+
+PR #58 was rechecked at feature revision
+`6841c602bc2c56f71d1e412cb62f01e05fe2d0e2` against its `main` comparison
+base `ed590b54fe4f96970de38075bb92b55d8d84c38d`. The PR changes operation-only
+modules including `resources/environment.py`,
+`internal/database_preparation.py`, `internal/port_allocation.py`, and
+`storage/backup_catalog.py`; none became part of the metadata import path.
+
+On that exact feature revision, `tests/unit/test_cli_startup.py` passed (`5
+passed`). Independent fresh Python processes invoking each metadata option
+also exited `0` and reported both `httpx` and
+`odoo_instance_sdk.resources.monitor` absent from `sys.modules`:
+
+```text
+{"option": "--help", "exit_code": 0, "httpx": false, "monitor": false}
+{"option": "--version", "exit_code": 0, "httpx": false, "monitor": false}
+```
+
+This is a compatibility verification, not a replacement timing baseline. The
+lightweight metadata contract remains unchanged and no new duration threshold
+is introduced.
