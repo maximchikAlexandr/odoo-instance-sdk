@@ -7,7 +7,7 @@ An imported Compose project currently needs manual manifest, Odoo configuration,
 - Allow an explicit non-interactive `init --yes` overwrite while preserving refusal by default and side-effect-free dry-run behavior.
 - Generate a project-local Odoo runtime config for Compose projects from the existing config-generation path, bind it to the owned PostgreSQL cluster without publishing its password, preserve the imported source config, and keep local ignore rules inside `.odcli`.
 - Give every runtime progress event a stable step identity and concise operation context, while retaining elapsed time, exit status, redaction, and machine-output isolation.
-- Scope owned catalogue listings to the resolved project by default, require `--all-projects` for global output, and make Rich list output single-owner, tabular, and human-sized without changing JSON/TOON byte values or schemas.
+- Scope owned catalogue listings to the resolved project by default, require `--all-projects` for global output, and make Rich list output single-owner, tabular, and human-sized. JSON/TOON byte values and schemas remain unchanged except for the two approved CLI-only worktree contracts: additive `worktree_path` in `env list` results and the new `env path` envelope.
 - Resolve project-bound Odoo endpoints with one precedence rule: explicit command override, then `preferred_http_port`, then `odoo.conf` fallback.
 - Make all bounded Rich output human-oriented and make every Rich dry-run display each real sanitized `ProcessStep` command in addition to semantic context.
 - Expose stored environment worktree paths through `env list` machine results and a read-only `env path [ENVIRONMENT]` command, without publishing local paths through monitor/FastAPI/dashboard snapshots.

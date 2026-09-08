@@ -40,7 +40,7 @@
 
 ## 6. Make Rich Output Consistently Human-Oriented
 
-- [ ] 6.1 Establish the exact bounded-leaf presentation inventory in the existing shared output-contract tests and assert non-empty, non-raw-primary-JSON, non-concatenated Rich output with unchanged JSON/TOON documents and exit codes.
+- [ ] 6.1 Establish the exact bounded-leaf presentation inventory in the existing shared output-contract tests and assert non-empty, non-raw-primary-JSON, non-concatenated Rich output with unchanged JSON/TOON documents and exit codes except for exactly the additive CLI `env list.worktree_path` field and the new CLI `env path` envelope.
 - [ ] 6.2 Make `backup list` rendering single-owner and convert `backup`, `db`, `resource`, `module`, and `env` list results to one Rich table per logical result set using the existing human byte formatter while preserving exact machine integers.
 - [ ] 6.3 Render the bound cluster once for `db list` and use database, size, sessions, default, and origin columns; remove repeated unstructured cluster fields from rows.
 - [ ] 6.4 Replace affected bounded Rich raw JSON and key-value dumps, including `db restore`, with concise shared summaries, labelled panels/tables, and spaced nested details in current leaf renderers; remove duplicate pre-emission and do not add a renderer hierarchy.
