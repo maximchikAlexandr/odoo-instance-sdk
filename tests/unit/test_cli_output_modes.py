@@ -2089,6 +2089,45 @@ def test_project_module_update_keeps_confirmation_and_output_contract(
         assert payload["result"]["updated"] == ["sale"]
 
 
+def test_project_module_update_incomplete_result_is_a_failure_document(tmp_path: Path) -> None:
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        python=sys.executable,
+        odoo_bin=Path(sys.executable),
+    )
+    incomplete = _command_result(0, {"result": {"updated": []}})
+
+    def shell_script(_source: str, **kwargs: Any) -> Command[CommandResult]:
+        converter = kwargs["result_converter"]
+
+        def run(_context: object) -> CommandResult:
+            return converter(incomplete) if converter is not None else incomplete
+
+        return Command.create(ExecutionPlan(), run)
+
+    instance = SimpleNamespace(
+        config=SimpleNamespace(start_config=StartConfig(db_name="project_db")),
+        _shell_script_command=shell_script,
+    )
+    resolved = ResolvedContext(
+        client=cast("Any", object()),
+        source=cast("Any", project),
+        instance=cast("Any", instance),
+        provenance="cwd",
+    )
+    with patch("odoo_instance_sdk.cli.cli_context.ready_instance", return_value=resolved):
+        result = CliRunner().invoke(
+            cli,
+            ["module", "update", "sale", "--yes", "--format", "json"],
+        )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "updated" not in result.stdout
+    assert "did not confirm" in payload["error"]["message"]
+
+
 def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) -> None:
     snapshot = Snapshot(
         schema_version=3,

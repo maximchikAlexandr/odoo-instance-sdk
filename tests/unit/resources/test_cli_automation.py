@@ -18,6 +18,7 @@ from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.address import AddressState
 from odoo_instance_sdk.internal.automation import (
+    _update_modules_source,
     eval_expression,
     exec_script,
     export_translations,
@@ -240,6 +241,68 @@ class TestModuleList:
 
 
 class TestModuleUpdate:
+    def test_update_source_decodes_requested_names_to_a_real_list(self) -> None:
+        source = _update_modules_source(("sale", "stock"))
+
+        class FakeModules:
+            domain: list[tuple[str, str, object]] | None = None
+
+            def search(self, domain: list[tuple[str, str, object]]) -> FakeModules:
+                self.domain = domain
+                return self
+
+            def button_immediate_upgrade(self) -> None:
+                return None
+
+            def mapped(self, _field: str) -> list[str]:
+                return ["sale", "stock"]
+
+        class FakeEnvironment:
+            def __init__(self) -> None:
+                self.modules = FakeModules()
+
+            def __getitem__(self, model: str) -> FakeModules:
+                assert model == "ir.module.module"
+                return self.modules
+
+        environment = FakeEnvironment()
+        namespace: dict[str, Any] = {"env": environment}
+        exec(source, namespace)
+
+        assert environment.modules.domain is not None
+        assert environment.modules.domain[0][2] == ["sale", "stock"]
+        assert type(environment.modules.domain[0][2]) is list
+
+    def test_empty_selection_is_rejected_before_spawn(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        with (
+            patch.object(type(inst), "run_shell_script_command") as read_shell,
+            patch.object(type(inst), "_shell_script_command") as write_shell,
+            pytest.raises(ConfigError, match="at least one module"),
+        ):
+            update_modules(inst, ())
+        read_shell.assert_not_called()
+        write_shell.assert_not_called()
+
+    @pytest.mark.parametrize("updated", [[], ["sale"]])
+    def test_incomplete_updated_result_is_not_success(
+        self, tmp_path: Path, updated: list[str]
+    ) -> None:
+        inst = _make_instance(tmp_path)
+        installed = {
+            "result": [
+                {"name": "sale", "state": "installed"},
+                {"name": "stock", "state": "installed"},
+            ]
+        }
+        upgrade = {"result": {"updated": updated}}
+        with (
+            patch.object(type(inst), "run_shell_script_command", _stub_run_shell_script(installed)),
+            patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(upgrade)),
+            pytest.raises(ConfigError, match="did not confirm all requested modules"),
+        ):
+            update_modules(inst, ("sale", "stock"))
+
     def test_update_does_not_reacquire_its_own_environment_lock(self, tmp_path: Path) -> None:
         inst = _make_instance(tmp_path)
         from odoo_instance_sdk.internal.locks import environment_lock_path

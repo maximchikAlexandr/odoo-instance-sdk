@@ -3,7 +3,7 @@
 - [x] 1.1 Add init tests for identical no-op, default headless refusal, interactive confirmation, `--no-input --yes` atomic replacement, and `--yes --dry-run` zero writes; assert the repository-root `.gitignore` is never created or changed.
 - [x] 1.2 Add an imported Compose project test that preserves the external source config, creates an owner-only project runtime config bound to the owned cluster, uses `preferred_http_port`, and proves cluster credentials are absent from manifest, output, diagnostics, plans, and fingerprints.
 - [x] 1.3 Add behavioral catalogue migration tests for v7-to-current row preservation, both child foreign-key targets, a successful post-migration environment-event insert with foreign keys enabled, fresh-schema references, and unchanged current v14 on this base.
-- [ ] 1.4 Add generated module-source regressions proving requested names enter the Odoo domain as a list, empty selection is rejected before spawn, and an empty or incomplete returned `updated` set cannot produce success.
+- [x] 1.4 Add generated module-source regressions proving requested names enter the Odoo domain as a list, empty selection is rejected before spawn, and an empty or incomplete returned `updated` set cannot produce success.
 - [ ] 1.5 Add Git collector regressions with `base_ref=dev`, no `main`, local and upstream baseline variants, committed numstat, excluded binary/uncommitted changes, missing ancestry, and equality between recorded and direct collectors.
 - [ ] 1.6 Add socket regressions for an immediate bind after a closed accepted loopback connection, a live listener that remains occupied, unknown socket failures, and module-test preflight proceeding without manual retry.
 
@@ -25,7 +25,7 @@
 
 ## 4. Fix Truthful Runtime State
 
-- [ ] 4.1 Change `_update_modules_source()` to JSON-decode the frozen name list inside Odoo shell, retain pre-spawn empty-selection validation, and verify all requested modules in the returned result before building a success document.
+- [x] 4.1 Change `_update_modules_source()` to JSON-decode the frozen name list inside Odoo shell, retain pre-spawn empty-selection validation, and verify all requested modules in the returned result before building a success document.
 - [ ] 4.2 Thread each catalogue row's validated `base_ref` through bounded Git probe construction, `_recorded_git_activity()`, direct collection, compatibility output, and cache identity; resolve upstream then local baseline without fetch/pull and preserve orphan semantics.
 - [ ] 4.3 Set `SO_REUSEADDR` before the shared probe bind on supported sockets while retaining timeout, multi-address, live-listener, and `UNKNOWN` behavior without sleeps or broad retries.
 - [x] 4.4 Retain `_migrate_v14_environment_foreign_keys()` as the single current repair, adjust it only if the behavioral tests reveal a preservation/index/transaction defect, and do not advance schema version solely for this issue.
