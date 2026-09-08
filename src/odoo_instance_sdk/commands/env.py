@@ -24,6 +24,7 @@ from odoo_instance_sdk.commands.context import (
     resolve_project_path,
 )
 from odoo_instance_sdk.commands.output import (
+    JsonObject,
     OutputDocument,
     OutputMode,
     emit,
@@ -37,12 +38,13 @@ from odoo_instance_sdk.commands.output import (
     sanitize_terminal_text,
     success_document,
 )
-from odoo_instance_sdk.exceptions import ProjectContextError
+from odoo_instance_sdk.exceptions import BackupCatalogError, ProjectContextError
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.internal.git_worktree import (
     rev_parse_git_common_dir,
     rev_parse_toplevel,
 )
+from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import (
     ClusterMetrics,
@@ -63,6 +65,7 @@ from odoo_instance_sdk.models import (
     Snapshot,
     StorageFootprint,
 )
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -87,6 +90,7 @@ _ENV_LIST_COLUMNS = (
     "DATABASE",
     "PORT",
     "ARTIFACTS",
+    "WORKTREE",
 )
 
 
@@ -291,12 +295,24 @@ def env_list(
         snapshot = monitor.snapshot(project_id=project_id, include_removed=include_removed)
     except Exception as e:
         fail(output_mode, "env.list", str(e))
+    try:
+        worktree_paths = (
+            _catalog_worktree_paths(monitor, include_removed=include_removed)
+            if snapshot.environments
+            else {}
+        )
+    except Exception as e:
+        fail(output_mode, "env.list", e)
 
     if machine_output:
         # ponytail: --json always wraps the non-removed Snapshot only; --all does
         # NOT change the JSON payload. msgspec round-trips enums/datetimes to
         # plain JSON-safe builtins.
         result = msgspec.to_builtins(snapshot)
+        try:
+            _add_cli_worktree_paths(result, worktree_paths)
+        except Exception as e:
+            fail(output_mode, "env.list", e)
         emit_json_envelope(
             ok=True,
             command="env.list",
@@ -310,7 +326,7 @@ def env_list(
         return
 
     # Human output: grouped by project, with cluster summary + environment rows.
-    _print_env_list_human(snapshot)
+    _print_env_list_human(snapshot, worktree_paths)
 
 
 def _validate_watch_options(output_mode: OutputMode, *, watch: bool, interval: float) -> None:
@@ -341,7 +357,12 @@ def _run_env_list_live(
                     project_id=project_id,
                     include_removed=include_removed,
                 )
-                last_renderable = _render_env_list_rich(snapshot)
+                worktree_paths = (
+                    _catalog_worktree_paths(monitor, include_removed=include_removed)
+                    if snapshot.environments
+                    else {}
+                )
+                last_renderable = _render_env_list_rich(snapshot, worktree_paths)
                 live.update(last_renderable, refresh=True)
             except KeyboardInterrupt:
                 raise
@@ -374,8 +395,63 @@ def _resolve_monitor_project_id(ctx: CliContext, all_projects: bool) -> str | No
     return f"project_{repo_key(repo_root, git_common)}"
 
 
-def _print_env_list_human(snapshot: Snapshot) -> None:
-    Console().print(_render_env_list_rich(snapshot))
+def _catalog_worktree_paths(
+    monitor: EnvironmentMonitor, *, include_removed: bool
+) -> dict[str, str]:
+    """Read stored CLI-only paths after the monitor's single snapshot pass."""
+    catalog_path = getattr(monitor, "catalog_path", None)
+    if catalog_path is None:
+        catalog_path = get_catalog_path(ensure_exists=False)
+    catalog_path = Path(catalog_path)
+    try:
+        if not catalog_path.is_file():
+            raise RuntimeError(
+                "environment catalogue unavailable; cannot resolve worktree paths for env list"
+            )
+    except OSError as exc:
+        raise RuntimeError(
+            "environment catalogue unavailable; cannot resolve worktree paths for env list"
+        ) from exc
+    try:
+        catalog = BackupCatalog(db_path=catalog_path)
+        try:
+            rows = catalog.list_environments(include_removed=include_removed)
+        finally:
+            catalog.close()
+    except (BackupCatalogError, OSError) as exc:
+        raise RuntimeError(
+            "environment catalogue read failed; cannot resolve worktree paths for env list"
+        ) from exc
+    return {
+        str(row["id"]): worktree_path
+        for row in rows
+        if isinstance(row["worktree_path"], str)
+        and (worktree_path := row["worktree_path"].strip())
+        and Path(worktree_path).is_absolute()
+    }
+
+
+def _add_cli_worktree_paths(result: JsonObject, worktree_paths: dict[str, str]) -> None:
+    """Add only the approved CLI projection field to machine environment rows."""
+    if not isinstance(result, dict):
+        raise TypeError("env list projection is not an environment result object")
+    environments = result.get("environments")
+    if not isinstance(environments, (list, tuple)):
+        raise TypeError("env list projection has no environment rows")
+    for environment in environments:
+        if not isinstance(environment, dict):
+            raise TypeError("environment catalogue join returned an invalid environment row")
+        environment_id = environment.get("id")
+        worktree_path = worktree_paths.get(str(environment_id))
+        if not isinstance(environment_id, str) or worktree_path is None:
+            raise RuntimeError(
+                "environment catalogue is missing a worktree path for an environment result"
+            )
+        environment["worktree_path"] = worktree_path
+
+
+def _print_env_list_human(snapshot: Snapshot, worktree_paths: dict[str, str] | None = None) -> None:
+    Console().print(_render_env_list_rich(snapshot, worktree_paths))
 
 
 def _project_provenance(cli_context: CliContext) -> str:
@@ -384,8 +460,85 @@ def _project_provenance(cli_context: CliContext) -> str:
     return project_provenance(cli_context)
 
 
-def _render_env_list_rich(snapshot: Snapshot) -> Group:
+def _validated_env_path(environment: DevelopmentEnvironment) -> str:
+    """Return the registered active worktree only when it is usable."""
+    if str(environment.state) != EnvironmentState.READY.value:
+        raise RuntimeError(
+            f"Environment {environment.name} is not active (state={environment.state})"
+        )
+    raw_path = environment.worktree_path
+    if not isinstance(raw_path, str) or not raw_path or raw_path != raw_path.strip():
+        raise RuntimeError("environment has no valid absolute worktree path")
+    worktree = Path(raw_path)
+    if not worktree.is_absolute():
+        raise RuntimeError("environment worktree path is not absolute")
+    try:
+        is_directory = worktree.is_dir()
+    except OSError as exc:
+        raise RuntimeError("environment worktree is unavailable") from exc
+    if not is_directory:
+        raise RuntimeError("environment worktree is missing or not a directory")
+    return raw_path
+
+
+@env_group.command(
+    "path",
+    help='Print an active environment worktree path. Example: cd "$(odcli env path <environment>)".',
+)
+@click.argument("environment", required=False, metavar="ENVIRONMENT")
+@output_options
+@pass_cli_context
+def env_path(
+    ctx: CliContext,
+    environment: str | None,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    """Print one validated absolute worktree path without changing state."""
+    output_mode = resolve_output_mode(output_format, json_output)
+    if environment is None and ctx.env is not None:
+        fail(
+            output_mode,
+            "env.path",
+            "root --env is not accepted by env path; pass ENVIRONMENT or cd into its worktree",
+            usage=True,
+        )
+
+    client = _client_class()(config=_client_config_class()(executable="odoo"))
+    try:
+        env_obj = resolve_environment(client, environment, cwd=Path.cwd())
+        worktree_path = _validated_env_path(env_obj)
+    except Exception as exc:
+        fail(output_mode, "env.path", exc)
+
+    emit(
+        success_document(
+            command="env.path",
+            result={
+                "environment_id": str(env_obj.id),
+                "name": env_obj.name,
+                "worktree_path": worktree_path,
+            },
+            provenance={
+                "environment_source": "cwd" if environment is None else "explicit",
+            },
+        ),
+        output_mode,
+        rich=lambda _document: worktree_path,
+    )
+
+
+def _render_env_list_rich(
+    snapshot: Snapshot, worktree_paths: dict[str, str] | None = None
+) -> Group:
     """Build the Rich inventory projection without collecting any data."""
+    if worktree_paths is not None:
+        for env in snapshot.environments:
+            if env.id not in worktree_paths:
+                raise RuntimeError(
+                    "environment catalogue is missing a worktree path for an environment result"
+                )
+    paths = worktree_paths or {}
     envs_by_project: dict[str, list[EnvironmentSnapshot]] = {}
     for env in snapshot.environments:
         envs_by_project.setdefault(env.project_id, []).append(env)
@@ -404,17 +557,17 @@ def _render_env_list_rich(snapshot: Snapshot) -> Group:
         )
         table = Table(show_header=True, box=None, pad_edge=False)
         for column in _ENV_LIST_COLUMNS:
-            table.add_column(column, overflow="fold")
+            table.add_column(column, overflow="fold", no_wrap=column == "WORKTREE")
         project_envs = sorted(envs_by_project.get(project.id, ()), key=lambda item: item.id)
         for env in project_envs:
-            table.add_row(*_rich_env_row(env))
+            table.add_row(*_rich_env_row(env, paths.get(env.id)))
         sections.append(table)
     return Group(*sections)
 
 
-def _rich_env_row(env: EnvironmentSnapshot) -> tuple[Text, ...]:
-    """Return all fifteen environment values with terminal-aware styles."""
-    values = _env_row_values(env)
+def _rich_env_row(env: EnvironmentSnapshot, worktree_path: str | None = None) -> tuple[Text, ...]:
+    """Return all sixteen environment values with terminal-aware styles."""
+    values = _env_row_values(env, worktree_path)
     state_style = {
         "ready": "green",
         "not_ready": "yellow",
@@ -436,9 +589,9 @@ def _rich_env_row(env: EnvironmentSnapshot) -> tuple[Text, ...]:
     )
 
 
-def _env_row_values(env: EnvironmentSnapshot) -> tuple[str, ...]:
+def _env_row_values(env: EnvironmentSnapshot, worktree_path: str | None = None) -> tuple[str, ...]:
     if env.lifecycle_state is EnvironmentState.REMOVED:
-        return _removed_env_row_values(env)
+        return _removed_env_row_values(env, worktree_path)
     return (
         env.name,
         env.branch,
@@ -455,10 +608,13 @@ def _env_row_values(env: EnvironmentSnapshot) -> tuple[str, ...]:
         env.database or "",
         _port_str(env),
         _artifacts_str(env.artifacts),
+        worktree_path or "—",
     )
 
 
-def _removed_env_row_values(env: EnvironmentSnapshot) -> tuple[str, ...]:
+def _removed_env_row_values(
+    env: EnvironmentSnapshot, worktree_path: str | None = None
+) -> tuple[str, ...]:
     return (
         env.name,
         env.branch,
@@ -475,6 +631,7 @@ def _removed_env_row_values(env: EnvironmentSnapshot) -> tuple[str, ...]:
         env.database or "",
         str(env.allocated_http_port) if env.allocated_http_port is not None else "—",
         _artifacts_str(env.artifacts),
+        worktree_path or "—",
     )
 
 

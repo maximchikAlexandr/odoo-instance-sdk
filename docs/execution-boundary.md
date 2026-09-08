@@ -32,6 +32,7 @@ classification is bounded and whose contract requires `--dry-run`:
 | --- | --- |
 | `init` | mutating-or-spawning |
 | `env checkout` | mutating-or-spawning |
+| `env path` | bounded-read-only |
 | `env remove` | mutating-or-spawning |
 | `env sync` | mutating-or-spawning |
 | `backup delete` | mutating-or-spawning |
@@ -145,7 +146,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 
 - `src/odoo_instance_sdk/cli.py:1006-1007` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
-- `src/odoo_instance_sdk/commands/env.py:378` — existing Rich-live inventory
+- `src/odoo_instance_sdk/commands/env.py:454` — existing Rich-live inventory
   transport; remove when Rich live output is supplied by a distinct transport
   adapter rather than the live command callback.
 - `src/odoo_instance_sdk/commands/output.py:234` — shared Rich output

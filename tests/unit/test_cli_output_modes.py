@@ -63,6 +63,7 @@ from odoo_instance_sdk.models import (
     EnvironmentPythonMode,
     OdooTestResult,
     PostgresClusterState,
+    ProjectSummary,
     Snapshot,
     StartConfig,
 )
@@ -144,6 +145,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         False,
         variants=("rich-live",),
     ),
+    PublicLeafCase(("env", "path"), ("env", "path", "env-1"), "bounded-read-only", False),
     PublicLeafCase(
         ("env", "remove"), ("env", "remove", "env-1", "--yes"), "mutating-or-spawning", True
     ),
@@ -475,7 +477,7 @@ def _patch_leaf_external(  # noqa: C901
     if path[:1] == ("resource",):
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.resource._resource_command",
-            lambda: _matrix_command(
+            lambda **_kwargs: _matrix_command(
                 ResourceInventory(resources=(), findings=(), complete=True),
                 error=RuntimeError("isolated external operation failed") if failing else None,
             ),
@@ -639,6 +641,20 @@ def _patch_leaf_external(  # noqa: C901
 
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot_operation
+        )
+        return
+
+    if path[:2] == ("env", "path"):
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(exist_ok=True)
+        path_environment = _matrix_environment()
+        path_environment.worktree_path = str(worktree)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.OdooClient", lambda **_kwargs: MagicMock()
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.resolve_environment",
+            fail_operation if failing else lambda *_args, **_kwargs: path_environment,
         )
         return
 
@@ -960,6 +976,8 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     for mode in ("json", "toon"):
         with monkeypatch.context() as isolated:
             args = list(case.args)
+            if case.path in (("backup", "list"), ("resource", "list")):
+                args.append("--all-projects")
             if case.path == ("init",):
                 args.append(str(tmp_path))
             _patch_leaf_external(isolated, case, failing=False, tmp_path=tmp_path)
@@ -1980,10 +1998,21 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                     str(tmp_path),
                 ]
             else:
-                snapshot = {
-                    "catalog_value": payload,
-                    "nested": [{"display_name": payload}],
-                }
+                snapshot = Snapshot(
+                    schema_version=3,
+                    generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+                    projects=(
+                        ProjectSummary(
+                            id="project",
+                            name=payload,
+                            display_hint=payload,
+                            environment_count=0,
+                            cluster=None,
+                            runtime=None,
+                        ),
+                    ),
+                    environments=(),
+                )
                 isolated.setattr(
                     "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
                     lambda *_args, **_kwargs: snapshot,
@@ -2172,7 +2201,7 @@ def test_resource_machine_projection_is_read_only_and_one_document(
         lambda **_kwargs: tmp_path / "backups",
     )
 
-    result = CliRunner().invoke(cli, ["resource", "list", "--format", mode])
+    result = CliRunner().invoke(cli, ["resource", "list", "--all-projects", "--format", mode])
 
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
@@ -2188,12 +2217,13 @@ def test_resource_rich_projections_are_bounded_and_deterministic(
 ) -> None:
     empty = ResourceInventory(resources=(), findings=(), complete=True)
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.resource._resource_command", lambda: _matrix_command(empty)
+        "odoo_instance_sdk.commands.resource._resource_command",
+        lambda **_kwargs: _matrix_command(empty),
     )
     runner = CliRunner()
 
-    first = runner.invoke(cli, ["resource", "list"])
-    second = runner.invoke(cli, ["resource", "list"])
+    first = runner.invoke(cli, ["resource", "list", "--all-projects"])
+    second = runner.invoke(cli, ["resource", "list", "--all-projects"])
     doctor = runner.invoke(cli, ["resource", "doctor"])
 
     assert first.exit_code == second.exit_code == doctor.exit_code == 0

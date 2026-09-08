@@ -90,6 +90,8 @@ promise: commands that support it expose `--format rich|json|toon` and/or
 `--json`. Supplying `--json` with `--format json` is allowed where both are
 documented. TOON is the compact structured form.
 
+To enter a registered environment worktree, use ordinary shell command substitution: `cd "$(odcli env path <environment>)"`.
+
 All bounded mutating or process-backed leaves support the same inspect-first
 shape: add `--dry-run` to render the captured typed plan, then omit it to run
 the command. The preview contains ordered process/action steps, redacted
@@ -300,6 +302,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.
 - `odcli env checkout` — Plan or create an isolated branch worktree and environment.
 - `odcli env list` — List registered environments, active-only unless `--all` is requested.
+- `odcli env path` — Print one active environment's absolute worktree path.
 - `odcli env remove` — Remove a registered environment and its owned artifacts safely.
 - `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
 - `odcli backup list` — List retained backup records with state and file presence.

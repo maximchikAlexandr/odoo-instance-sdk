@@ -17,11 +17,11 @@
 
 ## 3. Scope Catalogue Data and Expose Worktree Paths
 
-- [ ] 3.1 Extend backup and local-resource catalogue queries with the existing canonical project identity predicate before pagination; add `--all-projects`, explicit global provenance, and outside-project refusal while leaving `db list` project-bound.
-- [ ] 3.2 Add a CLI-only environment projection that joins the existing catalogue `DevelopmentEnvironment.worktree_path` to one already-collected monitor snapshot by UUID without changing monitor/FastAPI/dashboard models or collecting metrics twice.
-- [ ] 3.3 Add `WORKTREE` to Rich `env list` and `worktree_path` to each CLI JSON/TOON environment result, preserving stable ordering, watch selection, machine parity, and absence of local paths from HTTP/OpenAPI/dashboard fixtures.
-- [ ] 3.4 Implement read-only `env path [ENVIRONMENT]` with existing cwd/name/UUID resolution, active and directory validation, exact plain-path Rich output, normal JSON/TOON envelopes, and actionable unknown/ambiguous/removed/missing failures; do not add root `--env`, `env cd`, or a nested shell.
-- [ ] 3.5 Add the short help/README example for `cd "$(odcli env path <environment>)"` and tests for cwd resolution, name/UUID, paths with spaces, exact no-ANSI stdout, machine parity, and no misleading `env cd` documentation.
+- [x] 3.1 Extend backup and local-resource catalogue queries with the existing canonical project identity predicate before pagination; add `--all-projects`, explicit global provenance, and outside-project refusal while leaving `db list` project-bound.
+- [x] 3.2 Add a CLI-only environment projection that joins the existing catalogue `DevelopmentEnvironment.worktree_path` to one already-collected monitor snapshot by UUID without changing monitor/FastAPI/dashboard models or collecting metrics twice.
+- [x] 3.3 Add `WORKTREE` to Rich `env list` and `worktree_path` to each CLI JSON/TOON environment result, preserving stable ordering, watch selection, machine parity, and absence of local paths from HTTP/OpenAPI/dashboard fixtures.
+- [x] 3.4 Implement read-only `env path [ENVIRONMENT]` with existing cwd/name/UUID resolution, active and directory validation, exact plain-path Rich output, normal JSON/TOON envelopes, and actionable unknown/ambiguous/removed/missing failures; do not add root `--env`, `env cd`, or a nested shell.
+- [x] 3.5 Add the short help/README example for `cd "$(odcli env path <environment>)"` and tests for cwd resolution, name/UUID, paths with spaces, exact no-ANSI stdout, machine parity, and no misleading `env cd` documentation.
 
 ## 4. Fix Truthful Runtime State
 

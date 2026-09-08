@@ -15,6 +15,7 @@ else:
 from rich.console import Console
 from rich.table import Table
 
+from odoo_instance_sdk.commands.context import CliContext, pass_cli_context, resolve_catalogue_scope
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
@@ -174,22 +175,27 @@ def backup_group() -> None:
 @click.option(
     "--all", "include_all_states", is_flag=True, default=False, help="Include all states."
 )
+@click.option("--all-projects", is_flag=True, default=False, help="List all project-owned records.")
 @click.option("--limit", type=click.IntRange(1, 1000), default=100, show_default=True)
 @click.option("--cursor", default=None, help="Opaque cursor returned by a previous page.")
 @output_options
+@pass_cli_context
 def backup_list(
+    ctx: CliContext,
     source_base_url: str | None,
     database_name: str | None,
     include_all_states: bool,
+    all_projects: bool,
     limit: int,
     cursor: str | None,
     output_format: str | None,
     json_output: bool,
 ) -> None:
-    """List state-aware backup projections without project context."""
+    """List state-aware backup projections for the current project."""
     mode = resolve_output_mode(output_format, json_output)
     catalog: BackupCatalog | None = None
     try:
+        project_id, project_source = resolve_catalogue_scope(ctx, all_projects)
         catalog = _catalog()
         if source_base_url is not None:
             source_base_url = normalize_base_url(source_base_url)
@@ -197,11 +203,16 @@ def backup_list(
             source_base_url=source_base_url,
             database_name=database_name,
             include_all_states=include_all_states,
+            project_id=project_id,
             limit=limit,
             cursor=cursor,
         )
         emit(
-            success_document(command="backup.list", result=_page_payload(page)),
+            success_document(
+                command="backup.list",
+                result=_page_payload(page),
+                provenance={"project_source": project_source, "environment_source": "null"},
+            ),
             mode,
             rich=_rich_table,
         )

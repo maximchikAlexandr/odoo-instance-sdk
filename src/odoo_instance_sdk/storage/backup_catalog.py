@@ -1004,6 +1004,7 @@ class BackupCatalog:
         database_name: str | None = None,
         format: str | None = None,
         include_all_states: bool = False,
+        project_id: str | None = None,
         limit: int = 100,
         cursor: str | None = None,
     ) -> BackupProjectionPage:
@@ -1026,6 +1027,16 @@ class BackupCatalog:
         if format is not None:
             clauses.append("format = ?")
             params.append(format)
+        if project_id is not None:
+            clauses.append(
+                "EXISTS ("
+                "SELECT 1 FROM environments e "
+                "JOIN projects p ON p.repository_root = e.repository_root "
+                "AND p.git_common_dir = e.git_common_dir "
+                "WHERE e.backup_id = backups.id AND p.project_id = ?"
+                ")"
+            )
+            params.append(project_id)
         if after is not None:
             clauses.append(
                 "(COALESCE(downloaded_at, started_at) < ? OR "
@@ -1656,23 +1667,65 @@ class BackupCatalog:
         return list(self._monitor_snapshot_rows(include_removed=include_removed).environments)
 
     @_translate_sqlite_error
-    def _monitor_snapshot_rows(self, *, include_removed: bool = False) -> MonitorCatalogSnapshot:
+    def _monitor_snapshot_rows(
+        self, *, include_removed: bool = False, project_id: str | None = None
+    ) -> MonitorCatalogSnapshot:
         """Read all monitor catalog inputs in one transactionally typed snapshot."""
         self._conn.execute("BEGIN")
         try:
-            state_clause = "" if include_removed else " WHERE e.state != 'removed'"
-            environments = self._conn.execute(
+            clauses: list[str] = []
+            params: list[str] = []
+            if not include_removed:
+                clauses.append("e.state != 'removed'")
+            if project_id is not None:
+                clauses.append(
+                    "EXISTS ("
+                    "SELECT 1 FROM projects p "
+                    "WHERE p.project_id = ? AND p.repository_root = e.repository_root "
+                    "AND p.git_common_dir = e.git_common_dir"
+                    ")"
+                )
+                params.append(project_id)
+            state_clause = " WHERE " + " AND ".join(clauses) if clauses else ""
+            environment_query = (
                 "SELECT e.*, b.state AS backup_state, b.path AS backup_path "
                 "FROM environments e LEFT JOIN backups b ON b.id = e.backup_id"
                 f"{state_clause} ORDER BY e.created_at DESC, e.id DESC"
-            ).fetchall()
-            runtimes = self._conn.execute(
-                "SELECT * FROM runtime WHERE owner_kind = 'environment' ORDER BY owner_id"
-            ).fetchall()
-            projects = self._conn.execute("SELECT * FROM projects ORDER BY project_id").fetchall()
-            project_runtimes = self._conn.execute(
-                "SELECT * FROM runtime WHERE owner_kind = 'project' ORDER BY owner_id"
-            ).fetchall()
+            )
+            environments = (
+                self._conn.execute(environment_query, params).fetchall()
+                if params
+                else self._conn.execute(environment_query).fetchall()
+            )
+            if project_id is None:
+                runtimes = self._conn.execute(
+                    "SELECT * FROM runtime WHERE owner_kind = 'environment' ORDER BY owner_id"
+                ).fetchall()
+                projects = self._conn.execute(
+                    "SELECT * FROM projects ORDER BY project_id"
+                ).fetchall()
+                project_runtimes = self._conn.execute(
+                    "SELECT * FROM runtime WHERE owner_kind = 'project' ORDER BY owner_id"
+                ).fetchall()
+            else:
+                environment_ids = [str(row["id"]) for row in environments]
+                if environment_ids:
+                    placeholders = ",".join("?" for _ in environment_ids)
+                    runtimes = self._conn.execute(
+                        "SELECT * FROM runtime WHERE owner_kind = 'environment' "
+                        f"AND owner_id IN ({placeholders}) ORDER BY owner_id",
+                        environment_ids,
+                    ).fetchall()
+                else:
+                    runtimes = []
+                projects = self._conn.execute(
+                    "SELECT * FROM projects WHERE project_id = ? ORDER BY project_id",
+                    (project_id,),
+                ).fetchall()
+                project_runtimes = self._conn.execute(
+                    "SELECT * FROM runtime WHERE owner_kind = 'project' AND owner_id = ?",
+                    (project_id,),
+                ).fetchall()
             self._conn.execute("COMMIT")
         except Exception:
             self._conn.execute("ROLLBACK")

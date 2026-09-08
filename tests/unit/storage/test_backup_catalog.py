@@ -12,6 +12,7 @@ from odoo_instance_sdk.exceptions import (
     BackupNotAvailableError,
     BackupNotFoundError,
 )
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import Backup, BackupFormat, BackupState, BackupValidationStatus
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.monitor_support import make_env, runtime_kwargs
@@ -143,6 +144,42 @@ def test_start_download_records_event(tmp_path: Path) -> None:
     assert len(events) == 1
     assert events[0]["event_type"] == "download_started"
     assert events[0]["sequence"] == 1
+    catalog.close()
+
+
+def test_project_catalogue_scope_filters_before_backup_pagination_and_snapshot(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    roots = {name: tmp_path / name for name in ("project-a", "project-b")}
+    project_ids = {name: f"project_{repo_key(root, root / '.git')}" for name, root in roots.items()}
+    for name, root in roots.items():
+        catalog._register_project(project_ids[name], root, root / ".git")
+
+    backup_ids: dict[str, str] = {}
+    for name in ("project-a", "project-b"):
+        backup_id = _u(f"scoped-{name}")
+        backup_ids[name] = backup_id
+        path = _create_backup_file(tmp_path, f"{name}.zip")
+        catalog.start_download(backup_id, "http://localhost:8069", name, "zip", True, path)
+        catalog.success_download(backup_id, path.name, 1, "")
+        catalog.create_environment(
+            make_env(
+                _u(f"environment-{name}"),
+                name=name,
+                repository_root=str(roots[name]),
+                git_common_dir=str(roots[name] / ".git"),
+                backup_id=backup_id,
+            )
+        )
+
+    scoped = catalog._list_backup_projections(
+        include_all_states=True, project_id=project_ids["project-a"], limit=1
+    )
+    assert [str(item.backup.id) for item in scoped.items] == [backup_ids["project-a"]]
+    snapshot = catalog._monitor_snapshot_rows(project_id=project_ids["project-a"])
+    assert [str(row["name"]) for row, _runtime in snapshot.environments] == ["project-a"]
+    assert [str(row["project_id"]) for row in snapshot.projects] == [project_ids["project-a"]]
     catalog.close()
 
 
