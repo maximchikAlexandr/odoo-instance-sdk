@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import shutil
+import socket
 import textwrap
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -557,6 +558,54 @@ class TestOdooTestRunner:
                 http_port=18084,
             )
         runner.assert_not_called()
+
+    def test_unknown_port_probe_fails_closed_without_calling_shell(self, tmp_path: Path) -> None:
+        inst = _make_instance(tmp_path)
+        with (
+            patch.object(type(inst), "_shell_script_command") as runner,
+            patch(
+                "odoo_instance_sdk.internal.automation.probe_address",
+                return_value=AddressState.UNKNOWN,
+            ),
+            pytest.raises(ConfigError, match="port unknown"),
+        ):
+            run_odoo_tests(
+                inst,
+                OdooTestSpec(modules=("sale",), test_tags="/sale"),
+                http_interface="127.0.0.1",
+                http_port=18085,
+            )
+        runner.assert_not_called()
+
+    def test_closed_accepted_port_allows_module_test_preflight(self, tmp_path: Path) -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            client.connect(("127.0.0.1", port))
+            accepted, _ = listener.accept()
+            accepted.close()
+            client.close()
+            listener.close()
+            inst = _make_instance(tmp_path)
+            payload = {"result": {"tests": 1, "successful": 1, "failed": 0, "errors": 0}}
+            with patch.object(type(inst), "_shell_script_command", _stub_run_shell_script(payload)):
+                result, diagnostic = run_odoo_tests(
+                    inst,
+                    OdooTestSpec(modules=("sale",), test_tags="/sale"),
+                    http_interface="127.0.0.1",
+                    http_port=port,
+                )
+        finally:
+            client.close()
+            listener.close()
+
+        assert diagnostic is None
+        assert result.exit_code == 0
+        assert result.zero_tests is False
 
 
 class TestTranslationsExport:
