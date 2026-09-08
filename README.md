@@ -78,6 +78,11 @@ to plans, logs, diagnostics, fingerprints, or structured output. A missing
 `.odcli/.env` is valid; unreadable, insecure, or malformed files fail before
 work and report only the path (and parser line where applicable).
 
+With `--postgres compose`, init also writes the effective project runtime config
+to `.odcli/odoo.conf` with owner-only permissions. It is derived from the
+source config without changing its bytes, binds Odoo to the SDK-owned cluster,
+and keeps the cluster password out of the manifest and command output.
+
 Global selectors such as `--project` and `--env` belong before the subcommand.
 Exact flags are intentionally delegated to executable help, for example
 `odcli env checkout --help`. Structured output is leaf-local, not a root command

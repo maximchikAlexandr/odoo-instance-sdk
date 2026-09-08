@@ -60,27 +60,59 @@ def test_roundtrip_write_read_secrets_free(tmp_path: Path) -> None:
     write_manifest(tmp_path, cfg)
     loaded = ProjectConfig.load(tmp_path)
     assert loaded.to_manifest() == cfg.to_manifest()
-    assert ".odcli/.env" in (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".env" in (tmp_path / ".odcli" / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert loaded.repository_root == tmp_path.resolve()
 
 
+def test_manifest_ignore_normalizes_managed_rules_after_user_negations(tmp_path: Path) -> None:
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / ".gitignore").write_text(
+        "keep-me\n.env\n!odoo.conf\n!*.conf\nodoo.conf\n", encoding="utf-8"
+    )
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
+
+    write_manifest(tmp_path, cfg)
+
+    assert (manifest_dir / ".gitignore").read_text(encoding="utf-8") == (
+        "keep-me\n!odoo.conf\n!*.conf\n.env\nodoo.conf\n"
+    )
+
+
 def test_manifest_ignore_refuses_outward_symlink_without_mutating_target(tmp_path: Path) -> None:
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
     outside = tmp_path / "outside.gitignore"
     outside.write_text("keep-me\n", encoding="utf-8")
-    (tmp_path / ".gitignore").symlink_to(outside)
+    (manifest_dir / ".gitignore").symlink_to(outside)
     cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
 
     with pytest.raises(OSError):
         write_manifest(tmp_path, cfg)
 
     assert outside.read_text(encoding="utf-8") == "keep-me\n"
-    assert not (tmp_path / ".odcli" / "project.toml").exists()
+    assert not (manifest_dir / "project.toml").exists()
+
+
+def test_manifest_ignore_refuses_symlinked_project_local_directory(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / ".odcli").symlink_to(outside, target_is_directory=True)
+    cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
+
+    with pytest.raises(OSError):
+        write_manifest(tmp_path, cfg)
+
+    assert not (outside / ".gitignore").exists()
+    assert not (outside / "project.toml").exists()
 
 
 def test_manifest_ignore_refuses_check_write_race_substitution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ignore = tmp_path / ".gitignore"
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    ignore = manifest_dir / ".gitignore"
     ignore.write_text("keep-me\n", encoding="utf-8")
     outside = tmp_path / "outside.gitignore"
     outside.write_text("outside\n", encoding="utf-8")
@@ -114,8 +146,8 @@ def test_manifest_ignore_cleans_temp_after_injected_write_failure(
     with pytest.raises(OSError, match="injected write failure"):
         write_manifest(tmp_path, cfg)
 
-    assert list(tmp_path.glob(".gitignore.*.tmp")) == []
-    assert not (tmp_path / ".gitignore").exists()
+    assert list((tmp_path / ".odcli").glob(".gitignore.*.tmp")) == []
+    assert not (tmp_path / ".odcli" / ".gitignore").exists()
 
 
 def test_manifest_ignore_cleans_temp_after_injected_stream_write_failure(
@@ -151,8 +183,8 @@ def test_manifest_ignore_cleans_temp_after_injected_stream_write_failure(
     with pytest.raises(OSError, match="injected stream write failure"):
         write_manifest(tmp_path, cfg)
 
-    assert list(tmp_path.glob(".gitignore.*.tmp")) == []
-    assert not (tmp_path / ".gitignore").exists()
+    assert list((tmp_path / ".odcli").glob(".gitignore.*.tmp")) == []
+    assert not (tmp_path / ".odcli" / ".gitignore").exists()
 
 
 def test_manifest_refuses_secrets() -> None:

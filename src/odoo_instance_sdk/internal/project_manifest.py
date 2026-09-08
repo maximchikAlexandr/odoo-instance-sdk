@@ -12,7 +12,7 @@ from odoo_instance_sdk.project import ProjectConfig
 
 _MANIFEST_DIR = ".odcli"
 _MANIFEST_FILE = "project.toml"
-_PROJECT_ENV_IGNORE = ".odcli/.env"
+_PROJECT_LOCAL_IGNORES = (".env", "odoo.conf")
 
 _SECRET_KEYS = frozenset(
     {
@@ -52,34 +52,52 @@ def write_manifest(project_path: str | Path, config: ProjectConfig) -> Path:
 
 
 def ensure_project_ignore(project_path: str | Path) -> Path:
-    """Ensure init's project-local dotenv is explicitly ignored by Git."""
+    """Ensure init's project-local secrets are explicitly ignored by Git."""
     root = Path(project_path).resolve(strict=True)
-    ignore = root / ".gitignore"
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
     root_fd = os.open(root, directory_flags)
+    local_fd: int | None = None
     temporary_name: str | None = None
     try:
         root_stat = os.fstat(root_fd)
         if not stat.S_ISDIR(root_stat.st_mode):
             raise OSError(errno.ENOTDIR, f"project root is not a directory: {root}")
-        content, target_stat = _read_regular_ignore(root_fd, ignore)
-        if _PROJECT_ENV_IGNORE in content.splitlines():
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(_MANIFEST_DIR, 0o755, dir_fd=root_fd)
+        local_fd = os.open(_MANIFEST_DIR, directory_flags, dir_fd=root_fd)
+        local_stat = os.fstat(local_fd)
+        if not stat.S_ISDIR(local_stat.st_mode):
+            raise OSError(
+                errno.ENOTDIR,
+                f"project-local directory is not a directory: {root / _MANIFEST_DIR}",
+            )
+        ignore = root / _MANIFEST_DIR / ".gitignore"
+        content, target_stat = _read_regular_ignore(local_fd, ignore)
+        managed = frozenset(_PROJECT_LOCAL_IGNORES)
+        preserved = [
+            line for line in content.splitlines(keepends=True) if line.rstrip("\r\n") not in managed
+        ]
+        base = "".join(preserved)
+        if base and not base.endswith(("\n", "\r")):
+            base += "\n"
+        updated = (base + "".join(f"{entry}\n" for entry in _PROJECT_LOCAL_IGNORES)).encode()
+        if updated == content.encode():
             return ignore
-        prefix = "" if not content or content.endswith("\n") else "\n"
-        updated = f"{content}{prefix}{_PROJECT_ENV_IGNORE}\n".encode()
 
-        temporary_name = _write_ignore_temp(root_fd, updated)
-        _assert_ignore_unchanged(root_fd, target_stat, ignore)
-        os.replace(temporary_name, ".gitignore", src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        temporary_name = _write_ignore_temp(local_fd, updated)
+        _assert_ignore_unchanged(local_fd, target_stat, ignore)
+        os.replace(temporary_name, ".gitignore", src_dir_fd=local_fd, dst_dir_fd=local_fd)
         temporary_name = None
-        replaced_stat = os.stat(".gitignore", dir_fd=root_fd, follow_symlinks=False)
+        replaced_stat = os.stat(".gitignore", dir_fd=local_fd, follow_symlinks=False)
         if not stat.S_ISREG(replaced_stat.st_mode):
             raise OSError(errno.ELOOP, f"refusing non-regular .gitignore target: {ignore}")
         return ignore
     finally:
         if temporary_name is not None:
             with contextlib.suppress(OSError):
-                os.unlink(temporary_name, dir_fd=root_fd)
+                os.unlink(temporary_name, dir_fd=local_fd)
+        if local_fd is not None:
+            os.close(local_fd)
         os.close(root_fd)
 
 

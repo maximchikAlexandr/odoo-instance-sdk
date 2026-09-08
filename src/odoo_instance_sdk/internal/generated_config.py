@@ -7,6 +7,11 @@ import tempfile
 from pathlib import Path
 
 
+def project_generated_config_path(project_root: str | Path) -> Path:
+    """Return the project-owned runtime config location."""
+    return Path(project_root).resolve() / ".odcli" / "odoo.conf"
+
+
 def _split_list(value: str) -> list[str]:
     return [s.strip() for s in value.split(",") if s.strip()]
 
@@ -27,7 +32,7 @@ def _rebase_path(entry: str, repo_root: Path, worktree: Path) -> str:
 
 
 def generate_config(
-    source_config: Path,
+    source_config: Path | None,
     dest: Path,
     *,
     repo_root: Path,
@@ -35,9 +40,14 @@ def generate_config(
     http_interface: str,
     http_port: int,
     db_name: str,
+    db_host: str | None = None,
+    db_port: int | None = None,
+    db_user: str | None = None,
+    db_password: str | None = None,
 ) -> None:
     src = configparser.RawConfigParser(interpolation=None)
-    src.read(str(source_config))
+    if source_config is not None:
+        src.read(str(source_config))
     if not src.has_section("options"):
         src.add_section("options")
     options = src["options"]
@@ -58,6 +68,14 @@ def generate_config(
     options["http_port"] = str(http_port)
     options["db_name"] = db_name
     options["dbfilter"] = db_name
+    for key, value in (
+        ("db_host", db_host),
+        ("db_port", str(db_port) if db_port is not None else None),
+        ("db_user", db_user),
+        ("db_password", db_password),
+    ):
+        if value is not None:
+            options[key] = value
     if options.get("logfile", "").strip():
         options["logfile"] = str((dest.parent / "odoo.log").resolve())
 

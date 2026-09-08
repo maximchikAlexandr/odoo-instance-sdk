@@ -18,29 +18,29 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 954),
-        ("src/odoo_instance_sdk/cli.py", 955),
-        ("src/odoo_instance_sdk/commands/env.py", 378),
+        ("src/odoo_instance_sdk/cli.py", 1102),
+        ("src/odoo_instance_sdk/cli.py", 1103),
+        ("src/odoo_instance_sdk/commands/env.py", 454),
         ("src/odoo_instance_sdk/commands/output.py", 234),
         ("src/odoo_instance_sdk/commands/output.py", 358),
         ("src/odoo_instance_sdk/commands/output.py", 360),
         ("src/odoo_instance_sdk/commands/output.py", 367),
         ("src/odoo_instance_sdk/commands/output.py", 369),
-        ("src/odoo_instance_sdk/resources/instance.py", 1068),
+        ("src/odoo_instance_sdk/resources/instance.py", 1077),
     }
 )
 
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
-    ("src/odoo_instance_sdk/commands/env.py", 378): "existing Rich live inventory transport",
+    ("src/odoo_instance_sdk/commands/env.py", 454): "existing Rich live inventory transport",
     ("src/odoo_instance_sdk/commands/output.py", 234): "shared Rich output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 358): "shared JSON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 360): "shared TOON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 367): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/commands/output.py", 369): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/cli.py", 954): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 955): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/resources/instance.py", 1068): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/cli.py", 1102): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 1103): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/resources/instance.py", 1077): "lifecycle cleanup diagnostic transport",
 }
 
 
@@ -53,7 +53,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("tests/unit/resources/test_database_resource.py", 637),
-        ("tests/unit/test_monitor_cache_and_docker.py", 128),
+        ("tests/unit/test_monitor_cache_and_docker.py", 129),
         ("tests/unit/test_cluster_resources.py", 190),
     }
 )

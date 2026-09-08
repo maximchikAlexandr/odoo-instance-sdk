@@ -21,7 +21,7 @@ from odoo_instance_sdk.internal.proc import (
 )
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import CommandResult, OdooProcess, StartConfig
-from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -252,6 +252,50 @@ class TestInstancePrefix:
             step for step in command.commands if step.step_id == "instance.foreground"
         )
         assert foreground.argv[-2:] == ("--dev=xml", "--stop-after-init")
+
+    def test_from_project_uses_owned_compose_runtime_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        for name in ("python", "odoo-bin"):
+            (root / name).write_text("")
+        (root / "python").chmod(0o755)
+        generated = root / ".odcli" / "odoo.conf"
+        generated.parent.mkdir()
+        generated.write_text(
+            "[options]\nhttp_port = 8077\ndb_name = tenant\n"
+            "db_host = 127.0.0.1\ndb_port = 5468\ndb_user = odoo\n"
+            "db_password = private\n"
+        )
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path("python"),
+            odoo_bin=Path("odoo-bin"),
+            source_config=None,
+            preferred_http_port=8077,
+            postgres=PostgresProjectConfig(
+                mode="compose", image="postgres:16", port=5468, user="odoo"
+            ),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+
+        instance = _make_client().instance.from_project(project)
+
+        assert instance.config.start_config is not None
+        assert instance.config.start_config.config_path == str(generated)
+        assert instance.config.base_url == "http://127.0.0.1:8077"
+        assert instance.config.db_host == "127.0.0.1"
+        assert instance.config.db_port == 5468
+        assert instance.config.db_user == "odoo"
+        assert instance.config.db_password == "private"
+        assert "db_password='private'" not in repr(instance.config)
+        command = instance.run_foreground_command()
+        assert "db_password" not in repr(command.plan)
+        assert "private" not in command.plan.fingerprint
 
     @pytest.mark.parametrize("selector", ["python3"])
     def test_from_project_resolves_python_selectors(

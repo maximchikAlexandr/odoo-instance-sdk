@@ -80,9 +80,14 @@ from odoo_instance_sdk.internal.automation import (
     verify_deps_command,
 )
 from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
+from odoo_instance_sdk.internal.generated_config import (
+    generate_config,
+    project_generated_config_path,
+)
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
+from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.internal.vscode_generate import (
     build_launch_profile,
@@ -510,6 +515,7 @@ class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]
     help="Compose only; default: source db_user or 'odoo'.",
 )
 @click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
+@click.option("--yes", "yes", is_flag=True, default=False, help="Confirm manifest replacement.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Do not write.")
 @output_options
 @click.option(
@@ -531,6 +537,7 @@ def init(
     postgres_port: int | None,
     postgres_user: str | None,
     no_input: bool,
+    yes: bool,
     dry_run: bool,
     output_format: str | None,
     json_output: bool,
@@ -589,9 +596,26 @@ def init(
 
     existing = manifest_path(resolved_project)
     if existing.is_file() and _handle_existing_manifest(
-        existing, resolved_project, config, no_input, output_mode, dry_run=dry_run
+        existing, resolved_project, config, no_input, yes, output_mode, dry_run=dry_run
     ):
         return
+    if not dry_run and config.postgres is not None and config.postgres.mode == "compose":
+        from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
+
+        try:
+            tracked = is_tracked_path(project_generated_config_path(resolved_project))
+        except GitError:
+            fail(
+                output_mode,
+                "init",
+                "unable to verify project-owned runtime config tracking; refusing secret write",
+            )
+        if tracked:
+            fail(
+                output_mode,
+                "init",
+                "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf",
+            )
 
     status, _ = run_or_preview(
         lambda: action_command(
@@ -625,8 +649,48 @@ def _write_initialized_project(
 ) -> dict[str, JsonValue]:
     """Write init artifacts, then register the canonical project transactionally."""
     write_manifest(project_path, config)
+    if config.postgres is not None and config.postgres.mode == "compose":
+        _write_project_generated_config(project_path, config)
     _register_initialized_project(project_path)
     return _manifest_dict(config, postgres_allocated=postgres_allocated)
+
+
+def _write_project_generated_config(project_path: Path, config: ProjectConfig) -> None:
+    """Bind a Compose project config to its existing private cluster secret."""
+    root = project_path.resolve()
+    source = config.source_config
+    source_path = (
+        (root / source).resolve() if source is not None and not source.is_absolute() else source
+    )
+    if source_path is None:
+        candidate = root / "odoo.conf"
+        source_path = candidate if candidate.is_file() else None
+    elif not source_path.is_file():
+        raise InstanceConfigurationError("local source config is missing")
+
+    from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    cluster = PostgresCluster.from_project(root)
+    password = ensure_password_file(cluster.password_file)
+    source_start = (
+        StartConfig.from_odoo_config(source_path) if source_path is not None else StartConfig()
+    )
+    postgres = config.postgres
+    assert postgres is not None
+    generate_config(
+        source_path,
+        project_generated_config_path(root),
+        repo_root=root,
+        worktree=root,
+        http_interface=source_start.http_interface,
+        http_port=resolve_project_http_port(config.preferred_http_port, source_start.http_port),
+        db_name=config.default_source_database or source_start.db_name or "",
+        db_host=cluster.endpoint_host,
+        db_port=cluster.endpoint_port,
+        db_user=postgres.user or "odoo",
+        db_password=password,
+    )
 
 
 def _register_initialized_project(project_path: Path) -> None:
@@ -772,6 +836,7 @@ def _handle_existing_manifest(
     resolved_project: Path,
     config: ProjectConfig,
     no_input: bool,
+    yes: bool,
     output_mode: OutputMode,
     *,
     dry_run: bool,
@@ -798,7 +863,11 @@ def _handle_existing_manifest(
             rich_print("Manifest already up to date; no-op.")
         return True
     if no_input or output_mode is not OutputMode.RICH:
+        if yes:
+            return False
         fail(output_mode, "init", "manifest exists and differs; remove it first or adjust options")
+    if yes:
+        return False
     if not click.confirm("Manifest exists and differs; overwrite?", default=False):
         rich_print("Aborted.")
         return True

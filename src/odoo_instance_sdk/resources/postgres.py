@@ -23,10 +23,6 @@ from odoo_instance_sdk.exceptions import (
     PostgresImageNotTrustedError,
 )
 from odoo_instance_sdk.internal.address import AddressState, probe_address
-from odoo_instance_sdk.internal.git_worktree import (
-    rev_parse_git_common_dir,
-    rev_parse_toplevel,
-)
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.paths import get_catalog_path, get_project_postgres_dir
 from odoo_instance_sdk.internal.postgres_compose import (
@@ -47,7 +43,7 @@ from odoo_instance_sdk.internal.postgres_compose import (
     resolve_image_digest,
     write_compose_file_atomic,
 )
-from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import ClusterResourceSnapshot, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, PostgresClusterClaim
@@ -71,13 +67,14 @@ _RESOURCE_SNAPSHOT_TIMEOUT = 5.0
 
 
 def _resolve_project_id(repository_root: Path) -> str:
-    """Return Git identity; retain the documented non-Git project fallback."""
+    """Return one stable Git identity in captured and direct execution modes."""
+    resolved = repository_root.resolve()
     try:
-        toplevel = rev_parse_toplevel(repository_root)
-        return repo_key(toplevel, rev_parse_git_common_dir(toplevel))
-    except Exception:
-        resolved = repository_root.resolve()
-        return f"{resolved.name or 'repo'}_{hashlib.sha256(str(resolved).encode()).hexdigest()[:8]}"
+        if os.path.lexists(str(resolved / ".git")):
+            return repo_key(resolved, git_common_dir(resolved))
+    except OSError:
+        pass
+    return f"{resolved.name or 'repo'}_{hashlib.sha256(str(resolved).encode()).hexdigest()[:8]}"
 
 
 def _resolve_endpoint_external(source_config: Path | None) -> tuple[str, int]:

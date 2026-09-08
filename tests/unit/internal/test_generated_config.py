@@ -26,6 +26,42 @@ def _read_config(path: Path) -> dict[str, str]:
 
 
 class TestGenerateConfig:
+    def test_compose_overlay_preserves_source_and_writes_connection_values(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        source = repo / "odoo.conf"
+        source_bytes = b"[options]\nhttp_port = 8068\ncustom_option = retained\n"
+        source.write_bytes(source_bytes)
+        dest = repo / ".odcli" / "odoo.conf"
+
+        generate_config(
+            source,
+            dest,
+            repo_root=repo,
+            worktree=repo,
+            http_interface="127.0.0.1",
+            http_port=8077,
+            db_name="tenant",
+            db_host="127.0.0.1",
+            db_port=5468,
+            db_user="odoo",
+            db_password="private-cluster-password",
+        )
+
+        generated = _read_config(dest)
+        assert generated["custom_option"] == "retained"
+        assert generated["http_port"] == "8077"
+        assert generated["db_name"] == "tenant"
+        assert generated["dbfilter"] == "tenant"
+        assert generated["db_host"] == "127.0.0.1"
+        assert generated["db_port"] == "5468"
+        assert generated["db_user"] == "odoo"
+        assert generated["db_password"] == "private-cluster-password"
+        assert source.read_bytes() == source_bytes
+        assert os.stat(dest).st_mode & 0o777 == 0o600
+
     def test_atomic_write_0600(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
         repo.mkdir()

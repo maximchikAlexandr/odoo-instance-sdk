@@ -1,7 +1,7 @@
 ## 1. Pin Root-Cause Regressions
 
-- [ ] 1.1 Add init tests for identical no-op, default headless refusal, interactive confirmation, `--no-input --yes` atomic replacement, and `--yes --dry-run` zero writes; assert the repository-root `.gitignore` is never created or changed.
-- [ ] 1.2 Add an imported Compose project test that preserves the external source config, creates an owner-only project runtime config bound to the owned cluster, uses `preferred_http_port`, and proves cluster credentials are absent from manifest, output, diagnostics, plans, and fingerprints.
+- [x] 1.1 Add init tests for identical no-op, default headless refusal, interactive confirmation, `--no-input --yes` atomic replacement, and `--yes --dry-run` zero writes; assert the repository-root `.gitignore` is never created or changed.
+- [x] 1.2 Add an imported Compose project test that preserves the external source config, creates an owner-only project runtime config bound to the owned cluster, uses `preferred_http_port`, and proves cluster credentials are absent from manifest, output, diagnostics, plans, and fingerprints.
 - [ ] 1.3 Add behavioral catalogue migration tests for v7-to-current row preservation, both child foreign-key targets, a successful post-migration environment-event insert with foreign keys enabled, fresh-schema references, and unchanged current v14 on this base.
 - [ ] 1.4 Add generated module-source regressions proving requested names enter the Odoo domain as a list, empty selection is rejected before spawn, and an empty or incomplete returned `updated` set cannot produce success.
 - [ ] 1.5 Add Git collector regressions with `base_ref=dev`, no `main`, local and upstream baseline variants, committed numstat, excluded binary/uncommitted changes, missing ancestry, and equality between recorded and direct collectors.
@@ -9,11 +9,11 @@
 
 ## 2. Make Project Initialization Usable
 
-- [ ] 2.1 Add `init --yes` and thread it through existing-manifest handling so only a validated non-identical manifest bypasses the Rich prompt; preserve no-op, stable refusal, machine output, and dry-run semantics.
-- [ ] 2.2 Replace repository-root ignore mutation in `internal/project_manifest.py` with an atomically written, symlink-safe `.odcli/.gitignore` rule for the local environment file and remove obsolete root-ignore code/tests.
-- [ ] 2.3 Extend the existing generated-config path to build the project-owned Compose runtime config from `source_config`, overlay owned cluster connection values and effective HTTP/database values, preserve unknown options, and keep source bytes unchanged.
-- [ ] 2.4 Read the Compose password only from the existing owner-only cluster secret artifact, keep generated files mode `0600`, add the password to existing private redaction inputs, and route project runtime construction to the generated config without adding manifest fields.
-- [ ] 2.5 Centralize explicit override → `preferred_http_port` → effective Odoo config → default precedence in the project runtime/context resolver and replace every project-bound endpoint inference, including restore postconditions, with that resolved value.
+- [x] 2.1 Add `init --yes` and thread it through existing-manifest handling so only a validated non-identical manifest bypasses the Rich prompt; preserve no-op, stable refusal, machine output, and dry-run semantics.
+- [x] 2.2 Replace repository-root ignore mutation in `internal/project_manifest.py` with an atomically written, symlink-safe `.odcli/.gitignore` rule for the local environment file and remove obsolete root-ignore code/tests.
+- [x] 2.3 Extend the existing generated-config path to build the project-owned Compose runtime config from `source_config`, overlay owned cluster connection values and effective HTTP/database values, preserve unknown options, and keep source bytes unchanged.
+- [x] 2.4 Read the Compose password only from the existing owner-only cluster secret artifact, keep generated files mode `0600`, add the password to existing private redaction inputs, and route project runtime construction to the generated config without adding manifest fields.
+- [x] 2.5 Centralize explicit override → `preferred_http_port` → effective Odoo config → default precedence in the project runtime/context resolver and replace every project-bound endpoint inference, including restore postconditions, with that resolved value.
 
 ## 3. Scope Catalogue Data and Expose Worktree Paths
 

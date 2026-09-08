@@ -119,11 +119,7 @@ def _database_instance(ctx: CliContext) -> tuple[DevelopmentEnvironment | None, 
         if ctx.env is not None:
             raise
         project = ProjectConfig.load(project_root)
-        if project.source_config is None:
-            raise
-        instance = client.instance.from_config(project.source_config)
-        instance._postgres_cluster = PostgresCluster.from_project(project_root)
-        return None, instance
+        return None, client.instance.from_project(project)
     if Path(environment.repository_root).resolve() != project_root:
         raise RuntimeError(
             f"Environment {environment.name} ({environment.id}) does not belong to project "

@@ -14,6 +14,15 @@ from odoo_instance_sdk.exceptions import InstanceConfigurationError
 _UV_PYTHON_SELECTOR = re.compile(r"^\d+\.\d+(?:\.\d+)?$")
 
 
+def resolve_project_http_port(
+    preferred_http_port: int | None, configured_http_port: int | None
+) -> int:
+    """Apply the shared project endpoint precedence for HTTP ports."""
+    if preferred_http_port is not None:
+        return preferred_http_port
+    return configured_http_port if configured_http_port is not None else 8069
+
+
 @dataclass(frozen=True, slots=True)
 class DeferredProjectRuntime:
     """A project Python selector represented by one native ``uv run`` prefix."""

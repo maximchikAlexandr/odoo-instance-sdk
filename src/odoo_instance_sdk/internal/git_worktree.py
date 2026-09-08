@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -14,6 +15,10 @@ if TYPE_CHECKING:
 
 class GitError(Exception):
     pass
+
+
+class GitRepositoryNotFoundError(GitError):
+    """Git proved that a path is outside an enclosing repository."""
 
 
 @dataclass(slots=True, kw_only=True)
@@ -59,6 +64,8 @@ def _run(
 def rev_parse_toplevel(path: Path) -> Path:
     proc = _run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], check=False)
     if proc.returncode != 0:
+        if proc.returncode == 128 and "not a git repository" in proc.stderr.lower():
+            raise GitRepositoryNotFoundError(f"not a git repository: {path}")
         raise GitError(f"not a git repository: {path}")
     return Path(proc.stdout.strip()).resolve()
 
@@ -81,6 +88,50 @@ def rev_parse_verify(repo_root: Path, ref: str) -> str:
     if proc.returncode != 0:
         raise GitError(f"ref {ref!r} not found in {repo_root}: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def is_tracked_path(path: Path) -> bool:
+    """Return whether an enclosing Git index owns this exact path."""
+    candidate = Path(path).absolute()
+    probe = candidate.parent
+    while not os.path.lexists(str(probe)) and probe != probe.parent:
+        probe = probe.parent
+    try:
+        repo_root = rev_parse_toplevel(probe)
+    except GitRepositoryNotFoundError:
+        if _has_git_marker(candidate.parent):
+            raise
+        return False
+    try:
+        relative = candidate.relative_to(repo_root)
+    except ValueError:
+        return False
+    proc = _run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "ls-files",
+            "--cached",
+            "--error-unmatch",
+            "--",
+            relative.as_posix(),
+        ],
+        check=False,
+    )
+    if proc.returncode == 1:
+        return False
+    if proc.returncode != 0:
+        raise GitError("git ls-files could not verify the project runtime config")
+    return relative.as_posix() in proc.stdout.splitlines()
+
+
+def _has_git_marker(path: Path) -> bool:
+    """Detect a repository marker without following it or masking errors."""
+    try:
+        return any(os.path.lexists(str(parent / ".git")) for parent in (path, *path.parents))
+    except OSError:
+        return True
 
 
 def local_branch_exists(repo_root: Path, branch: str) -> bool:
