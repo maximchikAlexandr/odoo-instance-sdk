@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TypeVar
@@ -10,7 +11,9 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.exceptions import PostgresClusterTimeoutError
+from odoo_instance_sdk.commands.context import CliContext
+from odoo_instance_sdk.commands.pg import _database_instance
+from odoo_instance_sdk.exceptions import EnvironmentResolutionError, PostgresClusterTimeoutError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
 from odoo_instance_sdk.models import PostgresClusterState
@@ -216,8 +219,10 @@ def test_postgres_status_external_no_docker(
     runner = CliRunner()
     result = runner.invoke(cli, ["--project", str(root), "postgres", "status"])
     assert result.exit_code == 0
-    assert "mode=external" in result.output
-    assert "owned=False" in result.output
+    assert "Mode" in result.output
+    assert "external" in result.output
+    assert "Owned" in result.output
+    assert "false" in result.output
 
 
 @pytest.mark.unit
@@ -272,6 +277,48 @@ def test_postgres_status_resolves_project_without_arg(
     result = runner.invoke(cli, ["postgres", "status", "--json"], catch_exceptions=False)
     assert result.exit_code == 0  # STOPPED → diagnostic exit 0
     assert json.loads(result.output)["command"] == "postgres.status"
+
+
+@pytest.mark.unit
+def test_database_instance_uses_owned_compose_project_when_environment_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    odoo_bin = tmp_path / "odoo-bin"
+    odoo_bin.write_text("#!/bin/sh\n")
+    odoo_bin.chmod(0o755)
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        odoo_bin=odoo_bin,
+        python=Path(sys.executable),
+        preferred_http_port=8077,
+        postgres=PostgresProjectConfig(mode="compose", image="pg", port=5468, user="odoo"),
+    )
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(project.to_manifest())
+    (manifest_dir / "odoo.conf").write_text(
+        "[options]\nhttp_port = 8069\ndb_host = 127.0.0.1\ndb_port = 5468\ndb_name = tenant\n"
+    )
+    cluster = object()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+        staticmethod(lambda _path: cluster),
+    )
+
+    def no_environment(*_args: object, **_kwargs: object) -> None:
+        raise EnvironmentResolutionError("no environment")
+
+    monkeypatch.setattr("odoo_instance_sdk.commands.context.resolve_environment", no_environment)
+
+    environment, instance = _database_instance(CliContext(project=str(tmp_path)))
+
+    assert environment is None
+    assert instance._postgres_cluster is cluster
+    assert instance.config.start_config is not None
+    assert instance.config.start_config.http_port == 8077
+    assert instance.config.start_config.config_path == str(manifest_dir / "odoo.conf")
+    assert instance.config.configured_database_names == ("tenant",)
 
 
 @pytest.mark.unit

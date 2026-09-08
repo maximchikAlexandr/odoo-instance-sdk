@@ -31,6 +31,7 @@ from odoo_instance_sdk.internal.proc import (
     run_captured,
     run_captured_limited,
     spawn,
+    wait_foreground,
 )
 from odoo_instance_sdk.internal.proc.redaction import (
     IncrementalStreamRedactor,
@@ -84,6 +85,53 @@ def test_optional_step_observer_preserves_result_and_redacts_output() -> None:
     assert events[-1].kind == "completed"
     assert all(secret not in (event.chunk or "") for event in events)
     assert events[0].step_id == events[-1].step_id == step.step_id
+
+
+def test_process_events_carry_sanitized_context_elapsed_and_exit_status() -> None:
+    secret = "progress-secret"
+    step = PreparedStep(
+        step_id="module.update",
+        argv=(*_python("print('updated')"), f"--token={secret}"),
+        secret_values=(secret,),
+    )
+    events: list[StepEvent] = []
+
+    prepared_command(
+        lambda context: context.process(step.step_id),
+        (step,),
+        executor=SubprocessExecutor(),
+    ).run(observer=events.append)
+
+    assert [event.kind for event in events] == ["started", "completed"]
+    assert all(event.step_id == step.step_id for event in events)
+    assert all(event.operation and event.target for event in events)
+    assert all(secret not in (event.operation or "") + (event.target or "") for event in events)
+    assert events[0].elapsed == 0.0
+    assert events[-1].elapsed is not None and events[-1].elapsed >= 0
+    assert events[-1].returncode == 0
+
+
+def test_spawned_process_completion_is_reported_after_foreground_wait() -> None:
+    step = PreparedStep(
+        step_id="postgres.up",
+        argv=_python("import sys; sys.exit(4)"),
+        inherit_stdio=False,
+    )
+    events: list[StepEvent] = []
+
+    def callback(context: RunContext[int]) -> int:
+        return wait_foreground(context.spawn(step.step_id))
+
+    result = prepared_command(
+        callback,
+        (step,),
+        executor=SubprocessExecutor(),
+    ).run(observer=events.append)
+
+    assert result == 4
+    assert [event.kind for event in events] == ["started", "completed"]
+    assert events[-1].returncode == 4
+    assert events[-1].elapsed is not None and events[-1].elapsed >= 0
 
 
 def test_action_progress_is_explicit_and_completion_carries_elapsed_units() -> None:

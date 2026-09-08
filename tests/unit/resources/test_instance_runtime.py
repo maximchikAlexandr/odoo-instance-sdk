@@ -16,7 +16,9 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.proc import (
     ProcessHandle,
     ProcessResult,
+    ProcessSpawnError,
     RecordingExecutor,
+    StepEvent,
     StepObserver,
 )
 from odoo_instance_sdk.internal.server import _build_cli_args
@@ -871,6 +873,74 @@ class TestRunForeground:
         )
 
         assert instance.run_foreground(args=("--stop-after-init",)) == 23
+
+    @pytest.mark.parametrize(
+        ("command_prefix", "expected_returncode"),
+        [
+            pytest.param(
+                ("python3", "-c", "import sys; sys.exit(23)"),
+                23,
+                id="non-zero-exit",
+            ),
+        ],
+    )
+    def test_foreground_terminal_event_retains_captured_metadata(
+        self,
+        tmp_path: Path,
+        command_prefix: tuple[str, ...],
+        expected_returncode: int,
+    ) -> None:
+        instance = OdooInstance(
+            config=InstanceConfig(
+                base_url="http://localhost:8069",
+                start_config=StartConfig(
+                    http_port=9999,
+                    http_interface="127.0.0.1",
+                    config_path=str(tmp_path / "generated.conf"),
+                ),
+                command_prefix=command_prefix,
+            ),
+            _client=_make_client(),
+        )
+        events: list[StepEvent] = []
+
+        result = instance.run_foreground_command().run(observer=events.append)
+
+        assert result == expected_returncode
+        assert [event.kind for event in events] == ["started", "completed"]
+        started, completed = events
+        assert started.operation == completed.operation
+        assert started.target == completed.target
+        assert started.elapsed == 0.0
+        assert completed.elapsed is not None
+        assert completed.returncode == expected_returncode
+
+    def test_foreground_spawn_failure_retains_captured_metadata_without_completion(
+        self, tmp_path: Path
+    ) -> None:
+        instance = OdooInstance(
+            config=InstanceConfig(
+                base_url="http://localhost:8069",
+                start_config=StartConfig(
+                    http_port=9999,
+                    http_interface="127.0.0.1",
+                    config_path=str(tmp_path / "generated.conf"),
+                ),
+                command_prefix=("/definitely/missing/odoo-sdk",),
+            ),
+            _client=_make_client(),
+        )
+        events: list[StepEvent] = []
+
+        with pytest.raises(ProcessSpawnError):
+            instance.run_foreground_command().run(observer=events.append)
+
+        assert [event.kind for event in events] == ["started", "failed"]
+        started, failed = events
+        assert started.operation == failed.operation
+        assert started.target == failed.target
+        assert failed.elapsed is not None
+        assert not any(event.kind == "completed" for event in events)
 
     def test_runtime_validator_returns_an_unchanged_frozen_tuple(self) -> None:
         from odoo_instance_sdk.resources.instance import _validate_runtime_args

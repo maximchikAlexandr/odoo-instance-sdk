@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import contextlib
-import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -42,6 +42,8 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     success_document,
 )
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
+from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.paths import get_backups_dir, get_catalog_path, get_data_root
 from odoo_instance_sdk.internal.resource_inventory import (
     FileResourceSource,
@@ -487,25 +489,31 @@ def _rich_list(document: OutputDocument) -> str:
     result = document.result if isinstance(document.result, dict) else {}
     resources = result.get("resources", [])
     if not isinstance(resources, list):
-        return json.dumps(result, ensure_ascii=False, default=str, indent=2)
+        return "No resources"
     table = Table(
         "Identity", "Type", "Name", "Ownership", "Measured bytes", "Complete", "Reclaimable"
     )
     for resource in resources:
         if not isinstance(resource, dict):
             continue
+        measured_bytes = resource.get("measured_bytes")
         table.add_row(
-            str(resource.get("stable_identity", "")),
-            str(resource.get("type", "")),
-            str(resource.get("name", "")),
-            str(resource.get("ownership_confidence", "")),
-            str(resource.get("measured_bytes", "")),
-            str(resource.get("completeness", "")),
-            str(resource.get("reclaimable", False)).lower(),
+            rich_cell(resource.get("stable_identity", "")),
+            rich_cell(resource.get("type", "")),
+            rich_cell(resource.get("name", "")),
+            rich_cell(resource.get("ownership_confidence", "")),
+            rich_cell(
+                _human_bytes(measured_bytes)
+                if isinstance(measured_bytes, int) and not isinstance(measured_bytes, bool)
+                else "—"
+            ),
+            rich_cell(resource.get("completeness", "")),
+            rich_cell(str(resource.get("reclaimable", False)).lower()),
         )
-    console = Console(record=True, color_system=None, width=180)
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
     console.print(table)
-    return console.export_text().rstrip()
+    return output.getvalue().rstrip()
 
 
 def _rich_doctor(document: OutputDocument) -> str:
@@ -514,7 +522,7 @@ def _rich_doctor(document: OutputDocument) -> str:
     result = document.result if isinstance(document.result, dict) else {}
     findings = result.get("findings", [])
     if not isinstance(findings, list):
-        return json.dumps(result, ensure_ascii=False, default=str, indent=2)
+        return "Resource findings unavailable."
     if not findings:
         return "No resource findings."
     table = Table("Severity", "Code", "Identity", "Message", "Recommendation")
@@ -522,11 +530,11 @@ def _rich_doctor(document: OutputDocument) -> str:
         if not isinstance(finding, dict):
             continue
         table.add_row(
-            str(finding.get("severity", "")),
-            str(finding.get("code", "")),
-            str(finding.get("stable_identity", "")),
-            str(finding.get("message", "")),
-            str(finding.get("recommendation", "") or ""),
+            rich_cell(finding.get("severity", "")),
+            rich_cell(finding.get("code", "")),
+            rich_cell(finding.get("stable_identity", "")),
+            rich_cell(finding.get("message", "")),
+            rich_cell(finding.get("recommendation", "") or ""),
         )
     console = Console(record=True, color_system=None, width=180)
     console.print(table)

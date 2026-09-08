@@ -10,6 +10,7 @@ import msgspec
 import pytest
 
 from odoo_instance_sdk import OdooClient, OdooClientConfig
+from odoo_instance_sdk.commands.output import OutputMode, run_or_preview
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import BackupCatalogError, ConfigError, LockConflictError
 from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lock_path
@@ -232,6 +233,39 @@ def test_drop_plan_is_maintenance_bound_and_redacts_credentials(
         "database.drop.execute",
         "database.drop.verify",
     ]
+
+
+@pytest.mark.unit
+def test_drop_rich_dry_run_uses_real_builder_process_displays(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    executor = _executor()
+    command = build_database_drop_command(
+        _instance(project_manifest), project_manifest, "feature_db", executor=executor
+    )
+    planned = len(executor.executed)
+    displays = tuple(step.display for step in command.plan.process_steps)
+
+    status, value = run_or_preview(
+        lambda: command,
+        command_name="db.drop",
+        mode=OutputMode.RICH,
+        dry_run=True,
+    )
+
+    rendered = capsys.readouterr().out
+    assert (status, value) == (0, None)
+    offset = 0
+    for display in displays:
+        position = rendered.index(display, offset)
+        offset = position + len(display)
+    assert len(executor.executed) == planned
+    assert "DROP DATABASE" in rendered
+    assert "argv:" not in rendered
+    assert "fingerprint:" not in rendered
 
 
 @pytest.mark.unit

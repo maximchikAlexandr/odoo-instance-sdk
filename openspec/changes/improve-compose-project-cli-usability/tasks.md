@@ -32,19 +32,19 @@
 
 ## 5. Identify Progress and Preserve Dry-Run Commands
 
-- [ ] 5.1 Carry stable `step_id`, sanitized operation/target context, elapsed time, reliable units, and known process exit status through existing run-context observer events for process and action steps.
-- [ ] 5.2 Update the shared Rich observer so every start/progress/completion/failure line is attributable and no bare anonymous `started`/`completed` output can occur; keep TTY lifecycle, non-TTY determinism, machine silence, redaction, and interrupt cleanup.
-- [ ] 5.3 Update the shared semantic Rich plan projection to append every captured `ProcessStep.display` in execution order, including after failed preconditions, while describing `ActionStep` values without fabricated commands and omitting the remaining low-level fields.
-- [ ] 5.4 Add one parameterized progress contract covering refresh, restore, environment lifecycle, tests, module update, eval, exec, translations, and PostgreSQL startup, including exit and elapsed context plus machine-output isolation.
-- [ ] 5.5 Add parameterized Rich dry-run coverage for `run`, `env checkout`, `postgres up/stop`, `module update`, and `translations export`, plus recording/fake cases for conditional `env sync/remove`, `db drop`, `test`, and project/environment run branches; require each planned process display and zero execution.
+- [x] 5.1 Carry stable `step_id`, sanitized operation/target context, elapsed time, reliable units, and known process exit status through existing run-context observer events for process and action steps.
+- [x] 5.2 Update the shared Rich observer so every start/progress/completion/failure line is attributable and no bare anonymous `started`/`completed` output can occur; keep TTY lifecycle, non-TTY determinism, machine silence, redaction, and interrupt cleanup.
+- [x] 5.3 Update the shared semantic Rich plan projection to append every captured `ProcessStep.display` in execution order, including after failed preconditions, while describing `ActionStep` values without fabricated commands and omitting the remaining low-level fields.
+- [x] 5.4 Add one parameterized progress contract covering refresh, restore, environment lifecycle, tests, module update, eval, exec, translations, and PostgreSQL startup, including exit and elapsed context plus machine-output isolation.
+- [x] 5.5 Add parameterized Rich dry-run coverage for `run`, `env checkout`, `postgres up/stop`, `module update`, and `translations export`, plus recording/fake cases for conditional `env sync/remove`, `db drop`, `test`, and project/environment run branches; require each planned process display and zero execution.
 
 ## 6. Make Rich Output Consistently Human-Oriented
 
-- [ ] 6.1 Establish the exact bounded-leaf presentation inventory in the existing shared output-contract tests and assert non-empty, non-raw-primary-JSON, non-concatenated Rich output with unchanged JSON/TOON documents and exit codes except for exactly the additive CLI `env list.worktree_path` field and the new CLI `env path` envelope.
-- [ ] 6.2 Make `backup list` rendering single-owner and convert `backup`, `db`, `resource`, `module`, and `env` list results to one Rich table per logical result set using the existing human byte formatter while preserving exact machine integers.
-- [ ] 6.3 Render the bound cluster once for `db list` and use database, size, sessions, default, and origin columns; remove repeated unstructured cluster fields from rows.
-- [ ] 6.4 Replace affected bounded Rich raw JSON and key-value dumps, including `db restore`, with concise shared summaries, labelled panels/tables, and spaced nested details in current leaf renderers; remove duplicate pre-emission and do not add a renderer hierarchy.
-- [ ] 6.5 Update CLI help/documentation for project-scoped `--all-projects`, human-size tables, endpoint precedence, identified progress, and exact sanitized commands in Rich dry-run.
+- [x] 6.1 Establish the exact bounded-leaf presentation inventory in the existing shared output-contract tests and assert non-empty, non-raw-primary-JSON, non-concatenated Rich output with unchanged JSON/TOON documents and exit codes except for exactly the additive CLI `env list.worktree_path` field and the new CLI `env path` envelope.
+- [x] 6.2 Make `backup list` rendering single-owner and convert `backup`, `db`, `resource`, `module`, and `env` list results to one Rich table per logical result set using the existing human byte formatter while preserving exact machine integers.
+- [x] 6.3 Render the bound cluster once for `db list` and use database, size, sessions, default, and origin columns; remove repeated unstructured cluster fields from rows.
+- [x] 6.4 Replace affected bounded Rich raw JSON and key-value dumps, including `db restore`, with concise shared summaries, labelled panels/tables, and spaced nested details in current leaf renderers; remove duplicate pre-emission and do not add a renderer hierarchy.
+- [x] 6.5 Update CLI help/documentation for project-scoped `--all-projects`, human-size tables, endpoint precedence, identified progress, and exact sanitized commands in Rich dry-run.
 
 ## 7. Verify the Integrated Change
 

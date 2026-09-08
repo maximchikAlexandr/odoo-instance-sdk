@@ -4,6 +4,7 @@ import contextlib
 import os
 import subprocess
 import tempfile
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -12,7 +13,7 @@ from msgspec import structs
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.internal.proc import StepObserver
+    from odoo_instance_sdk.internal.proc import ProcessHandle, StepObserver
 from odoo_instance_sdk.models import (
     CommandResult,
     ProcessStatus,
@@ -138,7 +139,7 @@ def run_command(
 
 
 def wait_foreground_process(
-    proc: subprocess.Popen[bytes],
+    proc: subprocess.Popen[bytes] | ProcessHandle,
     *,
     observer: StepObserver | None = None,
     step_id: str | None = None,
@@ -148,18 +149,41 @@ def wait_foreground_process(
     Ctrl+C uses the same bounded TERM/KILL/reap cleanup as exceptional wait
     failures, then returns 130. Restores the previous SIGINT handler on return.
     """
-    from odoo_instance_sdk.internal.proc import StepEvent, owned_handle, wait_foreground
+    from odoo_instance_sdk.internal.proc import (
+        ProcessHandle,
+        StepEvent,
+        owned_handle,
+        wait_foreground,
+    )
 
+    if isinstance(proc, ProcessHandle):
+        return wait_foreground(proc)
+
+    started = time.perf_counter()
     try:
         returncode = wait_foreground(owned_handle(proc, process_group_id=proc.pid))
     except BaseException as error:
         if observer is not None and step_id is not None:
             with contextlib.suppress(Exception):
-                observer(StepEvent(step_id=step_id, kind="failed", error=str(error)))
+                observer(
+                    StepEvent(
+                        step_id=step_id,
+                        kind="failed",
+                        error=str(error),
+                        elapsed=time.perf_counter() - started,
+                    )
+                )
         raise
     if observer is not None and step_id is not None:
         with contextlib.suppress(Exception):
-            observer(StepEvent(step_id=step_id, kind="completed", returncode=returncode))
+            observer(
+                StepEvent(
+                    step_id=step_id,
+                    kind="completed",
+                    returncode=returncode,
+                    elapsed=time.perf_counter() - started,
+                )
+            )
     return returncode
 
 

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+
+from rich.console import Console
+from rich.table import Table
 
 if TYPE_CHECKING:
     import click
@@ -33,6 +37,7 @@ from odoo_instance_sdk.internal.automation import (
     TestCommandSnapshot,
     run_odoo_tests_command,
 )
+from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.test_selection import (
     _ChangedSelection,
     _ChangedSelectionError,
@@ -187,32 +192,40 @@ def rich_test_result(result: dict[str, JsonValue]) -> str:
     module_text = ", ".join(str(item) for item in modules) if isinstance(modules, list) else "none"
     environment_id = result.get("environment_id")
     environment_name = result.get("environment_name")
-    lines = [
-        f"owner={result['owner_kind']} project={result['project_id']}",
-        (
-            f"environment={environment_name} ({environment_id})"
+    table = Table("Field", "Value", title="Odoo test result")
+    table.add_row("Owner", rich_cell(f"{result['owner_kind']} ({result['project_id']})"))
+    table.add_row(
+        "Environment",
+        rich_cell(
+            f"{environment_name} ({environment_id})"
             if environment_id is not None and environment_name is not None
-            else "environment=none"
+            else "none"
         ),
-        f"selection={selection_kind}",
-        f"modules={module_text or 'none'}",
-    ]
+    )
+    table.add_row("Selection", rich_cell(selection_kind))
+    table.add_row("Modules", rich_cell(module_text or "none"))
     if "test_tags" in result:
         counts = result.get("counts")
         counts = counts if isinstance(counts, dict) else {}
-        lines.append(
-            f"tests={counts.get('tests', 0)} "
-            f"ok={counts.get('successful', 0)} "
-            f"failed={counts.get('failed', 0)} "
-            f"errors={counts.get('errors', 0)} "
-            f"skipped={counts.get('skipped', 0)}"
+        table.add_row(
+            "Tests",
+            rich_cell(
+                f"{counts.get('tests', 0)} total; "
+                f"{counts.get('successful', 0)} successful; "
+                f"{counts.get('failed', 0)} failed; "
+                f"{counts.get('errors', 0)} errors; "
+                f"{counts.get('skipped', 0)} skipped"
+            ),
         )
     elif result.get("reason") == "no_addon_changes":
-        lines.append("reason=no_addon_changes")
+        table.add_row("Reason", "no_addon_changes")
     elif result.get("dry_run"):
-        lines.append("dry_run=true")
-    lines.append(f"exit_code={result['exit_code']}")
-    return "\n".join(lines)
+        table.add_row("Mode", "dry-run")
+    table.add_row("Exit code", rich_cell(result["exit_code"]))
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print(table)
+    return output.getvalue().rstrip()
 
 
 def _execute_selection(

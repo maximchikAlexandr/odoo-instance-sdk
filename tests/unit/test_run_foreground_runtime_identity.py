@@ -466,7 +466,8 @@ def test_persisted_live_identity_is_accepted_by_default_process_collector(
         http_port=http_port,
     )
 
-    def inspect_live_identity(proc: Any, **_kwargs: object) -> int:
+    def inspect_live_identity(proc: ProcessHandle, **_kwargs: object) -> int:
+        assert isinstance(proc, ProcessHandle)
         assert len(catalog.upsert_calls) == 1
         identity = catalog.upsert_calls[0][1]
         result = collect_process_tree(
@@ -476,7 +477,7 @@ def test_persisted_live_identity_is_accepted_by_default_process_collector(
         )
         assert result is not None
         proc.terminate()
-        return cast("int", proc.wait(timeout=5))
+        return proc.wait(timeout=5)
 
     with patch(
         "odoo_instance_sdk.internal.server.wait_foreground_process",

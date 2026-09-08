@@ -100,6 +100,22 @@ fingerprint. A preview never launches a process, prompts, or mutates the
 workspace. See [execution boundary and CLI inventory](docs/execution-boundary.md)
 for the complete eligibility table and the intentionally narrow exceptions.
 
+Rich previews show the exact sanitized captured commands in execution order;
+identified progress lines use the captured step ID, operation, target, elapsed
+time, and process exit status. For example:
+
+```bash
+odcli env checkout feature/customer-credit --dry-run
+odcli db restore 01234567-89ab-cdef-0123-456789abcdef --dry-run
+```
+
+Catalogue lists are project-scoped by default. Use `--all-projects` when a
+global result is intended, for example `odcli backup list --all-projects` or
+`odcli resource list --all-projects`; Rich tables format byte values for
+people while JSON/TOON retain exact integer bytes. Project HTTP endpoints use
+the same precedence everywhere: explicit override, `preferred_http_port`, the
+effective `odoo.conf`, then the default port.
+
 ## Common workflows
 
 ### Tests, modules, dependencies, translations, and VS Code

@@ -167,10 +167,14 @@ def test_postgres_status_human_includes_container_fields(
     result = CliRunner().invoke(cli, ["--project", str(root), "postgres", "status"])
     assert result.exit_code == 0, result.output
     out = result.output
-    assert "container=4fc83d" in out
-    assert "pid=vm:9124" in out
-    assert "cpu=4.2%" in out
-    assert "ram=512.0 MiB" in out
+    assert "Container" in out
+    assert "4fc83d" in out
+    assert "Process" in out
+    assert "vm:9124" in out
+    assert "CPU" in out
+    assert "4.2%" in out
+    assert "RAM" in out
+    assert "512.0 MiB" in out
 
 
 @pytest.mark.unit

@@ -1031,9 +1031,7 @@ class OdooInstance:
                     from odoo_instance_sdk.internal.server import wait_foreground_process
 
                     return wait_foreground_process(
-                        handle.process,
-                        observer=context.observer,
-                        step_id=step.step_id,
+                        handle,
                     )
                 except BaseException:
                     if handle is not None:

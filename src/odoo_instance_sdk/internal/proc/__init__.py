@@ -45,12 +45,35 @@ class StepEvent:
 
     step_id: str
     kind: Literal["started", "progress", "stdout", "stderr", "completed", "failed"]
+    operation: str | None = None
+    target: str | None = None
     chunk: str | None = None
     returncode: int | None = None
     error: str | None = None
     elapsed: float | None = None
     completed_units: int | float | None = None
     total_units: int | float | None = None
+
+    def __post_init__(self) -> None:
+        """Keep even compatibility-created events attributable and inert."""
+        from odoo_instance_sdk.internal.sanitize import sanitize_event_message
+
+        step_id = sanitize_event_message(self.step_id) or "step"
+        operation = sanitize_event_message(self.operation or step_id) or step_id
+        target = sanitize_event_message(self.target or step_id) or operation
+        object.__setattr__(self, "step_id", step_id)
+        object.__setattr__(self, "operation", operation)
+        object.__setattr__(self, "target", target)
+        if self.chunk is not None:
+            from odoo_instance_sdk.internal.sanitize import sanitize_terminal_text
+
+            object.__setattr__(
+                self,
+                "chunk",
+                sanitize_terminal_text(self.chunk, preserve_newlines=True),
+            )
+        if self.error is not None:
+            object.__setattr__(self, "error", sanitize_event_message(self.error))
 
 
 type StepObserver = Callable[[StepEvent], None]
@@ -304,6 +327,48 @@ class PreparedAction:
         )
 
 
+def event_for_step(
+    step: PreparedStep | PreparedAction,
+    kind: Literal["started", "progress", "stdout", "stderr", "completed", "failed"],
+    *,
+    chunk: str | None = None,
+    returncode: int | None = None,
+    error: str | None = None,
+    elapsed: float | None = None,
+    completed_units: float | None = None,
+    total_units: float | None = None,
+) -> StepEvent:
+    """Create an identified event from the immutable private step metadata."""
+    if isinstance(step, PreparedStep):
+        from shlex import join
+
+        from .redaction import captured_secret_values, redacted_argv
+
+        target = join(
+            redacted_argv(
+                step.argv,
+                secrets=captured_secret_values(step),
+                sensitive_indices=step.sensitive_argv_indices,
+            )
+        )
+        operation = step.step_id
+    else:
+        operation = step.action or step.step_id
+        target = step.description or operation
+    return StepEvent(
+        step_id=step.step_id,
+        kind=kind,
+        operation=operation,
+        target=target,
+        chunk=chunk,
+        returncode=returncode,
+        error=error,
+        elapsed=elapsed,
+        completed_units=completed_units,
+        total_units=total_units,
+    )
+
+
 Step = PreparedStep | PreparedAction
 T = TypeVar("T")
 _ACTIVE_CONTEXT: ContextVar[RunContext[PrivateJsonValue] | None] = ContextVar(
@@ -332,7 +397,13 @@ class _StreamingStepObserver:
                 if chunk:
                     _notify(
                         self._observer,
-                        StepEvent(step_id=self._step.step_id, kind=event.kind, chunk=chunk),
+                        StepEvent(
+                            step_id=self._step.step_id,
+                            kind=event.kind,
+                            operation=event.operation,
+                            target=event.target,
+                            chunk=chunk,
+                        ),
                     )
             return
         if event.kind in {"completed", "failed"}:
@@ -345,6 +416,8 @@ class _StreamingStepObserver:
                     StepEvent(
                         step_id=self._step.step_id,
                         kind=stream,
+                        operation=event.operation,
+                        target=event.target,
                         chunk=chunk,
                     ),
                 )
@@ -442,7 +515,7 @@ class RunContext(Generic[T]):
         if not isinstance(step, PreparedAction):
             raise UnplannedStepError(step_id, reason="requested step is not an action")
         started = time.monotonic()
-        _notify(self._observer, StepEvent(step_id=step.step_id, kind="started", elapsed=0.0))
+        _notify(self._observer, event_for_step(step, "started", elapsed=0.0))
         self._started_actions[step.step_id] = started
         return step
 
@@ -456,18 +529,27 @@ class RunContext(Generic[T]):
         started = self._started_actions.get(step_id)
         if started is None:
             raise UnplannedStepError(step_id, reason="action has not started")
-        if isinstance(completed_units, bool) or completed_units < 0:
+        if (
+            isinstance(completed_units, bool)
+            or not isinstance(completed_units, (int, float))
+            or not math.isfinite(completed_units)
+            or completed_units < 0
+        ):
             raise ValueError("completed_units must be a non-negative number")
         if total_units is not None and (
-            isinstance(total_units, bool) or total_units < 0 or total_units < completed_units
+            isinstance(total_units, bool)
+            or not isinstance(total_units, (int, float))
+            or not math.isfinite(total_units)
+            or total_units < 0
+            or total_units < completed_units
         ):
             raise ValueError("total_units must be greater than or equal to completed_units")
         self._action_progress[step_id] = (completed_units, total_units)
         _notify(
             self._observer,
-            StepEvent(
-                step_id=step_id,
-                kind="progress",
+            event_for_step(
+                self._steps[step_id],
+                "progress",
                 elapsed=max(0.0, time.monotonic() - started),
                 completed_units=completed_units,
                 total_units=total_units,
@@ -482,9 +564,9 @@ class RunContext(Generic[T]):
         completed_units, total_units = self._action_progress.pop(step_id, (None, None))
         _notify(
             self._observer,
-            StepEvent(
-                step_id=step_id,
-                kind="completed",
+            event_for_step(
+                self._steps[step_id],
+                "completed",
                 returncode=0,
                 elapsed=max(0.0, time.monotonic() - started),
                 completed_units=completed_units,
@@ -518,9 +600,9 @@ class RunContext(Generic[T]):
         self._action_progress.pop(step_id, None)
         _notify(
             self._observer,
-            StepEvent(
-                step_id=step_id,
-                kind="failed",
+            event_for_step(
+                self._steps[step_id],
+                "failed",
                 error=sanitize_event_message(str(error)) or "interrupted",
                 elapsed=max(0.0, time.monotonic() - started),
             ),
