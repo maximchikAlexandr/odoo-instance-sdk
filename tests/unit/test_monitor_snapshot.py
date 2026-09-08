@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import subprocess
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -14,7 +15,9 @@ import pytest
 
 from odoo_instance_sdk.exceptions import MonitorError
 from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.internal.git_activity import collect_git_activity
 from odoo_instance_sdk.internal.proc import (
+    PreparedProcess,
     PreparedStep,
     ProcessResult,
     RecordingExecutor,
@@ -835,6 +838,7 @@ def test_snapshot_command_records_each_catalog_process_probe(
             worktree_path=str(worktree),
             generated_config_path=str(config),
             dependency_lock_path=str(lock),
+            base_ref="dev",
         ),
     )
     catalog.close()
@@ -880,6 +884,14 @@ def test_snapshot_command_records_each_catalog_process_probe(
 
     command = monitor.snapshot_command()
     process_ids = tuple(step.step_id for step in command.plan.process_steps)
+    git_steps = tuple(step for step in command.plan.process_steps if ".git." in step.step_id)
+    git_argv = {arg for step in git_steps for arg in step.argv}
+    assert "dev@{upstream}" in git_argv
+    assert "refs/heads/dev" in git_argv
+    assert any(step.argv[-3:] == ("rev-parse", "--verify", "dev") for step in git_steps)
+    assert "main@{upstream}" not in git_argv
+    assert "refs/heads/main" not in git_argv
+    assert not {"fetch", "pull"}.intersection(git_argv)
     assert process_ids[:3] == (
         f"monitor.{env_id}.git.head",
         f"monitor.{env_id}.storage.worktree",
@@ -888,6 +900,7 @@ def test_snapshot_command_records_each_catalog_process_probe(
     assert any(step_id.startswith("monitor.project_") for step_id in process_ids)
     snapshot = command.run()
     assert snapshot.environments[0].git.head_sha == "abcdef0123456789"
+    assert snapshot.environments[0].git.default_branch == "dev"
     assert snapshot.environments[0].git.branch == "feature"
     assert snapshot.environments[0].git.ahead == 2
     assert snapshot.environments[0].git.behind == 1
@@ -927,6 +940,88 @@ def test_snapshot_command_failed_git_and_docker_probes_are_not_retried(
 
     assert snapshot.environments[0].git.state is GitActivityState.ORPHAN
     assert tuple(step.step_id for step in executor.executed) == process_ids
+
+
+@pytest.mark.parametrize("base_ref", ["HEAD", "refs/tags/v1"])
+def test_prepared_recorded_git_exact_ref_matches_direct(tmp_path: Path, base_ref: str) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(args: list[str]) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    git(["init", "-q", "-b", "main"])
+    (repo / "a.txt").write_text("base\n", encoding="utf-8")
+    git(["add", "a.txt"])
+    git(
+        [
+            "-c",
+            "user.email=t@t.t",
+            "-c",
+            "user.name=tester",
+            "commit",
+            "-qm",
+            "base",
+        ]
+    )
+    if base_ref == "refs/tags/v1":
+        git(["tag", "v1"])
+        (repo / "a.txt").write_text("base\nchange\n", encoding="utf-8")
+        git(["add", "a.txt"])
+        git(
+            [
+                "-c",
+                "user.email=t@t.t",
+                "-c",
+                "user.name=tester",
+                "commit",
+                "-qm",
+                "change",
+            ]
+        )
+
+    catalog = _make_catalog(tmp_path)
+    env_id = str(uuid.uuid4())
+    config = tmp_path / "odoo.conf"
+    config.write_text("", encoding="utf-8")
+    _seed_env(
+        catalog,
+        _make_env(
+            env_id,
+            repository_root=str(repo),
+            git_common_dir=str(repo / ".git"),
+            worktree_path=str(repo),
+            generated_config_path=str(config),
+            source_db_name=None,
+            base_ref=base_ref,
+        ),
+    )
+    catalog.close()
+
+    real_executor = SubprocessExecutor()
+
+    def result_factory(step: PreparedProcess) -> ProcessResult:
+        if ".git." in step.step_id:
+            return real_executor.execute(step)
+        return ProcessResult(step.argv, 0, "", "", 0.0, None, ())
+
+    executor = RecordingExecutor(result_factory=result_factory)
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        docker_provider=FakeDockerProvider(),
+        _executor=executor,
+    )
+    command = monitor.snapshot_command()
+    snapshot = command.run()
+
+    assert snapshot.environments[0].git == collect_git_activity(repo, base_ref=base_ref)
 
 
 def test_hanging_storage_probe_is_bounded_and_keeps_sibling_observations(

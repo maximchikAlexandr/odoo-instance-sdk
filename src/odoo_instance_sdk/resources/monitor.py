@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
+from msgspec.structs import replace
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -28,6 +29,7 @@ from odoo_instance_sdk.internal.cluster_resources import (
 from odoo_instance_sdk.internal.db_name import validate_filestore_containment
 from odoo_instance_sdk.internal.git_activity import (
     _resolve_identity,
+    _validated_base_ref,
     collect_git_activity_from_identity,
 )
 from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
@@ -148,9 +150,9 @@ class _SnapshotPlan:
     cpu_points: frozenset[tuple[int, float]]
 
 
-def _orphan_git() -> GitActivity:
+def _orphan_git(default_branch: str = "main") -> GitActivity:
     return GitActivity(
-        default_branch="main",
+        default_branch=default_branch,
         head_sha=None,
         short_sha=None,
         branch="unknown",
@@ -174,8 +176,12 @@ def _empty_storage() -> StorageFootprint:
     )
 
 
-def _recorded_git_activity(results: Mapping[str, ProcessResult]) -> GitActivity:  # noqa: C901
+def _recorded_git_activity(  # noqa: C901
+    results: Mapping[str, ProcessResult], base_ref: str | None = "main"
+) -> GitActivity:
     """Rebuild the complete Git collector result from captured probe output."""
+
+    default_branch = base_ref or "unknown"
 
     def output(name: str) -> tuple[int, str]:
         result = results.get(name)
@@ -187,19 +193,23 @@ def _recorded_git_activity(results: Mapping[str, ProcessResult]) -> GitActivity:
     head_rc, head = output("head")
     branch_rc, branch = output("branch")
     if head_rc != 0 or not head or branch_rc != 0 or not branch:
-        return _orphan_git()
+        return _orphan_git(default_branch)
     upstream_rc, default_tip = output("upstream")
     if upstream_rc == 0 and default_tip:
         prefix = "upstream"
     else:
         local_rc, default_tip = output("local_main")
         if local_rc != 0 or not default_tip:
-            return _orphan_git()
-        prefix = "local"
+            local_rc, default_tip = output("local_exact")
+            prefix = "local_exact"
+        else:
+            prefix = "local"
+        if local_rc != 0 or not default_tip:
+            return _orphan_git(default_branch)
     merge_rc, merge_base = output(f"{prefix}_merge_base")
     if merge_rc == 1:
         return GitActivity(
-            default_branch="main",
+            default_branch=default_branch,
             head_sha=head,
             short_sha=head[:7],
             branch=branch,
@@ -209,7 +219,7 @@ def _recorded_git_activity(results: Mapping[str, ProcessResult]) -> GitActivity:
             state=GitActivityState.ORPHAN,
         )
     if merge_rc != 0 or not merge_base:
-        return _orphan_git()
+        return _orphan_git(default_branch)
     ahead_rc, ahead_text = output(f"{prefix}_ahead")
     behind_rc, behind_text = output(f"{prefix}_behind")
     diff_rc, diff_text = output(f"{prefix}_diff")
@@ -220,7 +230,7 @@ def _recorded_git_activity(results: Mapping[str, ProcessResult]) -> GitActivity:
         or not ahead_text.isdigit()
         or not behind_text.isdigit()
     ):
-        return _orphan_git()
+        return _orphan_git(default_branch)
     added = deleted = 0
     for line in diff_text.splitlines():
         parts = line.split("\t")
@@ -241,7 +251,7 @@ def _recorded_git_activity(results: Mapping[str, ProcessResult]) -> GitActivity:
     else:
         state = GitActivityState.DIVERGED
     return GitActivity(
-        default_branch="main",
+        default_branch=default_branch,
         head_sha=head,
         short_sha=head[:7],
         branch=branch,
@@ -293,7 +303,7 @@ class EnvironmentMonitor:
     _cluster_status_cache: dict[str, tuple[float, PostgresClusterState]] = field(
         default_factory=dict, repr=False, hash=False, compare=False
     )
-    _git_cache: dict[tuple[Path, str, str | None], tuple[float, GitActivity]] = field(
+    _git_cache: dict[tuple[Path, str, str | None, str], tuple[float, GitActivity]] = field(
         default_factory=dict, repr=False, hash=False, compare=False
     )
     _storage_cache: dict[str, tuple[float, StorageFootprint]] = field(
@@ -443,25 +453,37 @@ class EnvironmentMonitor:
             resolved_project = f"project_{repo_key(repository, Path(str(row['git_common_dir'])))}"
             if project_id is not None and resolved_project != project_id:
                 continue
-            if self.git_provider is None:
+            base_ref = _validated_base_ref(row["base_ref"])
+            git_commands: tuple[tuple[str, tuple[str, ...]], ...] = ()
+            if self.git_provider is None and base_ref is not None:
+                upstream_ref = f"{base_ref}@{{upstream}}"
+                local_ref = f"refs/heads/{base_ref}"
                 git_commands = (
                     ("branch", ("rev-parse", "--abbrev-ref", "HEAD")),
-                    ("upstream", ("rev-parse", "--verify", "main@{upstream}")),
-                    ("local_main", ("rev-parse", "--verify", "refs/heads/main")),
+                    ("upstream", ("rev-parse", "--verify", upstream_ref)),
+                    ("local_main", ("rev-parse", "--verify", local_ref)),
+                    ("local_exact", ("rev-parse", "--verify", base_ref)),
                     (
                         "upstream_merge_base",
-                        ("merge-base", "main@{upstream}", "HEAD"),
+                        ("merge-base", upstream_ref, "HEAD"),
                     ),
-                    ("upstream_ahead", ("rev-list", "--count", "main@{upstream}..HEAD")),
-                    ("upstream_behind", ("rev-list", "--count", "HEAD..main@{upstream}")),
-                    ("upstream_diff", ("diff", "--numstat", "main@{upstream}...HEAD")),
+                    ("upstream_ahead", ("rev-list", "--count", f"{upstream_ref}..HEAD")),
+                    ("upstream_behind", ("rev-list", "--count", f"HEAD..{upstream_ref}")),
+                    ("upstream_diff", ("diff", "--numstat", f"{upstream_ref}...HEAD")),
                     (
                         "local_merge_base",
-                        ("merge-base", "refs/heads/main", "HEAD"),
+                        ("merge-base", local_ref, "HEAD"),
                     ),
-                    ("local_ahead", ("rev-list", "--count", "refs/heads/main..HEAD")),
-                    ("local_behind", ("rev-list", "--count", "HEAD..refs/heads/main")),
-                    ("local_diff", ("diff", "--numstat", "refs/heads/main...HEAD")),
+                    ("local_ahead", ("rev-list", "--count", f"{local_ref}..HEAD")),
+                    ("local_behind", ("rev-list", "--count", f"HEAD..{local_ref}")),
+                    ("local_diff", ("diff", "--numstat", f"{local_ref}...HEAD")),
+                    (
+                        "local_exact_merge_base",
+                        ("merge-base", base_ref, "HEAD"),
+                    ),
+                    ("local_exact_ahead", ("rev-list", "--count", f"{base_ref}..HEAD")),
+                    ("local_exact_behind", ("rev-list", "--count", f"HEAD..{base_ref}")),
+                    ("local_exact_diff", ("diff", "--numstat", f"{base_ref}...HEAD")),
                 )
                 steps.append(
                     PreparedStep(
@@ -586,18 +608,17 @@ class EnvironmentMonitor:
                             text=True,
                         )
                     )
-            if self.git_provider is None:
-                for suffix, args in git_commands:
-                    steps.append(
-                        PreparedStep(
-                            step_id=f"monitor.{env_id}.git.{suffix}",
-                            argv=("git", "-C", str(worktree), *args),
-                            cwd=str(worktree),
-                            timeout=_PROBE_TIMEOUT_SECONDS,
-                            read_only=True,
-                            text=True,
-                        )
+            for suffix, args in git_commands:
+                steps.append(
+                    PreparedStep(
+                        step_id=f"monitor.{env_id}.git.{suffix}",
+                        argv=("git", "-C", str(worktree), *args),
+                        cwd=str(worktree),
+                        timeout=_PROBE_TIMEOUT_SECONDS,
+                        read_only=True,
+                        text=True,
                     )
+                )
             projects.add((repository, resolved_project))
             if (repository / ".git").exists():
                 repositories.add((repository, resolved_project))
@@ -1141,6 +1162,7 @@ class EnvironmentMonitor:
                 runtime = _stopped_runtime()
 
         worktree = Path(str(row["worktree_path"]))
+        base_ref = _validated_base_ref(row["base_ref"])
         git_probes = None
         if probe_results is not None:
             git_probes = {
@@ -1148,7 +1170,7 @@ class EnvironmentMonitor:
                 for key, value in probe_results.items()
                 if key.startswith(f"monitor.{env_id}.git.")
             }
-        git = self._collect_git(worktree, recorded=git_probes or None)
+        git = self._collect_git(worktree, base_ref=base_ref, recorded=git_probes or None)
         short_sha = git.head_sha[:7] if git.head_sha else None
 
         storage_probes = (
@@ -1381,23 +1403,38 @@ class EnvironmentMonitor:
         self,
         worktree: Path,
         *,
+        base_ref: str | None = "main",
         recorded: Mapping[str, ProcessResult] | None = None,
     ) -> GitActivity:
         if recorded is not None:
-            return _recorded_git_activity(recorded)
+            return _recorded_git_activity(recorded, base_ref=base_ref)
+        validated_base_ref = _validated_base_ref(base_ref)
+        if validated_base_ref is None:
+            return _orphan_git("unknown")
         try:
             if self.git_provider is not None:
                 key = worktree.resolve()
-                cache_key: tuple[Path, str, str | None] = (key, "provider", None)
+                cache_key: tuple[Path, str, str | None, str] = (
+                    key,
+                    "provider",
+                    None,
+                    validated_base_ref,
+                )
                 cached = self._git_cache.get(cache_key)
                 if cached is not None and time.monotonic() - cached[0] < _EXPENSIVE_TTL:
                     return cached[1]
                 result = self.git_provider.collect(worktree)
+                if result.default_branch != validated_base_ref:
+                    result = replace(result, default_branch=validated_base_ref)
                 self._git_cache[cache_key] = (time.monotonic(), result)
             else:
                 resolved = worktree.resolve()
-                identity = _resolve_identity(resolved)
-                cache_key = (resolved, identity[0], identity[3])
+                identity = (
+                    _resolve_identity(resolved)
+                    if validated_base_ref == "main"
+                    else _resolve_identity(resolved, validated_base_ref)
+                )
+                cache_key = (resolved, identity[0], identity[3], validated_base_ref)
                 # Identity probing is cheap.  Keep at most one expensive value
                 # per worktree: a new HEAD or default tip must invalidate the old
                 # result instead of growing the monitor for every commit.
@@ -1407,10 +1444,16 @@ class EnvironmentMonitor:
                 cached = self._git_cache.get(cache_key)
                 if cached is not None and time.monotonic() - cached[0] < _EXPENSIVE_TTL:
                     return cached[1]
-                result = collect_git_activity_from_identity(resolved, identity)
+                result = (
+                    collect_git_activity_from_identity(resolved, identity)
+                    if validated_base_ref == "main"
+                    else collect_git_activity_from_identity(
+                        resolved, identity, base_ref=validated_base_ref
+                    )
+                )
                 self._git_cache[cache_key] = (time.monotonic(), result)
         except Exception:
-            result = _orphan_git()
+            result = _orphan_git(validated_base_ref or "unknown")
         return result
 
     def _collect_storage(  # noqa: C901

@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from odoo_instance_sdk.internal.git_activity import collect_git_activity
+from odoo_instance_sdk.internal.proc import ProcessResult
 from odoo_instance_sdk.models import GitActivityState
+from odoo_instance_sdk.resources.monitor import _recorded_git_activity
 
 # These are deterministic local-repository integration tests, not pure unit tests.
 pytestmark = pytest.mark.integration
@@ -277,6 +279,169 @@ def test_cache_invalidated_on_head_change(tmp_path: Path) -> None:
     second = collect_git_activity(repo)
     assert second.state is GitActivityState.AHEAD
     assert second.ahead == 1
+
+
+def test_custom_upstream_base_ref_is_used_without_fetch_or_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git(["init", "-q", "--bare", "-b", "main"], remote)
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "base", {"a.txt": "base\n"})
+    _git(["remote", "add", "origin", str(remote)], repo)
+    _git(["push", "-q", "origin", "main"], repo)
+    _git(["fetch", "-q", "origin"], repo)
+    _git(["checkout", "-q", "-b", "dev"], repo)
+    _git(["push", "-q", "-u", "origin", "dev"], repo)
+
+    _git(["checkout", "-q", "main"], repo)
+    _commit(repo, "main-only", {"main.txt": "main\n"})
+    _git(["push", "-q", "origin", "main"], repo)
+    _git(["checkout", "-q", "dev"], repo)
+    _commit(repo, "dev-change", {"a.txt": "base\ndev\n", "blob.bin": bytes(range(32))})
+    (repo / "uncommitted.txt").write_text("ignored\n", encoding="utf-8")
+
+    import odoo_instance_sdk.internal.git_activity as activity
+
+    original = activity._run_git
+    calls: list[tuple[str, ...]] = []
+
+    def recording(args: list[str], cwd: Path) -> tuple[int, str, str]:
+        calls.append(tuple(args))
+        return original(args, cwd)
+
+    monkeypatch.setattr(activity, "_run_git", recording)
+    result = collect_git_activity(repo, base_ref="dev")
+
+    assert result.default_branch == "dev"
+    assert result.state is GitActivityState.AHEAD
+    assert result.ahead == 1
+    assert result.behind == 0
+    assert result.diff is not None
+    assert result.diff.added == 1
+    assert result.diff.deleted == 0
+    assert ("rev-parse", "--verify", "dev@{upstream}") in calls
+    merge_base = _git(["merge-base", "dev@{upstream}", "HEAD"], repo).strip()
+    assert ("diff", "--numstat", f"{merge_base}...HEAD") in calls
+    assert not any(args and args[0] in {"fetch", "pull"} for args in calls)
+    assert not any("main" in arg for args in calls for arg in args)
+
+
+def test_custom_local_base_ref_works_without_main_and_matches_recorded(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init", "-q", "-b", "dev"], repo)
+    _git(["config", "user.email", "t@t.t"], repo)
+    _git(["config", "user.name", "tester"], repo)
+    _commit(repo, "base", {"a.txt": "base\n"})
+    _commit(repo, "dev-change", {"a.txt": "base\ndev\n"})
+    (repo / "uncommitted.txt").write_text("ignored\n", encoding="utf-8")
+
+    direct = collect_git_activity(repo, base_ref="dev")
+
+    def captured(args: list[str], *, returncode: int = 0) -> ProcessResult:
+        if returncode:
+            stdout = ""
+            stderr = "missing upstream"
+        else:
+            proc = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=os.environ,
+            )
+            assert proc.returncode == 0, proc.stderr
+            stdout = proc.stdout
+            stderr = proc.stderr
+        return ProcessResult(
+            argv=("git", "-C", str(repo), *args),
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            duration=0.0,
+            cwd=str(repo),
+            environment=(),
+        )
+
+    recorded = {
+        "head": captured(["rev-parse", "--verify", "HEAD"]),
+        "branch": captured(["rev-parse", "--abbrev-ref", "HEAD"]),
+        "upstream": captured(["rev-parse", "--verify", "dev@{upstream}"], returncode=1),
+        "local_main": captured(["rev-parse", "--verify", "refs/heads/dev"]),
+        "local_merge_base": captured(["merge-base", "refs/heads/dev", "HEAD"]),
+        "local_ahead": captured(["rev-list", "--count", "refs/heads/dev..HEAD"]),
+        "local_behind": captured(["rev-list", "--count", "HEAD..refs/heads/dev"]),
+        "local_diff": captured(["diff", "--numstat", "refs/heads/dev...HEAD"]),
+    }
+
+    assert _recorded_git_activity(recorded, base_ref="dev") == direct
+
+
+def test_head_base_ref_without_upstream_uses_exact_recorded_ref(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "init", {"a.txt": "hello\n"})
+
+    result = collect_git_activity(repo, base_ref="HEAD")
+
+    assert result.default_branch == "HEAD"
+    assert result.state is GitActivityState.CLEAN
+    assert result.ahead == 0
+    assert result.behind == 0
+    assert result.diff is not None
+    assert result.diff.added == 0
+    assert result.diff.deleted == 0
+
+
+def test_non_branch_base_ref_uses_exact_recorded_ref(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    initial = _commit(repo, "init", {"a.txt": "hello\n"})
+    _git(["tag", "v1"], repo)
+    _commit(repo, "change", {"a.txt": "hello\nchanged\n"})
+
+    result = collect_git_activity(repo, base_ref="refs/tags/v1")
+
+    assert result.default_branch == "refs/tags/v1"
+    assert result.state is GitActivityState.AHEAD
+    assert result.head_sha != initial
+    assert result.ahead == 1
+    assert result.behind == 0
+    assert result.diff is not None
+    assert result.diff.added == 1
+    assert result.diff.deleted == 0
+
+
+def test_custom_base_ref_missing_ancestry_is_orphan_with_identity(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _commit(repo, "main-base", {"main.txt": "main\n"})
+    _git(["checkout", "-q", "--orphan", "dev"], repo)
+    _git(["rm", "-q", "-rf", "."], repo)
+    _commit(repo, "unrelated-dev", {"dev.txt": "dev\n"})
+    _git(["checkout", "-q", "main"], repo)
+
+    result = collect_git_activity(repo, base_ref="dev")
+
+    assert result.default_branch == "dev"
+    assert result.state is GitActivityState.ORPHAN
+    assert result.head_sha is not None
+    assert result.branch == "main"
+    assert result.ahead is None
+    assert result.behind is None
+    assert result.diff is None
 
 
 @pytest.mark.parametrize("failed_command", ["branch", "merge-base", "counts"])

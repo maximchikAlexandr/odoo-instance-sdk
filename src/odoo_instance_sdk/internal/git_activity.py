@@ -29,10 +29,10 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str, str]:
     return proc.returncode, stdout, stderr
 
 
-def _orphan_full() -> GitActivity:
+def _orphan_full(default_branch: str = _DEFAULT_BRANCH) -> GitActivity:
     """Total git failure: not a repo / no HEAD. head_sha unknown."""
     return GitActivity(
-        default_branch=_DEFAULT_BRANCH,
+        default_branch=default_branch,
         head_sha=None,
         short_sha=None,
         branch="unknown",
@@ -43,11 +43,13 @@ def _orphan_full() -> GitActivity:
     )
 
 
-def _orphan_partial(head_sha: str, short_sha: str, branch: str) -> GitActivity:
+def _orphan_partial(
+    head_sha: str, short_sha: str, branch: str, default_branch: str = _DEFAULT_BRANCH
+) -> GitActivity:
     # ponytail: HEAD known but no usable default tip / merge-base — keep identity,
     # drop ahead/behind/diff. Distinguishes "in a repo, off the rails" from "not a repo".
     return GitActivity(
-        default_branch=_DEFAULT_BRANCH,
+        default_branch=default_branch,
         head_sha=head_sha,
         short_sha=short_sha,
         branch=branch,
@@ -105,39 +107,49 @@ def _resolve_counts(
     return ahead, behind, _sum_numstat(numstat_out)
 
 
-def collect_git_activity(worktree: Path) -> GitActivity:
-    """Pure compute (no cache): three-dot git activity against the default branch tip.
+def collect_git_activity(worktree: Path, *, base_ref: str = _DEFAULT_BRANCH) -> GitActivity:
+    """Pure compute (no cache): three-dot activity against one validated base ref.
 
-    Resolves HEAD SHA, branch name, default-tip SHA (upstream then local main),
+    Resolves HEAD SHA, branch name, base-tip SHA (upstream then local ref),
     merge-base, and ahead/behind/numstat. Any git failure degrades to an orphan
     shape (full or partial). The monitor owns instance-level caching; this is the
-    This is the sole stateless collector; callers own any cache.
+    sole stateless collector; callers own any cache.
     """
-    return collect_git_activity_from_identity(worktree, _resolve_identity(worktree))
+    validated = _validated_base_ref(base_ref)
+    if validated is None:
+        return _orphan_full("unknown")
+    identity = _resolve_identity(worktree, validated)
+    return collect_git_activity_from_identity(worktree, identity, base_ref=validated)
 
 
 def collect_git_activity_from_identity(
-    worktree: Path, identity: tuple[str, str, str, str | None]
+    worktree: Path,
+    identity: tuple[str, str, str, str | None],
+    *,
+    base_ref: str = _DEFAULT_BRANCH,
 ) -> GitActivity:
     """Compute expensive activity data from a caller-probed git identity."""
+    validated = _validated_base_ref(base_ref)
+    if validated is None:
+        return _orphan_full("unknown")
     head_sha, short_sha, branch, default_tip = identity
     if not head_sha:
-        return _orphan_full()
+        return _orphan_full(validated)
     if default_tip is None:
-        return _orphan_full()
+        return _orphan_full(validated)
 
     rc, mb_out, _ = _run_git(["merge-base", default_tip, "HEAD"], worktree)
     # Exit 1 is Git's documented "no merge base" result.  It is a normal
     # orphan shape and retains the identity; every other CLI failure is fully
     # redacted as required by the public snapshot contract.
     if rc == 1:
-        return _orphan_partial(head_sha, short_sha, branch)
+        return _orphan_partial(head_sha, short_sha, branch, validated)
     if rc != 0:
-        return _orphan_full()
+        return _orphan_full(validated)
 
     counts = _resolve_counts(worktree, default_tip, mb_out.strip())
     if counts is None:
-        return _orphan_full()
+        return _orphan_full(validated)
     ahead, behind, diff = counts
 
     if ahead == 0 and behind == 0:
@@ -150,7 +162,7 @@ def collect_git_activity_from_identity(
         state = GitActivityState.DIVERGED
 
     return GitActivity(
-        default_branch=_DEFAULT_BRANCH,
+        default_branch=validated,
         head_sha=head_sha,
         short_sha=short_sha,
         branch=branch,
@@ -161,11 +173,16 @@ def collect_git_activity_from_identity(
     )
 
 
-def _resolve_identity(worktree: Path) -> tuple[str, str, str, str | None]:
-    """Cheap rev-parse pass: (head_sha, short_sha, branch, default_tip_sha).
+def _resolve_identity(
+    worktree: Path, base_ref: str = _DEFAULT_BRANCH
+) -> tuple[str, str, str, str | None]:
+    """Cheap rev-parse pass: (head_sha, short_sha, branch, base_tip_sha).
 
-    default_tip_sha is None when no upstream/local main tip resolves (orphan path).
+    The base tip is resolved from ``<base_ref>@{upstream}`` then its local ref.
     """
+    validated = _validated_base_ref(base_ref)
+    if validated is None:
+        return "", "", "unknown", None
     rc, head_out, _ = _run_git(["rev-parse", "--verify", "HEAD"], worktree)
     if rc != 0:
         return "", "", "unknown", None
@@ -178,8 +195,20 @@ def _resolve_identity(worktree: Path) -> tuple[str, str, str, str | None]:
     if rc != 0 or not branch_out.strip():
         return "", "", "unknown", None
     branch = branch_out.strip()
-    rc, tip_out, _ = _run_git(["rev-parse", "--verify", "main@{upstream}"], worktree)
+    upstream_ref = f"{validated}@{{upstream}}"
+    local_refs = (f"refs/heads/{validated}", validated)
+    rc, tip_out, _ = _run_git(["rev-parse", "--verify", upstream_ref], worktree)
     if rc != 0:
-        rc, tip_out, _ = _run_git(["rev-parse", "--verify", "refs/heads/main"], worktree)
+        for local_ref in local_refs:
+            rc, tip_out, _ = _run_git(["rev-parse", "--verify", local_ref], worktree)
+            if rc == 0:
+                break
     default_tip = tip_out.strip() if rc == 0 else None
     return head_sha, short_sha, branch, default_tip
+
+
+def _validated_base_ref(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    base_ref = value.strip()
+    return base_ref or None
