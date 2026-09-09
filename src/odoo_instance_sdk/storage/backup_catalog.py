@@ -1830,6 +1830,18 @@ class BackupCatalog:
     def clear_environment_runtime(self, environment_id: str) -> None:
         self._clear_runtime("environment", environment_id)
 
+    @_translate_sqlite_error
+    def _clear_environment_runtime_if_matches(
+        self, environment_id: str, *, root_pid: int, create_time: float
+    ) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM runtime WHERE owner_kind = 'environment' AND owner_id = ? "
+            "AND root_pid = ? AND create_time = ?",
+            (environment_id, root_pid, create_time),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
     def _add_event(
         self,
         backup_id: str,

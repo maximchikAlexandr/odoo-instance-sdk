@@ -92,7 +92,7 @@ def test_process_failure_is_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
             if pid == 11:
                 raise RuntimeError("one process disappeared")
             return (
-                ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=2.0, rss_bytes=3),
+                ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=2.0, memory_bytes=3),
                 CpuPoint(0.0, 0.0),
             )
 
@@ -161,7 +161,7 @@ def test_cpu_identity_changes_prune_old_point_and_read_runtime_once_per_poll(
             self, _: int, __: float, *, prev_cpu_point: CpuPoint | None
         ) -> tuple[ProcessTreeResult, CpuPoint] | None:
             return (
-                ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.0, rss_bytes=1),
+                ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.0, memory_bytes=1),
                 CpuPoint(0.0, 0.0),
             )
 

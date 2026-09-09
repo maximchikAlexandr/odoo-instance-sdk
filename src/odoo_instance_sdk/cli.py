@@ -1057,6 +1057,46 @@ def _print_doctor(report: DoctorReport) -> None:
         rich_print(f"  {marker:<5} {c.name}: {sanitize_diagnostic(c.detail)}")
 
 
+@cli.command(help="Stop the selected environment's proven-owned runtime.")
+@command_options
+@pass_cli_context
+def stop(
+    ctx: CliContext,
+    dry_run: bool,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    try:
+        runtime_context = cli_context.ready_instance(ctx)
+        environment = runtime_context.require_environment()
+        command = runtime_context.instance._stop_environment_command()
+    except SystemExit:
+        raise
+    except Exception as error:
+        fail(output_mode, "stop", error, dry_run=dry_run)
+    try:
+        status, _value = run_or_preview(
+            lambda: command,
+            command_name="stop",
+            mode=output_mode,
+            dry_run=dry_run,
+            result=lambda value: cast("JsonObject", value or {}),
+            context={
+                "environment_id": str(environment.id),
+                "worktree_path": environment.worktree_path,
+            },
+            provenance=cast("JsonObject", runtime_context.output_provenance),
+            rich=lambda _document: f"Stopped environment {environment.name} ({environment.id})",
+        )
+    except SystemExit:
+        raise
+    except Exception as error:
+        fail(output_mode, "stop", error, dry_run=dry_run)
+    if not dry_run:
+        sys.exit(status)
+
+
 @cli.command(
     cls=_RunCommand,
     help="Native Odoo arguments must follow a literal `--` delimiter.",

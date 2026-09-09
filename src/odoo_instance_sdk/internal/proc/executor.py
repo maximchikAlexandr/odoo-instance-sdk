@@ -1021,6 +1021,55 @@ def terminate(
         handle.wait(timeout=timeout)
 
 
+def is_process_alive(pid: int) -> bool:
+    """Return whether the OS still exposes a process with this PID."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def terminate_pid(
+    pid: int,
+    *,
+    process_group_id: int | None = None,
+    timeout: float = _CLEANUP_TIMEOUT,
+) -> None:
+    """Boundedly terminate an adopted process through the private proc seam."""
+    if pid <= 0:
+        raise ValueError("pid must be positive")
+    if sys.platform == "win32":
+        args = ["/T", "/PID", str(pid)]
+        taskkill = prepared_step("taskkill", args, step_id="taskkill", timeout=timeout)
+        SubprocessExecutor().execute(taskkill)
+        deadline = time.monotonic() + timeout
+        while is_process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if is_process_alive(pid):
+            force = prepared_step(
+                "taskkill", (*args, "/F"), step_id="taskkill.force", timeout=timeout
+            )
+            SubprocessExecutor().execute(force)
+    else:
+        group_id = process_group_id or pid
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(group_id, signal.SIGTERM)
+        deadline = time.monotonic() + timeout
+        while is_process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if is_process_alive(pid):
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(group_id, signal.SIGKILL)
+            deadline = time.monotonic() + timeout
+            while is_process_alive(pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+    if is_process_alive(pid):
+        raise TimeoutError(f"process {pid} did not exit within {timeout}s")
+
+
 def wait_foreground(handle: ProcessHandle) -> int:  # noqa: C901
     interrupted = False
     process_group_id = handle.process_group_id or handle.pid
@@ -1092,11 +1141,13 @@ __all__ = [
     "ProcessSpawnError",
     "ProcessTimeoutError",
     "SubprocessExecutor",
+    "is_process_alive",
     "owned_handle",
     "prepared_step",
     "run_captured",
     "run_captured_limited",
     "spawn",
     "terminate",
+    "terminate_pid",
     "wait_foreground",
 ]

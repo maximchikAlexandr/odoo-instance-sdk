@@ -148,7 +148,7 @@ def test_project_runtime_is_collected_with_shared_runtime_metrics(
 
     provider = FakeProcessProvider(
         result=ProcessTreeResult(
-            child_pids=(4243,), process_count=2, cpu_percent=1.25, rss_bytes=99
+            child_pids=(4243,), process_count=2, cpu_percent=1.25, memory_bytes=99
         )
     )
     monkeypatch.setattr(
@@ -170,7 +170,7 @@ def test_project_runtime_is_collected_with_shared_runtime_metrics(
     assert runtime.child_pids == (4243,)
     assert runtime.process_count == 2
     assert runtime.cpu_percent == 1.25
-    assert runtime.rss_bytes == 99
+    assert runtime.memory_bytes == 99
     assert runtime.http_url == "http://127.0.0.1:8069"
     assert runtime.database_name == "mydb"
     assert provider.calls == 1
@@ -225,7 +225,9 @@ def test_mixed_project_and_environment_runtime_ownership_is_combined(
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3",
         process_provider=FakeProcessProvider(
-            result=ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.5, rss_bytes=8)
+            result=ProcessTreeResult(
+                child_pids=(), process_count=1, cpu_percent=0.5, memory_bytes=8
+            )
         ),
         git_provider=FakeGitProvider(),
         docker_provider=FakeDockerProvider(),
@@ -263,7 +265,7 @@ def test_stopped_odoo_no_runtime_record(tmp_path: Path) -> None:
     assert env.runtime.state is RuntimeState.STOPPED
     assert env.runtime.root_pid is None
     assert env.runtime.cpu_percent is None
-    assert env.runtime.rss_bytes is None
+    assert env.runtime.memory_bytes is None
 
 
 def test_running_odoo_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,7 +277,9 @@ def test_running_odoo_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     _seed_runtime(catalog, e1)
     catalog.close()
 
-    result = ProcessTreeResult(child_pids=(200,), process_count=2, cpu_percent=1.5, rss_bytes=4096)
+    result = ProcessTreeResult(
+        child_pids=(200,), process_count=2, cpu_percent=1.5, memory_bytes=4096
+    )
     provider = FakeProcessProvider(result=result)
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
 
@@ -292,7 +296,7 @@ def test_running_odoo_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert env.runtime.root_pid == 12345
     assert env.runtime.process_count == 2
     assert env.runtime.cpu_percent == 1.5
-    assert env.runtime.rss_bytes == 4096
+    assert env.runtime.memory_bytes == 4096
     assert env.runtime.http_url == "http://127.0.0.1:8069"
 
 
@@ -305,7 +309,7 @@ def test_running_odoo_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     _seed_runtime(catalog, e1)
     catalog.close()
 
-    result = ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.0, rss_bytes=2048)
+    result = ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.0, memory_bytes=2048)
     provider = FakeProcessProvider(result=result)
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
 
@@ -320,7 +324,7 @@ def test_running_odoo_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     env = snap.environments[0]
     assert env.runtime.state is RuntimeState.NOT_READY
     assert env.runtime.root_pid == 12345
-    assert env.runtime.rss_bytes == 2048
+    assert env.runtime.memory_bytes == 2048
 
 
 def test_pid_reuse_returns_stopped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -596,7 +600,9 @@ def test_malformed_health_response_is_not_ready_and_keeps_metrics(
         "odoo_instance_sdk.resources.monitor.httpx.get", lambda *args, **kwargs: response
     )
     provider = FakeProcessProvider(
-        result=ProcessTreeResult(child_pids=(42,), process_count=2, cpu_percent=3.5, rss_bytes=99)
+        result=ProcessTreeResult(
+            child_pids=(42,), process_count=2, cpu_percent=3.5, memory_bytes=99
+        )
     )
     runtime = (
         EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider)
@@ -605,7 +611,7 @@ def test_malformed_health_response_is_not_ready_and_keeps_metrics(
         .runtime
     )
     assert runtime.state is RuntimeState.NOT_READY
-    assert (runtime.root_pid, runtime.process_count, runtime.cpu_percent, runtime.rss_bytes) == (
+    assert (runtime.root_pid, runtime.process_count, runtime.cpu_percent, runtime.memory_bytes) == (
         12345,
         2,
         3.5,
@@ -625,7 +631,7 @@ def test_runtime_is_read_once_in_atomic_catalog_snapshot_and_cpu_identity_is_sta
     catalog.close()
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
     provider = FakeProcessProvider(
-        result=ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=None, rss_bytes=1)
+        result=ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=None, memory_bytes=1)
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.monitor.EnvironmentMonitor._probe_readiness",
@@ -1137,7 +1143,7 @@ def test_cpu_not_cached_between_snapshots(tmp_path: Path, monkeypatch: pytest.Mo
     _seed_runtime(catalog, e1)
     catalog.close()
 
-    result = ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.0, rss_bytes=1024)
+    result = ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.0, memory_bytes=1024)
     provider = FakeProcessProvider(result=result)
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
     monkeypatch.setattr(httpx, "get", lambda *a, **k: httpx.Response(200, json={"status": "pass"}))

@@ -819,7 +819,7 @@ def _env_row_values(env: EnvironmentSnapshot, worktree_path: str | None = None) 
         _observed_str(env),
         _odoo_pid_str(env.runtime),
         f"{env.runtime.cpu_percent:.1f}%" if env.runtime.cpu_percent is not None else "—",
-        _human_bytes(env.runtime.rss_bytes) if env.runtime.rss_bytes is not None else "—",
+        _human_bytes(env.runtime.memory_bytes) if env.runtime.memory_bytes is not None else "—",
         _git_ahead_str(env.git),
         _git_diff_str(env.git),
         _size_str(env.storage),

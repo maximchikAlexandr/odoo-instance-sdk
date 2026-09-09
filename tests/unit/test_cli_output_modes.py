@@ -136,6 +136,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         True,
     ),
     PublicLeafCase(("doctor",), ("doctor",), "bounded-read-only", False),
+    PublicLeafCase(("stop",), ("stop", "--dry-run"), "mutating-or-spawning", True),
     PublicLeafCase(("resource", "list"), ("resource", "list"), "bounded-read-only", False),
     PublicLeafCase(("resource", "doctor"), ("resource", "doctor"), "bounded-read-only", False),
     PublicLeafCase(
@@ -516,6 +517,21 @@ def _patch_leaf_external(  # noqa: C901
             else lambda *_args, **_kwargs: DoctorReport(
                 checks=[CheckResult(name="catalogue", status="ok", detail="ready")]
             ),
+        )
+        return
+
+    if path == ("stop",):
+        instance = MagicMock()
+        env = _matrix_environment()
+        if failing:
+            instance._stop_environment_command.side_effect = fail_operation
+        else:
+            instance._stop_environment_command.return_value = _matrix_command(
+                {"status": "stopped", "environment_id": str(env.id)}
+            )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            lambda _ctx: _resolved_context(MagicMock(), env, instance),
         )
         return
 

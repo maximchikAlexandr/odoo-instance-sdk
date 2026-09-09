@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ctypes
 import sys
 import types
 from typing import Any
 
 import pytest
 
+import odoo_instance_sdk.internal.process_metrics as process_metrics
 from odoo_instance_sdk.internal.process_metrics import (
     CpuPoint,
     collect_process_tree,
@@ -115,6 +117,11 @@ class FakeProcess:
 _current_psutil: Any = _make_psutil(pid_exists=True, root=None)
 
 
+@pytest.fixture(autouse=True)
+def _non_darwin_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+
+
 def _install_psutil(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
     global _current_psutil  # noqa: PLW0603
     _current_psutil = fake
@@ -180,7 +187,7 @@ def test_live_root_no_children(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.child_pids == ()
     assert result.process_count == 1
     assert result.cpu_percent is None
-    assert result.rss_bytes == 42
+    assert result.memory_bytes == 42
     assert isinstance(point, CpuPoint)
     assert point.times_cpu == 3.0
 
@@ -203,7 +210,7 @@ def test_two_children(monkeypatch: pytest.MonkeyPatch) -> None:
     result, _ = outcome
     assert result.child_pids == (2, 3)
     assert result.process_count == 3
-    assert result.rss_bytes == 72
+    assert result.memory_bytes == 72
     assert result.cpu_percent is None
 
 
@@ -276,4 +283,94 @@ def test_child_lifecycle_error_is_omitted_entirely(
     result, _ = outcome
     assert result.child_pids == (2,)
     assert result.process_count == 2
-    assert result.rss_bytes == 52
+    assert result.memory_bytes == 52
+
+
+@pytest.mark.unit
+def test_darwin_uses_one_physical_footprint_read_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_a = FakeProcess(pid=2, create_time=100.0, rss=999)
+    child_b = FakeProcess(pid=3, create_time=100.0, rss=999)
+    proc = FakeProcess(pid=1, create_time=100.0, rss=999, children=[child_a, child_b])
+    fake = _make_psutil(root={"pid": 1, "instance": proc})
+    _install_psutil(monkeypatch, fake)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    calls: list[int] = []
+
+    def physical_footprint(pid: int) -> int:
+        calls.append(pid)
+        return {1: 100, 2: 200, 3: 300}[pid]
+
+    monkeypatch.setattr(process_metrics, "_darwin_phys_footprint", physical_footprint)
+    outcome = collect_process_tree(1, 100.0, prev_cpu_point=None)
+
+    assert outcome is not None
+    result, _ = outcome
+    assert result.memory_bytes == 600
+    assert calls == [1, 2, 3]
+
+
+@pytest.mark.unit
+def test_darwin_unreadable_child_is_omitted_without_rss_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_a = FakeProcess(pid=2, create_time=100.0, rss=10)
+    child_b = FakeProcess(pid=3, create_time=100.0, rss=20)
+    proc = FakeProcess(pid=1, create_time=100.0, rss=42, children=[child_a, child_b])
+    fake = _make_psutil(root={"pid": 1, "instance": proc})
+    _install_psutil(monkeypatch, fake)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        process_metrics,
+        "_darwin_phys_footprint",
+        lambda pid: {1: 100, 2: 200, 3: None}[pid],
+    )
+
+    outcome = collect_process_tree(1, 100.0, prev_cpu_point=None)
+
+    assert outcome is not None
+    result, _ = outcome
+    assert result.child_pids == (2,)
+    assert result.memory_bytes == 300
+
+
+@pytest.mark.unit
+def test_darwin_root_unavailable_is_null_not_rss_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = FakeProcess(pid=1, create_time=100.0, rss=42)
+    fake = _make_psutil(root={"pid": 1, "instance": proc})
+    _install_psutil(monkeypatch, fake)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(process_metrics, "_darwin_phys_footprint", lambda _: None)
+
+    assert collect_process_tree(1, 100.0, prev_cpu_point=None) is None
+
+
+@pytest.mark.unit
+def test_darwin_adapter_validates_flavor_and_return(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeProcPidRusage:
+        argtypes: object
+        restype: object
+
+        def __call__(self, pid: int, flavor: int, pointer: Any) -> int:
+            assert pid == 7
+            assert flavor == process_metrics._RUSAGE_INFO_V4
+            info = ctypes.cast(pointer, ctypes.POINTER(process_metrics._RusageInfoV4)).contents
+            info.ri_phys_footprint = 1234
+            return 0
+
+    class FakeLibproc:
+        proc_pid_rusage = FakeProcPidRusage()
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: FakeLibproc())
+    assert process_metrics._darwin_phys_footprint(7) == 1234
+
+    class FailedLibproc:
+        def proc_pid_rusage(self, *args: object) -> int:
+            return 1
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: FailedLibproc())
+    assert process_metrics._darwin_phys_footprint(7) is None

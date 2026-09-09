@@ -4,9 +4,9 @@
 - [x] 1.2 Add COPY removal regressions for stopped direct drop, unrelated HTTP-port occupancy, a proven live environment runtime, unsafe database sessions, ownership mismatch, idempotent absent artifacts, and retry from `cleanup_failed`.
 - [x] 1.3 Add one parameterized alias suite covering identical Click object/callback, help de-duplication, existing machine command IDs, Rich/JSON/TOON parity, destructive confirmation and dry-run for all eleven pairs through existing `PUBLIC_LEAF_CASES`.
 - [x] 1.4 Add shared failure-envelope tests for successful dry-run, precondition-failed dry-run and normal failure across representative sibling `fail()` callers, asserting unchanged errors/exits and no child execution.
-- [ ] 1.5 Add process-memory tests for Darwin root/child `ri_phys_footprint`, non-Darwin RSS, root failure/PID reuse, omitted unreadable children, schema-v4 naming and exact Rich/machine equality.
+- [x] 1.5 Add process-memory tests for Darwin root/child `ri_phys_footprint`, non-Darwin RSS, root failure/PID reuse, omitted unreadable children, schema-v4 naming and exact Rich/machine equality.
 - [ ] 1.6 Add replacement tests for cwd/root-selector parity, active-session refusal without termination, `--replace`/`--target` rejection, compatible `--reset-admin-password` success and compensated failure, exact dry-run actions, unchanged identity, matching database/filestore provenance, success cleanup, reverse compensation, incomplete `cleanup_failed`, retry and concurrent evidence changes with recording/fake executors.
-- [ ] 1.7 Add stop tests for cwd/root-selector parity, runtime-row owner/PID/create-time plus environment `runtime_json`/config sourcing, matching live executable/argv/cwd/config and POSIX `pgid == pid`, Windows pre-termination checks, no runtime row, vanished process, stale/reused PID, inaccessible or mismatched evidence, unrelated port occupant, bounded escalation, exit verification and selective row clearing.
+- [x] 1.7 Add stop tests for cwd/root-selector parity, runtime-row owner/PID/create-time plus environment `runtime_json`/config sourcing, matching live executable/argv/cwd/config and POSIX `pgid == pid`, Windows pre-termination checks, no runtime row, vanished process, stale/reused PID, inaccessible or mismatched evidence, unrelated port occupant, bounded escalation, exit verification and selective row clearing.
 - [x] 1.8 Add Jira allocation tests for grammar, empty/unsuffixed/mixed/sparse local-catalogue-origin evidence, removed-row reservation, malformed-ref exclusion, selected-base creation, immutable dry-run evidence and late collision without live Jira or fetch.
 - [ ] 1.9 Add drift tests for Python, dependency inputs, managed Odoo values, add-on paths, Git provenance/context, semantic formatting equality, legacy unknown, failed checkout/sync preservation, Rich/JSON/TOON parity and zero diagnosis mutation.
 
@@ -21,8 +21,8 @@
 ## 3. Shared Output and Memory Boundaries
 
 - [x] 3.1 Make resolved `dry_run` mandatory in the post-MYL-121 shared failure boundary, update every caller found by the repository audit, and preserve envelope schemas, classifications and exit codes.
-- [ ] 3.2 Add the private Darwin `proc_pid_rusage(RUSAGE_INFO_V4)` adapter with validated structure/return handling and select physical footprint or RSS once inside `internal/process_metrics` without a dependency or fallback metric.
-- [ ] 3.3 Advance runtime monitor output to schema v4 with nullable `memory_bytes`, route Rich `Memory` through the same field, update OpenAPI/dashboard generated types and compatibility tests, and eliminate any physical-footprint-as-RSS or duplicate-memory path.
+- [x] 3.2 Add the private Darwin `proc_pid_rusage(RUSAGE_INFO_V4)` adapter with validated structure/return handling and select physical footprint or RSS once inside `internal/process_metrics` without a dependency or fallback metric.
+- [x] 3.3 Advance runtime monitor output to schema v4 with nullable `memory_bytes`, route Rich `Memory` through the same field, update OpenAPI/dashboard generated types and compatibility tests, and eliminate any physical-footprint-as-RSS or duplicate-memory path.
 
 ## 4. Compatible Aliases and Jira Checkout
 
@@ -48,9 +48,9 @@
 
 ## 7. Selected Environment Stop
 
-- [ ] 7.1 Add a private immutable live-process identity projection that re-reads runtime owner/PID/create time, environment `runtime_json` (`odoo_bin`, `runtime_cwd`) and generated-config path, then captures live create time, executable, argv, cwd, config argument and POSIX process group without changing runtime storage.
-- [ ] 7.2 Extend the existing process boundary to adopt and terminate only after execution-time equality plus POSIX `pgid == pid`, apply the same available identity checks before existing Windows tree termination, use existing bounded escalation, verify exit, and clear only the matching runtime row.
-- [ ] 7.3 Wire top-level `stop` through cwd/root `--env` and bounded output; return idempotent success for confirmed absence and fail without signaling on stale, reused, inaccessible or mismatched identity.
+- [x] 7.1 Add a private immutable live-process identity projection that re-reads runtime owner/PID/create time, environment `runtime_json` (`odoo_bin`, `runtime_cwd`) and generated-config path, then captures live create time, executable, argv, cwd, config argument and POSIX process group without changing runtime storage.
+- [x] 7.2 Extend the existing process boundary to adopt and terminate only after execution-time equality plus POSIX `pgid == pid`, apply the same available identity checks before existing Windows tree termination, use existing bounded escalation, verify exit, and clear only the matching runtime row.
+- [x] 7.3 Wire top-level `stop` through cwd/root `--env` and bounded output; return idempotent success for confirmed absence and fail without signaling on stale, reused, inaccessible or mismatched identity.
 
 ## 8. Cross-Cutting Verification and Delivery
 
