@@ -439,7 +439,7 @@ def test_command(  # noqa: C901
         _emit_result(mode=mode, command="test", result=result, dry_run=dry_run, diagnostic=str(exc))
         raise click.exceptions.Exit(1)
     except Exception as exc:
-        fail(mode, "test", str(exc))
+        fail(mode, "test", str(exc), dry_run=dry_run)
 
 
 def run_module_tests(

@@ -390,6 +390,10 @@ def _rich_rendered(
         and "steps" in document.result
     ):
         rendered = _rich_plan_projection(document)
+        if isinstance(document.provenance, dict) and "jira" in document.provenance:
+            annotation = projection(document) if projection is not None else ""
+            if annotation:
+                rendered = f"{rendered}\n{annotation}" if rendered else annotation
     else:
         rendered = (projection or _default_rich_projection)(document)
     if not document.ok or document.dry_run or document.command not in _RICH_COMPLETION_COMMANDS:
@@ -544,7 +548,7 @@ def failure_document(
     command: str,
     context: JsonObject | None = None,
     provenance: JsonObject | None = None,
-    dry_run: bool = False,
+    dry_run: bool,
     warnings: tuple[str, ...] = (),
     error_code: str | None = None,
     error_message: DiagnosticValue | None = None,
@@ -768,21 +772,16 @@ def emit_json_envelope(
 
 
 def fail(
-    output_mode: OutputMode | bool,
+    output_mode: OutputMode,
     command: str,
     message: DiagnosticValue,
     *,
+    dry_run: bool,
     usage: bool = False,
     error_code: str | None = None,
     details: JsonObject | None = None,
 ) -> Never:
-    mode = (
-        output_mode
-        if isinstance(output_mode, OutputMode)
-        else OutputMode.JSON
-        if output_mode
-        else OutputMode.RICH
-    )
+    mode = output_mode
     context = _failure_context(message if isinstance(message, BaseException) else None)
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropSafetyError
 
@@ -794,6 +793,7 @@ def fail(
             failure_document(
                 command=command,
                 context=context,
+                dry_run=dry_run,
                 error_code=error_code
                 or ("usage_error" if usage else command.replace(".", "_") + "_failed"),
                 error_message=rendered_message,
@@ -805,6 +805,7 @@ def fail(
         emit(
             failure_document(
                 command=command,
+                dry_run=dry_run,
                 error_message=rendered_message,
                 error_details=details,
             ),

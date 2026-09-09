@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -38,12 +40,15 @@ from odoo_instance_sdk.commands.output import (
     sanitize_terminal_text,
     success_document,
 )
-from odoo_instance_sdk.exceptions import BackupCatalogError, ProjectContextError
+from odoo_instance_sdk.exceptions import BackupCatalogError, ProjectContextError, StalePlanError
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.internal.git_worktree import (
+    local_branch_names,
+    remote_branch_names,
     rev_parse_git_common_dir,
     rev_parse_toplevel,
 )
+from odoo_instance_sdk.internal.locks import exclusive_lock, provisioning_lock_path
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import (
@@ -65,12 +70,13 @@ from odoo_instance_sdk.models import (
     Snapshot,
     StorageFootprint,
 )
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
-    from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
@@ -93,19 +99,218 @@ _ENV_LIST_COLUMNS = (
     "WORKTREE",
 )
 
+_JIRA_TICKET_RE = re.compile(r"[A-Z][A-Z0-9]+-[1-9][0-9]*\Z")
+_JIRA_EVIDENCE_LIMIT = 32
+
+
+class _JiraTicketType(click.ParamType[str]):
+    name = "JIRA_TICKET"
+
+    def convert(
+        self, value: object, param: click.Parameter | None, ctx: click.Context | None
+    ) -> str:
+        ticket = str(value)
+        if _JIRA_TICKET_RE.fullmatch(ticket) is None:
+            self.fail("expected Jira ticket like PROJ-123", param, ctx)
+        return ticket
+
+
+_JIRA_TICKET = _JiraTicketType()
+
+
+@dataclass(frozen=True, slots=True)
+class _JiraAllocation:
+    ticket: str
+    branch: str
+    repo_root: Path
+    git_common_dir: Path
+    base_ref: str
+    local_heads: tuple[str, ...]
+    catalogue_heads: tuple[str, ...]
+    remote_heads: tuple[str, ...]
+
+
+def _jira_iteration(ticket: str, branch: str) -> int | None:
+    if branch == ticket:
+        return 0
+    match = re.fullmatch(rf"{re.escape(ticket)}_([1-9][0-9]*)", branch)
+    return int(match.group(1)) if match is not None else None
+
+
+def _catalogue_branch_names(
+    client: object, repo_root: Path, git_common_dir: Path
+) -> tuple[str, ...]:
+    catalog = cast("OdooClient", client).get_catalog()
+    names: set[str] = set()
+    for row in catalog.list_environments(git_common_dir=str(git_common_dir), include_removed=True):
+        if (
+            Path(str(row["repository_root"])).resolve() == repo_root
+            and Path(str(row["git_common_dir"])).resolve() == git_common_dir
+        ):
+            branch = row["branch"]
+            if isinstance(branch, str):
+                names.add(branch)
+    return tuple(sorted(names))
+
+
+def _resolve_jira_allocation(
+    client: object,
+    project_path: Path,
+    ticket: str,
+    base_ref_override: str | None,
+) -> _JiraAllocation:
+    repo_root = rev_parse_toplevel(project_path)
+    git_common_dir = rev_parse_git_common_dir(repo_root)
+    project = ProjectConfig.load(repo_root)
+    base_ref = base_ref_override or project.default_base_ref or "HEAD"
+    local_heads = tuple(sorted(set(local_branch_names(repo_root))))
+    catalogue_heads = tuple(sorted(set(_catalogue_branch_names(client, repo_root, git_common_dir))))
+    remote_heads = tuple(sorted(set(remote_branch_names(repo_root, ticket))))
+    all_heads = (*local_heads, *catalogue_heads, *remote_heads)
+    iterations = [
+        iteration
+        for branch in all_heads
+        if (iteration := _jira_iteration(ticket, branch)) is not None
+    ]
+    next_iteration = max(iterations, default=-1) + 1
+    branch = ticket if next_iteration == 0 else f"{ticket}_{next_iteration}"
+    return _JiraAllocation(
+        ticket=ticket,
+        branch=branch,
+        repo_root=repo_root,
+        git_common_dir=git_common_dir,
+        base_ref=base_ref,
+        local_heads=local_heads,
+        catalogue_heads=catalogue_heads,
+        remote_heads=remote_heads,
+    )
+
+
+def _revalidate_jira_absence(client: object, allocation: _JiraAllocation) -> None:
+    sources = (
+        ("local", local_branch_names(allocation.repo_root)),
+        (
+            "catalogue",
+            _catalogue_branch_names(client, allocation.repo_root, allocation.git_common_dir),
+        ),
+        ("origin", remote_branch_names(allocation.repo_root, allocation.ticket)),
+    )
+    for source, branches in sources:
+        if allocation.branch in branches:
+            raise StalePlanError(
+                "Jira branch allocation became stale",
+                expected={"branch": allocation.branch, "absent": True},
+                actual={"source": source, "branch": allocation.branch},
+            )
+
+
+def _bounded_jira_heads(heads: tuple[str, ...]) -> JsonObject:
+    return {
+        "heads": list(heads[:_JIRA_EVIDENCE_LIMIT]),
+        "total": len(heads),
+        "truncated": len(heads) > _JIRA_EVIDENCE_LIMIT,
+    }
+
+
+def _jira_provenance(allocation: _JiraAllocation) -> JsonObject:
+    return {
+        "jira": {
+            "ticket": allocation.ticket,
+            "resolved_branch": allocation.branch,
+            "base_ref": allocation.base_ref,
+            "evidence": {
+                "local": _bounded_jira_heads(allocation.local_heads),
+                "catalogue": _bounded_jira_heads(allocation.catalogue_heads),
+                "origin": _bounded_jira_heads(allocation.remote_heads),
+            },
+        }
+    }
+
+
+def _jira_rich_lines(document: OutputDocument) -> list[str]:
+    if not isinstance(document.provenance, dict):
+        return []
+    jira = document.provenance.get("jira")
+    if not isinstance(jira, dict):
+        return []
+    lines = [
+        f"Jira {jira.get('ticket')} -> {jira.get('resolved_branch')} (base {jira.get('base_ref')})"
+    ]
+    evidence = jira.get("evidence")
+    if isinstance(evidence, dict):
+        for source in ("local", "catalogue", "origin"):
+            source_data = evidence.get(source)
+            if isinstance(source_data, dict):
+                heads = source_data.get("heads")
+                rendered_heads = (
+                    ", ".join(str(head) for head in heads) if isinstance(heads, list) else ""
+                )
+                suffix = ", truncated" if source_data.get("truncated") else ""
+                lines.append(
+                    f"Jira {source}: [{rendered_heads}] "
+                    f"({source_data.get('total')} captured head(s){suffix})"
+                )
+    return lines
+
+
+def _jira_checkout_command(
+    client: object,
+    project_path: Path,
+    options: EnvironmentCheckoutOptions,
+    allocation: _JiraAllocation,
+) -> Command[DevelopmentEnvironment]:
+    selected_options = msgspec.structs.replace(options, base_ref=allocation.base_ref)
+    from odoo_instance_sdk.resources.environment import EnvironmentResource
+
+    environments = cast("OdooClient", client).environments
+    if isinstance(environments, EnvironmentResource):
+        return environments._checkout_command_with_branch_revalidation(
+            project_path,
+            allocation.branch,
+            options=selected_options,
+            branch_revalidator=lambda: _revalidate_jira_absence(client, allocation),
+        )
+    return environments.checkout_command(project_path, allocation.branch, options=selected_options)
+
+
+def _build_jira_checkout_command(
+    client: object,
+    project_path: Path,
+    jira_ticket: str,
+    base_ref: str | None,
+    options: EnvironmentCheckoutOptions,
+) -> tuple[Command[DevelopmentEnvironment], _JiraAllocation | None]:
+    from odoo_instance_sdk.resources.environment import EnvironmentResource
+
+    if not isinstance(cast("OdooClient", client).environments, EnvironmentResource):
+        return (
+            cast("OdooClient", client).environments.checkout_command(
+                project_path, jira_ticket, options=options
+            ),
+            None,
+        )
+    with exclusive_lock(provisioning_lock_path()):
+        allocation = _resolve_jira_allocation(
+            client, project_path, jira_ticket, base_ref_override=base_ref
+        )
+        return _jira_checkout_command(client, project_path, options, allocation), allocation
+
 
 @click.group(help="Manage isolated development environments.")
 def env_group() -> None:
     pass
 
 
-@env_group.command("checkout", help="Create an isolated environment from a Git branch.")
-@click.argument("branch")
+@env_group.command(
+    "checkout",
+    aliases=["create"],
+    help="Create an isolated environment from a Jira ticket branch.",
+)
+@click.argument("jira_ticket", type=_JIRA_TICKET)
 @click.option("--base", "base_ref", default=None, help="Base ref (default HEAD).")
 @click.option(
     "--config", "config_path", type=click.Path(), default=None, help="Source odoo.conf path."
 )
-@click.option("--name", "name", default=None, help="Environment name.")
 @click.option(
     "--db-mode",
     "db_mode",
@@ -126,10 +331,9 @@ def env_group() -> None:
 @pass_cli_context
 def env_checkout(
     cli_ctx: CliContext,
-    branch: str,
+    jira_ticket: str,
     base_ref: str | None,
     config_path: str | None,
-    name: str | None,
     db_mode: str,
     source_database: str | None,
     target_database: str | None,
@@ -153,7 +357,6 @@ def env_checkout(
         client = _client_class()(config=_client_config_class()(executable="odoo"))
         options = EnvironmentCheckoutOptions(
             base_ref=base_ref,
-            name=name,
             config_path=Path(config_path) if config_path else None,
             db_mode=EnvironmentDatabaseMode(db_mode),
             source_database=source_database,
@@ -163,8 +366,11 @@ def env_checkout(
             create_venv=create_venv,
             http_port=http_port,
         )
-        command = client.environments.checkout_command(project_path, branch, options=options)
+        command, allocation = _build_jira_checkout_command(
+            client, project_path, jira_ticket, base_ref, options
+        )
         plan = _checkout_public_plan(command)
+        jira_provenance = _jira_provenance(allocation) if allocation is not None else None
 
         def checkout_rich(document: OutputDocument) -> str:
             payload = document.result
@@ -180,6 +386,7 @@ def env_checkout(
             plan_data = payload.get("plan")
             if isinstance(plan_data, dict):
                 lines.extend(_plan_lines("Checkout plan", plan_data))
+            lines.extend(_jira_rich_lines(document))
             return "\n".join(lines)
 
         _, captured = run_or_preview(
@@ -192,6 +399,8 @@ def env_checkout(
                     environment=cast("DevelopmentEnvironment", environment), plan=plan
                 )
             ),
+            emit_normal=False,
+            provenance=jira_provenance,
             rich=checkout_rich,
             progress=True,
         )
@@ -200,12 +409,12 @@ def env_checkout(
         assert captured is not None
         result = EnvironmentCheckoutResult(environment=captured, plan=plan)
     except Exception as e:
-        fail(output_mode, "env.checkout", e)
+        fail(output_mode, "env.checkout", e, dry_run=dry_run)
     data = model_to_dict(result)
     environment = result.environment if isinstance(result, EnvironmentCheckoutResult) else None
     checkout_db_mode = result.db_mode if isinstance(result, EnvironmentCheckoutPlan) else None
 
-    def rich_projection(_document: OutputDocument) -> str:
+    def rich_projection(document: OutputDocument) -> str:
         lines: list[str] = []
         if isinstance(result, (ExecutionPlan, EnvironmentCheckoutPlan)):
             lines.extend(_plan_lines("Checkout plan", data))
@@ -214,6 +423,7 @@ def env_checkout(
             rendered = result.environment
             lines.append(f"Environment {rendered.name} ({rendered.id}) state={rendered.state}")
             lines.extend(_plan_lines("Checkout plan", model_to_dict(result.plan)))
+        lines.extend(_jira_rich_lines(document))
         if checkout_db_mode == EnvironmentDatabaseMode.SHARED:
             lines.append("Warning: code/process isolated, DB and filestore are NOT.")
         return "\n".join(lines)
@@ -233,6 +443,7 @@ def env_checkout(
             provenance={
                 "project_source": _project_provenance(cli_ctx),
                 "environment_source": "null",
+                **(jira_provenance or {}),
             },
             dry_run=dry_run,
         ),
@@ -241,7 +452,9 @@ def env_checkout(
     )
 
 
-@env_group.command("list", help="List initialized environments and their runtime state.")
+@env_group.command(
+    "list", aliases=["ls"], help="List initialized environments and their runtime state."
+)
 @click.option("--all", "all_envs", is_flag=True, default=False, help="Include removed.")
 @click.option(
     "--all-projects", "all_projects", is_flag=True, default=False, help="List all projects."
@@ -273,7 +486,7 @@ def env_list(
         project_id = _resolve_monitor_project_id(ctx, all_projects)
         monitor = _monitor_class()()
     except Exception as e:
-        fail(output_mode, "env.list", str(e))
+        fail(output_mode, "env.list", str(e), dry_run=False)
 
     # Rich's ``--all`` view includes removed rows.  Machine output keeps the
     # established active-only ``--all`` contract until its format rollout
@@ -294,7 +507,7 @@ def env_list(
     try:
         snapshot = monitor.snapshot(project_id=project_id, include_removed=include_removed)
     except Exception as e:
-        fail(output_mode, "env.list", str(e))
+        fail(output_mode, "env.list", str(e), dry_run=False)
     try:
         worktree_paths = (
             _catalog_worktree_paths(monitor, include_removed=include_removed)
@@ -302,7 +515,7 @@ def env_list(
             else {}
         )
     except Exception as e:
-        fail(output_mode, "env.list", e)
+        fail(output_mode, "env.list", e, dry_run=False)
 
     if machine_output:
         # ponytail: --json always wraps the non-removed Snapshot only; --all does
@@ -312,7 +525,7 @@ def env_list(
         try:
             _add_cli_worktree_paths(result, worktree_paths)
         except Exception as e:
-            fail(output_mode, "env.list", e)
+            fail(output_mode, "env.list", e, dry_run=False)
         emit_json_envelope(
             ok=True,
             command="env.list",
@@ -338,7 +551,12 @@ def _validate_watch_options(output_mode: OutputMode, *, watch: bool, interval: f
     if output_mode is not OutputMode.RICH:
         raise click.UsageError("--watch is only available with Rich output")
     if not Console().is_terminal:
-        fail(OutputMode.RICH, "env.list", "--watch requires an interactive terminal")
+        fail(
+            OutputMode.RICH,
+            "env.list",
+            "--watch requires an interactive terminal",
+            dry_run=False,
+        )
 
 
 def _run_env_list_live(
@@ -368,7 +586,7 @@ def _run_env_list_live(
                 raise
             except Exception as exc:
                 if last_renderable is None:
-                    fail(OutputMode.RICH, "env.list", str(exc))
+                    fail(OutputMode.RICH, "env.list", str(exc), dry_run=False)
                 # Keep the last successful table in the live region and add a
                 # bounded, sanitized retry diagnostic below it.
                 live.update(
@@ -501,6 +719,7 @@ def env_path(
             output_mode,
             "env.path",
             "root --env is not accepted by env path; pass ENVIRONMENT or cd into its worktree",
+            dry_run=False,
             usage=True,
         )
 
@@ -509,7 +728,7 @@ def env_path(
         env_obj = resolve_environment(client, environment, cwd=Path.cwd())
         worktree_path = _validated_env_path(env_obj)
     except Exception as exc:
-        fail(output_mode, "env.path", exc)
+        fail(output_mode, "env.path", exc, dry_run=False)
 
     emit(
         success_document(
@@ -788,7 +1007,7 @@ def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
     raise click.exceptions.Exit(1)
 
 
-@env_group.command("remove", help="Remove an isolated development environment.")
+@env_group.command("remove", aliases=["rm"], help="Remove an isolated development environment.")
 @click.argument("environment", required=False)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation.")
@@ -811,18 +1030,19 @@ def env_remove(
                 output_mode,
                 "env.remove",
                 "root --env is not accepted by env remove; pass ENVIRONMENT or cd into its worktree",
+                dry_run=dry_run,
                 usage=True,
             )
         try:
             env_obj = resolve_environment(client, None)
         except Exception as e:
-            fail(output_mode, "env.remove", str(e))
+            fail(output_mode, "env.remove", str(e), dry_run=dry_run)
     else:
         try:
             resolve_project_path(ctx)
             env_obj = client.environments.get(environment)
         except Exception as e:
-            fail(output_mode, "env.remove", str(e))
+            fail(output_mode, "env.remove", str(e), dry_run=dry_run)
     try:
         command = client.environments.remove_command(env_obj)
 
@@ -861,7 +1081,7 @@ def env_remove(
     except click.exceptions.Exit:
         raise
     except Exception as e:
-        fail(output_mode, "env.remove", e)
+        fail(output_mode, "env.remove", e, dry_run=dry_run)
     sys.exit(status)
     return
 
@@ -889,17 +1109,18 @@ def env_sync(
                 output_mode,
                 "env.sync",
                 "root --env is not accepted by env sync; pass ENVIRONMENT or cd into its worktree",
+                dry_run=dry_run,
                 usage=True,
             )
         try:
             environment = str(resolve_environment(client, None).id)
         except Exception as e:
-            fail(output_mode, "env.sync", str(e))
+            fail(output_mode, "env.sync", str(e), dry_run=dry_run)
     try:
         resolve_project_path(ctx)
         command = client.environments.sync_python_command(environment, upgrade=upgrade)
     except Exception as e:
-        fail(output_mode, "env.sync", str(e))
+        fail(output_mode, "env.sync", str(e), dry_run=dry_run)
     try:
         status, _result = run_or_preview(
             lambda: command,
@@ -916,7 +1137,7 @@ def env_sync(
             progress=True,
         )
     except Exception as exc:
-        fail(output_mode, "env.sync", exc)
+        fail(output_mode, "env.sync", exc, dry_run=dry_run)
     raise click.exceptions.Exit(status)
 
 

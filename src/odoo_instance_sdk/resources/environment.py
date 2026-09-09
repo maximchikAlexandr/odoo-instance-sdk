@@ -189,6 +189,7 @@ class _CheckoutPlan:
     worktree_argv: tuple[str, ...]
     created_at: str
     options: EnvironmentCheckoutOptions
+    branch_revalidator: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -642,6 +643,8 @@ class EnvironmentResource:
         plan = snapshot.private
         with exclusive_lock(provisioning_lock_path()):
             self._validate_checkout_snapshot(snapshot, context=context)
+            if plan.branch_revalidator is not None:
+                plan.branch_revalidator()
             if plan.db_mode is EnvironmentDatabaseMode.COPY:
                 self._preflight_copy_checkout(plan)
             context.action("checkout.catalog")
@@ -775,6 +778,19 @@ class EnvironmentResource:
         """Capture checkout inputs once and return the inspectable command."""
         snapshot = self._build_checkout_snapshot(project, branch, options=options)
         return self._command_from_snapshot(snapshot)
+
+    def _checkout_command_with_branch_revalidation(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
+        branch_revalidator: Callable[[], None],
+    ) -> Command[DevelopmentEnvironment]:
+        """Build the normal checkout command with one private late branch guard."""
+        snapshot = self._build_checkout_snapshot(project, branch, options=options)
+        private = replace(snapshot.private, branch_revalidator=branch_revalidator)
+        return self._command_from_snapshot(replace(snapshot, private=private))
 
     def checkout_with_plan(
         self,

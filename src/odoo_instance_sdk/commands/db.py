@@ -124,7 +124,7 @@ def db_refresh(
             ),
         )
     except Exception as exc:
-        fail(output_mode, "db.refresh", exc)
+        fail(output_mode, "db.refresh", exc, dry_run=dry_run)
 
     runner = run_or_preview
 
@@ -147,11 +147,11 @@ def db_refresh(
     try:
         status, _result = run()
     except Exception as exc:
-        fail(output_mode, "db.refresh", exc)
+        fail(output_mode, "db.refresh", exc, dry_run=dry_run)
     raise click.exceptions.Exit(status)
 
 
-@db_group.command("list", help="List databases from the bound PostgreSQL cluster.")
+@db_group.command("list", aliases=["ls"], help="List databases from the bound PostgreSQL cluster.")
 @click.option("--tracked", is_flag=True, default=False, help="Show only proven restore identities.")
 @output_options
 @pass_cli_context
@@ -183,7 +183,7 @@ def db_list(
             rich=_list_rich,
         )
     except Exception as exc:
-        fail(output_mode, "db.list", exc)
+        fail(output_mode, "db.list", exc, dry_run=False)
     raise click.exceptions.Exit(status)
 
 
@@ -226,7 +226,12 @@ def db_restore(
     try:
         backup_id = uuid.UUID(backup_uuid)
     except (ValueError, TypeError, AttributeError) as exc:
-        fail(output_mode, "db.restore", "backup identifier must be a complete UUID")
+        fail(
+            output_mode,
+            "db.restore",
+            "backup identifier must be a complete UUID",
+            dry_run=dry_run,
+        )
         raise AssertionError from exc
 
     try:
@@ -244,7 +249,7 @@ def db_restore(
             target_database=target_database,
         )
     except Exception as exc:
-        fail(output_mode, "db.restore", exc)
+        fail(output_mode, "db.restore", exc, dry_run=dry_run)
 
     def confirm() -> None:
         click.confirm(
@@ -278,6 +283,7 @@ def db_restore(
             failure_document(
                 command="db.restore",
                 context=safe_context,
+                dry_run=dry_run,
                 error_code="db_restore_interrupted",
                 error_message="database restore interrupted",
             ),
@@ -303,7 +309,7 @@ def db_restore(
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        fail(output_mode, "db.restore", exc)
+        fail(output_mode, "db.restore", exc, dry_run=dry_run)
     raise click.exceptions.Exit(status)
 
 
@@ -328,7 +334,7 @@ def db_reset_admin_password(
         _validate_recorded_database_binding(instance, environment)
         command = instance.databases.reset_admin_password_command()
     except Exception as exc:
-        fail(output_mode, "db.reset-admin-password", exc)
+        fail(output_mode, "db.reset-admin-password", exc, dry_run=dry_run)
 
     try:
         status, result = run_or_preview(
@@ -344,13 +350,17 @@ def db_reset_admin_password(
             rich=_rich_admin_reset,
         )
     except Exception as exc:
-        fail(output_mode, "db.reset-admin-password", exc)
+        fail(output_mode, "db.reset-admin-password", exc, dry_run=dry_run)
     if not dry_run:
         assert isinstance(result, AdminPasswordResetResult)
     raise click.exceptions.Exit(status)
 
 
-@db_group.command("drop", help="Safely drop one database from the project PostgreSQL cluster.")
+@db_group.command(
+    "drop",
+    aliases=["rm"],
+    help="Safely drop one database from the project PostgreSQL cluster.",
+)
 @click.argument("database")
 @click.option(
     "--force-default", is_flag=True, default=False, help="Allow dropping the project default."
@@ -425,7 +435,7 @@ def db_drop(
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        fail(output_mode, "db.drop", exc)
+        fail(output_mode, "db.drop", exc, dry_run=dry_run)
     raise click.exceptions.Exit(status)
 
 

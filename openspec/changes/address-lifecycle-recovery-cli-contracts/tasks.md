@@ -2,12 +2,12 @@
 
 - [x] 1.1 Add owned-runtime checkout regressions for successful `<python> <odoo-bin> --help`, missing import, non-zero exit, timeout termination, redacted diagnostics, rollback and retryable retained cleanup; prove shared-runtime checkout adds no probe.
 - [x] 1.2 Add COPY removal regressions for stopped direct drop, unrelated HTTP-port occupancy, a proven live environment runtime, unsafe database sessions, ownership mismatch, idempotent absent artifacts, and retry from `cleanup_failed`.
-- [ ] 1.3 Add one parameterized alias suite covering identical Click object/callback, help de-duplication, existing machine command IDs, Rich/JSON/TOON parity, destructive confirmation and dry-run for all eleven pairs through existing `PUBLIC_LEAF_CASES`.
-- [ ] 1.4 Add shared failure-envelope tests for successful dry-run, precondition-failed dry-run and normal failure across representative sibling `fail()` callers, asserting unchanged errors/exits and no child execution.
+- [x] 1.3 Add one parameterized alias suite covering identical Click object/callback, help de-duplication, existing machine command IDs, Rich/JSON/TOON parity, destructive confirmation and dry-run for all eleven pairs through existing `PUBLIC_LEAF_CASES`.
+- [x] 1.4 Add shared failure-envelope tests for successful dry-run, precondition-failed dry-run and normal failure across representative sibling `fail()` callers, asserting unchanged errors/exits and no child execution.
 - [ ] 1.5 Add process-memory tests for Darwin root/child `ri_phys_footprint`, non-Darwin RSS, root failure/PID reuse, omitted unreadable children, schema-v4 naming and exact Rich/machine equality.
 - [ ] 1.6 Add replacement tests for cwd/root-selector parity, active-session refusal without termination, `--replace`/`--target` rejection, compatible `--reset-admin-password` success and compensated failure, exact dry-run actions, unchanged identity, matching database/filestore provenance, success cleanup, reverse compensation, incomplete `cleanup_failed`, retry and concurrent evidence changes with recording/fake executors.
 - [ ] 1.7 Add stop tests for cwd/root-selector parity, runtime-row owner/PID/create-time plus environment `runtime_json`/config sourcing, matching live executable/argv/cwd/config and POSIX `pgid == pid`, Windows pre-termination checks, no runtime row, vanished process, stale/reused PID, inaccessible or mismatched evidence, unrelated port occupant, bounded escalation, exit verification and selective row clearing.
-- [ ] 1.8 Add Jira allocation tests for grammar, empty/unsuffixed/mixed/sparse local-catalogue-origin evidence, removed-row reservation, malformed-ref exclusion, selected-base creation, immutable dry-run evidence and late collision without live Jira or fetch.
+- [x] 1.8 Add Jira allocation tests for grammar, empty/unsuffixed/mixed/sparse local-catalogue-origin evidence, removed-row reservation, malformed-ref exclusion, selected-base creation, immutable dry-run evidence and late collision without live Jira or fetch.
 - [ ] 1.9 Add drift tests for Python, dependency inputs, managed Odoo values, add-on paths, Git provenance/context, semantic formatting equality, legacy unknown, failed checkout/sync preservation, Rich/JSON/TOON parity and zero diagnosis mutation.
 
 ## 2. Applied Settings Storage and Diagnosis
@@ -20,17 +20,17 @@
 
 ## 3. Shared Output and Memory Boundaries
 
-- [ ] 3.1 Make resolved `dry_run` mandatory in the post-MYL-121 shared failure boundary, update every caller found by the repository audit, and preserve envelope schemas, classifications and exit codes.
+- [x] 3.1 Make resolved `dry_run` mandatory in the post-MYL-121 shared failure boundary, update every caller found by the repository audit, and preserve envelope schemas, classifications and exit codes.
 - [ ] 3.2 Add the private Darwin `proc_pid_rusage(RUSAGE_INFO_V4)` adapter with validated structure/return handling and select physical footprint or RSS once inside `internal/process_metrics` without a dependency or fallback metric.
 - [ ] 3.3 Advance runtime monitor output to schema v4 with nullable `memory_bytes`, route Rich `Memory` through the same field, update OpenAPI/dashboard generated types and compatibility tests, and eliminate any physical-footprint-as-RSS or duplicate-memory path.
 
 ## 4. Compatible Aliases and Jira Checkout
 
-- [ ] 4.1 Register `env create|ls|rm`, `backup ls|inspect|rm`, `db ls|rm`, `postgres ps`, `resource ls`, and `module ls` on existing Click command objects while preserving old spellings and semantic command IDs.
-- [ ] 4.2 Add a CLI-private Jira-key parser/resolution value and recorded Git probes for all local heads and matching current `origin` heads; combine them with repository-filtered catalogue history including removed rows and compute exact/maximum-plus-one only.
-- [ ] 4.3 Feed the captured new branch into the existing exact-branch checkout command, create it only from effective `--base`, revalidate absence in all sources before mutation, and fail stale without retry/reallocation on collision.
-- [ ] 4.4 Change both CLI spellings to `JIRA_TICKET`, remove CLI `--name`, retain generated `<project>:<resolved-branch>` naming and explicit `--create-venv`, and preserve the public SDK exact-branch/name API.
-- [ ] 4.5 Update root/group help, README and shell-completion characterization so aliases are one operation and Jira branch/naming rules are explicit without adding a Jira dependency/configuration.
+- [x] 4.1 Register `env create|ls|rm`, `backup ls|inspect|rm`, `db ls|rm`, `postgres ps`, `resource ls`, and `module ls` on existing Click command objects while preserving old spellings and semantic command IDs.
+- [x] 4.2 Add a CLI-private Jira-key parser/resolution value and recorded Git probes for all local heads and matching current `origin` heads; combine them with repository-filtered catalogue history including removed rows and compute exact/maximum-plus-one only.
+- [x] 4.3 Feed the captured new branch into the existing exact-branch checkout command, create it only from effective `--base`, revalidate absence in all sources before mutation, and fail stale without retry/reallocation on collision.
+- [x] 4.4 Change both CLI spellings to `JIRA_TICKET`, remove CLI `--name`, retain generated `<project>:<resolved-branch>` naming and explicit `--create-venv`, and preserve the public SDK exact-branch/name API.
+- [x] 4.5 Update root/group help, README and shell-completion characterization so aliases are one operation and Jira branch/naming rules are explicit without adding a Jira dependency/configuration.
 
 ## 5. Owned Checkout and COPY Cleanup
 

@@ -142,6 +142,51 @@ def local_branch_exists(repo_root: Path, branch: str) -> bool:
     return proc.returncode == 0
 
 
+def local_branch_names(repo_root: Path) -> tuple[str, ...]:
+    """Return every local branch from the current repository refs."""
+    proc = _run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "for-each-ref",
+            "--format=%(refname:strip=2)",
+            "refs/heads",
+        ],
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git could not enumerate local branches: {proc.stderr.strip()}")
+    return tuple(sorted({line.strip() for line in proc.stdout.splitlines() if line.strip()}))
+
+
+def remote_branch_names(repo_root: Path, ticket: str) -> tuple[str, ...]:
+    """Return exact ticket heads from origin without fetching or changing refs."""
+    proc = _run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "ls-remote",
+            "--heads",
+            "origin",
+            ticket,
+            f"{ticket}_*",
+        ],
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise GitError(f"git could not enumerate origin branches: {proc.stderr.strip()}")
+    branches: set[str] = set()
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[1].startswith("refs/heads/"):
+            branch = parts[1][len("refs/heads/") :].strip()
+            if branch == ticket or branch.startswith(f"{ticket}_"):
+                branches.add(branch)
+    return tuple(sorted(branches))
+
+
 def remote_branches(repo_root: Path, branch: str) -> list[str]:
     proc = _run(
         ["git", "-C", str(repo_root), "ls-remote", "--heads", "origin", branch],

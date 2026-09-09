@@ -49,10 +49,10 @@ odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --config ./odoo.conf
 odcli doctor
 odcli run --dry-run
 odcli run
-odcli env checkout feature/customer-credit --dry-run
-odcli env checkout feature/customer-credit
-odcli --env feature/customer-credit run -- --dev=reload
-odcli --env feature/customer-credit logs
+odcli env checkout PROJ-123 --dry-run
+odcli env checkout PROJ-123
+odcli --env PROJ-123 run -- --dev=reload
+odcli --env PROJ-123 logs
 odcli env list
 ```
 
@@ -105,9 +105,17 @@ identified progress lines use the captured step ID, operation, target, elapsed
 time, and process exit status. For example:
 
 ```bash
-odcli env checkout feature/customer-credit --dry-run
+odcli env checkout PROJ-123 --dry-run
 odcli db restore 01234567-89ab-cdef-0123-456789abcdef --dry-run
 ```
+
+`odcli env checkout` (also spelled `odcli env create`) accepts a Jira ticket
+(`JIRA_TICKET`, for example `PROJ-123`) rather than a branch name. It reserves
+`PROJ-123` or the next unused `PROJ-123_N` from local refs, retained catalogue
+history (including removed environments), and current `origin` heads, then
+creates the worktree from the selected `--base`. The generated environment
+name is `<project>:<resolved-branch>`; the CLI does not expose a separate
+`--name` override. Both spellings are the same Click operation.
 
 Catalogue lists are project-scoped by default. Use `--all-projects` when a
 global result is intended, for example `odcli backup list --all-projects` or
@@ -316,7 +324,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
 - `odcli resource list` — List retained local resources without lifecycle mutation.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.
-- `odcli env checkout` — Plan or create an isolated branch worktree and environment.
+- `odcli env checkout` — Plan or create an isolated Jira-ticket worktree and environment (`env create` is the same operation).
 - `odcli env list` — List registered environments, active-only unless `--all` is requested.
 - `odcli env path` — Print one active environment's absolute worktree path.
 - `odcli env remove` — Remove a registered environment and its owned artifacts safely.

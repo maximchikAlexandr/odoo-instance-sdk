@@ -640,7 +640,7 @@ def init(
     _record_option_provenance(option_state, provenance)
 
     if from_vscode is not None:
-        vscode_cfg = _import_vscode(from_vscode, launch_name, no_input, output_mode)
+        vscode_cfg = _import_vscode(from_vscode, launch_name, no_input, output_mode, dry_run)
         if vscode_cfg is None:
             return
         _merge_vscode(option_state, vscode_cfg, provenance)
@@ -656,6 +656,7 @@ def init(
         no_input=no_input,
         output_mode=output_mode,
         project_path=resolved_project,
+        dry_run=dry_run,
     )
     if postgres_cfg is not None:
         provenance["option"].append("postgres")
@@ -688,12 +689,14 @@ def init(
                 output_mode,
                 "init",
                 "unable to verify project-owned runtime config tracking; refusing secret write",
+                dry_run=dry_run,
             )
         if tracked:
             fail(
                 output_mode,
                 "init",
                 "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf",
+                dry_run=dry_run,
             )
 
     status, _ = run_or_preview(
@@ -795,6 +798,7 @@ def _resolve_postgres_state(
     no_input: bool,
     output_mode: OutputMode,
     project_path: Path,
+    dry_run: bool,
 ) -> tuple[PostgresProjectConfig | None, bool]:
     mode = "compose" if postgres_mode.lower() == "compose" else "external"
     if mode == "external":
@@ -802,7 +806,12 @@ def _resolve_postgres_state(
 
     if postgres_image is None:
         if no_input or output_mode is not OutputMode.RICH:
-            fail(output_mode, "init", "Missing required option --postgres-image for compose mode")
+            fail(
+                output_mode,
+                "init",
+                "Missing required option --postgres-image for compose mode",
+                dry_run=dry_run,
+            )
         postgres_image = click.prompt("PostgreSQL image (e.g. pgvector/pgvector:pg16)")
 
     allocated = False
@@ -881,12 +890,16 @@ def _record_option_provenance(state: _OptionState, provenance: dict[str, list[st
 
 
 def _import_vscode(
-    from_vscode: str, launch_name: str | None, no_input: bool, output_mode: OutputMode
+    from_vscode: str,
+    launch_name: str | None,
+    no_input: bool,
+    output_mode: OutputMode,
+    dry_run: bool,
 ) -> ProjectConfig | None:
     try:
         result = import_vscode_launch(from_vscode, launch_name=launch_name, no_input=no_input)
     except VscodeImportError as e:
-        fail(output_mode, "init", str(e))
+        fail(output_mode, "init", str(e), dry_run=dry_run)
     return result.config
 
 
@@ -923,7 +936,7 @@ def _handle_existing_manifest(
     try:
         existing_cfg = ProjectConfig.load(resolved_project)
     except Exception as e:
-        fail(output_mode, "init", f"Existing manifest unreadable: {e}")
+        fail(output_mode, "init", f"Existing manifest unreadable: {e}", dry_run=dry_run)
     # Comparison excludes ``postgres_allocated`` (dry-run-only flag); both
     # sides default to False here.
     if _manifest_dict(existing_cfg) == _manifest_dict(config):
@@ -944,7 +957,12 @@ def _handle_existing_manifest(
     if no_input or output_mode is not OutputMode.RICH:
         if yes:
             return False
-        fail(output_mode, "init", "manifest exists and differs; remove it first or adjust options")
+        fail(
+            output_mode,
+            "init",
+            "manifest exists and differs; remove it first or adjust options",
+            dry_run=dry_run,
+        )
     if yes:
         return False
     if not click.confirm("Manifest exists and differs; overwrite?", default=False):
@@ -999,7 +1017,7 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
         client = _client_class()(config=OdooClientConfig(executable="odoo"))
         report = _run_doctor()(client, project_path if project_path != Path.cwd() else None)
     except Exception as e:
-        fail(output_mode, "doctor", str(e))
+        fail(output_mode, "doctor", str(e), dry_run=False)
     if json_output:
         emit_json_envelope(
             ok=report.ok,
@@ -1066,12 +1084,13 @@ def run(
                 output_mode,
                 "run",
                 f"port-conflict: {http_interface}:{http_port} is occupied (ownership unknown)",
+                dry_run=dry_run,
             )
         command = runtime_context.instance.run_foreground_command(args=odoo_args)
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "run", e)
+        fail(output_mode, "run", e, dry_run=dry_run)
     if not dry_run and runtime_context.is_environment:
         runtime_context.client.environments.record_use(runtime_context.require_environment())
     try:
@@ -1085,7 +1104,7 @@ def run(
     except KeyboardInterrupt:
         value = 130
     except Exception as e:
-        fail(output_mode, "run", e)
+        fail(output_mode, "run", e, dry_run=dry_run)
     if not dry_run:
         sys.exit(int(value or 0))
     return
@@ -1104,11 +1123,11 @@ def logs(ctx: CliContext, tail: int, follow: bool) -> None:
     except KeyboardInterrupt:
         sys.exit(130)
     except LogfileAccessError as e:
-        fail(False, "logs", str(e))
+        fail(OutputMode.RICH, "logs", str(e), dry_run=False)
     except InstanceConfigurationError as e:
-        fail(False, "logs", str(e))
+        fail(OutputMode.RICH, "logs", str(e), dry_run=False)
     except Exception as e:
-        fail(False, "logs", str(e))
+        fail(OutputMode.RICH, "logs", str(e), dry_run=False)
 
 
 @cli.command(help="Open an interactive Odoo shell.")
@@ -1129,7 +1148,7 @@ def shell(
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "shell", e)
+        fail(output_mode, "shell", e, dry_run=dry_run)
     try:
         _status, value = run_or_preview(
             lambda: command,
@@ -1141,7 +1160,7 @@ def shell(
     except KeyboardInterrupt:
         value = 130
     except Exception as e:
-        fail(output_mode, "shell", e)
+        fail(output_mode, "shell", e, dry_run=dry_run)
     if not dry_run:
         sys.exit(int(value or 0))
     return
@@ -1178,9 +1197,9 @@ def eval_cmd(
     except SystemExit:
         raise
     except _ShellCommandFailure as e:
-        fail(output_mode, "eval", e, error_code=e.error_code, details=e.details)
+        fail(output_mode, "eval", e, dry_run=dry_run, error_code=e.error_code, details=e.details)
     except Exception as e:
-        fail(output_mode, "eval", e)
+        fail(output_mode, "eval", e, dry_run=dry_run)
     sys.exit(status)
 
 
@@ -1208,11 +1227,11 @@ def exec_cmd(
     else:
         p = Path(script)
         if not p.is_file():
-            fail(output_mode, "exec", f"script not found: {script}")
+            fail(output_mode, "exec", f"script not found: {script}", dry_run=dry_run)
         try:
             source = p.read_text(encoding="utf-8")
         except OSError as e:
-            fail(output_mode, "exec", f"cannot read script: {e}")
+            fail(output_mode, "exec", f"cannot read script: {e}", dry_run=dry_run)
     try:
         runtime_context = cli_context.ready_instance(ctx)
         instance = runtime_context.instance
@@ -1234,9 +1253,9 @@ def exec_cmd(
     except SystemExit:
         raise
     except _ShellCommandFailure as e:
-        fail(output_mode, "exec", e, error_code=e.error_code, details=e.details)
+        fail(output_mode, "exec", e, dry_run=dry_run, error_code=e.error_code, details=e.details)
     except Exception as e:
-        fail(output_mode, "exec", e)
+        fail(output_mode, "exec", e, dry_run=dry_run)
     sys.exit(status)
 
 
@@ -1245,7 +1264,7 @@ def module_group() -> None:
     pass
 
 
-@module_group.command("list", help="List installed or available Odoo modules.")
+@module_group.command("list", aliases=["ls"], help="List installed or available Odoo modules.")
 @click.argument("modules", nargs=-1)
 @click.option("--state", "state", default=None, help="Filter by state.")
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
@@ -1278,7 +1297,7 @@ def module_list(
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "module.list", e)
+        fail(output_mode, "module.list", e, dry_run=dry_run)
     sys.exit(status)
 
 
@@ -1304,7 +1323,7 @@ def module_update(
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "module.update", str(e))
+        fail(output_mode, "module.update", str(e), dry_run=dry_run)
     try:
         selected_modules = tuple(modules)
 
@@ -1321,7 +1340,14 @@ def module_update(
                 "updated": _updated_modules(value),
             },
             confirm=(
-                (lambda: fail(output_mode, "module.update", "module update requires --yes"))
+                (
+                    lambda: fail(
+                        output_mode,
+                        "module.update",
+                        "module update requires --yes",
+                        dry_run=dry_run,
+                    )
+                )
                 if not yes
                 else None
             ),
@@ -1334,7 +1360,7 @@ def module_update(
             progress=True,
         )
     except Exception as exc:
-        fail(output_mode, "module.update", exc)
+        fail(output_mode, "module.update", exc, dry_run=dry_run)
     sys.exit(status)
 
 
@@ -1394,7 +1420,7 @@ def module_test(
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "module.test", e)
+        fail(output_mode, "module.test", e, dry_run=dry_run)
     sys.exit(outcome[0].exit_code if outcome is not None and not dry_run else status)
 
 
@@ -1449,7 +1475,7 @@ def translations_export(
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "translations.export", e)
+        fail(output_mode, "translations.export", e, dry_run=dry_run)
     sys.exit(status)
 
 
@@ -1496,13 +1522,19 @@ def deps_verify(
         if dry_run:
             sys.exit(status)
         if _result is None:
-            fail(output_mode, "deps.verify", "dependency verification returned no result")
+            fail(
+                output_mode,
+                "deps.verify",
+                "dependency verification returned no result",
+                dry_run=dry_run,
+            )
         result_payload = _deps_verify_payload(_result)
         if _result.ok:
             document = success_document(command="deps.verify", result=result_payload)
         else:
             document = failure_document(
                 command="deps.verify",
+                dry_run=dry_run,
                 error_code="deps_verify_failed",
                 error_message="Dependency verification failed",
                 error_details=result_payload,
@@ -1511,7 +1543,7 @@ def deps_verify(
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "deps.verify", e)
+        fail(output_mode, "deps.verify", e, dry_run=dry_run)
     sys.exit(status)
 
 
@@ -1618,7 +1650,7 @@ def vscode_generate(
     except SystemExit:
         raise
     except Exception as e:
-        fail(output_mode, "vscode.generate", e)
+        fail(output_mode, "vscode.generate", e, dry_run=dry_run)
     sys.exit(status)
 
 
@@ -1655,11 +1687,11 @@ def _resolve_odoo_bin(
 ) -> None:
     if option_state.odoo_bin is None:
         if no_input or output_mode is not OutputMode.RICH or dry_run:
-            fail(output_mode, "init", "Missing required option --odoo-bin")
+            fail(output_mode, "init", "Missing required option --odoo-bin", dry_run=dry_run)
         option_state.odoo_bin = Path(click.prompt("Path to odoo-bin"))
         provenance["discovery"].append("odoo_bin")
     if not option_state.odoo_bin:
-        fail(output_mode, "init", "odoo_bin is required")
+        fail(output_mode, "init", "odoo_bin is required", dry_run=dry_run)
 
 
 if __name__ == "__main__":

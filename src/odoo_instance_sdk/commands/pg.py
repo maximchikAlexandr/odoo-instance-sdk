@@ -264,7 +264,7 @@ def _run_database_command(
             rich=rich,
         )
     except Exception as exc:
-        fail(output_mode, command_name, exc)
+        fail(output_mode, command_name, exc, dry_run=dry_run)
     raise click.exceptions.Exit(status)
 
 
@@ -295,7 +295,7 @@ def psql(
             emit_normal=False,
         )
     except Exception as exc:
-        fail(output_mode, "psql", exc)
+        fail(output_mode, "psql", exc, dry_run=dry_run)
     raise click.exceptions.Exit(status if value is None else value)
 
 
@@ -413,6 +413,7 @@ def db_init_monitoring(
             output_mode,
             "db.init-monitoring",
             "init-monitoring requires --yes",
+            dry_run=dry_run,
             error_code="confirmation_required",
         )
     confirm = None
@@ -444,7 +445,7 @@ def db_init_monitoring(
             rich=_monitoring_rich,
         )
     except Exception as exc:
-        fail(output_mode, "db.init-monitoring", exc)
+        fail(output_mode, "db.init-monitoring", exc, dry_run=dry_run)
     raise click.exceptions.Exit(status)
 
 
@@ -501,7 +502,7 @@ def postgres_approve_image(
     except Exception as exc:
         from odoo_instance_sdk.commands.output import fail
 
-        fail(output_mode, "postgres.approve-image", exc)
+        fail(output_mode, "postgres.approve-image", exc, dry_run=dry_run)
     sys.exit(status)
 
 
@@ -519,7 +520,9 @@ def _approval_rich(document: OutputDocument, digest: str) -> str:
     return output.getvalue().rstrip()
 
 
-@postgres_group.command("status", help="Show the project PostgreSQL cluster status.")
+@postgres_group.command(
+    "status", aliases=["ps"], help="Show the project PostgreSQL cluster status."
+)
 @output_options
 @pass_cli_context
 def postgres_status(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
@@ -568,7 +571,7 @@ def postgres_status(ctx: CliContext, output_format: str | None, json_output: boo
     except Exception as exc:
         from odoo_instance_sdk.commands.output import fail
 
-        fail(output_mode, "postgres.status", exc)
+        fail(output_mode, "postgres.status", exc, dry_run=False)
     if value is not None and snapshot is not None:
         from odoo_instance_sdk.internal.postgres_cli import status_exit_code
 
@@ -618,7 +621,7 @@ def postgres_up(
     except Exception as exc:
         from odoo_instance_sdk.commands.output import fail
 
-        fail(output_mode, "postgres.up", exc)
+        fail(output_mode, "postgres.up", exc, dry_run=dry_run)
     sys.exit(status)
 
 
@@ -663,7 +666,7 @@ def postgres_stop(
     except Exception as exc:
         from odoo_instance_sdk.commands.output import fail
 
-        fail(output_mode, "postgres.stop", exc)
+        fail(output_mode, "postgres.stop", exc, dry_run=dry_run)
     sys.exit(status)
 
 
