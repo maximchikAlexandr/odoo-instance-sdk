@@ -196,6 +196,50 @@ def test_stop_inaccessible_identity_fails_closed_and_retains_runtime(tmp_path: P
 
 
 @pytest.mark.unit
+def test_stop_win32_identity_mismatch_fails_closed_without_taskkill(tmp_path: Path) -> None:
+    instance, catalog, _ = _instance(tmp_path)
+    with (
+        patch("odoo_instance_sdk.resources.instance.sys.platform", "win32"),
+        patch(
+            "odoo_instance_sdk.resources.instance.psutil.Process",
+            return_value=_live_process(instance, mismatch="create_time"),
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.os.getpgid",
+            side_effect=AssertionError("Windows must not require POSIX pgid"),
+        ),
+        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        pytest.raises(RuntimeError, match="runtime identity mismatch"),
+    ):
+        instance._stop_environment_command().run()
+    terminate.assert_not_called()
+    assert catalog.runtime_row is not None
+    assert catalog.clear_calls == []
+
+
+@pytest.mark.unit
+def test_stop_win32_inaccessible_identity_fails_closed_without_taskkill(tmp_path: Path) -> None:
+    instance, catalog, _ = _instance(tmp_path)
+    with (
+        patch("odoo_instance_sdk.resources.instance.sys.platform", "win32"),
+        patch(
+            "odoo_instance_sdk.resources.instance.psutil.Process",
+            side_effect=psutil.AccessDenied(4242),
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.os.getpgid",
+            side_effect=AssertionError("Windows must not require POSIX pgid"),
+        ),
+        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        pytest.raises(RuntimeError, match="identity is inaccessible"),
+    ):
+        instance._stop_environment_command().run()
+    terminate.assert_not_called()
+    assert catalog.runtime_row is not None
+    assert catalog.clear_calls == []
+
+
+@pytest.mark.unit
 def test_stop_rejects_runtime_record_changed_after_planning(tmp_path: Path) -> None:
     instance, catalog, _ = _instance(tmp_path)
     with (
@@ -312,6 +356,31 @@ def test_terminate_pid_uses_bounded_term_then_kill_escalation() -> None:
     assert [call.args[1] for call in killpg.call_args_list] == [
         signal.SIGTERM,
         signal.SIGKILL,
+    ]
+
+
+@pytest.mark.unit
+def test_terminate_pid_win32_escalates_taskkill_and_verifies_exit() -> None:
+    alive = iter((True, True, False))
+    with (
+        patch("odoo_instance_sdk.internal.proc.executor.sys.platform", "win32"),
+        patch("odoo_instance_sdk.internal.proc.executor.SubprocessExecutor.execute") as execute,
+        patch(
+            "odoo_instance_sdk.internal.proc.executor.is_process_alive",
+            side_effect=lambda _pid: next(alive),
+        ),
+        patch(
+            "odoo_instance_sdk.internal.proc.executor.time.monotonic",
+            side_effect=(0.0, 100.0),
+        ),
+        patch("odoo_instance_sdk.internal.proc.executor.time.sleep"),
+    ):
+        terminate_pid(4242, timeout=5.0)
+
+    commands = [call.args[0].argv for call in execute.call_args_list]
+    assert commands == [
+        ("taskkill", "/T", "/PID", "4242"),
+        ("taskkill", "/T", "/PID", "4242", "/F"),
     ]
 
 

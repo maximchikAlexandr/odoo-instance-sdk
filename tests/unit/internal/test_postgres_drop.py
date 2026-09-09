@@ -905,6 +905,56 @@ def test_drop_allows_only_the_selected_environment_binding(
 
 
 @pytest.mark.unit
+def test_drop_allows_proven_retained_rollback_binding(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "rollback.sqlite3")
+    instance, _backup_file = _managed_instance(
+        project_manifest, catalog, tmp_path, data_directory=tmp_path / "data"
+    )
+    backup = catalog.list_backups()[0]
+    rollback = "feature_db_odcli_rb_0123456789abcdef0123"
+    catalog.create_environment(
+        make_env(
+            "selected-environment",
+            repository_root=str(project_manifest),
+            target_db_name="feature_db",
+            db_mode="copy",
+            backup_id=str(backup.id),
+            last_error=(
+                "copy replacement cleanup_failed; retained="
+                + json.dumps(
+                    {
+                        "backup_id": str(backup.id),
+                        "target_database": "feature_db",
+                        "rollback_database": rollback,
+                        "target_present": False,
+                        "rollback_present": True,
+                    },
+                    separators=(",", ":"),
+                )
+                + "; retained rollback"
+            ),
+        )
+    )
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        rollback,
+        executor=_executor(),
+        allow_environment_id="selected-environment",
+        allow_environment_backup_id=str(backup.id),
+        allow_environment_rollback_database=rollback,
+    ).run()
+
+    assert result.database == rollback
+    catalog.close()
+
+
+@pytest.mark.unit
 def test_verified_drop_cleans_only_filestore_and_retains_source_backup(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
 ) -> None:

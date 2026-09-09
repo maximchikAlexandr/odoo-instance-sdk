@@ -201,9 +201,17 @@ def model_to_dict(value: msgspec.Struct) -> JsonObject:
 def _failure_context(error: BaseException | None) -> JsonObject:
     """Project only the typed, secret-free retained-artifact context."""
     context = getattr(error, "failure_context", None) if error is not None else None
+    from odoo_instance_sdk.internal.database_replacement import CopyReplacementFailureContext
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropFailureContext
 
-    if not isinstance(context, (DatabasePreparationFailureContext, DatabaseDropFailureContext)):
+    if not isinstance(
+        context,
+        (
+            DatabasePreparationFailureContext,
+            DatabaseDropFailureContext,
+            CopyReplacementFailureContext,
+        ),
+    ):
         return {}
     return model_to_dict(context)
 

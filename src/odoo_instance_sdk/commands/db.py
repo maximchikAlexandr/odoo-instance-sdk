@@ -6,6 +6,7 @@ import sys
 import uuid
 from collections.abc import Callable
 from io import StringIO
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -21,11 +22,13 @@ from odoo_instance_sdk.commands.context import (
     pass_cli_context,
     project_provenance,
     ready_instance,
+    resolve_environment,
     resolve_project_path,
 )
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputMode,
+    _InspectableCommand,
     _rich_plan_projection,
     emit,
     emit_json_envelope,
@@ -68,6 +71,25 @@ def _run_rich_restore(
         console=Console(),
         include_elapsed=False,
     )
+
+
+def _validate_replace_context(client: OdooClient, environment: DevelopmentEnvironment) -> None:
+    """Reject non-COPY or live contexts before constructing a mutation command."""
+    from odoo_instance_sdk.models import DevelopmentEnvironment as _DevelopmentEnvironment
+
+    if not isinstance(environment, _DevelopmentEnvironment):
+        return
+    if environment.removed_at is not None or environment.state.value == "removed":
+        raise InstanceConfigurationError("replacement requires a non-removed environment")
+    if environment.db_mode.value != "copy":
+        raise InstanceConfigurationError("replacement requires a COPY environment")
+    if environment.state.value not in {"ready", "cleanup_failed"}:
+        raise InstanceConfigurationError("replacement requires a ready or retryable environment")
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog = client.get_catalog()
+    if isinstance(catalog, BackupCatalog) and catalog.get_environment_runtime(str(environment.id)):
+        raise InstanceConfigurationError("replacement requires a stopped environment runtime")
 
 
 @click.group(help="Prepare and reset project databases.")
@@ -198,6 +220,13 @@ def db_list(
     help="Reset base.user_admin after restoring.",
 )
 @click.option("--yes", is_flag=True, default=False, help="Skip interactive confirmation.")
+@click.option(
+    "--replace",
+    "replace_environment",
+    is_flag=True,
+    default=False,
+    help="Replace the selected stopped COPY environment in place.",
+)
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
@@ -207,12 +236,15 @@ def db_restore(
     target_database: str | None,
     reset_admin_password: bool,
     yes: bool,
+    replace_environment: bool,
     dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
     """Restore one exact catalogue backup without downloading it again."""
     output_mode = resolve_output_mode(output_format, json_output)
+    if replace_environment and target_database is not None:
+        raise click.UsageError("--replace cannot be combined with --target")
     if not dry_run and not yes and output_mode is not OutputMode.RICH:
         emit_json_envelope(
             ok=False,
@@ -235,19 +267,40 @@ def db_restore(
         raise AssertionError from exc
 
     try:
-        from odoo_instance_sdk.internal.database_preparation import _CatalogueRestoreSource
-
-        project_path = resolve_project_path(ctx)
         client = _client_class()(config=_client_config_class()(executable="odoo"))
-        command = client.environments.refresh_database_command(
-            project_path,
-            options=DatabaseRefreshOptions(
-                restore=True,
-                reset_admin_password=reset_admin_password,
-            ),
-            restore_source=_CatalogueRestoreSource(backup_id),
-            target_database=target_database,
-        )
+        command: _InspectableCommand[object]
+        if replace_environment:
+            from odoo_instance_sdk.internal.database_replacement import (
+                build_copy_replacement_command,
+            )
+
+            environment = resolve_environment(client, ctx.env, cwd=Path.cwd())
+            _validate_replace_context(client, environment)
+            command = cast(
+                "_InspectableCommand[object]",
+                build_copy_replacement_command(
+                    client,
+                    environment,
+                    backup_id,
+                    reset_admin_password=reset_admin_password,
+                ),
+            )
+        else:
+            from odoo_instance_sdk.internal.database_preparation import _CatalogueRestoreSource
+
+            project_path = resolve_project_path(ctx)
+            command = cast(
+                "_InspectableCommand[object]",
+                client.environments.refresh_database_command(
+                    project_path,
+                    options=DatabaseRefreshOptions(
+                        restore=True,
+                        reset_admin_password=reset_admin_password,
+                    ),
+                    restore_source=_CatalogueRestoreSource(backup_id),
+                    target_database=target_database,
+                ),
+            )
     except Exception as exc:
         fail(output_mode, "db.restore", exc, dry_run=dry_run)
 
@@ -264,11 +317,14 @@ def db_restore(
         from odoo_instance_sdk.internal.database_preparation import (
             DatabasePreparationFailureContext,
         )
+        from odoo_instance_sdk.internal.database_replacement import CopyReplacementFailureContext
 
         context = getattr(error, "failure_context", None)
         safe_context: dict[str, JsonValue] = (
             model_to_dict(context)
-            if isinstance(context, DatabasePreparationFailureContext)
+            if isinstance(
+                context, (DatabasePreparationFailureContext, CopyReplacementFailureContext)
+            )
             else cast(
                 "dict[str, JsonValue]",
                 {
@@ -296,10 +352,12 @@ def db_restore(
             command_name="db.restore",
             mode=output_mode,
             dry_run=dry_run,
-            result=cast(
-                "Callable[[DatabasePreparationResult | None], dict[str, JsonValue]]", model_to_dict
-            ),
-            context={"backup_id": str(backup_id), "target_database": target_database},
+            result=cast("Callable[[object | None], dict[str, JsonValue]]", model_to_dict),
+            context={
+                "backup_id": str(backup_id),
+                "target_database": target_database,
+                "replace": replace_environment,
+            },
             provenance={"project_source": project_provenance(ctx)},
             confirm=None if yes or dry_run else confirm,
             rich=_restore_rich,

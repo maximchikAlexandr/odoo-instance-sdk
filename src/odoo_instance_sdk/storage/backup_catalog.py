@@ -33,6 +33,7 @@ from odoo_instance_sdk.models import (
     BackupFormat,
     BackupState,
     BackupValidationStatus,
+    EnvironmentState,
 )
 
 if TYPE_CHECKING:
@@ -1355,6 +1356,115 @@ class BackupCatalog:
                    (db_host, db_port, database_name, event_type, occurred_at, backup_id, cluster_id, data_directory)
                    VALUES (?, ?, ?, 'restored', datetime('now'), ?, ?, ?)""",
                 (host, db_port, database_name, backup_id, identity, data_dir),
+            )
+
+    @_translate_sqlite_error
+    def finalize_environment_replacement(
+        self,
+        environment_id: str,
+        backup_id: str,
+        *,
+        db_host: str | None,
+        db_port: int,
+        target_database: str,
+        cluster_id: uuid.UUID | str,
+        data_directory: str | Path,
+    ) -> None:
+        """Publish replacement provenance and environment binding atomically."""
+        host = normalize_db_host(db_host)
+        identity = self._cluster_uuid(cluster_id)
+        data_dir = str(data_directory)
+        if not data_dir.strip():
+            raise BackupCatalogError("replacement data_directory must not be empty")
+        with self._conn:
+            environment = self._conn.execute(
+                "SELECT state, db_mode, target_db_name FROM environments WHERE id=?",
+                (environment_id,),
+            ).fetchone()
+            if (
+                environment is None
+                or environment["state"] not in {"ready", EnvironmentState.CLEANUP_FAILED.value}
+                or environment["db_mode"] != "copy"
+                or environment["target_db_name"] != target_database
+            ):
+                raise BackupCatalogError("environment replacement identity changed")
+            backup = self._conn.execute(
+                "SELECT state FROM backups WHERE id=?", (backup_id,)
+            ).fetchone()
+            if backup is None or backup["state"] != BackupState.AVAILABLE.value:
+                raise BackupCatalogError("replacement backup is no longer available")
+            claim = self._conn.execute(
+                "SELECT state FROM postgres_clusters WHERE cluster_id=?", (identity,)
+            ).fetchone()
+            if claim is None or claim["state"] != "active":
+                raise BackupCatalogError("replacement cluster claim is not active")
+            self._conn.execute(
+                "UPDATE environments SET backup_id=?, state='ready', last_error=NULL WHERE id=?",
+                (backup_id, environment_id),
+            )
+            self._conn.execute(
+                "INSERT INTO restores "
+                "(db_host, db_port, database_name, backup_id, restored_at, cluster_id, data_directory) "
+                "VALUES (?, ?, ?, ?, datetime('now'), ?, ?)",
+                (host, db_port, target_database, backup_id, identity, data_dir),
+            )
+            self._conn.execute(
+                "INSERT INTO database_events "
+                "(db_host, db_port, database_name, event_type, occurred_at, backup_id, cluster_id, data_directory) "
+                "VALUES (?, ?, ?, 'restored', datetime('now'), ?, ?, ?)",
+                (host, db_port, target_database, backup_id, identity, data_dir),
+            )
+            self._conn.execute(
+                "INSERT INTO environment_events "
+                "(environment_id, operation, outcome, occurred_at, message) "
+                "VALUES (?, 'sync', 'succeeded', datetime('now'), 'replacement')",
+                (environment_id,),
+            )
+
+    @_translate_sqlite_error
+    def rollback_environment_replacement(
+        self,
+        environment_id: str,
+        backup_id: str,
+        *,
+        db_host: str | None,
+        db_port: int,
+        target_database: str,
+        cluster_id: uuid.UUID | str,
+        data_directory: str | Path,
+    ) -> None:
+        """Restore the previous catalogue claim after post-publication compensation."""
+        host = normalize_db_host(db_host)
+        identity = self._cluster_uuid(cluster_id)
+        data_dir = str(data_directory)
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT db_mode, target_db_name FROM environments WHERE id=?",
+                (environment_id,),
+            ).fetchone()
+            if row is None or row["db_mode"] != "copy" or row["target_db_name"] != target_database:
+                raise BackupCatalogError("environment replacement rollback identity changed")
+            self._conn.execute(
+                "UPDATE environments SET backup_id=?, state='ready', last_error=NULL WHERE id=?",
+                (backup_id, environment_id),
+            )
+            self._conn.execute(
+                "INSERT INTO restores "
+                "(db_host, db_port, database_name, backup_id, restored_at, cluster_id, data_directory) "
+                "VALUES (?, ?, ?, ?, datetime('now'), ?, ?)",
+                (host, db_port, target_database, backup_id, identity, data_dir),
+            )
+            self._conn.execute(
+                "INSERT INTO database_events "
+                "(db_host, db_port, database_name, event_type, occurred_at, backup_id, cluster_id, data_directory) "
+                "VALUES (?, ?, ?, 'restored', datetime('now'), ?, ?, ?)",
+                (host, db_port, target_database, backup_id, identity, data_dir),
+            )
+            self._conn.execute(
+                "INSERT INTO environment_events "
+                "(environment_id, operation, outcome, occurred_at, message) "
+                "VALUES (?, 'sync', 'failed', datetime('now'), 'replacement compensated')",
+                (environment_id,),
             )
 
     @_translate_sqlite_error

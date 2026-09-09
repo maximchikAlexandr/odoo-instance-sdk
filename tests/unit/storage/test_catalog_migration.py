@@ -227,6 +227,68 @@ def test_v13_claim_and_nullable_restore_provenance_are_transactional(tmp_path: P
     catalog.close()
 
 
+def test_copy_replacement_publishes_backup_and_restore_atomically(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "replacement.sqlite3")
+    claim = catalog._ensure_postgres_cluster_pending(
+        "project-a", "odcli_pg_project-a", "pgdata_project-a"
+    )
+    active = catalog._activate_postgres_cluster(
+        claim.cluster_id, "project-a", "odcli_pg_project-a", "pgdata_project-a"
+    )
+    old_path = tmp_path / "old.zip"
+    new_path = tmp_path / "new.zip"
+    old_path.write_bytes(b"old")
+    new_path.write_bytes(b"new")
+    old_id = str(uuid.uuid4())
+    new_id = str(uuid.uuid4())
+    for backup_id, path in ((old_id, old_path), (new_id, new_path)):
+        catalog.start_download(backup_id, "https://example.test", "source", "zip", True, path)
+        catalog.success_download(backup_id, path.name, path.stat().st_size, "")
+    environment_id = str(uuid.uuid4())
+    catalog.create_environment(
+        make_env(
+            environment_id,
+            db_mode="copy",
+            source_db_name="source",
+            target_db_name="copy_target",
+            backup_id=old_id,
+        )
+    )
+    catalog.record_restore(
+        "localhost",
+        5432,
+        "copy_target",
+        old_id,
+        cluster_id=active.cluster_id,
+        data_directory=tmp_path / "data",
+    )
+
+    catalog.finalize_environment_replacement(
+        environment_id,
+        new_id,
+        db_host="localhost",
+        db_port=5432,
+        target_database="copy_target",
+        cluster_id=active.cluster_id,
+        data_directory=tmp_path / "data",
+    )
+
+    row = catalog.get_environment(environment_id)
+    assert row is not None
+    assert row["backup_id"] == new_id
+    latest = catalog.latest_restore_provenance("localhost", 5432, "copy_target")
+    assert latest is not None
+    assert latest.id == uuid.UUID(new_id)
+    assert (
+        catalog._conn.execute(
+            "SELECT operation, outcome FROM environment_events WHERE environment_id=? ORDER BY sequence DESC LIMIT 1",
+            (environment_id,),
+        ).fetchone()["outcome"]
+        == "succeeded"
+    )
+    catalog.close()
+
+
 def test_v13_migration_rolls_back_on_claim_index_conflict(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=db)

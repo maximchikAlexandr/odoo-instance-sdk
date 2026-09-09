@@ -4,6 +4,7 @@ import configparser
 import contextlib
 import hashlib
 import importlib
+import json
 import os
 import re
 import shutil
@@ -178,6 +179,45 @@ class CopyCleanupPlan:
     instance: OdooInstance | None
     backup: Backup | None
     stage: CopyJournalStage
+    rollback_database: str | None = None
+    rollback_filestore: Path | None = None
+
+
+def _replacement_retained_error(value: str | None) -> dict[str, object]:
+    if not isinstance(value, str) or "copy replacement cleanup_failed" not in value:
+        return {}
+    try:
+        payload = value.split("retained=", 1)[1].split(";", 1)[0]
+        decoded = json.loads(payload)
+    except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _validate_retained_removal_evidence(
+    catalog: BackupCatalog, env: DevelopmentEnvironment
+) -> None:
+    """Reject a removal command whose durable replacement evidence changed."""
+    retained = _replacement_retained_error(env.last_error)
+    if not retained:
+        return
+    row = catalog.get_environment(str(env.id))
+    current = _replacement_retained_error(None if row is None else row["last_error"])
+    for key in (
+        "backup_id",
+        "previous_backup_id",
+        "target_database",
+        "rollback_database",
+        "target_present",
+        "rollback_present",
+        "rollback_filestore_present",
+        "published",
+    ):
+        if current.get(key) != retained.get(key):
+            raise EnvironmentConflictError(
+                "replacement_conflict",
+                "retained replacement evidence changed before removal",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1926,7 +1966,7 @@ class EnvironmentResource:
             optional_steps=tuple(step.step_id for step in steps),
         )
 
-    def _remove_copy_database_command(
+    def _remove_copy_database_command(  # noqa: C901
         self,
         env: DevelopmentEnvironment,
         *,
@@ -1949,18 +1989,76 @@ class EnvironmentResource:
             from odoo_instance_sdk.resources.postgres import PostgresCluster
 
             instance._postgres_cluster = PostgresCluster.from_project(env.repository_root)
+            drop_name = env.target_db_name
+            retained = _replacement_retained_error(env.last_error)
+            if retained.get("target_present") is False and retained.get("rollback_present") is True:
+                rollback_name = retained.get("rollback_database")
+                if isinstance(rollback_name, str) and rollback_name:
+                    drop_name = rollback_name
             command = build_database_drop_command(
                 instance,
                 env.repository_root,
-                env.target_db_name,
+                drop_name,
                 executor=executor,
                 allow_environment_id=str(env.id),
                 allow_environment_backup_id=(
                     str(env.backup_id) if env.backup_id is not None else None
                 ),
+                allow_environment_rollback_database=(
+                    drop_name if drop_name != env.target_db_name else None
+                ),
                 idempotent_absent=True,
             )
-            return cast("PreparedCommand[object]", command._prepared())
+            prepared = cast("PreparedCommand[object]", command._prepared())
+
+            def validate_retained_replay() -> None:
+                _validate_retained_removal_evidence(self._client.get_catalog(), env)
+
+            if (
+                drop_name == env.target_db_name
+                and retained.get("target_present") is True
+                and retained.get("rollback_present") is True
+            ):
+                rollback_name = retained.get("rollback_database")
+                if not isinstance(rollback_name, str) or not rollback_name:
+                    return prepared
+                rollback_command = build_database_drop_command(
+                    instance,
+                    env.repository_root,
+                    rollback_name,
+                    executor=executor,
+                    allow_environment_id=str(env.id),
+                    allow_environment_backup_id=(
+                        str(env.backup_id) if env.backup_id is not None else None
+                    ),
+                    allow_environment_rollback_database=rollback_name,
+                    idempotent_absent=True,
+                    step_prefix="environment.remove.rollback.",
+                )
+                rollback_prepared = cast("PreparedCommand[object]", rollback_command._prepared())
+                from odoo_instance_sdk.internal.proc import prepared_command
+
+                def remove_pair(context: RunContext[object]) -> object:
+                    validate_retained_replay()
+                    result = prepared.callback(context)
+                    rollback_prepared.callback(context)
+                    return result
+
+                return prepared_command(
+                    remove_pair,
+                    (*prepared.steps, *rollback_prepared.steps),
+                    executor=executor,
+                )
+            if retained:
+
+                def remove_retained(context: RunContext[object]) -> object:
+                    validate_retained_replay()
+                    return prepared.callback(context)
+
+                from odoo_instance_sdk.internal.proc import prepared_command
+
+                return prepared_command(remove_retained, prepared.steps, executor=executor)
+            return prepared  # noqa: TRY300
         except Exception:
             return None
 
@@ -2020,7 +2118,7 @@ class EnvironmentResource:
             ),
         )
 
-    def _do_remove(
+    def _do_remove(  # noqa: C901
         self,
         catalog: BackupCatalog,
         env: DevelopmentEnvironment,
@@ -2030,6 +2128,7 @@ class EnvironmentResource:
     ) -> None:
         cat = catalog
         copy_plan = self._preflight_remove(cat, env, context=context)
+        _validate_retained_removal_evidence(cat, env)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
         cat.add_environment_event(str(env.id), "remove", "started")
 
@@ -2065,6 +2164,28 @@ class EnvironmentResource:
                 )
                 cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
                 raise EnvironmentConflictError("cleanup_failed", msg)
+            if copy_plan.rollback_filestore is not None:
+                rollback_filestore = copy_plan.rollback_filestore
+                if rollback_filestore.is_symlink() or not rollback_filestore.is_dir():
+                    if rollback_filestore.exists() or rollback_filestore.is_symlink():
+                        failures.append("rollback filestore ownership is unresolved")
+                        cleanup_failed = True
+                else:
+                    try:
+                        shutil.rmtree(rollback_filestore)
+                    except OSError as exc:
+                        failures.append(f"rollback filestore delete: {exc}")
+                        cleanup_failed = True
+                    if rollback_filestore.exists() or rollback_filestore.is_symlink():
+                        failures.append("rollback filestore cleanup was not verified")
+                        cleanup_failed = True
+                if cleanup_failed:
+                    msg = "; ".join(failures)[:2000]
+                    cat.update_environment_state(
+                        str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
+                    )
+                    cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
+                    raise EnvironmentConflictError("cleanup_failed", msg)
             instance = cast("OdooInstance", copy_plan.instance)
             cat.upsert_copy_journal(
                 str(env.id),
@@ -2311,6 +2432,55 @@ class EnvironmentResource:
             )
         instance = self._client.instance.from_config(config_path, master_password=master_pwd)
         db_port = instance.config.db_port or 5432
+        retained = _replacement_retained_error(env.last_error)
+        if (
+            env.state is EnvironmentState.CLEANUP_FAILED
+            and isinstance(env.last_error, str)
+            and "copy replacement cleanup_failed" in env.last_error
+            and not retained
+        ):
+            raise EnvironmentConflictError(
+                "replacement_conflict", "retained replacement cleanup evidence is malformed"
+            )
+        if env.state is EnvironmentState.CLEANUP_FAILED and retained:
+            expected_backup = str(env.backup_id) if env.backup_id is not None else None
+            if (
+                retained.get("target_database") != env.target_db_name
+                or retained.get("backup_id") != expected_backup
+                or not isinstance(retained.get("rollback_database"), str)
+                or Path(str(retained["rollback_database"])).name
+                != str(retained["rollback_database"])
+            ):
+                raise EnvironmentConflictError(
+                    "replacement_conflict",
+                    "retained replacement cleanup evidence does not match environment",
+                )
+            rollback_database = str(retained["rollback_database"])
+            start_config = instance.config.start_config
+            data_dir_value = cfg.get("data_dir") or (
+                None if start_config is None else start_config.data_dir
+            )
+            if not data_dir_value:
+                raise EnvironmentConflictError(
+                    "replacement_conflict", "retained replacement data binding is unavailable"
+                )
+            rollback_filestore = validate_filestore_containment(
+                Path(data_dir_value), rollback_database
+            )
+            target_present = retained.get("target_present")
+            rollback_present = retained.get("rollback_present")
+            if rollback_present is True and isinstance(target_present, bool):
+                backup_id = uuid.UUID(str(retained["backup_id"]))
+                backup_row = catalog.get_by_id(str(backup_id))
+                return CopyCleanupPlan(
+                    target_database=str(env.target_db_name),
+                    backup_id=backup_id,
+                    instance=instance,
+                    backup=_row_to_backup(backup_row) if backup_row is not None else None,
+                    stage=CopyJournalStage.RESTORED,
+                    rollback_database=rollback_database,
+                    rollback_filestore=rollback_filestore,
+                )
         if journal is not None:
             self._validate_copy_journal_ownership(env, journal, instance)
             stage = CopyJournalStage(str(journal["stage"]))

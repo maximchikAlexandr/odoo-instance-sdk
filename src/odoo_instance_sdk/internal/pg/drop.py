@@ -154,16 +154,40 @@ def _validate_allowed_environment(
     environment_id: str,
     database: str,
     expected_backup_id: str | None,
+    expected_rollback_database: str | None = None,
 ) -> None:
     row = catalog.get_environment(environment_id)
+    recorded_target = None if row is None else row["target_db_name"]
+    allowed_database = recorded_target
+    if expected_rollback_database is not None:
+        if database != expected_rollback_database:
+            raise ConfigError("copy environment rollback ownership changed before database drop")
+        allowed_database = expected_rollback_database
     if (
         row is None
         or row["state"] == "removed"
         or row["db_mode"] != "copy"
-        or row["target_db_name"] != database
+        or recorded_target is None
+        or (database != recorded_target and database != allowed_database)
         or (expected_backup_id is not None and str(row["backup_id"]) != expected_backup_id)
     ):
         raise ConfigError("copy environment ownership changed before database drop")
+    if expected_rollback_database is not None:
+        raw = row["last_error"]
+        if not isinstance(raw, str) or "copy replacement cleanup_failed" not in raw:
+            raise ConfigError("retained rollback ownership evidence is unavailable")
+        try:
+            retained = json.loads(raw.split("retained=", 1)[1].split(";", 1)[0])
+        except (IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ConfigError("retained rollback ownership evidence is malformed") from exc
+        if (
+            not isinstance(retained, dict)
+            or retained.get("rollback_database") != expected_rollback_database
+            or retained.get("target_database") != recorded_target
+            or not isinstance(retained.get("target_present"), bool)
+            or retained.get("rollback_present") is not True
+        ):
+            raise ConfigError("retained rollback ownership evidence changed")
 
 
 def _sql_literal(value: str) -> str:
@@ -364,6 +388,7 @@ def _drop_ownership_evidence(  # noqa: C901
     container_step_id: str | None = None,
     allow_environment_id: str | None = None,
     allow_environment_backup_id: str | None = None,
+    allow_environment_rollback_database: str | None = None,
 ) -> _DropOwnershipEvidence | None:
     """Require exact active managed evidence when the real catalogue is available."""
     from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
@@ -392,7 +417,14 @@ def _drop_ownership_evidence(  # noqa: C901
             allow_environment_id,
             database,
             allow_environment_backup_id,
+            allow_environment_rollback_database,
         )
+    row_target_database = database
+    if allow_environment_rollback_database is not None and allow_environment_id is not None:
+        row = catalog.get_environment(allow_environment_id)
+        if row is None or not isinstance(row["target_db_name"], str):
+            raise ConfigError("copy environment target ownership is unavailable")
+        row_target_database = str(row["target_db_name"])
     if _catalog_database_in_use(catalog, database, allow_environment_id=allow_environment_id):
         raise ConfigError("database is bound to an active environment or process")
     inspected = cluster._inspect_cluster_volume(
@@ -410,12 +442,15 @@ def _drop_ownership_evidence(  # noqa: C901
                 context.skip(step_id)
     if inspected is not True:
         raise ConfigError("database drop volume identity or attachment evidence is unavailable")
+    binding_database = (
+        database if allow_environment_rollback_database is None else row_target_database
+    )
     binding = catalog._latest_restore_binding(
-        cluster.endpoint_host, cluster.endpoint_port, database
+        cluster.endpoint_host, cluster.endpoint_port, binding_database
     )
     if binding is None or binding["cluster_id"] != str(claim.cluster_id):
         raise ConfigError("database drop requires an exact active restore binding")
-    if binding["database_name"] != database or not isinstance(binding["backup_id"], str):
+    if binding["database_name"] != binding_database or not isinstance(binding["backup_id"], str):
         raise ConfigError("database drop restore binding identity does not match")
     return _DropOwnershipEvidence(
         cluster_id=str(claim.cluster_id),
@@ -493,7 +528,9 @@ def build_database_drop_command(  # noqa: C901
     executor: ProcessExecutor | None = None,
     allow_environment_id: str | None = None,
     allow_environment_backup_id: str | None = None,
+    allow_environment_rollback_database: str | None = None,
     idempotent_absent: bool = False,
+    step_prefix: str = "",
 ) -> Command[DatabaseDropResult]:
     """Build and inspect one exact project-cluster drop command."""
     database = database_name
@@ -506,6 +543,19 @@ def build_database_drop_command(  # noqa: C901
         raise ConfigError(f"database {database!r} is protected and cannot be dropped")
     if timeout <= 0:
         raise ConfigError("database drop timeout must be greater than zero")
+
+    def scoped(step_id: str) -> str:
+        return f"{step_prefix}{step_id}" if step_prefix else step_id
+
+    root_step = scoped(_ROOT_STEP)
+    ownership_volume_step_id = scoped(_OWNERSHIP_VOLUME_STEP)
+    ownership_container_step_id = scoped(_OWNERSHIP_CONTAINER_STEP)
+    inspect_step_id = scoped(_INSPECT_STEP)
+    revalidate_terminate_step_id = scoped(_REVALIDATE_TERMINATE_STEP)
+    terminate_step_id = scoped(_TERMINATE_STEP)
+    revalidate_drop_step_id = scoped(_REVALIDATE_DROP_STEP)
+    drop_step_id = scoped(_DROP_STEP)
+    verify_step_id = scoped(_VERIFY_STEP)
 
     project_path = Path(project_root).resolve()
     from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
@@ -522,6 +572,7 @@ def build_database_drop_command(  # noqa: C901
         database,
         allow_environment_id=allow_environment_id,
         allow_environment_backup_id=allow_environment_backup_id,
+        allow_environment_rollback_database=allow_environment_rollback_database,
     )
     process_executor = executor or SubprocessExecutor()
     planning_step = _inspect_command_step(
@@ -565,12 +616,12 @@ def build_database_drop_command(  # noqa: C901
         executed_during_planning=True,
     )
 
-    inspect_step = _inspect_command_step(
-        binding, database=database, step_id=_INSPECT_STEP, timeout=timeout
+    inspect_prepared_step = _inspect_command_step(
+        binding, database=database, step_id=inspect_step_id, timeout=timeout
     )
 
     ownership_volume_step = PreparedStep(
-        step_id=_OWNERSHIP_VOLUME_STEP,
+        step_id=ownership_volume_step_id,
         argv=(
             "docker",
             "volume",
@@ -584,7 +635,7 @@ def build_database_drop_command(  # noqa: C901
         read_only=True,
     )
     ownership_container_step = PreparedStep(
-        step_id=_OWNERSHIP_CONTAINER_STEP,
+        step_id=ownership_container_step_id,
         argv=(
             "docker",
             "inspect",
@@ -600,13 +651,13 @@ def build_database_drop_command(  # noqa: C901
     revalidate_terminate_step = _inspect_command_step(
         binding,
         database=database,
-        step_id=_REVALIDATE_TERMINATE_STEP,
+        step_id=revalidate_terminate_step_id,
         timeout=timeout,
     )
     terminate_step = _inspect_command_step(
         binding,
         database=database,
-        step_id=_TERMINATE_STEP,
+        step_id=terminate_step_id,
         timeout=timeout,
         mutating=True,
         sql=_terminate_sql(database),
@@ -614,13 +665,13 @@ def build_database_drop_command(  # noqa: C901
     revalidate_drop_step = _inspect_command_step(
         binding,
         database=database,
-        step_id=_REVALIDATE_DROP_STEP,
+        step_id=revalidate_drop_step_id,
         timeout=timeout,
     )
     drop_step = _inspect_command_step(
         binding,
         database=database,
-        step_id=_DROP_STEP,
+        step_id=drop_step_id,
         timeout=timeout,
         mutating=True,
         sql=_drop_sql(database),
@@ -628,20 +679,20 @@ def build_database_drop_command(  # noqa: C901
     verify_step = _inspect_command_step(
         binding,
         database=database,
-        step_id=_VERIFY_STEP,
+        step_id=verify_step_id,
         timeout=timeout,
         sql=_verify_sql(database),
     )
     prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (
         PreparedAction(
-            step_id=_ROOT_STEP,
+            step_id=root_step,
             action="drop-project-database",
             description="Drop one exact database from the bound project cluster",
             mutating=True,
         ),
         ownership_volume_step,
         ownership_container_step,
-        inspect_step,
+        inspect_prepared_step,
         revalidate_terminate_step,
         terminate_step,
         revalidate_drop_step,
@@ -657,26 +708,27 @@ def build_database_drop_command(  # noqa: C901
             instance,
             cluster,
             database,
-            volume_step_id=_OWNERSHIP_VOLUME_STEP,
-            container_step_id=_OWNERSHIP_CONTAINER_STEP,
+            volume_step_id=ownership_volume_step_id,
+            container_step_id=ownership_container_step_id,
             allow_environment_id=allow_environment_id,
             allow_environment_backup_id=allow_environment_backup_id,
+            allow_environment_rollback_database=allow_environment_rollback_database,
         )
         if current_ownership is None:
-            for step_id in (_OWNERSHIP_VOLUME_STEP, _OWNERSHIP_CONTAINER_STEP):
+            for step_id in (ownership_volume_step_id, ownership_container_step_id):
                 if context.planned(step_id) and not context.consumed(step_id):
                     context.skip(step_id)
         if ownership is not None and current_ownership != ownership:
             raise ConfigError("database drop ownership evidence changed before mutation")
         current_project_default = current_default()
-        planned = _decode_inspection(_process_result(context, _INSPECT_STEP), database)
+        planned = _decode_inspection(_process_result(context, inspect_step_id), database)
         if idempotent_absent and not planned.exists:
             for step_id in (
-                _REVALIDATE_TERMINATE_STEP,
-                _TERMINATE_STEP,
-                _REVALIDATE_DROP_STEP,
-                _DROP_STEP,
-                _VERIFY_STEP,
+                revalidate_terminate_step_id,
+                terminate_step_id,
+                revalidate_drop_step_id,
+                drop_step_id,
+                verify_step_id,
             ):
                 if context.planned(step_id) and not context.consumed(step_id):
                     context.skip(step_id)
@@ -702,7 +754,7 @@ def build_database_drop_command(  # noqa: C901
         terminated = 0
         if planned.sessions and force_connections:
             checked = _decode_inspection(
-                _process_result(context, _REVALIDATE_TERMINATE_STEP), database
+                _process_result(context, revalidate_terminate_step_id), database
             )
             _assert_safe(
                 checked,
@@ -711,19 +763,19 @@ def build_database_drop_command(  # noqa: C901
                 force_default=force_default,
                 force_connections=True,
             )
-            terminate_result = _process_result(context, _TERMINATE_STEP)
+            terminate_result = _process_result(context, terminate_step_id)
             if terminate_result.returncode != 0:
                 raise ConfigError("target session termination failed; database was not dropped")
             terminated = len(checked.sessions)
         else:
-            context.skip(_REVALIDATE_TERMINATE_STEP)
-            context.skip(_TERMINATE_STEP)
-        checked = _decode_inspection(_process_result(context, _REVALIDATE_DROP_STEP), database)
+            context.skip(revalidate_terminate_step_id)
+            context.skip(terminate_step_id)
+        checked = _decode_inspection(_process_result(context, revalidate_drop_step_id), database)
         if idempotent_absent and not checked.exists:
-            if context.planned(_DROP_STEP) and not context.consumed(_DROP_STEP):
-                context.skip(_DROP_STEP)
-            if context.planned(_VERIFY_STEP) and not context.consumed(_VERIFY_STEP):
-                context.skip(_VERIFY_STEP)
+            if context.planned(drop_step_id) and not context.consumed(drop_step_id):
+                context.skip(drop_step_id)
+            if context.planned(verify_step_id) and not context.consumed(verify_step_id):
+                context.skip(verify_step_id)
             filestore_state = "unknown"
             filestore_path = None
             if current_ownership is not None:
@@ -744,10 +796,10 @@ def build_database_drop_command(  # noqa: C901
             force_connections=force_connections,
             require_no_sessions=True,
         )
-        drop_result = _process_result(context, _DROP_STEP)
+        drop_result = _process_result(context, drop_step_id)
         if drop_result.returncode != 0:
             raise ConfigError(f"DROP DATABASE failed for {database!r}")
-        verified = _decode_verify(_process_result(context, _VERIFY_STEP), database)
+        verified = _decode_verify(_process_result(context, verify_step_id), database)
         if not verified:
             raise ConfigError(f"database {database!r} still exists after drop")
         catalog = instance._client.get_catalog()
@@ -778,7 +830,7 @@ def build_database_drop_command(  # noqa: C901
         )
 
     def execute(context: RunContext[DatabaseDropResult]) -> DatabaseDropResult:
-        context.action(_ROOT_STEP)
+        context.action(root_step)
         # Cluster up/stop use this same lock.  Keep ownership revalidation,
         # PostgreSQL mutation, audit reconciliation, and filestore disposition
         # in one critical section so lifecycle changes cannot race the proof.

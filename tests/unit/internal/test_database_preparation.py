@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import io
 import os
 import shutil
+import subprocess
 import uuid
+import warnings
+import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
 
@@ -92,7 +98,8 @@ def test_preparation_command_captures_restore_process_manifest_before_run(
     from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: "/usr/bin/psql"
+        "odoo_instance_sdk.internal.pg.builder.shutil.which",
+        lambda _name: "/usr/bin/psql",
     )
     source = tmp_path / "odoo.conf"
     source.write_text(
@@ -138,6 +145,503 @@ def test_preparation_command_captures_restore_process_manifest_before_run(
         "database.restore.exists-before",
         "database.restore.exists-after",
     )
+
+
+def test_selected_native_dump_uses_pg_restore_process_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from odoo_instance_sdk.internal.backup_validation import DumpValidationResult
+    from odoo_instance_sdk.internal.database_preparation import (
+        build_selected_backup_restore_steps,
+        capture_selected_backup_restore,
+    )
+
+    dump_path = tmp_path / "production.dump"
+    dump_path.write_bytes(b"PGDMP\x01production-format")
+    backup = Backup(
+        id=uuid.uuid4(),
+        source_base_url="https://example.test",
+        database_name="remote_test",
+        format=BackupFormat.DUMP,
+        filestore_requested=False,
+        path=str(dump_path),
+        filename=dump_path.name,
+        size_bytes=dump_path.stat().st_size,
+        sha256=hashlib.sha256(dump_path.read_bytes()).hexdigest(),
+        downloaded_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.backup_validation.validate_dump",
+        lambda *_args, **_kwargs: DumpValidationResult(valid=True),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.database_preparation.shutil.which",
+        lambda name: "/usr/bin/pg_restore" if name == "pg_restore" else "/usr/bin/psql",
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which",
+        lambda name: "/usr/bin/pg_restore" if name == "pg_restore" else "/usr/bin/psql",
+    )
+    payload = capture_selected_backup_restore(backup)
+    instance = SimpleNamespace(
+        _postgres_cluster=SimpleNamespace(
+            endpoint_host="127.0.0.1", endpoint_port=5432, _user="odoo"
+        ),
+        config=SimpleNamespace(db_user="odoo", db_password="secret", default_cwd=tmp_path),
+    )
+
+    create, validate, restore = build_selected_backup_restore_steps(
+        instance,
+        target_database="copy_target",
+        dump_path=payload.dump_path,
+        backup_format=payload.format,
+    )
+
+    assert create.step_id == "database.replace.restore.create"
+    assert validate.step_id == "database.replace.restore.validate"
+    assert restore.step_id == "database.replace.restore.pg-restore"
+    assert restore.argv[0] == "/usr/bin/pg_restore"
+    assert restore.argv[1:3] == ("--exit-on-error", "--single-transaction")
+
+
+def test_selected_native_dump_uses_verified_snapshot_after_source_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import database_preparation
+    from odoo_instance_sdk.internal.backup_validation import DumpValidationResult
+
+    dump_path = tmp_path / "production.dump"
+    replacement_path = tmp_path / "replacement.dump"
+    original = b"PGDMP\x01verified-native"
+    dump_path.write_bytes(original)
+    replacement_path.write_bytes(b"PGDMP\x01substituted-native")
+    backup = Backup(
+        id=uuid.uuid4(),
+        source_base_url="https://example.test",
+        database_name="remote_test",
+        format=BackupFormat.DUMP,
+        filestore_requested=False,
+        path=str(dump_path),
+        filename=dump_path.name,
+        size_bytes=len(original),
+        sha256=hashlib.sha256(original).hexdigest(),
+        downloaded_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.backup_validation.validate_dump",
+        lambda *_args, **_kwargs: DumpValidationResult(valid=True),
+        raising=False,
+    )
+    payload = database_preparation.capture_selected_backup_restore(backup)
+    real_open = database_preparation.os.open
+    swapped = False
+
+    def open_source_once(path: object, flags: int, *args: object) -> int:
+        nonlocal swapped
+        descriptor = real_open(path, flags, *args)
+        if Path(path) == dump_path and not swapped:
+            swapped = True
+            dump_path.unlink()
+            replacement_path.rename(dump_path)
+        return descriptor
+
+    monkeypatch.setattr(database_preparation.os, "open", open_source_once)
+    database_preparation.materialize_selected_backup_dump(payload)
+
+    assert payload.dump_path.read_bytes() == original
+
+
+@pytest.mark.skipif(shutil.which("pg_restore") is None, reason="PostgreSQL client is required")
+def test_native_pg_restore_rejects_odoo_plain_sql_fixture(tmp_path: Path) -> None:
+    """The native archive transport must never be used for an Odoo SQL dump."""
+    plain_sql = tmp_path / "dump.sql"
+    plain_sql.write_text("CREATE TABLE replacement_probe (id integer);\n")
+
+    result = subprocess.run(
+        [str(shutil.which("pg_restore")), "--list", str(plain_sql)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+
+
+@pytest.mark.skipif(shutil.which("psql") is None, reason="PostgreSQL client is required")
+def test_selected_odoo_zip_executes_real_psql_plain_sql_transport(tmp_path: Path) -> None:
+    """A supported Odoo ZIP selects real psql with bounded SQL-file input."""
+    from odoo_instance_sdk.internal.database_preparation import (
+        _preparation_process_steps,
+        capture_selected_backup_restore,
+        materialize_selected_backup_dump,
+    )
+
+    archive_path = tmp_path / "odoo.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name": "remote_test", "db_version": "19.0"}')
+        archive.writestr("dump.sql", "CREATE TABLE replacement_probe (id integer);\n")
+        archive.writestr("filestore/remote_test/marker", "fixture")
+    backup = Backup(
+        id=uuid.uuid4(),
+        source_base_url="https://example.test",
+        database_name="remote_test",
+        format=BackupFormat.ZIP,
+        filestore_requested=True,
+        path=str(archive_path),
+        filename=archive_path.name,
+        size_bytes=archive_path.stat().st_size,
+        sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        downloaded_at=datetime.now(UTC),
+    )
+    payload = capture_selected_backup_restore(backup)
+    materialize_selected_backup_dump(payload)
+    instance = SimpleNamespace(
+        _postgres_cluster=SimpleNamespace(endpoint_host="127.0.0.1", endpoint_port=1, _user="odoo"),
+        config=SimpleNamespace(db_user="odoo", db_password=None, default_cwd=tmp_path),
+    )
+    _, validate, restore = _preparation_process_steps(
+        tmp_path,
+        options=DatabaseRefreshOptions(restore=True),
+        restore_inputs=("copy_target", payload.dump_path),
+        selected_environment=MagicMock(repository_root=tmp_path),
+        selected_instance=instance,
+        selected_restore=payload,
+    )
+
+    assert validate.step_id == "database.replace.restore.validate"
+    assert restore.step_id == "database.replace.restore.psql"
+    assert restore.argv[0] == str(shutil.which("psql"))
+    assert "ON_ERROR_STOP=1" in restore.argv
+    assert restore.argv[-2:] == ("--file", str(payload.dump_path))
+    result = subprocess.run(
+        list(restore.argv),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    assert result.returncode != 0
+
+
+def test_validate_zip_rejects_duplicate_members_and_policy_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import backup_validation
+
+    archive_path = tmp_path / "duplicate.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 1;\n")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            archive.writestr("dump.sql", "select 2;\n")
+
+    duplicate = backup_validation.validate_zip(archive_path)
+    assert not duplicate.valid
+    assert any("Duplicate ZIP member" in error for error in duplicate.errors)
+
+    monkeypatch.setattr(backup_validation, "_MAX_ZIP_ENTRY_BYTES", 1)
+    limited = backup_validation.validate_zip(archive_path)
+    assert not limited.valid
+    assert any("too large" in error for error in limited.errors)
+
+
+def test_validate_zip_counts_duplicate_central_directory_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import backup_validation
+
+    archive_path = tmp_path / "member-count.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 1;\n")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            archive.writestr("dump.sql", "select 2;\n")
+    monkeypatch.setattr(backup_validation, "_MAX_ZIP_ENTRIES", 2)
+
+    result = backup_validation.validate_zip(archive_path)
+
+    assert not result.valid
+    assert "ZIP contains too many members" in result.errors
+    assert not any("Duplicate ZIP member" in error for error in result.errors)
+
+
+def test_validate_zip_bounds_policy_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import backup_validation
+
+    archive_path = tmp_path / "diagnostics.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 1;\n")
+        for index in range(40):
+            archive.writestr(f"member-{index}", b"payload")
+    monkeypatch.setattr(backup_validation, "_SUPPORTED_ZIP_COMPRESSION", set())
+
+    result = backup_validation.validate_zip(archive_path)
+
+    assert not result.valid
+    assert len(result.errors) == backup_validation._MAX_ZIP_DIAGNOSTICS
+
+
+def test_validate_zip_rejects_aggregate_uncompressed_size_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import backup_validation
+
+    archive_path = tmp_path / "aggregate-size.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 1;\n")
+    monkeypatch.setattr(backup_validation, "_MAX_ZIP_TOTAL_BYTES", 1)
+
+    result = backup_validation.validate_zip(archive_path)
+
+    assert not result.valid
+    assert any("uncompressed size is too large" in error for error in result.errors)
+    assert not any("too many members" in error for error in result.errors)
+
+
+def test_validate_zip_rejects_compression_ratio_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import backup_validation
+
+    archive_path = tmp_path / "compression-ratio.zip"
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "x" * 4096)
+    monkeypatch.setattr(backup_validation, "_MAX_ZIP_COMPRESSION_RATIO", 1)
+
+    result = backup_validation.validate_zip(archive_path)
+
+    assert not result.valid
+    assert any("compression ratio is unsafe" in error for error in result.errors)
+    assert not any("uncompressed size is too large" in error for error in result.errors)
+
+
+def test_validate_zip_rejects_oversized_manifest_before_json_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import backup_validation
+
+    archive_path = tmp_path / "manifest-limit.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"' + ("x" * 128) + '"}')
+        archive.writestr("dump.sql", "select 1;\n")
+    monkeypatch.setattr(backup_validation, "_MAX_MANIFEST_BYTES", 32, raising=False)
+    monkeypatch.setattr(
+        zipfile.ZipFile,
+        "read",
+        lambda *_args, **_kwargs: pytest.fail("manifest must be streamed"),
+    )
+
+    result = backup_validation.validate_zip(archive_path)
+
+    assert not result.valid
+    assert any("manifest.json is too large" in error for error in result.errors)
+
+
+@pytest.mark.parametrize("attribute", ["flag_bits", "compress_type"])
+def test_validate_zip_rejects_encrypted_or_unsupported_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attribute: str
+) -> None:
+    from copy import copy
+
+    from odoo_instance_sdk.internal import backup_validation
+
+    archive_path = tmp_path / "policy.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 1;\n")
+
+    original_infolist = zipfile.ZipFile.infolist
+
+    def modified_infolist(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+        infos = [copy(info) for info in original_infolist(archive)]
+        if attribute == "flag_bits":
+            infos[-1].flag_bits |= 0x1
+        else:
+            infos[-1].compress_type = 99
+        return infos
+
+    monkeypatch.setattr(zipfile.ZipFile, "infolist", modified_infolist)
+    result = backup_validation.validate_zip(archive_path)
+    assert not result.valid
+    expected = "Encrypted ZIP member" if attribute == "flag_bits" else "Unsupported ZIP compression"
+    assert any(expected in error for error in result.errors)
+
+
+def test_validate_zip_rejects_insufficient_available_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from odoo_instance_sdk.internal import backup_validation
+
+    archive_path = tmp_path / "space.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 1;\n")
+    monkeypatch.setattr(
+        backup_validation.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=0),
+    )
+    result = backup_validation.validate_zip(archive_path)
+    assert not result.valid
+    assert any("ZIP requires more space" in error for error in result.errors)
+
+
+def test_selected_dump_stream_counter_cleans_up_lying_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import database_preparation
+
+    archive_path = tmp_path / "lying.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 1;\n")
+        archive.writestr("filestore/remote_test/marker", b"fixture")
+    backup = Backup(
+        id=uuid.uuid4(),
+        source_base_url="https://example.test",
+        database_name="remote_test",
+        format=BackupFormat.ZIP,
+        filestore_requested=True,
+        path=str(archive_path),
+        filename=archive_path.name,
+        size_bytes=archive_path.stat().st_size,
+        sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        downloaded_at=datetime.now(UTC),
+    )
+    payload = database_preparation.capture_selected_backup_restore(backup)
+    real_open = database_preparation._open_verified_zip
+
+    class LyingZip:
+        def __enter__(self) -> LyingZip:
+            self.archive = real_open(archive_path)
+            self.archive.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.archive.__exit__(*args)
+
+        def open(self, _name: str) -> io.BytesIO:
+            return io.BytesIO(b"select 1;\nextra bytes")
+
+    monkeypatch.setattr(database_preparation, "_open_verified_zip", lambda _path: LyingZip())
+    with pytest.raises(ConfigError, match=r"exceeds|size changed"):
+        database_preparation.materialize_selected_backup_dump(payload)
+    assert not payload.dump_path.exists()
+
+
+def test_selected_filestore_stream_counter_removes_partial_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import database_preparation
+
+    archive_path = tmp_path / "lying-filestore.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 1;\n")
+        archive.writestr("filestore/remote_test/marker", b"fixture")
+    backup = Backup(
+        id=uuid.uuid4(),
+        source_base_url="https://example.test",
+        database_name="remote_test",
+        format=BackupFormat.ZIP,
+        filestore_requested=True,
+        path=str(archive_path),
+        filename=archive_path.name,
+        size_bytes=archive_path.stat().st_size,
+        sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        downloaded_at=datetime.now(UTC),
+    )
+    payload = database_preparation.capture_selected_backup_restore(backup)
+    real_open = database_preparation._open_verified_zip
+
+    class LyingZip:
+        def __enter__(self) -> LyingZip:
+            self.archive = real_open(payload.verified_snapshot_path)
+            self.archive.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.archive.__exit__(*args)
+
+        def namelist(self) -> list[str]:
+            return self.archive.namelist()
+
+        def getinfo(self, name: str) -> zipfile.ZipInfo:
+            return self.archive.getinfo(name)
+
+        def open(self, _info: zipfile.ZipInfo) -> io.BytesIO:
+            return io.BytesIO(b"fixture plus unexpected bytes")
+
+    monkeypatch.setattr(database_preparation, "_open_verified_zip", lambda _path: LyingZip())
+    destination = tmp_path / "filestore"
+
+    with pytest.raises(ConfigError, match=r"exceeds|size changed"):
+        database_preparation.materialize_selected_backup_filestore(destination, payload)
+
+    assert not destination.exists()
+
+
+def test_selected_restore_consumes_verified_snapshot_after_source_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path replacement after the final source open cannot alter restore bytes."""
+    from odoo_instance_sdk.internal import database_preparation
+
+    archive_path = tmp_path / "snapshot.zip"
+    replacement_path = tmp_path / "replacement.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 'original';\n")
+        archive.writestr("filestore/remote_test/marker", b"original")
+    with zipfile.ZipFile(replacement_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
+        archive.writestr("dump.sql", "select 'substituted';\n")
+        archive.writestr("filestore/remote_test/marker", b"substituted")
+    backup = Backup(
+        id=uuid.uuid4(),
+        source_base_url="https://example.test",
+        database_name="remote_test",
+        format=BackupFormat.ZIP,
+        filestore_requested=True,
+        path=str(archive_path),
+        filename=archive_path.name,
+        size_bytes=archive_path.stat().st_size,
+        sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        downloaded_at=datetime.now(UTC),
+    )
+    payload = database_preparation.capture_selected_backup_restore(backup)
+    real_open = database_preparation.os.open
+    swapped = False
+
+    def open_source_once(path: object, flags: int, *args: object) -> int:
+        nonlocal swapped
+        descriptor = real_open(path, flags, *args)
+        if Path(path) == archive_path and not swapped:
+            swapped = True
+            archive_path.unlink()
+            replacement_path.rename(archive_path)
+        return descriptor
+
+    monkeypatch.setattr(database_preparation.os, "open", open_source_once)
+    database_preparation.materialize_selected_backup_dump(payload)
+    filestore = tmp_path / "filestore"
+    database_preparation.materialize_selected_backup_filestore(filestore, payload)
+
+    assert payload.dump_path.read_text() == "select 'original';\n"
+    assert (filestore / "marker").read_bytes() == b"original"
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
