@@ -653,7 +653,7 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
     assert "database_events" in tables
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 14
+    assert version == 15
 
     # Existing backups table still works
     path = _create_backup_file(tmp_path, "migrated.zip")
@@ -729,7 +729,7 @@ def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None
     assert event_row["event_type"] == "download_started"
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 14
+    assert version == 15
 
     catalog.close()
 
@@ -738,12 +738,12 @@ def test_schema_creation_v2_reopen(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     catalog = BackupCatalog(db_path=db)
     version1 = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version1 == 14
+    assert version1 == 15
     catalog.close()
 
     catalog2 = BackupCatalog(db_path=db)
     version2 = catalog2._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version2 == 14
+    assert version2 == 15
     tables = {
         r[0]
         for r in catalog2._conn.execute(

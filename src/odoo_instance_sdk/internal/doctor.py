@@ -1,20 +1,48 @@
 from __future__ import annotations
 
 import configparser
+import os
 import shutil
 import sqlite3
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from odoo_instance_sdk.exceptions import OdooInstanceSdkError, ProjectManifestNotFoundError
+from odoo_instance_sdk.exceptions import (
+    ConfigError,
+    OdooInstanceSdkError,
+    ProjectManifestNotFoundError,
+)
 from odoo_instance_sdk.internal.address import AddressState, probe_address
-from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
+from odoo_instance_sdk.internal.applied_settings import (
+    AppliedSettingsError,
+    decode_applied_settings,
+    encode_applied_settings,
+)
+from odoo_instance_sdk.internal.generated_config import _rebase_path
+from odoo_instance_sdk.internal.git_activity import collect_git_activity
+from odoo_instance_sdk.internal.git_worktree import (
+    _run as _run_git,
+)
+from odoo_instance_sdk.internal.git_worktree import (
+    worktree_is_dirty,
+    worktree_list_porcelain,
+)
+from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.paths import get_environments_root
 from odoo_instance_sdk.internal.postgres_compose import docker_available
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.environment import (
+    _APPLIED_CONFIG_BINDINGS,
+    _configured_addons,
+    _dependency_evidence,
+    _find_odoo_requirements,
+    _git_ticket,
+    _rebase_requirement_paths,
+)
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 if TYPE_CHECKING:
@@ -38,10 +66,52 @@ class CheckResult:
     environment_name: str | None = None
 
 
+DriftStatus = Literal["in_sync", "drifted", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class _DriftComponent:
+    component: str
+    status: DriftStatus
+    reason: str
+    remediation: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "component": self.component,
+            "status": self.status,
+            "reason": self.reason,
+            "remediation": self.remediation,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _EnvironmentDrift:
+    environment_id: str
+    environment_name: str
+    components: tuple[_DriftComponent, ...]
+    git_context: Mapping[str, object]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "environment_id": self.environment_id,
+            "environment_name": self.environment_name,
+            "components": [component.as_dict() for component in self.components],
+            "git_context": dict(self.git_context),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _CurrentDriftEvidence:
+    components: Mapping[str, object]
+    reasons: Mapping[str, str]
+
+
 @dataclass(slots=True)
 class DoctorReport:
     checks: list[CheckResult] = field(default_factory=list)
     context: dict[str, str | None] = field(default_factory=lambda: {"project_source": None})
+    drift: list[_EnvironmentDrift] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -78,6 +148,9 @@ def run_doctor(client: OdooClient, project_path: Path | None) -> DoctorReport:
 
     for env in envs:
         _check_environment(report, client, env)
+        row = client.get_catalog().get_environment(str(env.id))
+        raw_applied = row["applied_settings_json"] if row is not None else None
+        report.drift.append(_project_environment_drift(env, raw_applied))
 
     report.checks.sort(key=lambda c: _ORDER.get(c.status, 0))
     return report
@@ -229,6 +302,357 @@ def _check_environment(
     _check_port(report, env, eid, ename)
     if env.db_mode == "copy" and env.backup_id is not None:
         _check_backup(report, client, env, eid, ename)
+
+
+_REMEDIATION = {
+    "python": "run odcli env sync",
+    "dependencies": "run odcli env sync",
+    "odoo_config": "recreate the environment",
+    "addons": "recreate the environment",
+    "git_provenance": "recreate the environment",
+}
+
+
+def _current_drift_components(
+    env: DevelopmentEnvironment,
+) -> _CurrentDriftEvidence:
+    """Capture normalized current evidence without changing any resource."""
+    worktree = Path(env.worktree_path)
+    project: ProjectConfig | None
+    try:
+        project = ProjectConfig.load(Path(env.repository_root))
+    except Exception:
+        project = None
+
+    dependency_values: Mapping[str, object] | None = None
+    if project is not None:
+        inputs = _rebase_requirement_paths(
+            list(project.requirements), Path(env.repository_root), worktree
+        )
+        odoo_requirements = _find_odoo_requirements(Path(env.repository_root))
+        if odoo_requirements is not None and str(odoo_requirements) not in inputs:
+            inputs.append(str(odoo_requirements))
+        try:
+            dependency_values = _dependency_evidence(inputs)
+        except (ConfigError, OSError, UnicodeError):
+            dependency_values = None
+
+    source_config: Mapping[str, object] | None
+    source_addons: tuple[str, ...] | None
+    artifact_config: Mapping[str, object] | None
+    artifact_addons: tuple[str, ...] | None
+    if project is None:
+        source_config, source_addons = None, None
+    else:
+        source_config, source_addons = _read_config_components(
+            _resolve_source_config(project, Path(env.repository_root))
+        )
+        source_config, source_addons = _rebase_source_components(
+            source_config, source_addons, Path(env.repository_root), worktree
+        )
+    artifact_config, artifact_addons = _read_config_components(Path(env.generated_config_path))
+
+    python_component: object | None = None
+    if project is not None and _python_artifact_available(
+        Path(env.python_environment_path), env.python_environment_owned
+    ):
+        python_component = _component_from_codec(
+            python={
+                "selector": project.python,
+                "path": env.python_environment_path,
+                "owned": env.python_environment_owned,
+            }
+        ).get("python")
+    dependency_component = (
+        _component_from_codec(dependencies=dependency_values).get("dependencies")
+        if dependency_values is not None
+        else None
+    )
+    source_components = _component_from_codec(
+        managed_config=source_config,
+        addons=source_addons,
+    )
+    artifact_components = _component_from_codec(
+        managed_config=artifact_config,
+        addons=artifact_addons,
+    )
+
+    components: dict[str, object] = {
+        "python": python_component,
+        "dependencies": dependency_component,
+        "odoo_config": _paired_component(
+            source_components.get("odoo"), artifact_components.get("odoo")
+        ),
+        "addons": _paired_component(
+            source_components.get("addons"), artifact_components.get("addons")
+        ),
+        "git_provenance": _live_git_component(worktree, env.base_ref),
+    }
+    return _CurrentDriftEvidence(
+        components=components,
+        reasons=_paired_reasons(source_components, artifact_components),
+    )
+
+
+def _paired_reasons(source: Mapping[str, object], artifact: Mapping[str, object]) -> dict[str, str]:
+    reasons: dict[str, str] = {}
+    pairs = (
+        (
+            "odoo",
+            "odoo_config",
+            "source and generated Odoo settings differ",
+        ),
+        ("addons", "addons", "source and generated add-on paths differ"),
+    )
+    for source_key, output_key, reason in pairs:
+        source_value = source.get(source_key)
+        artifact_value = artifact.get(source_key)
+        if source_value != artifact_value and _is_known(source_value) and _is_known(artifact_value):
+            reasons[output_key] = reason
+    return reasons
+
+
+def _resolve_source_config(project: ProjectConfig, repo_root: Path) -> Path | None:
+    configured = project.source_config
+    if configured is None:
+        default = repo_root / "odoo.conf"
+        return default if default.is_file() else None
+    path = Path(configured)
+    return (repo_root / path).resolve() if not path.is_absolute() else path
+
+
+def _read_config_components(
+    path: Path | None,
+) -> tuple[Mapping[str, object] | None, tuple[str, ...] | None]:
+    if path is None:
+        return None, None
+    try:
+        raw = path.read_text(encoding="utf-8")
+        parser = configparser.RawConfigParser(interpolation=None)
+        parser.read_string(raw)
+        if not parser.has_section("options"):
+            return None, None
+        parsed = parse_odoo_config(path)
+    except (OSError, UnicodeError, configparser.Error, ValueError):
+        return None, None
+    return (
+        {key: value for key, value in parsed.items() if key not in _APPLIED_CONFIG_BINDINGS},
+        _configured_addons(parsed),
+    )
+
+
+def _rebase_source_components(
+    config: Mapping[str, object] | None,
+    addons: tuple[str, ...] | None,
+    repo_root: Path,
+    worktree: Path,
+) -> tuple[Mapping[str, object] | None, tuple[str, ...] | None]:
+    if config is not None:
+        normalized = dict(config)
+        upgrade_path = normalized.get("upgrade_path")
+        if isinstance(upgrade_path, str):
+            normalized["upgrade_path"] = ",".join(
+                _rebase_path(item.strip(), repo_root, worktree)
+                for item in upgrade_path.split(",")
+                if item.strip()
+            )
+        config = normalized
+    if addons is not None:
+        addons = tuple(_rebase_path(item, repo_root, worktree) for item in addons)
+    return config, addons
+
+
+def _python_artifact_available(path: Path, owned: bool) -> bool:
+    candidate = (
+        path / ("Scripts/python.exe" if os.name == "nt" else "bin/python") if owned else path
+    )
+    try:
+        return candidate.is_file() and os.access(candidate, os.R_OK | os.X_OK)
+    except OSError:
+        return False
+
+
+def _component_from_codec(
+    *,
+    python: Mapping[str, object] | None = None,
+    dependencies: object | None = None,
+    managed_config: Mapping[str, object] | None = None,
+    addons: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    document = decode_applied_settings(
+        encode_applied_settings(
+            python=python,
+            dependencies=dependencies,
+            managed_config=managed_config,
+            addons=addons,
+        )
+    )
+    components = document["components"]
+    if not isinstance(components, dict):
+        return {}
+    return dict(components)
+
+
+def _is_known(value: object) -> bool:
+    return isinstance(value, dict) and value.get("status") == "known"
+
+
+def _paired_component(source: object, artifact: object) -> object | None:
+    if not _is_known(source) or not _is_known(artifact):
+        return None
+    return artifact
+
+
+def _live_git_component(worktree: Path, base_ref: str) -> object | None:
+    if not worktree.is_dir():
+        return None
+    try:
+        branch_proc = _run_git(
+            ["git", "-C", str(worktree), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=False,
+        )
+        base_proc = _run_git(
+            ["git", "-C", str(worktree), "rev-parse", "--verify", base_ref],
+            check=False,
+        )
+    except (OSError, ValueError):
+        return None
+    branch = branch_proc.stdout.strip()
+    if branch_proc.returncode != 0 or not branch or base_proc.returncode != 0:
+        return None
+    # The ref name is persisted as provenance; rev-parse proves it is live
+    # without introducing a fetch or relying on mutable remote state.
+    return _git_component(branch, base_ref)
+
+
+def _git_component(branch: str, base_ref: str) -> object | None:
+    document = decode_applied_settings(
+        encode_applied_settings(
+            git={"ticket": _git_ticket(branch), "branch": branch, "base": base_ref}
+        )
+    )
+    components = document["components"]
+    if not isinstance(components, dict):
+        return None
+    return components.get("git")
+
+
+def _stored_drift_components(raw: object) -> dict[str, object] | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        document = decode_applied_settings(raw)
+    except AppliedSettingsError:
+        return None
+    components = document.get("components")
+    if not isinstance(components, dict):
+        return None
+    return {
+        "python": components.get("python"),
+        "dependencies": components.get("dependencies"),
+        "odoo_config": components.get("odoo"),
+        "addons": components.get("addons"),
+        "git_provenance": components.get("git"),
+    }
+
+
+_UNKNOWN_REASONS = {
+    "python": "Python selector or artifact is unavailable",
+    "dependencies": "dependency input is unavailable",
+    "odoo_config": "source or generated Odoo config is unavailable",
+    "addons": "source or generated add-on paths are unavailable",
+    "git_provenance": "live branch/base identity is unavailable",
+}
+
+
+def _difference_reason(name: str, current: object, stored: object) -> str:
+    if name == "python" and isinstance(current, dict) and isinstance(stored, dict):
+        for field, reason in (
+            ("selector", "Python selector differs"),
+            ("path", "Python artifact path differs"),
+            ("owned", "Python ownership differs"),
+        ):
+            if current.get(field) != stored.get(field):
+                return reason
+    if name == "git_provenance" and isinstance(current, dict) and isinstance(stored, dict):
+        if current.get("branch") != stored.get("branch"):
+            return "live branch differs"
+        if current.get("base") != stored.get("base"):
+            return "live base differs"
+    return {
+        "dependencies": "dependency input identity or fingerprint differs",
+        "odoo_config": "managed Odoo value differs",
+        "addons": "add-on path differs",
+        "git_provenance": "live branch/base differs",
+    }.get(name, "current evidence differs")
+
+
+def _drift_component(
+    name: str,
+    current: object,
+    stored: object | None,
+    *,
+    reason: str | None = None,
+) -> _DriftComponent:
+    remediation = _REMEDIATION[name]
+    if not isinstance(current, dict) or current.get("status") != "known":
+        return _DriftComponent(name, "unknown", _UNKNOWN_REASONS[name], remediation)
+    if not isinstance(stored, dict) or stored.get("status") != "known":
+        return _DriftComponent(
+            name,
+            "unknown",
+            f"applied {name} evidence is unavailable",
+            remediation,
+        )
+    if reason is not None:
+        return _DriftComponent(name, "drifted", reason, remediation)
+    if current != stored:
+        return _DriftComponent(
+            name,
+            "drifted",
+            reason or _difference_reason(name, current, stored),
+            remediation,
+        )
+    return _DriftComponent(name, "in_sync", "current evidence matches applied", remediation)
+
+
+def _git_context(worktree: Path, base_ref: str) -> Mapping[str, object]:
+    if not worktree.is_dir():
+        return {"dirty": None, "ahead": None, "behind": None}
+    try:
+        activity = collect_git_activity(worktree, base_ref=base_ref)
+        return {
+            "dirty": worktree_is_dirty(worktree),
+            "ahead": activity.ahead,
+            "behind": activity.behind,
+        }
+    except Exception:
+        return {"dirty": None, "ahead": None, "behind": None}
+
+
+def _project_environment_drift(
+    env: DevelopmentEnvironment, applied_settings_json: object
+) -> _EnvironmentDrift:
+    try:
+        evidence = _current_drift_components(env)
+    except (AppliedSettingsError, ConfigError, OSError, UnicodeError):
+        evidence = _CurrentDriftEvidence(components={}, reasons={})
+    stored = _stored_drift_components(applied_settings_json)
+    components = tuple(
+        _drift_component(
+            name,
+            evidence.components.get(name),
+            stored.get(name) if stored else None,
+            reason=evidence.reasons.get(name),
+        )
+        for name in ("python", "dependencies", "odoo_config", "addons", "git_provenance")
+    )
+    return _EnvironmentDrift(
+        environment_id=str(env.id),
+        environment_name=env.name,
+        components=components,
+        git_context=_git_context(Path(env.worktree_path), env.base_ref),
+    )
 
 
 def _check_worktree(

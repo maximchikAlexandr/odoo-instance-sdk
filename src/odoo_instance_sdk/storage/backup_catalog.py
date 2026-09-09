@@ -19,6 +19,11 @@ from odoo_instance_sdk.exceptions import (
     BackupNotAvailableError,
     BackupNotFoundError,
 )
+from odoo_instance_sdk.internal.applied_settings import (
+    LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
+    AppliedSettingsError,
+    decode_applied_settings,
+)
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
 from odoo_instance_sdk.models import (
@@ -37,7 +42,7 @@ type CatalogValue = JsonValue | Path | datetime | uuid.UUID | tuple[str, ...]
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 15
 
 
 class CopyJournalStage(StrEnum):
@@ -364,6 +369,28 @@ class BackupCatalog:
             self._migrate_v14_environment_foreign_keys(conn)
             conn.execute("PRAGMA user_version = 14")
             conn.commit()
+            user_version = 14
+        if user_version < 15:
+            self._migrate_v15_applied_settings(conn)
+            conn.execute("PRAGMA user_version = 15")
+            conn.commit()
+
+    def _migrate_v15_applied_settings(self, conn: sqlite3.Connection) -> None:
+        """Add secret-free applied evidence without inferring legacy values."""
+        if (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='environments'"
+            ).fetchone()
+            is None
+        ):
+            return
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(environments)")}
+        if "applied_settings_json" not in columns:
+            default = LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON.replace("'", "''")
+            conn.execute(
+                "ALTER TABLE environments ADD COLUMN applied_settings_json TEXT NOT NULL "
+                f"DEFAULT '{default}'"
+            )
 
     def _migrate_v12_backup_point_order(self, conn: sqlite3.Connection) -> None:
         """Index the immutable ordering key used by point-query pagination."""
@@ -1452,19 +1479,28 @@ class BackupCatalog:
 
     @_translate_sqlite_error
     def create_environment(self, env: Mapping[str, CatalogValue]) -> None:
+        applied_settings = env.get("applied_settings_json", LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON)
+        if not isinstance(applied_settings, str):
+            raise BackupCatalogError("invalid applied_settings_json")
+        try:
+            decode_applied_settings(applied_settings)
+        except AppliedSettingsError as exc:
+            raise BackupCatalogError("invalid applied_settings_json") from exc
         self._conn.execute(
             """INSERT INTO environments (
                 id, name, repository_root, git_common_dir, branch, base_ref,
                 worktree_path, generated_config_path, python_environment_path,
                 python_environment_owned, dependency_lock_path, db_mode,
                 source_db_name, target_db_name, backup_id,
-                runtime_json, state, created_at, last_used_at, removed_at, last_error
+                runtime_json, applied_settings_json, state, created_at, last_used_at,
+                removed_at, last_error
             ) VALUES (
                 :id, :name, :repository_root, :git_common_dir, :branch, :base_ref,
                 :worktree_path, :generated_config_path, :python_environment_path,
                 :python_environment_owned, :dependency_lock_path, :db_mode,
                 :source_db_name, :target_db_name, :backup_id,
-                :runtime_json, :state, :created_at, :last_used_at, :removed_at, :last_error
+                :runtime_json, :applied_settings_json, :state, :created_at, :last_used_at,
+                :removed_at, :last_error
             )""",
             {
                 "id": env["id"],
@@ -1483,6 +1519,7 @@ class BackupCatalog:
                 "target_db_name": env.get("target_db_name"),
                 "backup_id": env.get("backup_id"),
                 "runtime_json": env["runtime_json"],
+                "applied_settings_json": applied_settings,
                 "state": env["state"],
                 "created_at": env["created_at"],
                 "last_used_at": env.get("last_used_at"),
@@ -1493,6 +1530,56 @@ class BackupCatalog:
             },
         )
         self._conn.commit()
+
+    @_translate_sqlite_error
+    def finalize_environment_checkout(
+        self, environment_id: str, applied_settings_json: str
+    ) -> None:
+        """Atomically publish applied evidence, ready state, and success event."""
+        if not isinstance(applied_settings_json, str):
+            raise BackupCatalogError("invalid applied_settings_json")
+        try:
+            decode_applied_settings(applied_settings_json)
+        except AppliedSettingsError as exc:
+            raise BackupCatalogError("invalid applied_settings_json") from exc
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE environments SET state = ?, applied_settings_json = ? WHERE id = ?",
+                ("ready", applied_settings_json, environment_id),
+            )
+            if cursor.rowcount != 1:
+                raise BackupCatalogError("environment row disappeared during checkout finalization")
+            self._conn.execute(
+                "INSERT INTO environment_events "
+                "(environment_id, operation, outcome, occurred_at, message) "
+                "VALUES (?, 'checkout', 'succeeded', datetime('now'), NULL)",
+                (environment_id,),
+            )
+
+    @_translate_sqlite_error
+    def record_environment_sync_success(
+        self, environment_id: str, applied_settings_json: str
+    ) -> None:
+        """Atomically publish sync evidence and its successful lifecycle event."""
+        if not isinstance(applied_settings_json, str):
+            raise BackupCatalogError("invalid applied_settings_json")
+        try:
+            decode_applied_settings(applied_settings_json)
+        except AppliedSettingsError as exc:
+            raise BackupCatalogError("invalid applied_settings_json") from exc
+        with self._conn:
+            cursor = self._conn.execute(
+                "UPDATE environments SET applied_settings_json = ? WHERE id = ?",
+                (applied_settings_json, environment_id),
+            )
+            if cursor.rowcount != 1:
+                raise BackupCatalogError("environment row disappeared during sync finalization")
+            self._conn.execute(
+                "INSERT INTO environment_events "
+                "(environment_id, operation, outcome, occurred_at, message) "
+                "VALUES (?, 'sync', 'succeeded', datetime('now'), NULL)",
+                (environment_id,),
+            )
 
     @_translate_sqlite_error
     def update_environment_state(

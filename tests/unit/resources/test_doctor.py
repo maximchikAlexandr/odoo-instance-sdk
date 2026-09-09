@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import socket
+import subprocess
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.internal.applied_settings import LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
 from odoo_instance_sdk.internal.doctor import DoctorReport, run_doctor
 from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
@@ -38,6 +40,289 @@ def _doctor(env_client: OdooClient, project_manifest: Path) -> DoctorReport:
 
 
 class TestDoctorMissingWorktree:
+    def test_drift_projection_is_in_sync_after_checkout(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        env = _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-drift-sync")
+
+        report = _doctor(env_client, project_manifest)
+        drift = next(item for item in report.drift if item.environment_id == str(env.id))
+
+        assert {item.component: item.status for item in drift.components} == {
+            "python": "in_sync",
+            "dependencies": "in_sync",
+            "odoo_config": "in_sync",
+            "addons": "unknown",
+            "git_provenance": "in_sync",
+        }
+        assert drift.git_context["dirty"] is False
+
+    def test_legacy_applied_evidence_is_unknown_without_mutation(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        env = _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-drift-legacy")
+        catalog = env_client.get_catalog()
+        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+        catalog.update_environment(
+            str(env.id), {"applied_settings_json": LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON}
+        )
+
+        for raw in (LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON, "{malformed"):
+            catalog.update_environment(str(env.id), {"applied_settings_json": raw})
+            report = _doctor(env_client, project_manifest)
+            drift = next(item for item in report.drift if item.environment_id == str(env.id))
+
+            assert all(item.status == "unknown" for item in drift.components)
+            assert catalog.get_environment(str(env.id))["applied_settings_json"] == raw
+        assert before != LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
+
+    def test_config_drift_is_field_isolated(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        source_config: Path,
+    ) -> None:
+        source_config.write_text(
+            source_config.read_text(encoding="utf-8") + "limit_memory_soft = 1\n",
+            encoding="utf-8",
+        )
+        env = _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-drift-config")
+        generated = Path(env.generated_config_path)
+        generated.write_text(
+            generated.read_text(encoding="utf-8").replace(
+                "limit_memory_soft = 1", "limit_memory_soft = 2"
+            ),
+            encoding="utf-8",
+        )
+
+        report = _doctor(env_client, project_manifest)
+        drift = next(item for item in report.drift if item.environment_id == str(env.id))
+
+        statuses = {item.component: item.status for item in drift.components}
+        assert statuses == {
+            "python": "in_sync",
+            "dependencies": "in_sync",
+            "odoo_config": "drifted",
+            "addons": "unknown",
+            "git_provenance": "in_sync",
+        }
+
+    def test_doctor_drift_is_format_parity_and_write_free(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        env = _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-drift-output")
+        catalog = env_client.get_catalog()
+        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+        runner = _runner()
+
+        json_result = runner.invoke(
+            cli, ["--project", str(project_manifest), "doctor", "--format", "json"]
+        )
+        toon_result = runner.invoke(
+            cli, ["--project", str(project_manifest), "doctor", "--format", "toon"]
+        )
+        rich_result = runner.invoke(cli, ["--project", str(project_manifest), "doctor"])
+
+        assert json_result.exit_code == toon_result.exit_code == rich_result.exit_code == 0
+        json_document = json.loads(json_result.output)
+        from toon import DecodeOptions, decode
+
+        toon_document = decode(toon_result.output, DecodeOptions(indent=2, strict=True))
+        assert json_document["data"] == toon_document["data"]
+        for item in json_document["data"]["drift"]:
+            for component in item["components"]:
+                assert component["reason"] in rich_result.output
+                assert component["remediation"] in rich_result.output
+        assert catalog.get_environment(str(env.id))["applied_settings_json"] == before
+
+    def test_python_selector_and_artifact_fail_closed(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        env = _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-drift-python")
+        manifest = project_manifest / ".odcli" / "project.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                f'python = "{fake_python}"', 'python = "/missing/python"'
+            ),
+            encoding="utf-8",
+        )
+
+        selector_report = _doctor(env_client, project_manifest)
+        selector_drift = next(
+            item for item in selector_report.drift if item.environment_id == str(env.id)
+        )
+        selector = next(item for item in selector_drift.components if item.component == "python")
+        assert selector.status == "drifted"
+        assert "selector" in selector.reason
+
+        fake_python.unlink()
+        artifact_report = _doctor(env_client, project_manifest)
+        artifact_drift = next(
+            item for item in artifact_report.drift if item.environment_id == str(env.id)
+        )
+        python = next(item for item in artifact_drift.components if item.component == "python")
+        assert python.status == "unknown"
+        assert "artifact" in python.reason
+
+    def test_source_and_generated_config_addon_drift_are_isolated(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        source_config: Path,
+    ) -> None:
+        source_config.write_text(
+            source_config.read_text(encoding="utf-8")
+            + "limit_memory_soft = 1\naddons_path = addons-a\n",
+            encoding="utf-8",
+        )
+        env = _checkout_shared(
+            env_client, project_manifest, fake_python, "feat/doc-drift-config-input"
+        )
+        source_config.write_text(
+            "# equivalent formatting\n"
+            + source_config.read_text(encoding="utf-8").replace(
+                "limit_memory_soft = 1", "limit_memory_soft    =    1"
+            ),
+            encoding="utf-8",
+        )
+        equal_report = _doctor(env_client, project_manifest)
+        equal_drift = next(
+            item for item in equal_report.drift if item.environment_id == str(env.id)
+        )
+        equal_status = {item.component: item.status for item in equal_drift.components}
+        assert equal_status["odoo_config"] == equal_status["addons"] == "in_sync"
+        source_config.write_text(
+            source_config.read_text(encoding="utf-8")
+            .replace("limit_memory_soft    =    1", "limit_memory_soft = 2")
+            .replace("addons_path = addons-a", "addons_path = addons-b"),
+            encoding="utf-8",
+        )
+        source_report = _doctor(env_client, project_manifest)
+        source_drift = next(
+            item for item in source_report.drift if item.environment_id == str(env.id)
+        )
+        source_status = {item.component: item.status for item in source_drift.components}
+        assert source_status["odoo_config"] == source_status["addons"] == "drifted"
+
+        source_config.write_text(
+            source_config.read_text(encoding="utf-8")
+            .replace("limit_memory_soft = 2", "limit_memory_soft = 1")
+            .replace("addons_path = addons-b", "addons_path = addons-a"),
+            encoding="utf-8",
+        )
+        generated = Path(env.generated_config_path)
+        generated_text = generated.read_text(encoding="utf-8")
+        generated_text = "\n".join(
+            (
+                f"addons_path = {Path(env.worktree_path) / 'addons-c'}"
+                if line.startswith("addons_path = ")
+                else line.replace("limit_memory_soft = 1", "limit_memory_soft = 3")
+            )
+            for line in generated_text.splitlines()
+        )
+        generated.write_text(
+            generated_text + "\n",
+            encoding="utf-8",
+        )
+        artifact_report = _doctor(env_client, project_manifest)
+        artifact_drift = next(
+            item for item in artifact_report.drift if item.environment_id == str(env.id)
+        )
+        artifact_status = {item.component: item.status for item in artifact_drift.components}
+        assert artifact_status["odoo_config"] == artifact_status["addons"] == "drifted"
+
+    def test_live_git_identity_and_context_are_separate(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        env = _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-drift-git")
+        subprocess.run(
+            ["git", "switch", "-c", "doctor-live-branch"],
+            cwd=env.worktree_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        report = _doctor(env_client, project_manifest)
+        drift = next(item for item in report.drift if item.environment_id == str(env.id))
+        git = next(item for item in drift.components if item.component == "git_provenance")
+        assert git.status == "drifted"
+        assert "branch" in git.reason
+
+        clean_env = _checkout_shared(
+            env_client, project_manifest, fake_python, "feat/doc-drift-git-context"
+        )
+        (Path(clean_env.worktree_path) / "untracked.txt").write_text("context\n", encoding="utf-8")
+        context_report = _doctor(env_client, project_manifest)
+        context_drift = next(
+            item for item in context_report.drift if item.environment_id == str(clean_env.id)
+        )
+        context_git = next(
+            item for item in context_drift.components if item.component == "git_provenance"
+        )
+        assert context_git.status == "in_sync"
+        assert context_drift.git_context["dirty"] is True
+
+    def test_dependency_drift_uses_semantic_entries_and_unknown_on_unreadable_input(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        requirements = project_manifest / "requirements.txt"
+        requirements.write_text("requests>=1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "requirements.txt"], cwd=project_manifest, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "doctor requirements"], cwd=project_manifest, check=True
+        )
+        manifest = project_manifest / ".odcli" / "project.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8") + 'requirements = ["requirements.txt"]\n',
+            encoding="utf-8",
+        )
+        env = _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-drift-deps")
+        worktree_requirements = Path(env.worktree_path) / "requirements.txt"
+
+        worktree_requirements.write_text(
+            "# comment\nrequests >= 1  # equivalent\n", encoding="utf-8"
+        )
+        equal_report = _doctor(env_client, project_manifest)
+        equal_drift = next(
+            item for item in equal_report.drift if item.environment_id == str(env.id)
+        )
+        assert (
+            next(item for item in equal_drift.components if item.component == "dependencies").status
+            == "in_sync"
+        )
+
+        worktree_requirements.unlink()
+        unknown_report = _doctor(env_client, project_manifest)
+        unknown_drift = next(
+            item for item in unknown_report.drift if item.environment_id == str(env.id)
+        )
+        assert (
+            next(
+                item for item in unknown_drift.components if item.component == "dependencies"
+            ).status
+            == "unknown"
+        )
+
     def test_missing_worktree_warns(
         self,
         env_client: OdooClient,
@@ -62,6 +347,9 @@ class TestDoctorMissingConfig:
         Path(env.generated_config_path).unlink(missing_ok=True)
         report = _doctor(env_client, project_manifest)
         assert any(c.name == "config" and c.status == "warn" for c in report.checks)
+        drift = next(item for item in report.drift if item.environment_id == str(env.id))
+        statuses = {item.component: item.status for item in drift.components}
+        assert statuses["odoo_config"] == statuses["addons"] == "unknown"
 
 
 class TestDoctorMissingUv:

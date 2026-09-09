@@ -6,7 +6,7 @@ import textwrap
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -22,6 +22,10 @@ from odoo_instance_sdk.exceptions import (
     StalePlanError,
 )
 from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.internal.applied_settings import (
+    LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
+    decode_applied_settings,
+)
 from odoo_instance_sdk.internal.proc import ProcessResult, ProcessTimeoutError, RecordingExecutor
 from odoo_instance_sdk.models import (
     Backup,
@@ -146,6 +150,40 @@ def _catalog_backup(
 
 
 class TestCheckoutPreflight:
+    def test_successful_checkout_publishes_complete_applied_snapshot(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        env = env_client.environments.checkout(
+            project_manifest,
+            "PROJ-123_1",
+            options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+        )
+
+        row = env_client.get_catalog().get_environment(str(env.id))
+        assert row is not None
+        document = decode_applied_settings(row["applied_settings_json"])
+        components = document["components"]
+        assert isinstance(components, dict)
+        assert set(components) == {"python", "dependencies", "odoo", "addons", "git"}
+        assert components["python"]["status"] == "known"
+        assert components["dependencies"]["status"] == "known"
+        assert components["git"]["status"] == "known"
+        assert components["python"]["path"] == env.python_environment_path
+        assert components["git"]["branch"] == env.branch
+        events = (
+            env_client.get_catalog()
+            ._conn.execute(
+                "SELECT operation, outcome FROM environment_events "
+                "WHERE environment_id = ? ORDER BY sequence",
+                (str(env.id),),
+            )
+            .fetchall()
+        )
+        assert tuple((event["operation"], event["outcome"]) for event in events)[-1] == (
+            "checkout",
+            "succeeded",
+        )
+
     @pytest.mark.parametrize(
         ("db_mode", "target_database"),
         [
@@ -799,6 +837,103 @@ class TestCheckoutShared:
         assert "comerta" in content
         assert f"http_port = {env.http_port}" in content
 
+    def test_applied_snapshot_separates_generated_bindings_and_addons(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        source_config: Path,
+    ) -> None:
+        source_config.write_text(
+            "[options]\n"
+            "db_name = comerta\n"
+            "http_interface = 127.0.0.1\n"
+            "http_port = 8069\n"
+            "db_host = localhost\n"
+            "db_port = 5432\n"
+            "db_user = odoo\n"
+            "db_password = secret\n"
+            "addons_path = addons,/opt/odoo/addons\n"
+            "limit_memory_hard = 2147483648\n",
+            encoding="utf-8",
+        )
+        env = env_client.environments.checkout(
+            project_manifest,
+            "feat/applied-config-boundaries",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                config_path=source_config,
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+
+        document = decode_applied_settings(
+            env_client.get_catalog().get_environment(str(env.id))["applied_settings_json"]
+        )
+        components = document["components"]
+        assert components["odoo"] == {
+            "status": "known",
+            "values": {"limit_memory_hard": "2147483648"},
+        }
+        assert components["addons"] == {
+            "status": "known",
+            "paths": sorted(
+                [str((Path(env.worktree_path) / "addons").resolve()), "/opt/odoo/addons"]
+            ),
+        }
+
+    def test_disappeared_dependency_after_apply_rolls_back_checkout_evidence(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        requirements = project_manifest / "requirements.txt"
+        requirements.write_text("requests\n", encoding="utf-8")
+        subprocess.run(["git", "add", "requirements.txt"], cwd=project_manifest, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "checkout requirements"], cwd=project_manifest, check=True
+        )
+        manifest = project_manifest / ".odcli" / "project.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8") + 'requirements = ["requirements.txt"]\n',
+            encoding="utf-8",
+        )
+
+        from odoo_instance_sdk.internal.proc import executor as executor_module
+
+        original_pump = executor_module._run_pump
+
+        def disappear_after_apply(
+            step: object, **kwargs: object
+        ) -> tuple[int, bytes, bytes, float]:
+            prepared = cast("Any", step)
+            result = original_pump(step, **kwargs)
+            if "install" in prepared.argv:
+                Path(str(prepared.cwd), "requirements.txt").unlink()
+            return result
+
+        monkeypatch.setattr(executor_module, "_run_pump", disappear_after_apply)
+        with pytest.raises(ConfigError, match="dependency input is unavailable"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/checkout-missing-input",
+                options=EnvironmentCheckoutOptions(
+                    python=str(fake_python),
+                    db_mode=EnvironmentDatabaseMode.SHARED,
+                    source_database="comerta",
+                ),
+            )
+
+        env = env_client.environments.list(project=project_manifest)[0]
+        assert env.state in {EnvironmentState.FAILED, EnvironmentState.CLEANUP_FAILED}
+        assert (
+            env_client.get_catalog().get_environment(str(env.id))["applied_settings_json"]
+            == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
+        )
+
     def test_shared_remove_does_not_drop_source_db(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:
@@ -1411,6 +1546,10 @@ class TestOwnedRuntimePreflight:
 
         env = env_client.environments.list(project=project_manifest)[0]
         assert env.state is EnvironmentState.FAILED
+        assert (
+            env_client.get_catalog().get_environment(str(env.id))["applied_settings_json"]
+            == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
+        )
         assert expected in (
             env_client.get_catalog().get_environment(str(env.id))["last_error"] or ""
         )
@@ -1463,6 +1602,10 @@ class TestOwnedRuntimePreflight:
 
         env = env_client.environments.list(project=project_manifest)[0]
         assert env.state is EnvironmentState.CLEANUP_FAILED
+        assert (
+            env_client.get_catalog().get_environment(str(env.id))["applied_settings_json"]
+            == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
+        )
         assert Path(env.worktree_path).is_dir()
         assert "secret" not in (
             env_client.get_catalog().get_environment(str(env.id))["last_error"] or ""

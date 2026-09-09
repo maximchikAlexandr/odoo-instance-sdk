@@ -8,12 +8,17 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from odoo_instance_sdk.exceptions import LockConflictError
+from odoo_instance_sdk.exceptions import ConfigError, LockConflictError
+from odoo_instance_sdk.internal.applied_settings import (
+    decode_applied_settings,
+    encode_applied_settings,
+)
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
     EnvironmentState,
+    _dependency_evidence,
 )
 
 if TYPE_CHECKING:
@@ -146,6 +151,136 @@ class TestCreateVenv:
 
 
 class TestSyncUpgradePreserve:
+    def test_dependency_evidence_uses_normalized_meaningful_entries(self, tmp_path: Path) -> None:
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text(
+            "# ignored\n requests >= 1  # comment\n\nhttpx== 2\n",
+            encoding="utf-8",
+        )
+        first = _dependency_evidence([str(requirements)])
+        requirements.write_text("httpx==2\nrequests>=1\n", encoding="utf-8")
+
+        assert first == _dependency_evidence([str(requirements)])
+
+    def test_dependency_evidence_fails_closed_when_input_disappears(self, tmp_path: Path) -> None:
+        requirements = tmp_path / "requirements.txt"
+        requirements.write_text("requests\n", encoding="utf-8")
+        requirements.unlink()
+
+        with pytest.raises(ConfigError, match="dependency input is unavailable"):
+            _dependency_evidence([str(requirements)])
+
+    def test_successful_sync_updates_python_dependencies_only(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env = _checkout_reuse_reqs(
+            env_client, project_manifest, fake_python, "feat/sync-evidence", monkeypatch
+        )
+        catalog = env_client.get_catalog()
+        original = encode_applied_settings(
+            python={
+                "selector": str(fake_python),
+                "path": env.python_environment_path,
+                "owned": False,
+            },
+            dependencies={"requirements.txt": "old"},
+            managed_config={"http_port": "8069", "custom": "keep"},
+            addons=[project_manifest / "addons"],
+            git={"ticket": "PROJ-1", "branch": "PROJ-1", "base": "main"},
+        )
+        catalog.update_environment(str(env.id), {"applied_settings_json": original})
+
+        _patch_subprocess(monkeypatch)
+        env_client.environments.sync_python(str(env.id))
+
+        updated = decode_applied_settings(
+            catalog.get_environment(str(env.id))["applied_settings_json"]
+        )
+        before_components = decode_applied_settings(original)["components"]
+        after_components = updated["components"]
+        assert after_components["odoo"] == before_components["odoo"]
+        assert after_components["addons"] == before_components["addons"]
+        assert after_components["git"] == before_components["git"]
+        assert after_components["python"]["path"] == env.python_environment_path
+        assert after_components["dependencies"]["status"] == "known"
+
+    def test_sync_dry_run_does_not_publish_evidence(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env = _checkout_reuse_reqs(
+            env_client, project_manifest, fake_python, "feat/sync-preview", monkeypatch
+        )
+        catalog = env_client.get_catalog()
+        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+        env_client.environments.sync_python_command(str(env.id))
+        after = catalog.get_environment(str(env.id))["applied_settings_json"]
+        assert after == before
+
+    def test_failed_sync_does_not_publish_evidence(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env = _checkout_reuse_reqs(
+            env_client, project_manifest, fake_python, "feat/sync-failure", monkeypatch
+        )
+        catalog = env_client.get_catalog()
+        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+
+        def fail_compile(step: object, **_kwargs: object) -> tuple[int, bytes, bytes, float]:
+            prepared = cast("Any", step)
+            if "compile" in prepared.argv:
+                return 1, b"", b"compile failed", 0.0
+            return 0, b"", b"", 0.0
+
+        monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fail_compile)
+        env_client.environments.sync_python(str(env.id))
+        after = catalog.get_environment(str(env.id))["applied_settings_json"]
+        assert after == before
+
+    def test_unreadable_sync_input_preserves_previous_evidence(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env = _checkout_reuse_reqs(
+            env_client, project_manifest, fake_python, "feat/sync-missing-input", monkeypatch
+        )
+        catalog = env_client.get_catalog()
+        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+
+        _patch_subprocess(monkeypatch)
+        from odoo_instance_sdk.internal.proc import executor as executor_module
+
+        original_pump = executor_module._run_pump
+
+        def disappear_after_apply(
+            step: object, **kwargs: object
+        ) -> tuple[int, bytes, bytes, float]:
+            prepared = cast("Any", step)
+            result = original_pump(step, **kwargs)
+            if "install" in prepared.argv:
+                Path(env.worktree_path, "requirements.txt").unlink()
+            return result
+
+        monkeypatch.setattr(executor_module, "_run_pump", disappear_after_apply)
+        with pytest.raises(ConfigError, match="dependency input is unavailable"):
+            env_client.environments.sync_python(str(env.id))
+
+        assert catalog.get_environment(str(env.id))["applied_settings_json"] == before
+
     def test_sync_upgrade_passes_upgrade_flag(
         self,
         env_client: OdooClient,

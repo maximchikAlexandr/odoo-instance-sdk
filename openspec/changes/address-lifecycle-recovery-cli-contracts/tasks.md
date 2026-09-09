@@ -8,15 +8,15 @@
 - [ ] 1.6 Add replacement tests for cwd/root-selector parity, active-session refusal without termination, `--replace`/`--target` rejection, compatible `--reset-admin-password` success and compensated failure, exact dry-run actions, unchanged identity, matching database/filestore provenance, success cleanup, reverse compensation, incomplete `cleanup_failed`, retry and concurrent evidence changes with recording/fake executors.
 - [x] 1.7 Add stop tests for cwd/root-selector parity, runtime-row owner/PID/create-time plus environment `runtime_json`/config sourcing, matching live executable/argv/cwd/config and POSIX `pgid == pid`, Windows pre-termination checks, no runtime row, vanished process, stale/reused PID, inaccessible or mismatched evidence, unrelated port occupant, bounded escalation, exit verification and selective row clearing.
 - [x] 1.8 Add Jira allocation tests for grammar, empty/unsuffixed/mixed/sparse local-catalogue-origin evidence, removed-row reservation, malformed-ref exclusion, selected-base creation, immutable dry-run evidence and late collision without live Jira or fetch.
-- [ ] 1.9 Add drift tests for Python, dependency inputs, managed Odoo values, add-on paths, Git provenance/context, semantic formatting equality, legacy unknown, failed checkout/sync preservation, Rich/JSON/TOON parity and zero diagnosis mutation.
+- [x] 1.9 Add drift tests for Python, dependency inputs, managed Odoo values, add-on paths, Git provenance/context, semantic formatting equality, legacy unknown, failed checkout/sync preservation, Rich/JSON/TOON parity and zero diagnosis mutation.
 
 ## 2. Applied Settings Storage and Diagnosis
 
-- [ ] 2.1 Add the next sequential additive catalogue migration for versioned secret-free `applied_settings_json`, preserving all rows/foreign keys/indexes and representing every legacy component as unknown without inferred backfill.
-- [ ] 2.2 Define one private frozen applied-settings codec for normalized Python, dependency, managed-config, add-on and Git provenance fields; apply existing secret projection before semantic fingerprints and reject malformed/unknown versions safely.
-- [ ] 2.3 Record the complete snapshot atomically only after successful checkout readiness; after successful `env sync`, update only Python/dependency fields and preserve other applied values; keep failure/interruption/dry-run write-free.
-- [ ] 2.4 Build one private frozen doctor drift projection returning `in_sync|drifted|unknown` plus bounded sanitized reason/remediation per component, treating ordinary worktree changes as Git context and recorded database/port as bindings.
-- [ ] 2.5 Extend `odcli doctor` Rich and machine projections with identical typed drift results and no repairs, state changes, fetches or catalogue writes; keep the projection reusable by a future `env show` without adding that command.
+- [x] 2.1 Add the next sequential additive catalogue migration for versioned secret-free `applied_settings_json`, preserving all rows/foreign keys/indexes and representing every legacy component as unknown without inferred backfill.
+- [x] 2.2 Define one private frozen applied-settings codec for normalized Python, dependency, managed-config, add-on and Git provenance fields; apply existing secret projection before semantic fingerprints and reject malformed/unknown versions safely.
+- [x] 2.3 Record the complete snapshot atomically only after successful checkout readiness; after successful `env sync`, update only Python/dependency fields and preserve other applied values; keep failure/interruption/dry-run write-free.
+- [x] 2.4 Build one private frozen doctor drift projection returning `in_sync|drifted|unknown` plus bounded sanitized reason/remediation per component, treating ordinary worktree changes as Git context and recorded database/port as bindings.
+- [x] 2.5 Extend `odcli doctor` Rich and machine projections with identical typed drift results and no repairs, state changes, fetches or catalogue writes; keep the projection reusable by a future `env show` without adding that command.
 
 ## 3. Shared Output and Memory Boundaries
 

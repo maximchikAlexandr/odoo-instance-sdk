@@ -1033,7 +1033,8 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
                         "environment_name": c.environment_name,
                     }
                     for c in report.checks
-                ]
+                ],
+                "drift": cast("JsonValue", [item.as_dict() for item in report.drift]),
             },
             error_code="doctor_failed" if not report.ok else None,
             error_message="doctor reported failed checks" if not report.ok else None,
@@ -1055,6 +1056,22 @@ def _print_doctor(report: DoctorReport) -> None:
             c.status, c.status
         )
         rich_print(f"  {marker:<5} {c.name}: {sanitize_diagnostic(c.detail)}")
+    for drift in report.drift:
+        rich_print("")
+        rich_print(f"[{drift.environment_id}] {drift.environment_name} drift")
+        for component in drift.components:
+            marker = component.status.upper()
+            rich_print(
+                f"  {marker:<8} {component.component}: "
+                f"{sanitize_diagnostic(component.reason)} "
+                f"({sanitize_diagnostic(component.remediation)})"
+            )
+        context = drift.git_context
+        rich_print(
+            "  GIT      context: "
+            f"dirty={context.get('dirty')} ahead={context.get('ahead')} "
+            f"behind={context.get('behind')}"
+        )
 
 
 @cli.command(help="Stop the selected environment's proven-owned runtime.")

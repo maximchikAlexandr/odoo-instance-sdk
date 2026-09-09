@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import contextlib
 import hashlib
 import importlib
@@ -38,6 +39,11 @@ from odoo_instance_sdk.exceptions import (
     StalePlanError,
 )
 from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.internal.applied_settings import (
+    AppliedSettingsError,
+    decode_applied_settings,
+    encode_applied_settings,
+)
 from odoo_instance_sdk.internal.database_preparation import (
     classify_freshness,
     compare_provenance,
@@ -59,6 +65,7 @@ from odoo_instance_sdk.internal.odoo_config import (
 from odoo_instance_sdk.internal.paths import get_environments_root
 from odoo_instance_sdk.internal.pgadmin import PgAdminPhaseHandle
 from odoo_instance_sdk.internal.port_allocation import find_free_port
+from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.urls import assert_local
@@ -124,6 +131,23 @@ type _EnvironmentList = list[DevelopmentEnvironment]
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _PGADMIN_LIFECYCLE_TIMEOUT = 60.0
+_REQUIREMENT_OPERATOR = re.compile(r"\s*(===|==|~=|!=|<=|>=|<|>|;|@)\s*")
+_APPLIED_CONFIG_BINDINGS = frozenset(
+    {
+        "admin_passwd",
+        "addons_path",
+        "data_dir",
+        "db_host",
+        "db_name",
+        "db_password",
+        "db_port",
+        "db_user",
+        "dbfilter",
+        "http_interface",
+        "http_port",
+        "logfile",
+    }
+)
 
 
 class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
@@ -964,8 +988,7 @@ class EnvironmentResource:
                     target_db=plan.target_database,
                 )
 
-            cat.update_environment_state(str(plan.env_id), EnvironmentState.READY)
-            cat.add_environment_event(str(plan.env_id), "checkout", "succeeded")
+            cat.finalize_environment_checkout(str(plan.env_id), _checkout_applied_settings(plan))
             context.action("checkout.cleanup")
             if context.planned("checkout.cleanup.worktree"):
                 context.skip("checkout.cleanup.worktree")
@@ -1414,7 +1437,10 @@ class EnvironmentResource:
                             raise ConfigError(
                                 f"uv pip install failed: {_process_stderr(install_result)}".strip()
                             )
-                    catalog.add_environment_event(str(env.id), "sync", "succeeded")
+                    catalog.record_environment_sync_success(
+                        str(env.id),
+                        _sync_applied_settings(catalog, env, project, inputs),
+                    )
                     completed = True
                     return self._get_env_row(catalog, env.id)
             finally:
@@ -2645,6 +2671,132 @@ def _encode_runtime_json(odoo_bin: str, runtime_cwd: str) -> str:
     import json
 
     return json.dumps({"odoo_bin": odoo_bin, "runtime_cwd": runtime_cwd})
+
+
+def _dependency_evidence(paths: Sequence[str]) -> dict[str, object]:
+    evidence: dict[str, object] = {}
+    for path in paths:
+        candidate = Path(path)
+        if not candidate.is_file():
+            raise ConfigError(f"dependency input is unavailable: {candidate}")
+        try:
+            raw = candidate.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConfigError(f"dependency input is unavailable: {candidate}") from exc
+        entries: list[str] = []
+        for raw_line in raw.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            line = re.sub(r"\s+#.*$", "", line).strip()
+            if not line:
+                continue
+            line = " ".join(line.split())
+            line = _REQUIREMENT_OPERATOR.sub(r"\1", line)
+            projected = redacted_projection(line, field="dependency")
+            if not isinstance(projected, str):
+                raise ConfigError(f"dependency input is malformed: {candidate}")
+            entries.append(projected)
+        evidence[str(candidate.resolve(strict=False))] = tuple(sorted(entries))
+    return evidence
+
+
+def _configured_addons(config: Mapping[str, str]) -> tuple[str, ...] | None:
+    raw = config.get("addons_path")
+    if raw is None:
+        return None
+    return tuple(path.strip() for path in raw.split(",") if path.strip())
+
+
+def _git_ticket(branch: str) -> str:
+    match = re.fullmatch(r"(?P<ticket>[A-Za-z][A-Za-z0-9]*-[0-9]+)(?:_[1-9][0-9]*)?", branch)
+    return match.group("ticket") if match is not None else ""
+
+
+def _generated_applied_components(
+    plan: _CheckoutPlan,
+) -> tuple[Mapping[str, str] | None, tuple[str, ...] | None]:
+    if plan.source_config is None:
+        return None, None
+    if not plan.generated_config.is_file():
+        raise ConfigError(f"generated config is unavailable: {plan.generated_config}")
+    try:
+        config = parse_odoo_config(plan.generated_config)
+    except (OSError, configparser.Error, ValueError) as exc:
+        raise ConfigError(f"generated config is unreadable: {plan.generated_config}") from exc
+    addons = _configured_addons(config)
+    managed = {key: value for key, value in config.items() if key not in _APPLIED_CONFIG_BINDINGS}
+    return managed, addons
+
+
+def _checkout_applied_settings(plan: _CheckoutPlan) -> str:
+    managed_config, addons = _generated_applied_components(plan)
+    return encode_applied_settings(
+        python={
+            "selector": plan.python_selector,
+            "path": plan.python_path,
+            "owned": plan.python_owned,
+        },
+        dependencies=_dependency_evidence(plan.dependency_inputs),
+        managed_config=managed_config,
+        addons=addons,
+        git={"ticket": _git_ticket(plan.branch), "branch": plan.branch, "base": plan.base_ref},
+    )
+
+
+def _known_applied_component(
+    components: Mapping[str, object], name: str, field: str
+) -> object | None:
+    value = components.get(name)
+    if not isinstance(value, dict) or value.get("status") != "known":
+        return None
+    return value if not field else value.get(field)
+
+
+def _sync_applied_settings(
+    catalog: BackupCatalog,
+    env: DevelopmentEnvironment,
+    project: ProjectConfig,
+    inputs: Sequence[str],
+) -> str:
+    row = catalog.get_environment(str(env.id))
+    if row is None:
+        raise ConfigError("environment row disappeared during sync")
+    raw = row["applied_settings_json"]
+    if not isinstance(raw, str):
+        raise ConfigError("stored applied settings are malformed")
+    try:
+        document = decode_applied_settings(raw)
+    except AppliedSettingsError as exc:
+        raise ConfigError("stored applied settings are malformed") from exc
+    components = document.get("components")
+    if not isinstance(components, dict):
+        raise ConfigError("stored applied settings are malformed")
+    managed_config = _known_applied_component(components, "odoo", "values")
+    addons = _known_applied_component(components, "addons", "paths")
+    git = _known_applied_component(components, "git", "")
+    managed_values = managed_config if isinstance(managed_config, dict) else None
+    addon_values = tuple(str(path) for path in addons) if isinstance(addons, list) else None
+    git_values = (
+        {
+            field: git[field]
+            for field in ("ticket", "branch", "base")
+            if isinstance(git, dict) and isinstance(git.get(field), str)
+        }
+        if isinstance(git, dict)
+        else None
+    )
+    return encode_applied_settings(
+        python={
+            "selector": project.python,
+            "path": env.python_environment_path,
+            "owned": env.python_environment_owned,
+        },
+        dependencies=_dependency_evidence(inputs),
+        managed_config=cast("Mapping[str, object] | None", managed_values),
+        addons=addon_values,
+        git=cast("Mapping[str, object] | None", git_values),
+    )
 
 
 def _decode_runtime_json(raw: str | None) -> dict[str, str]:
