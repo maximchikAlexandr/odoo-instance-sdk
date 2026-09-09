@@ -1,7 +1,7 @@
 ## 1. Root-Cause Contract Tests
 
-- [ ] 1.1 Add owned-runtime checkout regressions for successful `<python> <odoo-bin> --help`, missing import, non-zero exit, timeout termination, redacted diagnostics, rollback and retryable retained cleanup; prove shared-runtime checkout adds no probe.
-- [ ] 1.2 Add COPY removal regressions for stopped direct drop, unrelated HTTP-port occupancy, a proven live environment runtime, unsafe database sessions, ownership mismatch, idempotent absent artifacts, and retry from `cleanup_failed`.
+- [x] 1.1 Add owned-runtime checkout regressions for successful `<python> <odoo-bin> --help`, missing import, non-zero exit, timeout termination, redacted diagnostics, rollback and retryable retained cleanup; prove shared-runtime checkout adds no probe.
+- [x] 1.2 Add COPY removal regressions for stopped direct drop, unrelated HTTP-port occupancy, a proven live environment runtime, unsafe database sessions, ownership mismatch, idempotent absent artifacts, and retry from `cleanup_failed`.
 - [ ] 1.3 Add one parameterized alias suite covering identical Click object/callback, help de-duplication, existing machine command IDs, Rich/JSON/TOON parity, destructive confirmation and dry-run for all eleven pairs through existing `PUBLIC_LEAF_CASES`.
 - [ ] 1.4 Add shared failure-envelope tests for successful dry-run, precondition-failed dry-run and normal failure across representative sibling `fail()` callers, asserting unchanged errors/exits and no child execution.
 - [ ] 1.5 Add process-memory tests for Darwin root/child `ri_phys_footprint`, non-Darwin RSS, root failure/PID reuse, omitted unreadable children, schema-v4 naming and exact Rich/machine equality.
@@ -34,9 +34,9 @@
 
 ## 5. Owned Checkout and COPY Cleanup
 
-- [ ] 5.1 Insert one immutable 30-second owned-runtime entry-point preflight after runtime/config preparation and before `ready`, execute it only through `internal/proc`, and route failure/timeout through existing rollback and sanitized retained-artifact reporting.
-- [ ] 5.2 Replace COPY removal's HTTP/port dependency with the existing guarded direct PostgreSQL drop plus exact environment ownership evidence and execution-time revalidation; preserve the shared project cluster and never infer or terminate a port occupant.
-- [ ] 5.3 Permit `cleanup_failed` removal retries, make each owned cleanup step absence-aware/idempotent, and keep active-runtime/session/ownership failures closed and actionable.
+- [x] 5.1 Insert one immutable 30-second owned-runtime entry-point preflight after runtime/config preparation and before `ready`, execute it only through `internal/proc`, and route failure/timeout through existing rollback and sanitized retained-artifact reporting.
+- [x] 5.2 Replace COPY removal's HTTP/port dependency with the existing guarded direct PostgreSQL drop plus exact environment ownership evidence and execution-time revalidation; preserve the shared project cluster and never infer or terminate a port occupant.
+- [x] 5.3 Permit `cleanup_failed` removal retries, make each owned cleanup step absence-aware/idempotent, and keep active-runtime/session/ownership failures closed and actionable.
 
 ## 6. COPY Environment Replacement
 

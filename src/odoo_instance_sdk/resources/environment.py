@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import importlib
+import os
 import re
 import shutil
 import sqlite3
@@ -100,6 +101,7 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
+        PreparedCommand,
         PreparedStep,
         ProcessExecutor,
         ProcessResult,
@@ -918,6 +920,16 @@ class EnvironmentResource:
                             f"uv pip install failed: {_process_stderr(install_result)}".strip()
                         )
                     created_paths.append(plan.dependency_lock)
+
+            if plan.python_owned:
+                preflight = cast("ProcessResult", context.process("checkout.runtime.preflight"))
+                if preflight.returncode != 0:
+                    diagnostic = sanitize_last_error(_process_stderr(preflight).strip())
+                    detail = f": {diagnostic}" if diagnostic else ""
+                    raise InstanceConfigurationError(  # noqa: TRY301
+                        "owned runtime preflight failed "
+                        f"(returncode={preflight.returncode}){detail}"
+                    )
 
             context.action("checkout.database")
 
@@ -1859,66 +1871,70 @@ class EnvironmentResource:
                     mutating=True,
                 ),
             )
-        steps = (*steps, *self._remove_copy_database_steps(env))
+        copy_drop = self._remove_copy_database_command(env, executor=executor)
+        if copy_drop is not None:
+            steps = (*steps, *copy_drop.steps)
         return self._action_command(
             "environment.remove",
             "Remove the selected development environment",
-            lambda: self._remove_impl(env),
+            lambda: self._remove_impl(env, copy_drop=copy_drop),
             executor=executor,
             mutating=True,
             steps=steps,
             optional_steps=tuple(step.step_id for step in steps),
         )
 
-    def _remove_copy_database_steps(
-        self, env: DevelopmentEnvironment
-    ) -> tuple[PreparedStep | PreparedAction, ...]:
-        """Capture the conditional COPY cleanup probes before removal starts."""
+    def _remove_copy_database_command(
+        self,
+        env: DevelopmentEnvironment,
+        *,
+        executor: ProcessExecutor | None,
+    ) -> PreparedCommand[object] | None:
+        """Capture the guarded direct COPY database cleanup before removal starts."""
         if env.db_mode is not EnvironmentDatabaseMode.COPY or env.target_db_name is None:
-            return ()
+            return None
         config_path = Path(env.generated_config_path)
         if not config_path.is_file():
-            return ()
+            return None
         try:
-            from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
+            from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
 
             cfg = parse_odoo_config(config_path)
             password = get_admin_passwd(cfg)
             if password is None:
-                return ()
+                return None
             instance = self._client.instance.from_config(config_path, master_password=password)
-            before = instance.databases._psql_probe_for(
-                env.target_db_name, "environment.remove.database.exists-before"
-            )
-            after = instance.databases._psql_probe_for(
-                env.target_db_name, "environment.remove.database.exists-after"
-            )
-            postcondition = instance.databases._psql_probe_for(
-                env.target_db_name, "environment.remove.database.exists-postcondition"
-            )
-        except Exception:
-            return ()
-        probes = tuple(
-            probe for probe in (before, after, postcondition) if isinstance(probe, PreparedStep)
-        )
-        if not probes:
-            return ()
-        return (
-            PreparedAction(
-                step_id="environment.remove.database.drop",
-                action="drop-owned-copy-database",
-                description="Drop the owned COPY database between exact existence probes",
-                mutating=True,
-            ),
-            *probes,
-        )
+            from odoo_instance_sdk.resources.postgres import PostgresCluster
 
-    def _remove_impl(self, env: DevelopmentEnvironment) -> None:
+            instance._postgres_cluster = PostgresCluster.from_project(env.repository_root)
+            command = build_database_drop_command(
+                instance,
+                env.repository_root,
+                env.target_db_name,
+                executor=executor,
+                allow_environment_id=str(env.id),
+                allow_environment_backup_id=(
+                    str(env.backup_id) if env.backup_id is not None else None
+                ),
+                idempotent_absent=True,
+            )
+            return cast("PreparedCommand[object]", command._prepared())
+        except Exception:
+            return None
+
+    def _remove_impl(
+        self, env: DevelopmentEnvironment, *, copy_drop: PreparedCommand[object] | None
+    ) -> None:
         from odoo_instance_sdk.internal.proc import active_context
 
         catalog = self._client.get_catalog()
         with exclusive_lock(environment_lock_path(str(env.id))):
-            self._do_remove(catalog, env, context=cast("RunContext[None] | None", active_context()))
+            self._do_remove(
+                catalog,
+                env,
+                context=cast("RunContext[None] | None", active_context()),
+                copy_drop=copy_drop,
+            )
 
     def _action_command(
         self,
@@ -1968,6 +1984,7 @@ class EnvironmentResource:
         env: DevelopmentEnvironment,
         *,
         context: RunContext[None] | None = None,
+        copy_drop: PreparedCommand[object] | None = None,
     ) -> None:
         cat = catalog
         copy_plan = self._preflight_remove(cat, env, context=context)
@@ -1994,7 +2011,8 @@ class EnvironmentResource:
 
         if copy_plan is not None and copy_plan.stage is CopyJournalStage.RESTORED:
             cleanup_failed = (
-                self._drop_copy_target(copy_plan, failures, context=context) or cleanup_failed
+                self._drop_copy_target(copy_plan, failures, context=context, copy_drop=copy_drop)
+                or cleanup_failed
             )
             if cleanup_failed:
                 # Keep the config and owned backup: they are the only durable
@@ -2099,7 +2117,9 @@ class EnvironmentResource:
         context: RunContext[None] | None = None,
     ) -> CopyCleanupPlan | None:
         """Reject unsafe or stale catalog rows before changing any external state."""
-        if not _port_free(env.http_interface, env.http_port):
+        if env.db_mode is not EnvironmentDatabaseMode.COPY and not _port_free(
+            env.http_interface, env.http_port
+        ):
             raise EnvironmentConflictError(
                 "port_in_use",
                 f"reserved port {env.http_interface}:{env.http_port} is occupied",
@@ -2155,6 +2175,11 @@ class EnvironmentResource:
     def _preflight_copy_remove(  # noqa: C901
         self, catalog: BackupCatalog, env: DevelopmentEnvironment
     ) -> CopyCleanupPlan:
+        if catalog.get_environment_runtime(str(env.id)) is not None:
+            raise EnvironmentConflictError(
+                "runtime_active",
+                "copy environment has an active owned runtime; stop it before removal",
+            )
         if env.target_db_name is None:
             raise EnvironmentConflictError(
                 "copy_ownership_missing", "copy environment ownership is incomplete"
@@ -2193,17 +2218,9 @@ class EnvironmentResource:
                     uuid.UUID(str(journal["backup_id"])) if journal["backup_id"] else env.backup_id
                 )
                 if stage in (CopyJournalStage.DROPPED, CopyJournalStage.BACKUP_DELETED):
-                    if stage is CopyJournalStage.DROPPED:
-                        if backup_id is None:
-                            raise EnvironmentConflictError(
-                                "copy_backup_missing", "owned backup is absent"
-                            )
+                    if stage is CopyJournalStage.DROPPED and backup_id is not None:
                         row = catalog.get_by_id(str(backup_id))
                         backup = _row_to_backup(row) if row is not None else None
-                        if backup is None:
-                            raise EnvironmentConflictError(
-                                "copy_backup_missing", "owned backup is absent"
-                            )
                     return CopyCleanupPlan(
                         target_database=str(journal["target_database"]),
                         backup_id=backup_id,
@@ -2345,39 +2362,16 @@ class EnvironmentResource:
         failures: _StrList,
         *,
         context: RunContext[None] | None = None,
+        copy_drop: PreparedCommand[object] | None = None,
     ) -> bool:
         if plan.stage is CopyJournalStage.RESTORE_PENDING:
             failures.append("copy restore ownership is unresolved")
             return True
-        instance = cast("OdooInstance", plan.instance)
+        if copy_drop is None or context is None:
+            failures.append("guarded direct PostgreSQL drop plan is unavailable")
+            return True
         try:
-            if not instance.databases.exists(plan.target_database):
-                return False
-            if context is not None and context.planned("environment.remove.database.drop"):
-                context.action("environment.remove.database.drop")
-                instance.databases._drop_impl(
-                    plan.target_database,
-                    timeout=None,
-                    psql_step_id=(
-                        "environment.remove.database.exists-after"
-                        if context.planned("environment.remove.database.exists-after")
-                        else None
-                    ),
-                )
-            else:
-                instance.databases.drop(plan.target_database)
-            if context is not None and context.planned(
-                "environment.remove.database.exists-postcondition"
-            ):
-                still_exists = instance.databases._exists_impl(
-                    plan.target_database,
-                    psql_step_id="environment.remove.database.exists-postcondition",
-                )
-            else:
-                still_exists = instance.databases.exists(plan.target_database)
-            if still_exists:
-                failures.append(f"drop postcondition failed: {plan.target_database} still exists")
-                return True
+            copy_drop.callback(cast("RunContext[object]", context))
         except Exception as exc:
             failures.append(f"drop: {exc}")
             return True
@@ -2759,6 +2753,12 @@ def _resolve_python_bin(py: str | Path, repo_root: Path) -> str:
     return str(p)
 
 
+def _owned_python_executable(venv: Path) -> str:
+    if os.name == "nt":
+        return str(venv / "Scripts" / "python.exe")
+    return str(venv / "bin" / "python")
+
+
 def _is_venv(pybin: str) -> bool:
     try:
         from odoo_instance_sdk.internal.proc import ProcessExecutionError, run_captured
@@ -2975,6 +2975,16 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 cwd=str(plan.worktree),
                 mode="captured",
                 mutating=True,
+            )
+        )
+    if plan.python_owned:
+        steps.append(
+            PreparedStep(
+                step_id="checkout.runtime.preflight",
+                argv=(_owned_python_executable(plan.venv), plan.odoo_bin, "--help"),
+                cwd=plan.runtime_cwd,
+                timeout=30.0,
+                read_only=True,
             )
         )
     if plan.db_mode is EnvironmentDatabaseMode.COPY and plan.target_database is not None:

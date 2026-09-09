@@ -22,6 +22,7 @@ from odoo_instance_sdk.exceptions import (
     StalePlanError,
 )
 from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.internal.proc import ProcessResult, ProcessTimeoutError, RecordingExecutor
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
@@ -1261,9 +1262,210 @@ class TestCheckoutDryRun:
             "checkout.worktree",
             "checkout.generated_config",
             "checkout.venv",
+            "checkout.runtime.preflight",
             "checkout.database",
             "checkout.cleanup.worktree",
             "checkout.cleanup",
+        )
+
+
+class TestOwnedRuntimePreflight:
+    @staticmethod
+    def _result(
+        step_id: str,
+        *,
+        returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> ProcessResult:
+        return ProcessResult(
+            argv=(step_id,),
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            duration=0.0,
+            cwd=None,
+            environment=(),
+        )
+
+    def _run_owned_checkout(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        *,
+        branch: str,
+        executor: RecordingExecutor,
+    ) -> object:
+        resource = env_client.environments
+        options = EnvironmentCheckoutOptions(
+            python="3.12",
+            create_venv=True,
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            source_database="comerta",
+        )
+        snapshot = resource._build_checkout_snapshot(project_manifest, branch, options=options)
+        executor.results.update(
+            {
+                "checkout.validate.git.toplevel": self._result(
+                    "checkout.validate.git.toplevel", stdout=str(snapshot.private.repo_root)
+                ),
+                "checkout.validate.git.common-dir": self._result(
+                    "checkout.validate.git.common-dir", stdout=snapshot.private.git_common_dir
+                ),
+                "checkout.validate.git.base": self._result(
+                    "checkout.validate.git.base", stdout=snapshot.private.base_revision
+                ),
+            }
+        )
+        return resource._command_from_snapshot(snapshot, executor=executor).run()
+
+    def test_owned_checkout_runs_one_immutable_help_preflight_before_ready(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+    ) -> None:
+        executor = RecordingExecutor()
+
+        env = self._run_owned_checkout(
+            env_client,
+            project_manifest,
+            branch="feat/owned-preflight",
+            executor=executor,
+        )
+
+        preflight = next(
+            step for step in executor.executed if step.step_id == "checkout.runtime.preflight"
+        )
+        assert preflight.argv[0].endswith("/venv/bin/python")
+        assert preflight.argv[1].endswith("/odoo-bin")
+        assert tuple(step.step_id for step in executor.executed) == (
+            "checkout.validate.git.toplevel",
+            "checkout.validate.git.common-dir",
+            "checkout.validate.git.base",
+            "checkout.worktree",
+            "checkout.venv",
+            "checkout.runtime.preflight",
+        )
+        assert preflight.argv[-1] == "--help"
+        assert preflight.timeout == 30.0
+        assert preflight.read_only is True
+        assert env.state is EnvironmentState.READY
+
+    def test_shared_checkout_does_not_add_or_execute_preflight(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+    ) -> None:
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/shared-no-preflight",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+        assert "checkout.runtime.preflight" not in {step.step_id for step in command.plan.steps}
+
+    @pytest.mark.parametrize(
+        ("stderr", "expected"),
+        [
+            (
+                "ImportError: cannot import odoo from /private/project; admin_passwd=secret",
+                "ImportError: cannot import odoo from <path> <redacted>",
+            ),
+            ("odoo-bin --help failed", "odoo-bin --help failed"),
+        ],
+    )
+    def test_preflight_nonzero_is_sanitized_and_rolls_back(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        stderr: str,
+        expected: str,
+    ) -> None:
+        def result_for(step: object) -> ProcessResult:
+            step_id = getattr(step, "step_id")
+            if step_id == "checkout.validate.git.toplevel":
+                return self._result(step_id, stdout=str(project_manifest))
+            if step_id == "checkout.validate.git.common-dir":
+                return self._result(step_id, stdout=str(project_manifest / ".git"))
+            if step_id == "checkout.validate.git.base":
+                base = subprocess.check_output(
+                    ["git", "-C", str(project_manifest), "rev-parse", "HEAD"], text=True
+                )
+                return self._result(step_id, stdout=base)
+            if step_id == "checkout.runtime.preflight":
+                return self._result(step_id, returncode=1, stderr=stderr)
+            return self._result(step_id)
+
+        executor = RecordingExecutor(result_factory=result_for)
+        with pytest.raises(InstanceConfigurationError, match=expected):
+            self._run_owned_checkout(
+                env_client,
+                project_manifest,
+                branch="feat/preflight-failure",
+                executor=executor,
+            )
+
+        env = env_client.environments.list(project=project_manifest)[0]
+        assert env.state is EnvironmentState.FAILED
+        assert expected in (
+            env_client.get_catalog().get_environment(str(env.id))["last_error"] or ""
+        )
+        assert "secret" not in (
+            env_client.get_catalog().get_environment(str(env.id))["last_error"] or ""
+        )
+
+    def test_preflight_timeout_uses_process_boundary_and_retains_cleanup(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+    ) -> None:
+        resource = env_client.environments
+        options = EnvironmentCheckoutOptions(
+            python="3.12",
+            create_venv=True,
+            db_mode=EnvironmentDatabaseMode.SHARED,
+            source_database="comerta",
+        )
+        snapshot = resource._build_checkout_snapshot(
+            project_manifest, "feat/preflight-timeout", options=options
+        )
+
+        def result_for(step: object) -> ProcessResult:
+            step_id = getattr(step, "step_id")
+            if step_id == "checkout.validate.git.toplevel":
+                return self._result(step_id, stdout=str(snapshot.private.repo_root))
+            if step_id == "checkout.validate.git.common-dir":
+                return self._result(step_id, stdout=snapshot.private.git_common_dir)
+            if step_id == "checkout.validate.git.base":
+                return self._result(step_id, stdout=snapshot.private.base_revision)
+            if step_id == "checkout.worktree":
+                snapshot.private.worktree.mkdir(parents=True, exist_ok=True)
+            if step_id == "checkout.runtime.preflight":
+                raise ProcessTimeoutError(
+                    tuple(getattr(step, "argv")),
+                    30.0,
+                    duration=30.0,
+                    stderr_tail="admin_passwd=secret /private/project",
+                )
+            if step_id == "checkout.cleanup.worktree":
+                return self._result(step_id, returncode=1, stderr="cleanup failed")
+            return self._result(step_id)
+
+        with pytest.raises(ProcessTimeoutError, match=r"timeout after 30\.0s"):
+            resource._command_from_snapshot(
+                snapshot,
+                executor=RecordingExecutor(result_factory=result_for),
+            ).run()
+
+        env = env_client.environments.list(project=project_manifest)[0]
+        assert env.state is EnvironmentState.CLEANUP_FAILED
+        assert Path(env.worktree_path).is_dir()
+        assert "secret" not in (
+            env_client.get_catalog().get_environment(str(env.id))["last_error"] or ""
         )
 
     def test_copy_checkout_plans_authoritative_restore_probes(
