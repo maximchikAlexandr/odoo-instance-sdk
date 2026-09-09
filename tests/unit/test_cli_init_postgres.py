@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
@@ -83,6 +85,36 @@ def test_init_compose_with_image_writes_postgres_section(tmp_path: Path) -> None
     assert "password" not in content.lower()
 
 
+def test_init_compose_secret_matches_cluster_after_captured_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Captured init and later direct cluster resolution must share one secret."""
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *_base_args(tmp_path),
+            "--postgres",
+            "compose",
+            "--postgres-image",
+            "pgvector/pgvector:pg16",
+            "--postgres-port",
+            "5468",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    cluster = PostgresCluster.from_project(tmp_path)
+    generated = parse_odoo_config(tmp_path / ".odcli" / "odoo.conf")
+    assert generated["db_password"] == cluster.password_file.read_text(encoding="utf-8").strip()
+
+
 def test_init_compose_allocates_free_port(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(
@@ -123,7 +155,83 @@ def test_init_compose_user_defaults_from_source_config(tmp_path: Path) -> None:
     assert 'user = "alice"' in content
 
 
-def test_init_compose_user_defaults_to_odoo_without_source(tmp_path: Path) -> None:
+def test_init_compose_generates_private_project_runtime_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    root_ignore = tmp_path / ".gitignore"
+    root_ignore.write_text("root-only\n")
+    root_ignore_before = root_ignore.read_bytes()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    cfg = tmp_path / "odoo.conf"
+    source_bytes = b"[options]\nhttp_port = 8068\ncustom_option = retained\n"
+    cfg.write_bytes(source_bytes)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *_base_args(tmp_path),
+            "--config",
+            str(cfg),
+            "--database",
+            "tenant",
+            "--http-port",
+            "8077",
+            "--postgres",
+            "compose",
+            "--postgres-image",
+            "pgvector/pgvector:pg16",
+            "--postgres-port",
+            "5468",
+            "--postgres-user",
+            "odoo",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    assert generated.is_file()
+    assert generated.stat().st_mode & 0o777 == 0o600
+    generated_text = generated.read_text()
+    assert "custom_option = retained" in generated_text
+    assert "http_port = 8077" in generated_text
+    assert "db_name = tenant" in generated_text
+    assert "dbfilter = tenant" in generated_text
+    assert "db_host = 127.0.0.1" in generated_text
+    assert "db_port = 5468" in generated_text
+    assert "db_user = odoo" in generated_text
+    secret_files = list(data_root.glob("projects/*/postgres/postgres-password"))
+    assert len(secret_files) == 1
+    password = secret_files[0].read_text().strip()
+    assert password
+    assert secret_files[0].stat().st_mode & 0o777 == 0o600
+    assert password not in result.output
+    assert password not in (tmp_path / ".odcli" / "project.toml").read_text()
+    assert cfg.read_bytes() == source_bytes
+    assert (tmp_path / ".odcli" / ".gitignore").read_text().splitlines() == [".env", "odoo.conf"]
+    assert root_ignore.read_bytes() == root_ignore_before
+    ignored = subprocess.run(
+        ["git", "-C", str(tmp_path), "check-ignore", ".odcli/odoo.conf"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ignored.returncode == 0, ignored.stderr
+    assert ignored.stdout.strip() == ".odcli/odoo.conf"
+
+
+def test_init_compose_user_defaults_to_odoo_without_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
     runner = CliRunner()
     result = runner.invoke(
         cli,
@@ -140,6 +248,179 @@ def test_init_compose_user_defaults_to_odoo_without_source(tmp_path: Path) -> No
     assert result.exit_code == 0
     content = (tmp_path / ".odcli" / "project.toml").read_text()
     assert 'user = "odoo"' in content
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    assert generated.is_file()
+    assert generated.stat().st_mode & 0o777 == 0o600
+    generated_text = generated.read_text()
+    assert "http_port = 8069" in generated_text
+    assert "db_host = 127.0.0.1" in generated_text
+    assert "db_port = " in generated_text
+    assert "db_user = odoo" in generated_text
+    assert not (tmp_path / "odoo.conf").exists()
+
+
+def test_init_compose_refuses_pretracked_generated_config_without_secret_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    generated.parent.mkdir()
+    original = b"[options]\ncustom = retained\n"
+    generated.write_bytes(original)
+    subprocess.run(["git", "-C", str(tmp_path), "add", ".odcli/odoo.conf"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.email=test@test.com",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-qm",
+            "tracked-runtime-config",
+        ],
+        check=True,
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *_base_args(tmp_path),
+            "--postgres",
+            "compose",
+            "--postgres-image",
+            "pgvector/pgvector:pg16",
+            "--postgres-port",
+            "5468",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "tracked" in result.output.lower()
+    assert generated.read_bytes() == original
+    assert not list(data_root.glob("projects/*/postgres/postgres-password"))
+    tracked = subprocess.run(
+        ["git", "-C", str(tmp_path), "ls-files", "--error-unmatch", "--", ".odcli/odoo.conf"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.returncode == 0
+
+
+def test_init_compose_fails_closed_when_git_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    source = tmp_path / "odoo.conf"
+    source_bytes = b"[options]\ndb_password = source-secret\ncustom = retained\n"
+    source.write_bytes(source_bytes)
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    generated.parent.mkdir()
+    generated_bytes = b"[options]\ndb_password = tracked-secret\n"
+    generated.write_bytes(generated_bytes)
+    root_ignore = tmp_path / ".gitignore"
+    root_ignore.write_bytes(b"root-only\n")
+    monkeypatch.setenv("PATH", "")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            *_base_args(tmp_path),
+            "--config",
+            str(source),
+            "--postgres",
+            "compose",
+            "--postgres-image",
+            "pgvector/pgvector:pg16",
+            "--postgres-port",
+            "5468",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "unable to verify" in result.output.lower()
+    assert "source-secret" not in result.output
+    assert "tracked-secret" not in result.output
+    assert source.read_bytes() == source_bytes
+    assert generated.read_bytes() == generated_bytes
+    assert root_ignore.read_bytes() == b"root-only\n"
+    assert not list(data_root.glob("projects/*/postgres/postgres-password"))
+
+
+def test_init_compose_fails_closed_on_rev_parse_failure_with_git_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    source = tmp_path / "odoo.conf"
+    source_bytes = b"[options]\ndb_password = source-secret\ncustom = retained\n"
+    source.write_bytes(source_bytes)
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    generated.parent.mkdir()
+    generated_bytes = b"[options]\ndb_password = tracked-secret\n"
+    generated.write_bytes(generated_bytes)
+    subprocess.run(["git", "-C", str(tmp_path), "add", ".odcli/odoo.conf"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.email=test@test.com",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-qm",
+            "tracked-runtime-config",
+        ],
+        check=True,
+    )
+
+    from odoo_instance_sdk.internal import git_worktree
+
+    def fail_rev_parse(_path: Path) -> Path:
+        raise git_worktree.GitError("rev-parse failed")
+
+    monkeypatch.setattr(git_worktree, "rev_parse_toplevel", fail_rev_parse)
+    result = CliRunner().invoke(
+        cli,
+        [
+            *_base_args(tmp_path),
+            "--config",
+            str(source),
+            "--postgres",
+            "compose",
+            "--postgres-image",
+            "pgvector/pgvector:pg16",
+            "--postgres-port",
+            "5468",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "unable to verify" in result.output.lower()
+    assert "rev-parse failed" not in result.output
+    assert "source-secret" not in result.output
+    assert "tracked-secret" not in result.output
+    assert source.read_bytes() == source_bytes
+    assert generated.read_bytes() == generated_bytes
+    assert not list(data_root.glob("projects/*/postgres/postgres-password"))
 
 
 def test_init_external_default_omits_postgres_section(tmp_path: Path) -> None:
@@ -148,6 +429,38 @@ def test_init_external_default_omits_postgres_section(tmp_path: Path) -> None:
     assert result.exit_code == 0
     content = (tmp_path / ".odcli" / "project.toml").read_text()
     assert "[postgres]" not in content
+
+
+def test_init_normalizes_project_ignore_rules_and_git_ownership(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / ".gitignore").write_text(
+        "keep-me\n.env\n!odoo.conf\n!*.conf\nodoo.conf\n", encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(cli, _base_args(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    assert (manifest_dir / ".gitignore").read_text(encoding="utf-8") == (
+        "keep-me\n!odoo.conf\n!*.conf\n.env\nodoo.conf\n"
+    )
+    ignored = subprocess.run(
+        ["git", "-C", str(tmp_path), "check-ignore", ".odcli/odoo.conf"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ignored.returncode == 0
+    tracked = subprocess.run(
+        ["git", "-C", str(tmp_path), "ls-files", "--error-unmatch", "--", ".odcli/odoo.conf"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.returncode == 1
 
 
 def test_init_dry_run_json_reports_postgres_plan(tmp_path: Path) -> None:

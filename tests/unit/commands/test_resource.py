@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from odoo_instance_sdk.models import (
     PidScope,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from tests.unit.monitor_support import make_env
 
 
 @pytest.mark.unpatched_xdg
@@ -124,10 +126,98 @@ def test_resource_leaves_do_not_create_absent_xdg_roots(
 
     runner = CliRunner()
     for leaf in ("list", "doctor"):
-        result = runner.invoke(cli, ["resource", leaf, "--format", "json"])
+        args = ["resource", leaf, "--format", "json"]
+        if leaf == "list":
+            args.insert(2, "--all-projects")
+        result = runner.invoke(cli, args)
         assert result.exit_code == 0, result.output
         assert not data_root.exists()
         assert not cache_root.exists()
+
+
+def test_resource_list_scopes_real_catalogue_files_and_preserves_global_parity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from odoo_instance_sdk.internal.repo_key import repo_key
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog_path = tmp_path / "catalog.sqlite3"
+    backup_root = tmp_path / "backups"
+    catalog = BackupCatalog(db_path=catalog_path)
+    roots = {name: tmp_path / name for name in ("project-a", "project-b")}
+    project_ids = {name: f"project_{repo_key(root, root / '.git')}" for name, root in roots.items()}
+    backup_ids = {
+        "project-a": "00000000-0000-0000-0000-000000000021",
+        "project-b": "00000000-0000-0000-0000-000000000022",
+    }
+    for name, root in roots.items():
+        catalog._register_project(project_ids[name], root, root / ".git")
+        path = backup_root / f"{name}.zip"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(name.encode())
+        catalog.start_download(backup_ids[name], "http://localhost:8069", name, "zip", True, path)
+        catalog.success_download(backup_ids[name], path.name, path.stat().st_size, "")
+        catalog.create_environment(
+            make_env(
+                f"environment-{name}",
+                name=name,
+                repository_root=str(root),
+                git_common_dir=str(root / ".git"),
+                backup_id=backup_ids[name],
+            )
+        )
+    catalog.close()
+
+    monkeypatch.setattr(resource_command._catalog_path_provider, "provider", lambda: catalog_path)
+    monkeypatch.setattr(resource_command, "_project_root", lambda: None)
+    monkeypatch.setattr(
+        resource_command,
+        "resolve_catalogue_scope",
+        lambda _ctx, all_projects: (
+            (None, "null") if all_projects else (project_ids["project-a"], "cwd")
+        ),
+    )
+    monkeypatch.setattr(resource_command, "get_data_root", lambda **_kwargs: tmp_path / "data")
+    monkeypatch.setattr(resource_command, "get_backups_dir", lambda **_kwargs: backup_root)
+
+    runner = CliRunner()
+    scoped_json = runner.invoke(cli, ["resource", "list", "--format", "json"])
+    scoped_toon = runner.invoke(cli, ["resource", "list", "--format", "toon"])
+    global_json = runner.invoke(cli, ["resource", "list", "--all-projects", "--format", "json"])
+    global_toon = runner.invoke(cli, ["resource", "list", "--all-projects", "--format", "toon"])
+    assert all(
+        result.exit_code == 0 for result in (scoped_json, scoped_toon, global_json, global_toon)
+    )
+
+    from toon import DecodeOptions, decode
+
+    scoped = json.loads(scoped_json.stdout)
+    global_payload = json.loads(global_json.stdout)
+    scoped_toon_payload = decode(scoped_toon.stdout, DecodeOptions(indent=2, strict=False))
+    global_toon_payload = decode(global_toon.stdout, DecodeOptions(indent=2, strict=False))
+    assert scoped["provenance"] == {"project_source": "cwd", "environment_source": "null"}
+    assert global_payload["provenance"] == {"project_source": "null", "environment_source": "null"}
+    assert scoped_toon_payload["provenance"] == scoped["provenance"]
+    assert global_toon_payload["provenance"] == global_payload["provenance"]
+    scoped_resources = scoped["result"]["resources"]
+    global_resources = global_payload["result"]["resources"]
+    assert [item["stable_identity"] for item in scoped_toon_payload["result"]["resources"]] == [
+        item["stable_identity"] for item in scoped_resources
+    ]
+    assert [item["stable_identity"] for item in global_toon_payload["result"]["resources"]] == [
+        item["stable_identity"] for item in global_resources
+    ]
+    scoped_identities = {item["stable_identity"] for item in scoped_resources}
+    global_identities = [item["stable_identity"] for item in global_resources]
+    assert f"backup:{backup_ids['project-a']}" in scoped_identities
+    assert f"backup:{backup_ids['project-b']}" not in scoped_identities
+    assert f"project:{project_ids['project-b']}" not in scoped_identities
+    assert "environment:environment-project-b" not in scoped_identities
+    assert not any(
+        "project-b.zip" in str(item.get("sanitized_path", "")) for item in scoped_resources
+    )
+    assert global_identities.count(f"backup:{backup_ids['project-a']}") == 1
+    assert global_identities.count(f"backup:{backup_ids['project-b']}") == 1
 
 
 @pytest.mark.parametrize("snapshot_available", [True, False], ids=["measured", "unavailable"])
@@ -215,7 +305,7 @@ def test_resource_project_projection_includes_measured_and_unavailable_cluster_l
         lambda _self, *, executor=None: snapshot_command,
     )
 
-    result = CliRunner().invoke(cli, ["resource", "list", "--format", "json"])
+    result = CliRunner().invoke(cli, ["resource", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     payload = result.exception or None

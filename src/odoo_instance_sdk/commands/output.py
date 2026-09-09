@@ -28,6 +28,10 @@ else:
 from rich.console import Console
 from toon import encode
 
+from odoo_instance_sdk.internal.cli_format import (
+    _rich_plan_metadata,
+    _rich_semantic_step_lines,
+)
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
 
@@ -375,7 +379,19 @@ def _rich_rendered(
     projection: Callable[[OutputDocument], str] | None,
 ) -> str:
     """Add the one common completion line to a successful Rich document."""
-    rendered = (projection or _default_rich_projection)(document)
+    # Every dry-run process plan uses the same semantic projection.  Command
+    # adapters may keep their execution-result renderer for normal runs, but
+    # must not replace captured process displays with a result-shaped summary
+    # while previewing the immutable plan.
+    if (
+        document.ok
+        and document.dry_run
+        and isinstance(document.result, dict)
+        and "steps" in document.result
+    ):
+        rendered = _rich_plan_projection(document)
+    else:
+        rendered = (projection or _default_rich_projection)(document)
     if not document.ok or document.dry_run or document.command not in _RICH_COMPLETION_COMMANDS:
         return rendered
     completion = _rich_success_completion(document)
@@ -456,6 +472,10 @@ def run_rich_bounded(  # noqa: C901
         if elapsed is None and event.step_id in started:
             elapsed = max(0.0, now - started[event.step_id])
         parts = [f"[{event.step_id}] {event.kind}"]
+        if event.operation and event.operation != event.step_id:
+            parts.append(f"operation={event.operation}")
+        if event.target and event.target != event.step_id:
+            parts.append(f"target={event.target}")
         if event.chunk and event.kind in {"stdout", "stderr"}:
             parts[-1] += f": {event.chunk}"
         if event.completed_units is not None:
@@ -896,6 +916,7 @@ def _semantic_plan_projection(
     if warning_values:
         lines.append("Warnings:")
         lines.extend(f"  - {warning}" for warning in warning_values)
+    lines.extend(_rich_semantic_step_lines(result))
     return "\n".join(lines)
 
 
@@ -959,29 +980,4 @@ def _rich_process_lines(item: dict[str, JsonValue]) -> list[str]:
     if isinstance(stdin, str):
         lines.append("   stdin: |")
         lines.extend(f"     {line}" for line in (stdin.splitlines() or [""]))
-    return lines
-
-
-def _rich_plan_metadata(
-    result: dict[str, JsonValue], document_warnings: tuple[str, ...]
-) -> list[str]:
-    lines: list[str] = []
-    observations = result.get("observations")
-    if isinstance(observations, list) and observations:
-        lines.append("observations:")
-        lines.extend(
-            "  - " + json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
-            for item in observations
-        )
-    warnings = result.get("warnings")
-    warning_values = list(warnings) if isinstance(warnings, list) else []
-    for warning in document_warnings:
-        if warning not in warning_values:
-            warning_values.append(warning)
-    if warning_values:
-        lines.append("warnings:")
-        lines.extend(f"  - {warning}" for warning in warning_values)
-    fingerprint = result.get("fingerprint")
-    if isinstance(fingerprint, str) and fingerprint:
-        lines.append(f"fingerprint: {fingerprint}")
     return lines

@@ -4,6 +4,7 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -11,6 +12,9 @@ if TYPE_CHECKING:
     import click
 else:
     import rich_click as click
+
+from rich.console import Console
+from rich.table import Table
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.backup import (
@@ -79,10 +83,17 @@ from odoo_instance_sdk.internal.automation import (
     update_modules_command,
     verify_deps_command,
 )
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
+from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
+from odoo_instance_sdk.internal.generated_config import (
+    generate_config,
+    project_generated_config_path,
+)
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
+from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.internal.vscode_generate import (
     build_launch_profile,
@@ -380,6 +391,79 @@ def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject
     return {"modules": [record.to_dict() for record in records]}
 
 
+def _rich_module_list(document: OutputDocument) -> str:
+    """Render module records as one human-oriented table."""
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
+    records = result.get("modules", [])
+    if not isinstance(records, list):
+        return "No modules"
+    table = Table("NAME", "STATE", "VERSION")
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        table.add_row(
+            rich_cell(record.get("name", "")),
+            rich_cell(record.get("state", "")),
+            rich_cell(record.get("installed_version") or record.get("latest_version") or ""),
+        )
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print(table)
+    return output.getvalue().rstrip()
+
+
+def _rich_module_update(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
+    modules = result.get("modules", [])
+    updated = result.get("updated", [])
+    values = updated if isinstance(updated, list) and updated else modules
+    table = Table("Module", "Status", title="Module update")
+    if isinstance(values, list) and values:
+        status = "planned" if document.dry_run else "updated"
+        for module in values:
+            table.add_row(rich_cell(module), rich_cell(status))
+    else:
+        table.add_row("(none)", "no changes")
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print("Dry run — modules to update:" if document.dry_run else "Updated modules:")
+    console.print(table)
+    return output.getvalue().rstrip()
+
+
+def _rich_translation_export(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
+    exports = result.get("exports", [])
+    table = Table("Module", "Language", "File", "Size", title="Translation export")
+    if isinstance(exports, list) and exports:
+        for item in exports:
+            if not isinstance(item, dict):
+                continue
+            size = item.get("bytes_written")
+            table.add_row(
+                rich_cell(item.get("module", "")),
+                rich_cell(item.get("requested_lang", "")),
+                rich_cell(item.get("actual_filename", "")),
+                rich_cell(
+                    _human_bytes(size)
+                    if isinstance(size, int) and not isinstance(size, bool)
+                    else "—"
+                ),
+            )
+    else:
+        table.add_row("(none)", "—", "—", "—")
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print(table)
+    return output.getvalue().rstrip()
+
+
 @click.rich_config(  # type: ignore[operator]
     {
         "commands_before_options": True,
@@ -510,6 +594,7 @@ class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]
     help="Compose only; default: source db_user or 'odoo'.",
 )
 @click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
+@click.option("--yes", "yes", is_flag=True, default=False, help="Confirm manifest replacement.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Do not write.")
 @output_options
 @click.option(
@@ -531,6 +616,7 @@ def init(
     postgres_port: int | None,
     postgres_user: str | None,
     no_input: bool,
+    yes: bool,
     dry_run: bool,
     output_format: str | None,
     json_output: bool,
@@ -589,9 +675,26 @@ def init(
 
     existing = manifest_path(resolved_project)
     if existing.is_file() and _handle_existing_manifest(
-        existing, resolved_project, config, no_input, output_mode, dry_run=dry_run
+        existing, resolved_project, config, no_input, yes, output_mode, dry_run=dry_run
     ):
         return
+    if not dry_run and config.postgres is not None and config.postgres.mode == "compose":
+        from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
+
+        try:
+            tracked = is_tracked_path(project_generated_config_path(resolved_project))
+        except GitError:
+            fail(
+                output_mode,
+                "init",
+                "unable to verify project-owned runtime config tracking; refusing secret write",
+            )
+        if tracked:
+            fail(
+                output_mode,
+                "init",
+                "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf",
+            )
 
     status, _ = run_or_preview(
         lambda: action_command(
@@ -625,8 +728,48 @@ def _write_initialized_project(
 ) -> dict[str, JsonValue]:
     """Write init artifacts, then register the canonical project transactionally."""
     write_manifest(project_path, config)
+    if config.postgres is not None and config.postgres.mode == "compose":
+        _write_project_generated_config(project_path, config)
     _register_initialized_project(project_path)
     return _manifest_dict(config, postgres_allocated=postgres_allocated)
+
+
+def _write_project_generated_config(project_path: Path, config: ProjectConfig) -> None:
+    """Bind a Compose project config to its existing private cluster secret."""
+    root = project_path.resolve()
+    source = config.source_config
+    source_path = (
+        (root / source).resolve() if source is not None and not source.is_absolute() else source
+    )
+    if source_path is None:
+        candidate = root / "odoo.conf"
+        source_path = candidate if candidate.is_file() else None
+    elif not source_path.is_file():
+        raise InstanceConfigurationError("local source config is missing")
+
+    from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    cluster = PostgresCluster.from_project(root)
+    password = ensure_password_file(cluster.password_file)
+    source_start = (
+        StartConfig.from_odoo_config(source_path) if source_path is not None else StartConfig()
+    )
+    postgres = config.postgres
+    assert postgres is not None
+    generate_config(
+        source_path,
+        project_generated_config_path(root),
+        repo_root=root,
+        worktree=root,
+        http_interface=source_start.http_interface,
+        http_port=resolve_project_http_port(config.preferred_http_port, source_start.http_port),
+        db_name=config.default_source_database or source_start.db_name or "",
+        db_host=cluster.endpoint_host,
+        db_port=cluster.endpoint_port,
+        db_user=postgres.user or "odoo",
+        db_password=password,
+    )
 
 
 def _register_initialized_project(project_path: Path) -> None:
@@ -772,6 +915,7 @@ def _handle_existing_manifest(
     resolved_project: Path,
     config: ProjectConfig,
     no_input: bool,
+    yes: bool,
     output_mode: OutputMode,
     *,
     dry_run: bool,
@@ -798,7 +942,11 @@ def _handle_existing_manifest(
             rich_print("Manifest already up to date; no-op.")
         return True
     if no_input or output_mode is not OutputMode.RICH:
+        if yes:
+            return False
         fail(output_mode, "init", "manifest exists and differs; remove it first or adjust options")
+    if yes:
+        return False
     if not click.confirm("Manifest exists and differs; overwrite?", default=False):
         rich_print("Aborted.")
         return True
@@ -1125,19 +1273,7 @@ def module_list(
                 if value is not None
                 else {"modules": []}
             ),
-            rich=lambda document: "\n".join(
-                ["NAME                            STATE           VERSION"]
-                + [
-                    f"{record['name']:<30} {record['state']:<15} "
-                    f"{record.get('installed_version') or record.get('latest_version') or ''}"
-                    for record in cast(
-                        "list[dict[str, JsonValue]]",
-                        document.result.get("modules", [])
-                        if isinstance(document.result, dict)
-                        else [],
-                    )
-                ]
-            ),
+            rich=_rich_module_list,
         )
     except SystemExit:
         raise
@@ -1194,24 +1330,7 @@ def module_update(
                 "plan": model_to_dict(command.plan),
                 "dry_run": True,
             },
-            rich=lambda document: "\n".join(
-                [
-                    "Dry run — modules to update:" if dry_run else "Updated modules:",
-                    *[
-                        f"  {module}"
-                        for module in (
-                            selected_modules
-                            if dry_run
-                            else cast(
-                                "list[str]",
-                                document.result.get("updated", [])
-                                if isinstance(document.result, dict)
-                                else [],
-                            )
-                        )
-                    ],
-                ]
-            ),
+            rich=_rich_module_update,
             progress=True,
         )
     except Exception as exc:
@@ -1324,14 +1443,7 @@ def translations_export(
                     for item in cast("list[TranslationExportResult]", value or [])
                 ]
             },
-            rich=lambda document: "\n".join(
-                f"{item['module']} {item['requested_lang']} -> {item['actual_filename']} "
-                f"({item['bytes_written']} bytes at {item['path']})"
-                for item in cast(
-                    "list[dict[str, JsonValue]]",
-                    document.result.get("exports", []) if isinstance(document.result, dict) else [],
-                )
-            ),
+            rich=_rich_translation_export,
             progress=True,
         )
     except SystemExit:
@@ -1444,6 +1556,25 @@ def vscode_group() -> None:
     pass
 
 
+def _rich_vscode_generate(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
+    table = Table("Field", "Value", title="VS Code launch")
+    if "written" in result:
+        table.add_row("Output", rich_cell(result["written"]))
+    profile = result.get("profile")
+    if isinstance(profile, dict):
+        table.add_row("Name", rich_cell(profile.get("name", "default")))
+        table.add_row("Program", rich_cell(profile.get("program", "odoo")))
+    if not table.rows:
+        table.add_row("Status", "ready")
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print(table)
+    return output.getvalue().rstrip()
+
+
 @vscode_group.command("generate", help="Generate a VS Code debugpy launch profile.")
 @click.option(
     "--write", "write_file", is_flag=True, default=False, help="Write .vscode/launch.json."
@@ -1482,13 +1613,7 @@ def vscode_generate(
             mode=output_mode,
             dry_run=dry_run,
             result=lambda value: cast("dict[str, JsonValue]", value or {}),
-            rich=lambda document: (
-                f"Wrote {document.result['written']}"
-                if isinstance(document.result, dict) and "written" in document.result
-                else launch_json(cast("dict[str, JsonValue]", document.result.get("profile", {})))
-                if isinstance(document.result, dict)
-                else ""
-            ),
+            rich=_rich_vscode_generate,
         )
     except SystemExit:
         raise

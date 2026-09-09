@@ -330,13 +330,14 @@ def test_changed_test_rich_owner_matrix(tmp_path: Path, owner_kind: str, state: 
         result = CliRunner().invoke(cli, [*args, "--format", "rich"])
 
     assert result.exit_code == 0, result.output
-    assert f"owner={owner_kind} project=" in result.output
+    assert "Owner" in result.output
+    assert owner_kind in result.output
     assert (
-        "environment=demo (env-1)" in result.output
+        "demo (env-1)" in result.output
         if owner_kind == "environment"
-        else ("environment=none" in result.output)
+        else ("none" in result.output)
     )
-    assert ("tests=" in result.output) is (state == "executed")
+    assert ("Tests" in result.output) is (state == "executed")
 
 
 def test_changed_execution_uses_default_tags_and_preflight_before_runner(tmp_path: Path) -> None:
@@ -651,7 +652,8 @@ def test_direct_and_module_test_share_owner_and_format_contracts(
 
     assert result.exit_code == 0, result.output
     if mode == "rich":
-        assert f"owner={owner_kind} project=" in result.output
+        assert "Owner" in result.output
+        assert owner_kind in result.output
         return
     payload = _decode_test_document(result.stdout, mode)["result"]
     assert isinstance(payload, dict)

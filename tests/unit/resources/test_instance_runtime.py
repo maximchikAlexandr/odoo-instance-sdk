@@ -16,12 +16,14 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.proc import (
     ProcessHandle,
     ProcessResult,
+    ProcessSpawnError,
     RecordingExecutor,
+    StepEvent,
     StepObserver,
 )
 from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import CommandResult, OdooProcess, StartConfig
-from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -252,6 +254,50 @@ class TestInstancePrefix:
             step for step in command.commands if step.step_id == "instance.foreground"
         )
         assert foreground.argv[-2:] == ("--dev=xml", "--stop-after-init")
+
+    def test_from_project_uses_owned_compose_runtime_config(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "repo"
+        root.mkdir()
+        for name in ("python", "odoo-bin"):
+            (root / name).write_text("")
+        (root / "python").chmod(0o755)
+        generated = root / ".odcli" / "odoo.conf"
+        generated.parent.mkdir()
+        generated.write_text(
+            "[options]\nhttp_port = 8077\ndb_name = tenant\n"
+            "db_host = 127.0.0.1\ndb_port = 5468\ndb_user = odoo\n"
+            "db_password = private\n"
+        )
+        project = ProjectConfig(
+            repository_root=root,
+            python=Path("python"),
+            odoo_bin=Path("odoo-bin"),
+            source_config=None,
+            preferred_http_port=8077,
+            postgres=PostgresProjectConfig(
+                mode="compose", image="postgres:16", port=5468, user="odoo"
+            ),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            staticmethod(lambda _path: MagicMock()),
+        )
+
+        instance = _make_client().instance.from_project(project)
+
+        assert instance.config.start_config is not None
+        assert instance.config.start_config.config_path == str(generated)
+        assert instance.config.base_url == "http://127.0.0.1:8077"
+        assert instance.config.db_host == "127.0.0.1"
+        assert instance.config.db_port == 5468
+        assert instance.config.db_user == "odoo"
+        assert instance.config.db_password == "private"
+        assert "db_password='private'" not in repr(instance.config)
+        command = instance.run_foreground_command()
+        assert "db_password" not in repr(command.plan)
+        assert "private" not in command.plan.fingerprint
 
     @pytest.mark.parametrize("selector", ["python3"])
     def test_from_project_resolves_python_selectors(
@@ -827,6 +873,74 @@ class TestRunForeground:
         )
 
         assert instance.run_foreground(args=("--stop-after-init",)) == 23
+
+    @pytest.mark.parametrize(
+        ("command_prefix", "expected_returncode"),
+        [
+            pytest.param(
+                ("python3", "-c", "import sys; sys.exit(23)"),
+                23,
+                id="non-zero-exit",
+            ),
+        ],
+    )
+    def test_foreground_terminal_event_retains_captured_metadata(
+        self,
+        tmp_path: Path,
+        command_prefix: tuple[str, ...],
+        expected_returncode: int,
+    ) -> None:
+        instance = OdooInstance(
+            config=InstanceConfig(
+                base_url="http://localhost:8069",
+                start_config=StartConfig(
+                    http_port=9999,
+                    http_interface="127.0.0.1",
+                    config_path=str(tmp_path / "generated.conf"),
+                ),
+                command_prefix=command_prefix,
+            ),
+            _client=_make_client(),
+        )
+        events: list[StepEvent] = []
+
+        result = instance.run_foreground_command().run(observer=events.append)
+
+        assert result == expected_returncode
+        assert [event.kind for event in events] == ["started", "completed"]
+        started, completed = events
+        assert started.operation == completed.operation
+        assert started.target == completed.target
+        assert started.elapsed == 0.0
+        assert completed.elapsed is not None
+        assert completed.returncode == expected_returncode
+
+    def test_foreground_spawn_failure_retains_captured_metadata_without_completion(
+        self, tmp_path: Path
+    ) -> None:
+        instance = OdooInstance(
+            config=InstanceConfig(
+                base_url="http://localhost:8069",
+                start_config=StartConfig(
+                    http_port=9999,
+                    http_interface="127.0.0.1",
+                    config_path=str(tmp_path / "generated.conf"),
+                ),
+                command_prefix=("/definitely/missing/odoo-sdk",),
+            ),
+            _client=_make_client(),
+        )
+        events: list[StepEvent] = []
+
+        with pytest.raises(ProcessSpawnError):
+            instance.run_foreground_command().run(observer=events.append)
+
+        assert [event.kind for event in events] == ["started", "failed"]
+        started, failed = events
+        assert started.operation == failed.operation
+        assert started.target == failed.target
+        assert failed.elapsed is not None
+        assert not any(event.kind == "completed" for event in events)
 
     def test_runtime_validator_returns_an_unchanged_frozen_tuple(self) -> None:
         from odoo_instance_sdk.resources.instance import _validate_runtime_args

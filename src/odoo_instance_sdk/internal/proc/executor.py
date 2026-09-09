@@ -28,6 +28,7 @@ from . import (
     StepEvent,
     StepObserver,
     bounded_process_inputs,
+    event_for_step,
 )
 from .redaction import IncrementalStreamRedactor
 
@@ -126,6 +127,9 @@ class ProcessHandle:
     process_group_id: int | None
     session_id: int | None
     inherited_stdio: bool
+    observer: StepObserver | None = None
+    step: PreparedStep | None = None
+    started_at: float | None = None
 
     @property
     def pid(self) -> int:
@@ -153,6 +157,10 @@ class ProcessHandle:
         self, input: bytes | None = None, timeout: float | None = None
     ) -> tuple[bytes | None, bytes | None]:
         return self.process.communicate(input=input, timeout=timeout)
+
+    def terminate(self) -> None:
+        """Terminate this owned process through the bounded process seam."""
+        terminate(self, process_group_id=self.process_group_id)
 
 
 def owned_handle(
@@ -251,9 +259,9 @@ def _run_pump(  # noqa: C901
         if safe:
             _notify(
                 observer,
-                StepEvent(
-                    step_id=prepared.step_id,
-                    kind=cast("Literal['stdout', 'stderr']", stream),
+                event_for_step(
+                    prepared,
+                    cast("Literal['stdout', 'stderr']", stream),
                     chunk=safe,
                 ),
             )
@@ -264,7 +272,10 @@ def _run_pump(  # noqa: C901
         for stream in ("stdout", "stderr"):
             safe = redactors[stream].flush()
             if safe:
-                _notify(observer, StepEvent(step_id=prepared.step_id, kind=stream, chunk=safe))
+                _notify(
+                    observer,
+                    event_for_step(prepared, stream, chunk=safe),
+                )
 
     def close_stream(stream: IO[bytes]) -> None:
         with contextlib.suppress(OSError, ValueError):
@@ -479,7 +490,7 @@ class SubprocessExecutor:
             prepared.environment_snapshot if bounded is None else bounded.environment_snapshot
         )
         started = time.perf_counter()
-        _notify(observer, StepEvent(step_id=prepared.step_id, kind="started"))
+        _notify(observer, event_for_step(prepared, "started", elapsed=0.0))
         if prepared.mode == "captured":
             try:
                 returncode, stdout, stderr, duration = _run_pump(
@@ -492,30 +503,33 @@ class SubprocessExecutor:
             except ProcessTimeoutError as error:
                 _notify(
                     observer,
-                    StepEvent(
-                        step_id=prepared.step_id,
-                        kind="failed",
+                    event_for_step(
+                        prepared,
+                        "failed",
                         error=str(error),
+                        elapsed=error.duration,
                     ),
                 )
                 raise
             except KeyboardInterrupt:
                 _notify(
                     observer,
-                    StepEvent(
-                        step_id=prepared.step_id,
-                        kind="failed",
+                    event_for_step(
+                        prepared,
+                        "failed",
                         error="interrupted",
+                        elapsed=time.perf_counter() - started,
                     ),
                 )
                 raise
             except OSError as error:
                 _notify(
                     observer,
-                    StepEvent(
-                        step_id=prepared.step_id,
-                        kind="failed",
+                    event_for_step(
+                        prepared,
+                        "failed",
                         error=_safe_error(prepared, error),
+                        elapsed=time.perf_counter() - started,
                     ),
                 )
                 raise ProcessSpawnError(
@@ -528,10 +542,11 @@ class SubprocessExecutor:
             except Exception as error:
                 _notify(
                     observer,
-                    StepEvent(
-                        step_id=prepared.step_id,
-                        kind="failed",
+                    event_for_step(
+                        prepared,
+                        "failed",
                         error=_safe_error(prepared, error),
+                        elapsed=time.perf_counter() - started,
                     ),
                 )
                 raise
@@ -548,10 +563,11 @@ class SubprocessExecutor:
             )
             _notify(
                 observer,
-                StepEvent(
-                    step_id=prepared.step_id,
-                    kind="completed",
+                event_for_step(
+                    prepared,
+                    "completed",
                     returncode=result.returncode,
+                    elapsed=result.duration,
                 ),
             )
             return result
@@ -575,7 +591,12 @@ class SubprocessExecutor:
         except subprocess.TimeoutExpired:
             _notify(
                 observer,
-                StepEvent(step_id=prepared.step_id, kind="failed", error="timeout"),
+                event_for_step(
+                    prepared,
+                    "failed",
+                    error="timeout",
+                    elapsed=time.perf_counter() - started,
+                ),
             )
             raise ProcessTimeoutError(
                 prepared.argv,
@@ -587,10 +608,11 @@ class SubprocessExecutor:
         except OSError as error:
             _notify(
                 observer,
-                StepEvent(
-                    step_id=prepared.step_id,
-                    kind="failed",
+                event_for_step(
+                    prepared,
+                    "failed",
                     error=_safe_error(prepared, error),
+                    elapsed=time.perf_counter() - started,
                 ),
             )
             raise ProcessSpawnError(
@@ -603,10 +625,11 @@ class SubprocessExecutor:
         except Exception as error:
             _notify(
                 observer,
-                StepEvent(
-                    step_id=prepared.step_id,
-                    kind="failed",
+                event_for_step(
+                    prepared,
+                    "failed",
                     error=_safe_error(prepared, error),
+                    elapsed=time.perf_counter() - started,
                 ),
             )
             raise
@@ -635,10 +658,11 @@ class SubprocessExecutor:
             _notify_output(observer, prepared, stderr_value, "stderr")
         _notify(
             observer,
-            StepEvent(
-                step_id=prepared.step_id,
-                kind="completed",
+            event_for_step(
+                prepared,
+                "completed",
                 returncode=result.returncode,
+                elapsed=result.duration,
             ),
         )
         return result
@@ -652,7 +676,7 @@ class SubprocessExecutor:
     ) -> ProcessHandle:
         inherited = step.inherit_stdio
         started = time.perf_counter()
-        _notify(observer, StepEvent(step_id=step.step_id, kind="started"))
+        _notify(observer, event_for_step(step, "started", elapsed=0.0))
         try:
             process = subprocess.Popen(
                 list(step.argv),
@@ -671,7 +695,12 @@ class SubprocessExecutor:
         except OSError as error:
             _notify(
                 observer,
-                StepEvent(step_id=step.step_id, kind="failed", error=_safe_error(step, error)),
+                event_for_step(
+                    step,
+                    "failed",
+                    error=_safe_error(step, error),
+                    elapsed=time.perf_counter() - started,
+                ),
             )
             raise ProcessSpawnError(
                 step.argv,
@@ -687,6 +716,9 @@ class SubprocessExecutor:
             process_group_id=group_id,
             session_id=group_id,
             inherited_stdio=inherited,
+            observer=observer,
+            step=step,
+            started_at=started,
         )
 
 
@@ -714,10 +746,10 @@ def _notify_output(
     safe = cast(
         "str", redacted_projection(text, secrets=_captured_error_secrets(step), field=stream)
     )
-    if stream == "stdout":
-        _notify(observer, StepEvent(step_id=step.step_id, kind="stdout", chunk=safe))
-    else:
-        _notify(observer, StepEvent(step_id=step.step_id, kind="stderr", chunk=safe))
+    _notify(
+        observer,
+        event_for_step(step, cast("Literal['stdout', 'stderr']", stream), chunk=safe),
+    )
 
 
 def _safe_error(step: PreparedStep, error: BaseException) -> str:
@@ -989,7 +1021,7 @@ def terminate(
         handle.wait(timeout=timeout)
 
 
-def wait_foreground(handle: ProcessHandle) -> int:
+def wait_foreground(handle: ProcessHandle) -> int:  # noqa: C901
     interrupted = False
     process_group_id = handle.process_group_id or handle.pid
     previous = signal.getsignal(signal.SIGINT)
@@ -1033,7 +1065,24 @@ def wait_foreground(handle: ProcessHandle) -> int:
                 terminate(handle, process_group_id=process_group_id)
         if sys.platform != "win32":
             signal.signal(signal.SIGINT, previous)
-    return 130 if interrupted else exit_code
+    result = 130 if interrupted else exit_code
+    if handle.observer is not None and handle.step is not None:
+        elapsed = (
+            max(0.0, time.perf_counter() - handle.started_at)
+            if handle.started_at is not None
+            else None
+        )
+        _notify(
+            handle.observer,
+            event_for_step(
+                handle.step,
+                "failed" if interrupted else "completed",
+                returncode=result,
+                elapsed=elapsed,
+                error="interrupted" if interrupted else None,
+            ),
+        )
+    return result
 
 
 __all__ = [

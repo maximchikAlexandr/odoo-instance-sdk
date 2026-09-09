@@ -13,6 +13,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -126,9 +127,9 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
             "init",
             "--no-input",
             "--odoo-bin",
-            "/opt/odoo/odoo-bin",
+            sys.executable,
             "--python",
-            "python3",
+            sys.executable,
             "--config",
             str(source_config),
             "--project",

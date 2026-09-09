@@ -58,8 +58,12 @@ def test_backup_list_and_show_are_context_independent_and_format_parity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path, backup_path = _seed_backup(tmp_path)
-    json_result = _invoke(monkeypatch, db_path, ["backup", "list", "--format", "json"])
-    toon_result = _invoke(monkeypatch, db_path, ["backup", "list", "--format", "toon"])
+    json_result = _invoke(
+        monkeypatch, db_path, ["backup", "list", "--all-projects", "--format", "json"]
+    )
+    toon_result = _invoke(
+        monkeypatch, db_path, ["backup", "list", "--all-projects", "--format", "toon"]
+    )
     assert json_result.exit_code == toon_result.exit_code == 0
     json_payload = json.loads(json_result.stdout)
     from toon import DecodeOptions, decode
@@ -77,6 +81,24 @@ def test_backup_list_and_show_are_context_independent_and_format_parity(
     abbreviated = _invoke(monkeypatch, db_path, ["backup", "show", BACKUP_ID[:8], "--json"])
     assert abbreviated.exit_code == 1
     assert json.loads(abbreviated.stdout)["error"]["code"] == "backup_show_failed"
+
+
+def test_backup_list_requires_project_or_explicit_global_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path, _backup_path = _seed_backup(tmp_path)
+    refused = _invoke(monkeypatch, db_path, ["backup", "list", "--json"])
+    assert refused.exit_code == 1
+    payload = json.loads(refused.stdout)
+    assert payload["ok"] is False
+    assert "run odcli init" in payload["error"]["message"]
+
+    global_result = _invoke(monkeypatch, db_path, ["backup", "list", "--all-projects", "--json"])
+    assert global_result.exit_code == 0
+    assert json.loads(global_result.stdout)["provenance"] == {
+        "project_source": "null",
+        "environment_source": "null",
+    }
 
 
 def test_backup_delete_dry_run_and_machine_confirmation_gate_precede_mutation(

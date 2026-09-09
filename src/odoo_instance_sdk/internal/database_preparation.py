@@ -28,6 +28,7 @@ from odoo_instance_sdk.exceptions import (
     MasterPasswordRequiredError,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
+from odoo_instance_sdk.internal.generated_config import project_generated_config_path
 from odoo_instance_sdk.internal.git_worktree import (
     rev_parse_git_common_dir,
     rev_parse_toplevel,
@@ -46,6 +47,7 @@ from odoo_instance_sdk.internal.project_env import (
 )
 from odoo_instance_sdk.internal.project_runtime import (
     is_uv_python_selector,
+    resolve_project_http_port,
     resolve_project_runtime,
     resolve_uv_executable,
     uv_run_prefix,
@@ -419,6 +421,10 @@ def _resolve_source_config(project: ProjectConfig, root: Path) -> Path:
     path = path.resolve()
     if not path.is_file():
         raise InstanceConfigurationError("local source config is missing")
+    if project.postgres is not None and project.postgres.mode == "compose":
+        generated = project_generated_config_path(root)
+        if generated.is_file():
+            return generated
     return path
 
 
@@ -525,6 +531,7 @@ def build_target_instance(
     project_id: str,
     project_environment: Mapping[str, str] | None = None,
     target_config_path: Path | None = None,
+    preferred_http_port: int | None = None,
 ) -> Iterator[OdooInstance]:
     """Build a target-only instance and remove its ephemeral config on exit."""
     from odoo_instance_sdk.config import InstanceConfig
@@ -534,11 +541,16 @@ def build_target_instance(
     try:
         _write_target_config(source_config, target_config, target_database)
         parsed = parse_odoo_config(target_config)
-        local_url = normalize_base_url(infer_base_url(parsed))
-        assert_local(local_url)
         from odoo_instance_sdk.models import StartConfig
 
         start_config = StartConfig.from_odoo_config(target_config)
+        start_config.http_port = resolve_project_http_port(
+            preferred_http_port, start_config.http_port
+        )
+        local_url = normalize_base_url(
+            f"http://{start_config.http_interface}:{start_config.http_port}"
+        )
+        assert_local(local_url)
         db_port = start_config.db_port
         if start_config.db_host and db_port is None:
             db_port = 5432
@@ -730,6 +742,14 @@ def _restore_preflight(  # noqa: C901
                 )
         source_config = _resolve_source_config(current, root)
         local_cfg = parse_odoo_config(source_config)
+        configured_http_port = local_cfg.get("http_port")
+        try:
+            parsed_http_port = int(configured_http_port) if configured_http_port else None
+        except ValueError:
+            parsed_http_port = None
+        local_cfg["http_port"] = str(
+            resolve_project_http_port(current.preferred_http_port, parsed_http_port)
+        )
         local_password = local_cfg.get("admin_passwd")
         if local_password is None or not local_password.strip():
             raise MasterPasswordRequiredError("local source config has no admin_passwd")
@@ -884,6 +904,7 @@ def prepare_restore(  # noqa: C901
                         target_config_path=restore_inputs[1]
                         if restore_inputs is not None
                         else None,
+                        preferred_http_port=current.preferred_http_port,
                     ) as target_instance:
                         target_instance.databases.reset_admin_password()
                     reset_completed = True
@@ -1166,6 +1187,9 @@ def _preparation_process_steps(
 
         runtime = resolve_runtime_binding(initial, root)
         start_config = StartConfig.from_odoo_config(source_config)
+        start_config.http_port = resolve_project_http_port(
+            initial.preferred_http_port, start_config.http_port
+        )
         if restore_inputs is None:
             raise ConfigError("reset admin preparation inputs were not captured")
         start_config.config_path = str(restore_inputs[1])

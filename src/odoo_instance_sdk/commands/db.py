@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import uuid
 from collections.abc import Callable
+from io import StringIO
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -14,6 +14,7 @@ else:
     import rich_click as click
 
 from rich.console import Console
+from rich.table import Table
 
 from odoo_instance_sdk.commands.context import (
     CliContext,
@@ -37,6 +38,8 @@ from odoo_instance_sdk.commands.output import (
     run_rich_bounded,
 )
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
+from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     DatabaseRefreshOptions,
@@ -135,7 +138,7 @@ def db_refresh(
                 "Callable[[DatabasePreparationResult | None], dict[str, JsonValue]]", model_to_dict
             ),
             provenance={"project_source": project_provenance(ctx)},
-            rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
+            rich=_rich_refresh,
             observer=observer,
             observe_output=show_command_output,
             progress=True,
@@ -338,7 +341,7 @@ def db_reset_admin_password(
             ),
             context={"environment_id": str(environment.id)},
             provenance=cast("dict[str, JsonValue]", runtime_context.output_provenance),
-            rich=lambda document: json.dumps(document.result, indent=2, sort_keys=True),
+            rich=_rich_admin_reset,
         )
     except Exception as exc:
         fail(output_mode, "db.reset-admin-password", exc)
@@ -433,6 +436,52 @@ def _drop_rich(document: OutputDocument) -> str:
     return f"Dropped database {payload['database']} on {payload['cluster']}"
 
 
+def _rich_refresh(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    payload = document.result if isinstance(document.result, dict) else {}
+    if "steps" in payload:
+        return _rich_plan_projection(document)
+    table = Table("Field", "Value", title="Database refresh")
+    for field in (
+        "mode",
+        "restored_database",
+        "source_git_branch",
+        "branch_origin",
+        "admin_password_reset",
+        "default_switched",
+        "previous_default",
+        "effective_default",
+    ):
+        value = payload.get(field)
+        if value is not None:
+            table.add_row(field.replace("_", " ").title(), rich_cell(value))
+    retained = payload.get("retained_artifacts")
+    if isinstance(retained, list) and retained:
+        table.add_row("Retained artifacts", rich_cell(", ".join(str(item) for item in retained)))
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print(table)
+    return output.getvalue().rstrip()
+
+
+def _rich_admin_reset(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    payload = document.result if isinstance(document.result, dict) else {}
+    if "steps" in payload:
+        return _rich_plan_projection(document)
+    table = Table("Field", "Value", title="Administrator password reset")
+    for field in ("database", "completed", "xml_id", "environment_id"):
+        value = payload.get(field)
+        if value is not None:
+            table.add_row(field.replace("_", " ").title(), rich_cell(value))
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print(table)
+    return output.getvalue().rstrip()
+
+
 def _restore_rich(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
@@ -442,25 +491,42 @@ def _restore_rich(document: OutputDocument) -> str:
     database = payload.get("restored_database", "")
     backup = payload.get("backup")
     backup_id = backup.get("id") if isinstance(backup, dict) else backup
-    details = f"Restored database {database}"
+    table = Table("Field", "Value", title="Database restore")
+    table.add_row("Database", rich_cell(database))
     if backup_id:
-        details += f" from backup {backup_id}"
-    return details
+        table.add_row("Backup", rich_cell(backup_id))
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print(table)
+    return output.getvalue().rstrip()
 
 
 def _list_rich(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
     payload = document.result if isinstance(document.result, dict) else {}
     rows = payload.get("databases", [])
     if not isinstance(rows, list) or not rows:
         return "No databases"
-    return "\n".join(
-        f"{row.get('name', '')} cluster={row.get('cluster', '')} "
-        f"size={row.get('logical_size_bytes', 'unknown')} "
-        f"sessions={row.get('active_sessions', 0)} "
-        f"default={row.get('is_default', False)} origin={row.get('origin', 'unknown')}"
-        for row in rows
-        if isinstance(row, dict)
-    )
+    table = Table("Database", "Size", "Sessions", "Default", "Origin")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        size = row.get("logical_size_bytes")
+        table.add_row(
+            rich_cell(row.get("name", "")),
+            rich_cell(
+                _human_bytes(size) if isinstance(size, int) and not isinstance(size, bool) else "—"
+            ),
+            rich_cell(row.get("active_sessions", 0)),
+            rich_cell(str(row.get("is_default", False)).lower()),
+            rich_cell(row.get("origin", "unknown")),
+        )
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print(rich_cell(f"Cluster: {payload.get('cluster', '—')}"))
+    console.print(table)
+    return output.getvalue().rstrip()
 
 
 def _validate_recorded_database_binding(

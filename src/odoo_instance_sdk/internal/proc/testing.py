@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import cast
@@ -11,9 +12,9 @@ from . import (
     PreparedProcess,
     PreparedStep,
     ProcessResultLike,
-    StepEvent,
     StepObserver,
     bounded_process_inputs,
+    event_for_step,
 )
 from .executor import ProcessHandle, ProcessResult, _notify, _notify_output, _safe_error
 
@@ -42,7 +43,7 @@ class RecordingExecutor:
     ) -> ProcessResultLike:
         prepared = cast("PreparedStep", step)
         self.executed.append(prepared)
-        _notify(observer, StepEvent(step_id=prepared.step_id, kind="started"))
+        _notify(observer, event_for_step(prepared, "started", elapsed=0.0))
         try:
             result: ProcessResultLike | None
             if self.result_factory is not None:
@@ -62,8 +63,11 @@ class RecordingExecutor:
         except Exception as error:
             _notify(
                 observer,
-                StepEvent(
-                    step_id=prepared.step_id, kind="failed", error=_safe_error(prepared, error)
+                event_for_step(
+                    prepared,
+                    "failed",
+                    error=_safe_error(prepared, error),
+                    elapsed=0.0,
                 ),
             )
             raise
@@ -73,7 +77,7 @@ class RecordingExecutor:
                     for chunk in self.stdout_chunks:
                         _notify(
                             observer,
-                            StepEvent(step_id=prepared.step_id, kind="stdout", chunk=chunk),
+                            event_for_step(prepared, "stdout", chunk=chunk),
                         )
                 else:
                     _notify_output(observer, prepared, result.stdout, "stdout")
@@ -81,7 +85,7 @@ class RecordingExecutor:
                     for chunk in self.stderr_chunks:
                         _notify(
                             observer,
-                            StepEvent(step_id=prepared.step_id, kind="stderr", chunk=chunk),
+                            event_for_step(prepared, "stderr", chunk=chunk),
                         )
                 else:
                     _notify_output(observer, prepared, result.stderr, "stderr")
@@ -90,7 +94,12 @@ class RecordingExecutor:
             returncode = None
         _notify(
             observer,
-            StepEvent(step_id=prepared.step_id, kind="completed", returncode=returncode),
+            event_for_step(
+                prepared,
+                "completed",
+                returncode=returncode,
+                elapsed=getattr(result, "duration", 0.0),
+            ),
         )
         return result
 
@@ -120,17 +129,25 @@ class RecordingExecutor:
     ) -> ProcessHandle:
         prepared = cast("PreparedStep", step)
         self.spawned.append(prepared)
-        _notify(observer, StepEvent(step_id=prepared.step_id, kind="started"))
+        started = time.perf_counter()
+        _notify(observer, event_for_step(prepared, "started", elapsed=0.0))
         try:
-            return self.handles[prepared.step_id]
+            handle = self.handles[prepared.step_id]
         except Exception as error:
             _notify(
                 observer,
-                StepEvent(
-                    step_id=prepared.step_id, kind="failed", error=_safe_error(prepared, error)
+                event_for_step(
+                    prepared,
+                    "failed",
+                    error=_safe_error(prepared, error),
+                    elapsed=time.perf_counter() - started,
                 ),
             )
             raise
+        handle.observer = observer
+        handle.step = prepared
+        handle.started_at = started
+        return handle
 
 
 __all__ = ["RecordingExecutor"]

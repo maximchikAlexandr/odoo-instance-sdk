@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import msgspec
+from rich.console import Console
+from rich.table import Table
 
 if TYPE_CHECKING:
     import click
@@ -33,6 +35,8 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     run_or_preview,
 )
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
+from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.models import PostgresClusterState
 
 if TYPE_CHECKING:
@@ -57,41 +61,45 @@ def _postgres_cluster(ctx: CliContext) -> PostgresCluster:
 
 def _cluster_rich(document: OutputDocument) -> str:
     payload = document.result if isinstance(document.result, dict) else {}
-    endpoint = payload.get("endpoint", "—")
-    parts = [
-        f"mode={payload.get('mode', 'unknown')} owned={payload.get('owned', False)} "
-        f"state={payload.get('state', 'unknown')} endpoint={endpoint}"
-    ]
+    table = Table("Field", "Value", title="PostgreSQL cluster")
+    table.add_row("Mode", rich_cell(payload.get("mode", "unknown")))
+    table.add_row("Owned", rich_cell(str(payload.get("owned", False)).lower()))
+    table.add_row("State", rich_cell(payload.get("state", "unknown")))
+    table.add_row("Endpoint", rich_cell(payload.get("endpoint", "—")))
     container = payload.get("container")
     if isinstance(container, dict):
         if container.get("id"):
-            parts.append(f"container={str(container['id'])[:12]}")
+            table.add_row("Container", rich_cell(str(container["id"])[:12]))
         if container.get("pid") is not None:
             scope = "vm" if container.get("pid_scope") == "docker_vm" else "host"
-            parts.append(f"pid={scope}:{container['pid']}")
+            table.add_row("Process", rich_cell(f"{scope}:{container['pid']}"))
     metrics = payload.get("metrics")
     if isinstance(metrics, dict):
         cpu = metrics.get("cpu_percent")
         memory = metrics.get("memory_usage_bytes")
         volume = metrics.get("volume_usage_bytes")
         if isinstance(cpu, (int, float)):
-            parts.append(f"cpu={float(cpu):.1f}%")
+            table.add_row("CPU", rich_cell(f"{float(cpu):.1f}%"))
         if isinstance(memory, (int, float)):
-            parts.append(f"ram={int(memory) / 1024**2:.1f} MiB")
+            table.add_row("RAM", rich_cell(_human_bytes(int(memory))))
         if isinstance(volume, (int, float)):
-            parts.append(f"disk={int(volume) / 1024**3:.1f} GiB")
+            table.add_row("Disk", rich_cell(_human_bytes(int(volume))))
     server = payload.get("server")
     if isinstance(server, dict):
-        parts.append(
-            "server="
-            f"{server.get('version', 'unknown')} "
-            f"uptime={server.get('uptime_seconds', 0)}s "
-            f"connections={server.get('connections_active', 0)}/"
-            f"{server.get('connections_total', 0)}"
+        table.add_row("Server", rich_cell(server.get("version", "unknown")))
+        table.add_row("Uptime", rich_cell(f"{server.get('uptime_seconds', 0)}s"))
+        table.add_row(
+            "Connections",
+            rich_cell(
+                f"{server.get('connections_active', 0)}/{server.get('connections_total', 0)}"
+            ),
         )
     elif payload.get("server_unavailability_reason") is not None:
-        parts.append(f"server={payload['server_unavailability_reason']}")
-    return " ".join(parts)
+        table.add_row("Server", rich_cell(payload["server_unavailability_reason"]))
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=120)
+    console.print(table)
+    return output.getvalue().rstrip()
 
 
 def _database_instance(ctx: CliContext) -> tuple[DevelopmentEnvironment | None, OdooInstance]:
@@ -119,11 +127,7 @@ def _database_instance(ctx: CliContext) -> tuple[DevelopmentEnvironment | None, 
         if ctx.env is not None:
             raise
         project = ProjectConfig.load(project_root)
-        if project.source_config is None:
-            raise
-        instance = client.instance.from_config(project.source_config)
-        instance._postgres_cluster = PostgresCluster.from_project(project_root)
-        return None, instance
+        return None, client.instance.from_project(project)
     if Path(environment.repository_root).resolve() != project_root:
         raise RuntimeError(
             f"Environment {environment.name} ({environment.id}) does not belong to project "
@@ -153,11 +157,13 @@ def _database_resource(
 
 def _render_rows(title: str, rows: JsonValue) -> str:
     """Render one typed row collection as a Rich table without changing data."""
-    from rich.console import Console
-    from rich.table import Table
-
     output = StringIO()
     console = Console(file=output, color_system=None, force_terminal=False, width=120)
+    console.print(_rows_table(title, rows))
+    return output.getvalue().rstrip()
+
+
+def _rows_table(title: str, rows: JsonValue) -> Table:
     table = Table(title=title)
     if not isinstance(rows, (list, tuple)) or not rows:
         table.add_column("value")
@@ -167,16 +173,26 @@ def _render_rows(title: str, rows: JsonValue) -> str:
         payload = first
         if not isinstance(payload, dict):
             table.add_column("value")
-            table.add_row(str(payload))
+            table.add_row(rich_cell(payload))
         else:
             columns = tuple(str(key) for key in payload)
             for column in columns:
-                table.add_column(column)
+                table.add_column(rich_cell(column))
             for row in rows:
                 value = row
                 if isinstance(value, dict):
-                    table.add_row(*(str(value.get(column, "")) for column in columns))
-    console.print(table)
+                    table.add_row(*(rich_cell(value.get(column, "")) for column in columns))
+    return table
+
+
+def _render_row_sections(*sections: tuple[str, JsonValue]) -> str:
+    """Render related result sets in one spaced Rich document."""
+    output = StringIO()
+    console = Console(file=output, color_system=None, force_terminal=False, width=120)
+    for index, (title, rows) in enumerate(sections):
+        if index:
+            console.print()
+        console.print(_rows_table(title, rows))
     return output.getvalue().rstrip()
 
 
@@ -187,31 +203,36 @@ def _locks_rich(document: OutputDocument) -> str:
 
 def _stats_rich(document: OutputDocument) -> str:
     payload = document.result if isinstance(document.result, dict) else {}
-    return "\n".join(
-        (
-            _render_rows("Tables", payload.get("tables", [])),
-            _render_rows("Indexes", payload.get("indexes", [])),
-        )
+    return _render_row_sections(
+        ("Tables", payload.get("tables", [])),
+        ("Indexes", payload.get("indexes", [])),
     )
 
 
 def _bloat_rich(document: OutputDocument) -> str:
     payload = document.result if isinstance(document.result, dict) else {}
-    return "\n".join(
-        (
-            _render_rows("Tables", payload.get("tables", [])),
-            _render_rows("Indexes", payload.get("indexes", [])),
-        )
+    return _render_row_sections(
+        ("Tables", payload.get("tables", [])),
+        ("Indexes", payload.get("indexes", [])),
     )
 
 
 def _monitoring_rich(document: OutputDocument) -> str:
     payload = document.result if isinstance(document.result, dict) else {}
-    return "installed={installed} already_present={already} skipped={skipped}".format(
-        installed=payload.get("installed", ()),
-        already=payload.get("already_present", ()),
-        skipped=payload.get("skipped", ()),
-    )
+    table = Table("Outcome", "Extensions", title="PostgreSQL monitoring")
+    for field, label in (
+        ("installed", "Installed"),
+        ("already_present", "Already present"),
+        ("skipped", "Skipped"),
+    ):
+        values = payload.get(field, ())
+        if not isinstance(values, (list, tuple)):
+            values = ()
+        table.add_row(label, rich_cell(", ".join(str(value) for value in values) or "none"))
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=120)
+    console.print(table)
+    return output.getvalue().rstrip()
 
 
 def _run_database_command(
@@ -474,11 +495,7 @@ def postgres_approve_image(
                 else None,
                 "digest": image_digest,
             },
-            rich=lambda document: (
-                f"approved image={document.result.get('image')} digest={image_digest}"
-                if isinstance(document.result, dict)
-                else ""
-            ),
+            rich=lambda document: _approval_rich(document, image_digest),
             progress=True,
         )
     except Exception as exc:
@@ -486,6 +503,20 @@ def postgres_approve_image(
 
         fail(output_mode, "postgres.approve-image", exc)
     sys.exit(status)
+
+
+def _approval_rich(document: OutputDocument, digest: str) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
+    table = Table("Field", "Value", title="PostgreSQL image approval")
+    table.add_row("Image", rich_cell(result.get("image", "—")))
+    table.add_row("Digest", rich_cell(digest))
+    table.add_row("Status", "approved")
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=120)
+    console.print(table)
+    return output.getvalue().rstrip()
 
 
 @postgres_group.command("status", help="Show the project PostgreSQL cluster status.")

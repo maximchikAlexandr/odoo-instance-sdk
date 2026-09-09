@@ -23,6 +23,7 @@ from odoo_instance_sdk.exceptions import (
     LogfileAccessError,
     NonLocalInstanceError,
 )
+from odoo_instance_sdk.internal.generated_config import project_generated_config_path
 from odoo_instance_sdk.internal.locks import environment_lock_path, exclusive_lock, shared_lock
 from odoo_instance_sdk.internal.odoo_config import (
     infer_base_url,
@@ -48,6 +49,7 @@ from odoo_instance_sdk.internal.project_env import (
     load_project_environment,
     project_environment_secret_values,
 )
+from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.internal.server import (
     _write_secret_config,
@@ -270,7 +272,15 @@ class InstanceFactory:
 
         root = project.repository_root.resolve()
         project_environment = load_project_environment(root)
-        config_path = _project_path(root, project.source_config, field="source_config")
+        generated_config_path = project_generated_config_path(root)
+        if (
+            project.postgres is not None
+            and project.postgres.mode == "compose"
+            and generated_config_path.is_file()
+        ):
+            config_path = generated_config_path
+        else:
+            config_path = _project_path(root, project.source_config, field="source_config")
         odoo_bin = _project_path(root, project.odoo_bin, field="odoo_bin")
         python_bin, deferred_runtime = _project_runtime_binding(root, project, odoo_bin)
         default_cwd = (
@@ -280,8 +290,9 @@ class InstanceFactory:
         )
 
         start_cfg = StartConfig.from_odoo_config(config_path)
-        if project.preferred_http_port is not None:
-            start_cfg.http_port = project.preferred_http_port
+        start_cfg.http_port = resolve_project_http_port(
+            project.preferred_http_port, start_cfg.http_port
+        )
         if project.default_source_database is not None:
             start_cfg.db_name = project.default_source_database
         normalized = normalize_base_url(f"http://{start_cfg.http_interface}:{start_cfg.http_port}")
@@ -1020,9 +1031,7 @@ class OdooInstance:
                     from odoo_instance_sdk.internal.server import wait_foreground_process
 
                     return wait_foreground_process(
-                        handle.process,
-                        observer=context.observer,
-                        step_id=step.step_id,
+                        handle,
                     )
                 except BaseException:
                     if handle is not None:

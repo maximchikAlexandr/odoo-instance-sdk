@@ -32,6 +32,7 @@ classification is bounded and whose contract requires `--dry-run`:
 | --- | --- |
 | `init` | mutating-or-spawning |
 | `env checkout` | mutating-or-spawning |
+| `env path` | bounded-read-only |
 | `env remove` | mutating-or-spawning |
 | `env sync` | mutating-or-spawning |
 | `backup delete` | mutating-or-spawning |
@@ -143,22 +144,22 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:954-955` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:1102-1103` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
-- `src/odoo_instance_sdk/commands/env.py:378` — existing Rich-live inventory
+- `src/odoo_instance_sdk/commands/env.py:454` — existing Rich-live inventory
   transport; remove when Rich live output is supplied by a distinct transport
   adapter rather than the live command callback.
-- `src/odoo_instance_sdk/commands/output.py:234` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:238` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:358` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:362` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:360` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:364` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:367` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:371` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:369` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:373` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:1068` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance.py:1077` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 

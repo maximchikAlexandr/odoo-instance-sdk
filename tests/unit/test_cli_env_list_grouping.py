@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from inspect import getsource
 from typing import Any, ClassVar, cast
 
+import msgspec
 import pytest
 from click.testing import CliRunner
 from rich.console import Console, Group
@@ -34,7 +35,8 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.resources.environment import EnvironmentState
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
-from tests.unit.monitor_support import FakeProcessProvider
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from tests.unit.monitor_support import FakeProcessProvider, make_env
 
 
 @pytest.fixture(autouse=True)
@@ -179,11 +181,21 @@ def _snapshot(
     )
 
 
-def _patch_snapshot(monkeypatch: pytest.MonkeyPatch, snapshot: Snapshot) -> None:
+def _patch_snapshot(
+    monkeypatch: pytest.MonkeyPatch, snapshot: Snapshot, *, use_catalogue: bool = False
+) -> None:
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda self, project_id=None, *, include_removed=False: snapshot,
     )
+    if not use_catalogue:
+        monkeypatch.setattr(
+            env_commands,
+            "_catalog_worktree_paths",
+            lambda _monitor, *, include_removed: {
+                env.id: "/worktree" for env in snapshot.environments
+            },
+        )
 
 
 def _render_snapshot(snapshot: Snapshot) -> str:
@@ -355,6 +367,129 @@ def test_env_list_json_emits_snapshot_contract(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.unit
+def test_env_list_joins_catalogue_worktree_by_environment_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    project = ProjectSummary(
+        id="project_comerta_abc12345",
+        name="comerta",
+        display_hint="comerta_abc12345",
+        environment_count=1,
+        cluster=_healthy_cluster(),
+        runtime=None,
+    )
+    env = _env()
+    snapshot = _snapshot((project,), (env,))
+    worktree = tmp_path / ("registered-" + "very-long-" * 12 + "worktree")
+    worktree.mkdir()
+    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog.create_environment(make_env(env.id, worktree_path=str(worktree)))
+    catalog.close()
+    monitor = EnvironmentMonitor(catalog_path=catalog_path)
+    _patch_snapshot(monkeypatch, snapshot, use_catalogue=True)
+    monkeypatch.setattr(env_commands, "_monitor_class", lambda: lambda: monitor)
+    assert env_commands._catalog_worktree_paths(monitor, include_removed=False) == {
+        env.id: str(worktree)
+    }
+    machine_projection = msgspec.to_builtins(snapshot)
+    env_commands._add_cli_worktree_paths(machine_projection, {env.id: str(worktree)})
+    assert machine_projection["environments"][0]["worktree_path"] == str(worktree)
+
+    json_result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    assert json_result.exit_code == 0, json_result.output
+    json_row = json.loads(json_result.output)["result"]["environments"][0]
+    assert json_row.get("worktree_path") == str(worktree), json_result.output
+
+    toon_result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "toon"])
+    assert toon_result.exit_code == 0, toon_result.output
+    from toon import DecodeOptions, decode
+
+    toon_row = decode(toon_result.stdout, DecodeOptions(indent=2, strict=True))["result"][
+        "environments"
+    ][0]
+    assert toon_row["worktree_path"] == str(worktree)
+
+    rich_console = Console(record=True, color_system=None, width=300)
+    rich_console.print(env_commands._render_env_list_rich(snapshot, {env.id: str(worktree)}))
+    rich_output = rich_console.export_text()
+    assert "WORKTREE" in rich_output
+    assert str(worktree) in rich_output
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("catalogue_state", ["missing", "read-failure"])
+def test_env_list_fails_closed_when_catalogue_cannot_enrich(
+    catalogue_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    project = ProjectSummary(
+        id="project_comerta_abc12345",
+        name="comerta",
+        display_hint="comerta_abc12345",
+        environment_count=1,
+        cluster=_healthy_cluster(),
+        runtime=None,
+    )
+    env = _env()
+    snapshot = _snapshot((project,), (env,))
+    catalog_path = tmp_path / "catalog.sqlite3"
+    if catalogue_state == "read-failure":
+        catalog = BackupCatalog(db_path=catalog_path)
+        catalog.create_environment(make_env(env.id))
+        catalog.close()
+
+        def fail_read(*_args: Any, **_kwargs: Any) -> list[Any]:
+            raise OSError("catalogue read failed at private path")
+
+        monkeypatch.setattr(BackupCatalog, "list_environments", fail_read)
+    monitor = EnvironmentMonitor(catalog_path=catalog_path)
+    _patch_snapshot(monkeypatch, snapshot, use_catalogue=True)
+    monkeypatch.setattr(env_commands, "_monitor_class", lambda: lambda: monitor)
+
+    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert "catalogue" in payload["error"]["message"]
+    assert "worktree" in payload["error"]["message"]
+    assert str(tmp_path) not in result.output
+
+
+@pytest.mark.unit
+def test_env_list_fails_closed_for_incomplete_uuid_join(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    project = ProjectSummary(
+        id="project_comerta_abc12345",
+        name="comerta",
+        display_hint="comerta_abc12345",
+        environment_count=1,
+        cluster=_healthy_cluster(),
+        runtime=None,
+    )
+    env = _env()
+    snapshot = _snapshot((project,), (env,))
+    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    catalog.create_environment(
+        make_env("22222222-2222-2222-2222-222222222222", worktree_path="/other")
+    )
+    catalog.close()
+    monitor = EnvironmentMonitor(catalog_path=catalog_path)
+    _patch_snapshot(monkeypatch, snapshot, use_catalogue=True)
+    monkeypatch.setattr(env_commands, "_monitor_class", lambda: lambda: monitor)
+
+    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert "environment" in payload["error"]["message"]
+    assert "worktree" in payload["error"]["message"]
+
+
+@pytest.mark.unit
 def test_env_list_all_json_omits_removed_human_includes_removed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -388,6 +523,14 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
         lambda self, project_id=None, *, include_removed=False: (
             all_snapshot if include_removed else active_snapshot
         ),
+    )
+    monkeypatch.setattr(
+        env_commands,
+        "_catalog_worktree_paths",
+        lambda _monitor, *, include_removed: {
+            env.id: "/worktree",
+            removed_env.id: "/removed-worktree",
+        },
     )
 
     # --json --all: only non-removed snapshot; removed is NOT in the payload.

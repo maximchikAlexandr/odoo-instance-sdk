@@ -687,6 +687,8 @@ def collect_resource_inventory(
     backup_root: Path | None = None,
     owned_directories: Sequence[Path] = (),
     database_measurement_reason: str | None = None,
+    project_id: str | None = None,
+    all_projects: bool = False,
 ) -> ResourceInventory:
     """Read existing catalogue projections, then build the same pure graph.
 
@@ -700,9 +702,11 @@ def collect_resource_inventory(
     env_sources = tuple(environments)
     project_sources = tuple(projects)
     if catalog is not None:
-        page = catalog._list_backup_projections(include_all_states=True, limit=1000)
+        page = catalog._list_backup_projections(
+            include_all_states=True, limit=1000, project_id=project_id
+        )
         backups = page.items
-        rows = catalog._monitor_snapshot_rows(include_removed=False)
+        rows = catalog._monitor_snapshot_rows(include_removed=False, project_id=project_id)
         if not env_sources:
             env_sources = tuple(
                 EnvironmentResourceSource(
@@ -720,20 +724,29 @@ def collect_resource_inventory(
                 )
                 for row, _runtime in rows.environments
             )
-        if not project_sources:
-            project_sources = tuple(
-                ProjectResourceSource(
-                    project_id=str(row["project_id"]),
-                    repository_root=Path(str(row["repository_root"])),
-                )
-                for row in rows.projects
+        catalog_projects = tuple(
+            ProjectResourceSource(
+                project_id=str(row["project_id"]),
+                repository_root=Path(str(row["repository_root"])),
             )
+            for row in rows.projects
+        )
+        if all_projects:
+            by_project = {source.project_id: source for source in project_sources}
+            by_project.update({source.project_id: source for source in catalog_projects})
+            project_sources = tuple(by_project.values())
+        elif not project_sources:
+            project_sources = catalog_projects
     known_files = {
         Path(str(projection.backup.path)).resolve(strict=False)
         for projection in backups
         if projection.backup.path
     }
-    discovered_roots = tuple(owned_directories) + ((backup_root,) if backup_root else ())
+    discovered_roots = (
+        ()
+        if project_id is not None
+        else tuple(owned_directories) + ((backup_root,) if backup_root else ())
+    )
     discovered_files = _read_only_files(discovered_roots, known_files)
     return build_resource_inventory(
         backups=backups,

@@ -43,6 +43,12 @@ def test_fresh_install_creates_v14_directly(tmp_path: Path) -> None:
     assert "environment_events" in tables
     assert "runtime" in tables
     assert "projects" in tables
+    for child_table in ("environment_events", "environment_copy_journal"):
+        environment_foreign_keys = {
+            (foreign_key[3], foreign_key[2], foreign_key[4])
+            for foreign_key in catalog._conn.execute(f"PRAGMA foreign_key_list({child_table})")
+        }
+        assert ("environment_id", "environments", "id") in environment_foreign_keys
     indexes = {r[1] for r in catalog._conn.execute("PRAGMA index_list(backups)").fetchall()}
     assert "backups_point_order_idx" in indexes
     catalog.close()
@@ -461,6 +467,16 @@ def _write_v7_catalog_with_environment(db: Path, env_id: str) -> None:
             message TEXT,
             FOREIGN KEY (environment_id) REFERENCES environments(id)
         );
+        CREATE TABLE environment_copy_journal (
+            environment_id TEXT PRIMARY KEY REFERENCES environments(id),
+            target_database TEXT NOT NULL,
+            db_host TEXT NOT NULL,
+            db_port INTEGER NOT NULL,
+            db_user TEXT,
+            backup_id TEXT REFERENCES backups(id),
+            stage TEXT NOT NULL CHECK (stage IN ('prepared', 'backed_up', 'restore_pending', 'restored', 'dropped', 'backup_deleted')),
+            updated_at TEXT NOT NULL
+        );
         CREATE UNIQUE INDEX environments_one_active_branch
             ON environments(git_common_dir, branch) WHERE state <> 'removed';
     """)
@@ -504,6 +520,12 @@ def _write_v7_catalog_with_environment(db: Path, env_id: str) -> None:
            VALUES (?, 'checkout', 'succeeded', '2026-01-01T00:00:00', NULL)""",
         (env_id,),
     )
+    conn.execute(
+        """INSERT INTO environment_copy_journal
+           (environment_id, target_database, db_host, db_port, db_user, backup_id, stage, updated_at)
+           VALUES (?, 'target', 'localhost', 5432, 'odoo', NULL, 'prepared', '2026-01-01T00:00:00')""",
+        (env_id,),
+    )
     conn.commit()
     conn.close()
 
@@ -522,6 +544,10 @@ def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
         "SELECT environment_id FROM environment_events WHERE environment_id=?",
         (env_id,),
     ).fetchone()
+    journal = catalog._conn.execute(
+        "SELECT environment_id, target_database FROM environment_copy_journal WHERE environment_id=?",
+        (env_id,),
+    ).fetchone()
 
     assert version == 14
     assert "http_port" not in columns
@@ -531,11 +557,26 @@ def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
     assert row["name"] == "test"
     assert row["branch"] == "main"
     assert event is not None
-    foreign_tables = {
-        row[2] for row in catalog._conn.execute("PRAGMA foreign_key_list(environment_events)")
-    }
-    assert foreign_tables == {"environments"}
+    assert event["environment_id"] == env_id
+    assert journal is not None
+    assert journal["environment_id"] == env_id
+    assert journal["target_database"] == "target"
+    for child_table in ("environment_events", "environment_copy_journal"):
+        environment_foreign_tables = {
+            foreign_key[2]
+            for foreign_key in catalog._conn.execute(f"PRAGMA foreign_key_list({child_table})")
+            if foreign_key[3] == "environment_id"
+        }
+        assert environment_foreign_tables == {"environments"}
+    catalog._conn.execute("PRAGMA foreign_keys=ON")
     catalog.add_environment_event(env_id, "use", "succeeded", message="after migration")
+    event_ids = [
+        event_row[0]
+        for event_row in catalog._conn.execute(
+            "SELECT environment_id FROM environment_events ORDER BY sequence"
+        )
+    ]
+    assert event_ids == [env_id, env_id]
     catalog.close()
 
 

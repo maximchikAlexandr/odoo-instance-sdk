@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -15,6 +15,7 @@ else:
 from rich.console import Console
 from rich.table import Table
 
+from odoo_instance_sdk.commands.context import CliContext, pass_cli_context, resolve_catalogue_scope
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
@@ -30,6 +31,8 @@ from odoo_instance_sdk.commands.output import (
     success_document,
 )
 from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
+from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import (
     BackupDeletionResult,
@@ -113,43 +116,97 @@ def _rich_table(document: OutputDocument) -> str:
     result = document.result if isinstance(document.result, dict) else {}
     backups = result.get("backups", [])
     if not isinstance(backups, list):
-        return json.dumps(result, ensure_ascii=False, default=str, indent=2)
+        return "No backups"
     table = Table("UUID", "Source", "Database", "State", "File", "Bytes", "Catalogue time")
     for item in backups:
         if not isinstance(item, dict):
             continue
+        recorded_bytes = item.get("recorded_bytes")
         table.add_row(
-            str(item.get("id", "")),
-            str(item.get("source_base_url", "")),
-            str(item.get("database_name", "")),
-            str(item.get("state", "")),
-            str(item.get("file_present", False)).lower(),
-            str(item.get("recorded_bytes", "")),
-            str(item.get("catalogue_time", "")),
+            rich_cell(item.get("id", "")),
+            rich_cell(item.get("source_base_url", "")),
+            rich_cell(item.get("database_name", "")),
+            rich_cell(item.get("state", "")),
+            rich_cell(str(item.get("file_present", False)).lower()),
+            rich_cell(
+                _human_bytes(recorded_bytes)
+                if isinstance(recorded_bytes, int) and not isinstance(recorded_bytes, bool)
+                else "—"
+            ),
+            rich_cell(item.get("catalogue_time", "")),
         )
-    console = Console(record=True, color_system=None, width=180)
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
     console.print(table)
     next_cursor = result.get("next_cursor")
     if next_cursor:
-        console.print(f"Next cursor: {next_cursor}")
-    return console.export_text().rstrip()
+        console.print(rich_cell(f"Next cursor: {next_cursor}"))
+    return output.getvalue().rstrip()
 
 
 def _rich_detail(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
-    return json.dumps(document.result, ensure_ascii=False, default=str, indent=2, sort_keys=True)
+    result = document.result if isinstance(document.result, dict) else {}
+    summary = Table("Field", "Value", title="Backup")
+    for field in (
+        "id",
+        "source_base_url",
+        "database_name",
+        "state",
+        "file_present",
+        "recorded_bytes",
+        "occupied_bytes",
+        "catalogue_time",
+    ):
+        value = result.get(field)
+        if field in {"recorded_bytes", "occupied_bytes"}:
+            value = (
+                _human_bytes(value)
+                if isinstance(value, int) and not isinstance(value, bool)
+                else "—"
+            )
+        summary.add_row(
+            field.replace("_", " ").title(),
+            rich_cell(value if value is not None else "—"),
+        )
+
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
+    console.print(summary)
+    for title, field in (
+        ("History", "history"),
+        ("Restore links", "restore_links"),
+        ("Environment links", "environment_links"),
+    ):
+        items = result.get(field)
+        if not isinstance(items, list) or not items:
+            continue
+        details = Table("Details", title=title)
+        for item in items:
+            details.add_row(rich_cell(item))
+        console.print()
+        console.print(details)
+    return output.getvalue().rstrip()
 
 
 def _rich_delete(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
-    if "plan" in result:
-        return "Delete plan:\n" + json.dumps(
-            result["plan"], ensure_ascii=False, default=str, indent=2, sort_keys=True
-        )
-    return json.dumps(result, ensure_ascii=False, default=str, indent=2, sort_keys=True)
+    plan = result.get("plan")
+    if isinstance(plan, dict):
+        table = Table("Field", "Value", title="Delete plan")
+        for field in ("backup_id", "path", "state", "file_present"):
+            if field in plan:
+                table.add_row(field.replace("_", " ").title(), rich_cell(plan[field]))
+        output = StringIO()
+        console = Console(file=output, color_system=None, width=180)
+        console.print("Delete plan:")
+        console.print(table)
+        return output.getvalue().rstrip()
+    backup_id = result.get("backup_id", result.get("id", "unknown"))
+    return f"Deleted backup {backup_id}."
 
 
 def _validation_status(projection: BackupProjection) -> BackupValidationStatus | None:
@@ -174,22 +231,27 @@ def backup_group() -> None:
 @click.option(
     "--all", "include_all_states", is_flag=True, default=False, help="Include all states."
 )
+@click.option("--all-projects", is_flag=True, default=False, help="List all project-owned records.")
 @click.option("--limit", type=click.IntRange(1, 1000), default=100, show_default=True)
 @click.option("--cursor", default=None, help="Opaque cursor returned by a previous page.")
 @output_options
+@pass_cli_context
 def backup_list(
+    ctx: CliContext,
     source_base_url: str | None,
     database_name: str | None,
     include_all_states: bool,
+    all_projects: bool,
     limit: int,
     cursor: str | None,
     output_format: str | None,
     json_output: bool,
 ) -> None:
-    """List state-aware backup projections without project context."""
+    """List state-aware backup projections for the current project."""
     mode = resolve_output_mode(output_format, json_output)
     catalog: BackupCatalog | None = None
     try:
+        project_id, project_source = resolve_catalogue_scope(ctx, all_projects)
         catalog = _catalog()
         if source_base_url is not None:
             source_base_url = normalize_base_url(source_base_url)
@@ -197,11 +259,16 @@ def backup_list(
             source_base_url=source_base_url,
             database_name=database_name,
             include_all_states=include_all_states,
+            project_id=project_id,
             limit=limit,
             cursor=cursor,
         )
         emit(
-            success_document(command="backup.list", result=_page_payload(page)),
+            success_document(
+                command="backup.list",
+                result=_page_payload(page),
+                provenance={"project_source": project_source, "environment_source": "null"},
+            ),
             mode,
             rich=_rich_table,
         )

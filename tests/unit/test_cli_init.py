@@ -88,6 +88,34 @@ def test_no_input_full_specified_writes(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0
     assert (tmp_path / ".odcli" / "project.toml").is_file()
+    assert (tmp_path / ".odcli" / ".gitignore").read_text() == ".env\nodoo.conf\n"
+    assert not (tmp_path / ".gitignore").exists()
+
+
+def test_init_preserves_existing_root_gitignore(tmp_path: Path) -> None:
+    root_ignore = tmp_path / ".gitignore"
+    root_ignore.write_text("project-specific-rule\n")
+    before = root_ignore.stat()
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "init",
+            "--no-input",
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--python",
+            "python3",
+            "--project",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert root_ignore.read_text() == "project-specific-rule\n"
+    assert root_ignore.stat().st_ino == before.st_ino
+    assert root_ignore.stat().st_mtime_ns == before.st_mtime_ns
+    assert (tmp_path / ".odcli" / ".gitignore").read_text() == ".env\nodoo.conf\n"
 
 
 def test_dry_run_json_returns_manifest_no_write(tmp_path: Path) -> None:
@@ -163,6 +191,96 @@ def test_non_identical_no_input_errors(tmp_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "differs" in result.output
+
+
+def test_non_identical_no_input_yes_replaces_manifest_atomically(tmp_path: Path) -> None:
+    runner = CliRunner()
+    first = runner.invoke(
+        cli,
+        [
+            "init",
+            "--no-input",
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--python",
+            "python3",
+            "--project",
+            str(tmp_path),
+        ],
+    )
+    assert first.exit_code == 0, first.output
+    manifest = tmp_path / ".odcli" / "project.toml"
+    before_inode = manifest.stat().st_ino
+
+    result = runner.invoke(
+        cli,
+        [
+            "init",
+            "--no-input",
+            "--yes",
+            "--odoo-bin",
+            "/opt/other/odoo-bin",
+            "--python",
+            "python3",
+            "--project",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "/opt/other/odoo-bin" in manifest.read_text()
+    assert manifest.stat().st_ino != before_inode
+    assert list((tmp_path / ".odcli").glob("project.toml*.tmp")) == []
+    assert not (tmp_path / ".gitignore").exists()
+
+
+def test_yes_dry_run_does_not_write_existing_manifest_or_ignore(tmp_path: Path) -> None:
+    runner = CliRunner()
+    first = runner.invoke(
+        cli,
+        [
+            "init",
+            "--no-input",
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--python",
+            "python3",
+            "--project",
+            str(tmp_path),
+        ],
+    )
+    assert first.exit_code == 0, first.output
+    manifest = tmp_path / ".odcli" / "project.toml"
+    ignore = tmp_path / ".odcli" / ".gitignore"
+    manifest_before = manifest.read_bytes()
+    ignore_before = ignore.read_bytes()
+    manifest_stat_before = manifest.stat()
+    ignore_stat_before = ignore.stat()
+
+    result = runner.invoke(
+        cli,
+        [
+            "init",
+            "--no-input",
+            "--yes",
+            "--dry-run",
+            "--odoo-bin",
+            "/opt/other/odoo-bin",
+            "--python",
+            "python3",
+            "--project",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert manifest.read_bytes() == manifest_before
+    assert ignore.read_bytes() == ignore_before
+    assert manifest.stat().st_ino == manifest_stat_before.st_ino
+    assert manifest.stat().st_mtime_ns == manifest_stat_before.st_mtime_ns
+    assert ignore.stat().st_ino == ignore_stat_before.st_ino
+    assert ignore.stat().st_mtime_ns == ignore_stat_before.st_mtime_ns
+    assert not (tmp_path / ".gitignore").exists()
 
 
 def test_wizard_prompts_for_missing_odoo_bin(tmp_path: Path) -> None:

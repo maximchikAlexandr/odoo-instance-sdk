@@ -343,13 +343,36 @@ def update_modules_command(
     if not modules:
         raise ConfigError("no installed modules to update")
     source = _update_modules_source(modules)
-    return instance._shell_script_command(source, commit=True, exclusive=True)
+    return instance._shell_script_command(
+        source,
+        commit=True,
+        exclusive=True,
+        result_converter=lambda result: _validate_module_update_result(result, modules),
+    )
+
+
+def _validate_module_update_result(
+    result: CommandResult, requested: tuple[str, ...]
+) -> CommandResult:
+    """Require Odoo to confirm every requested module before reporting success."""
+    if result.returncode != 0:
+        return result
+    payload = parse_payload(result.stdout)
+    updated = payload.get("result") if isinstance(payload, dict) else None
+    confirmed = updated.get("updated") if isinstance(updated, dict) else None
+    if not isinstance(confirmed, list) or not all(isinstance(name, str) for name in confirmed):
+        raise ConfigError("module update did not confirm all requested modules")
+    if not set(requested).issubset(confirmed):
+        raise ConfigError("module update did not confirm all requested modules")
+    return result
 
 
 def _update_modules_source(modules: tuple[str, ...]) -> str:
     modules_repr = json.dumps(list(modules))
     return (
-        f"_mods = env['ir.module.module'].search([('name', 'in', {modules_repr!r}), "
+        "import json as _mjson\n"
+        f"_requested = _mjson.loads({modules_repr!r})\n"
+        f"_mods = env['ir.module.module'].search([('name', 'in', _requested), "
         "('state', '=', 'installed')])\n"
         "_mods.button_immediate_upgrade()\n"
         "result = {'updated': list(_mods.mapped('name'))}\n"

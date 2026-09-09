@@ -279,6 +279,20 @@ def resolve_project_path(cli_context: CliContext) -> Path:
     return Path(project)
 
 
+def resolve_catalogue_scope(
+    cli_context: CliContext, all_projects: bool
+) -> tuple[str | None, Literal["explicit", "worktree", "cwd", "null"]]:
+    """Resolve the canonical catalogue owner before a bounded query."""
+    if all_projects:
+        return None, "null"
+    from odoo_instance_sdk.internal import git_worktree
+
+    project_root = resolve_project_path(cli_context)
+    repository_root = git_worktree.rev_parse_toplevel(project_root)
+    common_dir = git_worktree.rev_parse_git_common_dir(repository_root)
+    return f"project_{repo_key(repository_root, common_dir)}", project_provenance(cli_context)
+
+
 def resolve_environment(
     client: OdooClient,
     explicit: str | None,

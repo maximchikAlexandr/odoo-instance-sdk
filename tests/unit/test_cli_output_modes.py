@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import sys
 import uuid
 from collections.abc import Callable
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
 from odoo_instance_sdk.cli import _rich_shell_projection, cli
+from odoo_instance_sdk.commands import output as output_commands
 from odoo_instance_sdk.commands.context import ResolvedContext
 from odoo_instance_sdk.commands.output import (
     JsonValue,
@@ -40,7 +42,7 @@ from odoo_instance_sdk.commands.output import (
     run_rich_bounded,
     success_document,
 )
-from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.execution import Command, ExecutionPlan, SemanticPlanObservation
 from odoo_instance_sdk.internal.automation import (
     DepsVerifyResult,
 )
@@ -63,6 +65,7 @@ from odoo_instance_sdk.models import (
     EnvironmentPythonMode,
     OdooTestResult,
     PostgresClusterState,
+    ProjectSummary,
     Snapshot,
     StartConfig,
 )
@@ -144,6 +147,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         False,
         variants=("rich-live",),
     ),
+    PublicLeafCase(("env", "path"), ("env", "path", "env-1"), "bounded-read-only", False),
     PublicLeafCase(
         ("env", "remove"), ("env", "remove", "env-1", "--yes"), "mutating-or-spawning", True
     ),
@@ -339,6 +343,27 @@ def test_public_leaf_inventory_is_complete_and_classified() -> None:
     )
 
 
+def test_bounded_catalogue_list_inventory_is_explicit() -> None:
+    assert {
+        case.path
+        for case in PUBLIC_LEAF_CASES
+        if case.path
+        in {
+            ("backup", "list"),
+            ("db", "list"),
+            ("resource", "list"),
+            ("module", "list"),
+            ("env", "list"),
+        }
+    } == {
+        ("backup", "list"),
+        ("db", "list"),
+        ("resource", "list"),
+        ("module", "list"),
+        ("env", "list"),
+    }
+
+
 def test_every_eligible_leaf_uses_the_shared_preview_or_run_helper() -> None:
     """Keep the canonical inventory coupled to the executable composition path."""
     for case in PUBLIC_LEAF_CASES:
@@ -411,6 +436,8 @@ def _matrix_command(
     error: BaseException | None = None,
     private_projection: EnvironmentCheckoutPlan | None = None,
     wrapper_nonce: str | None = None,
+    public_plan: ExecutionPlan | None = None,
+    execution_calls: list[str] | None = None,
 ) -> Command[T]:
     if wrapper_nonce is not None:
         from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
@@ -424,10 +451,20 @@ def _matrix_command(
         def run(context: object) -> T:
             if error is not None:
                 raise error
+            if execution_calls is not None:
+                execution_calls.append("run")
             return cast("T", cast("Any", context).process(step.step_id))
 
         return Command.create(
-            ExecutionPlan(steps=(step.public_projection(),)),
+            ExecutionPlan(
+                steps=(step.public_projection(),),
+                observations=(
+                    SemanticPlanObservation(
+                        kind="semantic",
+                        goal="Preview the bounded operation",
+                    ),
+                ),
+            ),
             run,
             steps=(step,),
             executor=RecordingExecutor(results={step.step_id: value}),
@@ -437,10 +474,12 @@ def _matrix_command(
     def simple_run(_context: object) -> T:
         if error is not None:
             raise error
+        if execution_calls is not None:
+            execution_calls.append("run")
         return value
 
     return Command.create(
-        ExecutionPlan(),
+        public_plan or ExecutionPlan(),
         simple_run,
         private_projection=private_projection,
     )
@@ -468,14 +507,18 @@ def _patch_leaf_external(  # noqa: C901
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.run_doctor",
-            fail_operation if failing else lambda *_args, **_kwargs: DoctorReport(),
+            fail_operation
+            if failing
+            else lambda *_args, **_kwargs: DoctorReport(
+                checks=[CheckResult(name="catalogue", status="ok", detail="ready")]
+            ),
         )
         return
 
     if path[:1] == ("resource",):
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.resource._resource_command",
-            lambda: _matrix_command(
+            lambda **_kwargs: _matrix_command(
                 ResourceInventory(resources=(), findings=(), complete=True),
                 error=RuntimeError("isolated external operation failed") if failing else None,
             ),
@@ -628,7 +671,16 @@ def _patch_leaf_external(  # noqa: C901
         snapshot = Snapshot(
             schema_version=3,
             generated_at=datetime(2020, 1, 1, tzinfo=UTC),
-            projects=(),
+            projects=(
+                ProjectSummary(
+                    id="project-1",
+                    name="demo",
+                    display_hint="demo",
+                    environment_count=0,
+                    cluster=None,
+                    runtime=None,
+                ),
+            ),
             environments=(),
         )
 
@@ -639,6 +691,20 @@ def _patch_leaf_external(  # noqa: C901
 
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot_operation
+        )
+        return
+
+    if path[:2] == ("env", "path"):
+        worktree = tmp_path / "worktree"
+        worktree.mkdir(exist_ok=True)
+        path_environment = _matrix_environment()
+        path_environment.worktree_path = str(worktree)
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.OdooClient", lambda **_kwargs: MagicMock()
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.resolve_environment",
+            fail_operation if failing else lambda *_args, **_kwargs: path_environment,
         )
         return
 
@@ -960,6 +1026,8 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     for mode in ("json", "toon"):
         with monkeypatch.context() as isolated:
             args = list(case.args)
+            if case.path in (("backup", "list"), ("resource", "list")):
+                args.append("--all-projects")
             if case.path == ("init",):
                 args.append(str(tmp_path))
             _patch_leaf_external(isolated, case, failing=False, tmp_path=tmp_path)
@@ -1004,6 +1072,108 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     assert failure_documents[0] == failure_documents[1]
     assert success_documents[0][0]["ok"] is True  # type: ignore[index]
     assert failure_documents[0][0]["ok"] is False  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [case for case in PUBLIC_LEAF_CASES if case.is_bounded],
+    ids=lambda case: ".".join(case.path),
+)
+def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
+    case: PublicLeafCase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercise every bounded leaf through Click's actual Rich selection."""
+    runner = CliRunner()
+    outputs: list[str] = []
+    for _ in range(2):
+        with monkeypatch.context() as isolated:
+            original_matrix_command = _matrix_command
+            execution_calls: list[str] = []
+            original_projection = output_commands._rich_plan_projection
+
+            def validating_projection(document: OutputDocument) -> str:
+                rendered = original_projection(document)
+                result = document.result
+                if isinstance(result, dict):
+                    steps = result.get("steps")
+                    if isinstance(steps, list):
+                        displays = tuple(
+                            str(item["display"])
+                            for item in steps
+                            if isinstance(item, dict)
+                            and item.get("kind") == "process"
+                            and isinstance(item.get("display"), str)
+                        )
+                    else:
+                        displays = ()
+                    assert all(display in rendered for display in displays), rendered
+                return rendered
+
+            def rich_matrix_command(value: Any, **kwargs: Any) -> Command[Any]:
+                if kwargs.get("wrapper_nonce") is None:
+                    kwargs["public_plan"] = _rich_contract_process_plan()
+                kwargs["execution_calls"] = execution_calls
+                return original_matrix_command(value, **kwargs)
+
+            isolated.setattr(sys.modules[__name__], "_matrix_command", rich_matrix_command)
+            isolated.setattr(
+                "odoo_instance_sdk.commands.output._rich_plan_projection",
+                validating_projection,
+            )
+            args = list(case.args)
+            if case.path in (("backup", "list"), ("resource", "list")):
+                args.append("--all-projects")
+            if case.path == ("init",):
+                args.append(str(tmp_path))
+            if case.requires_dry_run and "--dry-run" not in args:
+                args.append("--dry-run")
+            _patch_leaf_external(isolated, case, failing=False, tmp_path=tmp_path)
+            invoked = runner.invoke(cli, [*args, "--format", "rich"])
+
+        assert invoked.exit_code == 0, invoked.output
+        assert invoked.stderr == ""
+        assert invoked.stdout.strip()
+        assert "\x1b[" not in invoked.stdout
+        assert '"result"' not in invoked.stdout
+        assert '"steps"' not in invoked.stdout
+        assert not re.search(r"\}\s*\n\s*\{", invoked.stdout)
+        assert not re.search(r"\]\s*\n\s*\[", invoked.stdout)
+        if case.path == ("env", "path"):
+            assert invoked.stdout == str(tmp_path / "worktree") + "\n"
+        else:
+            key_value_lines = [
+                line
+                for line in invoked.stdout.splitlines()
+                if re.fullmatch(r"\s*[a-z][a-z0-9_-]*=[^=]+(?:\s+[a-z][a-z0-9_-]*=[^=]+)+\s*", line)
+            ]
+            assert all(line.lstrip().startswith("status=success") for line in key_value_lines)
+        if case.requires_dry_run:
+            assert "--dry-run" in args
+            assert execution_calls == []
+        outputs.append(invoked.stdout)
+
+    assert outputs[0] == outputs[1]
+
+
+def _rich_contract_process_plan() -> ExecutionPlan:
+    from odoo_instance_sdk.internal.proc import PreparedStep
+
+    step = PreparedStep(
+        step_id="rich.contract.process",
+        argv=("odoo", "--database", "demo"),
+        cwd="/worktree",
+        read_only=True,
+    )
+    return ExecutionPlan(
+        steps=(step.public_projection(),),
+        observations=(
+            SemanticPlanObservation(
+                kind="semantic",
+                goal="Preview the bounded operation",
+                targets=("demo",),
+            ),
+        ),
+    )
 
 
 @pytest.mark.parametrize("mode", ["rich", "json", "toon"])
@@ -1691,6 +1861,59 @@ def test_action_postcondition_failure_emits_failed_without_completion() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "db.refresh",
+        "db.restore",
+        "env.lifecycle",
+        "test",
+        "module.update",
+        "eval",
+        "exec",
+        "translations.export",
+        "postgres.up",
+    ],
+)
+def test_progress_inventory_is_identified_and_machine_silent(
+    operation: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from odoo_instance_sdk.internal.proc import StepEvent
+
+    events: list[StepEvent] = []
+    command = action_command(operation, lambda: "done")
+
+    def run(observer: Callable[[StepEvent], None]) -> str:
+        def observe(event: StepEvent) -> None:
+            events.append(event)
+            observer(event)
+
+        return command.run(observer=observe)
+
+    result = run_rich_bounded(run)
+    captured = capsys.readouterr().out
+
+    assert result == "done"
+    assert [event.kind for event in events] == ["started", "completed"]
+    assert all(event.step_id and event.operation and event.target for event in events)
+    # Rich receives identified lifecycle events and no bare lifecycle line.
+    assert f"[{operation}] started" in captured
+    assert f"[{operation}] completed" in captured
+
+    run_or_preview(
+        lambda: action_command(operation, lambda: "done"),
+        command_name=operation,
+        mode=OutputMode.JSON,
+        dry_run=False,
+        result=lambda value: {"value": value},
+        progress=True,
+    )
+    machine_output = capsys.readouterr().out
+    assert "started" not in machine_output
+    assert "completed" not in machine_output
+
+
 def test_run_or_preview_maps_ctrl_c_to_exit_130() -> None:
     def operation() -> None:
         raise KeyboardInterrupt
@@ -1809,6 +2032,213 @@ def test_semantic_plan_projection_hides_private_execution_details(
     assert "Preconditions:" in rendered
     assert "127.0.0.1:8069 is occupied" in rendered
     assert "fingerprint" not in rendered
+
+
+def _assert_actual_builder_rich_preview(
+    command: Command[Any],
+    *,
+    command_name: str,
+    capsys: pytest.CaptureFixture[str],
+    executor: Any | None = None,
+) -> None:
+    """Project a real builder's captured plan without invoking its callback."""
+    from odoo_instance_sdk.execution import PlanPrecondition, SemanticPlanObservation
+
+    displays = tuple(step.display for step in command.plan.process_steps)
+    assert displays, f"{command_name} must capture at least one process"
+    semantic_plan = msgspec.structs.replace(
+        command.plan,
+        observations=(
+            SemanticPlanObservation(
+                kind="semantic",
+                goal=f"Preview {command_name}",
+                preconditions=(
+                    PlanPrecondition(name="preflight", status="failed", detail="preview only"),
+                ),
+            ),
+        ),
+    )
+    status, value = run_or_preview(
+        lambda: command,
+        command_name=command_name,
+        mode=OutputMode.RICH,
+        dry_run=True,
+        preview=lambda _command: model_to_dict(semantic_plan),
+    )
+    rendered = capsys.readouterr().out
+    assert (status, value) == (0, None)
+    positions: list[int] = []
+    offset = 0
+    for display in displays:
+        position = rendered.index(display, offset)
+        positions.append(position)
+        offset = position + len(display)
+    assert positions == sorted(positions)
+    assert "preflight: failed" in rendered
+    assert "fingerprint:" not in rendered
+    for private_field in ("argv:", "executable:", "cwd:", "timeout:", "environment:", "stdin:"):
+        assert private_field not in rendered
+    if executor is not None:
+        assert executor.executed == []
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "run",
+        "project.run",
+        "environment.run",
+        "module.update",
+        "translations.export",
+        "test",
+        "postgres.up",
+        "postgres.stop",
+        "environment.sync",
+        "environment.remove",
+    ],
+)
+def test_rich_dry_run_uses_real_command_builders(
+    branch: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actual leaf builders retain their process displays in a zero-execution preview."""
+    from odoo_instance_sdk.config import InstanceConfig
+    from odoo_instance_sdk.internal import proc as proc_module
+    from odoo_instance_sdk.internal.address import AddressState
+    from odoo_instance_sdk.internal.automation import (
+        export_translations_command,
+        run_odoo_tests_command,
+        update_modules_command,
+    )
+    from odoo_instance_sdk.internal.proc import RecordingExecutor
+    from odoo_instance_sdk.models import OdooTestSpec, StartConfig
+    from odoo_instance_sdk.resources import instance as instance_module
+    from odoo_instance_sdk.resources.environment import EnvironmentResource
+    from odoo_instance_sdk.resources.instance import OdooInstance, _RuntimeBinding
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    instance = OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:8069",
+            start_config=StartConfig(http_port=0, addons_path=[str(tmp_path / "addons")]),
+            command_prefix=("python", "odoo-bin"),
+            default_cwd=tmp_path,
+            configured_database_names=("demo",),
+            db_host="127.0.0.1",
+            db_port=5432,
+            db_user="odoo",
+        ),
+        _client=MagicMock(),
+    )
+    executor = RecordingExecutor()
+    monkeypatch.setattr(instance_module, "SubprocessExecutor", lambda: executor)
+    command: Command[Any]
+    if branch in {"run", "project.run", "environment.run"}:
+        if branch == "project.run":
+            instance._runtime_binding = _RuntimeBinding(
+                owner_kind="project",
+                owner_id="project",
+                project_id="project",
+                repository_root=tmp_path,
+                git_common_dir=tmp_path / ".git",
+            )
+        elif branch == "environment.run":
+            instance._environment_id = "environment"
+        command = instance.run_foreground_command(args=("--stop-after-init",))
+    elif branch == "module.update":
+        command = update_modules_command(instance, ("sale",))
+    elif branch == "translations.export":
+        command = export_translations_command(
+            instance, ("sale",), ("en_US",), worktree_root=tmp_path
+        )
+    elif branch == "test":
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.automation.probe_address",
+            lambda *_args, **_kwargs: AddressState.FREE,
+        )
+        command = run_odoo_tests_command(
+            instance,
+            OdooTestSpec(modules=("sale",), test_tags="/sale"),
+            http_interface="127.0.0.1",
+            http_port=0,
+        )
+    elif branch in {"postgres.up", "postgres.stop"}:
+        postgres_root = tmp_path / "postgres"
+        postgres_root.mkdir()
+        (postgres_root / "compose.yaml").write_text("services: {}\n")
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+            lambda _project_id: postgres_root,
+        )
+        cluster = PostgresCluster(
+            _repository_root=tmp_path,
+            _project_id="rich-preview",
+            _mode="compose",
+            _endpoint_host="127.0.0.1",
+            _endpoint_port=5432,
+            _image="postgres:16",
+            _user="odoo",
+        )
+        command = (
+            cluster.ensure_running_command(executor=executor)
+            if branch == "postgres.up"
+            else cluster.stop_command(executor=executor)
+        )
+    else:
+        root = tmp_path / "project"
+        worktree = root / "worktree"
+        (root / ".odcli").mkdir(parents=True)
+        worktree.mkdir()
+        (root / ".odcli" / "project.toml").write_text(
+            '[project]\nrequirements = ["requirements.txt"]\n'
+        )
+        (root / "requirements.txt").write_text("httpx\n")
+        environment = _matrix_public_environment()
+        environment = msgspec.structs.replace(
+            environment,
+            repository_root=str(root),
+            worktree_path=str(worktree),
+            dependency_lock_path=str(worktree / "uv.lock"),
+            python_environment_path=str(worktree / ".venv"),
+            generated_config_path=str(worktree / "odoo.conf"),
+        )
+        resource = EnvironmentResource(_client=MagicMock())
+        if branch == "environment.sync":
+            monkeypatch.setattr(proc_module, "SubprocessExecutor", lambda: executor)
+            command = resource.sync_python_command(environment)
+        else:
+            command = resource.remove_command(environment, executor=executor)
+
+    _assert_actual_builder_rich_preview(
+        command, command_name=branch, capsys=capsys, executor=executor
+    )
+
+
+def test_rich_dry_run_uses_actual_environment_checkout_builder(
+    env_client: Any,
+    project_manifest: Path,
+    fake_python: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.internal import proc as proc_module
+    from odoo_instance_sdk.internal.proc import RecordingExecutor
+    from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
+
+    executor = RecordingExecutor()
+    monkeypatch.setattr(proc_module, "SubprocessExecutor", lambda: executor)
+
+    command = env_client.environments.checkout_command(
+        project_manifest,
+        "feature/rich-preview",
+        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+    )
+
+    _assert_actual_builder_rich_preview(
+        command, command_name="env.checkout", capsys=capsys, executor=executor
+    )
 
 
 def test_capture_boundary_corpus_is_secret_free_in_all_public_surfaces(
@@ -1980,10 +2410,21 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                     str(tmp_path),
                 ]
             else:
-                snapshot = {
-                    "catalog_value": payload,
-                    "nested": [{"display_name": payload}],
-                }
+                snapshot = Snapshot(
+                    schema_version=3,
+                    generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+                    projects=(
+                        ProjectSummary(
+                            id="project",
+                            name=payload,
+                            display_hint=payload,
+                            environment_count=0,
+                            cluster=None,
+                            runtime=None,
+                        ),
+                    ),
+                    environments=(),
+                )
                 isolated.setattr(
                     "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
                     lambda *_args, **_kwargs: snapshot,
@@ -2089,6 +2530,45 @@ def test_project_module_update_keeps_confirmation_and_output_contract(
         assert payload["result"]["updated"] == ["sale"]
 
 
+def test_project_module_update_incomplete_result_is_a_failure_document(tmp_path: Path) -> None:
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        python=sys.executable,
+        odoo_bin=Path(sys.executable),
+    )
+    incomplete = _command_result(0, {"result": {"updated": []}})
+
+    def shell_script(_source: str, **kwargs: Any) -> Command[CommandResult]:
+        converter = kwargs["result_converter"]
+
+        def run(_context: object) -> CommandResult:
+            return converter(incomplete) if converter is not None else incomplete
+
+        return Command.create(ExecutionPlan(), run)
+
+    instance = SimpleNamespace(
+        config=SimpleNamespace(start_config=StartConfig(db_name="project_db")),
+        _shell_script_command=shell_script,
+    )
+    resolved = ResolvedContext(
+        client=cast("Any", object()),
+        source=cast("Any", project),
+        instance=cast("Any", instance),
+        provenance="cwd",
+    )
+    with patch("odoo_instance_sdk.cli.cli_context.ready_instance", return_value=resolved):
+        result = CliRunner().invoke(
+            cli,
+            ["module", "update", "sale", "--yes", "--format", "json"],
+        )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "updated" not in result.stdout
+    assert "did not confirm" in payload["error"]["message"]
+
+
 def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) -> None:
     snapshot = Snapshot(
         schema_version=3,
@@ -2133,7 +2613,7 @@ def test_resource_machine_projection_is_read_only_and_one_document(
         lambda **_kwargs: tmp_path / "backups",
     )
 
-    result = CliRunner().invoke(cli, ["resource", "list", "--format", mode])
+    result = CliRunner().invoke(cli, ["resource", "list", "--all-projects", "--format", mode])
 
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
@@ -2149,12 +2629,13 @@ def test_resource_rich_projections_are_bounded_and_deterministic(
 ) -> None:
     empty = ResourceInventory(resources=(), findings=(), complete=True)
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.resource._resource_command", lambda: _matrix_command(empty)
+        "odoo_instance_sdk.commands.resource._resource_command",
+        lambda **_kwargs: _matrix_command(empty),
     )
     runner = CliRunner()
 
-    first = runner.invoke(cli, ["resource", "list"])
-    second = runner.invoke(cli, ["resource", "list"])
+    first = runner.invoke(cli, ["resource", "list", "--all-projects"])
+    second = runner.invoke(cli, ["resource", "list", "--all-projects"])
     doctor = runner.invoke(cli, ["resource", "doctor"])
 
     assert first.exit_code == second.exit_code == doctor.exit_code == 0
@@ -2162,6 +2643,206 @@ def test_resource_rich_projections_are_bounded_and_deterministic(
     assert "Identity" in first.output
     assert "No resource findings." in doctor.output
     assert "\x1b[" not in first.output + doctor.output
+
+
+@pytest.mark.parametrize(
+    ("command", "render", "result", "headers"),
+    [
+        pytest.param(
+            "backup.list",
+            "odoo_instance_sdk.commands.backup._rich_table",
+            {
+                "backups": [
+                    {
+                        "id": "backup-1",
+                        "source_base_url": "https://odoo.example",
+                        "database_name": "demo",
+                        "state": "available",
+                        "file_present": True,
+                        "recorded_bytes": 1024,
+                        "catalogue_time": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+                "next_cursor": None,
+            },
+            ("UUID", "Source", "Database", "State", "Bytes"),
+            id="backup-list",
+        ),
+        pytest.param(
+            "db.list",
+            "odoo_instance_sdk.commands.db._list_rich",
+            {
+                "cluster": "127.0.0.1:5432",
+                "databases": [
+                    {
+                        "cluster": "127.0.0.1:5432",
+                        "name": "demo",
+                        "logical_size_bytes": 1024,
+                        "active_sessions": 2,
+                        "is_default": True,
+                        "origin": "unknown",
+                    }
+                ],
+            },
+            ("Database", "Size", "Sessions", "Default", "Origin"),
+            id="db-list",
+        ),
+        pytest.param(
+            "resource.list",
+            "odoo_instance_sdk.commands.resource._rich_list",
+            {
+                "resources": [
+                    {
+                        "stable_identity": "file:demo",
+                        "type": "backup",
+                        "name": "demo.zip",
+                        "ownership_confidence": "proven",
+                        "measured_bytes": 1024,
+                        "completeness": "complete",
+                        "reclaimable": True,
+                    }
+                ]
+            },
+            ("Identity", "Type", "Name", "Measured bytes"),
+            id="resource-list",
+        ),
+    ],
+)
+def test_catalogue_rich_lists_use_single_human_table(
+    command: str,
+    render: str,
+    result: dict[str, object],
+    headers: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """List leaves keep machine integers while Rich renders human bytes."""
+    module = __import__(render.rsplit(".", 1)[0], fromlist=[render.rsplit(".", 1)[1]])
+    rich_renderer = getattr(module, render.rsplit(".", 1)[1])
+    rendered = rich_renderer(success_document(command=command, result=cast("Any", result)))
+
+    assert capsys.readouterr().out == ""
+    assert rendered.strip()
+    assert all(header in rendered for header in headers)
+    assert "1.0 KiB" in rendered
+    if command == "db.list":
+        assert rendered.count("Cluster: 127.0.0.1:5432") == 1
+        assert "cluster=" not in rendered
+    assert '"recorded_bytes"' not in rendered
+    assert '"logical_size_bytes"' not in rendered
+    assert '"measured_bytes"' not in rendered
+
+
+def test_module_rich_list_uses_single_table() -> None:
+    from odoo_instance_sdk.cli import _rich_module_list
+
+    result = success_document(
+        command="module.list",
+        result={
+            "modules": [
+                {
+                    "name": "sale",
+                    "state": "installed",
+                    "installed_version": "19.0",
+                    "latest_version": None,
+                }
+            ]
+        },
+    )
+    rendered = _rich_module_list(result)
+    assert rendered.strip()
+    assert all(header in rendered for header in ("NAME", "STATE", "VERSION"))
+    assert "sale" in rendered
+    assert '"modules"' not in rendered
+
+
+@pytest.mark.parametrize(
+    ("render", "command", "result", "labels"),
+    [
+        (
+            "odoo_instance_sdk.commands.backup._rich_detail",
+            "backup.show",
+            {
+                "id": "backup-1",
+                "database_name": "demo",
+                "state": "available",
+                "recorded_bytes": 1024,
+            },
+            ("Backup", "Database Name", "1.0 KiB"),
+        ),
+        (
+            "odoo_instance_sdk.commands.backup._rich_delete",
+            "backup.delete",
+            {"plan": {"backup_id": "backup-1", "path": "/safe/backup.zip", "state": "available"}},
+            ("Delete plan:", "Backup Id", "/safe/backup.zip"),
+        ),
+        (
+            "odoo_instance_sdk.commands.db._restore_rich",
+            "db.restore",
+            {"restored_database": "demo_copy", "backup": {"id": "backup-1"}},
+            ("Database restore", "demo_copy", "backup-1"),
+        ),
+        (
+            "odoo_instance_sdk.commands.resource._rich_doctor",
+            "resource.doctor",
+            {"findings": [{"severity": "warning", "code": "stale", "message": "inspect"}]},
+            ("Severity", "warning", "stale"),
+        ),
+        (
+            "odoo_instance_sdk.cli._rich_module_update",
+            "module.update",
+            {"modules": ["sale"], "updated": ["sale"]},
+            ("Module update", "sale", "updated"),
+        ),
+        (
+            "odoo_instance_sdk.cli._rich_translation_export",
+            "translations.export",
+            {
+                "exports": [
+                    {
+                        "module": "sale",
+                        "requested_lang": "fr_FR",
+                        "actual_filename": "sale.po",
+                        "bytes_written": 1024,
+                    }
+                ]
+            },
+            ("Translation export", "fr_FR", "1.0 KiB"),
+        ),
+        (
+            "odoo_instance_sdk.commands.pg._monitoring_rich",
+            "db.init-monitoring",
+            {"installed": ["pg_stat_statements"], "already_present": [], "skipped": []},
+            ("PostgreSQL monitoring", "Installed", "pg_stat_statements"),
+        ),
+        (
+            "odoo_instance_sdk.commands.pg._cluster_rich",
+            "postgres.status",
+            {"mode": "compose", "owned": True, "state": "healthy", "endpoint": "127.0.0.1:5432"},
+            ("PostgreSQL cluster", "Endpoint", "127.0.0.1:5432"),
+        ),
+        (
+            "odoo_instance_sdk.cli._rich_vscode_generate",
+            "vscode.generate",
+            {"profile": {"name": "Odoo", "program": "odoo-bin"}},
+            ("VS Code launch", "Name", "Odoo"),
+        ),
+    ],
+)
+def test_bounded_rich_leaf_renderers_use_labelled_summaries(
+    render: str,
+    command: str,
+    result: dict[str, object],
+    labels: tuple[str, ...],
+) -> None:
+    module_name, function_name = render.rsplit(".", 1)
+    renderer = getattr(__import__(module_name, fromlist=[function_name]), function_name)
+    rendered = renderer(success_document(command=command, result=cast("Any", result)))
+
+    assert rendered.strip()
+    assert all(label in rendered for label in labels)
+    assert '"restored_database"' not in rendered
+    assert '"bytes_written"' not in rendered
+    assert "=" not in rendered
 
 
 @pytest.mark.parametrize("args", [["--json"], ["--format", "json"]])

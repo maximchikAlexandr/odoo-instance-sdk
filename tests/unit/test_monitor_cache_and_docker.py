@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from msgspec.structs import replace
 
 from odoo_instance_sdk.internal.postgres_compose import SubprocessComposeRunner
 from odoo_instance_sdk.models import GitActivity
@@ -306,6 +307,49 @@ def test_production_git_cache_reuses_and_invalidates_identity(
     for _ in range(4):
         monitor._collect_git(worktree)
     assert calls == [("head-a", "tip-a"), ("head-b", "tip-a"), ("head-b", "tip-b")]
+    assert len(monitor._git_cache) == 1
+
+
+def test_git_cache_identity_includes_base_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    identities = iter(
+        [
+            ("head", "head", "topic", "tip"),
+            ("head", "head", "topic", "tip"),
+            ("head", "head", "topic", "tip"),
+        ]
+    )
+    resolved_refs: list[str] = []
+    collected_refs: list[str] = []
+
+    def resolve(_: Path, base_ref: str = "main") -> tuple[str, str, str, str | None]:
+        resolved_refs.append(base_ref)
+        return next(identities)
+
+    def collect(
+        _: Path,
+        identity: tuple[str, str, str, str | None],
+        *,
+        base_ref: str = "main",
+    ) -> GitActivity:
+        assert identity[0] == "head"
+        collected_refs.append(base_ref)
+        return replace(FakeGitProvider().collect(worktree), default_branch=base_ref)
+
+    monkeypatch.setattr("odoo_instance_sdk.resources.monitor._resolve_identity", resolve)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.monitor.collect_git_activity_from_identity", collect
+    )
+    monitor = EnvironmentMonitor()
+
+    assert monitor._collect_git(worktree, base_ref="main").default_branch == "main"
+    assert monitor._collect_git(worktree, base_ref="dev").default_branch == "dev"
+
+    assert resolved_refs == ["main", "dev"]
+    assert collected_refs == ["main", "dev"]
     assert len(monitor._git_cache) == 1
 
 

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import contextlib
-import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -25,7 +25,12 @@ else:
 from rich.console import Console
 from rich.table import Table
 
-from odoo_instance_sdk.commands.context import CliContext, resolve_project_path
+from odoo_instance_sdk.commands.context import (
+    CliContext,
+    pass_cli_context,
+    resolve_catalogue_scope,
+    resolve_project_path,
+)
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
@@ -37,6 +42,8 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     success_document,
 )
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
+from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.paths import get_backups_dir, get_catalog_path, get_data_root
 from odoo_instance_sdk.internal.resource_inventory import (
     FileResourceSource,
@@ -109,6 +116,8 @@ class _ResourcePlan:
     observations: tuple[PlanObservation, ...] = ()
     files: tuple[FileResourceSource, ...] = ()
     database_reason: str | None = None
+    catalogue_project_id: str | None = None
+    catalogue_all_projects: bool = False
 
 
 def _skip_remaining(
@@ -241,7 +250,12 @@ def database_resource_identity(cluster: str, database: str) -> str:
     return _database_identity(cluster, database)
 
 
-def _build_resource_plan(process_executor: SubprocessExecutor) -> _ResourcePlan:  # noqa: C901
+def _build_resource_plan(  # noqa: C901
+    process_executor: SubprocessExecutor,
+    *,
+    project_id: str | None = None,
+    all_projects: bool = False,
+) -> _ResourcePlan:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.internal.pg.inventory import build_database_inventory_command
@@ -257,6 +271,8 @@ def _build_resource_plan(process_executor: SubprocessExecutor) -> _ResourcePlan:
         catalog=catalog,
         data_root=get_data_root(ensure_exists=False),
         backup_root=_inspection_backups_dir(),
+        catalogue_project_id=project_id,
+        catalogue_all_projects=all_projects,
     )
     project_root = _project_root()
     if project_root is None:
@@ -375,7 +391,9 @@ def _volume_source(
     )
 
 
-def _resource_command() -> Command[ResourceInventory]:
+def _resource_command(
+    *, project_id: str | None = None, all_projects: bool = False
+) -> Command[ResourceInventory]:
     from odoo_instance_sdk.execution import Command, ExecutionPlan
     from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor, prepared_command
 
@@ -386,7 +404,12 @@ def _resource_command() -> Command[ResourceInventory]:
         description="Collect read-only local resource inventory",
         read_only=True,
     )
-    plan = _build_resource_plan(process_executor)
+    if project_id is None and not all_projects:
+        plan = _build_resource_plan(process_executor)
+    else:
+        plan = _build_resource_plan(
+            process_executor, project_id=project_id, all_projects=all_projects
+        )
     prepared_children = tuple(
         child for child in (plan.database_command, plan.snapshot_command) if child is not None
     )
@@ -438,6 +461,8 @@ def _resource_command() -> Command[ResourceInventory]:
                 backup_root=plan.backup_root,
                 owned_directories=(plan.backup_root,),
                 database_measurement_reason=database_reason,
+                project_id=plan.catalogue_project_id,
+                all_projects=plan.catalogue_all_projects,
             )
             context.complete_action(_RESOURCE_STEP)
             return inventory
@@ -464,25 +489,31 @@ def _rich_list(document: OutputDocument) -> str:
     result = document.result if isinstance(document.result, dict) else {}
     resources = result.get("resources", [])
     if not isinstance(resources, list):
-        return json.dumps(result, ensure_ascii=False, default=str, indent=2)
+        return "No resources"
     table = Table(
         "Identity", "Type", "Name", "Ownership", "Measured bytes", "Complete", "Reclaimable"
     )
     for resource in resources:
         if not isinstance(resource, dict):
             continue
+        measured_bytes = resource.get("measured_bytes")
         table.add_row(
-            str(resource.get("stable_identity", "")),
-            str(resource.get("type", "")),
-            str(resource.get("name", "")),
-            str(resource.get("ownership_confidence", "")),
-            str(resource.get("measured_bytes", "")),
-            str(resource.get("completeness", "")),
-            str(resource.get("reclaimable", False)).lower(),
+            rich_cell(resource.get("stable_identity", "")),
+            rich_cell(resource.get("type", "")),
+            rich_cell(resource.get("name", "")),
+            rich_cell(resource.get("ownership_confidence", "")),
+            rich_cell(
+                _human_bytes(measured_bytes)
+                if isinstance(measured_bytes, int) and not isinstance(measured_bytes, bool)
+                else "—"
+            ),
+            rich_cell(resource.get("completeness", "")),
+            rich_cell(str(resource.get("reclaimable", False)).lower()),
         )
-    console = Console(record=True, color_system=None, width=180)
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=180)
     console.print(table)
-    return console.export_text().rstrip()
+    return output.getvalue().rstrip()
 
 
 def _rich_doctor(document: OutputDocument) -> str:
@@ -491,7 +522,7 @@ def _rich_doctor(document: OutputDocument) -> str:
     result = document.result if isinstance(document.result, dict) else {}
     findings = result.get("findings", [])
     if not isinstance(findings, list):
-        return json.dumps(result, ensure_ascii=False, default=str, indent=2)
+        return "Resource findings unavailable."
     if not findings:
         return "No resource findings."
     table = Table("Severity", "Code", "Identity", "Message", "Recommendation")
@@ -499,11 +530,11 @@ def _rich_doctor(document: OutputDocument) -> str:
         if not isinstance(finding, dict):
             continue
         table.add_row(
-            str(finding.get("severity", "")),
-            str(finding.get("code", "")),
-            str(finding.get("stable_identity", "")),
-            str(finding.get("message", "")),
-            str(finding.get("recommendation", "") or ""),
+            rich_cell(finding.get("severity", "")),
+            rich_cell(finding.get("code", "")),
+            rich_cell(finding.get("stable_identity", "")),
+            rich_cell(finding.get("message", "")),
+            rich_cell(finding.get("recommendation", "") or ""),
         )
     console = Console(record=True, color_system=None, width=180)
     console.print(table)
@@ -514,10 +545,30 @@ def _run_resource(
     command_name: str,
     mode: OutputMode,
     rich: Callable[[OutputDocument], str],
+    *,
+    project_id: str | None = None,
+    project_source: str | None = None,
+    all_projects: bool = False,
 ) -> None:
     try:
-        inventory = _resource_command().run()
-        emit(success_document(command=command_name, result=_payload(inventory)), mode, rich=rich)
+        if project_id is None and not all_projects:
+            command = _resource_command()
+        else:
+            command = _resource_command(project_id=project_id, all_projects=all_projects)
+        inventory = command.run()
+        emit(
+            success_document(
+                command=command_name,
+                result=_payload(inventory),
+                provenance=(
+                    {"project_source": project_source, "environment_source": "null"}
+                    if project_source is not None
+                    else None
+                ),
+            ),
+            mode,
+            rich=rich,
+        )
     except Exception as exc:
         fail(mode, command_name, exc)
 
@@ -528,9 +579,25 @@ def resource_group() -> None:
 
 
 @resource_group.command("list", help="List read-only local resource observations.")
+@click.option("--all-projects", is_flag=True, default=False, help="List all project-owned records.")
 @output_options
-def resource_list(output_format: str | None, json_output: bool) -> None:
-    _run_resource("resource.list", resolve_output_mode(output_format, json_output), _rich_list)
+@pass_cli_context
+def resource_list(
+    ctx: CliContext, all_projects: bool, output_format: str | None, json_output: bool
+) -> None:
+    mode = resolve_output_mode(output_format, json_output)
+    try:
+        project_id, project_source = resolve_catalogue_scope(ctx, all_projects)
+    except Exception as exc:
+        fail(mode, "resource.list", exc)
+    _run_resource(
+        "resource.list",
+        mode,
+        _rich_list,
+        project_id=project_id,
+        project_source=project_source,
+        all_projects=all_projects,
+    )
 
 
 @resource_group.command("doctor", help="Diagnose read-only local resource findings.")

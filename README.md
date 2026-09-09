@@ -78,12 +78,19 @@ to plans, logs, diagnostics, fingerprints, or structured output. A missing
 `.odcli/.env` is valid; unreadable, insecure, or malformed files fail before
 work and report only the path (and parser line where applicable).
 
+With `--postgres compose`, init also writes the effective project runtime config
+to `.odcli/odoo.conf` with owner-only permissions. It is derived from the
+source config without changing its bytes, binds Odoo to the SDK-owned cluster,
+and keeps the cluster password out of the manifest and command output.
+
 Global selectors such as `--project` and `--env` belong before the subcommand.
 Exact flags are intentionally delegated to executable help, for example
 `odcli env checkout --help`. Structured output is leaf-local, not a root command
 promise: commands that support it expose `--format rich|json|toon` and/or
 `--json`. Supplying `--json` with `--format json` is allowed where both are
 documented. TOON is the compact structured form.
+
+To enter a registered environment worktree, use ordinary shell command substitution: `cd "$(odcli env path <environment>)"`.
 
 All bounded mutating or process-backed leaves support the same inspect-first
 shape: add `--dry-run` to render the captured typed plan, then omit it to run
@@ -92,6 +99,22 @@ arguments and stdin, planning observations, warnings, classifications, and a
 fingerprint. A preview never launches a process, prompts, or mutates the
 workspace. See [execution boundary and CLI inventory](docs/execution-boundary.md)
 for the complete eligibility table and the intentionally narrow exceptions.
+
+Rich previews show the exact sanitized captured commands in execution order;
+identified progress lines use the captured step ID, operation, target, elapsed
+time, and process exit status. For example:
+
+```bash
+odcli env checkout feature/customer-credit --dry-run
+odcli db restore 01234567-89ab-cdef-0123-456789abcdef --dry-run
+```
+
+Catalogue lists are project-scoped by default. Use `--all-projects` when a
+global result is intended, for example `odcli backup list --all-projects` or
+`odcli resource list --all-projects`; Rich tables format byte values for
+people while JSON/TOON retain exact integer bytes. Project HTTP endpoints use
+the same precedence everywhere: explicit override, `preferred_http_port`, the
+effective `odoo.conf`, then the default port.
 
 ## Common workflows
 
@@ -295,6 +318,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.
 - `odcli env checkout` — Plan or create an isolated branch worktree and environment.
 - `odcli env list` — List registered environments, active-only unless `--all` is requested.
+- `odcli env path` — Print one active environment's absolute worktree path.
 - `odcli env remove` — Remove a registered environment and its owned artifacts safely.
 - `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
 - `odcli backup list` — List retained backup records with state and file presence.
