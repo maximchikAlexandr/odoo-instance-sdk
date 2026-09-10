@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
@@ -33,7 +33,12 @@ class TestOdcliLifecycle:
         git_repo: Path,
         fake_python: Path,
         source_config: Path,
+        monkeypatch: Any,
     ) -> None:
+        monkeypatch.setattr("odoo_instance_sdk.commands.env.remote_branch_names", lambda *_args: ())
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env._revalidate_jira_absence", lambda *_args: None
+        )
         fake_odoo = fake_python.parent / "odoo-bin"
         fake_odoo.write_text("#!/bin/sh\nexit 0\n")
         fake_odoo.chmod(0o755)
@@ -65,7 +70,7 @@ class TestOdcliLifecycle:
                 str(git_repo),
                 "env",
                 "checkout",
-                "feat/lifecycle",
+                "PROJ-123",
                 "--source-db",
                 "comerta",
             ],

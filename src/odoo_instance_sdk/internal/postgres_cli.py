@@ -42,7 +42,7 @@ def run_postgres_command(
     except SystemExit:
         raise
     except Exception as exc:
-        fail(output_mode, command, str(exc))
+        fail(output_mode, command, str(exc), dry_run=False)
     raise AssertionError("fail always exits")
 
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import configparser
 import contextlib
 import hashlib
 import importlib
+import json
+import os
 import re
 import shutil
 import sqlite3
@@ -37,6 +40,11 @@ from odoo_instance_sdk.exceptions import (
     StalePlanError,
 )
 from odoo_instance_sdk.internal.address import AddressState, probe_address
+from odoo_instance_sdk.internal.applied_settings import (
+    AppliedSettingsError,
+    decode_applied_settings,
+    encode_applied_settings,
+)
 from odoo_instance_sdk.internal.database_preparation import (
     classify_freshness,
     compare_provenance,
@@ -100,6 +108,7 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
+        PreparedCommand,
         PreparedStep,
         ProcessExecutor,
         ProcessResult,
@@ -122,6 +131,23 @@ type _EnvironmentList = list[DevelopmentEnvironment]
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _PGADMIN_LIFECYCLE_TIMEOUT = 60.0
+_REQUIREMENT_OPERATOR = re.compile(r"\s*(===|==|~=|!=|<=|>=|<|>|;|@)\s*")
+_APPLIED_CONFIG_BINDINGS = frozenset(
+    {
+        "admin_passwd",
+        "addons_path",
+        "data_dir",
+        "db_host",
+        "db_name",
+        "db_password",
+        "db_port",
+        "db_user",
+        "dbfilter",
+        "http_interface",
+        "http_port",
+        "logfile",
+    }
+)
 
 
 class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
@@ -152,6 +178,45 @@ class CopyCleanupPlan:
     instance: OdooInstance | None
     backup: Backup | None
     stage: CopyJournalStage
+    rollback_database: str | None = None
+    rollback_filestore: Path | None = None
+
+
+def _replacement_retained_error(value: str | None) -> dict[str, JsonValue]:
+    if not isinstance(value, str) or "copy replacement cleanup_failed" not in value:
+        return {}
+    try:
+        payload = value.split("retained=", 1)[1].split(";", 1)[0]
+        decoded = json.loads(payload)
+    except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _validate_retained_removal_evidence(
+    catalog: BackupCatalog, env: DevelopmentEnvironment
+) -> None:
+    """Reject a removal command whose durable replacement evidence changed."""
+    retained = _replacement_retained_error(env.last_error)
+    if not retained:
+        return
+    row = catalog.get_environment(str(env.id))
+    current = _replacement_retained_error(None if row is None else row["last_error"])
+    for key in (
+        "backup_id",
+        "previous_backup_id",
+        "target_database",
+        "rollback_database",
+        "target_present",
+        "rollback_present",
+        "rollback_filestore_present",
+        "published",
+    ):
+        if current.get(key) != retained.get(key):
+            raise EnvironmentConflictError(
+                "replacement_conflict",
+                "retained replacement evidence changed before removal",
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +252,7 @@ class _CheckoutPlan:
     worktree_argv: tuple[str, ...]
     created_at: str
     options: EnvironmentCheckoutOptions
+    branch_revalidator: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -640,6 +706,8 @@ class EnvironmentResource:
         plan = snapshot.private
         with exclusive_lock(provisioning_lock_path()):
             self._validate_checkout_snapshot(snapshot, context=context)
+            if plan.branch_revalidator is not None:
+                plan.branch_revalidator()
             if plan.db_mode is EnvironmentDatabaseMode.COPY:
                 self._preflight_copy_checkout(plan)
             context.action("checkout.catalog")
@@ -773,6 +841,19 @@ class EnvironmentResource:
         """Capture checkout inputs once and return the inspectable command."""
         snapshot = self._build_checkout_snapshot(project, branch, options=options)
         return self._command_from_snapshot(snapshot)
+
+    def _checkout_command_with_branch_revalidation(
+        self,
+        project: ProjectConfig | Path,
+        branch: str,
+        *,
+        options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
+        branch_revalidator: Callable[[], None],
+    ) -> Command[DevelopmentEnvironment]:
+        """Build the normal checkout command with one private late branch guard."""
+        snapshot = self._build_checkout_snapshot(project, branch, options=options)
+        private = replace(snapshot.private, branch_revalidator=branch_revalidator)
+        return self._command_from_snapshot(replace(snapshot, private=private))
 
     def checkout_with_plan(
         self,
@@ -919,6 +1000,16 @@ class EnvironmentResource:
                         )
                     created_paths.append(plan.dependency_lock)
 
+            if plan.python_owned:
+                preflight = cast("ProcessResult", context.process("checkout.runtime.preflight"))
+                if preflight.returncode != 0:
+                    diagnostic = sanitize_last_error(_process_stderr(preflight).strip())
+                    detail = f": {diagnostic}" if diagnostic else ""
+                    raise InstanceConfigurationError(  # noqa: TRY301
+                        "owned runtime preflight failed "
+                        f"(returncode={preflight.returncode}){detail}"
+                    )
+
             context.action("checkout.database")
 
             if (
@@ -936,8 +1027,7 @@ class EnvironmentResource:
                     target_db=plan.target_database,
                 )
 
-            cat.update_environment_state(str(plan.env_id), EnvironmentState.READY)
-            cat.add_environment_event(str(plan.env_id), "checkout", "succeeded")
+            cat._finalize_environment_checkout(str(plan.env_id), _checkout_applied_settings(plan))
             context.action("checkout.cleanup")
             if context.planned("checkout.cleanup.worktree"):
                 context.skip("checkout.cleanup.worktree")
@@ -1386,7 +1476,10 @@ class EnvironmentResource:
                             raise ConfigError(
                                 f"uv pip install failed: {_process_stderr(install_result)}".strip()
                             )
-                    catalog.add_environment_event(str(env.id), "sync", "succeeded")
+                    catalog._record_environment_sync_success(
+                        str(env.id),
+                        _sync_applied_settings(catalog, env, project, inputs),
+                    )
                     completed = True
                     return self._get_env_row(catalog, env.id)
             finally:
@@ -1859,66 +1952,128 @@ class EnvironmentResource:
                     mutating=True,
                 ),
             )
-        steps = (*steps, *self._remove_copy_database_steps(env))
+        copy_drop = self._remove_copy_database_command(env, executor=executor)
+        if copy_drop is not None:
+            steps = (*steps, *copy_drop.steps)
         return self._action_command(
             "environment.remove",
             "Remove the selected development environment",
-            lambda: self._remove_impl(env),
+            lambda: self._remove_impl(env, copy_drop=copy_drop),
             executor=executor,
             mutating=True,
             steps=steps,
             optional_steps=tuple(step.step_id for step in steps),
         )
 
-    def _remove_copy_database_steps(
-        self, env: DevelopmentEnvironment
-    ) -> tuple[PreparedStep | PreparedAction, ...]:
-        """Capture the conditional COPY cleanup probes before removal starts."""
+    def _remove_copy_database_command(  # noqa: C901
+        self,
+        env: DevelopmentEnvironment,
+        *,
+        executor: ProcessExecutor | None,
+    ) -> PreparedCommand[None] | None:
+        """Capture the guarded direct COPY database cleanup before removal starts."""
         if env.db_mode is not EnvironmentDatabaseMode.COPY or env.target_db_name is None:
-            return ()
+            return None
         config_path = Path(env.generated_config_path)
         if not config_path.is_file():
-            return ()
+            return None
         try:
-            from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
+            from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
 
             cfg = parse_odoo_config(config_path)
             password = get_admin_passwd(cfg)
             if password is None:
-                return ()
+                return None
             instance = self._client.instance.from_config(config_path, master_password=password)
-            before = instance.databases._psql_probe_for(
-                env.target_db_name, "environment.remove.database.exists-before"
-            )
-            after = instance.databases._psql_probe_for(
-                env.target_db_name, "environment.remove.database.exists-after"
-            )
-            postcondition = instance.databases._psql_probe_for(
-                env.target_db_name, "environment.remove.database.exists-postcondition"
-            )
-        except Exception:
-            return ()
-        probes = tuple(
-            probe for probe in (before, after, postcondition) if isinstance(probe, PreparedStep)
-        )
-        if not probes:
-            return ()
-        return (
-            PreparedAction(
-                step_id="environment.remove.database.drop",
-                action="drop-owned-copy-database",
-                description="Drop the owned COPY database between exact existence probes",
-                mutating=True,
-            ),
-            *probes,
-        )
+            from odoo_instance_sdk.resources.postgres import PostgresCluster
 
-    def _remove_impl(self, env: DevelopmentEnvironment) -> None:
+            instance._postgres_cluster = PostgresCluster.from_project(env.repository_root)
+            drop_name = env.target_db_name
+            retained = _replacement_retained_error(env.last_error)
+            if retained.get("target_present") is False and retained.get("rollback_present") is True:
+                rollback_name = retained.get("rollback_database")
+                if isinstance(rollback_name, str) and rollback_name:
+                    drop_name = rollback_name
+            command = build_database_drop_command(
+                instance,
+                env.repository_root,
+                drop_name,
+                executor=executor,
+                allow_environment_id=str(env.id),
+                allow_environment_backup_id=(
+                    str(env.backup_id) if env.backup_id is not None else None
+                ),
+                allow_environment_rollback_database=(
+                    drop_name if drop_name != env.target_db_name else None
+                ),
+                idempotent_absent=True,
+            )
+            prepared = cast("PreparedCommand[None]", command._prepared())
+
+            def validate_retained_replay() -> None:
+                _validate_retained_removal_evidence(self._client.get_catalog(), env)
+
+            if (
+                drop_name == env.target_db_name
+                and retained.get("target_present") is True
+                and retained.get("rollback_present") is True
+            ):
+                rollback_name = retained.get("rollback_database")
+                if not isinstance(rollback_name, str) or not rollback_name:
+                    return prepared
+                rollback_command = build_database_drop_command(
+                    instance,
+                    env.repository_root,
+                    rollback_name,
+                    executor=executor,
+                    allow_environment_id=str(env.id),
+                    allow_environment_backup_id=(
+                        str(env.backup_id) if env.backup_id is not None else None
+                    ),
+                    allow_environment_rollback_database=rollback_name,
+                    idempotent_absent=True,
+                    step_prefix="environment.remove.rollback.",
+                )
+                rollback_prepared = cast("PreparedCommand[None]", rollback_command._prepared())
+                from odoo_instance_sdk.internal.proc import prepared_command
+
+                def remove_pair(context: RunContext[None]) -> None:
+                    validate_retained_replay()
+                    result = prepared.callback(context)
+                    rollback_prepared.callback(context)
+                    return result
+
+                return prepared_command(
+                    remove_pair,
+                    (*prepared.steps, *rollback_prepared.steps),
+                    executor=executor,
+                )
+            if retained:
+
+                def remove_retained(context: RunContext[None]) -> None:
+                    validate_retained_replay()
+                    return prepared.callback(context)
+
+                from odoo_instance_sdk.internal.proc import prepared_command
+
+                return prepared_command(remove_retained, prepared.steps, executor=executor)
+            return prepared  # noqa: TRY300
+        except Exception:
+            return None
+
+    def _remove_impl(
+        self, env: DevelopmentEnvironment, *, copy_drop: PreparedCommand[None] | None
+    ) -> None:
         from odoo_instance_sdk.internal.proc import active_context
 
         catalog = self._client.get_catalog()
         with exclusive_lock(environment_lock_path(str(env.id))):
-            self._do_remove(catalog, env, context=cast("RunContext[None] | None", active_context()))
+            self._do_remove(
+                catalog,
+                env,
+                context=cast("RunContext[None] | None", active_context()),
+                copy_drop=copy_drop,
+            )
 
     def _action_command(
         self,
@@ -1962,15 +2117,17 @@ class EnvironmentResource:
             ),
         )
 
-    def _do_remove(
+    def _do_remove(  # noqa: C901
         self,
         catalog: BackupCatalog,
         env: DevelopmentEnvironment,
         *,
         context: RunContext[None] | None = None,
+        copy_drop: PreparedCommand[None] | None = None,
     ) -> None:
         cat = catalog
         copy_plan = self._preflight_remove(cat, env, context=context)
+        _validate_retained_removal_evidence(cat, env)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
         cat.add_environment_event(str(env.id), "remove", "started")
 
@@ -1994,7 +2151,8 @@ class EnvironmentResource:
 
         if copy_plan is not None and copy_plan.stage is CopyJournalStage.RESTORED:
             cleanup_failed = (
-                self._drop_copy_target(copy_plan, failures, context=context) or cleanup_failed
+                self._drop_copy_target(copy_plan, failures, context=context, copy_drop=copy_drop)
+                or cleanup_failed
             )
             if cleanup_failed:
                 # Keep the config and owned backup: they are the only durable
@@ -2005,6 +2163,28 @@ class EnvironmentResource:
                 )
                 cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
                 raise EnvironmentConflictError("cleanup_failed", msg)
+            if copy_plan.rollback_filestore is not None:
+                rollback_filestore = copy_plan.rollback_filestore
+                if rollback_filestore.is_symlink() or not rollback_filestore.is_dir():
+                    if rollback_filestore.exists() or rollback_filestore.is_symlink():
+                        failures.append("rollback filestore ownership is unresolved")
+                        cleanup_failed = True
+                else:
+                    try:
+                        shutil.rmtree(rollback_filestore)
+                    except OSError as exc:
+                        failures.append(f"rollback filestore delete: {exc}")
+                        cleanup_failed = True
+                    if rollback_filestore.exists() or rollback_filestore.is_symlink():
+                        failures.append("rollback filestore cleanup was not verified")
+                        cleanup_failed = True
+                if cleanup_failed:
+                    msg = "; ".join(failures)[:2000]
+                    cat.update_environment_state(
+                        str(env.id), EnvironmentState.CLEANUP_FAILED, last_error=msg
+                    )
+                    cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
+                    raise EnvironmentConflictError("cleanup_failed", msg)
             instance = cast("OdooInstance", copy_plan.instance)
             cat.upsert_copy_journal(
                 str(env.id),
@@ -2099,7 +2279,9 @@ class EnvironmentResource:
         context: RunContext[None] | None = None,
     ) -> CopyCleanupPlan | None:
         """Reject unsafe or stale catalog rows before changing any external state."""
-        if not _port_free(env.http_interface, env.http_port):
+        if env.db_mode is not EnvironmentDatabaseMode.COPY and not _port_free(
+            env.http_interface, env.http_port
+        ):
             raise EnvironmentConflictError(
                 "port_in_use",
                 f"reserved port {env.http_interface}:{env.http_port} is occupied",
@@ -2155,6 +2337,11 @@ class EnvironmentResource:
     def _preflight_copy_remove(  # noqa: C901
         self, catalog: BackupCatalog, env: DevelopmentEnvironment
     ) -> CopyCleanupPlan:
+        if catalog.get_environment_runtime(str(env.id)) is not None:
+            raise EnvironmentConflictError(
+                "runtime_active",
+                "copy environment has an active owned runtime; stop it before removal",
+            )
         if env.target_db_name is None:
             raise EnvironmentConflictError(
                 "copy_ownership_missing", "copy environment ownership is incomplete"
@@ -2193,17 +2380,9 @@ class EnvironmentResource:
                     uuid.UUID(str(journal["backup_id"])) if journal["backup_id"] else env.backup_id
                 )
                 if stage in (CopyJournalStage.DROPPED, CopyJournalStage.BACKUP_DELETED):
-                    if stage is CopyJournalStage.DROPPED:
-                        if backup_id is None:
-                            raise EnvironmentConflictError(
-                                "copy_backup_missing", "owned backup is absent"
-                            )
+                    if stage is CopyJournalStage.DROPPED and backup_id is not None:
                         row = catalog.get_by_id(str(backup_id))
                         backup = _row_to_backup(row) if row is not None else None
-                        if backup is None:
-                            raise EnvironmentConflictError(
-                                "copy_backup_missing", "owned backup is absent"
-                            )
                     return CopyCleanupPlan(
                         target_database=str(journal["target_database"]),
                         backup_id=backup_id,
@@ -2252,6 +2431,55 @@ class EnvironmentResource:
             )
         instance = self._client.instance.from_config(config_path, master_password=master_pwd)
         db_port = instance.config.db_port or 5432
+        retained = _replacement_retained_error(env.last_error)
+        if (
+            env.state is EnvironmentState.CLEANUP_FAILED
+            and isinstance(env.last_error, str)
+            and "copy replacement cleanup_failed" in env.last_error
+            and not retained
+        ):
+            raise EnvironmentConflictError(
+                "replacement_conflict", "retained replacement cleanup evidence is malformed"
+            )
+        if env.state is EnvironmentState.CLEANUP_FAILED and retained:
+            expected_backup = str(env.backup_id) if env.backup_id is not None else None
+            if (
+                retained.get("target_database") != env.target_db_name
+                or retained.get("backup_id") != expected_backup
+                or not isinstance(retained.get("rollback_database"), str)
+                or Path(str(retained["rollback_database"])).name
+                != str(retained["rollback_database"])
+            ):
+                raise EnvironmentConflictError(
+                    "replacement_conflict",
+                    "retained replacement cleanup evidence does not match environment",
+                )
+            rollback_database = str(retained["rollback_database"])
+            start_config = instance.config.start_config
+            data_dir_value = cfg.get("data_dir") or (
+                None if start_config is None else start_config.data_dir
+            )
+            if not data_dir_value:
+                raise EnvironmentConflictError(
+                    "replacement_conflict", "retained replacement data binding is unavailable"
+                )
+            rollback_filestore = validate_filestore_containment(
+                Path(data_dir_value), rollback_database
+            )
+            target_present = retained.get("target_present")
+            rollback_present = retained.get("rollback_present")
+            if rollback_present is True and isinstance(target_present, bool):
+                backup_id = uuid.UUID(str(retained["backup_id"]))
+                backup_row = catalog.get_by_id(str(backup_id))
+                return CopyCleanupPlan(
+                    target_database=str(env.target_db_name),
+                    backup_id=backup_id,
+                    instance=instance,
+                    backup=_row_to_backup(backup_row) if backup_row is not None else None,
+                    stage=CopyJournalStage.RESTORED,
+                    rollback_database=rollback_database,
+                    rollback_filestore=rollback_filestore,
+                )
         if journal is not None:
             self._validate_copy_journal_ownership(env, journal, instance)
             stage = CopyJournalStage(str(journal["stage"]))
@@ -2345,39 +2573,16 @@ class EnvironmentResource:
         failures: _StrList,
         *,
         context: RunContext[None] | None = None,
+        copy_drop: PreparedCommand[None] | None = None,
     ) -> bool:
         if plan.stage is CopyJournalStage.RESTORE_PENDING:
             failures.append("copy restore ownership is unresolved")
             return True
-        instance = cast("OdooInstance", plan.instance)
+        if copy_drop is None or context is None:
+            failures.append("guarded direct PostgreSQL drop plan is unavailable")
+            return True
         try:
-            if not instance.databases.exists(plan.target_database):
-                return False
-            if context is not None and context.planned("environment.remove.database.drop"):
-                context.action("environment.remove.database.drop")
-                instance.databases._drop_impl(
-                    plan.target_database,
-                    timeout=None,
-                    psql_step_id=(
-                        "environment.remove.database.exists-after"
-                        if context.planned("environment.remove.database.exists-after")
-                        else None
-                    ),
-                )
-            else:
-                instance.databases.drop(plan.target_database)
-            if context is not None and context.planned(
-                "environment.remove.database.exists-postcondition"
-            ):
-                still_exists = instance.databases._exists_impl(
-                    plan.target_database,
-                    psql_step_id="environment.remove.database.exists-postcondition",
-                )
-            else:
-                still_exists = instance.databases.exists(plan.target_database)
-            if still_exists:
-                failures.append(f"drop postcondition failed: {plan.target_database} still exists")
-                return True
+            copy_drop.callback(context)
         except Exception as exc:
             failures.append(f"drop: {exc}")
             return True
@@ -2637,6 +2842,134 @@ def _encode_runtime_json(odoo_bin: str, runtime_cwd: str) -> str:
     return json.dumps({"odoo_bin": odoo_bin, "runtime_cwd": runtime_cwd})
 
 
+def _dependency_evidence(paths: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
+    evidence: dict[str, tuple[str, ...]] = {}
+    for path in paths:
+        candidate = Path(path)
+        if not candidate.is_file():
+            raise ConfigError(f"dependency input is unavailable: {candidate}")
+        try:
+            raw = candidate.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConfigError(f"dependency input is unavailable: {candidate}") from exc
+        entries: list[str] = []
+        for raw_line in raw.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            line = re.sub(r"\s+#.*$", "", line).strip()
+            if not line:
+                continue
+            line = " ".join(line.split())
+            line = _REQUIREMENT_OPERATOR.sub(r"\1", line)
+            projected = redacted_projection(line, field="dependency")
+            if not isinstance(projected, str):
+                raise ConfigError(f"dependency input is malformed: {candidate}")
+            entries.append(projected)
+        evidence[str(candidate.resolve(strict=False))] = tuple(sorted(entries))
+    return evidence
+
+
+def _configured_addons(config: Mapping[str, str]) -> tuple[str, ...] | None:
+    raw = config.get("addons_path")
+    if raw is None:
+        return None
+    return tuple(path.strip() for path in raw.split(",") if path.strip())
+
+
+def _git_ticket(branch: str) -> str:
+    match = re.fullmatch(r"(?P<ticket>[A-Za-z][A-Za-z0-9]*-[0-9]+)(?:_[1-9][0-9]*)?", branch)
+    return match.group("ticket") if match is not None else ""
+
+
+def _generated_applied_components(
+    plan: _CheckoutPlan,
+) -> tuple[Mapping[str, str] | None, tuple[str, ...] | None]:
+    if plan.source_config is None:
+        return None, None
+    if not plan.generated_config.is_file():
+        raise ConfigError(f"generated config is unavailable: {plan.generated_config}")
+    try:
+        config = parse_odoo_config(plan.generated_config)
+    except (OSError, configparser.Error, ValueError) as exc:
+        raise ConfigError(f"generated config is unreadable: {plan.generated_config}") from exc
+    addons = _configured_addons(config)
+    managed = {key: value for key, value in config.items() if key not in _APPLIED_CONFIG_BINDINGS}
+    return managed, addons
+
+
+def _checkout_applied_settings(plan: _CheckoutPlan) -> str:
+    managed_config, addons = _generated_applied_components(plan)
+    return encode_applied_settings(
+        python={
+            "selector": str(plan.python_selector) if plan.python_selector is not None else None,
+            "path": plan.python_path,
+            "owned": plan.python_owned,
+        },
+        dependencies=_dependency_evidence(plan.dependency_inputs),
+        managed_config=managed_config,
+        addons=addons,
+        git={"ticket": _git_ticket(plan.branch), "branch": plan.branch, "base": plan.base_ref},
+    )
+
+
+def _known_applied_component(
+    components: Mapping[str, JsonValue], name: str, field: str
+) -> JsonValue | None:
+    value = components.get(name)
+    if not isinstance(value, dict) or value.get("status") != "known":
+        return None
+    return value if not field else value.get(field)
+
+
+def _sync_applied_settings(
+    catalog: BackupCatalog,
+    env: DevelopmentEnvironment,
+    project: ProjectConfig,
+    inputs: Sequence[str],
+) -> str:
+    row = catalog.get_environment(str(env.id))
+    if row is None:
+        raise ConfigError("environment row disappeared during sync")
+    raw = row["applied_settings_json"]
+    if not isinstance(raw, str):
+        raise ConfigError("stored applied settings are malformed")
+    try:
+        document = decode_applied_settings(raw)
+    except AppliedSettingsError as exc:
+        raise ConfigError("stored applied settings are malformed") from exc
+    components = document.get("components")
+    if not isinstance(components, dict):
+        raise ConfigError("stored applied settings are malformed")
+    managed_config = _known_applied_component(components, "odoo", "values")
+    addons = _known_applied_component(components, "addons", "paths")
+    git = _known_applied_component(components, "git", "")
+    managed_values = managed_config if isinstance(managed_config, dict) else None
+    addon_values = tuple(str(path) for path in addons) if isinstance(addons, list) else None
+    git_values = (
+        {
+            field: git[field]
+            for field in ("ticket", "branch", "base")
+            if isinstance(git, dict) and isinstance(git.get(field), str)
+        }
+        if isinstance(git, dict)
+        else None
+    )
+    return encode_applied_settings(
+        python={
+            "selector": str(project.python) if project.python is not None else None,
+            "path": env.python_environment_path,
+            "owned": env.python_environment_owned,
+        },
+        dependencies=_dependency_evidence(inputs),
+        managed_config=cast("Mapping[str, JsonValue] | None", managed_values),
+        addons=addon_values,
+        git=cast("Mapping[str, JsonValue] | None", git_values),
+    )
+
+
 def _decode_runtime_json(raw: str | None) -> dict[str, str]:
     import json
 
@@ -2757,6 +3090,12 @@ def _resolve_python_bin(py: str | Path, repo_root: Path) -> str:
             return candidate
         p = (repo_root / p).resolve()
     return str(p)
+
+
+def _owned_python_executable(venv: Path) -> str:
+    if os.name == "nt":
+        return str(venv / "Scripts" / "python.exe")
+    return str(venv / "bin" / "python")
 
 
 def _is_venv(pybin: str) -> bool:
@@ -2975,6 +3314,16 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 cwd=str(plan.worktree),
                 mode="captured",
                 mutating=True,
+            )
+        )
+    if plan.python_owned:
+        steps.append(
+            PreparedStep(
+                step_id="checkout.runtime.preflight",
+                argv=(_owned_python_executable(plan.venv), plan.odoo_bin, "--help"),
+                cwd=plan.runtime_cwd,
+                timeout=30.0,
+                read_only=True,
             )
         )
     if plan.db_mode is EnvironmentDatabaseMode.COPY and plan.target_database is not None:

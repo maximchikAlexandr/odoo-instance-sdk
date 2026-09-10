@@ -297,9 +297,9 @@ export type RuntimeMetrics = {
     database_name: string | null;
     http_port: number | null;
     http_url: string | null;
+    memory_bytes: number | null;
     process_count: number;
     root_pid: number | null;
-    rss_bytes: number | null;
     started_at: string | null;
     state: RuntimeState;
 };

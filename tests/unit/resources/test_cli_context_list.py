@@ -92,8 +92,12 @@ def test_sync_rejects_root_env_as_usage_error(env_client: OdooClient) -> None:
 
 
 def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
-    env_client: OdooClient, project_manifest: Path, fake_python: Path
+    env_client: OdooClient,
+    project_manifest: Path,
+    fake_python: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.commands.env.remote_branch_names", lambda *_args: ())
     before = env_client.environments.list(project=project_manifest, include_removed=True)
     result = _invoke(
         CliRunner(),
@@ -103,7 +107,7 @@ def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
             str(project_manifest),
             "env",
             "checkout",
-            "feat/plan",
+            "PROJ-123",
             "--python",
             str(fake_python),
             "--source-db",

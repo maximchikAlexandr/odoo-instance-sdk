@@ -49,10 +49,10 @@ odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --config ./odoo.conf
 odcli doctor
 odcli run --dry-run
 odcli run
-odcli env checkout feature/customer-credit --dry-run
-odcli env checkout feature/customer-credit
-odcli --env feature/customer-credit run -- --dev=reload
-odcli --env feature/customer-credit logs
+odcli env checkout PROJ-123 --dry-run
+odcli env checkout PROJ-123
+odcli --env PROJ-123 run -- --dev=reload
+odcli --env PROJ-123 logs
 odcli env list
 ```
 
@@ -105,9 +105,58 @@ identified progress lines use the captured step ID, operation, target, elapsed
 time, and process exit status. For example:
 
 ```bash
-odcli env checkout feature/customer-credit --dry-run
+odcli env checkout PROJ-123 --dry-run
 odcli db restore 01234567-89ab-cdef-0123-456789abcdef --dry-run
 ```
+
+### Lifecycle and recovery contracts
+
+The current release includes the nine GitHub #61 contracts below. They all
+reuse the existing captured-command, catalogue, locking, redaction, and
+confirmation boundaries:
+
+- Owned `env checkout --create-venv` runs one bounded `<python> <odoo-bin>
+  --help` readiness probe before `ready`; shared runtimes do not receive that
+  probe.
+- COPY `env remove` drops only the proven target through guarded PostgreSQL
+  ownership checks, does not depend on an Odoo listener or HTTP-port state, and
+  retries retained `cleanup_failed` evidence idempotently.
+- Canonical aliases (`env create|ls|rm`, `backup ls|inspect|rm`, `db ls|rm`,
+  `postgres ps`, `resource ls`, and `module ls`) are the same Click operations
+  as their retained spellings, with one command ID and one output contract.
+- Monitor schema v4 exposes one nullable `memory_bytes` value: Darwin uses
+  validated physical footprint and other supported platforms use the existing
+  RSS total. Rich, JSON, TOON, OpenAPI, and the dashboard read that same field.
+- Success and failure documents preserve the resolved `dry_run` value; a
+  preview never launches a child, prompts, or mutates state.
+- `odcli db restore BACKUP_UUID --replace` replaces only a selected stopped
+  COPY environment. It preserves the exact target and environment identity,
+  uses matching database/filestore provenance, supports the existing
+  `--reset-admin-password`, and retains sanitized retry evidence on incomplete
+  compensation.
+- Top-level `odcli stop` signals only a runtime whose persisted owner and live
+  executable, argv, create time, cwd, config, and (on POSIX) process-group
+  identity still match; stale or inaccessible evidence fails closed.
+- Jira checkout accepts `JIRA_TICKET`, allocates the next never-reused branch
+  from local refs, catalogue history (including removed rows), and recorded
+  `origin` heads, then creates it from the selected `--base` without fetch or
+  Jira/network configuration.
+- Applied settings are versioned, normalized, and secret-free. `odcli doctor`
+  reports field-specific `in_sync`, `drifted`, or `unknown` results without
+  repairing or mutating anything; dependency and managed-config formatting
+  that is semantically unchanged remains synchronized.
+
+`.localhost` browser-session isolation is separate research and is not part of
+this delivery. A future reusable `env show` projection is also deliberately
+outside the current CLI scope; use `odcli doctor` for read-only drift today.
+
+`odcli env checkout` (also spelled `odcli env create`) accepts a Jira ticket
+(`JIRA_TICKET`, for example `PROJ-123`) rather than a branch name. It reserves
+`PROJ-123` or the next unused `PROJ-123_N` from local refs, retained catalogue
+history (including removed environments), and current `origin` heads, then
+creates the worktree from the selected `--base`. The generated environment
+name is `<project>:<resolved-branch>`; the CLI does not expose a separate
+`--name` override. Both spellings are the same Click operation.
 
 Catalogue lists are project-scoped by default. Use `--all-projects` when a
 global result is intended, for example `odcli backup list --all-projects` or
@@ -316,11 +365,12 @@ sentence; use the entry's `--help` for exact options.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
 - `odcli resource list` — List retained local resources without lifecycle mutation.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.
-- `odcli env checkout` — Plan or create an isolated branch worktree and environment.
+- `odcli env checkout` — Plan or create an isolated Jira-ticket worktree and environment (`env create` is the same operation).
 - `odcli env list` — List registered environments, active-only unless `--all` is requested.
 - `odcli env path` — Print one active environment's absolute worktree path.
 - `odcli env remove` — Remove a registered environment and its owned artifacts safely.
 - `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
+- `odcli stop` — Stop the selected environment's proven-owned runtime.
 - `odcli backup list` — List retained backup records with state and file presence.
 - `odcli backup show` — Show one exact backup UUID with history and relationships.
 - `odcli backup validate` — Validate one exact backup and report invalid versus unavailable.

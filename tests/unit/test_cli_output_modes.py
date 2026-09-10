@@ -33,6 +33,7 @@ from odoo_instance_sdk.commands.output import (
     build_envelope,
     emit,
     emit_json_envelope,
+    fail,
     failure_document,
     model_to_dict,
     output_options,
@@ -135,10 +136,14 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         True,
     ),
     PublicLeafCase(("doctor",), ("doctor",), "bounded-read-only", False),
+    PublicLeafCase(("stop",), ("stop", "--dry-run"), "mutating-or-spawning", True),
     PublicLeafCase(("resource", "list"), ("resource", "list"), "bounded-read-only", False),
     PublicLeafCase(("resource", "doctor"), ("resource", "doctor"), "bounded-read-only", False),
     PublicLeafCase(
-        ("env", "checkout"), ("env", "checkout", "main", "--dry-run"), "mutating-or-spawning", True
+        ("env", "checkout"),
+        ("env", "checkout", "PROJ-123", "--dry-run"),
+        "mutating-or-spawning",
+        True,
     ),
     PublicLeafCase(
         ("env", "list"),
@@ -512,6 +517,21 @@ def _patch_leaf_external(  # noqa: C901
             else lambda *_args, **_kwargs: DoctorReport(
                 checks=[CheckResult(name="catalogue", status="ok", detail="ready")]
             ),
+        )
+        return
+
+    if path == ("stop",):
+        instance = MagicMock()
+        env = _matrix_environment()
+        if failing:
+            instance._stop_environment_command.side_effect = fail_operation
+        else:
+            instance._stop_environment_command.return_value = _matrix_command(
+                {"status": "stopped", "environment_id": str(env.id)}
+            )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            lambda _ctx: _resolved_context(MagicMock(), env, instance),
         )
         return
 
@@ -1072,6 +1092,9 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     assert failure_documents[0] == failure_documents[1]
     assert success_documents[0][0]["ok"] is True  # type: ignore[index]
     assert failure_documents[0][0]["ok"] is False  # type: ignore[index]
+    assert success_documents[0][0]["dry_run"] is ("--dry-run" in case.args)  # type: ignore[index]
+    failure_dry_run = "--dry-run" in case.args and case.path != ("init",)
+    assert failure_documents[0][0]["dry_run"] is failure_dry_run  # type: ignore[index]
 
 
 @pytest.mark.parametrize(
@@ -1581,6 +1604,7 @@ def test_shell_failure_details_round_trip_and_rich_parity(
     rendered = _rich_shell_projection(
         failure_document(
             command="eval",
+            dry_run=False,
             error_code="eval_user_code_failed",
             error_message="ValueError: failure",
             error_details=details,
@@ -1599,6 +1623,7 @@ def test_typed_output_documents_are_frozen_and_keep_v1_shape() -> None:
     )
     failure = failure_document(
         command="typed",
+        dry_run=False,
         error_code="stale_plan",
         error_message="token=hidden",
     )
@@ -1611,6 +1636,24 @@ def test_typed_output_documents_are_frozen_and_keep_v1_shape() -> None:
     assert "details" not in failure_builtins["error"]
     with pytest.raises(AttributeError):
         success.ok = False  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_shared_failure_boundary_requires_and_preserves_resolved_dry_run(
+    dry_run: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        fail(
+            OutputMode.JSON,
+            "representative.failure",
+            "precondition failed",
+            dry_run=dry_run,
+        )
+
+    assert caught.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is dry_run
+    assert payload["error"]["code"] == "representative_failure_failed"
 
 
 def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
@@ -3007,7 +3050,7 @@ def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) 
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        result = CliRunner().invoke(cli, ["env", "checkout", "feature"])
+        result = CliRunner().invoke(cli, ["env", "checkout", "PROJ-123"])
 
     assert result.exit_code == 0, result.output
     assert "Environment demo" in result.output
@@ -3088,7 +3131,7 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        dry_result = CliRunner().invoke(cli, ["env", "checkout", "feature", "--dry-run", "--json"])
+        dry_result = CliRunner().invoke(cli, ["env", "checkout", "PROJ-123", "--dry-run", "--json"])
 
     assert dry_result.exit_code == 0, dry_result.output
     dry_payload = json.loads(dry_result.stdout)["result"]
@@ -3125,7 +3168,7 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        run_result = CliRunner().invoke(cli, ["env", "checkout", "feature"])
+        run_result = CliRunner().invoke(cli, ["env", "checkout", "PROJ-123"])
 
     assert run_result.exit_code == 0, run_result.output
     assert run_effects == ["run"]
@@ -3205,7 +3248,7 @@ def test_public_human_callbacks_neutralize_terminal_controls(
             patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
         ):
             args = {
-                "checkout": ["env", "checkout", "main"],
+                "checkout": ["env", "checkout", "PROJ-123"],
                 "remove": ["env", "remove", "env-1", "--yes"],
                 "sync": ["env", "sync", "env-1"],
             }[command]

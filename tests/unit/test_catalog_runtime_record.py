@@ -87,7 +87,7 @@ def test_reopen_v10_catalog_is_idempotent(tmp_path: Path) -> None:
     catalog.close()
     reopened = BackupCatalog(db_path=db)
     version = reopened._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 14
+    assert version == 15
     reopened.close()
 
 
@@ -115,7 +115,7 @@ def test_v8_catalog_upgrades_to_v14_on_open(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert version == 14
+    assert version == 15
     assert "runtime" in tables
     catalog.close()
 

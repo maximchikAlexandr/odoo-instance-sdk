@@ -58,7 +58,7 @@ def _runtime(
     root_pid: int | None = 4242,
     child_pids: tuple[int, ...] = (4243, 4244),
     cpu_percent: float | None = 12.3,
-    rss_bytes: int | None = 256 * 1024 * 1024,
+    memory_bytes: int | None = 256 * 1024 * 1024,
     http_port: int | None = 8069,
 ) -> RuntimeMetrics:
     return RuntimeMetrics(
@@ -67,7 +67,7 @@ def _runtime(
         child_pids=child_pids,
         process_count=1 + len(child_pids),
         cpu_percent=cpu_percent,
-        rss_bytes=rss_bytes,
+        memory_bytes=memory_bytes,
         started_at=datetime.now(UTC),
         http_url=f"http://127.0.0.1:{http_port}" if http_port else None,
         http_port=http_port,
@@ -254,6 +254,13 @@ def test_env_list_human_env_row_columns(monkeypatch: pytest.MonkeyPatch) -> None
     # ODOO_PID = root_pid (+child count)
     assert "4242 (+2)" in out
     assert "12.3%" in out
+    assert "256.0 MiB" in out
+    machine = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    assert machine.exit_code == 0, machine.output
+    assert (
+        json.loads(machine.output)["result"]["environments"][0]["runtime"]["memory_bytes"]
+        == 256 * 1024 * 1024
+    )
     # GIT_AHEAD / GIT_DIFF
     assert "↑2 ↓0" in out
     assert "+10 -3" in out
@@ -308,7 +315,7 @@ def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> N
             root_pid=None,
             child_pids=(),
             cpu_percent=None,
-            rss_bytes=None,
+            memory_bytes=None,
             http_port=None,
         ),
         git=_git(state=GitActivityState.ORPHAN, ahead=None, behind=None, diff=None),
@@ -512,7 +519,7 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
             root_pid=None,
             child_pids=(),
             cpu_percent=None,
-            rss_bytes=None,
+            memory_bytes=None,
             http_port=None,
         ),
     )
@@ -586,7 +593,7 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
             root_pid=None,
             child_pids=(),
             cpu_percent=None,
-            rss_bytes=None,
+            memory_bytes=None,
             http_port=None,
         ),
     )
@@ -600,7 +607,7 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
             root_pid=None,
             child_pids=(),
             cpu_percent=None,
-            rss_bytes=None,
+            memory_bytes=None,
             http_port=None,
         ),
     )

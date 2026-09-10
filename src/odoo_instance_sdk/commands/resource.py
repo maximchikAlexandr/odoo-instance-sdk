@@ -570,7 +570,7 @@ def _run_resource(
             rich=rich,
         )
     except Exception as exc:
-        fail(mode, command_name, exc)
+        fail(mode, command_name, exc, dry_run=False)
 
 
 @click.group("resource", help="Inspect retained local resources and findings.")
@@ -578,7 +578,7 @@ def resource_group() -> None:
     """Inspect retained local resources and findings."""
 
 
-@resource_group.command("list", help="List read-only local resource observations.")
+@resource_group.command("list", aliases=["ls"], help="List read-only local resource observations.")
 @click.option("--all-projects", is_flag=True, default=False, help="List all project-owned records.")
 @output_options
 @pass_cli_context
@@ -589,7 +589,7 @@ def resource_list(
     try:
         project_id, project_source = resolve_catalogue_scope(ctx, all_projects)
     except Exception as exc:
-        fail(mode, "resource.list", exc)
+        fail(mode, "resource.list", exc, dry_run=False)
     _run_resource(
         "resource.list",
         mode,

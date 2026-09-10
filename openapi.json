@@ -873,10 +873,7 @@
               }
             ]
           },
-          "process_count": {
-            "type": "integer"
-          },
-          "root_pid": {
+          "memory_bytes": {
             "anyOf": [
               {
                 "type": "integer"
@@ -886,7 +883,10 @@
               }
             ]
           },
-          "rss_bytes": {
+          "process_count": {
+            "type": "integer"
+          },
+          "root_pid": {
             "anyOf": [
               {
                 "type": "integer"
@@ -916,7 +916,7 @@
           "child_pids",
           "process_count",
           "cpu_percent",
-          "rss_bytes",
+          "memory_bytes",
           "started_at",
           "http_url",
           "http_port",

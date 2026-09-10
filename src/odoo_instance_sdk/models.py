@@ -648,7 +648,7 @@ class RuntimeMetrics(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
     child_pids: tuple[int, ...]
     process_count: int
     cpu_percent: float | None
-    rss_bytes: int | None
+    memory_bytes: int | None
     started_at: datetime | None
     http_url: str | None
     http_port: int | None

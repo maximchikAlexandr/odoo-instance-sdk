@@ -40,7 +40,8 @@ _SECRET_KEY = re.compile(
 _ASSIGNMENT = re.compile(
     r"(?P<prefix>(?:[A-Za-z0-9_. -]*?(?:password|passwd|pwd|secret|token|cookie|jwt|oauth|"
     r"api[-_ ]?key|dsn|database[-_ ]?url|sentry[-_ ]?dsn|docker[-_ ]?auth[-_ ]?config|"
-    r"authorization|bearer|credential|private[-_ ]?key|access[-_ ]?key|auth)"
+    r"authorization|bearer|credential|private[-_ ]?key|access[-_ ]?key|auth|refresh|"
+    r"client[-_ ]?secret)"
     r"[A-Za-z0-9_. -]*\s*[:=]\s*))"
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;]+)",
     re.IGNORECASE | re.DOTALL,
@@ -114,6 +115,8 @@ _ASSIGNMENT_TOKENS = (
     "private",
     "access",
     "auth",
+    "refresh",
+    "client",
 )
 _ASSIGNMENT_KEY_CHARACTERS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_. -"
@@ -269,23 +272,7 @@ def _redact_text(value: str, secrets: tuple[str, ...], *, field: str) -> str:
         if secret:
             text = text.replace(secret, REDACTION_MARKER)
     lowered = text.casefold()
-    if (
-        _SECRET_KEY.search(field)
-        or field
-        in {
-            "argv",
-            "environment",
-            "stdin",
-            "script",
-            "error",
-            "message",
-            "text",
-            "result",
-            "user_stdout",
-            "stdout",
-            "stderr",
-        }
-    ) and any(token in lowered for token in _ASSIGNMENT_TOKENS):
+    if any(token in lowered for token in _ASSIGNMENT_TOKENS):
         text = _ASSIGNMENT.sub(r"\g<prefix>" + REDACTION_MARKER, text)
     if any(
         header in lowered

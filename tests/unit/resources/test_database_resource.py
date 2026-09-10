@@ -1222,6 +1222,61 @@ def test_instance_url_isolation(client: OdooClient) -> None:
     assert inst1.databases is not inst2.databases
 
 
+@pytest.mark.parametrize("value", [1, "", "  ", "bad\nbranch"])
+def test_source_git_branch_validation_is_fail_closed(value: object) -> None:
+    from odoo_instance_sdk.resources.database import _normalize_source_git_branch
+
+    with pytest.raises(ConfigError):
+        _normalize_source_git_branch(value)  # type: ignore[arg-type]
+
+
+def test_stream_response_rejects_oversized_declared_content_before_open(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk.resources.database import _stream_response_to_file
+
+    response = MagicMock(spec=httpx.Response)
+    with pytest.raises(BackupDownloadError, match="exceeded"):
+        _stream_response_to_file(
+            response,
+            tmp_path / "backup.part",
+            max_bytes=5,
+            expected_bytes=6,
+        )
+    response.iter_bytes.assert_not_called()
+
+
+def test_database_probe_rejects_backslash_name_without_spawning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.resources.database import _verify_database_via_psql
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.transport.run_psql", lambda **_: pytest.fail()
+    )
+    assert _verify_database_via_psql("localhost", 5432, "odoo", None, "unsafe\\name") is None
+
+
+def test_database_resource_rejects_non_integer_index(instance: OdooInstance) -> None:
+    with pytest.raises(TypeError, match="indices must be integers"):
+        instance.databases["first"]  # type: ignore[index]
+
+
+def test_execute_sql_rejects_non_string_before_preparation(instance: OdooInstance) -> None:
+    with pytest.raises(TypeError, match="sql must be a string"):
+        instance.databases.execute_sql_command(1)  # type: ignore[arg-type]
+
+
+def test_catalog_rejects_non_string_backup_id(tmp_path: Path) -> None:
+    from odoo_instance_sdk.exceptions import BackupNotFoundError
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    with pytest.raises(BackupNotFoundError, match="complete UUID"):
+        catalog._canonical_backup_id(1)  # type: ignore[arg-type]
+    catalog.close()
+
+
 def test_no_basic_auth(instance: OdooInstance) -> None:
     mock_cm = _mock_http({"result": ["db1"]})
     with patch("httpx.Client", return_value=mock_cm) as mock_cls:

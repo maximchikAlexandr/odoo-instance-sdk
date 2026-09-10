@@ -293,6 +293,30 @@ def test_drop_records_catalogue_only_after_verified_absence(
 
 
 @pytest.mark.unit
+def test_idempotent_drop_accepts_absent_database_without_mutation(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    executor = _executor(exists=False)
+    instance = _instance(project_manifest)
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        "feature_db",
+        executor=executor,
+        idempotent_absent=True,
+    ).run()
+
+    assert result.database == "feature_db"
+    assert [step.step_id for step in executor.executed] == [
+        "database.drop.planning-inspect",
+        "database.drop.inspect",
+    ]
+    cast("Any", instance._client.get_catalog()).record_database_dropped.assert_not_called()
+
+
+@pytest.mark.unit
 def test_drop_requires_connection_force_and_never_mutates_on_refusal(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path
 ) -> None:
@@ -848,6 +872,85 @@ def test_drop_refuses_catalogue_active_environment_or_runtime(
     with pytest.raises(ConfigError, match="active environment or process"):
         build_database_drop_command(instance, project_manifest, "feature_db", executor=executor)
     assert executor.executed == []
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_drop_allows_only_the_selected_environment_binding(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "selected-environment.sqlite3")
+    instance, _backup = _managed_instance(project_manifest, catalog, tmp_path, data_directory=None)
+    catalog.create_environment(
+        make_env(
+            "selected-environment",
+            repository_root=str(project_manifest),
+            target_db_name="feature_db",
+            db_mode="copy",
+        )
+    )
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        "feature_db",
+        executor=_executor(),
+        allow_environment_id="selected-environment",
+    ).run()
+
+    assert result.database == "feature_db"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_drop_allows_proven_retained_rollback_binding(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    catalog = BackupCatalog(db_path=tmp_path / "rollback.sqlite3")
+    instance, _backup_file = _managed_instance(
+        project_manifest, catalog, tmp_path, data_directory=tmp_path / "data"
+    )
+    backup = catalog.list_backups()[0]
+    rollback = "feature_db_odcli_rb_0123456789abcdef0123"
+    catalog.create_environment(
+        make_env(
+            "selected-environment",
+            repository_root=str(project_manifest),
+            target_db_name="feature_db",
+            db_mode="copy",
+            backup_id=str(backup.id),
+            last_error=(
+                "copy replacement cleanup_failed; retained="
+                + json.dumps(
+                    {
+                        "backup_id": str(backup.id),
+                        "target_database": "feature_db",
+                        "rollback_database": rollback,
+                        "target_present": False,
+                        "rollback_present": True,
+                    },
+                    separators=(",", ":"),
+                )
+                + "; retained rollback"
+            ),
+        )
+    )
+
+    result = build_database_drop_command(
+        instance,
+        project_manifest,
+        rollback,
+        executor=_executor(),
+        allow_environment_id="selected-environment",
+        allow_environment_backup_id=str(backup.id),
+        allow_environment_rollback_database=rollback,
+    ).run()
+
+    assert result.database == rollback
     catalog.close()
 
 

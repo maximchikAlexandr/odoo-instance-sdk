@@ -1233,6 +1233,7 @@ class DatabaseResource:
         copy: bool = False,
         neutralize_database: bool = False,
         timeout: float | None = None,
+        record_provenance: bool = True,
     ) -> RestoreResult:
         """Restore after a caller consumed an authoritative absence probe."""
         from odoo_instance_sdk.internal.proc import active_context
@@ -1246,6 +1247,7 @@ class DatabaseResource:
             neutralize_database=neutralize_database,
             timeout=timeout,
             skip_existence_checks=True,
+            record_provenance=record_provenance,
         )
 
     def _restore_impl(
@@ -1259,6 +1261,7 @@ class DatabaseResource:
         skip_existence_checks: bool = False,
         before_step_id: str | None = None,
         after_step_id: str | None = None,
+        record_provenance: bool = True,
     ) -> RestoreResult:
         with exclusive_lock(backup_lock_path(str(backup.id))):
             return self._restore_impl_locked(
@@ -1270,6 +1273,7 @@ class DatabaseResource:
                 skip_existence_checks=skip_existence_checks,
                 before_step_id=before_step_id,
                 after_step_id=after_step_id,
+                record_provenance=record_provenance,
             )
 
     def _restore_impl_locked(  # noqa: C901
@@ -1283,6 +1287,7 @@ class DatabaseResource:
         skip_existence_checks: bool = False,
         before_step_id: str | None = None,
         after_step_id: str | None = None,
+        record_provenance: bool = True,
     ) -> RestoreResult:
         self._assert_local()
         pwd = self._require_password()
@@ -1360,7 +1365,7 @@ class DatabaseResource:
             )
 
         ck = self._cluster
-        if ck is not None:
+        if ck is not None and record_provenance:
             db_host, db_port = ck
             if cluster_identity is None and data_directory is None:
                 catalog.record_restore(

@@ -225,7 +225,7 @@ def backup_group() -> None:
     """Inspect and manage retained backups."""
 
 
-@backup_group.command("list", help="List retained backup catalogue records.")
+@backup_group.command("list", aliases=["ls"], help="List retained backup catalogue records.")
 @click.option("--source", "source_base_url", default=None, help="Filter by source base URL.")
 @click.option("--database", "database_name", default=None, help="Filter by database name.")
 @click.option(
@@ -273,13 +273,15 @@ def backup_list(
             rich=_rich_table,
         )
     except Exception as exc:
-        fail(mode, "backup.list", exc)
+        fail(mode, "backup.list", exc, dry_run=False)
     finally:
         if catalog is not None:
             catalog.close()
 
 
-@backup_group.command("show", help="Show one retained backup by its complete UUID.")
+@backup_group.command(
+    "show", aliases=["inspect"], help="Show one retained backup by its complete UUID."
+)
 @click.argument("backup_id")
 @output_options
 def backup_show(backup_id: str, output_format: str | None, json_output: bool) -> None:
@@ -295,7 +297,7 @@ def backup_show(backup_id: str, output_format: str | None, json_output: bool) ->
             rich=_rich_detail,
         )
     except Exception as exc:
-        fail(mode, "backup.show", exc)
+        fail(mode, "backup.show", exc, dry_run=False)
     finally:
         if catalog is not None:
             catalog.close()
@@ -329,6 +331,7 @@ def backup_validate(backup_id: str, output_format: str | None, json_output: bool
             emit(
                 failure_document(
                     command="backup.validate",
+                    dry_run=False,
                     error_code="backup_validate_invalid",
                     error_message="Backup archive is invalid",
                     error_details=payload,
@@ -341,6 +344,7 @@ def backup_validate(backup_id: str, output_format: str | None, json_output: bool
             emit(
                 failure_document(
                     command="backup.validate",
+                    dry_run=False,
                     error_code="backup_validate_unavailable",
                     error_message="Backup validator is unavailable",
                     error_details=payload,
@@ -353,9 +357,15 @@ def backup_validate(backup_id: str, output_format: str | None, json_output: bool
     except click.exceptions.Exit:
         raise
     except BackupValidationUnavailableError as exc:
-        fail(mode, "backup.validate", exc, error_code="backup_validate_unavailable")
+        fail(
+            mode,
+            "backup.validate",
+            exc,
+            dry_run=False,
+            error_code="backup_validate_unavailable",
+        )
     except Exception as exc:
-        fail(mode, "backup.validate", exc)
+        fail(mode, "backup.validate", exc, dry_run=False)
     finally:
         if catalog is not None:
             catalog.close()
@@ -370,7 +380,9 @@ def _backup_resource(catalog: BackupCatalog) -> tuple[OdooClient, BackupResource
     return client, client.backups
 
 
-@backup_group.command("delete", help="Delete one retained backup by its complete UUID.")
+@backup_group.command(
+    "delete", aliases=["rm"], help="Delete one retained backup by its complete UUID."
+)
 @click.argument("backup_id")
 @click.option("--dry-run", is_flag=True, default=False, help="Show the immutable deletion plan.")
 @click.option("--yes", is_flag=True, default=False, help="Skip interactive confirmation.")
@@ -388,6 +400,7 @@ def backup_delete(
         emit(
             failure_document(
                 command="backup.delete",
+                dry_run=dry_run,
                 error_code="confirmation_required",
                 error_message="backup delete requires --yes in machine output mode",
             ),
@@ -441,7 +454,7 @@ def backup_delete(
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        fail(mode, "backup.delete", exc)
+        fail(mode, "backup.delete", exc, dry_run=dry_run)
     finally:
         if catalog is not None:
             catalog.close()

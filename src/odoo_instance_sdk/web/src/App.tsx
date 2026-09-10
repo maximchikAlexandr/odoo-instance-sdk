@@ -233,7 +233,7 @@ function ProjectRuntime({ runtime }: { runtime: RuntimeMetrics | null }) {
             Odoo PID {runtime.root_pid ?? "—"}
             {runtime.child_pids.length > 0 ? ` · workers ${runtime.child_pids.join(", ")}` : ""}
             {" · CPU "}{formatPercent(runtime.cpu_percent)}
-            {" · RAM "}{formatBytes(runtime.rss_bytes)}
+            {" · RAM "}{formatBytes(runtime.memory_bytes)}
           </Text>
           <Text size="sm" c="dimmed">
             database: {runtime.database_name ?? "—"} · port: {runtime.http_port ?? "—"}
@@ -353,7 +353,7 @@ function EnvironmentCard({
                 {" · CPU "}
                 {formatPercent(rt.cpu_percent)}
                 {" · RAM "}
-                {formatBytes(rt.rss_bytes)}
+                {formatBytes(rt.memory_bytes)}
               </>
             ) : (
               "Odoo: —"

@@ -37,7 +37,9 @@ from odoo_instance_sdk.internal.proc import (
     ProcessHandle,
     ProcessResult,
     SubprocessExecutor,
+    is_process_alive,
     terminate,
+    terminate_pid,
     wait_foreground,
 )
 from odoo_instance_sdk.internal.process_env import (
@@ -83,6 +85,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
         Command,
         ExecutionPlan,
+        JsonValue,
         PlanObservation,
         SemanticPlanObservation,
     )
@@ -102,6 +105,29 @@ class _RuntimeBinding:
     project_id: str
     repository_root: Path
     git_common_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeIdentity:
+    """One execution-time projection of persisted and live runtime identity."""
+
+    environment_id: str
+    root_pid: int
+    create_time: float
+    expected_executable: str
+    expected_argv: tuple[str, ...]
+    expected_cwd: str
+    expected_config_path: str
+    live_create_time: float | None
+    live_executable: str | None
+    live_argv: tuple[str, ...] | None
+    live_cwd: str | None
+    live_config_path: str | None
+    process_group_id: int | None
+
+    @property
+    def vanished(self) -> bool:
+        return self.live_create_time is None
 
 
 class _RuntimeCatalog(Protocol):
@@ -125,6 +151,14 @@ class _RuntimeCatalog(Protocol):
     ) -> None: ...
 
     def _clear_runtime(self, owner_kind: str, owner_id: str) -> None: ...
+
+    def get_environment(self, environment_id: str) -> Mapping[str, JsonValue] | None: ...
+
+    def get_environment_runtime(self, environment_id: str) -> Mapping[str, JsonValue] | None: ...
+
+    def _clear_environment_runtime_if_matches(
+        self, environment_id: str, *, root_pid: int, create_time: float
+    ) -> bool: ...
 
 
 @dataclass(slots=True, kw_only=True)
@@ -350,6 +384,81 @@ def _resolve_python_binary(env: DevelopmentEnvironment) -> str:
     if py_path.is_dir():
         return str(py_path / "bin" / "python")
     return str(py_path)
+
+
+def _canonical_runtime_path(value: str) -> str:
+    return str(Path(value).expanduser().resolve(strict=False))
+
+
+def _runtime_config_arg(argv: Sequence[str]) -> str | None:
+    for index, value in enumerate(argv[:-1]):
+        if value in {"--config", "-c"}:
+            return argv[index + 1]
+    return None
+
+
+def _canonical_runtime_argv(argv: Sequence[str]) -> tuple[str, ...]:
+    values = list(argv)
+    for index, value in enumerate(values):
+        if index in {0, 1} or (index > 0 and values[index - 1] in {"--config", "-c"}):
+            values[index] = _canonical_runtime_path(value)
+    return tuple(values)
+
+
+def _runtime_expectations(
+    env_row: Mapping[str, JsonValue],
+) -> tuple[str, tuple[str, ...], str, str]:
+    from odoo_instance_sdk.resources.environment import _decode_runtime_json
+
+    try:
+        runtime_json = _decode_runtime_json(cast("str | None", env_row["runtime_json"]))
+        odoo_bin = runtime_json["odoo_bin"]
+        runtime_cwd = runtime_json["runtime_cwd"]
+        config_path = _canonical_runtime_path(str(env_row["generated_config_path"]))
+        python_path = Path(str(env_row["python_environment_path"]))
+        if python_path.is_dir():
+            python_path /= "bin/python"
+        expected_executable = _canonical_runtime_path(str(python_path))
+        expected_cwd = _canonical_runtime_path(runtime_cwd)
+        expected_odoo_bin = _canonical_runtime_path(odoo_bin)
+        start_config = StartConfig.from_odoo_config(config_path)
+        expected_argv = _canonical_runtime_argv(
+            (expected_executable, expected_odoo_bin, *_build_cli_args(start_config))
+        )
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise RuntimeError("runtime identity configuration is unreadable") from exc
+    return expected_executable, expected_argv, expected_cwd, config_path
+
+
+def _runtime_protected_bindings(argv: Sequence[str]) -> dict[str, str | None]:
+    bindings: dict[str, str | None] = {}
+    protected = set(_PROTECTED_RUNTIME_OPTIONS)
+    for index, token in enumerate(argv):
+        option, separator, inline_value = token.partition("=")
+        if option not in protected:
+            continue
+        if separator:
+            bindings[option] = inline_value
+        elif index + 1 < len(argv):
+            bindings[option] = argv[index + 1]
+        else:
+            bindings[option] = None
+    return bindings
+
+
+def _runtime_argv_matches(identity: _RuntimeIdentity) -> bool:
+    live_argv = identity.live_argv
+    return (
+        live_argv is not None
+        and live_argv[:2] == identity.expected_argv[:2]
+        and _runtime_protected_bindings(live_argv)
+        == _runtime_protected_bindings(identity.expected_argv)
+    )
+
+
+def _verify_process_exit(pid: int) -> None:
+    if is_process_alive(pid):
+        raise RuntimeError("runtime process did not exit")
 
 
 def _project_path(
@@ -1422,6 +1531,231 @@ class OdooInstance:
         lock = exclusive_lock if exclusive else shared_lock
         with lock(self._artifact_lock_path):
             yield
+
+    def _read_runtime_identity(self) -> _RuntimeIdentity | None:
+        """Read one environment runtime identity, including a live-process snapshot."""
+        environment_id = self._environment_id
+        if environment_id is None:
+            raise InstanceConfigurationError("stop requires an environment-owned runtime")
+        catalog = cast("_RuntimeCatalog", self._client.get_catalog())
+        runtime_row = catalog.get_environment_runtime(environment_id)
+        if runtime_row is None:
+            return None
+        try:
+            root_pid = int(str(runtime_row["root_pid"]))
+            create_time = float(str(runtime_row["create_time"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("runtime identity record is unreadable") from exc
+
+        env_row = catalog.get_environment(environment_id)
+        if env_row is None:
+            raise RuntimeError("environment identity record is unavailable")
+        expected_executable, expected_argv, expected_cwd, config_path = _runtime_expectations(
+            env_row
+        )
+
+        def vanished_identity() -> _RuntimeIdentity:
+            return _RuntimeIdentity(
+                environment_id=environment_id,
+                root_pid=root_pid,
+                create_time=create_time,
+                expected_executable=expected_executable,
+                expected_argv=expected_argv,
+                expected_cwd=expected_cwd,
+                expected_config_path=config_path,
+                live_create_time=None,
+                live_executable=None,
+                live_argv=None,
+                live_cwd=None,
+                live_config_path=None,
+                process_group_id=None,
+            )
+
+        try:
+            process = psutil.Process(root_pid)
+        except psutil.NoSuchProcess:
+            return vanished_identity()
+        except (psutil.AccessDenied, psutil.ZombieProcess, OSError) as exc:
+            raise RuntimeError("runtime identity is inaccessible") from exc
+
+        try:
+            live_create_time = float(process.create_time())
+            live_executable = _canonical_runtime_path(process.exe())
+            live_argv = tuple(process.cmdline())
+            live_cwd = _canonical_runtime_path(process.cwd())
+            process_group_id = os.getpgid(root_pid) if sys.platform != "win32" else None
+        except psutil.NoSuchProcess:
+            return vanished_identity()
+        except (psutil.AccessDenied, psutil.ZombieProcess, OSError, TypeError) as exc:
+            raise RuntimeError("runtime identity is inaccessible") from exc
+        return _RuntimeIdentity(
+            environment_id=environment_id,
+            root_pid=root_pid,
+            create_time=create_time,
+            expected_executable=expected_executable,
+            expected_argv=expected_argv,
+            expected_cwd=expected_cwd,
+            expected_config_path=config_path,
+            live_create_time=live_create_time,
+            live_executable=live_executable,
+            live_argv=_canonical_runtime_argv(live_argv),
+            live_cwd=live_cwd,
+            live_config_path=(
+                _canonical_runtime_path(config_arg)
+                if (config_arg := _runtime_config_arg(live_argv)) is not None
+                else None
+            ),
+            process_group_id=process_group_id,
+        )
+
+    @staticmethod
+    def _validate_runtime_identity(identity: _RuntimeIdentity) -> None:
+        if identity.vanished:
+            return
+        mismatches: list[str] = []
+        if identity.live_create_time != identity.create_time:
+            mismatches.append("create_time")
+        if identity.live_executable != identity.expected_executable:
+            mismatches.append("executable")
+        if not _runtime_argv_matches(identity):
+            mismatches.append("argv")
+        if identity.live_cwd != identity.expected_cwd:
+            mismatches.append("cwd")
+        if identity.live_config_path != identity.expected_config_path:
+            mismatches.append("config")
+        if sys.platform != "win32" and identity.process_group_id != identity.root_pid:
+            mismatches.append("process_group")
+        if mismatches:
+            raise RuntimeError(f"runtime identity mismatch: {', '.join(mismatches)}")
+
+    @staticmethod
+    def _assert_runtime_identity_unchanged(
+        planned: _RuntimeIdentity | None,
+        current: _RuntimeIdentity | None,
+    ) -> None:
+        if planned is None or current is None:
+            if planned is current:
+                return
+            raise RuntimeError("runtime identity changed after planning")
+
+        persisted_fields = (
+            "environment_id",
+            "root_pid",
+            "create_time",
+            "expected_executable",
+            "expected_argv",
+            "expected_cwd",
+            "expected_config_path",
+        )
+        if any(getattr(planned, field) != getattr(current, field) for field in persisted_fields):
+            raise RuntimeError("runtime identity changed after planning")
+        if planned.vanished != current.vanished and not (
+            planned.vanished is False and current.vanished is True
+        ):
+            raise RuntimeError("runtime identity changed after planning")
+        if planned.vanished or current.vanished:
+            return
+        live_fields = (
+            "live_create_time",
+            "live_executable",
+            "live_argv",
+            "live_cwd",
+            "live_config_path",
+            "process_group_id",
+        )
+        if any(getattr(planned, field) != getattr(current, field) for field in live_fields):
+            raise RuntimeError("runtime identity changed after planning")
+
+    def _stop_environment(self, *, timeout: float = 10.0) -> dict[str, str]:
+        return self._stop_environment_command(timeout=timeout).run()
+
+    def _stop_environment_command(self, *, timeout: float = 10.0) -> Command[dict[str, str]]:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+
+        with self._artifact_operation(exclusive=False):
+            planned_identity = self._read_runtime_identity()
+
+        action_ids = (
+            "instance.stop.environment",
+            "instance.stop.revalidate",
+            "instance.stop.terminate",
+            "instance.stop.verify_exit",
+            "instance.stop.clear_runtime",
+        )
+        actions = tuple(
+            PreparedAction(
+                step_id=step_id,
+                action=step_id,
+                description=step_id.replace(".", " "),
+                read_only=step_id in {"instance.stop.revalidate", "instance.stop.verify_exit"},
+                mutating=step_id in {"instance.stop.terminate", "instance.stop.clear_runtime"},
+            )
+            for step_id in action_ids
+        )
+
+        def execute(context: RunContext[dict[str, str]]) -> dict[str, str]:
+            context.action(action_ids[0])
+            try:
+                with self._artifact_operation(exclusive=True):
+                    context.action(action_ids[1])
+                    identity = self._read_runtime_identity()
+                    self._assert_runtime_identity_unchanged(planned_identity, identity)
+                    context.complete_action(action_ids[1])
+                    if identity is None:
+                        for step_id in action_ids[2:]:
+                            context.skip(step_id)
+                        return {
+                            "status": "already_stopped",
+                            "environment_id": str(self._environment_id),
+                        }
+                    if identity.vanished:
+                        context.skip(action_ids[2])
+                        context.action(action_ids[3])
+                        context.complete_action(action_ids[3])
+                        context.action(action_ids[4])
+                        self._clear_runtime_identity_if_matches(identity)
+                        context.complete_action(action_ids[4])
+                        return {
+                            "status": "already_stopped",
+                            "environment_id": identity.environment_id,
+                        }
+                    self._validate_runtime_identity(identity)
+                    context.action(action_ids[2])
+                    terminate_pid(
+                        identity.root_pid,
+                        process_group_id=identity.process_group_id,
+                        timeout=timeout,
+                    )
+                    context.complete_action(action_ids[2])
+                    context.action(action_ids[3])
+                    _verify_process_exit(identity.root_pid)
+                    context.complete_action(action_ids[3])
+                    context.action(action_ids[4])
+                    self._clear_runtime_identity_if_matches(identity)
+                    context.complete_action(action_ids[4])
+                    return {"status": "stopped", "environment_id": identity.environment_id}
+            except BaseException as error:
+                context.fail_action(action_ids[0], error)
+                raise
+            else:
+                context.complete_action(action_ids[0])
+
+        return Command.create(
+            ExecutionPlan(
+                steps=tuple(step.public_projection() for step in actions),
+            ),
+            execute,
+            actions,
+        )
+
+    def _clear_runtime_identity_if_matches(self, identity: _RuntimeIdentity) -> None:
+        catalog = cast("_RuntimeCatalog", self._client.get_catalog())
+        if not catalog._clear_environment_runtime_if_matches(
+            identity.environment_id,
+            root_pid=identity.root_pid,
+            create_time=identity.create_time,
+        ):
+            raise RuntimeError("runtime identity changed before clearing its row")
 
     def stop(self, proc: OdooProcess, *, timeout: float = 10.0) -> None:
         self.stop_command(proc, timeout=timeout).run()

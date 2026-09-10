@@ -766,6 +766,7 @@ __all__ = [
     "SubprocessExecutor",
     "active_context",
     "bounded_process_inputs",
+    "is_process_alive",
     "owned_handle",
     "prepared_command",
     "prepared_step",
@@ -774,6 +775,7 @@ __all__ = [
     "run_captured_limited",
     "spawn",
     "terminate",
+    "terminate_pid",
     "wait_foreground",
 ]
 
@@ -788,12 +790,14 @@ from .executor import (  # noqa: E402
     ProcessSpawnError,
     ProcessTimeoutError,
     SubprocessExecutor,
+    is_process_alive,
     owned_handle,
     prepared_step,
     run_captured,
     run_captured_limited,
     spawn,
     terminate,
+    terminate_pid,
     wait_foreground,
 )
 from .testing import RecordingExecutor  # noqa: E402
