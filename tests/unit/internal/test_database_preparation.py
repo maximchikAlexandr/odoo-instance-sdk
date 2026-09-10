@@ -12,8 +12,8 @@ import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
-from typing import cast
+from types import SimpleNamespace, TracebackType
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,7 +27,7 @@ from odoo_instance_sdk.exceptions import (
     UnplannedStepError,
 )
 from odoo_instance_sdk.execution import Command
-from odoo_instance_sdk.internal.proc import RecordingExecutor
+from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
 from odoo_instance_sdk.models import (
     Backup,
     BackupBranchOrigin,
@@ -39,6 +39,9 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 @pytest.fixture(autouse=True)
@@ -194,7 +197,7 @@ def test_selected_native_dump_uses_pg_restore_process_boundary(
     )
 
     create, validate, restore = build_selected_backup_restore_steps(
-        instance,
+        cast("OdooInstance", instance),
         target_database="copy_target",
         dump_path=payload.dump_path,
         backup_format=payload.format,
@@ -236,10 +239,10 @@ def test_selected_native_dump_uses_verified_snapshot_after_source_path_swap(
         raising=False,
     )
     payload = database_preparation.capture_selected_backup_restore(backup)
-    real_open = database_preparation.os.open
+    real_open = os.open
     swapped = False
 
-    def open_source_once(path: object, flags: int, *args: object) -> int:
+    def open_source_once(path: str | os.PathLike[str], flags: int, *args: int) -> int:
         nonlocal swapped
         descriptor = real_open(path, flags, *args)
         if Path(path) == dump_path and not swapped:
@@ -248,7 +251,7 @@ def test_selected_native_dump_uses_verified_snapshot_after_source_path_swap(
             replacement_path.rename(dump_path)
         return descriptor
 
-    monkeypatch.setattr(database_preparation.os, "open", open_source_once)
+    monkeypatch.setattr(os, "open", open_source_once)
     database_preparation.materialize_selected_backup_dump(payload)
 
     assert payload.dump_path.read_bytes() == original
@@ -308,12 +311,13 @@ def test_selected_odoo_zip_executes_real_psql_plain_sql_transport(tmp_path: Path
         options=DatabaseRefreshOptions(restore=True),
         restore_inputs=("copy_target", payload.dump_path),
         selected_environment=MagicMock(repository_root=tmp_path),
-        selected_instance=instance,
+        selected_instance=cast("OdooInstance", instance),
         selected_restore=payload,
     )
 
     assert validate.step_id == "database.replace.restore.validate"
     assert restore.step_id == "database.replace.restore.psql"
+    restore = cast("PreparedStep", restore)
     assert restore.argv[0] == str(shutil.which("psql"))
     assert "ON_ERROR_STOP=1" in restore.argv
     assert restore.argv[-2:] == ("--file", str(payload.dump_path))
@@ -490,7 +494,7 @@ def test_validate_zip_rejects_insufficient_available_space(
         archive.writestr("manifest.json", '{"db_name":"remote_test"}')
         archive.writestr("dump.sql", "select 1;\n")
     monkeypatch.setattr(
-        backup_validation.shutil,
+        shutil,
         "disk_usage",
         lambda _path: SimpleNamespace(free=0),
     )
@@ -530,8 +534,13 @@ def test_selected_dump_stream_counter_cleans_up_lying_metadata(
             self.archive.__enter__()
             return self
 
-        def __exit__(self, *args: object) -> None:
-            self.archive.__exit__(*args)
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_value: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            self.archive.__exit__(exc_type, exc_value, traceback)
 
         def open(self, _name: str) -> io.BytesIO:
             return io.BytesIO(b"select 1;\nextra bytes")
@@ -573,8 +582,13 @@ def test_selected_filestore_stream_counter_removes_partial_destination(
             self.archive.__enter__()
             return self
 
-        def __exit__(self, *args: object) -> None:
-            self.archive.__exit__(*args)
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_value: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            self.archive.__exit__(exc_type, exc_value, traceback)
 
         def namelist(self) -> list[str]:
             return self.archive.namelist()
@@ -623,10 +637,10 @@ def test_selected_restore_consumes_verified_snapshot_after_source_path_swap(
         downloaded_at=datetime.now(UTC),
     )
     payload = database_preparation.capture_selected_backup_restore(backup)
-    real_open = database_preparation.os.open
+    real_open = os.open
     swapped = False
 
-    def open_source_once(path: object, flags: int, *args: object) -> int:
+    def open_source_once(path: str | os.PathLike[str], flags: int, *args: int) -> int:
         nonlocal swapped
         descriptor = real_open(path, flags, *args)
         if Path(path) == archive_path and not swapped:
@@ -635,7 +649,7 @@ def test_selected_restore_consumes_verified_snapshot_after_source_path_swap(
             replacement_path.rename(archive_path)
         return descriptor
 
-    monkeypatch.setattr(database_preparation.os, "open", open_source_once)
+    monkeypatch.setattr(os, "open", open_source_once)
     database_preparation.materialize_selected_backup_dump(payload)
     filestore = tmp_path / "filestore"
     database_preparation.materialize_selected_backup_filestore(filestore, payload)

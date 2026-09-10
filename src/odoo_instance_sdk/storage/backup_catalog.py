@@ -1359,7 +1359,7 @@ class BackupCatalog:
             )
 
     @_translate_sqlite_error
-    def finalize_environment_replacement(
+    def _finalize_environment_replacement(
         self,
         environment_id: str,
         backup_id: str,
@@ -1422,7 +1422,7 @@ class BackupCatalog:
             )
 
     @_translate_sqlite_error
-    def rollback_environment_replacement(
+    def _rollback_environment_replacement(
         self,
         environment_id: str,
         backup_id: str,
@@ -1642,7 +1642,7 @@ class BackupCatalog:
         self._conn.commit()
 
     @_translate_sqlite_error
-    def finalize_environment_checkout(
+    def _finalize_environment_checkout(
         self, environment_id: str, applied_settings_json: str
     ) -> None:
         """Atomically publish applied evidence, ready state, and success event."""
@@ -1667,7 +1667,7 @@ class BackupCatalog:
             )
 
     @_translate_sqlite_error
-    def record_environment_sync_success(
+    def _record_environment_sync_success(
         self, environment_id: str, applied_settings_json: str
     ) -> None:
         """Atomically publish sync evidence and its successful lifecycle event."""

@@ -7,12 +7,24 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
-from odoo_instance_sdk.execution import JsonValue
-from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 
 APPLIED_SETTINGS_VERSION = 1
+type SettingsValue = (
+    None
+    | bool
+    | int
+    | float
+    | str
+    | bytes
+    | BaseException
+    | Path
+    | Mapping[str, SettingsValue]
+    | Sequence[SettingsValue]
+)
 
 
 class AppliedSettingsError(ValueError):
@@ -34,7 +46,9 @@ def _safe_path(value: str | Path, *, field: str) -> str:
     return projected
 
 
-def _secret_free(value: object, *, field: str) -> JsonValue:
+def _secret_free(value: SettingsValue, *, field: str) -> JsonValue:
+    from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
     return redacted_projection(cast("JsonValue", value), field=field)
 
 
@@ -46,7 +60,7 @@ def _unknown_component() -> dict[str, JsonValue]:
     return {"status": "unknown"}
 
 
-def _normalize_python(value: Mapping[str, object] | None) -> dict[str, JsonValue]:
+def _normalize_python(value: Mapping[str, SettingsValue] | None) -> dict[str, JsonValue]:
     if value is None:
         return _unknown_component()
     allowed = {"selector", "path", "owned"}
@@ -73,7 +87,7 @@ def _normalize_python(value: Mapping[str, object] | None) -> dict[str, JsonValue
     )
 
 
-def _normalize_dependencies(value: object | None) -> dict[str, JsonValue]:
+def _normalize_dependencies(value: SettingsValue | None) -> dict[str, JsonValue]:
     if value is None:
         return _unknown_component()
     if isinstance(value, Mapping):
@@ -94,10 +108,10 @@ def _normalize_dependencies(value: object | None) -> dict[str, JsonValue]:
     return _known_component(inputs=inputs)
 
 
-def _normalize_config(value: Mapping[str, object] | None) -> dict[str, JsonValue]:
+def _normalize_config(value: Mapping[str, SettingsValue] | None) -> dict[str, JsonValue]:
     if value is None:
         return _unknown_component()
-    projected = _secret_free(dict(value), field="managed_config")
+    projected = _secret_free(cast("JsonValue", dict(value)), field="managed_config")
     if not isinstance(projected, dict):
         raise AppliedSettingsError("managed Odoo config evidence is malformed")
     return _known_component(values=projected)
@@ -113,7 +127,7 @@ def _normalize_addons(value: Sequence[str | Path] | None) -> dict[str, JsonValue
     return _known_component(paths=paths)
 
 
-def _normalize_git(value: Mapping[str, object] | None) -> dict[str, JsonValue]:
+def _normalize_git(value: Mapping[str, SettingsValue] | None) -> dict[str, JsonValue]:
     if value is None:
         return _unknown_component()
     allowed = {"ticket", "branch", "base"}
@@ -135,7 +149,7 @@ def _normalize_git(value: Mapping[str, object] | None) -> dict[str, JsonValue]:
     return _known_component(ticket=ticket_value, branch=branch_value, base=base_value)
 
 
-def _validate_python_component(component: dict[str, object]) -> None:
+def _validate_python_component(component: dict[str, JsonValue]) -> None:
     if (
         not (component["selector"] is None or isinstance(component["selector"], str))
         or not (component["path"] is None or isinstance(component["path"], str))
@@ -144,7 +158,7 @@ def _validate_python_component(component: dict[str, object]) -> None:
         raise AppliedSettingsError("python known evidence is malformed")
 
 
-def _validate_dependency_component(component: dict[str, object]) -> None:
+def _validate_dependency_component(component: dict[str, JsonValue]) -> None:
     inputs = component["inputs"]
     if not isinstance(inputs, list):
         raise AppliedSettingsError("dependencies known evidence is malformed")
@@ -161,23 +175,23 @@ def _validate_dependency_component(component: dict[str, object]) -> None:
             raise AppliedSettingsError("dependencies known evidence is malformed")
 
 
-def _validate_config_component(component: dict[str, object]) -> None:
+def _validate_config_component(component: dict[str, JsonValue]) -> None:
     if not isinstance(component["values"], dict):
         raise AppliedSettingsError("odoo known evidence is malformed")
 
 
-def _validate_addons_component(component: dict[str, object]) -> None:
+def _validate_addons_component(component: dict[str, JsonValue]) -> None:
     paths = component["paths"]
     if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
         raise AppliedSettingsError("addons known evidence is malformed")
 
 
-def _validate_git_component(component: dict[str, object]) -> None:
+def _validate_git_component(component: dict[str, JsonValue]) -> None:
     if not all(isinstance(component[field], str) for field in ("ticket", "branch", "base")):
         raise AppliedSettingsError("git known evidence is malformed")
 
 
-def _validate_component(value: object, name: str) -> dict[str, JsonValue]:
+def _validate_component(value: JsonValue, name: str) -> dict[str, JsonValue]:
     if not isinstance(value, dict) or value.get("status") not in {"known", "unknown"}:
         raise AppliedSettingsError(f"{name} evidence is malformed")
     if value["status"] == "unknown" and set(value) != {"status"}:
@@ -192,7 +206,7 @@ def _validate_component(value: object, name: str) -> dict[str, JsonValue]:
         }[name]
         if set(value) != fields:
             raise AppliedSettingsError(f"{name} known evidence is malformed")
-        component = cast("dict[str, object]", value)
+        component = value
         validators = {
             "python": _validate_python_component,
             "dependencies": _validate_dependency_component,
@@ -201,7 +215,7 @@ def _validate_component(value: object, name: str) -> dict[str, JsonValue]:
             "git": _validate_git_component,
         }
         validators[name](component)
-    return cast("dict[str, JsonValue]", value)
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,11 +227,11 @@ class AppliedSettingsCodec:
     def encode(
         self,
         *,
-        python: Mapping[str, object] | None = None,
-        dependencies: object | None = None,
-        managed_config: Mapping[str, object] | None = None,
+        python: Mapping[str, SettingsValue] | None = None,
+        dependencies: SettingsValue | None = None,
+        managed_config: Mapping[str, SettingsValue] | None = None,
         addons: Sequence[str | Path] | None = None,
-        git: Mapping[str, object] | None = None,
+        git: Mapping[str, SettingsValue] | None = None,
     ) -> str:
         if self.version != APPLIED_SETTINGS_VERSION:
             raise AppliedSettingsError("unsupported applied-settings version")
@@ -268,11 +282,11 @@ LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON = CODEC.unknown()
 
 def encode_applied_settings(
     *,
-    python: Mapping[str, object] | None = None,
-    dependencies: object | None = None,
-    managed_config: Mapping[str, object] | None = None,
+    python: Mapping[str, SettingsValue] | None = None,
+    dependencies: SettingsValue | None = None,
+    managed_config: Mapping[str, SettingsValue] | None = None,
     addons: Sequence[str | Path] | None = None,
-    git: Mapping[str, object] | None = None,
+    git: Mapping[str, SettingsValue] | None = None,
 ) -> str:
     return CODEC.encode(
         python=python,

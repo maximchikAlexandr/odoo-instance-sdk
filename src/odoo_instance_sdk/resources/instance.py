@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
         Command,
         ExecutionPlan,
+        JsonValue,
         PlanObservation,
         SemanticPlanObservation,
     )
@@ -151,9 +152,9 @@ class _RuntimeCatalog(Protocol):
 
     def _clear_runtime(self, owner_kind: str, owner_id: str) -> None: ...
 
-    def get_environment(self, environment_id: str) -> Mapping[str, object] | None: ...
+    def get_environment(self, environment_id: str) -> Mapping[str, JsonValue] | None: ...
 
-    def get_environment_runtime(self, environment_id: str) -> Mapping[str, object] | None: ...
+    def get_environment_runtime(self, environment_id: str) -> Mapping[str, JsonValue] | None: ...
 
     def _clear_environment_runtime_if_matches(
         self, environment_id: str, *, root_pid: int, create_time: float
@@ -405,7 +406,7 @@ def _canonical_runtime_argv(argv: Sequence[str]) -> tuple[str, ...]:
 
 
 def _runtime_expectations(
-    env_row: Mapping[str, object],
+    env_row: Mapping[str, JsonValue],
 ) -> tuple[str, tuple[str, ...], str, str]:
     from odoo_instance_sdk.resources.environment import _decode_runtime_json
 

@@ -66,7 +66,6 @@ from odoo_instance_sdk.internal.odoo_config import (
 from odoo_instance_sdk.internal.paths import get_environments_root
 from odoo_instance_sdk.internal.pgadmin import PgAdminPhaseHandle
 from odoo_instance_sdk.internal.port_allocation import find_free_port
-from odoo_instance_sdk.internal.proc.redaction import redacted_projection
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.urls import assert_local
@@ -183,7 +182,7 @@ class CopyCleanupPlan:
     rollback_filestore: Path | None = None
 
 
-def _replacement_retained_error(value: str | None) -> dict[str, object]:
+def _replacement_retained_error(value: str | None) -> dict[str, JsonValue]:
     if not isinstance(value, str) or "copy replacement cleanup_failed" not in value:
         return {}
     try:
@@ -1028,7 +1027,7 @@ class EnvironmentResource:
                     target_db=plan.target_database,
                 )
 
-            cat.finalize_environment_checkout(str(plan.env_id), _checkout_applied_settings(plan))
+            cat._finalize_environment_checkout(str(plan.env_id), _checkout_applied_settings(plan))
             context.action("checkout.cleanup")
             if context.planned("checkout.cleanup.worktree"):
                 context.skip("checkout.cleanup.worktree")
@@ -1477,7 +1476,7 @@ class EnvironmentResource:
                             raise ConfigError(
                                 f"uv pip install failed: {_process_stderr(install_result)}".strip()
                             )
-                    catalog.record_environment_sync_success(
+                    catalog._record_environment_sync_success(
                         str(env.id),
                         _sync_applied_settings(catalog, env, project, inputs),
                     )
@@ -1971,7 +1970,7 @@ class EnvironmentResource:
         env: DevelopmentEnvironment,
         *,
         executor: ProcessExecutor | None,
-    ) -> PreparedCommand[object] | None:
+    ) -> PreparedCommand[None] | None:
         """Capture the guarded direct COPY database cleanup before removal starts."""
         if env.db_mode is not EnvironmentDatabaseMode.COPY or env.target_db_name is None:
             return None
@@ -2009,7 +2008,7 @@ class EnvironmentResource:
                 ),
                 idempotent_absent=True,
             )
-            prepared = cast("PreparedCommand[object]", command._prepared())
+            prepared = cast("PreparedCommand[None]", command._prepared())
 
             def validate_retained_replay() -> None:
                 _validate_retained_removal_evidence(self._client.get_catalog(), env)
@@ -2035,10 +2034,10 @@ class EnvironmentResource:
                     idempotent_absent=True,
                     step_prefix="environment.remove.rollback.",
                 )
-                rollback_prepared = cast("PreparedCommand[object]", rollback_command._prepared())
+                rollback_prepared = cast("PreparedCommand[None]", rollback_command._prepared())
                 from odoo_instance_sdk.internal.proc import prepared_command
 
-                def remove_pair(context: RunContext[object]) -> object:
+                def remove_pair(context: RunContext[None]) -> None:
                     validate_retained_replay()
                     result = prepared.callback(context)
                     rollback_prepared.callback(context)
@@ -2051,7 +2050,7 @@ class EnvironmentResource:
                 )
             if retained:
 
-                def remove_retained(context: RunContext[object]) -> object:
+                def remove_retained(context: RunContext[None]) -> None:
                     validate_retained_replay()
                     return prepared.callback(context)
 
@@ -2063,7 +2062,7 @@ class EnvironmentResource:
             return None
 
     def _remove_impl(
-        self, env: DevelopmentEnvironment, *, copy_drop: PreparedCommand[object] | None
+        self, env: DevelopmentEnvironment, *, copy_drop: PreparedCommand[None] | None
     ) -> None:
         from odoo_instance_sdk.internal.proc import active_context
 
@@ -2124,7 +2123,7 @@ class EnvironmentResource:
         env: DevelopmentEnvironment,
         *,
         context: RunContext[None] | None = None,
-        copy_drop: PreparedCommand[object] | None = None,
+        copy_drop: PreparedCommand[None] | None = None,
     ) -> None:
         cat = catalog
         copy_plan = self._preflight_remove(cat, env, context=context)
@@ -2574,7 +2573,7 @@ class EnvironmentResource:
         failures: _StrList,
         *,
         context: RunContext[None] | None = None,
-        copy_drop: PreparedCommand[object] | None = None,
+        copy_drop: PreparedCommand[None] | None = None,
     ) -> bool:
         if plan.stage is CopyJournalStage.RESTORE_PENDING:
             failures.append("copy restore ownership is unresolved")
@@ -2583,7 +2582,7 @@ class EnvironmentResource:
             failures.append("guarded direct PostgreSQL drop plan is unavailable")
             return True
         try:
-            copy_drop.callback(cast("RunContext[object]", context))
+            copy_drop.callback(context)
         except Exception as exc:
             failures.append(f"drop: {exc}")
             return True
@@ -2843,8 +2842,10 @@ def _encode_runtime_json(odoo_bin: str, runtime_cwd: str) -> str:
     return json.dumps({"odoo_bin": odoo_bin, "runtime_cwd": runtime_cwd})
 
 
-def _dependency_evidence(paths: Sequence[str]) -> dict[str, object]:
-    evidence: dict[str, object] = {}
+def _dependency_evidence(paths: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    from odoo_instance_sdk.internal.proc.redaction import redacted_projection
+
+    evidence: dict[str, tuple[str, ...]] = {}
     for path in paths:
         candidate = Path(path)
         if not candidate.is_file():
@@ -2903,7 +2904,7 @@ def _checkout_applied_settings(plan: _CheckoutPlan) -> str:
     managed_config, addons = _generated_applied_components(plan)
     return encode_applied_settings(
         python={
-            "selector": plan.python_selector,
+            "selector": str(plan.python_selector) if plan.python_selector is not None else None,
             "path": plan.python_path,
             "owned": plan.python_owned,
         },
@@ -2915,8 +2916,8 @@ def _checkout_applied_settings(plan: _CheckoutPlan) -> str:
 
 
 def _known_applied_component(
-    components: Mapping[str, object], name: str, field: str
-) -> object | None:
+    components: Mapping[str, JsonValue], name: str, field: str
+) -> JsonValue | None:
     value = components.get(name)
     if not isinstance(value, dict) or value.get("status") != "known":
         return None
@@ -2958,14 +2959,14 @@ def _sync_applied_settings(
     )
     return encode_applied_settings(
         python={
-            "selector": project.python,
+            "selector": str(project.python) if project.python is not None else None,
             "path": env.python_environment_path,
             "owned": env.python_environment_owned,
         },
         dependencies=_dependency_evidence(inputs),
-        managed_config=cast("Mapping[str, object] | None", managed_values),
+        managed_config=cast("Mapping[str, JsonValue] | None", managed_values),
         addons=addon_values,
-        git=cast("Mapping[str, object] | None", git_values),
+        git=cast("Mapping[str, JsonValue] | None", git_values),
     )
 
 

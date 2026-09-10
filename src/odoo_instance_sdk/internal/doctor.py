@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from odoo_instance_sdk.exceptions import (
     ConfigError,
@@ -47,6 +47,8 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.applied_settings import SettingsValue
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
 STATUS_OK = "ok"
@@ -90,20 +92,20 @@ class _EnvironmentDrift:
     environment_id: str
     environment_name: str
     components: tuple[_DriftComponent, ...]
-    git_context: Mapping[str, object]
+    git_context: Mapping[str, JsonValue]
 
-    def as_dict(self) -> dict[str, object]:
+    def as_dict(self) -> dict[str, JsonValue]:
         return {
             "environment_id": self.environment_id,
             "environment_name": self.environment_name,
-            "components": [component.as_dict() for component in self.components],
+            "components": cast("JsonValue", [component.as_dict() for component in self.components]),
             "git_context": dict(self.git_context),
         }
 
 
 @dataclass(frozen=True, slots=True)
 class _CurrentDriftEvidence:
-    components: Mapping[str, object]
+    components: Mapping[str, JsonValue]
     reasons: Mapping[str, str]
 
 
@@ -324,7 +326,7 @@ def _current_drift_components(
     except Exception:
         project = None
 
-    dependency_values: Mapping[str, object] | None = None
+    dependency_values: SettingsValue | None = None
     if project is not None:
         inputs = _rebase_requirement_paths(
             list(project.requirements), Path(env.repository_root), worktree
@@ -337,9 +339,9 @@ def _current_drift_components(
         except (ConfigError, OSError, UnicodeError):
             dependency_values = None
 
-    source_config: Mapping[str, object] | None
+    source_config: Mapping[str, JsonValue] | None
     source_addons: tuple[str, ...] | None
-    artifact_config: Mapping[str, object] | None
+    artifact_config: Mapping[str, JsonValue] | None
     artifact_addons: tuple[str, ...] | None
     if project is None:
         source_config, source_addons = None, None
@@ -352,13 +354,13 @@ def _current_drift_components(
         )
     artifact_config, artifact_addons = _read_config_components(Path(env.generated_config_path))
 
-    python_component: object | None = None
+    python_component: JsonValue | None = None
     if project is not None and _python_artifact_available(
         Path(env.python_environment_path), env.python_environment_owned
     ):
         python_component = _component_from_codec(
             python={
-                "selector": project.python,
+                "selector": str(project.python) if project.python is not None else None,
                 "path": env.python_environment_path,
                 "owned": env.python_environment_owned,
             }
@@ -377,7 +379,7 @@ def _current_drift_components(
         addons=artifact_addons,
     )
 
-    components: dict[str, object] = {
+    components: dict[str, JsonValue] = {
         "python": python_component,
         "dependencies": dependency_component,
         "odoo_config": _paired_component(
@@ -394,7 +396,9 @@ def _current_drift_components(
     )
 
 
-def _paired_reasons(source: Mapping[str, object], artifact: Mapping[str, object]) -> dict[str, str]:
+def _paired_reasons(
+    source: Mapping[str, JsonValue], artifact: Mapping[str, JsonValue]
+) -> dict[str, str]:
     reasons: dict[str, str] = {}
     pairs = (
         (
@@ -423,7 +427,7 @@ def _resolve_source_config(project: ProjectConfig, repo_root: Path) -> Path | No
 
 def _read_config_components(
     path: Path | None,
-) -> tuple[Mapping[str, object] | None, tuple[str, ...] | None]:
+) -> tuple[Mapping[str, JsonValue] | None, tuple[str, ...] | None]:
     if path is None:
         return None, None
     try:
@@ -442,11 +446,11 @@ def _read_config_components(
 
 
 def _rebase_source_components(
-    config: Mapping[str, object] | None,
+    config: Mapping[str, JsonValue] | None,
     addons: tuple[str, ...] | None,
     repo_root: Path,
     worktree: Path,
-) -> tuple[Mapping[str, object] | None, tuple[str, ...] | None]:
+) -> tuple[Mapping[str, JsonValue] | None, tuple[str, ...] | None]:
     if config is not None:
         normalized = dict(config)
         upgrade_path = normalized.get("upgrade_path")
@@ -474,11 +478,11 @@ def _python_artifact_available(path: Path, owned: bool) -> bool:
 
 def _component_from_codec(
     *,
-    python: Mapping[str, object] | None = None,
-    dependencies: object | None = None,
-    managed_config: Mapping[str, object] | None = None,
+    python: Mapping[str, JsonValue] | None = None,
+    dependencies: SettingsValue | None = None,
+    managed_config: Mapping[str, JsonValue] | None = None,
     addons: tuple[str, ...] | None = None,
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     document = decode_applied_settings(
         encode_applied_settings(
             python=python,
@@ -493,17 +497,17 @@ def _component_from_codec(
     return dict(components)
 
 
-def _is_known(value: object) -> bool:
+def _is_known(value: JsonValue) -> bool:
     return isinstance(value, dict) and value.get("status") == "known"
 
 
-def _paired_component(source: object, artifact: object) -> object | None:
+def _paired_component(source: JsonValue, artifact: JsonValue) -> JsonValue | None:
     if not _is_known(source) or not _is_known(artifact):
         return None
     return artifact
 
 
-def _live_git_component(worktree: Path, base_ref: str) -> object | None:
+def _live_git_component(worktree: Path, base_ref: str) -> JsonValue | None:
     if not worktree.is_dir():
         return None
     try:
@@ -525,7 +529,7 @@ def _live_git_component(worktree: Path, base_ref: str) -> object | None:
     return _git_component(branch, base_ref)
 
 
-def _git_component(branch: str, base_ref: str) -> object | None:
+def _git_component(branch: str, base_ref: str) -> JsonValue | None:
     document = decode_applied_settings(
         encode_applied_settings(
             git={"ticket": _git_ticket(branch), "branch": branch, "base": base_ref}
@@ -537,7 +541,7 @@ def _git_component(branch: str, base_ref: str) -> object | None:
     return components.get("git")
 
 
-def _stored_drift_components(raw: object) -> dict[str, object] | None:
+def _stored_drift_components(raw: str | None) -> dict[str, JsonValue] | None:
     if not isinstance(raw, str):
         return None
     try:
@@ -565,7 +569,7 @@ _UNKNOWN_REASONS = {
 }
 
 
-def _difference_reason(name: str, current: object, stored: object) -> str:
+def _difference_reason(name: str, current: JsonValue, stored: JsonValue) -> str:
     if name == "python" and isinstance(current, dict) and isinstance(stored, dict):
         for field, reason in (
             ("selector", "Python selector differs"),
@@ -589,8 +593,8 @@ def _difference_reason(name: str, current: object, stored: object) -> str:
 
 def _drift_component(
     name: str,
-    current: object,
-    stored: object | None,
+    current: JsonValue,
+    stored: JsonValue | None,
     *,
     reason: str | None = None,
 ) -> _DriftComponent:
@@ -616,7 +620,7 @@ def _drift_component(
     return _DriftComponent(name, "in_sync", "current evidence matches applied", remediation)
 
 
-def _git_context(worktree: Path, base_ref: str) -> Mapping[str, object]:
+def _git_context(worktree: Path, base_ref: str) -> Mapping[str, JsonValue]:
     if not worktree.is_dir():
         return {"dirty": None, "ahead": None, "behind": None}
     try:
@@ -631,7 +635,7 @@ def _git_context(worktree: Path, base_ref: str) -> Mapping[str, object]:
 
 
 def _project_environment_drift(
-    env: DevelopmentEnvironment, applied_settings_json: object
+    env: DevelopmentEnvironment, applied_settings_json: str | None
 ) -> _EnvironmentDrift:
     try:
         evidence = _current_drift_components(env)

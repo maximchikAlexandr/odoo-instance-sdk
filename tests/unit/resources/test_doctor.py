@@ -68,7 +68,9 @@ class TestDoctorMissingWorktree:
     ) -> None:
         env = _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-drift-legacy")
         catalog = env_client.get_catalog()
-        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        before = row["applied_settings_json"]
         catalog.update_environment(
             str(env.id), {"applied_settings_json": LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON}
         )
@@ -79,7 +81,9 @@ class TestDoctorMissingWorktree:
             drift = next(item for item in report.drift if item.environment_id == str(env.id))
 
             assert all(item.status == "unknown" for item in drift.components)
-            assert catalog.get_environment(str(env.id))["applied_settings_json"] == raw
+            row = catalog.get_environment(str(env.id))
+            assert row is not None
+            assert row["applied_settings_json"] == raw
         assert before != LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
 
     def test_config_drift_is_field_isolated(
@@ -122,7 +126,9 @@ class TestDoctorMissingWorktree:
     ) -> None:
         env = _checkout_shared(env_client, project_manifest, fake_python, "feat/doc-drift-output")
         catalog = env_client.get_catalog()
-        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        before = row["applied_settings_json"]
         runner = _runner()
 
         json_result = runner.invoke(
@@ -143,7 +149,9 @@ class TestDoctorMissingWorktree:
             for component in item["components"]:
                 assert component["reason"] in rich_result.output
                 assert component["remediation"] in rich_result.output
-        assert catalog.get_environment(str(env.id))["applied_settings_json"] == before
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        assert row["applied_settings_json"] == before
 
     def test_python_selector_and_artifact_fail_closed(
         self,

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.applied_settings import (
     LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
     AppliedSettingsCodec,
@@ -16,8 +18,7 @@ def test_legacy_document_is_versioned_and_all_components_unknown() -> None:
     codec = AppliedSettingsCodec()
     decoded = codec.decode(LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON)
     assert decoded["version"] == 1
-    components = decoded["components"]
-    assert isinstance(components, dict)
+    components = cast("dict[str, dict[str, JsonValue]]", decoded["components"])
     assert set(components) == {"python", "dependencies", "odoo", "addons", "git"}
     assert all(component == {"status": "unknown"} for component in components.values())
 
@@ -38,15 +39,11 @@ def test_codec_normalizes_components_and_fingerprints_secret_free_dependencies(
     )
     assert "do-not-store" not in encoded
     decoded = codec.decode(encoded)
-    components = decoded["components"]
-    assert isinstance(components, dict)
+    components = cast("dict[str, dict[str, JsonValue]]", decoded["components"])
     python = components["python"]
-    assert isinstance(python, dict)
     assert python["path"] == str((tmp_path / "venv").resolve())
     dependencies = components["dependencies"]
-    assert isinstance(dependencies, dict)
-    inputs = dependencies["inputs"]
-    assert isinstance(inputs, list)
+    inputs = cast("list[JsonValue]", dependencies["inputs"])
     assert all(
         isinstance(item, dict) and set(item) == {"identity", "fingerprint"} for item in inputs
     )
@@ -71,8 +68,10 @@ def test_credential_bearing_dependency_identity_is_projected_before_storage_and_
     )
     assert "first-secret" not in json.dumps(first)
     assert "second-secret" not in json.dumps(second)
-    first_inputs = first["components"]["dependencies"]["inputs"]
-    second_inputs = second["components"]["dependencies"]["inputs"]
+    first_components = cast("dict[str, dict[str, JsonValue]]", first["components"])
+    second_components = cast("dict[str, dict[str, JsonValue]]", second["components"])
+    first_inputs = first_components["dependencies"]["inputs"]
+    second_inputs = second_components["dependencies"]["inputs"]
     assert first_inputs == second_inputs
 
 
@@ -143,7 +142,8 @@ def test_equivalent_addon_paths_are_deduplicated_after_canonicalization(tmp_path
     second = tmp_path / "b"
     decoded = codec.decode(codec.encode(addons=[first, second]))
 
-    assert decoded["components"]["addons"] == {
+    components = cast("dict[str, dict[str, JsonValue]]", decoded["components"])
+    assert components["addons"] == {
         "status": "known",
         "paths": [str(second.resolve())],
     }

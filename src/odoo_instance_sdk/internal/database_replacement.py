@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import shutil
+import sqlite3
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -54,6 +55,7 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
@@ -253,25 +255,25 @@ def _replacement_backup(catalog: BackupCatalog, backup_id: uuid.UUID) -> Backup:
     return backup
 
 
-def _row_identity(row: object) -> tuple[tuple[str, str | None], ...]:
+def _row_identity(row: sqlite3.Row | None) -> tuple[tuple[str, str | None], ...]:
     if row is None:
         return ()
     keys = getattr(row, "keys", None)
     if not callable(keys):
         return ()
-    values = cast("Mapping[str, object]", row)
+    values = cast("Mapping[str, JsonValue]", row)
     return tuple(
         (str(key), None if values[key] is None else str(values[key]))
         for key in sorted(str(item) for item in keys())
     )
 
 
-def _retained_failure(row: object) -> dict[str, object]:
+def _retained_failure(row: sqlite3.Row | None) -> dict[str, JsonValue]:
     """Decode only the bounded structured replacement context, if present."""
     if row is None:
         return {}
     try:
-        raw = cast("Mapping[str, object]", row)["last_error"]
+        raw = cast("Mapping[str, JsonValue]", row)["last_error"]
     except (KeyError, IndexError, TypeError):
         return {}
     if not isinstance(raw, str) or "retained=" not in raw:
@@ -286,7 +288,7 @@ def _retained_failure(row: object) -> dict[str, object]:
 
 def _validate_retained_evidence(
     plan: CopyReplacementPlan,
-    row: object,
+    row: sqlite3.Row | None,
     *,
     target_exists: bool,
     rollback_exists: bool,
@@ -345,12 +347,12 @@ def _restore_binding(
     return None
 
 
-def _environment_matches(row: object, env: DevelopmentEnvironment) -> bool:
+def _environment_matches(row: sqlite3.Row | None, env: DevelopmentEnvironment) -> bool:
     if row is None:
         return False
-    values = cast("Mapping[str, object]", row)
+    values = cast("Mapping[str, JsonValue]", row)
     try:
-        expected_values: tuple[tuple[str, object], ...] = (
+        expected_values: tuple[tuple[str, JsonValue], ...] = (
             ("id", str(env.id)),
             ("name", env.name),
             ("repository_root", env.repository_root),
@@ -542,7 +544,7 @@ def _validate_plan(  # noqa: C901
 
 
 def _revalidate(  # noqa: C901
-    plan: CopyReplacementPlan, context: RunContext[object], step_id: str
+    plan: CopyReplacementPlan, context: RunContext[None], step_id: str
 ) -> None:
     catalog = plan.client.get_catalog()
     row = catalog.get_environment(str(plan.environment.id))
@@ -671,14 +673,14 @@ def _revalidate(  # noqa: C901
         )
 
 
-def _rename(context: RunContext[object], step_id: str, *, message: str) -> None:
+def _rename(context: RunContext[None], step_id: str, *, message: str) -> None:
     result = cast("ProcessResult", context.process(step_id))
     if result.returncode != 0:
         raise ConfigError(message)
 
 
 def _verify_database_move(
-    context: RunContext[object], step_id: str, *, target: str, rollback: str
+    context: RunContext[None], step_id: str, *, target: str, rollback: str
 ) -> None:
     target_exists, rollback_exists, sessions = _inspect(
         cast("ProcessResult", context.process(step_id)), target=target, rollback=rollback
@@ -687,7 +689,7 @@ def _verify_database_move(
         raise ConfigError("prior database move verification failed")
 
 
-def _skip_remaining(context: RunContext[object], step_ids: tuple[str, ...]) -> None:
+def _skip_remaining(context: RunContext[None], step_ids: tuple[str, ...]) -> None:
     for step_id in step_ids:
         if context.planned(step_id) and not context.consumed(step_id):
             context.skip(step_id)
@@ -864,7 +866,7 @@ def build_copy_replacement_command(  # noqa: C901
             ):
                 context.action("database.replace.validate")
                 context.skip(_INSPECT)
-                _revalidate(plan, cast("RunContext[object]", context), _REVALIDATE)
+                _revalidate(plan, cast("RunContext[None]", context), _REVALIDATE)
                 execution_payload = restore_payload
                 if not plan.cleanup_only:
                     execution_payload = _materialize_verified_snapshot(restore_payload)
@@ -873,7 +875,7 @@ def build_copy_replacement_command(  # noqa: C901
                     published = True
                     restored_database = True
                     _skip_remaining(
-                        cast("RunContext[object]", context),
+                        cast("RunContext[None]", context),
                         (
                             _MOVE_DATABASE,
                             _MOVE_DATABASE_VERIFY,
@@ -896,7 +898,7 @@ def build_copy_replacement_command(  # noqa: C901
                     rollback_cleanup_started = True
                     if plan.planning_database[1]:
                         _rename(
-                            cast("RunContext[object]", context),
+                            cast("RunContext[None]", context),
                             _DROP_ROLLBACK,
                             message="rollback database cleanup failed",
                         )
@@ -928,13 +930,13 @@ def build_copy_replacement_command(  # noqa: C901
                     moved_database = True
                 else:
                     _rename(
-                        cast("RunContext[object]", context),
+                        cast("RunContext[None]", context),
                         _MOVE_DATABASE,
                         message="prior database move failed",
                     )
                     moved_database = True
                     _verify_database_move(
-                        cast("RunContext[object]", context),
+                        cast("RunContext[None]", context),
                         _MOVE_DATABASE_VERIFY,
                         target=plan.target_database,
                         rollback=plan.rollback_database,
@@ -1021,7 +1023,7 @@ def build_copy_replacement_command(  # noqa: C901
                 ):
                     raise ConfigError("replacement postconditions failed before cleanup")  # noqa: TRY301
                 context.action(_PUBLISH)
-                catalog.finalize_environment_replacement(
+                catalog._finalize_environment_replacement(
                     str(plan.environment.id),
                     str(plan.backup.id),
                     db_host=cluster.endpoint_host,
@@ -1035,7 +1037,7 @@ def build_copy_replacement_command(  # noqa: C901
                 if moved_database:
                     rollback_cleanup_started = True
                     _rename(
-                        cast("RunContext[object]", context),
+                        cast("RunContext[None]", context),
                         _DROP_ROLLBACK,
                         message="rollback database cleanup failed",
                     )
@@ -1056,7 +1058,7 @@ def build_copy_replacement_command(  # noqa: C901
                     raise ConfigError("replacement cleanup postconditions failed")  # noqa: TRY301
                 discard_restore_dump()
                 _skip_remaining(
-                    cast("RunContext[object]", context),
+                    cast("RunContext[None]", context),
                     (_RESET, "instance.shell_script", _DROP_PARTIAL, _RESTORE_DATABASE),
                 )
                 return CopyReplacementResult(
@@ -1076,7 +1078,7 @@ def build_copy_replacement_command(  # noqa: C901
                 drop_attempted = True
                 try:
                     _rename(
-                        cast("RunContext[object]", context),
+                        cast("RunContext[None]", context),
                         _DROP_PARTIAL,
                         message="partial database cleanup failed",
                     )
@@ -1093,7 +1095,7 @@ def build_copy_replacement_command(  # noqa: C901
             if compensated and moved_database and (not drop_attempted or database_removed):
                 try:
                     _rename(
-                        cast("RunContext[object]", context),
+                        cast("RunContext[None]", context),
                         _RESTORE_DATABASE,
                         message="prior database compensation failed",
                     )
@@ -1101,7 +1103,7 @@ def build_copy_replacement_command(  # noqa: C901
                     compensated = False
             if compensated and published and plan.environment.backup_id is not None:
                 try:
-                    catalog.rollback_environment_replacement(
+                    catalog._rollback_environment_replacement(
                         str(plan.environment.id),
                         str(plan.environment.backup_id),
                         db_host=cluster.endpoint_host,
@@ -1148,7 +1150,7 @@ def build_copy_replacement_command(  # noqa: C901
                         str(plan.environment.id), "sync", "failed", message=message
                     )
             _skip_remaining(
-                cast("RunContext[object]", context),
+                cast("RunContext[None]", context),
                 (
                     _MOVE_DATABASE_VERIFY,
                     _RESTORE,

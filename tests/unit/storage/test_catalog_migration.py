@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.applied_settings import (
     LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
     encode_applied_settings,
@@ -164,9 +165,9 @@ def test_applied_settings_publication_rolls_back_with_success_event(
 
     with pytest.raises(BackupCatalogError, match="injected"):
         if operation == "checkout":
-            catalog.finalize_environment_checkout(environment_id, replacement)
+            catalog._finalize_environment_checkout(environment_id, replacement)
         else:
-            catalog.record_environment_sync_success(environment_id, replacement)
+            catalog._record_environment_sync_success(environment_id, replacement)
 
     row = catalog.get_environment(environment_id)
     assert row is not None
@@ -263,7 +264,7 @@ def test_copy_replacement_publishes_backup_and_restore_atomically(tmp_path: Path
         data_directory=tmp_path / "data",
     )
 
-    catalog.finalize_environment_replacement(
+    catalog._finalize_environment_replacement(
         environment_id,
         new_id,
         db_host="localhost",
@@ -542,7 +543,7 @@ def test_environment_methods_exist(tmp_path: Path) -> None:
 )
 def test_create_environment_rejects_unsafe_applied_settings(tmp_path: Path, document: str) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
-    environment = {
+    environment: dict[str, JsonValue] = {
         "id": str(uuid.uuid4()),
         "name": "unsafe",
         "repository_root": "/repo",

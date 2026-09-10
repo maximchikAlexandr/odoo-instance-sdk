@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +18,9 @@ from odoo_instance_sdk.internal.git_worktree import GitError
 from odoo_instance_sdk.models import DevelopmentEnvironment
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk import OdooClient
 
 
 def _allocation_client(rows: list[dict[str, str]]) -> SimpleNamespace:
@@ -65,7 +69,7 @@ def test_jira_allocation_uses_sparse_union_and_removed_catalogue_rows(
         ]
     )
 
-    allocation = env._resolve_jira_allocation(client, root, "PROJ-123", None)
+    allocation = env._resolve_jira_allocation(cast("OdooClient", client), root, "PROJ-123", None)
 
     assert allocation.branch == "PROJ-123_4"
     assert allocation.base_ref == "develop"
@@ -108,7 +112,9 @@ def test_jira_allocation_honors_explicit_base_and_exact_ticket(
     monkeypatch.setattr(env, "local_branch_names", lambda _: ())
     monkeypatch.setattr(env, "remote_branch_names", lambda _, __: ())
 
-    allocation = env._resolve_jira_allocation(_allocation_client([]), root, "PROJ-123", "release")
+    allocation = env._resolve_jira_allocation(
+        cast("OdooClient", _allocation_client([])), root, "PROJ-123", "release"
+    )
 
     assert allocation.branch == "PROJ-123"
     assert allocation.base_ref == "release"
@@ -145,7 +151,7 @@ def test_jira_allocation_revalidation_is_stale_without_reallocation(
     )
 
     with pytest.raises(StalePlanError) as error:
-        env._revalidate_jira_absence(_allocation_client([]), allocation)
+        env._revalidate_jira_absence(cast("OdooClient", _allocation_client([])), allocation)
 
     assert error.value.actual == {"source": source, "branch": "PROJ-123_1"}
 
@@ -166,7 +172,7 @@ def test_jira_checkout_passes_captured_base_to_existing_command() -> None:
     )
 
     result = env._jira_checkout_command(
-        client,
+        cast("OdooClient", client),
         Path("/repo"),
         EnvironmentCheckoutOptions(create_venv=True),
         allocation,
@@ -250,7 +256,9 @@ def test_unavailable_jira_evidence_fails_before_checkout_mutation(
     monkeypatch.setattr(env, "remote_branch_names", origin)
 
     with pytest.raises((GitError, RuntimeError)):
-        env._resolve_jira_allocation(_allocation_client([]), root, "PROJ-123", None)
+        env._resolve_jira_allocation(
+            cast("OdooClient", _allocation_client([])), root, "PROJ-123", None
+        )
 
     assert calls == [
         "local",

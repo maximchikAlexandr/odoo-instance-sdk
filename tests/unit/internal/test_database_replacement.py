@@ -2,20 +2,32 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import sqlite3
 import uuid
 import zipfile
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
 import msgspec
 import pytest
 
+from odoo_instance_sdk.execution import ProcessStep
 from odoo_instance_sdk.internal import database_replacement
 from odoo_instance_sdk.internal.database_replacement import build_copy_replacement_command
-from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    PreparedProcess,
+    PreparedStep,
+    ProcessResult,
+    RecordingExecutor,
+    RunContext,
+)
 from odoo_instance_sdk.models import (
     DevelopmentEnvironment,
     EnvironmentDatabaseMode,
@@ -24,10 +36,13 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
+if TYPE_CHECKING:
+    from odoo_instance_sdk import OdooClient
+
 
 def _replacement_fixture(  # noqa: C901
     tmp_path: Path, *, sessions: bool = False
-) -> tuple[object, DevelopmentEnvironment, BackupCatalog, uuid.UUID, RecordingExecutor]:
+) -> tuple[OdooClient, DevelopmentEnvironment, BackupCatalog, uuid.UUID, RecordingExecutor]:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     claim = catalog._ensure_postgres_cluster_pending(
         "project-a", "odcli_pg_project-a", "pgdata_project-a"
@@ -150,8 +165,8 @@ def _replacement_fixture(  # noqa: C901
     client.get_catalog.return_value = catalog
     client.instance.from_environment.return_value = instance
 
-    def result_factory(step: object) -> ProcessResult:
-        step_id = str(getattr(step, "step_id"))
+    def result_factory(step: PreparedProcess) -> ProcessResult:
+        step_id = step.step_id
         if step_id in {"database.replace.inspect", "database.replace.revalidate"}:
             payload = {"target_exists": True, "rollback_exists": False, "sessions": []}
             if sessions:
@@ -168,7 +183,7 @@ def _replacement_fixture(  # noqa: C901
         else:
             stdout = ""
         return ProcessResult(
-            argv=tuple(getattr(step, "argv")),
+            argv=step.argv,
             returncode=0,
             stdout=stdout,
             stderr="",
@@ -178,7 +193,18 @@ def _replacement_fixture(  # noqa: C901
         )
 
     executor = RecordingExecutor(result_factory=result_factory)
-    return client, environment, catalog, new_id, executor
+    return cast("OdooClient", client), environment, catalog, new_id, executor
+
+
+def _mock_environment_instance(client: OdooClient) -> MagicMock:
+    factory = cast("MagicMock", client.instance.from_environment)
+    return cast("MagicMock", factory.return_value)
+
+
+def _environment_row(catalog: BackupCatalog, environment: DevelopmentEnvironment) -> sqlite3.Row:
+    row = catalog.get_environment(str(environment.id))
+    assert row is not None
+    return row
 
 
 def test_replacement_dry_run_captures_rollback_and_compensation_actions(
@@ -195,7 +221,7 @@ def test_replacement_dry_run_captures_rollback_and_compensation_actions(
     assert "database.replace.move-filestore" in step_ids
     assert "database.replace.publish-provenance" in step_ids
     assert "database.replace.compensate.restore-database" in step_ids
-    assert catalog.get_environment(str(environment.id))["backup_id"] == str(environment.backup_id)
+    assert _environment_row(catalog, environment)["backup_id"] == str(environment.backup_id)
     catalog.close()
 
 
@@ -218,6 +244,7 @@ def test_replacement_plan_defers_archive_payload_until_execution(
     assert all(getattr(step, "stdin", None) is None for step in restore_steps)
     assert all("restore.sql" not in getattr(step, "step_id", "") for step in restore_steps)
     restore = next(step for step in restore_steps if step.step_id.endswith("restore.psql"))
+    restore = cast("PreparedStep", restore)
     assert restore.argv[0].endswith("/psql")
     assert restore.argv[-2:-1] == ("--file",)
     assert "ON_ERROR_STOP=1" in restore.argv
@@ -235,11 +262,11 @@ def test_replacement_rejects_same_shape_backup_byte_swap_before_mutation(
 
     archive_path = tmp_path / "new.zip"
     original_size = archive_path.stat().st_size
-    original_factory = executor.result_factory
+    original_factory = cast("Callable[[PreparedProcess], ProcessResult]", executor.result_factory)
 
-    def mutate_after_revalidation(step: object) -> ProcessResult:
+    def mutate_after_revalidation(step: PreparedProcess) -> ProcessResult:
         result = original_factory(step)
-        if getattr(step, "step_id", "") == "database.replace.revalidate":
+        if step.step_id == "database.replace.revalidate":
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("manifest.json", json.dumps({"db_name": "source"}))
                 archive.writestr("dump.sql", "-- changed dump!\n")
@@ -273,8 +300,8 @@ def test_replacement_active_sessions_fail_before_any_move(
         build_copy_replacement_command(client, environment, backup_id, executor=executor)
 
     assert [step.step_id for step in executor.executed] == ["database.replace.inspect"]
-    assert not client.instance.from_environment.return_value.databases._restore_after_verified_absence.called
-    assert catalog.get_environment(str(environment.id))["backup_id"] == str(environment.backup_id)
+    assert not _mock_environment_instance(client).databases._restore_after_verified_absence.called
+    assert _environment_row(catalog, environment)["backup_id"] == str(environment.backup_id)
     catalog.close()
 
 
@@ -296,7 +323,7 @@ def test_replacement_success_publishes_new_backup_and_removes_rollback_filestore
     assert row["backup_id"] == str(backup_id)
     assert not (tmp_path / "environment" / "data" / "filestore" / "copy_target").is_symlink()
     assert len(tuple((tmp_path / "environment" / "data" / "filestore").iterdir())) == 1
-    assert not client.instance.from_environment.return_value.databases._restore_impl_locked.called
+    assert not _mock_environment_instance(client).databases._restore_impl_locked.called
     assert {step.step_id for step in executor.executed} >= {
         "database.replace.restore.create",
         "database.replace.restore.psql",
@@ -321,6 +348,7 @@ def test_replacement_partial_cleanup_targets_rollback_database_not_restored_targ
         for step in command.plan.steps
         if step.step_id == "database.replace.cleanup-rollback.database"
     )
+    assert isinstance(cleanup, ProcessStep)
 
     assert 'DROP DATABASE IF EXISTS "copy_target";' not in cleanup.display
     assert "odcli_rb_" in cleanup.display
@@ -334,7 +362,7 @@ def test_replacement_uses_local_restore_pipeline_without_listener(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
     )
     client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
-    database = client.instance.from_environment.return_value.databases
+    database = _mock_environment_instance(client).databases
     database._restore_after_verified_absence.side_effect = AssertionError(
         "replacement must not call the lock-taking restore wrapper"
     )
@@ -366,8 +394,8 @@ def test_replacement_revalidates_generated_config_after_planning(
     with pytest.raises(Exception, match="generated environment config changed"):
         command.run()
 
-    assert not client.instance.from_environment.return_value.databases._restore_impl_locked.called
-    assert catalog.get_environment(str(environment.id))["backup_id"] == str(environment.backup_id)
+    assert not _mock_environment_instance(client).databases._restore_impl_locked.called
+    assert _environment_row(catalog, environment)["backup_id"] == str(environment.backup_id)
     catalog.close()
 
 
@@ -378,12 +406,12 @@ def test_replacement_planning_target_absence_fails_before_command_capture(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
     )
     client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
-    original_factory = executor.result_factory
+    original_factory = cast("Callable[[PreparedProcess], ProcessResult]", executor.result_factory)
     assert original_factory is not None
 
-    def absent_target(step: object) -> ProcessResult:
+    def absent_target(step: PreparedProcess) -> ProcessResult:
         result = original_factory(step)
-        if getattr(step, "step_id") == "database.replace.inspect":
+        if step.step_id == "database.replace.inspect":
             return replace(
                 result,
                 stdout=json.dumps(
@@ -397,7 +425,7 @@ def test_replacement_planning_target_absence_fails_before_command_capture(
         build_copy_replacement_command(client, environment, backup_id, executor=executor)
 
     assert [step.step_id for step in executor.executed] == ["database.replace.inspect"]
-    assert catalog.get_environment(str(environment.id))["backup_id"] == str(environment.backup_id)
+    assert _environment_row(catalog, environment)["backup_id"] == str(environment.backup_id)
     catalog.close()
 
 
@@ -408,12 +436,12 @@ def test_replacement_parses_move_postcondition_before_restore(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
     )
     client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
-    original_factory = executor.result_factory
+    original_factory = cast("Callable[[PreparedProcess], ProcessResult]", executor.result_factory)
     assert original_factory is not None
 
-    def bad_move_verification(step: object) -> ProcessResult:
+    def bad_move_verification(step: PreparedProcess) -> ProcessResult:
         result = original_factory(step)
-        if getattr(step, "step_id") == "database.replace.move-database.verify":
+        if step.step_id == "database.replace.move-database.verify":
             return replace(
                 result,
                 stdout=json.dumps(
@@ -428,8 +456,8 @@ def test_replacement_parses_move_postcondition_before_restore(
     with pytest.raises(Exception, match="prior database move verification failed"):
         command.run()
 
-    assert not client.instance.from_environment.return_value.databases._restore_impl_locked.called
-    assert catalog.get_environment(str(environment.id))["backup_id"] == str(environment.backup_id)
+    assert not _mock_environment_instance(client).databases._restore_impl_locked.called
+    assert _environment_row(catalog, environment)["backup_id"] == str(environment.backup_id)
     catalog.close()
 
 
@@ -440,19 +468,21 @@ def test_replacement_incomplete_compensation_persists_sanitized_cleanup_context(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
     )
     client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
-    original_factory = executor.result_factory
+    original_factory = cast("Callable[[PreparedProcess], ProcessResult]", executor.result_factory)
     assert original_factory is not None
 
-    def failed_restore(step: object) -> ProcessResult:
+    def failed_restore(step: PreparedProcess) -> ProcessResult:
         result = original_factory(step)
-        if getattr(step, "step_id") == "database.replace.restore.psql":
+        if step.step_id == "database.replace.restore.psql":
             return replace(result, returncode=1, stderr="restore failed")
         return result
 
     executor.result_factory = failed_restore
     original_rename = database_replacement._rename
 
-    def fail_database_compensation(context: object, step_id: str, *, message: str) -> None:
+    def fail_database_compensation(
+        context: RunContext[None], step_id: str, *, message: str
+    ) -> None:
         if step_id == "database.replace.compensate.restore-database":
             raise RuntimeError("compensation unavailable")
         original_rename(context, step_id, message=message)
@@ -483,14 +513,15 @@ def test_replacement_keeps_new_pair_after_rollback_cleanup_fault(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
     )
     client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
-    original_rmtree = database_replacement.shutil.rmtree
+    original_rmtree = shutil.rmtree
 
-    def fail_rollback(path: object, *args: object, **kwargs: object) -> None:
+    def fail_rollback(path: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
+        del args, kwargs
         if str(path).endswith("odcli_rb_" + environment.id.hex[:20]):
             raise OSError("rollback filestore cleanup fault")
-        original_rmtree(path, *args, **kwargs)
+        original_rmtree(path)
 
-    monkeypatch.setattr(database_replacement.shutil, "rmtree", fail_rollback)
+    monkeypatch.setattr(shutil, "rmtree", fail_rollback)
     command = build_copy_replacement_command(client, environment, backup_id, executor=executor)
 
     with pytest.raises(OSError, match="rollback filestore cleanup fault"):
@@ -513,17 +544,18 @@ def test_replacement_cleanup_failed_published_topology_is_retryable(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
     )
     client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
-    original_rmtree = database_replacement.shutil.rmtree
+    original_rmtree = shutil.rmtree
     calls = 0
 
-    def fail_once(path: object, *args: object, **kwargs: object) -> None:
+    def fail_once(path: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
+        del args, kwargs
         nonlocal calls
         if str(path).endswith("odcli_rb_" + environment.id.hex[:20]) and calls == 0:
             calls += 1
             raise OSError("rollback filestore cleanup fault")
-        original_rmtree(path, *args, **kwargs)
+        original_rmtree(path)
 
-    monkeypatch.setattr(database_replacement.shutil, "rmtree", fail_once)
+    monkeypatch.setattr(shutil, "rmtree", fail_once)
     command = build_copy_replacement_command(client, environment, backup_id, executor=executor)
     with pytest.raises(OSError, match="rollback filestore cleanup fault"):
         command.run()
@@ -550,12 +582,12 @@ def test_replacement_final_verification_fault_keeps_published_pair(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
     )
     client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
-    original_factory = executor.result_factory
+    original_factory = cast("Callable[[PreparedProcess], ProcessResult]", executor.result_factory)
     assert original_factory is not None
 
-    def failed_final_verify(step: object) -> ProcessResult:
+    def failed_final_verify(step: PreparedProcess) -> ProcessResult:
         result = original_factory(step)
-        if getattr(step, "step_id") == "database.replace.cleanup-rollback.verify":
+        if step.step_id == "database.replace.cleanup-rollback.verify":
             return replace(
                 result,
                 stdout=json.dumps(
@@ -585,7 +617,7 @@ def test_replacement_nonzero_admin_reset_does_not_publish(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
     )
     client, environment, catalog, backup_id, executor = _replacement_fixture(tmp_path)
-    instance = client.instance.from_environment.return_value
+    instance = _mock_environment_instance(client)
     instance.config.start_config = StartConfig(
         config_path=environment.generated_config_path,
         db_name="copy_target",
@@ -595,12 +627,12 @@ def test_replacement_nonzero_admin_reset_does_not_publish(
         db_password="db-secret",
         data_dir=str(tmp_path / "environment" / "data"),
     )
-    original_factory = executor.result_factory
+    original_factory = cast("Callable[[PreparedProcess], ProcessResult]", executor.result_factory)
     assert original_factory is not None
 
-    def failed_reset(step: object) -> ProcessResult:
+    def failed_reset(step: PreparedProcess) -> ProcessResult:
         result = original_factory(step)
-        if getattr(step, "step_id") == "instance.shell_script":
+        if step.step_id == "instance.shell_script":
             return replace(result, returncode=1, stderr="reset failed")
         return result
 
@@ -612,7 +644,7 @@ def test_replacement_nonzero_admin_reset_does_not_publish(
     with pytest.raises(Exception, match="administrator password reset failed"):
         command.run()
 
-    assert catalog.get_environment(str(environment.id))["backup_id"] == str(environment.backup_id)
+    assert _environment_row(catalog, environment)["backup_id"] == str(environment.backup_id)
     assert "database.replace.publish-provenance" not in {
         event.step_id for event in executor.executed
     }

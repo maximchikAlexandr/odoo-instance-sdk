@@ -6,7 +6,7 @@ import textwrap
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -21,12 +21,19 @@ from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     StalePlanError,
 )
-from odoo_instance_sdk.execution import Command
+from odoo_instance_sdk.execution import Command, JsonValue
 from odoo_instance_sdk.internal.applied_settings import (
     LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
     decode_applied_settings,
 )
-from odoo_instance_sdk.internal.proc import ProcessResult, ProcessTimeoutError, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    PreparedProcess,
+    PreparedStep,
+    ProcessResult,
+    ProcessTimeoutError,
+    RecordingExecutor,
+    StepObserver,
+)
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
@@ -38,6 +45,7 @@ from odoo_instance_sdk.models import (
     NoBackup,
 )
 from odoo_instance_sdk.resources.environment import (
+    DevelopmentEnvironment,
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
     EnvironmentState,
@@ -162,8 +170,7 @@ class TestCheckoutPreflight:
         row = env_client.get_catalog().get_environment(str(env.id))
         assert row is not None
         document = decode_applied_settings(row["applied_settings_json"])
-        components = document["components"]
-        assert isinstance(components, dict)
+        components = cast("dict[str, dict[str, JsonValue]]", document["components"])
         assert set(components) == {"python", "dependencies", "odoo", "addons", "git"}
         assert components["python"]["status"] == "known"
         assert components["dependencies"]["status"] == "known"
@@ -868,10 +875,10 @@ class TestCheckoutShared:
             ),
         )
 
-        document = decode_applied_settings(
-            env_client.get_catalog().get_environment(str(env.id))["applied_settings_json"]
-        )
-        components = document["components"]
+        row = env_client.get_catalog().get_environment(str(env.id))
+        assert row is not None
+        document = decode_applied_settings(row["applied_settings_json"])
+        components = cast("dict[str, dict[str, JsonValue]]", document["components"])
         assert components["odoo"] == {
             "status": "known",
             "values": {"limit_memory_hard": "2147483648"},
@@ -907,12 +914,24 @@ class TestCheckoutShared:
         original_pump = executor_module._run_pump
 
         def disappear_after_apply(
-            step: object, **kwargs: object
+            step: PreparedStep,
+            *,
+            timeout: float | None,
+            environment_snapshot: tuple[tuple[str, str], ...],
+            observer: StepObserver | None,
+            observe_output: bool,
+            max_output_bytes: int | None = None,
         ) -> tuple[int, bytes, bytes, float]:
-            prepared = cast("Any", step)
-            result = original_pump(step, **kwargs)
-            if "install" in prepared.argv:
-                Path(str(prepared.cwd), "requirements.txt").unlink()
+            result = original_pump(
+                step,
+                timeout=timeout,
+                environment_snapshot=environment_snapshot,
+                observer=observer,
+                observe_output=observe_output,
+                max_output_bytes=max_output_bytes,
+            )
+            if "install" in step.argv:
+                Path(str(step.cwd), "requirements.txt").unlink()
             return result
 
         monkeypatch.setattr(executor_module, "_run_pump", disappear_after_apply)
@@ -929,10 +948,9 @@ class TestCheckoutShared:
 
         env = env_client.environments.list(project=project_manifest)[0]
         assert env.state in {EnvironmentState.FAILED, EnvironmentState.CLEANUP_FAILED}
-        assert (
-            env_client.get_catalog().get_environment(str(env.id))["applied_settings_json"]
-            == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
-        )
+        row = env_client.get_catalog().get_environment(str(env.id))
+        assert row is not None
+        assert row["applied_settings_json"] == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
 
     def test_shared_remove_does_not_drop_source_db(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
@@ -1430,7 +1448,7 @@ class TestOwnedRuntimePreflight:
         *,
         branch: str,
         executor: RecordingExecutor,
-    ) -> object:
+    ) -> DevelopmentEnvironment:
         resource = env_client.environments
         options = EnvironmentCheckoutOptions(
             python="3.12",
@@ -1546,16 +1564,11 @@ class TestOwnedRuntimePreflight:
 
         env = env_client.environments.list(project=project_manifest)[0]
         assert env.state is EnvironmentState.FAILED
-        assert (
-            env_client.get_catalog().get_environment(str(env.id))["applied_settings_json"]
-            == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
-        )
-        assert expected in (
-            env_client.get_catalog().get_environment(str(env.id))["last_error"] or ""
-        )
-        assert "secret" not in (
-            env_client.get_catalog().get_environment(str(env.id))["last_error"] or ""
-        )
+        row = env_client.get_catalog().get_environment(str(env.id))
+        assert row is not None
+        assert row["applied_settings_json"] == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
+        assert expected in (row["last_error"] or "")
+        assert "secret" not in (row["last_error"] or "")
 
     def test_preflight_timeout_uses_process_boundary_and_retains_cleanup(
         self,
@@ -1573,8 +1586,8 @@ class TestOwnedRuntimePreflight:
             project_manifest, "feat/preflight-timeout", options=options
         )
 
-        def result_for(step: object) -> ProcessResult:
-            step_id = getattr(step, "step_id")
+        def result_for(step: PreparedProcess) -> ProcessResult:
+            step_id = step.step_id
             if step_id == "checkout.validate.git.toplevel":
                 return self._result(step_id, stdout=str(snapshot.private.repo_root))
             if step_id == "checkout.validate.git.common-dir":
@@ -1585,7 +1598,7 @@ class TestOwnedRuntimePreflight:
                 snapshot.private.worktree.mkdir(parents=True, exist_ok=True)
             if step_id == "checkout.runtime.preflight":
                 raise ProcessTimeoutError(
-                    tuple(getattr(step, "argv")),
+                    step.argv,
                     30.0,
                     duration=30.0,
                     stderr_tail="admin_passwd=secret /private/project",
@@ -1602,14 +1615,11 @@ class TestOwnedRuntimePreflight:
 
         env = env_client.environments.list(project=project_manifest)[0]
         assert env.state is EnvironmentState.CLEANUP_FAILED
-        assert (
-            env_client.get_catalog().get_environment(str(env.id))["applied_settings_json"]
-            == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
-        )
+        row = env_client.get_catalog().get_environment(str(env.id))
+        assert row is not None
+        assert row["applied_settings_json"] == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
         assert Path(env.worktree_path).is_dir()
-        assert "secret" not in (
-            env_client.get_catalog().get_environment(str(env.id))["last_error"] or ""
-        )
+        assert "secret" not in (row["last_error"] or "")
 
     def test_copy_checkout_plans_authoritative_restore_probes(
         self,
@@ -1704,8 +1714,6 @@ class TestOwnedRuntimePreflight:
         fake_python: Path,
     ) -> None:
         from odoo_instance_sdk.internal.proc import (
-            PreparedProcess,
-            PreparedStep,
             ProcessResult,
             RecordingExecutor,
         )

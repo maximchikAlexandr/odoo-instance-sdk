@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import click
+    import msgspec
 else:
     import rich_click as click
 
@@ -268,7 +269,7 @@ def db_restore(
 
     try:
         client = _client_class()(config=_client_config_class()(executable="odoo"))
-        command: _InspectableCommand[object]
+        command: _InspectableCommand[msgspec.Struct]
         if replace_environment:
             from odoo_instance_sdk.internal.database_replacement import (
                 build_copy_replacement_command,
@@ -277,7 +278,7 @@ def db_restore(
             environment = resolve_environment(client, ctx.env, cwd=Path.cwd())
             _validate_replace_context(client, environment)
             command = cast(
-                "_InspectableCommand[object]",
+                "_InspectableCommand[msgspec.Struct]",
                 build_copy_replacement_command(
                     client,
                     environment,
@@ -290,7 +291,7 @@ def db_restore(
 
             project_path = resolve_project_path(ctx)
             command = cast(
-                "_InspectableCommand[object]",
+                "_InspectableCommand[msgspec.Struct]",
                 client.environments.refresh_database_command(
                     project_path,
                     options=DatabaseRefreshOptions(
@@ -352,7 +353,7 @@ def db_restore(
             command_name="db.restore",
             mode=output_mode,
             dry_run=dry_run,
-            result=cast("Callable[[object | None], dict[str, JsonValue]]", model_to_dict),
+            result=cast("Callable[[msgspec.Struct | None], dict[str, JsonValue]]", model_to_dict),
             context={
                 "backup_id": str(backup_id),
                 "target_database": target_database,

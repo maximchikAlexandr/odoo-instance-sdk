@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 
 from odoo_instance_sdk.exceptions import ConfigError, LockConflictError
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.applied_settings import (
     decode_applied_settings,
     encode_applied_settings,
 )
+from odoo_instance_sdk.internal.proc import PreparedStep, StepObserver
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
     EnvironmentCheckoutOptions,
@@ -197,11 +199,13 @@ class TestSyncUpgradePreserve:
         _patch_subprocess(monkeypatch)
         env_client.environments.sync_python(str(env.id))
 
-        updated = decode_applied_settings(
-            catalog.get_environment(str(env.id))["applied_settings_json"]
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        updated = decode_applied_settings(row["applied_settings_json"])
+        before_components = cast(
+            "dict[str, dict[str, JsonValue]]", decode_applied_settings(original)["components"]
         )
-        before_components = decode_applied_settings(original)["components"]
-        after_components = updated["components"]
+        after_components = cast("dict[str, dict[str, JsonValue]]", updated["components"])
         assert after_components["odoo"] == before_components["odoo"]
         assert after_components["addons"] == before_components["addons"]
         assert after_components["git"] == before_components["git"]
@@ -219,9 +223,13 @@ class TestSyncUpgradePreserve:
             env_client, project_manifest, fake_python, "feat/sync-preview", monkeypatch
         )
         catalog = env_client.get_catalog()
-        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        before = row["applied_settings_json"]
         env_client.environments.sync_python_command(str(env.id))
-        after = catalog.get_environment(str(env.id))["applied_settings_json"]
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        after = row["applied_settings_json"]
         assert after == before
 
     def test_failed_sync_does_not_publish_evidence(
@@ -235,7 +243,9 @@ class TestSyncUpgradePreserve:
             env_client, project_manifest, fake_python, "feat/sync-failure", monkeypatch
         )
         catalog = env_client.get_catalog()
-        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        before = row["applied_settings_json"]
 
         def fail_compile(step: object, **_kwargs: object) -> tuple[int, bytes, bytes, float]:
             prepared = cast("Any", step)
@@ -245,7 +255,9 @@ class TestSyncUpgradePreserve:
 
         monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fail_compile)
         env_client.environments.sync_python(str(env.id))
-        after = catalog.get_environment(str(env.id))["applied_settings_json"]
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        after = row["applied_settings_json"]
         assert after == before
 
     def test_unreadable_sync_input_preserves_previous_evidence(
@@ -259,7 +271,9 @@ class TestSyncUpgradePreserve:
             env_client, project_manifest, fake_python, "feat/sync-missing-input", monkeypatch
         )
         catalog = env_client.get_catalog()
-        before = catalog.get_environment(str(env.id))["applied_settings_json"]
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        before = row["applied_settings_json"]
 
         _patch_subprocess(monkeypatch)
         from odoo_instance_sdk.internal.proc import executor as executor_module
@@ -267,11 +281,23 @@ class TestSyncUpgradePreserve:
         original_pump = executor_module._run_pump
 
         def disappear_after_apply(
-            step: object, **kwargs: object
+            step: PreparedStep,
+            *,
+            timeout: float | None,
+            environment_snapshot: tuple[tuple[str, str], ...],
+            observer: StepObserver | None,
+            observe_output: bool,
+            max_output_bytes: int | None = None,
         ) -> tuple[int, bytes, bytes, float]:
-            prepared = cast("Any", step)
-            result = original_pump(step, **kwargs)
-            if "install" in prepared.argv:
+            result = original_pump(
+                step,
+                timeout=timeout,
+                environment_snapshot=environment_snapshot,
+                observer=observer,
+                observe_output=observe_output,
+                max_output_bytes=max_output_bytes,
+            )
+            if "install" in step.argv:
                 Path(env.worktree_path, "requirements.txt").unlink()
             return result
 
@@ -279,7 +305,9 @@ class TestSyncUpgradePreserve:
         with pytest.raises(ConfigError, match="dependency input is unavailable"):
             env_client.environments.sync_python(str(env.id))
 
-        assert catalog.get_environment(str(env.id))["applied_settings_json"] == before
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        assert row["applied_settings_json"] == before
 
     def test_sync_upgrade_passes_upgrade_flag(
         self,

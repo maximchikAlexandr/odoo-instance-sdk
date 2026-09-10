@@ -106,9 +106,7 @@ _JIRA_EVIDENCE_LIMIT = 32
 class _JiraTicketType(click.ParamType[str]):
     name = "JIRA_TICKET"
 
-    def convert(
-        self, value: object, param: click.Parameter | None, ctx: click.Context | None
-    ) -> str:
+    def convert(self, value: str, param: click.Parameter | None, ctx: click.Context | None) -> str:
         ticket = str(value)
         if _JIRA_TICKET_RE.fullmatch(ticket) is None:
             self.fail("expected Jira ticket like PROJ-123", param, ctx)
@@ -138,9 +136,9 @@ def _jira_iteration(ticket: str, branch: str) -> int | None:
 
 
 def _catalogue_branch_names(
-    client: object, repo_root: Path, git_common_dir: Path
+    client: OdooClient, repo_root: Path, git_common_dir: Path
 ) -> tuple[str, ...]:
-    catalog = cast("OdooClient", client).get_catalog()
+    catalog = client.get_catalog()
     names: set[str] = set()
     for row in catalog.list_environments(git_common_dir=str(git_common_dir), include_removed=True):
         if (
@@ -154,7 +152,7 @@ def _catalogue_branch_names(
 
 
 def _resolve_jira_allocation(
-    client: object,
+    client: OdooClient,
     project_path: Path,
     ticket: str,
     base_ref_override: str | None,
@@ -186,7 +184,7 @@ def _resolve_jira_allocation(
     )
 
 
-def _revalidate_jira_absence(client: object, allocation: _JiraAllocation) -> None:
+def _revalidate_jira_absence(client: OdooClient, allocation: _JiraAllocation) -> None:
     sources = (
         ("local", local_branch_names(allocation.repo_root)),
         (
@@ -254,7 +252,7 @@ def _jira_rich_lines(document: OutputDocument) -> list[str]:
 
 
 def _jira_checkout_command(
-    client: object,
+    client: OdooClient,
     project_path: Path,
     options: EnvironmentCheckoutOptions,
     allocation: _JiraAllocation,
@@ -262,7 +260,7 @@ def _jira_checkout_command(
     selected_options = msgspec.structs.replace(options, base_ref=allocation.base_ref)
     from odoo_instance_sdk.resources.environment import EnvironmentResource
 
-    environments = cast("OdooClient", client).environments
+    environments = client.environments
     if isinstance(environments, EnvironmentResource):
         return environments._checkout_command_with_branch_revalidation(
             project_path,
@@ -274,7 +272,7 @@ def _jira_checkout_command(
 
 
 def _build_jira_checkout_command(
-    client: object,
+    client: OdooClient,
     project_path: Path,
     jira_ticket: str,
     base_ref: str | None,
@@ -282,11 +280,9 @@ def _build_jira_checkout_command(
 ) -> tuple[Command[DevelopmentEnvironment], _JiraAllocation | None]:
     from odoo_instance_sdk.resources.environment import EnvironmentResource
 
-    if not isinstance(cast("OdooClient", client).environments, EnvironmentResource):
+    if not isinstance(client.environments, EnvironmentResource):
         return (
-            cast("OdooClient", client).environments.checkout_command(
-                project_path, jira_ticket, options=options
-            ),
+            client.environments.checkout_command(project_path, jira_ticket, options=options),
             None,
         )
     with exclusive_lock(provisioning_lock_path()):
