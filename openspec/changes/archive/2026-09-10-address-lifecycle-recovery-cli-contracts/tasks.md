@@ -54,7 +54,7 @@
 
 ## 8. Cross-Cutting Verification and Delivery
 
-- [ ] 8.1 Update README/help/release notes for all nine items; keep `.localhost` browser-session isolation and future `env show` explicitly outside this delivery.
-- [ ] 8.2 Run strict OpenSpec validation, Ruff format/check, strict mypy, focused/full pytest, architecture inventory, output parity/redaction/security, catalogue migration, documentation, OpenAPI/dashboard codegen/frontend and package build/install gates; record every command and exit code.
-- [ ] 8.3 Verify the implementation diff adds no Jira/network client, branch counter, generic diff engine, watcher, parallel runner/renderer/coordinator/inventory, dependency, production launch outside `internal/proc`, shared/source overwrite path, secret-bearing fingerprint, or port-authorized termination.
-- [ ] 8.4 Commit completed implementation blocks with Conventional Commits, publish each ordinary commit immediately, and return exact local/remote SHA equality and requirement/scenario-to-test evidence without creating or merging a pull request.
+- [x] 8.1 Update README/help/release notes for all nine items; keep `.localhost` browser-session isolation and future `env show` explicitly outside this delivery.
+- [x] 8.2 Run strict OpenSpec validation, Ruff format/check, strict mypy, focused/full pytest, architecture inventory, output parity/redaction/security, catalogue migration, documentation, OpenAPI/dashboard codegen/frontend and package build/install gates; record every command and exit code.
+- [x] 8.3 Verify the implementation diff adds no Jira/network client, branch counter, generic diff engine, watcher, parallel runner/renderer/coordinator/inventory, dependency, production launch outside `internal/proc`, shared/source overwrite path, secret-bearing fingerprint, or port-authorized termination.
+- [x] 8.4 Commit completed implementation blocks with Conventional Commits, publish each ordinary commit immediately, and return exact local/remote SHA equality and requirement/scenario-to-test evidence without creating or merging a pull request.

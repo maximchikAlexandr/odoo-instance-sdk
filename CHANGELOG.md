@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including immutable previews, nullable ownership provenance, and admin reset
 - Read-only `resource list` and `resource doctor` projections for retained backups,
   databases, environments, logs, filestores, and owned volumes
+- GitHub #61 lifecycle recovery contracts: owned-runtime readiness, direct COPY
+  cleanup/retry, compatible aliases, selected process-tree memory, stopped COPY
+  replacement, ownership-proven `stop`, deterministic Jira checkout allocation,
+  versioned applied-settings evidence, and read-only doctor drift diagnosis
 
 ### Changed
 - Documentation now treats executable command help as the source of truth for exact flags
@@ -37,6 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Process-backed commands now expose bounded progress while JSON/TOON remain one
   progress-free document; transaction finalization and Ctrl-C/retention states are
   represented explicitly
+- `env checkout`/`env create` now accept Jira ticket keys and allocate a
+  never-reused branch from local, catalogue, and recorded `origin` evidence;
+  `.localhost` browser-session isolation remains outside this release
+- `db restore BACKUP_UUID --replace` preserves a stopped COPY environment's
+  identity while retaining compensating evidence for safe retry; future
+  `env show` is not included
+- Monitor schema v4 names the single platform-selected process-tree value
+  `memory_bytes`, and all human/machine/API/dashboard projections use it
 
 ### Security
 - `.odcli/.env` values never mutate the parent process environment, are scoped only
@@ -46,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resource diagnosis preserves unknown ownership and incomplete measurements; backup
   pruning, automatic log rotation, and `postgres destroy` remain separate,
   evidence-gated future changes
+- Replacement, stop, and COPY removal revalidate ownership at execution time;
+  no port occupant, active session, shared/source database, or stale process is
+  implicitly terminated
+- Applied-settings fingerprints use normalized semantic inputs after canonical
+  redaction; raw credentials, unsafe paths, Jira clients, fetches, and branch
+  counters are not persisted or introduced
 
 ## [0.1.0] - 2026-07-15
 
