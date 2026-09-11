@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+  <record id="probe_record" model="odcli.e2e.probe">
+    <field name="name">Pinned Odoo 19 fixture</field>
+    <field name="marker">ODCLI-E2E-RESTORED</field>
+  </record>
+  <record id="probe_attachment" model="ir.attachment">
+    <field name="name">odcli-e2e-attachment.txt</field>
+    <field name="type">binary</field>
+    <field name="datas">T2RDTGkgZmlsZXN0b3JlIHByb2JlCg==</field>
+    <field name="res_model">odcli.e2e.probe</field>
+    <field name="res_id" ref="probe_record"/>
+    <field name="mimetype">text/plain</field>
+  </record>
+</odoo>
