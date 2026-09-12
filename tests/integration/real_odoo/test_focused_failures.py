@@ -8,13 +8,13 @@ import os
 import shutil
 import signal
 import subprocess
-import sys
 import time
 import zipfile
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import pytest
 from click.testing import CliRunner
 
@@ -50,7 +50,7 @@ def _record(record_property: object, evidence: str, value: object = "passed") ->
 
 
 def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None = None) -> Path:
-    """Create a project rooted in the pinned Odoo checkout."""
+    """Create a project using the public pinned source/uv lifecycle."""
     repository_value = os.environ.get("ODCLI_E2E_ODOO_SOURCE_REPO") or os.environ.get(
         "ODCLI_E2E_ODOO_SOURCE_CACHE"
     )
@@ -72,32 +72,132 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     relative = next(
         relative for relative in ("odoo-bin", "odoo/odoo-bin") if (root / relative).is_file()
     )
-    config = ProjectConfig(
-        repository_root=root,
-        odoo_bin=root / relative,
-        python=sys.executable,
+    runtime.ledger.record(
+        "worktree",
+        f"{runtime.run_id}-{root.name}",
+        lambda: shutil.rmtree(root, ignore_errors=True),
+    )
+    environment = dict(runtime.environment)
+    command = shutil.which("odcli")
+    if command is None:
+        pytest.fail("odcli executable is required for focused public leaves")
+    process_environment = {**os.environ, **environment}
+    init = subprocess.run(
+        [
+            command,
+            "init",
+            "--project",
+            str(root),
+            "--no-input",
+            "--odoo-bin",
+            str(root / relative),
+            "--python",
+            E2E_PINS.cpython,
+            "--config",
+            str(runtime.config_file),
+            "--database",
+            runtime.topology.target_sentinel_database,
+            "--postgres",
+            "external",
+            "--http-port",
+            str(runtime.reservations[3].port),
+            "--format",
+            "json",
+        ],
+        cwd=root,
+        env=process_environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert init.returncode == 0, init.stdout + init.stderr
+    manifest = root / ".odcli" / "project.toml"
+    initialized = ProjectConfig.load(root)
+    initialized = msgspec.structs.replace(
+        initialized,
         source_config=Path(".odcli/odoo.conf"),
-        default_source_database=runtime.topology.target_sentinel_database,
         test_instance=(
             _TestInstanceConfig(base_url=source.endpoint, database=source.database)
             if source is not None
             else None
         ),
+        default_base_ref=E2E_PINS.odoo_source_commit,
     )
-    manifest = root / ".odcli" / "project.toml"
-    manifest.parent.mkdir(mode=0o700, exist_ok=True)
-    local_config = manifest.parent / "odoo.conf"
+    local_config = root / ".odcli" / "odoo.conf"
     shutil.copy2(runtime.config_file, local_config)
     logfile = root / f"odoo-{runtime.run_id}.log"
-    logfile.write_text(
-        "INFO focused leaf completed; secret=redacted\n",
-        encoding="utf-8",
-    )
+    logfile.write_text("INFO focused leaf completed; secret=redacted\n", encoding="utf-8")
     with local_config.open("a", encoding="utf-8") as stream:
         stream.write(f"logfile = {logfile}\n")
     local_config.chmod(0o600)
-    manifest.write_text(config.to_manifest(), encoding="utf-8")
+    manifest.write_text(initialized.to_manifest(), encoding="utf-8")
     manifest.chmod(0o600)
+
+    ticket = f"MYL-{int(runtime.run_id.replace('-', '')[:8], 16) % 100000000}"
+    runtime.reservations[3].release()
+    from odoo_instance_sdk import EnvironmentCheckoutOptions, OdooClient, OdooClientConfig
+
+    previous_environment = os.environ.copy()
+    os.environ.update(process_environment)
+    try:
+        checkout_result = OdooClient(
+            config=OdooClientConfig(executable="odoo")
+        ).environments.checkout_with_plan(
+            root,
+            ticket,
+            options=EnvironmentCheckoutOptions(
+                base_ref=E2E_PINS.odoo_source_commit,
+                config_path=root / ".odcli" / "odoo.conf",
+                source_database=runtime.topology.target_sentinel_database,
+                odoo_bin=root / relative,
+                python=E2E_PINS.cpython,
+                create_venv=True,
+                http_port=runtime.reservations[3].port,
+            ),
+        )
+    finally:
+        os.environ.clear()
+        os.environ.update(previous_environment)
+    checkout_environment = msgspec.to_builtins(checkout_result.environment)
+    environment_id = str(checkout_environment["id"])
+    worktree = Path(str(checkout_environment["worktree_path"]))
+    python = Path(str(checkout_environment["python_environment_path"])) / "bin" / "python"
+    generated_config = Path(str(checkout_environment["generated_config_path"]))
+    config = msgspec.structs.replace(
+        initialized,
+        odoo_bin=worktree / relative,
+        python=python,
+        source_config=generated_config,
+    )
+    manifest.write_text(config.to_manifest(), encoding="utf-8")
+
+    def remove_environment() -> None:
+        removed = subprocess.run(
+            [
+                command,
+                "--project",
+                str(root),
+                "env",
+                "remove",
+                environment_id,
+                "--yes",
+                "--format",
+                "json",
+            ],
+            cwd=root,
+            env=process_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if removed.returncode != 0:
+            raise RuntimeError(removed.stdout + removed.stderr)
+
+    runtime.ledger.record(
+        "environment",
+        f"{runtime.run_id}-environment-{environment_id}",
+        remove_environment,
+    )
     return root
 
 
