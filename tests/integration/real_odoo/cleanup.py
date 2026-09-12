@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import socket
 import subprocess
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -34,6 +35,8 @@ def write_odoo_config(
     database_port: int,
     database_password: str,
     data_dir: Path,
+    admin_password: str = "admin",
+    http_interface: str = "0.0.0.0",
     http_port: int = 8069,
     addons_path: Iterable[Path] = (),
 ) -> None:
@@ -42,12 +45,13 @@ def write_odoo_config(
     rendered_addons = ",".join(str(item) for item in addons_path)
     path.write_text(
         "[options]\n"
+        f"admin_passwd = {admin_password}\n"
         f"db_host = {database_host}\n"
         f"db_port = {database_port}\n"
         "db_user = odoo\n"
         f"db_password = {database_password}\n"
         f"data_dir = {data_dir}\n"
-        "http_interface = 0.0.0.0\n"
+        f"http_interface = {http_interface}\n"
         f"http_port = {http_port}\n"
         "list_db = True\n" + (f"addons_path = {rendered_addons}\n" if rendered_addons else ""),
         encoding="utf-8",
@@ -138,6 +142,8 @@ class FailureEvidence:
         manifest.chmod(0o600)
         files.append(manifest)
         if any(self.secret_canary in path.read_text(encoding="utf-8") for path in files):
+            for path in files:
+                path.unlink(missing_ok=True)
             raise AssertionError("secret canary leaked into failure evidence")
         if sum(path.stat().st_size for path in files) > MAX_FAILURE_BUNDLE_BYTES:
             raise AssertionError("failure evidence exceeds bundle limit")
@@ -190,8 +196,19 @@ def audit_no_leaks(
     run_id: str,
     *,
     probes: Mapping[str, Callable[[str], Iterable[str]]] | None = None,
+    compose_project: str | None = None,
+    runtime_root: Path | None = None,
+    ports: Iterable[int] = (),
+    catalog_path: Path | None = None,
+    filestore_paths: Iterable[Path] = (),
+    worktree_root: Path | None = None,
 ) -> LeakReport:
-    """Run every ownership probe and fail if any run-id resource remains."""
+    """Run every ownership probe and fail if any run-id resource remains.
+
+    The default probes query the local process table, Docker labels, loopback
+    listeners, Git worktrees, and fixture paths.  Unit tests may inject probes
+    to exercise each category without requiring Docker.
+    """
     categories = (
         "process",
         "container",
@@ -208,12 +225,140 @@ def audit_no_leaks(
     def no_leaks(_run_id: str) -> Iterable[str]:
         return ()
 
-    selected = probes or dict.fromkeys(categories, no_leaks)
+    selected = probes or default_leak_probes(
+        run_id,
+        compose_project=compose_project,
+        runtime_root=runtime_root,
+        ports=ports,
+        catalog_path=catalog_path,
+        filestore_paths=filestore_paths,
+        worktree_root=worktree_root,
+    )
     leaks = {category: tuple(selected.get(category, no_leaks)(run_id)) for category in categories}
     report = LeakReport(run_id, leaks)
     if not report.clean:
         raise LeakError(report)
     return report
+
+
+def default_leak_probes(  # noqa: C901
+    run_id: str,
+    *,
+    compose_project: str | None = None,
+    runtime_root: Path | None = None,
+    ports: Iterable[int] = (),
+    catalog_path: Path | None = None,
+    filestore_paths: Iterable[Path] = (),
+    worktree_root: Path | None = None,
+) -> dict[str, Callable[[str], Iterable[str]]]:
+    """Build real, ownership-scoped probes for all fixture resource classes."""
+
+    def docker_objects(kind: str) -> Callable[[str], Iterable[str]]:
+        def probe(scope: str) -> Iterable[str]:
+            if shutil.which("docker") is None:
+                return ("docker-unavailable",) if compose_project else ()
+            result = subprocess.run(
+                [
+                    "docker",
+                    kind,
+                    "ls",
+                    "--filter",
+                    f"label=io.odoo-instance-sdk.e2e-run={scope}",
+                    "--format",
+                    "{{.Name}}",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            if result.returncode:
+                return (f"docker-{kind}-probe-failed",) if compose_project else ()
+            return tuple(line for line in result.stdout.splitlines() if line.strip())
+
+        return probe
+
+    def processes(scope: str) -> Iterable[str]:
+        try:
+            import psutil
+        except ImportError:
+            return ()
+        try:
+            return tuple(
+                str(process.pid)
+                for process in psutil.process_iter(["pid", "cmdline"])
+                if scope in " ".join(process.info.get("cmdline") or ())
+            )
+        except psutil.Error:
+            return ()
+
+    def free_ports(_scope: str) -> Iterable[str]:
+        leaks: list[str] = []
+        for port in ports:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                leaks.append(str(port))
+            finally:
+                probe.close()
+        return tuple(leaks)
+
+    def existing_paths(paths: Iterable[Path]) -> Callable[[str], Iterable[str]]:
+        path_tuple = tuple(paths)
+        return lambda _scope: tuple(str(path) for path in path_tuple if path.exists())
+
+    def worktrees(scope: str) -> Iterable[str]:
+        if worktree_root is None:
+            return ()
+        result = subprocess.run(
+            ["git", "-C", str(worktree_root), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        return tuple(
+            line[9:]
+            for line in result.stdout.splitlines()
+            if line.startswith("worktree ") and scope in line
+        )
+
+    def databases(scope: str) -> Iterable[str]:
+        if shutil.which("docker") is None:
+            return ("docker-database-probe-unavailable",) if compose_project else ()
+        container = f"odcli-e2e-target-pg-{scope}"
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                container,
+                "psql",
+                "-U",
+                "odoo",
+                "-d",
+                "postgres",
+                "-At",
+                "-c",
+                "SELECT datname FROM pg_database WHERE datname LIKE 'odcli_e2e_%';",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        return tuple(line for line in result.stdout.splitlines() if line.strip())
+
+    runtime_paths = (runtime_root,) if runtime_root is not None else ()
+    return {
+        "process": processes,
+        "container": docker_objects("container"),
+        "network": docker_objects("network"),
+        "volume": docker_objects("volume"),
+        "port": free_ports,
+        "database": databases,
+        "filestore": existing_paths(filestore_paths),
+        "worktree": worktrees,
+        "catalog": existing_paths((catalog_path,) if catalog_path else ()),
+        "runtime-root": existing_paths(runtime_paths),
+    }
 
 
 def remove_owned_root(root: Path, *, run_id: str) -> None:

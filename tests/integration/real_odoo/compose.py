@@ -8,7 +8,9 @@ target Odoo process remains owned by OdCLI.
 from __future__ import annotations
 
 import secrets
+import shutil
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -131,6 +133,8 @@ class ComposeTopology:
         addon_root: Path,
         source_root: Path,
         source_config: Path | None = None,
+        target_config: Path | None = None,
+        target_root: Path | None = None,
     ) -> str:
         """Render a pinned, loopback-only Compose file without embedding secrets."""
         secret = str(secret_file)
@@ -141,15 +145,27 @@ class ComposeTopology:
         if source_config is not None:
             config_mount = f"      - {source_config}:/etc/odoo/odoo.conf:ro\n"
             config_arg = ', "--config=/etc/odoo/odoo.conf"'
+        target_mount = ""
+        if target_config is not None and target_root is not None:
+            target_mount = (
+                f"      - {target_config}:/etc/odoo/target.conf:ro\n"
+                f"      - {target_root}:/var/lib/odoo-target\n"
+            )
         common_labels = (
             f"      io.odoo-instance-sdk.e2e-run: {self.run_id}\n"
             '      io.odoo-instance-sdk.e2e-managed: "true"\n'
         )
 
         def postgres(name: str, volume: str, port: int) -> str:
+            container = (
+                self.source_postgres_name
+                if name == "source_postgres"
+                else self.target_postgres_name
+            )
             return (
                 f"  {name}:\n"
                 f"    image: {self.postgres_image}\n"
+                f"    container_name: {container}\n"
                 '    restart: "no"\n'
                 "    environment:\n"
                 "      POSTGRES_USER: odoo\n"
@@ -173,6 +189,7 @@ class ComposeTopology:
         source = (
             f"  source_odoo:\n"
             f"    image: {self.odoo_image}\n"
+            f"    container_name: {self.source_odoo_name}\n"
             '    restart: "no"\n'
             "    depends_on:\n"
             "      source_postgres:\n"
@@ -183,7 +200,8 @@ class ComposeTopology:
             f"      - {source_data}:/var/lib/odoo\n"
             f"      - {addons}:/mnt/extra-addons:ro\n"
             f"{config_mount}"
-            f'    command: ["odoo"{config_arg}, "--database={self.source_database}", "--without-demo=all"]\n'
+            f"{target_mount}"
+            f'    command: ["odoo"{config_arg}, "--without-demo=all"]\n'
             "    labels:\n"
             f"{common_labels}"
         )
@@ -193,10 +211,12 @@ class ComposeTopology:
             + postgres("target_postgres", self.target_postgres_volume, self.target_postgres_port)
             + source
             + "networks:\n"
-            f"  default:\n    name: {self.network_name}\n"
+            f"  default:\n    name: {self.network_name}\n    labels:\n{common_labels}"
             "volumes:\n"
-            f"  {self.source_postgres_volume}:\n    name: {self.source_postgres_volume}\n"
-            f"  {self.target_postgres_volume}:\n    name: {self.target_postgres_volume}\n"
+            f"  {self.source_postgres_volume}:\n    name: {self.source_postgres_volume}\n    labels:\n"
+            f"{common_labels}"
+            f"  {self.target_postgres_volume}:\n    name: {self.target_postgres_volume}\n    labels:\n"
+            f"{common_labels}"
             "secrets:\n"
             "  pg_password:\n"
             f"    file: {secret}\n"
@@ -214,6 +234,63 @@ def wait_for_tcp(host: str, port: int, *, timeout: float = PG_READY_TIMEOUT) -> 
 def wait_for_pg_isready(check: Callable[[], bool], *, timeout: float = PG_READY_TIMEOUT) -> None:
     """Wait for a caller-provided ``pg_isready`` probe, not just a socket."""
     _wait_until(check, timeout=timeout, description="PostgreSQL pg_isready")
+
+
+def wait_for_compose_pg_isready(
+    runner: Callable[[tuple[str, ...], float], subprocess.CompletedProcess[str]],
+    service: str,
+    *,
+    timeout: float = PG_READY_TIMEOUT,
+) -> None:
+    """Poll the container's actual ``pg_isready`` result."""
+
+    def check() -> bool:
+        result = runner(
+            ("exec", "-T", service, "pg_isready", "-U", "odoo", "-d", "postgres"),
+            5.0,
+        )
+        return result.returncode == 0
+
+    wait_for_pg_isready(check, timeout=timeout)
+
+
+@dataclass(slots=True)
+class ComposeLifecycle:
+    """Small test-only Compose boundary with injectable command execution."""
+
+    compose_file: Path
+    project_name: str
+    command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+
+    def run(self, *args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+        command = (
+            "docker",
+            "compose",
+            "--project-name",
+            self.project_name,
+            "--file",
+            str(self.compose_file),
+            *args,
+        )
+        try:
+            result = self.command_runner(
+                list(command),
+                cwd=self.compose_file.parent,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError("Docker Compose is required for real-Odoo E2E") from error
+        if result.returncode and args[0] in {"up", "run"}:
+            detail = (result.stdout + result.stderr)[-4000:]
+            raise RuntimeError(f"Compose {args[0]} failed: {detail}")
+        return result
+
+    @staticmethod
+    def available() -> bool:
+        return shutil.which("docker") is not None
 
 
 def wait_for_http(url: str, *, timeout: float = ODOO_READY_TIMEOUT) -> None:
