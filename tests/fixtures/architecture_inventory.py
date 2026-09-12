@@ -20,26 +20,26 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/cli.py", 1256),
         ("src/odoo_instance_sdk/cli.py", 1257),
-        ("src/odoo_instance_sdk/commands/backup.py", 295),
-        ("src/odoo_instance_sdk/commands/output.py", 478),
-        ("src/odoo_instance_sdk/commands/output.py", 621),
-        ("src/odoo_instance_sdk/commands/output.py", 623),
-        ("src/odoo_instance_sdk/commands/output.py", 630),
-        ("src/odoo_instance_sdk/commands/output.py", 632),
+        ("src/odoo_instance_sdk/commands/backup.py", 293),
+        ("src/odoo_instance_sdk/commands/output.py", 236),
+        ("src/odoo_instance_sdk/commands/output.py", 381),
+        ("src/odoo_instance_sdk/commands/output.py", 383),
+        ("src/odoo_instance_sdk/commands/output.py", 390),
+        ("src/odoo_instance_sdk/commands/output.py", 392),
         ("src/odoo_instance_sdk/resources/instance.py", 1195),
     }
 )
 
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
-    ("src/odoo_instance_sdk/commands/output.py", 478): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 621): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 623): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 630): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 632): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 236): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 381): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 383): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 390): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 392): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/cli.py", 1256): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/cli.py", 1257): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/commands/backup.py", 295): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/backup.py", 293): "shared Rich output boundary",
     ("src/odoo_instance_sdk/resources/instance.py", 1195): "lifecycle cleanup diagnostic transport",
 }
 

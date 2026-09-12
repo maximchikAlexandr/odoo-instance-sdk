@@ -112,6 +112,7 @@ catalog = "odoo_instance_sdk/(resources/database\\.py|storage/backup_catalog\\.p
 security = "odoo_instance_sdk/internal/(redact|sanitize|db_name|urls|address)\\.py$"
 postgres = "odoo_instance_sdk/(resources/postgres\\.py|internal/postgres_compose\\.py)$"
 monitor = "odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)$"
+developer_workflow = "odoo_instance_sdk/(resources/(git|module)\\.py|internal/storage_migration\\.py|commands/translations\\.py)$"
 
 [tool.coverage.thresholds]
 cli = 71
@@ -121,6 +122,7 @@ catalog = 92
 security = 94
 postgres = 80
 monitor = 80
+developer_workflow = 60
 
 [tool.coverage.branch_thresholds]
 cli = 53
@@ -130,6 +132,7 @@ catalog = 83
 security = 89
 postgres = 70
 monitor = 70
+developer_workflow = 40
 
 [tool.mutmut]
 source_paths = [

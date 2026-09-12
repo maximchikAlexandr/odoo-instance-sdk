@@ -6,7 +6,7 @@ import uuid
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import ClassVar, Literal, TypeVar, cast
+from typing import Annotated, Literal, TypeVar, cast
 
 import msgspec
 
@@ -876,12 +876,10 @@ class LockRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=T
 
 
 class LocksResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"captured_at", "warnings"})
-
     database: str
-    captured_at: datetime
+    captured_at: Annotated[datetime, "odcli-structural"]
     rows: tuple[LockRow, ...]
-    warnings: tuple[DiagnosticWarning, ...]
+    warnings: Annotated[tuple[DiagnosticWarning, ...], "odcli-structural"]
 
     def __post_init__(self) -> None:
         _require_datetime(self.captured_at, "LocksResult.captured_at")
@@ -971,13 +969,11 @@ class IndexStats(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_onl
 
 
 class PostgresStatsResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"capabilities", "warnings"})
-
     summary: StatsSummary
     tables: tuple[TableStats, ...]
     indexes: tuple[IndexStats, ...]
-    capabilities: StatsCapabilities
-    warnings: tuple[DiagnosticWarning, ...]
+    capabilities: Annotated[StatsCapabilities, "odcli-structural"]
+    warnings: Annotated[tuple[DiagnosticWarning, ...], "odcli-structural"]
 
     def __post_init__(self) -> None:
         _require_tuple(self.tables, "PostgresStatsResult.tables")
@@ -1057,16 +1053,12 @@ class IndexBloat(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_onl
 
 
 class PostgresBloatResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset(
-        {"captured_at", "capabilities", "warnings"}
-    )
-
     database: str
-    captured_at: datetime
+    captured_at: Annotated[datetime, "odcli-structural"]
     tables: tuple[TableBloat, ...]
     indexes: tuple[IndexBloat, ...]
-    capabilities: BloatCapabilities
-    warnings: tuple[DiagnosticWarning, ...]
+    capabilities: Annotated[BloatCapabilities, "odcli-structural"]
+    warnings: Annotated[tuple[DiagnosticWarning, ...], "odcli-structural"]
 
     def __post_init__(self) -> None:
         _require_datetime(self.captured_at, "PostgresBloatResult.captured_at")
@@ -1217,9 +1209,7 @@ class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
 
 
 class Snapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"generated_at"})
-
     schema_version: int
-    generated_at: datetime
+    generated_at: Annotated[datetime, "odcli-structural"]
     projects: tuple[ProjectSummary, ...]
     environments: tuple[EnvironmentSnapshot, ...]

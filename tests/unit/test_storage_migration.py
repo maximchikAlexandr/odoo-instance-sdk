@@ -7,6 +7,7 @@ import pytest
 
 from odoo_instance_sdk.internal.storage_migration import (
     StorageMigrationConflictError,
+    StorageMigrationError,
     migrate_storage,
 )
 
@@ -129,3 +130,26 @@ def test_interrupted_rewrite_is_resumable(tmp_path: Path) -> None:
         migrate_storage(home=home, legacy=legacy, after_stage=interrupt)
     migrate_storage(home=home, legacy=legacy)
     assert not catalog.exists()
+
+
+@pytest.mark.parametrize("location", ["data", "nested"])
+def test_symlinked_legacy_storage_is_rejected_without_touching_target(
+    tmp_path: Path, location: str
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = _legacy_tree(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "keep.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    if location == "data":
+        legacy["data"].rmdir()
+        legacy["data"].symlink_to(outside, target_is_directory=True)
+    else:
+        (legacy["data"] / "environments").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(StorageMigrationError, match="symlink"):
+        migrate_storage(home=home, legacy=legacy)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"

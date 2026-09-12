@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import msgspec
 
@@ -125,10 +125,8 @@ class _CliEnvironmentSnapshot(
 class _CliSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     """The concrete machine result, including its CLI-only enrichment."""
 
-    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"generated_at"})
-
     schema_version: int
-    generated_at: datetime
+    generated_at: Annotated[datetime, "odcli-structural"]
     projects: tuple[ProjectSummary, ...]
     environments: tuple[_CliEnvironmentSnapshot, ...]
 

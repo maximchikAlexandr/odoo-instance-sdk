@@ -112,3 +112,88 @@ Stages/topological levels: level 0 = WP-01 and WP-02; level 1 = WP-03, WP-04, an
 ## Coverage Audit
 
 `tasks.md` contains 35 tasks: WP-01 covers 1.1–1.6 (6), WP-02 covers 2.1–2.4 (4), WP-03 covers 3.1–3.5 (5), WP-04 covers 4.1–4.6 (6), WP-05 covers 5.1–5.3 (3), WP-06 covers 6.1–6.3 (3), WP-07 covers 7.1–7.5 (5), and WP-08 covers 8.1–8.3 (3). Total coverage is 35 tasks, with no duplicate or uncovered task IDs.
+
+## Requirement and scenario trace map
+
+This closeout map is the review evidence index for all 32 delta requirements and 43 scenarios. Each row points to the passing public/unit/integration contract suite; the focused R1 regressions are included in the referenced suites.
+
+| ID | Requirement | Passing test evidence |
+|---|---|---|
+| R01 | Nested process plans remain visible | `tests/unit/test_cli_output_modes.py`, `tests/unit/test_cli_module_workflow.py` |
+| R02 | Git operations use the shared execution boundary | `tests/unit/test_git_architecture.py`, `tests/unit/test_cli_git.py` |
+| R03 | Frozen Odoo commit context and message | `tests/unit/test_git_resource.py` |
+| R04 | Commit history validation | `tests/unit/test_git_resource.py` |
+| R05 | Optional external absorb adapter | `tests/unit/test_git_resource.py` |
+| R06 | Safe same-branch synchronization | `tests/integration/test_git_sync.py` |
+| R07 | Project ownership captured at download start | `tests/unit/test_backup_project_ownership.py`, `tests/unit/test_catalog_runtime_record.py` |
+| R08 | Effective runtime diagnosis | `tests/unit/test_doctor_runtime.py`, `tests/unit/test_monitor_snapshot.py` |
+| R09 | Generated Compose config is independently idempotent | `tests/unit/test_cli_init.py`, `tests/unit/test_cli_init_postgres.py` |
+| R10 | Git commit settings | `tests/unit/project/test_project_config_git.py` |
+| R11 | pgAdmin follows unified storage migration | `tests/unit/test_storage_migration.py`, `tests/unit/internal/test_pgadmin.py` |
+| R12 | Focused selection from one snapshot | `tests/unit/test_cli_env_show.py`, `tests/unit/test_monitor_snapshot.py` |
+| R13 | Direct project ownership of backups | `tests/unit/test_backup_project_ownership.py`, `tests/unit/storage/test_backup_catalog.py` |
+| R14 | Unified catalogue migration | `tests/unit/storage/test_catalog_migration.py`, `tests/unit/test_catalog_runtime_record.py` |
+| R15 | Single format selector and typed field projection | `tests/unit/test_cli_output_modes.py`, `tests/unit/test_cli_boundary_contract.py` |
+| R16 | Structured doctor remediations | `tests/unit/test_doctor_runtime.py`, `tests/unit/test_cli_boundary_contract.py` |
+| R17 | Focused environment details command | `tests/unit/test_cli_env_show.py` |
+| R18 | Human-oriented bounded presentation | `tests/unit/test_cli_rich_presentation.py`, `tests/unit/test_cli_output_modes.py` |
+| R19 | Canonical short resource commands | `tests/unit/test_cli_aliases.py` |
+| R20 | Tracker-neutral Ticket Allocation CLI | `tests/unit/test_cli_ticket_checkout.py`, `tests/unit/resources/test_odcli_lifecycle.py` |
+| R21 | Optional msgfmt validation step | `tests/unit/test_translation_msgfmt.py` |
+| R22 | Validation result and publication safety | `tests/unit/test_translation_msgfmt.py` |
+| R23 | Tracker-neutral ticket allocation | `tests/unit/test_cli_ticket_checkout.py` |
+| R24 | Unified environment storage location | `tests/unit/test_storage_migration.py`, `tests/unit/resources/test_odcli_lifecycle.py` |
+| R25 | Single global user-storage root | `tests/unit/test_storage_migration.py` |
+| R26 | Locked conflict-safe storage migration | `tests/unit/test_storage_migration.py` |
+| R27 | Restore while project Odoo is stopped | `tests/unit/test_stopped_project_restore.py`, `tests/integration/test_database_lifecycle.py` |
+| R28 | Manifest-backed module catalogue | `tests/unit/test_module_resource.py` |
+| R29 | Deterministic dependency plan | `tests/unit/test_module_resource.py` |
+| R30 | Changed-module update selection | `tests/unit/test_cli_module_workflow.py`, `tests/integration/test_module_update.py` |
+| R31 | Concurrent module operation classification | `tests/unit/test_cli_module_workflow.py` |
+| R32 | Optional host tools are not package dependencies | `tests/unit/test_translation_architecture.py`, `tests/unit/test_git_architecture.py` |
+
+| Scenario ID | Scenario | Passing test evidence |
+|---|---|---|
+| S01 | Module update preview contains process steps | `tests/unit/test_cli_module_workflow.py` |
+| S02 | Inspect Git plan | `tests/unit/test_cli_git.py` |
+| S03 | Build a configured ticket commit | `tests/unit/test_git_resource.py` |
+| S04 | Infer prefix deterministically | `tests/unit/test_git_resource.py` |
+| S05 | Validate feature history | `tests/unit/test_git_resource.py` |
+| S06 | Absorb executable appears after installation | `tests/unit/test_git_resource.py` |
+| S07 | Publish rebased feature branch | `tests/integration/test_git_sync.py` |
+| S08 | Rebase conflicts | `tests/integration/test_git_sync.py` |
+| S09 | Start project download | `tests/unit/test_backup_project_ownership.py` |
+| S10 | Diagnose project without environment | `tests/unit/test_doctor_runtime.py` |
+| S11 | Repair missing generated config | `tests/unit/test_cli_init.py` |
+| S12 | Initialize Git commit policy | `tests/unit/project/test_project_config_git.py` |
+| S13 | Migrate pgAdmin state | `tests/unit/test_storage_migration.py` |
+| S14 | Select explicit environment | `tests/unit/test_cli_env_show.py` |
+| S15 | Downloaded backup is immediately project-visible | `tests/unit/test_backup_project_ownership.py` |
+| S16 | Ambiguous legacy ownership stays unowned | `tests/unit/test_backup_project_ownership.py` |
+| S17 | Migrate existing catalogue | `tests/unit/storage/test_catalog_migration.py` |
+| S18 | Project repeated fields | `tests/unit/test_cli_output_modes.py` |
+| S19 | Reject invalid projection | `tests/unit/test_cli_output_modes.py` |
+| S20 | Typed schema is the field authority | `tests/unit/test_cli_output_modes.py` |
+| S21 | Known dependency drift remediation | `tests/unit/test_doctor_runtime.py` |
+| S22 | Show stopped current environment | `tests/unit/test_cli_env_show.py` |
+| S23 | Presentation contract audits real leaves | `tests/unit/test_cli_rich_presentation.py` |
+| S24 | Alias help and behavior parity | `tests/unit/test_cli_aliases.py` |
+| S25 | Allocate a repeated ticket | `tests/unit/test_cli_ticket_checkout.py` |
+| S26 | Validator is available | `tests/unit/test_translation_msgfmt.py` |
+| S27 | Validator is unavailable | `tests/unit/test_translation_msgfmt.py` |
+| S28 | Validation succeeds with statistics | `tests/unit/test_translation_msgfmt.py` |
+| S29 | Validation fails | `tests/unit/test_translation_msgfmt.py` |
+| S30 | Allocate without tracker integration | `tests/unit/test_cli_ticket_checkout.py` |
+| S31 | Create environment after migration | `tests/unit/resources/test_odcli_lifecycle.py` |
+| S32 | Fresh installation | `tests/unit/test_storage_migration.py` |
+| S33 | Conflicting destination | `tests/unit/test_storage_migration.py` |
+| S34 | Retry interrupted migration | `tests/unit/test_storage_migration.py` |
+| S35 | Restore valid ZIP on a free project port | `tests/unit/test_stopped_project_restore.py` |
+| S36 | Listener is unrelated | `tests/unit/test_stopped_project_restore.py` |
+| S37 | Retry retained artifact | `tests/unit/test_stopped_project_restore.py` |
+| S38 | Resolve module information safely | `tests/unit/test_module_resource.py` |
+| S39 | Plan transitive installation | `tests/unit/test_module_resource.py` |
+| S40 | Reject incomplete graph | `tests/unit/test_module_resource.py` |
+| S41 | Preview changed update | `tests/integration/test_module_update.py` |
+| S42 | Another module operation is active | `tests/unit/test_cli_module_workflow.py` |
+| S43 | Build package metadata | `tests/unit/test_translation_architecture.py`, `tests/unit/test_git_architecture.py` |

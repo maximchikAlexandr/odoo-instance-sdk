@@ -123,3 +123,10 @@ Generated configuration MUST be written atomically. The bootstrap administrator 
 
 - **WHEN** validated host-private paths are mounted into the official container on Linux
 - **THEN** UID 5050 can traverse/read only the password, passfile, and server configuration mounts and can create persistent data under `/var/lib/pgadmin`, while `group::---` and `other::---` remain effective despite ACL-mask mode bits and the invoking user never runs sudo or chown
+
+### Requirement: pgAdmin follows unified storage migration
+All pgAdmin private/data artifacts SHALL resolve through the canonical unified OdCLI path provider and participate in the same locked conflict-safe migration, without a parallel root. [Source: GH#64 §7]
+
+#### Scenario: Migrate pgAdmin state
+- **WHEN** legacy pgAdmin data exists and the unified destination is compatible
+- **THEN** it is preserved below `~/.odcli/pgadmin/` with existing permissions and ownership

@@ -18,6 +18,19 @@ from odoo_instance_sdk.exceptions import (
     PlanValidationError,
 )
 from odoo_instance_sdk.internal.executables import resolve_optional_executable
+from odoo_instance_sdk.internal.git_policy import (
+    check_log as _check_log,
+)
+from odoo_instance_sdk.internal.git_policy import (
+    module_scope as _module_scope,
+)
+from odoo_instance_sdk.internal.git_policy import (
+    semantic_tag as _semantic_tag,
+)
+from odoo_instance_sdk.internal.git_policy import (
+    ticket as _ticket,
+)
+from odoo_instance_sdk.internal.git_sync import SyncSteps, execute_sync
 from odoo_instance_sdk.models import (
     CommandResult,
     GitAbsorbResult,
@@ -41,21 +54,11 @@ if TYPE_CHECKING:
 
 
 _TICKET = re.compile(r"(?<![A-Za-z])([A-Z][A-Z0-9]+-\d+)(?:_\d+)?(?![A-Za-z0-9])")
-_MESSAGE = re.compile(r"^\[(?P<tag>[A-Z][A-Z0-9_-]*)\] (?P<module>[^:]+): .+$")
-_SUBJECT_TICKET = re.compile(r"^(?P<ticket>[A-Z][A-Z0-9]+-\d+)(?:_\d+)?(?:\s+|$)")
 _PROTECTED = {"main", "master", "develop"}
 _ALLOWED_TAGS = frozenset(
     {"ADD", "DEL", "PORT", "I18N", "UI", "TEST", "DOC", "CI", "IMP", "FIX", "REF"}
 )
-_SEMANTIC_DIRS = {
-    "i18n": "I18N",
-    "static": "UI",
-    "tests": "TEST",
-    "docs": "DOC",
-    ".github": "CI",
-    ".gitlab": "CI",
-    "migrations": "PORT",
-}
+_FULL_SHA = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def _worktree(instance: OdooInstance) -> Path:
@@ -273,23 +276,6 @@ def _unmapped_lines(*values: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(lines))
 
 
-def _ticket(value: str | None) -> str | None:
-    if value is None:
-        return None
-    match = _TICKET.fullmatch(value.strip())
-    if match is None:
-        raise PlanValidationError("ticket must match the configured uppercase key format")
-    return match.group(1)
-
-
-def _safe_ticket(value: str | None) -> str | None:
-    """Extract a history ticket without turning malformed history into a plan error."""
-    if value is None:
-        return None
-    match = _TICKET.fullmatch(value.strip())
-    return match.group(1) if match is not None else None
-
-
 def _ticket_from_branch(branch: str) -> str | None:
     match = _TICKET.search(branch)
     return match.group(1) if match else None
@@ -309,52 +295,6 @@ def _registered_environment_branch(instance: OdooInstance) -> str | None:
     return branch.strip() if isinstance(branch, str) and branch.strip() else None
 
 
-def _semantic_tag(paths: Sequence[str], statuses: Sequence[str], *, outside: bool) -> str:
-    if statuses and all(status == "A" for status in statuses):
-        return "ADD"
-    if statuses and all(status == "D" for status in statuses):
-        return "DEL"
-    if any("migrations" in Path(path).parts for path in paths):
-        return "PORT"
-    buckets = {_SEMANTIC_DIRS.get(part) for path in paths for part in Path(path).parts}
-    buckets.discard(None)
-    if outside and buckets:
-        if "DOC" in buckets:
-            return "DOC"
-        if buckets == {"CI"}:
-            return "CI"
-    if len(buckets) == 1:
-        return cast("str", next(iter(buckets)))
-    return "IMP" if not outside else ("DOC" if "DOC" in buckets else "CI" if buckets else "IMP")
-
-
-def _module_scope(instance: OdooInstance, root: Path, paths: Sequence[str]) -> tuple[str, bool]:
-    modules = getattr(getattr(instance, "modules", None), "catalogue", lambda: ())()
-    matches: set[str] = set()
-    path_matches: list[set[str]] = []
-    for raw in paths:
-        path = Path(raw)
-        if path.is_absolute() or ".." in path.parts:
-            raise GitScopeError(f"staged path is outside the repository: {raw}")
-        current: set[str] = set()
-        for module in modules:
-            try:
-                module_root = Path(module.path).resolve().relative_to(root.resolve())
-            except (ValueError, OSError):
-                continue
-            if path == module_root or module_root in path.parents:
-                matches.add(module.name)
-                current.add(module.name)
-        path_matches.append(current)
-    if len(matches) > 1:
-        raise GitScopeError("staged changes span multiple Odoo modules")
-    if matches:
-        if any(not current for current in path_matches):
-            raise GitScopeError("staged changes mix an Odoo module with repository files")
-        return next(iter(matches)), False
-    return root.name, True
-
-
 def _project_settings(root: Path) -> TicketLinkSettings | None:
     try:
         project = ProjectConfig.load(root)
@@ -363,9 +303,12 @@ def _project_settings(root: Path) -> TicketLinkSettings | None:
     return effective_ticket_settings(project)
 
 
-def _base_ref(instance: OdooInstance, requested: str | None) -> str:
+def _base_ref(instance: OdooInstance, requested: str | None) -> str:  # noqa: C901
     if requested and requested.strip():
-        return requested.strip()
+        candidate = requested.strip()
+        if candidate.startswith("-"):
+            raise GitCheckFailedError("Git base ref must not start with '-'")
+        return candidate
     environment_id = getattr(instance, "_environment_id", None)
     if environment_id:
         try:
@@ -375,149 +318,37 @@ def _base_ref(instance: OdooInstance, requested: str | None) -> str:
         if row is not None:
             base_value = row["base_ref"]
             if isinstance(base_value, str) and base_value.strip():
-                return base_value.strip()
+                candidate = base_value.strip()
+                if candidate.startswith("-"):
+                    raise GitCheckFailedError("Git base ref must not start with '-'")
+                return candidate
     try:
         project = ProjectConfig.load(_worktree(instance))
     except Exception:
         project = None
     if project is not None and project.default_base_ref:
+        if project.default_base_ref.startswith("-"):
+            raise GitCheckFailedError("Git base ref must not start with '-'")
         return project.default_base_ref
     raise GitCheckFailedError(
         "no Git base configured; pass --base or configure an environment/project base"
     )
 
 
-def _history_records(value: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    records: list[tuple[str, str, tuple[str, ...]]] = []
-    for raw_record in value.split("\x1e"):
-        record = raw_record.strip("\n")
-        if not record:
-            continue
-        header, separator, raw_paths = record.partition("\x1f")
-        if not separator:
-            header, raw_paths = record, ""
-        sha, separator, message = header.partition("\0")
-        if not separator or not sha:
-            continue
-        records.append(
-            (sha, message.rstrip("\n"), tuple(path for path in raw_paths.splitlines() if path))
-        )
-    return tuple(records)
-
-
-def _subject_parts(message: str) -> tuple[str, str, str | None] | None:
-    subject = message.splitlines()[0] if message.splitlines() else ""
-    match = _MESSAGE.fullmatch(subject)
-    if match is None:
-        return None
-    body = subject[match.end("module") + 2 :]
-    ticket_match = _SUBJECT_TICKET.match(body)
-    return (
-        match.group("tag"),
-        match.group("module").strip(),
-        ticket_match.group("ticket") if ticket_match is not None else None,
+def _verified_base_ref(root: Path, candidate: str) -> str:
+    """Resolve a configured base before interpolating it into Git revisions."""
+    if candidate.startswith("-"):
+        raise GitCheckFailedError("Git base ref must not start with '-'")
+    probe = _step(
+        root,
+        "git.base.verify",
+        ("rev-parse", "--verify", "--end-of-options", f"{candidate}^{{commit}}"),
     )
-
-
-def _message_issue(message: str, *, root: Path) -> str | None:
-    paragraphs = tuple(part for part in message.strip("\n").split("\n\n") if part)
-    if len(paragraphs) not in {1, 2} or any("\n" in part for part in paragraphs[:1]):
-        return "commit message must contain one subject or a subject plus one link paragraph"
-    parts = _subject_parts(message)
-    if parts is None:
-        return "commit message does not match the Odoo format"
-    if parts[0] not in _ALLOWED_TAGS:
-        return "commit message uses an unsupported prefix"
-    settings = _project_settings(root)
-    if settings is not None and settings.enabled:
-        if len(paragraphs) != 2 or not settings.base_url:
-            return "configured ticket links require a second message paragraph"
-        if not paragraphs[1].startswith(settings.base_url.rstrip("/") + "/"):
-            return "commit ticket link does not use the configured base URL"
-        if _TICKET.search(paragraphs[1].rsplit("/", 1)[-1]) is None:
-            return "commit ticket link does not contain a valid Ticket key"
-    elif len(paragraphs) == 2 and not re.fullmatch(r"https?://\S+", paragraphs[1]):
-        return "the second commit paragraph must be an HTTP(S) link"
-    return None
-
-
-def _check_log(  # noqa: C901
-    value: str,
-    *,
-    base: str,
-    branch: str,
-    instance: OdooInstance | None = None,
-    root: Path | None = None,
-) -> GitCheckResult:
-    issues: list[GitCheckIssue] = []
-    commits: list[str] = []
-    pending: list[str] = []
-    for sha, message, paths in _history_records(value):
-        commits.append(sha)
-        subject = message.splitlines()[0] if message.splitlines() else ""
-        if subject.startswith(("fixup!", "squash!")):
-            pending.append(sha)
-            issues.append(
-                GitCheckIssue(
-                    code="pending_fixup", message="fixup/squash commit remains", commit=sha
-                )
-            )
-        message_issue = _message_issue(message, root=root or Path.cwd())
-        if message_issue is not None:
-            issues.append(GitCheckIssue(code="message_invalid", message=message_issue, commit=sha))
-        resolved_module: str | None = None
-        scope_error: str | None = None
-        if instance is not None and root is not None and paths:
-            try:
-                resolved_module, _ = _module_scope(instance, root, tuple(paths))
-            except GitScopeError as exc:
-                scope_error = str(exc)
-        if scope_error is not None:
-            issues.append(
-                GitCheckIssue(code="scope_ambiguous", message=scope_error, commit=sha, paths=paths)
-            )
-        parts = _subject_parts(message)
-        if parts is not None and resolved_module is not None and parts[1] != resolved_module:
-            issues.append(
-                GitCheckIssue(
-                    code="scope_ambiguous",
-                    message="commit subject module does not match staged module",
-                    commit=sha,
-                    paths=paths,
-                )
-            )
-        settings = _project_settings(root or Path.cwd())
-        if parts is not None and settings is not None and settings.enabled:
-            paragraphs = tuple(part for part in message.strip("\n").split("\n\n") if part)
-            link_ticket = (
-                _safe_ticket(paragraphs[1].rsplit("/", 1)[-1])
-                if len(paragraphs) == 2 and "/" in paragraphs[1]
-                else None
-            )
-            if parts[2] is None:
-                issues.append(
-                    GitCheckIssue(
-                        code="message_invalid",
-                        message="configured ticket link requires a subject Ticket key",
-                        commit=sha,
-                    )
-                )
-            elif link_ticket != parts[2]:
-                issues.append(
-                    GitCheckIssue(
-                        code="message_invalid",
-                        message="subject Ticket key does not match the configured link",
-                        commit=sha,
-                    )
-                )
-    return GitCheckResult(
-        base=base,
-        branch=branch,
-        valid=not issues,
-        commits=tuple(commits),
-        issues=tuple(issues),
-        pending_fixups=tuple(pending),
-    )
+    result = _capture_probe(probe, allow_failure=True)
+    values = _text(result.stdout).splitlines()
+    if result.returncode != 0 or len(values) != 1 or _FULL_SHA.fullmatch(values[0]) is None:
+        raise GitCheckFailedError(f"Git base ref is unresolved: {candidate}")
+    return values[0]
 
 
 class GitResource:
@@ -694,10 +525,17 @@ class GitResource:
 
         root = _worktree(self._instance)
         resolved = _base_ref(self._instance, base)
+        verified = _verified_base_ref(root, resolved)
         log = _step(
             root,
             "git.check.log",
-            ("log", "--format=%x1e%H%x00%B%x1f", "--name-only", f"{resolved}..HEAD"),
+            (
+                "log",
+                "--format=%x1e%H%x00%B%x1f",
+                "--name-only",
+                "--end-of-options",
+                f"{verified}..HEAD",
+            ),
         )
         branch = _step(root, "git.check.branch", ("symbolic-ref", "--quiet", "--short", "HEAD"))
         dirty = _step(root, "git.check.dirty", ("status", "--porcelain=v1"))
@@ -756,7 +594,8 @@ class GitResource:
             raise GitAbsorbNotFoundError()
         root = _worktree(self._instance)
         resolved = _base_ref(self._instance, base)
-        args = ["-C", str(root), "--base", resolved]
+        verified = _verified_base_ref(root, resolved)
+        args = ["-C", str(root), "--base", verified]
         if dry_run:
             args.append("--dry-run")
         if and_rebase:
@@ -797,7 +636,7 @@ class GitResource:
     ) -> GitAbsorbResult:
         return self.absorb_command(base=base, dry_run=dry_run, and_rebase=and_rebase).run()
 
-    def sync_command(  # noqa: C901
+    def sync_command(
         self, *, base: str | None = None, push: bool = False
     ) -> Command[GitSyncResult]:
         from odoo_instance_sdk.execution import Command
@@ -842,13 +681,17 @@ class GitResource:
             ("rebase", f"refs/remotes/origin/{actual_branch}"),
             mutating=True,
         )
-        rebase = _step(
-            root, "git.sync.rebase", ("rebase", f"refs/remotes/origin/{resolved}"), mutating=True
-        )
+        rebase = _step(root, "git.sync.rebase", ("rebase", resolved), mutating=True)
         verify = _step(
             root,
             "git.sync.check",
-            ("log", "--format=%x1e%H%x00%B%x1f", "--name-only", f"{resolved}..HEAD"),
+            (
+                "log",
+                "--format=%x1e%H%x00%B%x1f",
+                "--name-only",
+                "--end-of-options",
+                f"{resolved}..HEAD",
+            ),
         )
         ancestry = _step(
             root,
@@ -896,118 +739,33 @@ class GitResource:
             fast_forward,
             *((rewritten,) if rewritten is not None else ()),
         )
+        sync_steps = SyncSteps(
+            status=status,
+            branch=branch,
+            upstream=upstream,
+            remote=remote,
+            authoritative=authoritative,
+            fetch=fetch,
+            fetched_sha=fetched_sha,
+            integrate=integrate,
+            rebase=rebase,
+            verify=verify,
+            ancestry=ancestry,
+            fast_forward=fast_forward,
+            rewritten=rewritten,
+        )
 
-        def callback(context: RunContext[GitSyncResult]) -> GitSyncResult:  # noqa: C901
-            status_result = cast("ProcessResult", context.process(status.step_id))
-            branch_result = cast("ProcessResult", context.process(branch.step_id))
-            upstream_result = cast("ProcessResult", context.process(upstream.step_id))
-            remote_result = cast("ProcessResult", context.process(remote.step_id))
-            observed_branch = _text(branch_result.stdout).strip()
-            upstream_name = _text(upstream_result.stdout).strip()
-            if status_result.returncode != 0 or _text(status_result.stdout).strip():
-                context.skip_remaining()
-                raise GitSyncError("Git synchronization requires a clean worktree")
-            if (
-                branch_result.returncode != 0
-                or observed_branch != actual_branch
-                or observed_branch in _PROTECTED
-                or observed_branch.startswith("release/")
-            ):
-                context.skip_remaining()
-                raise GitSyncError("detached or protected branches cannot be synchronized")
-            if remote_result.returncode != 0:
-                context.skip_remaining()
-                raise GitSyncError(
-                    "origin remote is unavailable; no fetch or publication was attempted"
-                )
-            if upstream_name and upstream_name != f"origin/{observed_branch}":
-                context.skip_remaining()
-                raise GitSyncError(f"upstream must be origin/{observed_branch}")
-            if push and not _ssh_remote(_text(remote_result.stdout).strip()):
-                context.skip_remaining()
-                raise GitSyncError("publication requires an SSH origin")
-            authoritative_result = cast("ProcessResult", context.process(authoritative.step_id))
-            if (
-                authoritative_result.returncode != 0
-                or _remote_head(_text(authoritative_result.stdout)) != planned_remote_sha
-            ):
-                context.skip_remaining()
-                raise GitSyncError("remote branch changed after sync planning")
-            fetched = cast("ProcessResult", context.process(fetch.step_id))
-            if fetched.returncode != 0:
-                context.skip_remaining()
-                raise GitSyncError("fetch failed; no rebase or publication was attempted")
-            integrated = False
-            fetched_sha_result = cast("ProcessResult", context.process(fetched_sha.step_id))
-            remote_sha = _text(fetched_sha_result.stdout).strip() or None
-            if planned_remote_sha is None:
-                if fetched_sha_result.returncode == 0 and remote_sha is not None:
-                    context.skip_remaining()
-                    raise GitSyncError("remote branch changed after sync planning")
-                remote_sha = None
-            elif fetched_sha_result.returncode != 0 or remote_sha != planned_remote_sha:
-                context.skip_remaining()
-                raise GitSyncError("remote branch changed after sync planning")
-            if remote_sha is not None:
-                integrated_result = cast("ProcessResult", context.process(integrate.step_id))
-                integrated = True
-                if integrated_result.returncode != 0:
-                    context.skip(rebase.step_id)
-                    raise GitSyncError(
-                        "rebase conflict; run `git rebase --continue` or `git rebase --abort`"
-                    )
-            else:
-                context.skip(integrate.step_id)
-            rebased = cast("ProcessResult", context.process(rebase.step_id))
-            if rebased.returncode != 0:
-                raise GitSyncError(
-                    "rebase conflict; run `git rebase --continue` or `git rebase --abort`"
-                )
-            checked = cast("ProcessResult", context.process(verify.step_id))
-            checked_result = _check_log(
-                _text(checked.stdout),
-                base=resolved,
-                branch=observed_branch,
+        def callback(context: RunContext[GitSyncResult]) -> GitSyncResult:
+            return execute_sync(
+                context,
+                sync_steps,
+                actual_branch=actual_branch,
+                planned_remote_sha=planned_remote_sha,
+                resolved=resolved,
+                push=push,
                 instance=self._instance,
                 root=root,
-            )
-            if checked.returncode != 0 or not checked_result.valid:
-                raise GitSyncError("git check failed before publication")
-            published = False
-            if push:
-                if remote_sha is None:
-                    context.skip(ancestry.step_id)
-                    if rewritten is not None:
-                        context.skip(rewritten.step_id)
-                    published_result = cast("ProcessResult", context.process(fast_forward.step_id))
-                else:
-                    ancestry_result = cast("ProcessResult", context.process(ancestry.step_id))
-                    if ancestry_result.returncode == 0:
-                        if rewritten is not None:
-                            context.skip(rewritten.step_id)
-                        published_result = cast(
-                            "ProcessResult", context.process(fast_forward.step_id)
-                        )
-                    else:
-                        if rewritten is None:
-                            context.skip(fast_forward.step_id)
-                            raise GitSyncError("rewritten publication has no fetched lease")
-                        context.skip(fast_forward.step_id)
-                        published_result = cast("ProcessResult", context.process(rewritten.step_id))
-                if published_result.returncode != 0:
-                    raise GitSyncError("publication failed; a stale lease was not retried")
-                published = True
-            else:
-                context.skip(ancestry.step_id)
-                context.skip(fast_forward.step_id)
-                if rewritten is not None:
-                    context.skip(rewritten.step_id)
-            return GitSyncResult(
-                branch=observed_branch,
-                base=resolved,
-                fetched_sha=remote_sha,
-                rebased=rebased.returncode == 0 or integrated,
-                pushed=published,
+                ssh_remote=_ssh_remote,
             )
 
         planning_steps = (

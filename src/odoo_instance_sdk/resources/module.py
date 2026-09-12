@@ -47,7 +47,7 @@ type _LiteralValue = (
     | str
     | list["_LiteralValue"]
     | tuple["_LiteralValue", ...]
-    | dict[object, "_LiteralValue"]
+    | dict[str, "_LiteralValue"]
 )
 
 
@@ -58,7 +58,9 @@ def _json_value(value: _LiteralValue) -> ModuleJsonValue:
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): _json_value(item) for key, item in value.items()}
+        if any(not isinstance(key, str) for key in value):
+            return str(value)
+        return {key: _json_value(item) for key, item in value.items()}
     # Odoo manifests occasionally contain an otherwise harmless literal type
     # that is not part of the public JSON model. Keeping its text is safer
     # than executing or dropping the complete manifest.

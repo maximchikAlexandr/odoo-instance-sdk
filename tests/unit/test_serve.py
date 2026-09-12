@@ -219,6 +219,11 @@ def test_snapshot_initializes_a_fresh_default_catalog_root(
         return data_root
 
     monkeypatch.setattr(paths, "get_data_root", get_data_root)
+
+    def get_catalog_path(*, ensure_exists: bool = True) -> Path:
+        return paths.get_data_root(ensure_exists=ensure_exists) / "catalog.sqlite3"
+
+    monkeypatch.setattr(paths, "get_catalog_path", get_catalog_path)
     assert not data_root.exists()
 
     with _client(headless=True) as client:

@@ -589,7 +589,9 @@ def db_drop(
 def _drop_rich(document: OutputDocument) -> str:
     payload = document.result if isinstance(document.result, dict) else {}
     if "observations" in payload:
-        return _rich_plan_projection(document)
+        return _rich_plan_projection(
+            document.result, command=document.command, warnings=document.warnings
+        )
     return f"Dropped database {payload['database']} on {payload['cluster']}"
 
 
@@ -598,7 +600,9 @@ def _rich_refresh(document: OutputDocument) -> str:
         return document.error.message if document.error is not None else "operation failed"
     payload = document.result if isinstance(document.result, dict) else {}
     if "steps" in payload:
-        return _rich_plan_projection(document)
+        return _rich_plan_projection(
+            document.result, command=document.command, warnings=document.warnings
+        )
     table = Table("Field", "Value", title="Database refresh")
     for field in (
         "mode",
@@ -627,7 +631,9 @@ def _rich_admin_reset(document: OutputDocument) -> str:
         return document.error.message if document.error is not None else "operation failed"
     payload = document.result if isinstance(document.result, dict) else {}
     if "steps" in payload:
-        return _rich_plan_projection(document)
+        return _rich_plan_projection(
+            document.result, command=document.command, warnings=document.warnings
+        )
     table = Table("Field", "Value", title="Administrator password reset")
     for field in ("database", "completed", "xml_id", "environment_id"):
         value = payload.get(field)
@@ -644,7 +650,9 @@ def _restore_rich(document: OutputDocument) -> str:
         return document.error.message if document.error is not None else "operation failed"
     payload = document.result if isinstance(document.result, dict) else {}
     if "steps" in payload:
-        return _rich_plan_projection(document)
+        return _rich_plan_projection(
+            document.result, command=document.command, warnings=document.warnings
+        )
     database = payload.get("restored_database", "")
     backup = payload.get("backup")
     backup_id = backup.get("id") if isinstance(backup, dict) else backup

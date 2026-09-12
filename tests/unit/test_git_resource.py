@@ -354,6 +354,16 @@ def test_check_accepts_module_history_with_matching_ticket_link(tmp_path: Path) 
     assert result.valid is True
 
 
+def test_check_rejects_option_like_base_before_git_log(tmp_path: Path) -> None:
+    _repo(tmp_path)
+    head = _git(tmp_path, "rev-parse", "HEAD").strip()
+
+    with pytest.raises(GitCheckFailedError, match="must not start"):
+        GitResource(_instance(tmp_path)).check(base="--output=HEAD")
+
+    assert _git(tmp_path, "rev-parse", "HEAD").strip() == head
+
+
 @pytest.mark.parametrize(
     ("subject", "expected"),
     [

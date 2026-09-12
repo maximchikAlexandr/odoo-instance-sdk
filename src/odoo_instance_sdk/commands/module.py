@@ -389,7 +389,7 @@ def module_list(
         runtime_context = cli_context.ready_instance(ctx)
         status, _records = run_or_preview(
             lambda: cast(
-                "Callable[..., Command[object]]",
+                "Callable[..., Command[CommandResult]]",
                 getattr(sys.modules["odoo_instance_sdk.cli"], "list_modules_command"),
             )(runtime_context.instance, names=tuple(modules), state=state),
             command_name="module.list",

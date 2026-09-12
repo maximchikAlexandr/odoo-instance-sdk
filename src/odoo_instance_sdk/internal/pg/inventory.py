@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import msgspec
 
@@ -64,11 +64,9 @@ class DatabaseInventoryResult(
 ):
     """Deterministic project-cluster database inventory."""
 
-    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"tracked"})
-
     cluster: str
     databases: tuple[DatabaseInventoryItem, ...]
-    tracked: bool = False
+    tracked: Annotated[bool, "odcli-structural"] = False
 
 
 def _credentials(instance: OdooInstance) -> tuple[str, int, str | None, str | None]:

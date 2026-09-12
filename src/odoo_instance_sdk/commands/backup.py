@@ -7,7 +7,7 @@ from collections.abc import Callable
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, Annotated, cast
 
 import msgspec
 
@@ -104,10 +104,8 @@ class _BackupPayloadResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tr
 
 
 class _BackupListResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"next_cursor"})
-
     backups: tuple[_BackupPayloadResult, ...]
-    next_cursor: str | None
+    next_cursor: Annotated[str | None, "odcli-structural"]
 
 
 def configure_catalog_path_provider(provider: Callable[[], Path]) -> None:

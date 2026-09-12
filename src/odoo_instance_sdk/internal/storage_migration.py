@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -84,6 +85,38 @@ def _journal_path(root: Path) -> Path:
 
 def _lock_path(root: Path) -> Path:
     return root / ".storage-migration.lock"
+
+
+def _lexical_path(path: Path) -> Path:
+    """Return an absolute path without resolving symlinks."""
+    return Path(os.path.abspath(os.fspath(path.expanduser())))
+
+
+def _assert_no_symlink_components(path: Path) -> None:
+    """Reject symlink roots/components before migration filesystem work."""
+    lexical = _lexical_path(path)
+    current = Path(lexical.anchor)
+    for part in lexical.parts[1:]:
+        current /= part
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise StorageMigrationError(f"cannot inspect legacy storage path: {current}") from exc
+        if stat.S_ISLNK(mode):
+            raise StorageMigrationError(f"legacy storage path contains a symlink: {current}")
+
+
+def _assert_safe_tree(path: Path) -> None:
+    _assert_no_symlink_components(path)
+    if not path.is_dir():
+        return
+    for child in path.iterdir():
+        if child.is_symlink():
+            raise StorageMigrationError(f"legacy storage path contains a symlink: {child}")
+        if child.is_dir():
+            _assert_safe_tree(child)
 
 
 def _read_journal(path: Path) -> dict[str, JsonValue]:
@@ -253,6 +286,9 @@ def _rewrite_catalogue(path: Path, replacements: tuple[tuple[Path, Path], ...]) 
 
 
 def _remove_verified(source: Path, destination: Path, original_digest: str) -> None:
+    # Revalidate the lexical source immediately before cleanup.  Never turn a
+    # changed legacy path into a resolved target owned by another directory.
+    _assert_safe_tree(source)
     if not source.exists() and not source.is_symlink():
         return
     if not destination.exists() and not destination.is_symlink():
@@ -290,7 +326,7 @@ def _catalogue_is_valid(path: Path) -> bool:
         connection.close()
 
 
-def migrate_storage(
+def migrate_storage(  # noqa: C901
     *,
     home: Path | None = None,
     legacy: Mapping[str, Path] | None = None,
@@ -311,9 +347,12 @@ def migrate_storage(
         if journal.get("stage") == "complete":
             return StorageMigrationResult("complete")
         legacy_roots = {
-            key: Path(value).expanduser().resolve()
+            key: _lexical_path(Path(value))
             for key, value in (legacy or legacy_storage_roots(home)).items()
         }
+        for legacy_root in legacy_roots.values():
+            if legacy_root.exists() or legacy_root.is_symlink():
+                _assert_safe_tree(legacy_root)
         mappings = (
             (legacy_roots["config"], root / "config"),
             (legacy_roots["data"] / "catalog.sqlite3", root / "catalog.sqlite3"),
@@ -328,6 +367,8 @@ def migrate_storage(
             for source, destination in mappings
             if source.exists() or source.is_symlink()
         )
+        for source, _ in existing:
+            _assert_safe_tree(source)
         journal_stage = str(journal.get("stage", "inventory"))
         conflicts = tuple(
             path

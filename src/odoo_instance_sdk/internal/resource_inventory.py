@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
 
@@ -121,11 +121,9 @@ class ResourceFinding(msgspec.Struct, frozen=True, forbid_unknown_fields=True, k
 class ResourceInventory(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     """One deterministic read-only resource graph and its findings."""
 
-    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"complete"})
-
     resources: tuple[ResourceInventoryItem, ...]
     findings: tuple[ResourceFinding, ...]
-    complete: bool
+    complete: Annotated[bool, "odcli-structural"]
 
 
 @dataclass(frozen=True, slots=True)

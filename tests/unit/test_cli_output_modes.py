@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
@@ -99,14 +99,10 @@ class _NestedFieldRow(msgspec.Struct, frozen=True):
 
 
 class _NestedFieldResult(msgspec.Struct, frozen=True):
-    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset(
-        {"metadata", "warnings", "complete"}
-    )
-
     rows: tuple[_NestedFieldRow, ...]
-    metadata: dict[str, str]
-    warnings: tuple[str, ...]
-    complete: bool
+    metadata: Annotated[dict[str, str], "odcli-structural"]
+    warnings: Annotated[tuple[str, ...], "odcli-structural"]
+    complete: Annotated[bool, "odcli-structural"]
 
 
 def _nested_field_result() -> _NestedFieldResult:
@@ -1315,9 +1311,10 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
             execution_calls: list[str] = []
             original_projection = output_commands._rich_plan_projection
 
-            def validating_projection(document: OutputDocument) -> str:
-                rendered = original_projection(document)
-                result = document.result
+            def validating_projection(
+                result: JsonValue, *, command: str, warnings: tuple[str, ...]
+            ) -> str:
+                rendered = original_projection(result, command=command, warnings=warnings)
                 if isinstance(result, dict):
                     steps = result.get("steps")
                     if isinstance(steps, list):
