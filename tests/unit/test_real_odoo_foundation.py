@@ -155,7 +155,7 @@ def test_initialization_command_and_all_leak_categories_are_explicit(tmp_path: P
 
 
 def test_secret_canary_and_password_are_not_written(tmp_path: Path) -> None:
-    evidence = FailureEvidence("run123", "random-canary", tmp_path)
+    evidence = FailureEvidence("run123", "random-canary", tmp_path, ("real-secret",))
     evidence.add_log("odoo", "admin_passwd=real-secret\ncredentials omitted\n")
     files = evidence.write()
     text = files[0].read_text(encoding="utf-8")
@@ -298,6 +298,28 @@ def test_default_audit_can_confirm_a_real_clean_finalization(
     assert any(command[:4] == ["docker", "container", "ls", "--all"] for command in calls)
 
 
+def test_default_database_probe_checks_both_fixture_postgres_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(args)
+        container = args[2]
+        stdout = "odcli_e2e_source_run123\n" if "source-pg" in container else ""
+        return subprocess.CompletedProcess(args, 0, stdout, "")
+
+    monkeypatch.setattr("tests.integration.real_odoo.cleanup.shutil.which", lambda name: "docker")
+    monkeypatch.setattr("tests.integration.real_odoo.cleanup.subprocess.run", run)
+    probes = default_leak_probes("run123", compose_project="odcli-e2e-project")
+    assert tuple(probes["database"]("run123")) == ("odcli_e2e_source_run123",)
+    assert [command[2] for command in calls] == [
+        "odcli-e2e-source-pg-run123",
+        "odcli-e2e-target-pg-run123",
+    ]
+
+
 def test_fixture_failure_still_unwinds_created_compose_resources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -327,3 +349,40 @@ def test_fixture_failure_still_unwinds_created_compose_resources(
             raise
     assert cleaned == ["compose"]
     assert not runtime.root.exists()
+
+
+def test_fixture_failure_publishes_bounded_sanitized_compose_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = e2e_fixtures._make_runtime(tmp_path, "b" * 32)
+    runtime.failed = True
+    monkeypatch.setenv("ODCLI_E2E_KEEP_FAILED", "1")
+    commands: list[tuple[str, ...]] = []
+
+    class FakeLifecycle:
+        def __init__(self, compose_file: Path, project_name: str) -> None:
+            del compose_file, project_name
+
+        def run(self, *args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+            del timeout
+            commands.append(args)
+            return subprocess.CompletedProcess(args, 0, "db_password=runtime-secret\nready\n", "")
+
+    monkeypatch.setattr(e2e_fixtures, "ComposeLifecycle", FakeLifecycle)
+    monkeypatch.setattr(e2e_fixtures, "compose_down", lambda *args, **kwargs: None)
+    monkeypatch.setattr(e2e_fixtures, "audit_no_leaks", lambda *args, **kwargs: None)
+    try:
+        error = RuntimeError("injected initialization failure")
+        with pytest.raises(RuntimeError, match="injected"):
+            e2e_fixtures._finalize(runtime, error)
+        assert commands == [
+            ("logs", "--no-color", "--tail", "200", "target_postgres"),
+            ("logs", "--no-color", "--tail", "200", "target_init"),
+        ]
+        logs = sorted(runtime.artifact_root.glob("*.log"))
+        assert {path.name for path in logs} == {"odoo.log", "postgres.log"}
+        assert all("runtime-secret" not in path.read_text(encoding="utf-8") for path in logs)
+        assert all(path.stat().st_size <= 2 * 1024 * 1024 for path in logs)
+    finally:
+        monkeypatch.delenv("ODCLI_E2E_KEEP_FAILED")
+        e2e_fixtures._remove_runtime_files(runtime)

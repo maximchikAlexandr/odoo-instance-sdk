@@ -290,9 +290,42 @@ def _remove_runtime_files(runtime: E2ERuntime) -> None:
         remove_owned_root(runtime.artifact_root, run_id=runtime.run_id)
 
 
+def _publish_failure_logs(runtime: E2ERuntime, lifecycle: ComposeLifecycle) -> None:
+    """Publish bounded Compose logs before teardown removes the run resources."""
+    secrets_to_redact = tuple(
+        value
+        for path in (runtime.secret_file, runtime.master_password_file)
+        for value in (path.read_text(encoding="utf-8").strip(),)
+        if value
+    )
+    evidence = FailureEvidence(
+        runtime.run_id,
+        secrets.token_urlsafe(24),
+        runtime.artifact_root,
+        secrets_to_redact,
+    )
+    services = (
+        ("source_postgres", "source_odoo")
+        if runtime.scope == "source"
+        else ("target_postgres", "target_init")
+    )
+    for name, service in zip(("postgres", "odoo"), services, strict=True):
+        result = lifecycle.run("logs", "--no-color", "--tail", "200", service, timeout=30.0)
+        evidence.add_log(name, result.stdout + result.stderr)
+    evidence.write()
+
+
 def _finalize(runtime: E2ERuntime, primary_failure: BaseException | None = None) -> None:
     runtime.failed = primary_failure is not None
     errors: list[BaseException] = []
+    if primary_failure is not None:
+        try:
+            _publish_failure_logs(
+                runtime,
+                ComposeLifecycle(runtime.compose_file, runtime.topology.project_name),
+            )
+        except BaseException as error:
+            errors.append(error)
     try:
         runtime.ledger.unwind(primary_failure=primary_failure)
     except BaseException as error:

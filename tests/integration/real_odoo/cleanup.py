@@ -117,11 +117,15 @@ class FailureEvidence:
     run_id: str
     secret_canary: str
     root: Path
+    secret_values: tuple[str, ...] = ()
     _logs: dict[str, str] = field(default_factory=dict)
 
     def add_log(self, name: str, text: str) -> None:
         if not name or Path(name).name != name or name in {".", ".."}:
             raise ValueError("evidence log name must be a single path component")
+        for secret in self.secret_values:
+            if secret:
+                text = text.replace(secret, "<redacted>")
         clean = sanitize_terminal_text(sanitize_last_error(text) or "", preserve_newlines=True)
         encoded = clean.encode("utf-8")[:MAX_TEXT_BYTES]
         self._logs[name] = encoded.decode("utf-8", errors="ignore")
@@ -326,26 +330,31 @@ def default_leak_probes(  # noqa: C901
     def databases(scope: str) -> Iterable[str]:
         if shutil.which("docker") is None:
             return ("docker-database-probe-unavailable",) if compose_project else ()
-        container = f"odcli-e2e-target-pg-{scope}"
-        result = subprocess.run(
-            [
-                "docker",
-                "exec",
-                container,
-                "psql",
-                "-U",
-                "odoo",
-                "-d",
-                "postgres",
-                "-At",
-                "-c",
-                "SELECT datname FROM pg_database WHERE datname LIKE 'odcli_e2e_%';",
-            ],
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        return tuple(line for line in result.stdout.splitlines() if line.strip())
+        leaks: list[str] = []
+        for container in (
+            f"odcli-e2e-source-pg-{scope}",
+            f"odcli-e2e-target-pg-{scope}",
+        ):
+            result = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    container,
+                    "psql",
+                    "-U",
+                    "odoo",
+                    "-d",
+                    "postgres",
+                    "-At",
+                    "-c",
+                    "SELECT datname FROM pg_database WHERE datname LIKE 'odcli_e2e_%';",
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            leaks.extend(line for line in result.stdout.splitlines() if line.strip())
+        return tuple(leaks)
 
     runtime_paths = (runtime_root,) if runtime_root is not None else ()
     return {
