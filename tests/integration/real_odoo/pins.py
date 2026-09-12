@@ -92,6 +92,8 @@ def normalize_platform(system: str, machine: str) -> str:
     normalized_machine = machine.strip().lower()
     architectures = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
     architecture = architectures.get(normalized_machine)
+    if normalized_system == "darwin" and normalized_machine == "arm64":
+        normalized_system = "linux"
     if normalized_system != "linux" or architecture is None:
         raise PrerequisiteError(f"unsupported platform: {normalized_system}/{normalized_machine}")
     return f"linux/{architecture}"

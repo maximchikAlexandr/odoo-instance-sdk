@@ -13,6 +13,7 @@ from tests.integration.real_odoo.pins import (
     classify_cache,
     normalize_platform,
     pin_manifest_dict,
+    prerequisite_manifest,
     require_prerequisites,
     validate_pins,
     validate_platform,
@@ -47,9 +48,10 @@ def test_pins_are_exact_and_immutable() -> None:
         validate_pins(replace(E2E_PINS, odoo_image="docker.io/library/odoo:latest"))
 
 
-def test_platforms_and_phase_budgets_are_normalized() -> None:
+def test_platforms_and_phase_budgets_are_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
     assert normalize_platform("Linux", "x86_64") == "linux/amd64"
     assert normalize_platform("linux", "aarch64") == "linux/arm64"
+    assert normalize_platform("Darwin", "arm64") == "linux/arm64"
     assert validate_platform("LINUX/AMD64") == "linux/amd64"
     assert budget_for("smoke", "cold").setup_seconds == 360
     assert budget_for("full", "warm").setup_seconds == 420
@@ -57,6 +59,15 @@ def test_platforms_and_phase_budgets_are_normalized() -> None:
     assert classify_cache(source_hit=True, uv_hit=False) == "cold"
     with pytest.raises(PrerequisiteError, match="unsupported platform"):
         validate_platform("darwin/arm64")
+    with pytest.raises(PrerequisiteError, match="unsupported platform"):
+        normalize_platform("Darwin", "x86_64")
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    assert prerequisite_manifest({"docker": True}) == {
+        "platform": "linux/arm64",
+        "missing": [],
+        "ok": True,
+    }
     with pytest.raises(TypeError):
         PHASE_BUDGETS[("smoke", "cold")] = budget_for("smoke", "cold")  # type: ignore[index]
 
