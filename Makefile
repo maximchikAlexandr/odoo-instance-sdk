@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help lint types test targeted coverage mutation package compat dashboard pgadmin-smoke smoke live web-codegen web-codegen-check pr
+.PHONY: help lint types test targeted coverage mutation package compat dashboard pgadmin-smoke smoke live real-odoo-bootstrap real-odoo-smoke real-odoo-full web-codegen web-codegen-check pr
 
 OFFLINE := not real_odoo and not packaging and not dashboard
 PYTEST_XDIST_AUTO_NUM_WORKERS ?= 1
@@ -10,7 +10,7 @@ DOCKER_CONFIG ?= $(HOME)/.docker
 export DOCKER_CONFIG
 
 help:
-	@printf '%s\n' 'make lint|types|test|targeted|coverage|mutation|package|compat|dashboard|pgadmin-smoke|smoke|live|web-codegen|web-codegen-check|pr'
+	@printf '%s\n' 'make lint|types|test|targeted|coverage|mutation|package|compat|dashboard|pgadmin-smoke|smoke|live|real-odoo-smoke|real-odoo-full|web-codegen|web-codegen-check|pr'
 
 lint:
 	uv run ruff format --check .
@@ -79,5 +79,17 @@ live:
 		exit 1; \
 	fi
 	uv run pytest -o addopts="" -v --tb=short --strict-markers -m real_odoo
+
+real-odoo-bootstrap:
+	mkdir -p .artifacts/real-odoo-e2e
+	uv run python scripts/real_odoo_bootstrap.py --tier "$${E2E_TIER:-full}" --output .artifacts/real-odoo-e2e/bootstrap.json
+
+real-odoo-smoke: E2E_TIER=smoke
+real-odoo-smoke: real-odoo-bootstrap
+	uv run pytest -o addopts='' -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
+
+real-odoo-full: E2E_TIER=full
+real-odoo-full: real-odoo-bootstrap
+	uv run pytest -o addopts='' -m 'real_odoo and e2e_full' tests/integration/real_odoo
 
 pr: lint types test compat dashboard smoke package

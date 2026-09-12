@@ -1,0 +1,89 @@
+name: Real Odoo full E2E
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ODCLI_E2E_SOURCE_CACHE: .cache/odoo-source
+  UV_CACHE_DIR: .cache/uv
+
+jobs:
+  real-odoo-full:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          python-version: "3.12.13"
+          version: "0.10.8"
+          enable-cache: false
+      - name: Restore content-addressed Odoo source cache
+        id: source-cache
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: .cache/odoo-source
+          key: odoo19-${{ runner.os }}-${{ runner.arch }}-cd992ceebbaf343c03e1941d39cfe423d35ba6c6
+          restore-keys: |
+            odoo19-${{ runner.os }}-${{ runner.arch }}-cd992ceebbaf343c03e1941d39cfe423d35ba6c6
+      - name: Restore content-addressed uv cache
+        id: uv-cache
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: .cache/uv
+          key: uv-${{ runner.os }}-${{ runner.arch }}-3.12.13-0.10.8-${{ hashFiles('uv.lock', '**/requirements.txt', '.cache/odoo-requirements.txt') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ runner.arch }}-3.12.13-0.10.8-${{ hashFiles('uv.lock', '**/requirements.txt', '.cache/odoo-requirements.txt') }}
+      - run: uv sync --frozen --group test
+      - name: Create upload canary outside evidence root
+        run: |
+          mkdir -p .artifacts
+          umask 077
+          python -c 'import secrets; print(secrets.token_urlsafe(24))' > .artifacts/real-odoo-e2e-secret-canary
+      - name: Bootstrap required full prerequisites
+        id: bootstrap
+        env:
+          ODCLI_E2E_SOURCE_CACHE_HIT: ${{ steps.source-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
+          ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
+        run: >-
+          uv run python scripts/real_odoo_bootstrap.py
+          --tier full
+          --output .artifacts/real-odoo-e2e/bootstrap.json
+      - name: Run source-backed full E2E
+        id: pytest
+        run: uv run pytest -o addopts='' -m 'real_odoo and e2e_full' tests/integration/real_odoo
+      - name: Save content-addressed caches
+        if: success()
+        uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: .cache/odoo-source
+          key: odoo19-${{ runner.os }}-${{ runner.arch }}-cd992ceebbaf343c03e1941d39cfe423d35ba6c6
+      - name: Save content-addressed uv cache
+        if: success()
+        uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: .cache/uv
+          key: uv-${{ runner.os }}-${{ runner.arch }}-3.12.13-0.10.8-${{ hashFiles('uv.lock', '**/requirements.txt', '.cache/odoo-requirements.txt') }}
+      - name: Package bounded E2E evidence
+        if: always()
+        run: >-
+          uv run python scripts/real_odoo_evidence.py
+          --source .artifacts/real-odoo-e2e
+          --output .artifacts/real-odoo-e2e/full-evidence.tar.gz
+          --canary-file .artifacts/real-odoo-e2e-secret-canary
+          --status ${{ steps.pytest.outcome == 'success' && 'success' || 'failure' }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: real-odoo-full-evidence
+          path: |
+            .artifacts/real-odoo-e2e/*-evidence.tar.gz
+            .artifacts/real-odoo-e2e/evidence-manifest.json
+            .artifacts/real-odoo-e2e/bootstrap.json
+            .artifacts/real-odoo-e2e/packaging-error.json
+          retention-days: 7

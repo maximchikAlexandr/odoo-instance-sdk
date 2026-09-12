@@ -10,6 +10,50 @@ permissions:
   contents: read
 
 jobs:
+  real-odoo-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          python-version: "3.12.13"
+          version: "0.10.8"
+          enable-cache: false
+      - run: uv sync --frozen --group test
+      - name: Create upload canary outside evidence root
+        run: |
+          mkdir -p .artifacts
+          umask 077
+          python -c 'import secrets; print(secrets.token_urlsafe(24))' > .artifacts/real-odoo-e2e-secret-canary
+      - name: Bootstrap required smoke prerequisites
+        id: bootstrap
+        run: >-
+          uv run python scripts/real_odoo_bootstrap.py
+          --tier smoke
+          --output .artifacts/real-odoo-e2e/bootstrap.json
+      - name: Run PR smoke E2E
+        id: pytest
+        run: uv run pytest -o addopts='' -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
+      - name: Package bounded E2E evidence
+        if: always()
+        run: >-
+          uv run python scripts/real_odoo_evidence.py
+          --source .artifacts/real-odoo-e2e
+          --output .artifacts/real-odoo-e2e/smoke-evidence.tar.gz
+          --canary-file .artifacts/real-odoo-e2e-secret-canary
+          --status ${{ steps.pytest.outcome == 'success' && 'success' || 'failure' }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: real-odoo-smoke-evidence
+          path: |
+            .artifacts/real-odoo-e2e/*-evidence.tar.gz
+            .artifacts/real-odoo-e2e/evidence-manifest.json
+            .artifacts/real-odoo-e2e/bootstrap.json
+            .artifacts/real-odoo-e2e/packaging-error.json
+          retention-days: 7
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
