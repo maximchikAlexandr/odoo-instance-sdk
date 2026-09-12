@@ -106,3 +106,40 @@ def test_execution_boundary_documents_current_output_inventory() -> None:
     documented = _documented_output_writes(ROOT / "docs" / "execution-boundary.md")
     assert documented == set(DIRECT_OUTPUT_WRITES)
     assert documented == _discover_output_writes()
+
+
+@pytest.mark.unit
+def test_developer_workflow_docs_cover_public_contracts() -> None:
+    readme = README.read_text(encoding="utf-8")
+    sdk_doc = SDK_DOC.read_text(encoding="utf-8")
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    combined = f"{readme}\n{sdk_doc}\n{changelog}"
+
+    for text in (
+        "--format rich|json|toon",
+        "--fields a.b,c",
+        "Ticket Allocation",
+        "~/.odcli",
+        "Storage migration",
+        "absolute",
+        "msgfmt",
+        "odcli module install-order",
+        "odcli translations export",
+        "odcli git commit",
+        "odcli git sync",
+    ):
+        assert text in combined
+
+
+@pytest.mark.unit
+def test_developer_workflow_docs_reject_stale_scope_claims() -> None:
+    readme = README.read_text(encoding="utf-8")
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog.split("## [0.1.0]", 1)[0]
+
+    assert "`odcli env show`" in readme
+    assert "future reusable `env show`" not in readme
+    assert "outside the current CLI scope" not in readme
+    assert "the platform cache directory" not in readme
+    assert "future `env show` is not included" not in unreleased
+    assert "Focused `odcli env show` projection" in unreleased

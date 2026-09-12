@@ -98,7 +98,7 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
 ) -> None:
     psql = _require_tools()
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
     )
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)

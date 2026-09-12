@@ -17,6 +17,15 @@ pytestmark = [pytest.mark.packaging]
 _REPO = Path(__file__).resolve().parents[2]
 
 
+def _isolated_process_env(root: Path) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    for name in ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        path = root / name.lower()
+        path.mkdir(parents=True, exist_ok=True)
+        env[name] = str(path)
+    return env
+
+
 def _dist() -> tuple[Path, Path]:
     dist = _REPO / "dist"
     wheels = list(dist.glob("*.whl")) if dist.is_dir() else []
@@ -61,7 +70,7 @@ def _install_and_smoke(artifact: Path, tmp_path: Path) -> None:
         check=True,
         cwd=tmp_path,
     )
-    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env = _isolated_process_env(tmp_path / "user-state")
     imported = subprocess.run(
         [str(python), "-c", "import odoo_instance_sdk; print(odoo_instance_sdk.__file__)"],
         cwd=empty,
@@ -129,7 +138,7 @@ def test_isolated_wheel_imports_rich_toon_and_runs_toon_env_list(tmp_path: Path)
         check=True,
         cwd=tmp_path,
     )
-    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env = _isolated_process_env(tmp_path / "user-state")
     imports = subprocess.run(
         [str(python), "-c", "import rich, toon; print(rich.__name__, toon.__name__)"],
         cwd=empty,
@@ -150,6 +159,8 @@ def test_isolated_wheel_imports_rich_toon_and_runs_toon_env_list(tmp_path: Path)
     assert result.stderr == ""
     assert result.stdout.strip()
     assert "schema_version" in result.stdout
+    assert str(Path.home()) not in result.stdout
+    assert str(_REPO) not in result.stdout
 
 
 def test_current_version_artifacts() -> None:

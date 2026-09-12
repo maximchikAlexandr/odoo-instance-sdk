@@ -129,3 +129,11 @@ def test_collection_guard_skips_dashboard_items_without_the_extra(
 
     assert any(getattr(marker, "name", None) == "skip" for marker in dashboard_item.markers)
     assert not any(getattr(marker, "name", None) == "skip" for marker in regular_item.markers)
+
+
+def test_make_test_recipe_fails_fast_between_verification_stages() -> None:
+    makefile = _REPOSITORY_ROOT / "Makefile"
+    recipe = makefile.read_text(encoding="utf-8")
+    test_recipe = recipe.split("\ntest:\n", 1)[1].split("\ntargeted:\n", 1)[0]
+
+    assert "set -e" in test_recipe

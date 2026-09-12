@@ -154,7 +154,17 @@ def docker_visible_postgres_root() -> Iterator[Path]:
     keep only that disposable artifact under the already shared checkout.  The
     approval sentinel proves that the parent checkout policy is never touched.
     """
-    volumes_before = _docker_project_volumes()
+    try:
+        volumes_before = _docker_project_volumes()
+    except AssertionError as exc:
+        detail = str(exc).lower()
+        if (
+            "cannot connect" in detail
+            or "failed to connect to the docker api" in detail
+            or "is the docker daemon running" in detail
+        ):
+            pytest.skip("Docker daemon unavailable; cannot establish a resource baseline")
+        raise
     if volumes_before is None:
         pytest.skip("Docker executable unavailable; cannot establish a resource baseline")
     root = Path(tempfile.mkdtemp(prefix=".odcli-postgres-", dir=Path.cwd()))
@@ -194,14 +204,14 @@ def isolated_cli_catalogue(  # noqa: C901
     """Keep every init path in a per-test, per-worker catalogue root."""
     worker_id = str(getattr(request.config, "workerinput", {}).get("workerid", "master"))
     worker_root = tmp_path / f"catalogue-{worker_id}"
+    home_root = worker_root / "home"
     user_root = worker_root / ".odcli"
+    config_root = worker_root / "config"
     data_root = worker_root / "data"
     state_root = worker_root / "state"
     cache_root = worker_root / "cache"
     catalog_path = data_root / "catalog.sqlite3"
-    canonical_production_catalogue_path = (
-        Path.home().expanduser().resolve() / ".odcli" / "catalog.sqlite3"
-    )
+    canonical_production_catalogue_path = home_root / ".odcli" / "catalog.sqlite3"
 
     def data_root_path(*, ensure_exists: bool = True) -> Path:
         if ensure_exists:
@@ -279,6 +289,8 @@ def isolated_cli_catalogue(  # noqa: C901
     if request.node.get_closest_marker("unpatched_xdg") is not None:
         return production_catalogue_path
 
+    monkeypatch.setenv("HOME", str(home_root))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
     monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root))

@@ -10,29 +10,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - CLI-first project and environment workflows, including changed-test selection,
   module operations, dependency verification, translation export, and VS Code generation
+- Manifest-safe module discovery, deterministic dependency planning, optional `msgfmt`
+  validation, and staged Odoo Git commit/check/absorb/sync workflows
+- Unified `~/.odcli/` user storage with locked, journaled migration and safe retry
+  evidence for legacy locations, conflicts, and interrupted stages
 - SDK-owned PostgreSQL lifecycle with digest approval, status, start, and stop commands
 - Environment database refresh and administrator-password reset workflows
 - Typed multi-project monitor snapshots, local headless API, optional dashboard, and pgAdmin launch
 - Complete shipped CLI command inventory and public Python SDK examples
+- Focused `odcli env show` projection for selected environment details
 - Project-local `.odcli/.env` support with owner-only permissions, bounded parsing,
   child-process scoping, and master-password consumption before spawn
 - Project-owned runtime summaries in monitor snapshots and the existing dashboard
 - Structured Rich/JSON/TOON output for `eval` and `exec`, including captured user output,
   bounded source-aware errors, and truncation state
-- Guarded cluster-bound `odcli db drop` with dry-run planning, exact-target session
+- Guarded cluster-bound `odcli db rm` with dry-run planning, exact-target session
   termination, confirmation, and post-drop catalogue reconciliation
 - Streamed backup acquisition with checksum/size verification, atomic publication,
   interrupt-safe cleanup, and typed retained-artifact failures
-- Exact-UUID backup list/show/validate/delete and local database restore workflows,
+- Exact-UUID backup ls/inspect/validate/rm and local database restore workflows,
   including immutable previews, nullable ownership provenance, and admin reset
-- Read-only `resource list` and `resource doctor` projections for retained backups,
+- Read-only `resource ls` and `resource doctor` projections for retained backups,
   databases, environments, logs, filestores, and owned volumes
 - GitHub #61 lifecycle recovery contracts: owned-runtime readiness, direct COPY
   cleanup/retry, compatible aliases, selected process-tree memory, stopped COPY
-  replacement, ownership-proven `stop`, deterministic Jira checkout allocation,
+  replacement, ownership-proven `stop`, deterministic Ticket Allocation,
   versioned applied-settings evidence, and read-only doctor drift diagnosis
 
 ### Changed
+- BREAKING: replace the removed `--json` compatibility option with explicit
+  leaf-local `--format rich|json|toon`; eligible bounded machine results may use
+  typed `--fields` projection only with explicit JSON or TOON
+- BREAKING: make `env create`/`env checkout` use tracker-neutral Ticket Allocation
+  terminology and canonical short resource spellings (`ls`, `inspect`, and `rm`)
+- Add focused environment details, structured doctor remediations, absolute machine
+  paths, adaptive Rich presentation, and command-tree shell completion guidance
 - Documentation now treats executable command help as the source of truth for exact flags
 - Project-context commands resolve registered project runtime data directly without
   fabricating an environment; explicit environment selectors retain precedence
@@ -41,12 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Process-backed commands now expose bounded progress while JSON/TOON remain one
   progress-free document; transaction finalization and Ctrl-C/retention states are
   represented explicitly
-- `env checkout`/`env create` now accept Jira ticket keys and allocate a
+- `env checkout`/`env create` now accept Ticket keys and allocate a
   never-reused branch from local, catalogue, and recorded `origin` evidence;
   `.localhost` browser-session isolation remains outside this release
 - `db restore BACKUP_UUID --replace` preserves a stopped COPY environment's
-  identity while retaining compensating evidence for safe retry; future
-  `env show` is not included
+  identity while retaining compensating evidence for safe retry
 - Monitor schema v4 names the single platform-selected process-tree value
   `memory_bytes`, and all human/machine/API/dashboard projections use it
 
@@ -62,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no port occupant, active session, shared/source database, or stale process is
   implicitly terminated
 - Applied-settings fingerprints use normalized semantic inputs after canonical
-  redaction; raw credentials, unsafe paths, Jira clients, fetches, and branch
+  redaction; raw credentials, unsafe paths, tracker clients, fetches, and branch
   counters are not persisted or introduced
 
 ## [0.1.0] - 2026-07-15

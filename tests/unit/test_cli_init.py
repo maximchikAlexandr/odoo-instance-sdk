@@ -33,6 +33,15 @@ def test_init_catalogue_access_is_worker_local_and_not_production(
     assert isolated_cli_catalogue.parent != production_catalogue_path.parent
 
 
+def test_offline_fixture_isolates_home_and_legacy_platformdirs_roots(
+    isolated_cli_catalogue: Path, production_catalogue_path: Path
+) -> None:
+    worker_root = isolated_cli_catalogue.parent.parent
+
+    assert Path.home() == worker_root / "home"
+    assert Path.home() / ".odcli" / "catalog.sqlite3" != production_catalogue_path
+
+
 def test_worker_local_catalogues_do_not_cross_contaminate_monitor_projects(
     tmp_path: Path,
 ) -> None:

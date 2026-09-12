@@ -179,10 +179,16 @@ def test_list_json_emits_snapshot_and_human_has_project_header(
 def test_list_reports_occupied_port(
     env_client: OdooClient, project_manifest: Path, fake_python: Path
 ) -> None:
+    port_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    port_probe.bind(("127.0.0.1", 0))
+    requested_port = port_probe.getsockname()[1]
+    port_probe.close()
     env = env_client.environments.checkout(
         project_manifest,
         "feat/list-port",
-        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+        options=EnvironmentCheckoutOptions(
+            python=str(fake_python), source_database="comerta", http_port=requested_port
+        ),
     )
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind((env.http_interface, env.http_port))
