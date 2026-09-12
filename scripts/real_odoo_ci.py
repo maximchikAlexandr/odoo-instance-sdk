@@ -288,7 +288,8 @@ def _instrumented_finalize(runtime: Any, primary_failure: BaseException | None =
                 real_odoo_timing.record(Path(configured), "cleanup", started, time.monotonic())
 
 
-def pytest_configure(_config: object) -> None:
+def pytest_configure(config: object) -> None:
+    del config
     global _ORIGINAL_FINALIZE, _ORIGINAL_UNWIND  # noqa: PLW0603
     if _ORIGINAL_FINALIZE is not None:
         return

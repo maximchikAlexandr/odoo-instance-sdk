@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -552,6 +554,46 @@ def test_timing_plugin_measures_fixture_cleanup_after_test(
         next(hook)
     value = json.loads(path.read_text())
     assert value["phases"]["test"]["duration_seconds"] == 2.0
+
+
+def test_declared_plugins_reach_pytest_collection_and_execution(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_declared_plugin.py"
+    test_file.write_text(
+        "def test_declared_plugin_executes():\n    assert True\n",
+        encoding="utf-8",
+    )
+    timing_file = tmp_path / "timing.json"
+    timing.start(timing_file, "test")
+    environment = {
+        **os.environ,
+        "ODCLI_E2E_TIMING_FILE": str(timing_file),
+        "ODCLI_E2E_EVIDENCE_ROOT": str(tmp_path / "evidence"),
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-o",
+            "addopts=",
+            "-p",
+            "scripts.real_odoo_timing",
+            "-p",
+            "scripts.real_odoo_ci",
+            str(test_file),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
+    manifest = json.loads(timing_file.read_text(encoding="utf-8"))
+    assert manifest["phases"]["test"]["duration_seconds"] >= 0.0
+    assert (tmp_path / "evidence" / "command-matrix.md").is_file()
 
 
 def test_test_timing_excludes_recorded_cleanup_segments(tmp_path: Path) -> None:

@@ -111,8 +111,9 @@ def finish_test_excluding_cleanup(path: Path, *, now: float | None = None) -> fl
     return duration
 
 
-def pytest_sessionfinish(_session: object, _exitstatus: int) -> Iterator[None]:
+def pytest_sessionfinish(session: object, exitstatus: int) -> Iterator[None]:
     """Measure test completion after teardown, excluding cleanup segments."""
+    del session, exitstatus
     configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
     if not configured:
         yield
