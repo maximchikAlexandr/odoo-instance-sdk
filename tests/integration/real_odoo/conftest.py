@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import secrets
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -48,6 +50,8 @@ class E2ERuntime:
     artifact_root: Path
     source_config_file: Path
     master_password_file: Path
+    scope: str
+    failed: bool = False
 
 
 @pytest.fixture(scope="session")
@@ -77,7 +81,26 @@ def source_backup_plan(source_server: E2ERuntime) -> SourceBackupPlan:
     )
 
 
-def _make_runtime(base: Path, run_id: str) -> E2ERuntime:
+def docker_visible_root(base: Path) -> Path:
+    """Put temporary fixture roots below a path shared with Docker Desktop."""
+    absolute = Path(os.path.abspath(base))
+    if sys.platform == "darwin":
+        temporary = str(absolute).startswith(("/tmp/", "/private/tmp/"))
+        if temporary:
+            digest = sha256(str(absolute).encode("utf-8")).hexdigest()[:16]
+            shared_root = Path(
+                os.environ.get(
+                    "ODCLI_E2E_DOCKER_ROOT", str(Path(__file__).parents[3] / ".odcli-e2e")
+                )
+            )
+            return shared_root / digest
+    return absolute
+
+
+def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERuntime:
+    if scope not in {"source", "target"}:
+        raise ValueError("scope must be source or target")
+    base = docker_visible_root(base)
     root = base / f"odcli-e2e-{run_id}"
     artifact_root = base / f"odcli-e2e-artifacts-{run_id}"
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -88,6 +111,8 @@ def _make_runtime(base: Path, run_id: str) -> E2ERuntime:
     master_password_file = root / "secrets" / "master-password"
     write_owner_only_secret(secret_file, secrets.token_urlsafe(32))
     write_owner_only_secret(master_password_file, secrets.token_urlsafe(32))
+    if not secret_file.is_file() or not secret_file.parent.is_dir():
+        raise RuntimeError(f"Docker cannot bind the fixture secret path: {secret_file}")
     reservations = reserve_ports(4)
     topology = ComposeTopology.create(
         run_id, (reservations[0].port, reservations[1].port, reservations[2].port)
@@ -132,9 +157,14 @@ def _make_runtime(base: Path, run_id: str) -> E2ERuntime:
             secret_file=secret_file,
             addon_root=addon_root,
             source_root=root / "source-data",
-            source_config=source_config_file,
-            target_config=container_config_file,
-            target_root=root / "target-data",
+            source_config=source_config_file if scope == "source" else None,
+            target_config=container_config_file if scope == "target" else None,
+            target_root=root / "target-data" if scope == "target" else None,
+            services=(
+                ("source_postgres", "source_odoo")
+                if scope == "source"
+                else ("target_postgres", "target_init")
+            ),
         ),
         encoding="utf-8",
     )
@@ -161,6 +191,7 @@ def _make_runtime(base: Path, run_id: str) -> E2ERuntime:
         artifact_root,
         source_config_file,
         master_password_file,
+        scope,
     )
 
 
@@ -173,7 +204,16 @@ def _compose_runner(
     return run
 
 
-def _provision(runtime: E2ERuntime) -> None:
+def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
+    scope = scope or runtime.scope
+    if scope not in {"source", "target"}:
+        raise ValueError("scope must be source or target")
+    services = (
+        ("source_postgres", "source_odoo")
+        if scope == "source"
+        else ("target_postgres", "target_init")
+    )
+    up_services = services if scope == "source" else ("target_postgres",)
     lifecycle = ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
     runtime.ledger.record(
         "runtime-root",
@@ -186,70 +226,72 @@ def _provision(runtime: E2ERuntime) -> None:
             f"{runtime.run_id}-port-{reservation.port}",
             reservation.release,
         )
-    for name in runtime.topology.names:
+    for name in runtime.topology.names_for(services):
         runtime.ledger.record("docker-resource", name, lambda: None)
-    for kind, suffix in (
-        ("database", "source-db"),
-        ("database", "sentinel-db"),
-        ("filestore", "source-filestore"),
-        ("filestore", "target-filestore"),
-        ("catalog", "catalog"),
-    ):
+    records = (
+        (("database", "source-db"), ("filestore", "source-filestore"))
+        if scope == "source"
+        else (("database", "sentinel-db"), ("filestore", "target-filestore"))
+    ) + (("catalog", "catalog"),)
+    for kind, suffix in records:
         runtime.ledger.record(kind, f"{runtime.run_id}-{suffix}", lambda: None)
     runtime.ledger.record(
         "compose-project",
         runtime.topology.project_name,
         lambda: compose_down(runtime.compose_file, runtime.topology.project_name),
     )
-    for reservation in runtime.reservations:
+    for reservation in runtime.reservations[:3]:
         reservation.release()
-    lifecycle.run("up", "--detach", "--wait", timeout=180.0)
+    lifecycle.run("up", "--detach", "--wait", *up_services, timeout=180.0)
     runner = _compose_runner(lifecycle)
-    wait_for_compose_pg_isready(runner, "source_postgres")
-    wait_for_compose_pg_isready(runner, "target_postgres")
-    lifecycle.run(
-        "run",
-        "--rm",
-        "--no-deps",
-        "source_odoo",
-        "odoo",
-        "--config=/etc/odoo/odoo.conf",
-        f"--database={runtime.topology.source_database}",
-        "--init=odcli_e2e_probe",
-        "--without-demo=all",
-        "--stop-after-init",
-        timeout=300.0,
-    )
-    lifecycle.run(
-        "run",
-        "--rm",
-        "--no-deps",
-        "source_odoo",
-        "odoo",
-        "--config=/etc/odoo/target.conf",
-        f"--database={runtime.topology.target_sentinel_database}",
-        "--init=base",
-        "--without-demo=all",
-        "--stop-after-init",
-        timeout=300.0,
-    )
-    wait_for_http(
-        f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/health",
-        timeout=180.0,
-    )
-    wait_for_http(
-        f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/database/selector",
-        timeout=180.0,
-    )
+    if scope == "source":
+        wait_for_compose_pg_isready(runner, "source_postgres")
+        lifecycle.run(
+            "run",
+            "--rm",
+            "--no-deps",
+            "source_odoo",
+            "odoo",
+            "--config=/etc/odoo/odoo.conf",
+            f"--database={runtime.topology.source_database}",
+            "--init=odcli_e2e_probe",
+            "--without-demo=all",
+            "--stop-after-init",
+            timeout=300.0,
+        )
+        wait_for_http(
+            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/health",
+            timeout=180.0,
+        )
+        wait_for_http(
+            f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/database/selector",
+            timeout=180.0,
+        )
+    else:
+        wait_for_compose_pg_isready(runner, "target_postgres")
+        lifecycle.run(
+            "run",
+            "--rm",
+            "--no-deps",
+            "target_init",
+            "odoo",
+            "--config=/etc/odoo/odoo.conf",
+            f"--database={runtime.topology.target_sentinel_database}",
+            "--init=base",
+            "--without-demo=all",
+            "--stop-after-init",
+            timeout=300.0,
+        )
 
 
 def _remove_runtime_files(runtime: E2ERuntime) -> None:
     remove_owned_root(runtime.root, run_id=runtime.run_id)
-    if os.environ.get("ODCLI_E2E_KEEP_FAILED") != "1":
+    if not runtime.failed or os.environ.get("ODCLI_E2E_KEEP_FAILED") != "1":
         remove_owned_root(runtime.artifact_root, run_id=runtime.run_id)
 
 
 def _finalize(runtime: E2ERuntime, primary_failure: BaseException | None = None) -> None:
+    runtime.failed = primary_failure is not None
     errors: list[BaseException] = []
     try:
         runtime.ledger.unwind(primary_failure=primary_failure)
@@ -280,7 +322,9 @@ def _finalize(runtime: E2ERuntime, primary_failure: BaseException | None = None)
 
 @pytest.fixture(scope="session")
 def source_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[E2ERuntime]:
-    runtime = _make_runtime(Path(tmp_path_factory.mktemp("odcli-e2e")), new_run_id())
+    runtime = _make_runtime(
+        Path(tmp_path_factory.mktemp("odcli-e2e")), new_run_id(), scope="source"
+    )
     try:
         _provision(runtime)
         yield runtime
@@ -293,7 +337,7 @@ def source_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[E2ERunti
 @pytest.fixture()
 def target_runtime(source_server: E2ERuntime, tmp_path: Path) -> Iterator[E2ERuntime]:
     """Create a fresh function-scoped target root and target resource ledger."""
-    runtime = _make_runtime(tmp_path, new_run_id())
+    runtime = _make_runtime(tmp_path, new_run_id(), scope="target")
     try:
         _provision(runtime)
         yield runtime
@@ -311,4 +355,4 @@ def resource_ledger(target_runtime: E2ERuntime) -> ResourceLedger:
 @pytest.fixture()
 def failure_evidence(target_runtime: E2ERuntime) -> FailureEvidence:
     canary = secrets.token_urlsafe(24)
-    return FailureEvidence(target_runtime.run_id, canary, target_runtime.root / "artifacts")
+    return FailureEvidence(target_runtime.run_id, canary, target_runtime.artifact_root)

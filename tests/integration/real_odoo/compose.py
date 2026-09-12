@@ -74,6 +74,7 @@ class ComposeTopology:
     source_postgres_name: str
     target_postgres_name: str
     source_odoo_name: str
+    target_init_name: str
     source_postgres_volume: str
     target_postgres_volume: str
     source_postgres_port: int
@@ -95,6 +96,7 @@ class ComposeTopology:
             source_postgres_name=_name("source-pg", run_id),
             target_postgres_name=_name("target-pg", run_id),
             source_odoo_name=_name("source-odoo", run_id),
+            target_init_name=_name("target-init", run_id),
             source_postgres_volume=_name("source-pg-volume", run_id),
             target_postgres_volume=_name("target-pg-volume", run_id),
             source_postgres_port=ports[0],
@@ -122,11 +124,29 @@ class ComposeTopology:
             self.source_postgres_name,
             self.target_postgres_name,
             self.source_odoo_name,
+            self.target_init_name,
             self.source_postgres_volume,
             self.target_postgres_volume,
         )
 
-    def render(
+    def names_for(self, services: tuple[str, ...]) -> tuple[str, ...]:
+        """Return only resources owned by the selected fixture services."""
+        names = [self.project_name, self.network_name]
+        service_names = {
+            "source_postgres": self.source_postgres_name,
+            "target_postgres": self.target_postgres_name,
+            "source_odoo": self.source_odoo_name,
+            "target_init": self.target_init_name,
+        }
+        for service in services:
+            names.append(service_names[service])
+        if "source_postgres" in services:
+            names.append(self.source_postgres_volume)
+        if "target_postgres" in services:
+            names.append(self.target_postgres_volume)
+        return tuple(names)
+
+    def render(  # noqa: C901
         self,
         *,
         secret_file: Path,
@@ -135,8 +155,27 @@ class ComposeTopology:
         source_config: Path | None = None,
         target_config: Path | None = None,
         target_root: Path | None = None,
+        services: tuple[str, ...] | None = None,
     ) -> str:
         """Render a pinned, loopback-only Compose file without embedding secrets."""
+        selected = tuple(
+            services
+            or (
+                "source_postgres",
+                "target_postgres",
+                "source_odoo",
+                *(
+                    ("target_init",)
+                    if target_config is not None and target_root is not None
+                    else ()
+                ),
+            )
+        )
+        valid_services = {"source_postgres", "target_postgres", "source_odoo", "target_init"}
+        if not selected or any(service not in valid_services for service in selected):
+            raise ValueError("services must select one or more known Compose services")
+        if len(set(selected)) != len(selected):
+            raise ValueError("services must not contain duplicates")
         secret = str(secret_file)
         addons = str(addon_root)
         source_data = str(source_root)
@@ -145,12 +184,6 @@ class ComposeTopology:
         if source_config is not None:
             config_mount = f"      - {source_config}:/etc/odoo/odoo.conf:ro\n"
             config_arg = ', "--config=/etc/odoo/odoo.conf"'
-        target_mount = ""
-        if target_config is not None and target_root is not None:
-            target_mount = (
-                f"      - {target_config}:/etc/odoo/target.conf:ro\n"
-                f"      - {target_root}:/var/lib/odoo-target\n"
-            )
         common_labels = (
             f"      io.odoo-instance-sdk.e2e-run: {self.run_id}\n"
             '      io.odoo-instance-sdk.e2e-managed: "true"\n'
@@ -200,24 +233,57 @@ class ComposeTopology:
             f"      - {source_data}:/var/lib/odoo\n"
             f"      - {addons}:/mnt/extra-addons:ro\n"
             f"{config_mount}"
-            f"{target_mount}"
             f'    command: ["odoo"{config_arg}, "--without-demo=all"]\n'
             "    labels:\n"
             f"{common_labels}"
         )
+        target_init = (
+            "  target_init:\n"
+            f"    image: {self.odoo_image}\n"
+            f"    container_name: {self.target_init_name}\n"
+            '    restart: "no"\n'
+            "    depends_on:\n"
+            "      target_postgres:\n"
+            "        condition: service_healthy\n"
+            "    volumes:\n"
+            f"      - {target_root}:/var/lib/odoo-target\n"
+            f"      - {target_config}:/etc/odoo/odoo.conf:ro\n"
+            f'    command: ["odoo", "--config=/etc/odoo/odoo.conf", '
+            f'"--database={self.target_sentinel_database}", "--init=base", '
+            '"--without-demo=all", "--stop-after-init"]\n'
+            "    labels:\n"
+            f"{common_labels}"
+        )
+        rendered_services = "services:\n"
+        if "source_postgres" in selected:
+            rendered_services += postgres(
+                "source_postgres", self.source_postgres_volume, self.source_postgres_port
+            )
+        if "target_postgres" in selected:
+            rendered_services += postgres(
+                "target_postgres", self.target_postgres_volume, self.target_postgres_port
+            )
+        if "source_odoo" in selected:
+            rendered_services += source
+        if "target_init" in selected:
+            if target_config is None or target_root is None:
+                raise ValueError("target_init requires target_config and target_root")
+            rendered_services += target_init
+        rendered_volumes = ""
+        if "source_postgres" in selected:
+            rendered_volumes += (
+                f"  {self.source_postgres_volume}:\n    name: {self.source_postgres_volume}\n    labels:\n"
+                f"{common_labels}"
+            )
+        if "target_postgres" in selected:
+            rendered_volumes += (
+                f"  {self.target_postgres_volume}:\n    name: {self.target_postgres_volume}\n    labels:\n"
+                f"{common_labels}"
+            )
         return (
-            "services:\n"
-            + postgres("source_postgres", self.source_postgres_volume, self.source_postgres_port)
-            + postgres("target_postgres", self.target_postgres_volume, self.target_postgres_port)
-            + source
-            + "networks:\n"
+            rendered_services + "networks:\n"
             f"  default:\n    name: {self.network_name}\n    labels:\n{common_labels}"
-            "volumes:\n"
-            f"  {self.source_postgres_volume}:\n    name: {self.source_postgres_volume}\n    labels:\n"
-            f"{common_labels}"
-            f"  {self.target_postgres_volume}:\n    name: {self.target_postgres_volume}\n    labels:\n"
-            f"{common_labels}"
-            "secrets:\n"
+            "volumes:\n" + rendered_volumes + "secrets:\n"
             "  pg_password:\n"
             f"    file: {secret}\n"
         )

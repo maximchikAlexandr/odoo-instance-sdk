@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import stat
 import subprocess
+import sys
 import zipfile
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,7 @@ from tests.integration.real_odoo.cleanup import (
     LeakError,
     ResourceLedger,
     audit_no_leaks,
+    default_leak_probes,
 )
 from tests.integration.real_odoo.compose import (
     ComposeTopology,
@@ -101,6 +104,16 @@ def test_runtime_factory_keeps_two_runs_disjoint_and_uses_loopback_target(
             reservation.release()
 
 
+def test_runtime_factory_uses_docker_visible_tmp_spelling() -> None:
+    source = Path("/private/tmp/odcli-e2e-check")
+    visible = e2e_fixtures.docker_visible_root(source)
+    if sys.platform == "darwin":
+        digest = sha256(str(source).encode("utf-8")).hexdigest()[:16]
+        assert visible == Path(e2e_fixtures.__file__).parents[3] / ".odcli-e2e" / digest
+    else:
+        assert visible == Path("/private/tmp/odcli-e2e-check")
+
+
 def test_pg_readiness_is_not_satisfied_by_tcp_alone() -> None:
     attempts = 0
 
@@ -153,7 +166,7 @@ def test_secret_canary_and_password_are_not_written(tmp_path: Path) -> None:
         evidence.write()
 
 
-def test_fixture_provision_runs_both_initializers_and_reverses_cleanup(
+def test_target_fixture_provisions_only_target_and_retains_host_http_port(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = e2e_fixtures._make_runtime(tmp_path, "c" * 32)
@@ -180,17 +193,109 @@ def test_fixture_provision_runs_both_initializers_and_reverses_cleanup(
         e2e_fixtures._provision(runtime)
         assert commands[0][:3] == ("up", "--detach", "--wait")
         assert any(
-            f"--database={runtime.topology.source_database}" in command for command in commands
-        )
-        assert any(
             f"--database={runtime.topology.target_sentinel_database}" in command
             for command in commands
         )
+        assert not any("source_odoo" in command for command in commands)
+        assert all(reservation.socket.fileno() == -1 for reservation in runtime.reservations[:3])
+        assert runtime.reservations[3].socket.fileno() != -1
     finally:
         e2e_fixtures._finalize(runtime)
     assert cleaned == ["compose"]
     assert not runtime.root.exists()
     assert not runtime.artifact_root.exists()
+
+
+def test_source_fixture_does_not_provision_target_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = e2e_fixtures._make_runtime(tmp_path, "e" * 32, scope="source")
+    commands: list[tuple[str, ...]] = []
+
+    class FakeLifecycle:
+        def __init__(self, compose_file: Path, project_name: str) -> None:
+            del compose_file, project_name
+
+        def run(self, *args: str, timeout: float = 180.0) -> subprocess.CompletedProcess[str]:
+            del timeout
+            commands.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(e2e_fixtures, "ComposeLifecycle", FakeLifecycle)
+    monkeypatch.setattr(e2e_fixtures, "wait_for_compose_pg_isready", lambda *args: None)
+    monkeypatch.setattr(e2e_fixtures, "wait_for_http", lambda *args, **kwargs: None)
+    monkeypatch.setattr(e2e_fixtures, "compose_down", lambda *args, **kwargs: None)
+    monkeypatch.setattr(e2e_fixtures, "audit_no_leaks", lambda *args, **kwargs: None)
+    try:
+        e2e_fixtures._provision(runtime)
+        assert any("source_odoo" in command for command in commands)
+        assert any(
+            f"--database={runtime.topology.source_database}" in command for command in commands
+        )
+        assert not any(
+            "target_postgres" in command or "target_init" in command for command in commands
+        )
+        recorded = {item.name for item in runtime.ledger.records}
+        assert runtime.topology.target_postgres_name not in recorded
+    finally:
+        e2e_fixtures._finalize(runtime)
+
+
+def test_failed_runtime_keeps_only_sanitized_artifacts_when_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = e2e_fixtures._make_runtime(tmp_path, "a" * 32)
+    runtime.failed = True
+    monkeypatch.setenv("ODCLI_E2E_KEEP_FAILED", "1")
+    evidence = FailureEvidence(runtime.run_id, "secret-canary", runtime.artifact_root)
+    evidence.add_log("odoo", "admin_passwd=secret\ncredentials omitted\n")
+    files = evidence.write()
+    e2e_fixtures._remove_runtime_files(runtime)
+    assert runtime.artifact_root.exists()
+    assert all("secret-canary" not in path.read_text(encoding="utf-8") for path in files)
+    monkeypatch.delenv("ODCLI_E2E_KEEP_FAILED")
+    e2e_fixtures._remove_runtime_files(runtime)
+    assert not runtime.artifact_root.exists()
+
+
+def test_real_default_docker_probes_include_stopped_containers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("tests.integration.real_odoo.cleanup.shutil.which", lambda name: "docker")
+    monkeypatch.setattr("tests.integration.real_odoo.cleanup.subprocess.run", run)
+    probes = default_leak_probes("f" * 32, compose_project="odcli-e2e-project")
+    assert tuple(probes["container"]("f" * 32)) == ()
+    command = calls[0]
+    assert command[:4] == ["docker", "container", "ls", "--all"]
+    assert "{{.Names}}" in command
+    assert "{{.Name}}" not in command
+    assert tuple(probes["network"]("f" * 32)) == ()
+    assert tuple(probes["volume"]("f" * 32)) == ()
+    assert sum(command[-1] == "{{.Name}}" for command in calls) == 2
+
+
+def test_default_audit_can_confirm_a_real_clean_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("tests.integration.real_odoo.cleanup.shutil.which", lambda name: "docker")
+    monkeypatch.setattr("tests.integration.real_odoo.cleanup.subprocess.run", run)
+    report = audit_no_leaks("1" * 32, compose_project="odcli-e2e-project")
+    assert report.clean
+    assert any(command[:4] == ["docker", "container", "ls", "--all"] for command in calls)
 
 
 def test_fixture_failure_still_unwinds_created_compose_resources(
