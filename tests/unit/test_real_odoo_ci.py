@@ -13,6 +13,7 @@ from typing import Literal, cast
 
 import pytest
 
+from scripts import real_odoo_acceptance as acceptance
 from scripts import real_odoo_bootstrap as bootstrap
 from scripts import real_odoo_ci as ci
 from scripts import real_odoo_evidence as evidence
@@ -74,6 +75,177 @@ def _evidence_contract(
         )
     )
     (source / "junit.xml").write_text(f"<testsuite tests='1' failures='{junit_failures}'/>\n")
+
+
+def _acceptance_run(root: Path, tier: str, cache_class: str, *, failed: bool = False) -> None:
+    run = root / f"{tier}-{cache_class}"
+    run.mkdir(parents=True)
+    (run / "bootstrap.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "platform": "linux/amd64",
+                "cache": {"class": cache_class},
+            }
+        )
+    )
+    properties = "".join(
+        f"<property name='{identifier.lower().replace('-', '_')}' value='passed'/>"
+        for identifier in acceptance.REQUIRED_TIER_EVIDENCE[tier]
+    )
+    (run / "junit.xml").write_text(
+        f"<testsuite tests='1' failures='{int(failed)}' errors='0'>"
+        f"<properties>{properties}</properties></testsuite>\n"
+    )
+    (run / "timing.json").write_text(
+        json.dumps(
+            {
+                "phases": {
+                    "setup": {"duration_seconds": 1.0},
+                    "test": {"duration_seconds": 1.0},
+                    "cleanup": {"duration_seconds": 1.0},
+                },
+                "budget": {
+                    "ok": not failed,
+                    "artifact_bytes": 100,
+                    "artifact_budget_bytes": acceptance.SUCCESS_ARTIFACT_LIMIT_BYTES,
+                },
+            }
+        )
+    )
+    (run / "evidence-manifest.json").write_text(
+        json.dumps(
+            {
+                "ok": not failed,
+                "artifact_bytes": 100,
+                "bundle_limit_bytes": acceptance.FAILURE_BUNDLE_LIMIT_BYTES,
+                "success_limit_bytes": acceptance.SUCCESS_ARTIFACT_LIMIT_BYTES,
+                "budget": {"ok": not failed, "artifact_bytes": 100},
+            }
+        )
+    )
+    (run / "resource-manifest.json").write_text(
+        json.dumps(
+            {
+                "resources": ["owned"],
+                "source_cache_consumed": True,
+                "audit": {
+                    "state": "failed" if failed else "clean",
+                    "leaks": ["leak"] if failed else [],
+                    "runs": [{"state": "failed" if failed else "clean"}],
+                },
+            }
+        )
+    )
+
+
+def _complete_acceptance_evidence(root: Path) -> None:
+    for tier, cache_class in acceptance.REQUIRED_RUNS:
+        _acceptance_run(root, tier, cache_class)
+
+
+def test_acceptance_missing_evidence_is_not_ready(tmp_path: Path) -> None:
+    state = acceptance._e2e_bootstrap_state(tmp_path)
+    assert state["status"] == "missing"
+
+
+def test_acceptance_blocked_bootstrap_is_not_ready(tmp_path: Path) -> None:
+    run = tmp_path / "smoke-cold"
+    run.mkdir()
+    (run / "bootstrap.json").write_text(json.dumps({"ok": False, "missing": ["docker"]}))
+    state = acceptance._e2e_bootstrap_state(tmp_path)
+    assert state["status"] == "blocked"
+
+
+def test_acceptance_failed_evidence_is_not_ready(tmp_path: Path) -> None:
+    _complete_acceptance_evidence(tmp_path)
+    failed_run = tmp_path / "full-warm"
+    (failed_run / "junit.xml").write_text("<testsuite tests='1' failures='1' errors='0'/>\n")
+    state = acceptance._e2e_bootstrap_state(tmp_path)
+    assert state["status"] == "failed"
+
+
+def test_acceptance_requires_complete_smoke_and_full_runs(tmp_path: Path) -> None:
+    _complete_acceptance_evidence(tmp_path)
+    state = acceptance._e2e_bootstrap_state(tmp_path)
+    assert state["status"] == "complete"
+    runs = state["runs"]
+    assert isinstance(runs, dict)
+    assert set(runs) == {f"{tier}-{cache}" for tier, cache in acceptance.REQUIRED_RUNS}
+
+
+def test_acceptance_expands_matrix_evidence_ranges() -> None:
+    identifiers = acceptance._matrix_evidence_ids("E2E-FC-01..04 E2E-REC-01..03")
+    assert identifiers == (
+        "E2E-FC-01",
+        "E2E-FC-02",
+        "E2E-FC-03",
+        "E2E-FC-04",
+        "E2E-REC-01",
+        "E2E-REC-02",
+        "E2E-REC-03",
+    )
+
+
+def test_acceptance_rejects_wrong_pytest_selector() -> None:
+    selector = "tests/integration/real_odoo/test_critical_path.py::wrong"
+    errors = acceptance._validate_evidence_executors(
+        ("E2E-CP-01",), {"E2E-CP-01": (selector,)}, {selector}
+    )
+    assert any("does not emit" in error for error in errors)
+
+
+def test_acceptance_rejects_executor_without_emitted_evidence() -> None:
+    selector = acceptance.EVIDENCE_EXECUTORS["E2E-CP-01"][0]
+    errors = acceptance._validate_evidence_executors(
+        ("E2E-FC-01",), {"E2E-FC-01": (selector,)}, {selector}
+    )
+    assert any("does not emit" in error for error in errors)
+
+
+def test_acceptance_rejects_duplicate_scenario_mapping() -> None:
+    errors = acceptance._scenario_mapping_errors(
+        ("Scenario A", "Scenario A"), {"Scenario A": ("E2E-CP-01",)}
+    )
+    assert "duplicate scenario heading" in errors
+
+
+def test_acceptance_rejects_stale_and_missing_scenario_mapping() -> None:
+    errors = acceptance._scenario_mapping_errors(("Scenario A",), {"Scenario B": ("E2E-CP-01",)})
+    assert "missing scenario mapping: Scenario A" in errors
+    assert "stale scenario mapping: Scenario B" in errors
+
+
+def test_real_pytest_plugins_load_through_collection(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        path for path in (str(root), environment.get("PYTHONPATH", "")) if path
+    )
+    environment["ODCLI_E2E_EVIDENCE_ROOT"] = str(tmp_path / "evidence")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-o",
+            "addopts=",
+            "-p",
+            "scripts.real_odoo_timing",
+            "-p",
+            "scripts.real_odoo_ci",
+            str(root / "tests/integration/real_odoo"),
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test_container_smoke_public_path" in result.stdout
 
 
 def test_cache_keys_include_all_immutable_inputs() -> None:
@@ -925,8 +1097,8 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert ".cache/odoo-source" in full
     assert ".cache/uv" in full
     assert "backups" not in full.lower()
-    smoke_command = "uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo"
-    full_command = "uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo"
+    smoke_command = "uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo"
+    full_command = "uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo"
     assert smoke_command in smoke_job
     assert smoke_command in docs
     assert smoke_command in makefile
@@ -969,6 +1141,7 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert full.count("steps.uv-key.outputs.key") >= 4
     assert "steps.source-prep.outputs.verified_source_cache_hit" in full
     assert "Materialize verified source-backed checkout" not in full
+    assert "git -C .cache/odoo-source update-ref refs/heads/odoo19-pinned FETCH_HEAD" in full
     assert "ODCLI_E2E_SOURCE_CHECKOUT" not in full
     assert ".artifacts/real-odoo-e2e/odoo-source" not in full
     assert "from scripts.real_odoo_bootstrap import source_cache_key" in full

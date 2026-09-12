@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +25,20 @@ pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_smoke, pytest.mark.serial]
 
 
 def _invoke(
-    runner: CliRunner, project: Path, environment: dict[str, str], *args: str
+    runner: CliRunner,
+    project: Path,
+    environment: dict[str, str],
+    *args: str,
+    command_project: bool = False,
 ) -> dict[str, Any]:
+    command = [*args]
+    if command_project:
+        command.extend(("--project", str(project)))
+    else:
+        command = ["--project", str(project), *command]
     result = runner.invoke(
         cli,
-        ["--project", str(project), *args, "--format", "json"],
+        [*command, "--format", "json"],
         env=environment,
     )
     assert result.exit_code == 0, result.output
@@ -150,11 +160,14 @@ def test_container_smoke_public_path(
         "init",
         "--no-input",
         "--odoo-bin",
-        "/bin/true",
+        "/usr/bin/true",
+        "--python",
+        sys.executable,
         "--config",
         str(config),
         "--database",
         runtime.topology.target_sentinel_database,
+        command_project=True,
     )
     manifest_path = project / ".odcli" / "project.toml"
     assert manifest_path.is_file()

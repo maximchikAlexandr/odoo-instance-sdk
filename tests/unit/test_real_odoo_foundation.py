@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration.real_odoo import cleanup as e2e_cleanup
 from tests.integration.real_odoo import conftest as e2e_fixtures
 from tests.integration.real_odoo.archive import (
     ArchiveValidationError,
@@ -124,6 +125,27 @@ def test_pg_readiness_is_not_satisfied_by_tcp_alone() -> None:
 
     wait_for_compose_pg_isready(runner, "source_postgres", timeout=1.0)
     assert attempts == 2
+
+
+def test_compose_down_waits_for_released_ports_without_masking_leaks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "tests.integration.real_odoo.cleanup.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "", ""),
+    )
+    states = iter(((8069,), ()))
+    monkeypatch.setattr(
+        "tests.integration.real_odoo.cleanup._bound_ports", lambda _ports: next(states)
+    )
+    monkeypatch.setattr("tests.integration.real_odoo.cleanup.time.sleep", lambda _seconds: None)
+    e2e_cleanup.compose_down(compose_file, "odcli-e2e-project", timeout=1.0, ports=(8069,))
+
+    monkeypatch.setattr("tests.integration.real_odoo.cleanup._bound_ports", lambda _ports: (8069,))
+    with pytest.raises(RuntimeError, match="left owned ports bound"):
+        e2e_cleanup.compose_down(compose_file, "odcli-e2e-project", timeout=0, ports=(8069,))
 
 
 def test_initialization_command_and_all_leak_categories_are_explicit(tmp_path: Path) -> None:

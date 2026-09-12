@@ -6,6 +6,7 @@ import json
 import shutil
 import socket
 import subprocess
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -170,10 +171,46 @@ class LeakError(AssertionError):
         super().__init__(f"run {report.run_id} leaked resources: {dict(report.leaks)!r}")
 
 
-def compose_down(compose_file: Path, project_name: str, *, timeout: float = 60.0) -> None:
+def _bound_ports(ports: Iterable[int]) -> tuple[int, ...]:
+    occupied: list[int] = []
+    for port in ports:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            occupied.append(port)
+        finally:
+            probe.close()
+    return tuple(occupied)
+
+
+def wait_for_ports_free(
+    ports: Iterable[int], *, timeout: float = 60.0, poll_interval: float = 0.1
+) -> tuple[int, ...]:
+    """Wait for released listeners, returning any ports still occupied at the deadline."""
+    selected = tuple(ports)
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        occupied = _bound_ports(selected)
+        if not occupied:
+            return ()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return occupied
+        time.sleep(min(max(0.001, poll_interval), remaining))
+
+
+def compose_down(
+    compose_file: Path,
+    project_name: str,
+    *,
+    timeout: float = 60.0,
+    ports: Iterable[int] = (),
+) -> None:
     """Remove exactly one run's Compose objects, including volumes/orphans."""
     if not compose_file.is_file():
         return
+    deadline = time.monotonic() + max(0.0, timeout)
     result = subprocess.run(
         [
             "docker",
@@ -190,10 +227,15 @@ def compose_down(compose_file: Path, project_name: str, *, timeout: float = 60.0
         capture_output=True,
         check=False,
         text=True,
-        timeout=timeout,
+        timeout=max(0.0, deadline - time.monotonic()),
     )
     if result.returncode:
         raise RuntimeError(f"Compose cleanup failed for owned project {project_name}")
+    remaining = wait_for_ports_free(ports, timeout=max(0.0, deadline - time.monotonic()))
+    if remaining:
+        raise RuntimeError(
+            f"Compose cleanup left owned ports bound for project {project_name}: {remaining}"
+        )
 
 
 def audit_no_leaks(

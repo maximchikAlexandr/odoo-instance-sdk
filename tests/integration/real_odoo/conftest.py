@@ -220,6 +220,20 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
         runtime.root.name,
         lambda: _remove_runtime_files(runtime),
     )
+    runtime.ledger.record(
+        "compose-project",
+        runtime.topology.project_name,
+        lambda: compose_down(
+            runtime.compose_file,
+            runtime.topology.project_name,
+            ports=(
+                runtime.topology.source_postgres_port,
+                runtime.topology.target_postgres_port,
+                runtime.topology.source_odoo_port,
+                runtime.reservations[3].port,
+            ),
+        ),
+    )
     for reservation in runtime.reservations:
         runtime.ledger.record(
             "port",
@@ -235,11 +249,6 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
     ) + (("catalog", "catalog"),)
     for kind, suffix in records:
         runtime.ledger.record(kind, f"{runtime.run_id}-{suffix}", lambda: None)
-    runtime.ledger.record(
-        "compose-project",
-        runtime.topology.project_name,
-        lambda: compose_down(runtime.compose_file, runtime.topology.project_name),
-    )
     for reservation in runtime.reservations[:3]:
         reservation.release()
     lifecycle.run("up", "--detach", "--wait", *up_services, timeout=180.0)

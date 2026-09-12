@@ -76,12 +76,12 @@ jobs:
           ODCLI_E2E_EVIDENCE_ROOT: .artifacts/real-odoo-e2e
           ODCLI_E2E_SOURCE_CACHE_HIT: false
           ODCLI_E2E_UV_CACHE_HIT: false
-        run: uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
+        run: uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
       - name: Package bounded E2E evidence
         id: package
         if: always()
         run: >-
-          uv run python scripts/real_odoo_evidence.py
+          PYTHONPATH=. uv run python scripts/real_odoo_evidence.py
           --source .artifacts/real-odoo-e2e
           --output .artifacts/real-odoo-e2e/smoke-evidence.tar.gz
           --canary-file .artifacts/real-odoo-e2e-secret-canary
@@ -185,12 +185,12 @@ jobs:
           ODCLI_E2E_EVIDENCE_ROOT: .artifacts/real-odoo-e2e
           ODCLI_E2E_SOURCE_CACHE_HIT: false
           ODCLI_E2E_UV_CACHE_HIT: true
-        run: uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
+        run: uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
       - name: Package bounded E2E evidence
         id: package
         if: always()
         run: >-
-          uv run python scripts/real_odoo_evidence.py
+          PYTHONPATH=. uv run python scripts/real_odoo_evidence.py
           --source .artifacts/real-odoo-e2e
           --output .artifacts/real-odoo-e2e/smoke-evidence.tar.gz
           --canary-file .artifacts/real-odoo-e2e-secret-canary

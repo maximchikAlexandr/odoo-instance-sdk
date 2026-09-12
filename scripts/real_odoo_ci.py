@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -289,17 +290,23 @@ def _instrumented_finalize(runtime: Any, primary_failure: BaseException | None =
 
 
 def pytest_configure(config: object) -> None:
-    del config
     global _ORIGINAL_FINALIZE, _ORIGINAL_UNWIND  # noqa: PLW0603
+    del config
     if _ORIGINAL_FINALIZE is not None:
         return
-    try:
-        from tests.integration.real_odoo import conftest
-    except ImportError:
-        return
     _write_command_matrix()
-    _ORIGINAL_FINALIZE = conftest._finalize
-    conftest._finalize = _instrumented_finalize
+    conftest = next(
+        (
+            module
+            for name, module in sys.modules.items()
+            if name.endswith("real_odoo.conftest") and hasattr(module, "_finalize")
+        ),
+        None,
+    )
+    if conftest is None:
+        return
+    _ORIGINAL_FINALIZE = getattr(conftest, "_finalize")
+    setattr(conftest, "_finalize", _instrumented_finalize)
     from tests.integration.real_odoo.cleanup import ResourceLedger
 
     _ORIGINAL_UNWIND = ResourceLedger.unwind

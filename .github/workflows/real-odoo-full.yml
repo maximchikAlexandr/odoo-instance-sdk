@@ -56,6 +56,7 @@ jobs:
             echo "verified_source_cache_hit=true" >> "$GITHUB_OUTPUT"
           else
             git -C .cache/odoo-source fetch --depth=1 https://github.com/odoo/odoo.git cd992ceebbaf343c03e1941d39cfe423d35ba6c6
+            git -C .cache/odoo-source update-ref refs/heads/odoo19-pinned FETCH_HEAD
             echo "verified_source_cache_hit=false" >> "$GITHUB_OUTPUT"
           fi
           git -C .cache/odoo-source cat-file -e cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}
@@ -104,7 +105,7 @@ jobs:
           ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
           ODCLI_E2E_SOURCE_CACHE_KEY: ${{ steps.source-key.outputs.key }}
           ODCLI_E2E_UV_CACHE_KEY: ${{ steps.uv-key.outputs.key }}
-        run: uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo
+        run: uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo
       - name: Save content-addressed caches
         if: >-
           always() && steps.source-prep.outcome == 'success' &&
@@ -125,7 +126,7 @@ jobs:
         id: package
         if: always()
         run: >-
-          uv run python scripts/real_odoo_evidence.py
+          PYTHONPATH=. uv run python scripts/real_odoo_evidence.py
           --source .artifacts/real-odoo-e2e
           --output .artifacts/real-odoo-e2e/full-evidence.tar.gz
           --canary-file .artifacts/real-odoo-e2e-secret-canary
