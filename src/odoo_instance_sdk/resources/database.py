@@ -575,6 +575,17 @@ class DatabaseResource:
 
     def names(self) -> tuple[str, ...]:
         """Return database names without touching the local audit catalog."""
+        from odoo_instance_sdk.internal.proc import active_context
+        from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
+
+        session = active_auxiliary_restore_session()
+        context = active_context()
+        if session is not None:
+            if context is None:
+                raise DatabaseManagerUnavailableError(
+                    "auxiliary database manager has no active execution context"
+                )
+            session.ensure_started(context)
         try:
             with self._http() as http:
                 resp = http.post(

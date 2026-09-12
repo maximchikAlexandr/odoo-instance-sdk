@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 if TYPE_CHECKING:
     import click
@@ -51,14 +51,16 @@ from odoo_instance_sdk.models import (
     DatabaseRefreshOptions,
 )
 
+_RestoreResult = TypeVar("_RestoreResult")
+
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
-    from odoo_instance_sdk.internal.proc import StepObserver
+    from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext, StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
-    from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.resources.instance import AuxiliaryRestoreSession, OdooInstance
 
 
 def _run_rich_restore(
@@ -92,6 +94,70 @@ def _validate_replace_context(client: OdooClient, environment: DevelopmentEnviro
     catalog = client.get_catalog()
     if isinstance(catalog, BackupCatalog) and catalog.get_environment_runtime(str(environment.id)):
         raise InstanceConfigurationError("replacement requires a stopped environment runtime")
+
+
+def _attach_auxiliary_restore_runtime(
+    command: _InspectableCommand[_RestoreResult],
+    session: AuxiliaryRestoreSession,
+) -> _InspectableCommand[_RestoreResult]:
+    """Add the stopped-project helper to the existing restore ledger."""
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import prepared_command
+    from odoo_instance_sdk.resources.instance import (
+        AuxiliaryRestoreSession,
+        activate_auxiliary_restore_session,
+        reset_auxiliary_restore_session,
+    )
+
+    if not isinstance(command, Command) or not isinstance(session, AuxiliaryRestoreSession):
+        return command
+    prepared = command._prepared()
+    auxiliary_start_steps = (
+        session.start_step,
+        session.ready_action,
+    )
+    local_restore_index = next(
+        (
+            index
+            for index, step in enumerate(prepared.steps)
+            if step.step_id == "database.prepare.local-restore"
+        ),
+        len(prepared.steps),
+    )
+    prepared_steps = (
+        *prepared.steps[:local_restore_index],
+        *auxiliary_start_steps,
+        *prepared.steps[local_restore_index:],
+        session.cleanup_action,
+    )
+
+    def execute(context: RunContext[PrivateJsonValue]) -> _RestoreResult:
+        token = activate_auxiliary_restore_session(session)
+        try:
+            return cast("_RestoreResult", prepared.callback(context))
+        finally:
+            try:
+                session.cleanup(context)
+            finally:
+                reset_auxiliary_restore_session(token)
+
+    plan = ExecutionPlan(
+        steps=tuple(step.public_projection() for step in prepared_steps),
+        observations=command.plan.observations,
+        warnings=command.plan.warnings,
+    ).with_fingerprint()
+    return cast(
+        "_InspectableCommand[_RestoreResult]",
+        Command.from_prepared(
+            plan,
+            prepared_command(
+                execute,
+                prepared_steps,
+                executor=prepared.executor,
+                private_projection=prepared.private_projection,
+            ),
+        ),
+    )
 
 
 @click.group(help="Prepare and reset project databases.")
@@ -139,14 +205,25 @@ def db_refresh(
     try:
         project_path = resolve_project_path(ctx)
         client = _client_class()(config=_client_config_class()(executable="odoo"))
-        command = client.environments.refresh_database_command(
-            project_path,
-            options=DatabaseRefreshOptions(
-                restore=restore,
-                source_branch=source_branch,
-                reset_admin_password=reset_admin_password,
-            ),
+        command: _InspectableCommand[DatabasePreparationResult] = (
+            client.environments.refresh_database_command(
+                project_path,
+                options=DatabaseRefreshOptions(
+                    restore=restore,
+                    source_branch=source_branch,
+                    reset_admin_password=reset_admin_password,
+                ),
+            )
         )
+        if restore and (project_path / ".odcli" / "project.toml").is_file():
+            from odoo_instance_sdk.project import ProjectConfig
+            from odoo_instance_sdk.resources.instance import auxiliary_restore_session
+
+            auxiliary_instance = client.instance.from_project(ProjectConfig.load(project_path))
+            command = _attach_auxiliary_restore_runtime(
+                command,
+                auxiliary_restore_session(auxiliary_instance),
+            )
     except Exception as exc:
         fail(output_mode, "db.refresh", exc, dry_run=dry_run)
 
@@ -233,7 +310,7 @@ def db_list(
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @output_options
 @pass_cli_context
-def db_restore(
+def db_restore(  # noqa: C901
     ctx: CliContext,
     backup_uuid: str,
     target_database: str | None,
@@ -304,6 +381,15 @@ def db_restore(
                     target_database=target_database,
                 ),
             )
+            from odoo_instance_sdk.project import ProjectConfig
+            from odoo_instance_sdk.resources.instance import auxiliary_restore_session
+
+            if (project_path / ".odcli" / "project.toml").is_file():
+                auxiliary_instance = client.instance.from_project(ProjectConfig.load(project_path))
+                command = _attach_auxiliary_restore_runtime(
+                    command,
+                    auxiliary_restore_session(auxiliary_instance),
+                )
     except Exception as exc:
         fail(output_mode, "db.restore", exc, dry_run=dry_run)
 
