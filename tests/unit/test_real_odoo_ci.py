@@ -607,12 +607,12 @@ def test_source_cache_consumption_survives_in_test_unwind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cache = tmp_path / "odoo.git"
-    alternates = tmp_path / "runtime" / "project" / ".git" / "objects" / "info"
+    alternates = tmp_path / "odcli-e2e-run-a" / "project" / ".git" / "objects" / "info"
     alternates.mkdir(parents=True)
     objects = cache / "objects"
     objects.mkdir(parents=True)
     (alternates / "alternates").write_text(str(objects) + "\n", encoding="utf-8")
-    runtime_root = tmp_path / "runtime"
+    runtime_root = tmp_path / "odcli-e2e-run-a"
     monkeypatch.setenv("ODCLI_E2E_ODOO_SOURCE_CACHE", str(cache))
     monkeypatch.setattr(
         subprocess,
@@ -622,8 +622,8 @@ def test_source_cache_consumption_survives_in_test_unwind(
         ),
     )
     ci._SOURCE_CACHE_CONSUMED.clear()
-    ledger = ResourceLedger("run")
-    ledger.record("runtime-root", "run-root", lambda: shutil.rmtree(runtime_root))
+    ledger = ResourceLedger("run-a")
+    ledger.record("runtime-root", "run-a-root", lambda: shutil.rmtree(runtime_root))
     original_unwind = ci._ORIGINAL_UNWIND
     ci._ORIGINAL_UNWIND = ResourceLedger.unwind
     try:
@@ -632,6 +632,28 @@ def test_source_cache_consumption_survives_in_test_unwind(
         ci._ORIGINAL_UNWIND = original_unwind
     assert not runtime_root.exists()
     assert ci._source_cache_consumed()
+
+
+def test_source_cache_consumption_ignores_another_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "odoo.git"
+    alternates = tmp_path / "odcli-e2e-run-b" / "project" / ".git" / "objects" / "info"
+    alternates.mkdir(parents=True)
+    objects = cache / "objects"
+    objects.mkdir(parents=True)
+    (alternates / "alternates").write_text(str(objects) + "\n", encoding="utf-8")
+    monkeypatch.setenv("ODCLI_E2E_ODOO_SOURCE_CACHE", str(cache))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, "cd992ceebbaf343c03e1941d39cfe423d35ba6c6\n", ""
+        ),
+    )
+    ci._SOURCE_CACHE_CONSUMED.clear()
+    ci._remember_source_cache_consumption("run-a")
+    assert not ci._source_cache_consumed()
 
 
 def test_full_bootstrap_has_no_synthetic_checkout_prerequisite(

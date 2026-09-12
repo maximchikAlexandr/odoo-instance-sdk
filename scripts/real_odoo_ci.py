@@ -152,12 +152,8 @@ def _source_cache_path() -> Path | None:
     return cache_path
 
 
-def _runtime_consumed_source_cache(runtime: Any) -> bool:
-    cache_path = _source_cache_path()
-    if cache_path is None:
-        return False
+def _checkout_consumed_source_cache(root: Path, cache_path: Path) -> bool:
     alternate = (cache_path / "objects").resolve()
-    root = Path(runtime.root)
     if not root.is_dir():
         return False
     for alternate_file in root.rglob("alternates"):
@@ -184,42 +180,46 @@ def _runtime_consumed_source_cache(runtime: Any) -> bool:
     return False
 
 
-def _remember_source_cache_consumption(runtime: Any | None = None) -> None:
-    if runtime is not None and _runtime_consumed_source_cache(runtime):
-        _SOURCE_CACHE_CONSUMED.append(True)
-        return
+def _runtime_consumed_source_cache(runtime: Any) -> bool:
+    cache_path = _source_cache_path()
+    return cache_path is not None and _checkout_consumed_source_cache(
+        Path(runtime.root), cache_path
+    )
+
+
+def _owned_runtime_roots(run_id: str) -> tuple[Path, ...]:
+    """Find only the runtime directories named for this ledger run."""
+    if not run_id:
+        return ()
+    runtime_name = f"odcli-e2e-{run_id}"
+    configured = os.environ.get("ODCLI_E2E_DOCKER_ROOT")
+    bases = (
+        Path(configured) if configured else Path.cwd() / ".odcli-e2e",
+        Path(tempfile.gettempdir()),
+    )
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for base in bases:
+        normalized_base = base if base.is_absolute() else Path.cwd() / base
+        candidates = (
+            (normalized_base,)
+            if normalized_base.name == runtime_name
+            else normalized_base.rglob(runtime_name)
+        )
+        for candidate in candidates:
+            if candidate.is_dir() and candidate not in seen:
+                seen.add(candidate)
+                roots.append(candidate)
+    return tuple(roots)
+
+
+def _remember_source_cache_consumption(run_id: str, runtime_root: Path | None = None) -> None:
     cache_path = _source_cache_path()
     if cache_path is None:
         return
-    for root in (Path.cwd() / ".odcli-e2e", Path(tempfile.gettempdir())):
-        if not root.is_dir():
-            continue
-        for alternate_file in root.rglob("alternates"):
-            if alternate_file.parent.name != "info":
-                continue
-            try:
-                project = alternate_file.parents[3]
-                lines = alternate_file.read_text(encoding="utf-8").splitlines()
-                head = subprocess.run(
-                    ["git", "-C", str(project), "rev-parse", "HEAD"],
-                    capture_output=True,
-                    check=False,
-                    text=True,
-                    timeout=30.0,
-                )
-                if (
-                    head.returncode == 0
-                    and head.stdout.strip() == "cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
-                    and any(
-                        Path(line).resolve() == (cache_path / "objects").resolve()
-                        for line in lines
-                        if line
-                    )
-                ):
-                    _SOURCE_CACHE_CONSUMED.append(True)
-                    return
-            except (OSError, subprocess.SubprocessError, IndexError):
-                continue
+    roots = (runtime_root,) if runtime_root is not None else _owned_runtime_roots(run_id)
+    if any(_checkout_consumed_source_cache(root, cache_path) for root in roots):
+        _SOURCE_CACHE_CONSUMED.append(True)
 
 
 def _source_cache_consumed() -> bool:
@@ -228,7 +228,7 @@ def _source_cache_consumed() -> bool:
 
 
 def _instrumented_unwind(ledger: Any, *args: Any, **kwargs: Any) -> Any:
-    _remember_source_cache_consumption()
+    _remember_source_cache_consumption(ledger.run_id)
     assert _ORIGINAL_UNWIND is not None
     return _ORIGINAL_UNWIND(ledger, *args, **kwargs)
 
@@ -272,7 +272,7 @@ def _write_resource_manifest() -> None:
 def _instrumented_finalize(runtime: Any, primary_failure: BaseException | None = None) -> None:
     _RUNTIMES.append(runtime)
     _RESOURCE_SNAPSHOTS.append(_snapshot_resources(runtime))
-    _remember_source_cache_consumption(runtime)
+    _remember_source_cache_consumption(runtime.run_id, Path(runtime.root))
     _capture_service_logs(runtime)
     configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
     started = time.monotonic()
