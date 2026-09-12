@@ -94,7 +94,16 @@ def _command(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("machine_options", [("--json",), ("--format", "toon")])
+@pytest.mark.parametrize(
+    "machine_options",
+    [
+        (
+            "--format",
+            "json",
+        ),
+        ("--format", "toon"),
+    ],
+)
 def test_machine_drop_requires_yes_before_sdk_or_transport(
     machine_options: tuple[str, ...],
 ) -> None:
@@ -130,7 +139,8 @@ def test_machine_drop_yes_executes_one_document_without_confirmation(
                 "drop",
                 "feature_db",
                 "--yes",
-                "--json",
+                "--format",
+                "json",
             ],
         )
 
@@ -162,7 +172,8 @@ def test_machine_drop_dry_run_does_not_require_yes_or_execute(project_manifest: 
                 "drop",
                 "feature_db",
                 "--dry-run",
-                "--json",
+                "--format",
+                "json",
             ],
         )
 
@@ -174,7 +185,17 @@ def test_machine_drop_dry_run_does_not_require_yes_or_execute(project_manifest: 
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("format_args", [(), ("--json",), ("--format", "toon")])
+@pytest.mark.parametrize(
+    "format_args",
+    [
+        (),
+        (
+            "--format",
+            "json",
+        ),
+        ("--format", "toon"),
+    ],
+)
 def test_drop_dry_run_projects_typed_active_sessions_in_every_transport(
     project_manifest: Path, format_args: tuple[str, ...]
 ) -> None:
@@ -207,7 +228,10 @@ def test_drop_dry_run_projects_typed_active_sessions_in_every_transport(
     if format_args == ():
         assert "Active sessions:" in result.output
         assert "pid=7, user=<redacted>" in result.output
-    elif format_args == ("--json",):
+    elif format_args == (
+        "--format",
+        "json",
+    ):
         assert json.loads(result.stdout)["result"]["observations"][0]["active_sessions"] == expected
     else:
         from toon import DecodeOptions, decode
@@ -224,7 +248,17 @@ def test_drop_dry_run_projects_typed_active_sessions_in_every_transport(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("format_args", [(), ("--json",), ("--format", "toon")])
+@pytest.mark.parametrize(
+    "format_args",
+    [
+        (),
+        (
+            "--format",
+            "json",
+        ),
+        ("--format", "toon"),
+    ],
+)
 def test_drop_refusal_projects_active_sessions_as_failure_details(
     project_manifest: Path, format_args: tuple[str, ...]
 ) -> None:
@@ -260,7 +294,10 @@ def test_drop_refusal_projects_active_sessions_as_failure_details(
     if format_args == ():
         assert "active sessions" in result.output
         assert '"pid":7' in result.output
-    elif format_args == ("--json",):
+    elif format_args == (
+        "--format",
+        "json",
+    ):
         assert json.loads(result.stdout)["error"]["details"] == {"active_sessions": expected}
     else:
         from toon import DecodeOptions, decode

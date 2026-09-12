@@ -56,6 +56,27 @@ class TestInstanceProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             raise ConfigError("invalid test_instance.base_url") from exc
 
 
+class TicketLinkSettings(msgspec.Struct, frozen=True, kw_only=True):
+    """Effective tracker-neutral commit-link policy."""
+
+    enabled: bool
+    base_url: str | None
+
+
+def effective_ticket_settings(
+    project: ProjectConfig,
+    *,
+    global_enabled: bool | None = None,
+    global_base_url: str | None = None,
+) -> TicketLinkSettings:
+    """Resolve project values first, with optional pre-existing client values."""
+    enabled = (
+        project.ticket_link_enabled if project.ticket_link_enabled is not None else global_enabled
+    )
+    base_url = project.ticket_base_url or global_base_url
+    return TicketLinkSettings(enabled=enabled is True, base_url=base_url)
+
+
 class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     """Declarative project manifest plus required repository identity.
 
@@ -75,6 +96,8 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     test_instance: TestInstanceProjectConfig | None = None
     default_base_ref: str | None = None
     refresh_after_hours: float | None = None
+    ticket_link_enabled: bool | None = None
+    ticket_base_url: str | None = None
 
     def __post_init__(self) -> None:
         if self.default_base_ref is not None and not self.default_base_ref.strip():
@@ -85,6 +108,15 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             or self.refresh_after_hours <= 0
         ):
             raise ConfigError("project.refresh_after_hours must be finite and greater than zero")
+        if self.ticket_link_enabled is not None and type(self.ticket_link_enabled) is not bool:
+            raise ConfigError("project.ticket_link_enabled must be a boolean")
+        if self.ticket_base_url is not None and self.ticket_base_url.strip():
+            try:
+                normalize_base_url(self.ticket_base_url)
+            except Exception as exc:
+                raise ConfigError("invalid project.ticket_base_url") from exc
+        if self.ticket_link_enabled is True and self.ticket_base_url is None:
+            raise ConfigError("project.ticket_link_enabled requires project.ticket_base_url")
 
     @classmethod
     def load(cls, project_path: str | Path) -> ProjectConfig:
@@ -117,6 +149,28 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         postgres_data: JsonValue | Mapping[str, JsonValue] = None,
         test_instance_data: JsonValue | Mapping[str, JsonValue] = None,
     ) -> ProjectConfig:
+        legacy_enabled = data.get("jira_enabled")
+        legacy_url = data.get("jira_base_url")
+        if legacy_enabled is not None or legacy_url is not None:
+            if "ticket_link_enabled" in data or "ticket_base_url" in data:
+                raise ConfigError(
+                    "historical ticket-link settings conflict with tracker-neutral settings"
+                )
+            if legacy_enabled is not None and type(legacy_enabled) is not bool:
+                raise ConfigError(
+                    "historical ticket-link setting is invalid; use ticket_link_enabled"
+                )
+            if legacy_enabled is True and (
+                not isinstance(legacy_url, str | Path) or not str(legacy_url).strip()
+            ):
+                raise ConfigError(
+                    "historical ticket-link setting is incomplete; set ticket_base_url and retry"
+                )
+            ticket_enabled: bool | None = legacy_enabled
+            ticket_url: str | None = str(legacy_url) if legacy_url is not None else None
+        else:
+            ticket_enabled = _bool_or_none(data.get("ticket_link_enabled"))
+            ticket_url = _str_or_none(data.get("ticket_base_url"))
         postgres = _postgres_from_mapping(cast("JsonValue", postgres_data))
         test_instance = _test_instance_from_mapping(
             cast(
@@ -138,6 +192,8 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             test_instance=test_instance,
             default_base_ref=_str_or_none(data.get("default_base_ref")),
             refresh_after_hours=_float_or_none(data.get("refresh_after_hours")),
+            ticket_link_enabled=ticket_enabled,
+            ticket_base_url=_ticket_url_or_none(ticket_url),
         )
 
     def to_manifest(self) -> str:
@@ -169,6 +225,9 @@ def _append_project_manifest_fields(lines: list[str], config: ProjectConfig) -> 
         lines.append(f"refresh_after_hours = {config.refresh_after_hours!r}")
     if config.preferred_http_port is not None:
         lines.append(f"preferred_http_port = {config.preferred_http_port}")
+    if config.ticket_link_enabled is not None:
+        lines.append(f"ticket_link_enabled = {str(config.ticket_link_enabled).lower()}")
+        lines.append(f'ticket_base_url = "{_toml_str(config.ticket_base_url or "")}"')
     _append_runtime_manifest_fields(lines, config)
 
 
@@ -275,6 +334,23 @@ def _str_or_none(value: JsonValue) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _bool_or_none(value: JsonValue) -> bool | None:
+    if value is None:
+        return None
+    if type(value) is not bool:
+        raise ConfigError("project.ticket_link_enabled must be a boolean")
+    return value
+
+
+def _ticket_url_or_none(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return normalize_base_url(value)
+    except Exception as exc:
+        raise ConfigError("invalid project.ticket_base_url") from exc
 
 
 def _int_or_none(value: JsonValue) -> int | None:

@@ -35,6 +35,7 @@ from odoo_instance_sdk.commands.output import (
     emit_json_envelope,
     fail,
     failure_document,
+    field_schema,
     model_to_dict,
     output_options,
     resolve_output_mode,
@@ -44,6 +45,7 @@ from odoo_instance_sdk.commands.output import (
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.internal.cli_format import rich_cell
+from odoo_instance_sdk.internal.pg.inventory import DatabaseInventoryResult
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     DatabaseRefreshOptions,
@@ -54,7 +56,6 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
-    from odoo_instance_sdk.internal.pg.inventory import DatabaseInventoryResult
     from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -177,6 +178,7 @@ def db_refresh(
 @db_group.command("list", aliases=["ls"], help="List databases from the bound PostgreSQL cluster.")
 @click.option("--tracked", is_flag=True, default=False, help="Show only proven restore identities.")
 @output_options
+@field_schema(DatabaseInventoryResult)
 @pass_cli_context
 def db_list(
     ctx: CliContext,

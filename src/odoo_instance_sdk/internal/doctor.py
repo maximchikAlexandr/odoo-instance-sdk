@@ -21,6 +21,7 @@ from odoo_instance_sdk.internal.applied_settings import (
     decode_applied_settings,
     encode_applied_settings,
 )
+from odoo_instance_sdk.internal.executables import resolve_optional_executable
 from odoo_instance_sdk.internal.generated_config import _rebase_path
 from odoo_instance_sdk.internal.git_activity import collect_git_activity
 from odoo_instance_sdk.internal.git_worktree import (
@@ -66,6 +67,29 @@ class CheckResult:
     detail: str
     environment_id: str | None = None
     environment_name: str | None = None
+    remediations: tuple[DoctorRemediation, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorRemediation:
+    """Secret-free advice; constructing it never authorizes execution."""
+
+    description: str
+    argv: tuple[str, ...]
+    mutating: bool
+    dry_run_supported: bool
+
+    @property
+    def supports_dry_run(self) -> bool:
+        return self.dry_run_supported
+
+    def as_dict(self) -> dict[str, JsonValue]:
+        return {
+            "description": self.description,
+            "argv": list(self.argv),
+            "mutating": self.mutating,
+            "dry_run_supported": self.dry_run_supported,
+        }
 
 
 DriftStatus = Literal["in_sync", "drifted", "unknown"]
@@ -144,6 +168,7 @@ def run_doctor(client: OdooClient, project_path: Path | None) -> DoctorReport:
         envs = client.environments.list(project=project_root, include_removed=True)
 
     _check_uv(report)
+    _check_optional_executables(report)
     _check_catalog(report, client)
     _check_orphaned(report, client)
     _check_postgres(report, project_root)
@@ -194,6 +219,16 @@ def _check_uv(report: DoctorReport) -> None:
         report.checks.append(CheckResult("uv", STATUS_WARN, "uv not found in PATH"))
     else:
         report.checks.append(CheckResult("uv", STATUS_OK, uv))
+
+
+def _check_optional_executables(report: DoctorReport) -> None:
+    """Report optional host capabilities without making health fail."""
+    for name in ("msgfmt", "git-absorb"):
+        capability = resolve_optional_executable(name)
+        detail = capability.path or f"{name} not found (optional)"
+        report.checks.append(
+            CheckResult(name, STATUS_OK if capability.available else STATUS_INFO, detail)
+        )
 
 
 def _check_catalog(report: DoctorReport, client: OdooClient) -> None:
@@ -768,6 +803,14 @@ def _check_dependencies(
                 f"requirements.lock missing: {lock}",
                 environment_id=eid,
                 environment_name=ename,
+                remediations=(
+                    DoctorRemediation(
+                        description="Synchronize the environment dependencies",
+                        argv=("odcli", "env", "sync", "--dry-run"),
+                        mutating=True,
+                        dry_run_supported=True,
+                    ),
+                ),
             )
         )
         return
@@ -910,4 +953,4 @@ def _check_backup(
     )
 
 
-__all__ = ["CheckResult", "DoctorReport", "run_doctor"]
+__all__ = ["CheckResult", "DoctorRemediation", "DoctorReport", "run_doctor"]

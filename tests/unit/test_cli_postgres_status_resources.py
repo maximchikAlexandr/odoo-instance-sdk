@@ -138,7 +138,9 @@ def test_postgres_status_json_includes_container_and_metrics(
         resource=_resource_snapshot(),
     )
     monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(lambda _path: cluster))
-    result = CliRunner().invoke(cli, ["--project", str(root), "postgres", "status", "--json"])
+    result = CliRunner().invoke(
+        cli, ["--project", str(root), "postgres", "status", "--format", "json"]
+    )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["command"] == "postgres.status"
@@ -196,7 +198,9 @@ def test_postgres_status_external_skips_resource_snapshot(
         "odoo_instance_sdk.resources.postgres.probe_address",
         lambda host, port: AddressState.OCCUPIED,
     )
-    result = CliRunner().invoke(cli, ["--project", str(root), "postgres", "status", "--json"])
+    result = CliRunner().invoke(
+        cli, ["--project", str(root), "postgres", "status", "--format", "json"]
+    )
     assert result.exit_code == 0, result.output
     snap = json.loads(result.output)["result"]
     assert snap["mode"] == "external"
@@ -221,7 +225,9 @@ def test_postgres_status_external_exit_tracks_tcp_health(
     root = _write_project(tmp_path, mode="external")
     cluster = _ExternalCluster(state)
     monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(lambda _path: cluster))
-    result = CliRunner().invoke(cli, ["--project", str(root), "postgres", "status", "--json"])
+    result = CliRunner().invoke(
+        cli, ["--project", str(root), "postgres", "status", "--format", "json"]
+    )
     assert result.exit_code == exit_code, result.output
     assert json.loads(result.output)["result"]["unavailability_reason"] == "external_not_owned"
 
@@ -236,7 +242,9 @@ def test_postgres_status_stopped_compose_exit_zero(
         resource=_resource_snapshot(unavailability_reason="stopped", with_metrics=False),
     )
     monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(lambda _path: cluster))
-    result = CliRunner().invoke(cli, ["--project", str(root), "postgres", "status", "--json"])
+    result = CliRunner().invoke(
+        cli, ["--project", str(root), "postgres", "status", "--format", "json"]
+    )
     assert result.exit_code == 0, result.output
     snap = json.loads(result.output)["result"]
     assert snap["state"] == "stopped"
@@ -254,7 +262,9 @@ def test_postgres_status_docker_unavailable_exit_zero(
         resource=_resource_snapshot(unavailability_reason="docker_unavailable", with_metrics=False),
     )
     monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(lambda _path: cluster))
-    result = CliRunner().invoke(cli, ["--project", str(root), "postgres", "status", "--json"])
+    result = CliRunner().invoke(
+        cli, ["--project", str(root), "postgres", "status", "--format", "json"]
+    )
     assert result.exit_code == 0, result.output
     snap = json.loads(result.output)["result"]
     assert snap["unavailability_reason"] == "docker_unavailable"

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
@@ -35,6 +35,7 @@ from odoo_instance_sdk.commands.output import (
     emit_json_envelope,
     fail,
     failure_document,
+    field_schema,
     model_to_dict,
     output_options,
     resolve_output_mode,
@@ -75,6 +76,39 @@ from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, Env
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 T = TypeVar("T")
+
+
+class _NestedFieldDetails(msgspec.Struct, frozen=True):
+    code: str
+    value: int
+
+
+class _NestedFieldRow(msgspec.Struct, frozen=True):
+    name: str
+    details: _NestedFieldDetails
+
+
+class _NestedFieldResult(msgspec.Struct, frozen=True):
+    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset(
+        {"metadata", "warnings", "complete"}
+    )
+
+    rows: tuple[_NestedFieldRow, ...]
+    metadata: dict[str, str]
+    warnings: tuple[str, ...]
+    complete: bool
+
+
+def _nested_field_result() -> _NestedFieldResult:
+    return _NestedFieldResult(
+        rows=(
+            _NestedFieldRow("first", _NestedFieldDetails("A", 1)),
+            _NestedFieldRow("second", _NestedFieldDetails("B", 2)),
+        ),
+        metadata={"source": "fixture"},
+        warnings=("retained",),
+        complete=True,
+    )
 
 
 def _resolved_context(client: object, source: object, instance: object) -> ResolvedContext:
@@ -1336,7 +1370,7 @@ def test_public_cli_leaf_matrix_rejects_env_list_watch_json(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda *_args, **_kwargs: pytest.fail("watch rejection must precede collection"),
     )
-    result = CliRunner().invoke(cli, ["env", "list", "--watch", "--json"])
+    result = CliRunner().invoke(cli, ["env", "list", "--watch", "--format", "json"])
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "--watch is only available with Rich output" in result.stderr
@@ -1379,7 +1413,7 @@ def test_init_monitoring_machine_mode_requires_yes_before_resolution(
     assert json.loads(result.stdout)["error"]["code"] == "confirmation_required"
 
 
-@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"], ["--json"]])
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"]])
 def test_machine_db_drop_requires_yes_before_project_resolution(args: list[str]) -> None:
     with patch(
         "odoo_instance_sdk.commands.pg._database_instance",
@@ -1426,7 +1460,7 @@ def test_psql_cli_keeps_native_args_and_rejects_document_mode_without_dry_run(
     resource.psql_command.assert_called_once_with(("-c", "SELECT 1"))
 
     resolved_before_rejection = resolve_resource.call_count
-    for args in (("--format", "json"), ("--json",)):
+    for args in (("--format", "json"),):
         rejected = CliRunner().invoke(cli, ["psql", *args])
         assert rejected.exit_code == 2
         assert "No such option" in rejected.stderr
@@ -1461,7 +1495,6 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         command = _command(path)
         options = _option_names(command)
         assert "--format" in options, path
-        assert "--json" in options, path
 
     for path in (("logs",), ("monitor",)):
         options = _option_names(_command(path))
@@ -1480,7 +1513,6 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         options = _option_names(_command(path))
         assert "--dry-run" in options, path
         assert "--format" in options, path
-        assert "--json" in options, path
 
     root_result = CliRunner().invoke(cli, ["--format", "json", "env", "list"])
     assert root_result.exit_code == 2
@@ -1488,12 +1520,11 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
     assert "No such option" in root_result.stderr
 
 
-def test_format_resolution_accepts_json_alias_and_rejects_conflicts_before_operation() -> None:
+def test_format_resolution_uses_one_selector() -> None:
     assert resolve_output_mode(None, False) is OutputMode.RICH
-    assert resolve_output_mode(None, True) is OutputMode.JSON
-    assert resolve_output_mode("json", True) is OutputMode.JSON
-    with pytest.raises(click.UsageError, match="conflicts"):
-        resolve_output_mode("toon", True)
+    assert resolve_output_mode("json", False) is OutputMode.JSON
+    with pytest.raises(click.UsageError, match="removed"):
+        resolve_output_mode(None, True)
 
 
 def test_invalid_format_uses_native_click_parse_failure() -> None:
@@ -2519,10 +2550,74 @@ def test_output_options_is_a_click_option_composition_helper() -> None:
         click.echo(resolve_output_mode(output_format, json_output).value)
 
     runner = CliRunner()
-    assert runner.invoke(command, ["--json", "--format", "json"]).output == "json\n"
-    conflict = runner.invoke(command, ["--json", "--format", "toon"])
-    assert conflict.exit_code == 2
-    assert "conflicts" in conflict.output
+    assert runner.invoke(command, ["--format", "json"]).output == "json\n"
+
+
+def test_public_nested_field_projection_preserves_order_metadata_and_parity() -> None:
+    @click.command()
+    @output_options
+    @field_schema(_NestedFieldResult)
+    def command(output_format: str | None, json_output: bool) -> None:
+        emit(
+            success_document(
+                command="fixture.nested",
+                result=model_to_dict(_nested_field_result()),
+            ),
+            resolve_output_mode(output_format, json_output),
+        )
+
+    runner = CliRunner()
+    documents: list[object] = []
+    for mode in ("json", "toon"):
+        result = runner.invoke(
+            command,
+            [
+                "--format",
+                mode,
+                "--fields",
+                "rows.name,rows.details.code",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        documents.append(_decode_document(result.output, mode))
+
+    json_document, toon_document = documents
+    assert json_document == toon_document
+    assert json_document["result"] == {  # type: ignore[index]
+        "rows": [
+            {"name": "first", "details": {"code": "A"}},
+            {"name": "second", "details": {"code": "B"}},
+        ],
+        "metadata": {"source": "fixture"},
+        "warnings": ["retained"],
+        "complete": True,
+    }
+
+
+def test_public_nested_field_rejection_happens_before_execution() -> None:
+    calls = 0
+
+    @click.command()
+    @output_options
+    @field_schema(_NestedFieldResult)
+    def command(output_format: str | None, json_output: bool) -> None:
+        nonlocal calls
+        calls += 1
+        emit(
+            success_document(
+                command="fixture.nested", result=model_to_dict(_nested_field_result())
+            ),
+            resolve_output_mode(output_format, json_output),
+        )
+
+    result = CliRunner().invoke(
+        command,
+        ["--format", "json", "--fields", "rows.details.missing"],
+    )
+
+    assert result.exit_code == 2
+    assert "unknown field" in result.output
+    assert calls == 0
 
 
 @pytest.mark.parametrize("mode", ["rich", "json", "toon"])
@@ -2776,7 +2871,7 @@ def test_catalogue_rich_lists_use_single_human_table(
 
 
 def test_module_rich_list_uses_single_table() -> None:
-    from odoo_instance_sdk.cli import _rich_module_list
+    from odoo_instance_sdk.commands.module import _rich_module_list
 
     result = success_document(
         command="module.list",
@@ -2831,13 +2926,13 @@ def test_module_rich_list_uses_single_table() -> None:
             ("Severity", "warning", "stale"),
         ),
         (
-            "odoo_instance_sdk.cli._rich_module_update",
+            "odoo_instance_sdk.commands.module._rich_module_update",
             "module.update",
             {"modules": ["sale"], "updated": ["sale"]},
             ("Module update", "sale", "updated"),
         ),
         (
-            "odoo_instance_sdk.cli._rich_translation_export",
+            "odoo_instance_sdk.commands.translations._rich_translation_export",
             "translations.export",
             {
                 "exports": [
@@ -2888,7 +2983,7 @@ def test_bounded_rich_leaf_renderers_use_labelled_summaries(
     assert "=" not in rendered
 
 
-@pytest.mark.parametrize("args", [["--json"], ["--format", "json"]])
+@pytest.mark.parametrize("args", [["--format", "json"]])
 def test_env_list_json_aliases_have_identical_v1_envelopes(
     args: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2907,18 +3002,9 @@ def test_env_list_json_aliases_have_identical_v1_envelopes(
     document = json.loads(result.stdout)
     assert document["schema_version"] == 1
     assert document["result"] == document["data"]
-    if args == ["--json"]:
-        monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
-            lambda self, project_id=None, *, include_removed=False: snapshot,
-        )
-        alias_result = CliRunner().invoke(
-            cli, ["env", "list", "--all-projects", "--format", "json"]
-        )
-        assert json.loads(alias_result.stdout) == document
 
 
-def test_conflicting_machine_alias_is_rejected_before_snapshot(
+def test_removed_machine_alias_is_rejected_before_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called = False
@@ -2929,14 +3015,14 @@ def test_conflicting_machine_alias_is_rejected_before_snapshot(
         raise AssertionError("conflicting mode must fail before operation")
 
     monkeypatch.setattr("odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot)
-    result = CliRunner().invoke(cli, ["env", "list", "--json", "--format", "toon"])
+    result = CliRunner().invoke(cli, ["env", "list", "--json"])
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert "conflicts" in result.stderr
+    assert "No such option" in result.stderr
     assert not called
 
 
-@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"], ["--json"]])
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"]])
 def test_machine_env_remove_requires_yes_without_prompt_or_operation(
     args: list[str], tmp_path: object
 ) -> None:
@@ -2967,7 +3053,7 @@ def test_machine_env_remove_requires_yes_without_prompt_or_operation(
     client.environments.remove.assert_not_called()
 
 
-@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"], ["--json"]])
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"]])
 def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path: object) -> None:
     env = SimpleNamespace(
         id="env-1",
@@ -3131,7 +3217,9 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        dry_result = CliRunner().invoke(cli, ["env", "checkout", "PROJ-123", "--dry-run", "--json"])
+        dry_result = CliRunner().invoke(
+            cli, ["env", "checkout", "PROJ-123", "--dry-run", "--format", "json"]
+        )
 
     assert dry_result.exit_code == 0, dry_result.output
     dry_payload = json.loads(dry_result.stdout)["result"]

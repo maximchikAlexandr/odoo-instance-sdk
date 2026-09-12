@@ -6,7 +6,7 @@ import uuid
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, TypeVar, cast
+from typing import ClassVar, Literal, TypeVar, cast
 
 import msgspec
 
@@ -751,6 +751,8 @@ class LockRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=T
 
 
 class LocksResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"captured_at", "warnings"})
+
     database: str
     captured_at: datetime
     rows: tuple[LockRow, ...]
@@ -844,6 +846,8 @@ class IndexStats(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_onl
 
 
 class PostgresStatsResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"capabilities", "warnings"})
+
     summary: StatsSummary
     tables: tuple[TableStats, ...]
     indexes: tuple[IndexStats, ...]
@@ -928,6 +932,10 @@ class IndexBloat(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_onl
 
 
 class PostgresBloatResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset(
+        {"captured_at", "capabilities", "warnings"}
+    )
+
     database: str
     captured_at: datetime
     tables: tuple[TableBloat, ...]
@@ -1084,6 +1092,8 @@ class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
 
 
 class Snapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"generated_at"})
+
     schema_version: int
     generated_at: datetime
     projects: tuple[ProjectSummary, ...]

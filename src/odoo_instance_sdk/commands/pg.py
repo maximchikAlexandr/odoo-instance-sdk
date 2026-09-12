@@ -30,6 +30,7 @@ from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputMode,
     fail,
+    field_schema,
     model_to_dict,
     output_options,
     resolve_output_mode,
@@ -37,7 +38,12 @@ from odoo_instance_sdk.commands.output import (
 )
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.internal.cli_format import rich_cell
-from odoo_instance_sdk.models import PostgresClusterState
+from odoo_instance_sdk.models import (
+    LocksResult,
+    PostgresBloatResult,
+    PostgresClusterState,
+    PostgresStatsResult,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
@@ -304,6 +310,7 @@ def psql(
 @click.option("--top", type=click.IntRange(min=1, max=1000), default=20, show_default=True)
 @click.option("--timeout", type=click.FloatRange(min=0.001), default=30.0, show_default=True)
 @output_options
+@field_schema(LocksResult)
 @pass_cli_context
 def db_locks(
     ctx: CliContext,
@@ -332,6 +339,7 @@ def db_locks(
 @click.option("--top", type=click.IntRange(min=1, max=1000), default=20, show_default=True)
 @click.option("--timeout", type=click.FloatRange(min=0.001), default=30.0, show_default=True)
 @output_options
+@field_schema(PostgresStatsResult)
 @pass_cli_context
 def db_stats(
     ctx: CliContext,
@@ -363,6 +371,7 @@ def db_stats(
 )
 @click.option("--timeout", type=click.FloatRange(min=0.001), default=30.0, show_default=True)
 @output_options
+@field_schema(PostgresBloatResult)
 @pass_cli_context
 def db_bloat(
     ctx: CliContext,

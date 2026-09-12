@@ -18,36 +18,40 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 1178),
-        ("src/odoo_instance_sdk/cli.py", 1179),
-        ("src/odoo_instance_sdk/commands/env.py", 668),
-        ("src/odoo_instance_sdk/commands/output.py", 246),
-        ("src/odoo_instance_sdk/commands/output.py", 370),
-        ("src/odoo_instance_sdk/commands/output.py", 372),
-        ("src/odoo_instance_sdk/commands/output.py", 379),
-        ("src/odoo_instance_sdk/commands/output.py", 381),
+        ("src/odoo_instance_sdk/cli.py", 1095),
+        ("src/odoo_instance_sdk/cli.py", 1096),
+        ("src/odoo_instance_sdk/commands/env.py", 720),
+        ("src/odoo_instance_sdk/commands/output.py", 478),
+        ("src/odoo_instance_sdk/commands/output.py", 621),
+        ("src/odoo_instance_sdk/commands/output.py", 623),
+        ("src/odoo_instance_sdk/commands/output.py", 630),
+        ("src/odoo_instance_sdk/commands/output.py", 632),
         ("src/odoo_instance_sdk/resources/instance.py", 1186),
     }
 )
 
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
-    ("src/odoo_instance_sdk/commands/env.py", 668): "existing Rich live inventory transport",
-    ("src/odoo_instance_sdk/commands/output.py", 246): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 370): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 372): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 379): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 381): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/cli.py", 1178): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 1179): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/commands/env.py", 720): "existing Rich live inventory transport",
+    ("src/odoo_instance_sdk/commands/output.py", 478): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 621): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 623): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 630): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 632): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/cli.py", 1095): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 1096): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/resources/instance.py", 1186): "lifecycle cleanup diagnostic transport",
 }
 
 
-# All production annotations are now concrete.  The empty mapping is kept as
-# the checked, line-specific inventory so any future regression reports its
-# exact file and line instead of being hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
+# Keep only deliberate, line-specific exceptions in this checked inventory so
+# every future regression reports its exact file and line instead of being
+# hidden by a broad allowlist.
+EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
+    # Storage migration journals are deliberately untyped JSON mappings; the
+    # migration boundary validates the version and stage before use.
+    "src/odoo_instance_sdk/internal/storage_migration.py": frozenset({88, 100}),
+}
 
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(

@@ -6,9 +6,12 @@ import json
 import sys
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from enum import StrEnum
+from functools import wraps
 from typing import (
     TYPE_CHECKING,
+    Final,
     Generic,
     Never,
     ParamSpec,
@@ -20,6 +23,7 @@ from typing import (
 )
 
 import msgspec
+from msgspec import inspect as msgspec_inspect
 
 if TYPE_CHECKING:
     import click
@@ -122,6 +126,159 @@ _ResultT = TypeVar("_ResultT")
 _ResultT_co = TypeVar("_ResultT_co", covariant=True)
 _P = ParamSpec("_P")
 
+_FIELD_SELECTION: ContextVar[tuple[str, ...] | None] = ContextVar(
+    "odcli_field_selection", default=None
+)
+_FIELD_SCHEMA: ContextVar[type[msgspec.Struct] | None] = ContextVar(
+    "odcli_field_schema", default=None
+)
+
+_FIELD_SCHEMA_ATTRIBUTE: Final = "__odcli_result_schema__"
+
+
+def field_schema(
+    schema: type[msgspec.Struct],
+) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
+    """Attach the concrete result schema used by an eligible bounded leaf."""
+
+    def decorate(callback: Callable[_P, None]) -> Callable[_P, None]:
+        setattr(callback, _FIELD_SCHEMA_ATTRIBUTE, schema)
+        return callback
+
+    return decorate
+
+
+def _schema_paths(info: msgspec_inspect.Type, prefix: str = "") -> set[str]:
+    paths: set[str] = set()
+    if isinstance(
+        info,
+        (msgspec_inspect.StructType, msgspec_inspect.DataclassType, msgspec_inspect.TypedDictType),
+    ):
+        for field in info.fields:
+            path = f"{prefix}.{field.name}" if prefix else field.name
+            paths.add(path)
+            paths.update(_schema_paths(field.type, path))
+    elif isinstance(
+        info,
+        (
+            msgspec_inspect.ListType,
+            msgspec_inspect.SetType,
+            msgspec_inspect.FrozenSetType,
+            msgspec_inspect.VarTupleType,
+        ),
+    ):
+        paths.update(_schema_paths(info.item_type, prefix))
+    elif isinstance(info, msgspec_inspect.TupleType):
+        for item_type in info.item_types:
+            paths.update(_schema_paths(item_type, prefix))
+    elif isinstance(info, msgspec_inspect.UnionType):
+        for item_type in info.types:
+            paths.update(_schema_paths(item_type, prefix))
+    return paths
+
+
+def _field_paths(schema: type[msgspec.Struct]) -> frozenset[str]:
+    return frozenset(_schema_paths(msgspec_inspect.type_info(schema)))
+
+
+def _structural_paths(schema: type[msgspec.Struct] | None) -> frozenset[str]:
+    """Read retained structural paths from the concrete result schema."""
+    if schema is None:
+        return frozenset()
+    paths = getattr(schema, "__odcli_structural_paths__", ())
+    return frozenset(path for path in paths if isinstance(path, str))
+
+
+def _schema_for(command: click.Command | Callable[[], None]) -> type[msgspec.Struct] | None:
+    schema = getattr(command, _FIELD_SCHEMA_ATTRIBUTE, None)
+    if isinstance(schema, type) and issubclass(schema, msgspec.Struct):
+        return schema
+    return None
+
+
+def _parse_field_selection(
+    raw: str | None,
+    *,
+    command: str,
+    output_format: str | None,
+    schema: type[msgspec.Struct] | None,
+) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    if output_format not in {OutputMode.JSON.value, OutputMode.TOON.value}:
+        raise click.UsageError("--fields requires explicit --format json or --format toon")
+    if schema is None:
+        raise click.UsageError(f"--fields is not supported for {command.replace('_', '.')}")
+    fields = tuple(part.strip() for part in raw.split(","))
+    if not fields or any(
+        not field or any(not piece.isidentifier() for piece in field.split(".")) for field in fields
+    ):
+        raise click.UsageError("--fields must be a comma-separated list of dotted field names")
+    if len(set(fields)) != len(fields):
+        raise click.UsageError("--fields must not contain duplicates")
+    allowed_paths = _field_paths(schema)
+    for field in fields:
+        if field not in allowed_paths:
+            raise click.UsageError(f"unknown field for {command.replace('_', '.')}: {field}")
+    return fields
+
+
+def _project_selected(value: JsonValue, parts: tuple[str, ...]) -> JsonValue:
+    if not parts:
+        return value
+    if isinstance(value, dict):
+        key = parts[0]
+        if key not in value:
+            return {}
+        return {key: _project_selected(value[key], parts[1:])}
+    if isinstance(value, list):
+        return [_project_selected(item, parts) for item in value]
+    return value
+
+
+def _merge_projection(target: JsonObject, addition: JsonValue) -> None:
+    if not isinstance(addition, dict):
+        return
+    for key, value in addition.items():
+        existing = target.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            _merge_projection(existing, value)
+        elif isinstance(existing, list) and isinstance(value, list):
+            for index, item in enumerate(value):
+                if index >= len(existing):
+                    existing.append(item)
+                else:
+                    existing_item = existing[index]
+                    if isinstance(existing_item, dict) and isinstance(item, dict):
+                        _merge_projection(existing_item, item)
+        else:
+            target[key] = value
+
+
+def project_fields(
+    result: JsonObject,
+    fields: tuple[str, ...] | list[str],
+    *,
+    schema: type[msgspec.Struct] | None = None,
+) -> JsonObject:
+    """Project successful result data while retaining structural metadata."""
+    selected: JsonObject = {}
+    for path in _structural_paths(schema):
+        _merge_projection(selected, _project_selected(result, tuple(path.split("."))))
+    for field in fields:
+        _merge_projection(selected, _project_selected(result, tuple(field.split("."))))
+    return selected
+
+
+def _contains_steps(value: JsonValue) -> bool:
+    if isinstance(value, dict):
+        return isinstance(value.get("steps"), list) or any(
+            _contains_steps(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_steps(item) for item in value)
+    return False
+
 
 class _InspectableCommand(Protocol, Generic[_ResultT_co]):
     @property
@@ -144,16 +301,91 @@ def output_options(
     command: click.Command | Callable[_P, None],
 ) -> click.Command | Callable[_P, None]:
     """Add the bounded command's local document-format options."""
-    decorated = click.option(
-        "--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope."
-    )(command)
-    return click.option(
+    if isinstance(command, click.Command):
+        callback = command.callback
+        if callback is None:
+            return command
+        command_name = getattr(callback, "__name__", command.name or "")
+        schema = _schema_for(callback)
+        click.option(
+            "--format",
+            "output_format",
+            type=click.Choice([mode.value for mode in OutputMode], case_sensitive=True),
+            default=None,
+            help="Output format (default: rich).",
+        )(command)
+        if schema is not None:
+            click.option(
+                "--fields",
+                "field_selection",
+                default=None,
+                help="Comma-separated dotted result fields (JSON/TOON reads only).",
+            )(command)
+
+        @wraps(callback)
+        def invoke(
+            *args: tuple[str, ...],
+            **kwargs: str | int | bool | None | tuple[str, ...],
+        ) -> None:
+            raw_fields = kwargs.pop("field_selection", None)
+            output_format = kwargs.get("output_format")
+            selected = _parse_field_selection(
+                raw_fields if isinstance(raw_fields, str) else None,
+                command=command_name,
+                output_format=output_format if isinstance(output_format, str) else None,
+                schema=schema,
+            )
+            kwargs.setdefault("json_output", False)
+            token = _FIELD_SELECTION.set(selected)
+            schema_token = _FIELD_SCHEMA.set(schema)
+            try:
+                callback(*args, **kwargs)
+            finally:
+                _FIELD_SCHEMA.reset(schema_token)
+                _FIELD_SELECTION.reset(token)
+
+        command.callback = invoke
+        return command
+
+    command_name = getattr(command, "__name__", "")
+    schema = _schema_for(command)
+
+    @wraps(command)
+    def compose(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        raw_fields = kwargs.pop("field_selection", None)
+        output_format = kwargs.get("output_format")
+        selected = _parse_field_selection(
+            raw_fields if isinstance(raw_fields, str) else None,
+            command=command_name,
+            output_format=output_format if isinstance(output_format, str) else None,
+            schema=schema,
+        )
+        # Keep the existing callback signatures source-compatible while the
+        # removed option is rejected by Click and never reaches a command.
+        kwargs.setdefault("json_output", False)
+        token = _FIELD_SELECTION.set(selected)
+        schema_token = _FIELD_SCHEMA.set(schema)
+        try:
+            command(*args, **kwargs)
+        finally:
+            _FIELD_SCHEMA.reset(schema_token)
+            _FIELD_SELECTION.reset(token)
+
+    decorated: click.Command | Callable[_P, None] = click.option(
         "--format",
         "output_format",
         type=click.Choice([mode.value for mode in OutputMode], case_sensitive=True),
         default=None,
         help="Output format (default: rich).",
-    )(decorated)
+    )(compose)
+    if schema is not None:
+        decorated = click.option(
+            "--fields",
+            "field_selection",
+            default=None,
+            help="Comma-separated dotted result fields (JSON/TOON reads only).",
+        )(decorated)
+    return decorated
 
 
 def command_options(command: Callable[_P, None]) -> Callable[_P, None]:
@@ -163,10 +395,10 @@ def command_options(command: Callable[_P, None]) -> Callable[_P, None]:
     )(output_options(command))
 
 
-def resolve_output_mode(output_format: str | None, json_output: bool) -> OutputMode:
-    """Resolve a command-local format and reject ambiguous alias combinations."""
-    if json_output and output_format not in {None, OutputMode.JSON.value}:
-        raise click.UsageError("--json conflicts with --format unless --format json is used")
+def resolve_output_mode(output_format: str | None, json_output: bool = False) -> OutputMode:
+    """Resolve the single command-local output format selector."""
+    if json_output:
+        raise click.UsageError("--json was removed; use --format json")
     if output_format is not None:
         return OutputMode(output_format)
     return OutputMode.JSON if json_output else OutputMode.RICH
@@ -181,7 +413,7 @@ def resolve_command_options(
 ) -> OutputMode:
     """Resolve output aliases and enforce preview-only raw-stream formats."""
     if not dry_run and (output_format is not None or json_output):
-        raise click.UsageError(f"--format/--json require --dry-run for raw-stream {command}")
+        raise click.UsageError(f"--format requires --dry-run for raw-stream {command}")
     return resolve_output_mode(output_format, json_output)
 
 
@@ -272,7 +504,12 @@ def _sanitize_envelope_value(value: JsonValue, *, preserve_newlines: bool = True
     return value
 
 
-def _document_payload(document: OutputDocument, *, preserve_newlines: bool = True) -> JsonObject:
+def _document_payload(
+    document: OutputDocument,
+    *,
+    preserve_newlines: bool = True,
+    fields: tuple[str, ...] | None = None,
+) -> JsonObject:
     """Build the exact v1 envelope projection for one immutable document."""
     payload: JsonObject = {
         "schema_version": document.schema_version,
@@ -286,8 +523,18 @@ def _document_payload(document: OutputDocument, *, preserve_newlines: bool = Tru
     if document.ok:
         # ``result`` and ``data`` are intentionally equal in every success
         # document, including an explicit JSON null result.
-        payload["result"] = document.result
-        payload["data"] = document.data
+        result = (
+            project_fields(document.result, fields, schema=_FIELD_SCHEMA.get())
+            if fields is not None and isinstance(document.result, dict)
+            else document.result
+        )
+        data = (
+            project_fields(document.data, fields, schema=_FIELD_SCHEMA.get())
+            if fields is not None and isinstance(document.data, dict)
+            else document.data
+        )
+        payload["result"] = result
+        payload["data"] = data
     elif document.error is not None:
         error_payload: JsonObject = {
             "code": document.error.code,
@@ -352,7 +599,7 @@ def _default_rich_projection(document: OutputDocument) -> str:
         return document.error.message
     if document.result in (None, {}):
         return ""
-    if isinstance(document.result, dict) and "steps" in document.result:
+    if isinstance(document.result, dict) and _contains_steps(document.result):
         return _rich_plan_projection(document)
     return json.dumps(document.result, ensure_ascii=False, default=str, indent=2)
 
@@ -365,7 +612,11 @@ def emit(
     diagnostic: str | None = None,
 ) -> int:
     """Emit one immutable document and return its normal CLI exit status."""
-    payload = _document_payload(document, preserve_newlines=mode is OutputMode.RICH)
+    payload = _document_payload(
+        document,
+        preserve_newlines=mode is OutputMode.RICH,
+        fields=_FIELD_SELECTION.get() if mode is not OutputMode.RICH else None,
+    )
     if mode is OutputMode.JSON:
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     elif mode is OutputMode.TOON:
@@ -395,10 +646,12 @@ def _rich_rendered(
         document.ok
         and document.dry_run
         and isinstance(document.result, dict)
-        and "steps" in document.result
+        and _contains_steps(document.result)
     ):
         rendered = _rich_plan_projection(document)
-        if isinstance(document.provenance, dict) and "jira" in document.provenance:
+        if (
+            isinstance(document.provenance, dict) and "ticket_allocation" in document.provenance
+        ) or document.command == "test":
             annotation = projection(document) if projection is not None else ""
             if annotation:
                 rendered = f"{rendered}\n{annotation}" if rendered else annotation
@@ -836,8 +1089,10 @@ __all__ = [
     "emit_json_envelope",
     "fail",
     "failure_document",
+    "field_schema",
     "model_to_dict",
     "output_options",
+    "project_fields",
     "resolve_command_options",
     "resolve_output_mode",
     "rich_print",
@@ -860,25 +1115,40 @@ def _rich_plan_projection(document: OutputDocument) -> str:
     if not isinstance(result, dict):
         return json.dumps(result, ensure_ascii=False, default=str, indent=2)
 
+    lines = [f"Plan: {document.command}"]
+    plan_values = tuple(_nested_plans(result))
     semantic = _semantic_plan_projection(
         result,
         command=document.command,
         document_warnings=document.warnings,
     )
-    if semantic is not None:
+    if semantic is not None and len(plan_values) == 1 and plan_values[0] is result:
         return semantic
-
-    lines = [f"Plan: {document.command}"]
-    steps = result.get("steps")
-    if isinstance(steps, list):
-        lines.extend(
-            line
-            for number, item in enumerate(steps, 1)
-            if isinstance(item, dict)
-            for line in _rich_step_lines(number, item)
-        )
-    lines.extend(_rich_plan_metadata(result, document.warnings))
+    number = 0
+    for plan in plan_values:
+        steps = plan.get("steps")
+        if isinstance(steps, list):
+            for item in steps:
+                if isinstance(item, dict):
+                    number += 1
+                    lines.extend(_rich_step_lines(number, item))
+        lines.extend(_rich_plan_metadata(plan, document.warnings if plan is result else ()))
     return "\n".join(lines)
+
+
+def _nested_plans(value: JsonValue) -> list[dict[str, JsonValue]]:
+    """Find captured plans without changing their document traversal order."""
+    plans: list[dict[str, JsonValue]] = []
+    if isinstance(value, dict):
+        if isinstance(value.get("steps"), list):
+            plans.append(value)
+        else:
+            for child in value.values():
+                plans.extend(_nested_plans(child))
+    elif isinstance(value, list):
+        for child in value:
+            plans.extend(_nested_plans(child))
+    return plans
 
 
 def _semantic_plan_projection(
@@ -967,6 +1237,9 @@ def _rich_step_lines(number: int, item: dict[str, JsonValue]) -> list[str]:
 
 def _rich_process_lines(item: dict[str, JsonValue]) -> list[str]:
     lines: list[str] = []
+    display = item.get("display")
+    if isinstance(display, str) and display:
+        lines.append(f"   command: {display}")
     argv = item.get("argv")
     if isinstance(argv, list):
         lines.append("   argv: " + json.dumps(argv, ensure_ascii=False, separators=(", ", ": ")))

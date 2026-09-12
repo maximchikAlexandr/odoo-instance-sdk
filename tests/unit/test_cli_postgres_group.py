@@ -120,7 +120,7 @@ def _patch_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_postgres_status_compose_json(tmp_path: Path) -> None:
     root = _write_project(tmp_path)
     runner = CliRunner()
-    result = runner.invoke(cli, ["--project", str(root), "postgres", "status", "--json"])
+    result = runner.invoke(cli, ["--project", str(root), "postgres", "status", "--format", "json"])
     assert result.exit_code == 0  # STOPPED → diagnostic exit 0
     envelope = json.loads(result.output)
     assert envelope["ok"] is True
@@ -137,7 +137,16 @@ def test_postgres_approve_image_json_requires_exact_digest(tmp_path: Path) -> No
     digest = "docker.io/library/postgres@sha256:" + "a" * 64
     result = runner.invoke(
         cli,
-        ["--project", str(root), "postgres", "approve-image", "--image-digest", digest, "--json"],
+        [
+            "--project",
+            str(root),
+            "postgres",
+            "approve-image",
+            "--image-digest",
+            digest,
+            "--format",
+            "json",
+        ],
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -196,7 +205,8 @@ def test_postgres_approve_image_forwards_bounded_timeout(
             digest,
             "--timeout",
             "4.5",
-            "--json",
+            "--format",
+            "json",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -274,7 +284,7 @@ def test_postgres_status_resolves_project_without_arg(
     _write_project(tmp_path)
     monkeypatch.chdir(tmp_path)
     runner = CliRunner()
-    result = runner.invoke(cli, ["postgres", "status", "--json"], catch_exceptions=False)
+    result = runner.invoke(cli, ["postgres", "status", "--format", "json"], catch_exceptions=False)
     assert result.exit_code == 0  # STOPPED → diagnostic exit 0
     assert json.loads(result.output)["command"] == "postgres.status"
 
@@ -359,14 +369,14 @@ def test_postgres_up_and_stop_forward_timeouts_and_emit_results(
     runner = CliRunner()
     up = runner.invoke(
         cli,
-        ["--project", str(root), "postgres", "up", "--wait-timeout", "12.5", "--json"],
+        ["--project", str(root), "postgres", "up", "--wait-timeout", "12.5", "--format", "json"],
     )
     assert up.exit_code == 0, up.output
     assert cluster.ensure_timeouts == [12.5]
     assert json.loads(up.output)["command"] == "postgres.up"
     stop = runner.invoke(
         cli,
-        ["--project", str(root), "postgres", "stop", "--timeout", "7.5", "--json"],
+        ["--project", str(root), "postgres", "stop", "--timeout", "7.5", "--format", "json"],
     )
     assert stop.exit_code == 0, stop.output
     assert cluster.stop_timeouts == [7.5]
@@ -390,7 +400,7 @@ def test_postgres_up_failure_uses_command_specific_json_envelope(
         PostgresCluster, "from_project", staticmethod(lambda _path: FailingCluster())
     )
     result = CliRunner().invoke(
-        cli, ["--project", str(root), "postgres", "up", "--wait-timeout", "3", "--json"]
+        cli, ["--project", str(root), "postgres", "up", "--wait-timeout", "3", "--format", "json"]
     )
     assert result.exit_code == 1
     payload = json.loads(result.output)

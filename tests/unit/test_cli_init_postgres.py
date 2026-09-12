@@ -470,7 +470,8 @@ def test_init_dry_run_json_reports_postgres_plan(tmp_path: Path) -> None:
         [
             *_base_args(tmp_path),
             "--dry-run",
-            "--json",
+            "--format",
+            "json",
             "--postgres",
             "compose",
             "--postgres-image",
@@ -582,7 +583,8 @@ def test_init_postgres_provenance_recorded(tmp_path: Path) -> None:
         [
             *_base_args(tmp_path),
             "--dry-run",
-            "--json",
+            "--format",
+            "json",
             "--postgres",
             "compose",
             "--postgres-image",

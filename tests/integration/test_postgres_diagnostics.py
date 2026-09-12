@@ -376,7 +376,7 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
 
         enriched = CliRunner().invoke(
             cli,
-            ["--project", str(tmp_path), "postgres", "status", "--json"],
+            ["--project", str(tmp_path), "postgres", "status", "--format", "json"],
         )
         assert enriched.exit_code == 0, enriched.output
         status_payload = json.loads(enriched.output)

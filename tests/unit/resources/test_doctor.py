@@ -515,7 +515,7 @@ class TestDoctorJsonEnvelope:
         runner = _runner()
         result = runner.invoke(
             cli,
-            ["--project", str(project_manifest), "doctor", "--json"],
+            ["--project", str(project_manifest), "doctor", "--format", "json"],
         )
         assert result.exit_code == 0
         envelope = json.loads(result.output)

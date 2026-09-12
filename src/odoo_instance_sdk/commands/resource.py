@@ -37,6 +37,7 @@ from odoo_instance_sdk.commands.output import (
     OutputMode,
     emit,
     fail,
+    field_schema,
     model_to_dict,
     output_options,
     resolve_output_mode,
@@ -581,6 +582,7 @@ def resource_group() -> None:
 @resource_group.command("list", aliases=["ls"], help="List read-only local resource observations.")
 @click.option("--all-projects", is_flag=True, default=False, help="List all project-owned records.")
 @output_options
+@field_schema(ResourceInventory)
 @pass_cli_context
 def resource_list(
     ctx: CliContext, all_projects: bool, output_format: str | None, json_output: bool
@@ -602,6 +604,7 @@ def resource_list(
 
 @resource_group.command("doctor", help="Diagnose read-only local resource findings.")
 @output_options
+@field_schema(ResourceInventory)
 def resource_doctor(output_format: str | None, json_output: bool) -> None:
     _run_resource("resource.doctor", resolve_output_mode(output_format, json_output), _rich_doctor)
 

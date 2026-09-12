@@ -5,25 +5,18 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import msgspec
 
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
-from odoo_instance_sdk.internal.proc import (
-    ProcessExecutor,
-    ProcessResult,
-    RunContext,
-    SubprocessExecutor,
-    prepared_command,
-)
-from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import Command, JsonValue
+    from odoo_instance_sdk.internal.proc import ProcessExecutor, ProcessResult, RunContext
     from odoo_instance_sdk.resources.instance import OdooInstance
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
 _INVENTORY_STEP = "database.list.inventory"
@@ -70,6 +63,8 @@ class DatabaseInventoryResult(
     msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
 ):
     """Deterministic project-cluster database inventory."""
+
+    __odcli_structural_paths__: ClassVar[frozenset[str]] = frozenset({"tracked"})
 
     cluster: str
     databases: tuple[DatabaseInventoryItem, ...]
@@ -160,6 +155,15 @@ def build_database_inventory_command(
     executor: ProcessExecutor | None = None,
 ) -> Command[DatabaseInventoryResult]:
     """Capture a direct PostgreSQL inventory without Odoo reconciliation."""
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
+    from odoo_instance_sdk.internal.proc import (
+        ProcessResult,
+        SubprocessExecutor,
+        prepared_command,
+    )
+    from odoo_instance_sdk.project import ProjectConfig
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
     project = ProjectConfig.load(Path(project_root).resolve())
     cluster = getattr(instance, "_postgres_cluster", None)
     if cluster is None:

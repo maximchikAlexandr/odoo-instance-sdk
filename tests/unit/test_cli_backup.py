@@ -75,10 +75,12 @@ def test_backup_list_and_show_are_context_independent_and_format_parity(
     assert item["file_present"] is True
     assert item["state"] == BackupState.AVAILABLE.value
 
-    shown = _invoke(monkeypatch, db_path, ["backup", "show", BACKUP_ID, "--json"])
+    shown = _invoke(monkeypatch, db_path, ["backup", "show", BACKUP_ID, "--format", "json"])
     assert shown.exit_code == 0
     assert json.loads(shown.stdout)["result"]["path"] == str(backup_path)
-    abbreviated = _invoke(monkeypatch, db_path, ["backup", "show", BACKUP_ID[:8], "--json"])
+    abbreviated = _invoke(
+        monkeypatch, db_path, ["backup", "show", BACKUP_ID[:8], "--format", "json"]
+    )
     assert abbreviated.exit_code == 1
     assert json.loads(abbreviated.stdout)["error"]["code"] == "backup_show_failed"
 
@@ -87,13 +89,15 @@ def test_backup_list_requires_project_or_explicit_global_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path, _backup_path = _seed_backup(tmp_path)
-    refused = _invoke(monkeypatch, db_path, ["backup", "list", "--json"])
+    refused = _invoke(monkeypatch, db_path, ["backup", "list", "--format", "json"])
     assert refused.exit_code == 1
     payload = json.loads(refused.stdout)
     assert payload["ok"] is False
     assert "run odcli init" in payload["error"]["message"]
 
-    global_result = _invoke(monkeypatch, db_path, ["backup", "list", "--all-projects", "--json"])
+    global_result = _invoke(
+        monkeypatch, db_path, ["backup", "list", "--all-projects", "--format", "json"]
+    )
     assert global_result.exit_code == 0
     assert json.loads(global_result.stdout)["provenance"] == {
         "project_source": "null",
@@ -105,7 +109,7 @@ def test_backup_delete_dry_run_and_machine_confirmation_gate_precede_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path, backup_path = _seed_backup(tmp_path)
-    required = _invoke(monkeypatch, db_path, ["backup", "delete", BACKUP_ID, "--json"])
+    required = _invoke(monkeypatch, db_path, ["backup", "delete", BACKUP_ID, "--format", "json"])
     assert required.exit_code == 1
     assert json.loads(required.stdout)["error"]["code"] == "confirmation_required"
     assert backup_path.is_file()
@@ -122,7 +126,9 @@ def test_backup_delete_dry_run_and_machine_confirmation_gate_precede_mutation(
     assert plan["state"] == BackupState.AVAILABLE.value
     assert backup_path.is_file()
 
-    confirmed = _invoke(monkeypatch, db_path, ["backup", "delete", BACKUP_ID, "--yes", "--json"])
+    confirmed = _invoke(
+        monkeypatch, db_path, ["backup", "delete", BACKUP_ID, "--yes", "--format", "json"]
+    )
     assert confirmed.exit_code == 0
     assert backup_path.exists() is False
     catalog = BackupCatalog(db_path=db_path)
@@ -146,7 +152,9 @@ def test_backup_validate_distinguishes_invalid_and_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     invalid_db, _invalid_path = _seed_backup(tmp_path / "invalid", valid_zip=False)
-    invalid = _invoke(monkeypatch, invalid_db, ["backup", "validate", BACKUP_ID, "--json"])
+    invalid = _invoke(
+        monkeypatch, invalid_db, ["backup", "validate", BACKUP_ID, "--format", "json"]
+    )
     assert invalid.exit_code == 1
     assert json.loads(invalid.stdout)["error"]["code"] == "backup_validate_invalid"
 
