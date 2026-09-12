@@ -851,7 +851,22 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "source_server.topology.source_odoo_port" in smoke_scenario
     assert "runtime.topology.target_postgres_port" in smoke_scenario
     assert "target-data" in smoke_scenario
-    assert "cache_class: [cold, warm]" in smoke_job
+    warm_job = smoke[smoke.index("  real-odoo-smoke-warm:") : smoke.index("\n  lint:")]
+    cold_job = smoke[smoke.index("  real-odoo-smoke:") : smoke.index("\n  real-odoo-smoke-warm:")]
+    assert "needs: real-odoo-smoke" in warm_job
+    assert "Save cold smoke uv cache" in cold_job
+    assert "actions/cache/restore@" not in cold_job
+    assert "actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a" in warm_job
+    assert cold_job.count("uv_cache_key(") == 1
+    assert warm_job.count("uv_cache_key(") == 1
+    assert 'b"", Path("uv.lock").read_bytes()' in cold_job
+    assert 'b"", Path("uv.lock").read_bytes()' in warm_job
+    assert "key: ${{ steps.uv-key.outputs.key }}" in cold_job
+    assert "key: ${{ steps.uv-key.outputs.key }}" in warm_job
+    assert "restore-keys:" not in warm_job
+    assert "matrix.cache_class" not in smoke_job
+    assert "real-odoo-smoke-evidence-cold" in cold_job
+    assert "real-odoo-smoke-evidence-warm" in warm_job
     assert "enable-cache: false" in smoke_job
     assert "ODCLI_E2E_SOURCE_CACHE_HIT" in smoke_job
     assert "ODCLI_E2E_UV_CACHE_HIT" in smoke_job
@@ -897,7 +912,8 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
         assert "if: steps.package.outcome != 'success'" in workflow
         assert "packaging-error.json" in workflow
     for workflow, failure_name in (
-        (smoke_job, "real-odoo-smoke-packaging-failure"),
+        (cold_job, "real-odoo-smoke-packaging-failure-cold"),
+        (warm_job, "real-odoo-smoke-packaging-failure-warm"),
         (full, "real-odoo-full-packaging-failure"),
     ):
         failure_upload = workflow[workflow.index(failure_name) :]
