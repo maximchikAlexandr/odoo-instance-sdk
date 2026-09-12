@@ -134,14 +134,15 @@ def _exception_messages(error: BaseException) -> tuple[str, ...]:
 
 
 def write_archive_variant(path: Path, variant: Literal["truncated", "incompatible"]) -> None:
-    """Write a malformed but deterministic archive for pre-publication checks."""
+    """Write a deterministic archive with either structural or identity failure."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if variant == "truncated":
         path.write_bytes(b"PK\x03\x04truncated")
         return
     with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("dump.sql", "-- database: incompatible\n")
-        archive.writestr("filestore/incompatible/blob", b"fixture")
+        archive.writestr("manifest.json", '{"db_name": "not-the-catalogue-database"}')
+        archive.writestr("dump.sql", "-- database: not-the-catalogue-database\n")
+        archive.writestr("filestore/not-the-catalogue-database/blob", b"fixture")
     path.chmod(0o600)
 
 
