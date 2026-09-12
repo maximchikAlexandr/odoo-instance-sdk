@@ -15,7 +15,8 @@ from click.testing import CliRunner
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.project import ProjectConfig
 
-from .cleanup import write_odoo_config
+from .cleanup import write_odoo_config, write_owner_only_secret
+from .compose import ComposeLifecycle, wait_for_http
 from .conftest import E2ERuntime
 from .pins import E2E_PINS
 
@@ -53,35 +54,85 @@ def _git_project(path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def _start_target_odoo(runtime: E2ERuntime) -> None:
+    compose_file = runtime.compose_file
+    rendered = compose_file.read_text(encoding="utf-8")
+    marker = "  target_init:\n"
+    if marker not in rendered:
+        raise AssertionError("target Compose service is missing")
+    rendered = rendered.replace(
+        marker,
+        f'{marker}    ports:\n      - "127.0.0.1:{runtime.reservations[3].port}:8069"\n',
+        1,
+    )
+    for argument in (
+        f', "--database={runtime.topology.target_sentinel_database}"',
+        ', "--init=base"',
+        ', "--stop-after-init"',
+    ):
+        if argument not in rendered:
+            raise AssertionError("target Compose service is not a bootstrap command")
+        rendered = rendered.replace(argument, "", 1)
+    compose_file.write_text(rendered, encoding="utf-8")
+    result = ComposeLifecycle(compose_file, runtime.topology.project_name).run(
+        "up",
+        "--detach",
+        "target_init",
+    )
+    assert result.returncode == 0, result.stderr
+    wait_for_http(
+        f"http://127.0.0.1:{runtime.reservations[3].port}/web/database/selector",
+        timeout=180.0,
+    )
+
+
+def _align_target_master_password(runtime: E2ERuntime, source: E2ERuntime) -> None:
+    """Give the local target and remote source one explicit test credential."""
+    master_password = source.master_password_file.read_text(encoding="utf-8").strip()
+    database_password = runtime.secret_file.read_text(encoding="utf-8").strip()
+    write_owner_only_secret(runtime.master_password_file, master_password)
+    write_odoo_config(
+        runtime.container_config_file,
+        database_host="target_postgres",
+        database_port=5432,
+        database_password=database_password,
+        admin_password=master_password,
+        data_dir=Path("/var/lib/odoo-target"),
+        addons_path=(Path("/usr/lib/python3/dist-packages/odoo/addons"),),
+    )
+    write_odoo_config(
+        runtime.config_file,
+        database_host="127.0.0.1",
+        database_port=runtime.topology.target_postgres_port,
+        database_password=database_password,
+        admin_password=master_password,
+        data_dir=runtime.root / "target-data",
+        http_interface="127.0.0.1",
+        http_port=runtime.reservations[3].port,
+    )
+
+
 def test_container_smoke_public_path(
     source_server: E2ERuntime,
     target_runtime: E2ERuntime,
     record_property: Any,
 ) -> None:
     """Exercise E2E-SM-01..05 through one disposable image-backed workflow."""
-    runtime = source_server
+    runtime = target_runtime
+    _align_target_master_password(runtime, source_server)
+    _start_target_odoo(runtime)
     project = runtime.root / f"smoke-project-{runtime.run_id}"
     _git_project(project)
-    password = runtime.secret_file.read_text(encoding="utf-8").strip()
-    config = project / "odoo.conf"
-    write_odoo_config(
-        config,
-        database_host="127.0.0.1",
-        database_port=runtime.topology.source_postgres_port,
-        database_password=password,
-        data_dir=project / "data",
-        http_interface="127.0.0.1",
-        http_port=runtime.topology.source_odoo_port,
-    )
+    config = runtime.config_file
     environment = dict(os.environ)
     environment.update(runtime.environment)
     environment.update(
         {
-            "ODCLI_TEST_MASTER_PASSWORD": runtime.master_password_file.read_text(
+            "ODCLI_TEST_MASTER_PASSWORD": source_server.master_password_file.read_text(
                 encoding="utf-8"
             ).strip(),
             "ODCLI_TEST_INSTANCE_ORIGIN_PINS": (
-                f"http://127.0.0.1:{runtime.topology.source_odoo_port}"
+                f"http://127.0.0.1:{source_server.topology.source_odoo_port}"
             ),
         }
     )
@@ -98,7 +149,7 @@ def test_container_smoke_public_path(
         "--config",
         str(config),
         "--database",
-        runtime.topology.source_database,
+        runtime.topology.target_sentinel_database,
     )
     manifest_path = project / ".odcli" / "project.toml"
     assert manifest_path.is_file()
@@ -108,8 +159,8 @@ def test_container_smoke_public_path(
     loaded = msgspec.structs.replace(
         loaded,
         test_instance=TestInstanceProjectConfig(
-            base_url=f"http://127.0.0.1:{runtime.topology.source_odoo_port}",
-            database=runtime.topology.source_database,
+            base_url=f"http://127.0.0.1:{source_server.topology.source_odoo_port}",
+            database=source_server.topology.source_database,
             git_branch=E2E_PINS.odoo_source_commit,
         ),
         default_base_ref=E2E_PINS.odoo_source_commit,
@@ -122,6 +173,7 @@ def test_container_smoke_public_path(
             "manifest": manifest_path,
             "init": initialized,
             "target_compose_project": target_runtime.topology.project_name,
+            "target_database_manager": (f"http://127.0.0.1:{target_runtime.reservations[3].port}"),
         },
     )
 
@@ -139,6 +191,8 @@ def test_container_smoke_public_path(
     backup = refreshed.get("backup")
     assert isinstance(restored_database, str) and restored_database
     assert isinstance(backup, dict) and isinstance(backup.get("id"), str)
+    assert (runtime.root / "target-data" / "filestore" / restored_database).is_dir()
+    assert runtime.environment["ODCLI_E2E_CATALOG"].startswith(str(runtime.root))
     _record(record_property, "E2E-SM-02", {"database": restored_database, "backup": backup})
 
     validated = _invoke(runner, project, environment, "backup", "validate", str(backup["id"]))

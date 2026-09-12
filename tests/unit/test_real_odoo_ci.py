@@ -6,7 +6,8 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
-from typing import Literal
+from types import SimpleNamespace
+from typing import Literal, cast
 
 import pytest
 
@@ -14,7 +15,9 @@ from scripts import real_odoo_bootstrap as bootstrap
 from scripts import real_odoo_ci as ci
 from scripts import real_odoo_evidence as evidence
 from scripts import real_odoo_timing as timing
+from tests.integration.real_odoo import test_smoke as smoke
 from tests.integration.real_odoo.cleanup import ResourceLedger
+from tests.integration.real_odoo.conftest import E2ERuntime
 
 
 def _evidence_contract(
@@ -406,6 +409,78 @@ def test_evidence_exercises_smoke_budget_classification(
     assert report["ok"] is True
 
 
+@pytest.mark.parametrize("cache_class", ["cold", "warm"])
+def test_smoke_bootstrap_and_evidence_emit_cache_class_and_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cache_class: Literal["cold", "warm"],
+) -> None:
+    """Exercise the smoke cache matrix through bootstrap and packaging."""
+    monkeypatch.setattr(bootstrap, "ROOT", tmp_path)
+    monkeypatch.setattr(bootstrap, "_cache_os_arch", lambda: ("Linux", "X64"))
+    monkeypatch.setattr(bootstrap, "prerequisite_checks", lambda _tier, _platform: {})
+    (tmp_path / "uv.lock").write_bytes(b"repository lock")
+    requirements = tmp_path / ".cache" / "odoo-requirements.txt"
+    requirements.parent.mkdir()
+    requirements.write_bytes(b"pinned requirements")
+    source = tmp_path / "evidence"
+    source.mkdir()
+    _evidence_contract(source)
+    monkeypatch.setenv("ODCLI_E2E_SOURCE_CACHE_HIT", str(cache_class == "warm").lower())
+    monkeypatch.setenv("ODCLI_E2E_UV_CACHE_HIT", str(cache_class == "warm").lower())
+    bootstrap_manifest = bootstrap.bootstrap(
+        "smoke", source / "bootstrap.json", platform_name="linux/amd64", artifact_root=source
+    )
+    emitted_cache = bootstrap_manifest["cache"]
+    assert isinstance(emitted_cache, dict)
+    emitted_class = cast("Literal['cold', 'warm']", emitted_cache["class"])
+    assert emitted_class == cache_class
+    canary = tmp_path / "canary"
+    canary.write_text("smoke-canary\n", encoding="utf-8")
+    packaged = evidence.package_evidence(
+        source,
+        tmp_path / "smoke.tar.gz",
+        status="success",
+        canary_file=canary,
+        tier="smoke",
+        cache_class=emitted_class,
+    )
+    packaged_budget = packaged["budget"]
+    assert isinstance(packaged_budget, dict)
+    assert packaged_budget["cache_class"] == cache_class
+    assert packaged_budget["ok"] is True
+
+
+def test_smoke_target_wiring_keeps_source_and_target_endpoints_distinct(tmp_path: Path) -> None:
+    source_password = tmp_path / "source-password"
+    target_password = tmp_path / "target-password"
+    source_password.write_text("source-master\n", encoding="utf-8")
+    target_password.write_text("target-master\n", encoding="utf-8")
+    target_secret = tmp_path / "target-pg-password"
+    target_secret.write_text("pg-secret\n", encoding="utf-8")
+    target = SimpleNamespace(
+        master_password_file=target_password,
+        secret_file=target_secret,
+        container_config_file=tmp_path / "container.conf",
+        config_file=tmp_path / "host.conf",
+        root=tmp_path / "target-root",
+        topology=SimpleNamespace(target_postgres_port=15432),
+        reservations=(None, None, None, SimpleNamespace(port=18069)),
+    )
+    source = SimpleNamespace(master_password_file=source_password)
+    smoke._align_target_master_password(cast("E2ERuntime", target), cast("E2ERuntime", source))
+    host_config = (tmp_path / "host.conf").read_text(encoding="utf-8")
+    container_config = (tmp_path / "container.conf").read_text(encoding="utf-8")
+    assert "admin_passwd = source-master" in host_config
+    assert "db_host = 127.0.0.1" in host_config
+    assert "db_port = 15432" in host_config
+    assert "http_port = 18069" in host_config
+    assert "admin_passwd = source-master" in container_config
+    assert "db_host = target_postgres" in container_config
+    assert target.root.joinpath("target-data").as_posix() in host_config
+    assert "source_postgres" not in host_config
+
+
 def test_timing_plugin_measures_fixture_cleanup_after_test(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -717,6 +792,17 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "pytest.mark.e2e_smoke" in smoke_scenario
     for scenario in ("E2E-SM-01", "E2E-SM-02", "E2E-SM-03", "E2E-SM-04", "E2E-SM-05"):
         assert scenario in smoke_scenario
+    assert "runtime = target_runtime" in smoke_scenario
+    assert "_align_target_master_password(runtime, source_server)" in smoke_scenario
+    assert "source_server.topology.source_odoo_port" in smoke_scenario
+    assert "runtime.topology.target_postgres_port" in smoke_scenario
+    assert "target-data" in smoke_scenario
+    assert "cache_class: [cold, warm]" in smoke_job
+    assert "enable-cache: true" in smoke_job
+    assert "ODCLI_E2E_SOURCE_CACHE_HIT" in smoke_job
+    assert "ODCLI_E2E_UV_CACHE_HIT" in smoke_job
+    assert "Assert smoke cache classification" in smoke_job
+    assert "Assert smoke evidence budget" in smoke_job
     assert ".cache/odoo-source" in full
     assert ".cache/uv" in full
     assert "backups" not in full.lower()
