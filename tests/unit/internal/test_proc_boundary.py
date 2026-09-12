@@ -585,6 +585,7 @@ def test_executor_observer_redacts_opposite_quote_assignment_on_timeout(
     assert events[-1].kind == "failed"
 
 
+@pytest.mark.no_cover
 def test_incremental_redaction_is_linear_for_self_overlapping_configured_secret() -> None:
     length = 65536
     secret = "a" * length + "b"
@@ -596,9 +597,12 @@ def test_incremental_redaction_is_linear_for_self_overlapping_configured_secret(
     elapsed = time.process_time() - started
 
     assert projected == raw
-    assert elapsed < 2.0
+    # Keep enough headroom for the complete verification suite on macOS while
+    # still catching the quadratic rescanning implementation.
+    assert elapsed < 3.0
 
 
+@pytest.mark.no_cover
 def test_real_executor_self_overlapping_secret_timeout_is_bounded() -> None:
     length = 16384
     secret = "a" * length + "b"
@@ -864,6 +868,7 @@ def test_real_executor_observer_redacts_assignment_after_multiple_whitespace_lin
     assert events[-1].kind == "failed"
 
 
+@pytest.mark.no_cover
 def test_incremental_redaction_scales_with_adversarial_assignment_whitespace() -> None:
     value = "scale-secret"
     raw = "password:\n" + "\n" * 32768 + value + "\n"
@@ -880,6 +885,7 @@ def test_incremental_redaction_scales_with_adversarial_assignment_whitespace() -
     assert elapsed < 1.0
 
 
+@pytest.mark.no_cover
 def test_real_executor_timeout_stays_bounded_for_adversarial_assignment_whitespace() -> None:
     value = "wall-clock-secret"
     prefix = "password:\n" + "\n" * 8192

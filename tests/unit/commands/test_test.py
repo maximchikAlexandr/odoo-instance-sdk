@@ -560,7 +560,7 @@ def test_module_alias_projects_registered_worktree_selection_provenance(tmp_path
             return_value=_result_command((typed, None)),
         ) as runner,
         patch(
-            "odoo_instance_sdk.cli.project_execution_result",
+            "odoo_instance_sdk.commands.module.project_execution_result",
             wraps=project_execution_result,
         ) as projector,
     ):

@@ -7,7 +7,9 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentResource,
     EnvironmentState,
 )
+from odoo_instance_sdk.resources.git import GitResource
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
+from odoo_instance_sdk.resources.module import ModuleResource
 
 __all__ = [
     "BackupResource",
@@ -17,6 +19,8 @@ __all__ = [
     "EnvironmentDatabaseMode",
     "EnvironmentResource",
     "EnvironmentState",
+    "GitResource",
     "InstanceFactory",
+    "ModuleResource",
     "OdooInstance",
 ]

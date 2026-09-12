@@ -31,28 +31,32 @@ classification is bounded and whose contract requires `--dry-run`:
 | CLI leaf | canonical classification |
 | --- | --- |
 | `init` | mutating-or-spawning |
-| `env checkout` | mutating-or-spawning |
+| `env create` | mutating-or-spawning |
 | `env path` | bounded-read-only |
-| `env remove` | mutating-or-spawning |
+| `env rm` | mutating-or-spawning |
 | `env sync` | mutating-or-spawning |
-| `backup delete` | mutating-or-spawning |
+| `backup rm` | mutating-or-spawning |
 | `db refresh` | mutating-or-spawning |
-| `db list` | bounded-read-only |
-| `db drop` | guarded mutating-or-spawning |
+| `db ls` | bounded-read-only |
+| `db rm` | guarded mutating-or-spawning |
 | `db reset-admin-password` | mutating-or-spawning |
-| `resource list` | bounded-read-only |
+| `resource ls` | bounded-read-only |
 | `resource doctor` | bounded-read-only |
 | `eval` | process-previewable-read-only |
 | `exec` | mutating-or-spawning |
 | `test` | process-previewable-read-only |
-| `module list` | process-previewable-read-only |
+| `module ls` | process-previewable-read-only |
 | `module update` | mutating-or-spawning |
 | `module test` | mutating-or-spawning |
+| `git commit` | mutating-or-spawning |
+| `git check` | bounded-read-only |
+| `git absorb` | mutating-or-spawning |
+| `git sync` | mutating-or-spawning |
 | `translations export` | mutating-or-spawning |
 | `deps verify` | process-previewable-read-only |
 | `vscode generate` | mutating-or-spawning |
 | `postgres approve-image` | mutating-or-spawning |
-| `postgres status` | process-previewable-read-only |
+| `postgres ps` | process-previewable-read-only |
 | `postgres up` | mutating-or-spawning |
 | `postgres stop` | mutating-or-spawning |
 
@@ -66,22 +70,28 @@ by the private grammar, but document formatting is rejected on normal runs.
 All four diagnostics and native `psql` preserve the instance-bound cluster
 identity and do not accept replacement host/user/password flags.
 
-The backup catalogue leaves (`backup list`, `backup show`, and `backup validate`)
+The backup catalogue leaves (`backup ls`, `backup inspect`, and `backup validate`)
 are bounded read-only documents independent of Odoo/worktree context. They
 resolve complete UUIDs through the state-aware catalogue projection; `backup
-delete` adds the same immutable preview and explicit confirmation contract as
+rm` adds the same immutable preview and explicit confirmation contract as
 the other guarded mutations.
 
-`db drop` is a guarded database mutation. Its plan records the bounded,
+`db rm` is a guarded database mutation. Its plan records the bounded,
 read-only planning inspection as an observation; execution retains separate
 revalidation, optional target-session termination, drop, and absence-verification
 steps. Dry-run performs only the planning inspection and never mutates the
 cluster or catalogue.
 
-The complete shipped CLI also contains `doctor` and `env list` as bounded
-read-only leaves, plus `resource list`, `resource doctor`, `run`, `shell`,
+The complete shipped CLI also contains `doctor` and `env ls` as bounded
+read-only leaves, plus `resource ls`, `resource doctor`, `run`, `shell`,
 `logs`, and `monitor` native/stream leaves. They remain in `PUBLIC_LEAF_CASES` with their explicit classifications
 and reasons; no parallel eligibility table is permitted.
+
+The Git workflow leaves use the same captured-plan boundary: `git commit` and
+`git absorb` require explicit confirmation for mutation, while `git check` is
+read-only and `git sync` captures fetch, integration, validation, and optional
+same-name publication before confirmation. Dry-run emits the complete Git
+plan without launching fetch, rebase, absorb, commit, or publication steps.
 
 Resource inventory and doctor are observation-only projections. They report
 logical versus measured bytes, ownership confidence, retained data, and
@@ -144,22 +154,21 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:1178-1179` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:1256-1257` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
-- `src/odoo_instance_sdk/commands/env.py:668` — existing Rich-live inventory
-  transport; remove when Rich live output is supplied by a distinct transport
-  adapter rather than the live command callback.
-- `src/odoo_instance_sdk/commands/output.py:246` — shared Rich output
+- `src/odoo_instance_sdk/commands/backup.py:293` — shared Rich validation
+  boundary; remove only if validation gains a replacement centralized emitter.
+- `src/odoo_instance_sdk/commands/output.py:236` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:370` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:381` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:372` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:383` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:379` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:390` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:381` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:392` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:1186` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance.py:1195` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 

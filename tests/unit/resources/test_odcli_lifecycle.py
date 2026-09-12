@@ -37,7 +37,7 @@ class TestOdcliLifecycle:
     ) -> None:
         monkeypatch.setattr("odoo_instance_sdk.commands.env.remote_branch_names", lambda *_args: ())
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env._revalidate_jira_absence", lambda *_args: None
+            "odoo_instance_sdk.commands.env._revalidate_ticket_absence", lambda *_args: None
         )
         fake_odoo = fake_python.parent / "odoo-bin"
         fake_odoo.write_text("#!/bin/sh\nexit 0\n")

@@ -16,10 +16,17 @@ from typing import (
     TypeAliasType,
     TypeVar,
     cast,
-    overload,
 )
 
 import msgspec
+
+from odoo_instance_sdk.internal.output_fields import (
+    current_field_schema,
+    current_field_selection,
+    field_schema,
+    output_options,
+    project_fields,
+)
 
 if TYPE_CHECKING:
     import click
@@ -28,11 +35,8 @@ else:
 from rich.console import Console
 from toon import encode
 
-from odoo_instance_sdk.internal.cli_format import (
-    _rich_plan_metadata,
-    _rich_semantic_step_lines,
-)
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationFailureContext
+from odoo_instance_sdk.internal.output_rich import rich_plan_projection as _rich_plan_projection
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
 
 if TYPE_CHECKING:
@@ -123,6 +127,16 @@ _ResultT_co = TypeVar("_ResultT_co", covariant=True)
 _P = ParamSpec("_P")
 
 
+def _contains_steps(value: JsonValue) -> bool:
+    if isinstance(value, dict):
+        return isinstance(value.get("steps"), list) or any(
+            _contains_steps(item) for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_steps(item) for item in value)
+    return False
+
+
 class _InspectableCommand(Protocol, Generic[_ResultT_co]):
     @property
     def plan(self) -> msgspec.Struct: ...
@@ -132,30 +146,6 @@ class _InspectableCommand(Protocol, Generic[_ResultT_co]):
     ) -> _ResultT_co: ...
 
 
-@overload
-def output_options(command: click.Command) -> click.Command: ...
-
-
-@overload
-def output_options(command: Callable[_P, None]) -> Callable[_P, None]: ...
-
-
-def output_options(
-    command: click.Command | Callable[_P, None],
-) -> click.Command | Callable[_P, None]:
-    """Add the bounded command's local document-format options."""
-    decorated = click.option(
-        "--json", "json_output", is_flag=True, default=False, help="Emit JSON envelope."
-    )(command)
-    return click.option(
-        "--format",
-        "output_format",
-        type=click.Choice([mode.value for mode in OutputMode], case_sensitive=True),
-        default=None,
-        help="Output format (default: rich).",
-    )(decorated)
-
-
 def command_options(command: Callable[_P, None]) -> Callable[_P, None]:
     """Add format aliases and the local preview switch to a spawning leaf."""
     return click.option(
@@ -163,10 +153,10 @@ def command_options(command: Callable[_P, None]) -> Callable[_P, None]:
     )(output_options(command))
 
 
-def resolve_output_mode(output_format: str | None, json_output: bool) -> OutputMode:
-    """Resolve a command-local format and reject ambiguous alias combinations."""
-    if json_output and output_format not in {None, OutputMode.JSON.value}:
-        raise click.UsageError("--json conflicts with --format unless --format json is used")
+def resolve_output_mode(output_format: str | None, json_output: bool = False) -> OutputMode:
+    """Resolve the single command-local output format selector."""
+    if json_output:
+        raise click.UsageError("--json was removed; use --format json")
     if output_format is not None:
         return OutputMode(output_format)
     return OutputMode.JSON if json_output else OutputMode.RICH
@@ -181,7 +171,7 @@ def resolve_command_options(
 ) -> OutputMode:
     """Resolve output aliases and enforce preview-only raw-stream formats."""
     if not dry_run and (output_format is not None or json_output):
-        raise click.UsageError(f"--format/--json require --dry-run for raw-stream {command}")
+        raise click.UsageError(f"--format requires --dry-run for raw-stream {command}")
     return resolve_output_mode(output_format, json_output)
 
 
@@ -272,7 +262,12 @@ def _sanitize_envelope_value(value: JsonValue, *, preserve_newlines: bool = True
     return value
 
 
-def _document_payload(document: OutputDocument, *, preserve_newlines: bool = True) -> JsonObject:
+def _document_payload(
+    document: OutputDocument,
+    *,
+    preserve_newlines: bool = True,
+    fields: tuple[str, ...] | None = None,
+) -> JsonObject:
     """Build the exact v1 envelope projection for one immutable document."""
     payload: JsonObject = {
         "schema_version": document.schema_version,
@@ -286,8 +281,18 @@ def _document_payload(document: OutputDocument, *, preserve_newlines: bool = Tru
     if document.ok:
         # ``result`` and ``data`` are intentionally equal in every success
         # document, including an explicit JSON null result.
-        payload["result"] = document.result
-        payload["data"] = document.data
+        result = (
+            project_fields(document.result, fields, schema=current_field_schema())
+            if fields is not None and isinstance(document.result, dict)
+            else document.result
+        )
+        data = (
+            project_fields(document.data, fields, schema=current_field_schema())
+            if fields is not None and isinstance(document.data, dict)
+            else document.data
+        )
+        payload["result"] = result
+        payload["data"] = data
     elif document.error is not None:
         error_payload: JsonObject = {
             "code": document.error.code,
@@ -352,8 +357,10 @@ def _default_rich_projection(document: OutputDocument) -> str:
         return document.error.message
     if document.result in (None, {}):
         return ""
-    if isinstance(document.result, dict) and "steps" in document.result:
-        return _rich_plan_projection(document)
+    if isinstance(document.result, dict) and _contains_steps(document.result):
+        return _rich_plan_projection(
+            document.result, command=document.command, warnings=document.warnings
+        )
     return json.dumps(document.result, ensure_ascii=False, default=str, indent=2)
 
 
@@ -365,7 +372,11 @@ def emit(
     diagnostic: str | None = None,
 ) -> int:
     """Emit one immutable document and return its normal CLI exit status."""
-    payload = _document_payload(document, preserve_newlines=mode is OutputMode.RICH)
+    payload = _document_payload(
+        document,
+        preserve_newlines=mode is OutputMode.RICH,
+        fields=current_field_selection() if mode is not OutputMode.RICH else None,
+    )
     if mode is OutputMode.JSON:
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     elif mode is OutputMode.TOON:
@@ -395,10 +406,14 @@ def _rich_rendered(
         document.ok
         and document.dry_run
         and isinstance(document.result, dict)
-        and "steps" in document.result
+        and _contains_steps(document.result)
     ):
-        rendered = _rich_plan_projection(document)
-        if isinstance(document.provenance, dict) and "jira" in document.provenance:
+        rendered = _rich_plan_projection(
+            document.result, command=document.command, warnings=document.warnings
+        )
+        if (
+            isinstance(document.provenance, dict) and "ticket_allocation" in document.provenance
+        ) or document.command == "test":
             annotation = projection(document) if projection is not None else ""
             if annotation:
                 rendered = f"{rendered}\n{annotation}" if rendered else annotation
@@ -829,6 +844,7 @@ __all__ = [
     "OutputDocument",
     "OutputError",
     "OutputMode",
+    "_rich_plan_projection",
     "action_command",
     "build_envelope",
     "command_options",
@@ -836,8 +852,10 @@ __all__ = [
     "emit_json_envelope",
     "fail",
     "failure_document",
+    "field_schema",
     "model_to_dict",
     "output_options",
+    "project_fields",
     "resolve_command_options",
     "resolve_output_mode",
     "rich_print",
@@ -847,146 +865,3 @@ __all__ = [
     "sanitize_terminal_text",
     "success_document",
 ]
-
-
-def _rich_plan_projection(document: OutputDocument) -> str:
-    """Render one captured plan as readable, fully redacted human text.
-
-    This is intentionally a pure projection.  It receives the same immutable
-    document as JSON and TOON, and therefore cannot launch a process, prompt,
-    or rebuild any command input.
-    """
-    result = document.result
-    if not isinstance(result, dict):
-        return json.dumps(result, ensure_ascii=False, default=str, indent=2)
-
-    semantic = _semantic_plan_projection(
-        result,
-        command=document.command,
-        document_warnings=document.warnings,
-    )
-    if semantic is not None:
-        return semantic
-
-    lines = [f"Plan: {document.command}"]
-    steps = result.get("steps")
-    if isinstance(steps, list):
-        lines.extend(
-            line
-            for number, item in enumerate(steps, 1)
-            if isinstance(item, dict)
-            for line in _rich_step_lines(number, item)
-        )
-    lines.extend(_rich_plan_metadata(result, document.warnings))
-    return "\n".join(lines)
-
-
-def _semantic_plan_projection(
-    result: dict[str, JsonValue],
-    *,
-    command: str,
-    document_warnings: tuple[str, ...] = (),
-) -> str | None:
-    """Render the single decision-oriented semantic plan observation."""
-    observations = result.get("observations")
-    if not isinstance(observations, list):
-        return None
-    semantic = next(
-        (
-            item
-            for item in observations
-            if isinstance(item, dict) and item.get("kind") == "semantic"
-        ),
-        None,
-    )
-    if not isinstance(semantic, dict):
-        return None
-    lines = [f"Plan: {command}", f"Goal: {semantic.get('goal', '')}"]
-    for field, label in (("targets", "Targets"), ("mutations", "Mutations")):
-        values = semantic.get(field)
-        if isinstance(values, list) and values:
-            lines.append(f"{label}:")
-            lines.extend(f"  - {value}" for value in values)
-    preconditions = semantic.get("preconditions")
-    if isinstance(preconditions, list) and preconditions:
-        lines.append("Preconditions:")
-        for item in preconditions:
-            if isinstance(item, dict):
-                lines.append(
-                    f"  - {item.get('name', 'precondition')}: "
-                    f"{item.get('status', 'unknown')} — {item.get('detail', '')}"
-                )
-    sessions = semantic.get("active_sessions")
-    if isinstance(sessions, list) and sessions:
-        lines.extend(_rich_active_session_lines(sessions))
-    warnings = semantic.get("warnings")
-    warning_values = list(warnings) if isinstance(warnings, list) else []
-    warning_values.extend(warning for warning in document_warnings if warning not in warning_values)
-    if warning_values:
-        lines.append("Warnings:")
-        lines.extend(f"  - {warning}" for warning in warning_values)
-    lines.extend(_rich_semantic_step_lines(result))
-    return "\n".join(lines)
-
-
-def _rich_active_session_lines(sessions: list[JsonValue]) -> list[str]:
-    lines = ["Active sessions:"]
-    for session in sessions:
-        if isinstance(session, dict):
-            identity = ", ".join(
-                f"{key}={session[key]}"
-                for key in ("pid", "user", "client", "application")
-                if session.get(key) is not None
-            )
-            lines.append(f"  - {identity}")
-    return lines
-
-
-def _rich_step_lines(number: int, item: dict[str, JsonValue]) -> list[str]:
-    kind = str(item.get("kind", "step"))
-    step_id = str(item.get("step_id", "<unnamed>"))
-    flags = tuple(
-        name
-        for name, enabled in (
-            ("mutating", item.get("mutating")),
-            ("interactive", item.get("interactive")),
-            ("long-running", item.get("long_running")),
-            ("read-only", item.get("read_only")),
-        )
-        if enabled is True
-    )
-    classification = ", ".join(flags) or "bounded"
-    lines = [f"{number}. {kind} {step_id} [{classification}]"]
-    lines.append(f"   classification: {classification}")
-    if kind == "process":
-        return lines + _rich_process_lines(item)
-    if "description" in item:
-        lines.append(f"   action: {item.get('description')}")
-    return lines
-
-
-def _rich_process_lines(item: dict[str, JsonValue]) -> list[str]:
-    lines: list[str] = []
-    argv = item.get("argv")
-    if isinstance(argv, list):
-        lines.append("   argv: " + json.dumps(argv, ensure_ascii=False, separators=(", ", ": ")))
-    for field, label in (
-        ("executable", "executable"),
-        ("cwd", "cwd"),
-        ("mode", "mode"),
-        ("timeout", "timeout"),
-    ):
-        value = item.get(field)
-        if value is not None:
-            lines.append(f"   {label}: {value}")
-    environment = item.get("environment_overrides")
-    if isinstance(environment, list) and environment:
-        lines.append(
-            "   environment: "
-            + json.dumps(environment, ensure_ascii=False, separators=(", ", ": "))
-        )
-    stdin = item.get("input_preview")
-    if isinstance(stdin, str):
-        lines.append("   stdin: |")
-        lines.extend(f"     {line}" for line in (stdin.splitlines() or [""]))
-    return lines

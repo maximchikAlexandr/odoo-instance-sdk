@@ -49,18 +49,18 @@ odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --config ./odoo.conf
 odcli doctor
 odcli run --dry-run
 odcli run
-odcli env checkout PROJ-123 --dry-run
-odcli env checkout PROJ-123
+odcli env create PROJ-123 --dry-run
+odcli env create PROJ-123
 odcli --env PROJ-123 run -- --dev=reload
 odcli --env PROJ-123 logs
-odcli env list
+odcli env ls
 ```
 
 `odcli run` resolves an explicit `--env` first, then an exact registered
 worktree, then the initialized project containing the current directory. A
 project run reads Python, `odoo-bin`, source config, working directory, port,
 database, and default run arguments from `.odcli/project.toml`; it does not
-create an environment or add the main checkout to `odcli env list`.
+create an environment or add the main checkout to `odcli env ls`.
 
 Project-local child variables may be placed in `.odcli/.env`. The file is
 ignored by Git, must be owner-readable only (`0600` or another mode with no
@@ -85,10 +85,14 @@ and keeps the cluster password out of the manifest and command output.
 
 Global selectors such as `--project` and `--env` belong before the subcommand.
 Exact flags are intentionally delegated to executable help, for example
-`odcli env checkout --help`. Structured output is leaf-local, not a root command
-promise: commands that support it expose `--format rich|json|toon` and/or
-`--json`. Supplying `--json` with `--format json` is allowed where both are
-documented. TOON is the compact structured form.
+`odcli env create --help`. Structured output is leaf-local, not a root command
+promise: commands that support it expose `--format rich|json|toon`. The former
+`--json` compatibility option is removed and fails before resolution; use
+`--format json`. Supplying `--json` with `--format json` is rejected before
+resolution. Eligible bounded machine-readable leaves also support typed
+`--fields a.b,c` projection with an explicit JSON or TOON format. The field
+schema comes from that leaf's typed result, and Rich output is never
+field-filtered. TOON is the compact structured form.
 
 To enter a registered environment worktree, use ordinary shell command substitution: `cd "$(odcli env path <environment>)"`.
 
@@ -105,7 +109,7 @@ identified progress lines use the captured step ID, operation, target, elapsed
 time, and process exit status. For example:
 
 ```bash
-odcli env checkout PROJ-123 --dry-run
+odcli env create PROJ-123 --dry-run
 odcli db restore 01234567-89ab-cdef-0123-456789abcdef --dry-run
 ```
 
@@ -115,10 +119,10 @@ The current release includes the nine GitHub #61 contracts below. They all
 reuse the existing captured-command, catalogue, locking, redaction, and
 confirmation boundaries:
 
-- Owned `env checkout --create-venv` runs one bounded `<python> <odoo-bin>
+- Owned `env create --create-venv` runs one bounded `<python> <odoo-bin>
   --help` readiness probe before `ready`; shared runtimes do not receive that
   probe.
-- COPY `env remove` drops only the proven target through guarded PostgreSQL
+- COPY `env rm` drops only the proven target through guarded PostgreSQL
   ownership checks, does not depend on an Odoo listener or HTTP-port state, and
   retries retained `cleanup_failed` evidence idempotently.
 - Canonical aliases (`env create|ls|rm`, `backup ls|inspect|rm`, `db ls|rm`,
@@ -137,30 +141,31 @@ confirmation boundaries:
 - Top-level `odcli stop` signals only a runtime whose persisted owner and live
   executable, argv, create time, cwd, config, and (on POSIX) process-group
   identity still match; stale or inaccessible evidence fails closed.
-- Jira checkout accepts `JIRA_TICKET`, allocates the next never-reused branch
-  from local refs, catalogue history (including removed rows), and recorded
-  `origin` heads, then creates it from the selected `--base` without fetch or
-  Jira/network configuration.
+- Ticket Allocation accepts a tracker-shaped key such as `PROJ-123`, allocates
+  the next never-reused branch from local refs, catalogue history (including
+  removed rows), and recorded `origin` heads, then creates it from the selected
+  `--base` without fetch, ticket validation, or network configuration.
 - Applied settings are versioned, normalized, and secret-free. `odcli doctor`
   reports field-specific `in_sync`, `drifted`, or `unknown` results without
   repairing or mutating anything; dependency and managed-config formatting
   that is semantically unchanged remains synchronized.
 
 `.localhost` browser-session isolation is separate research and is not part of
-this delivery. A future reusable `env show` projection is also deliberately
-outside the current CLI scope; use `odcli doctor` for read-only drift today.
+this delivery. Use `odcli env show` for a focused selected-environment
+projection, and use `odcli doctor` for read-only drift diagnosis.
 
-`odcli env checkout` (also spelled `odcli env create`) accepts a Jira ticket
-(`JIRA_TICKET`, for example `PROJ-123`) rather than a branch name. It reserves
-`PROJ-123` or the next unused `PROJ-123_N` from local refs, retained catalogue
-history (including removed environments), and current `origin` heads, then
-creates the worktree from the selected `--base`. The generated environment
-name is `<project>:<resolved-branch>`; the CLI does not expose a separate
-`--name` override. Both spellings are the same Click operation.
+`odcli env create` (also spelled `odcli env checkout`) accepts a Ticket key
+(for example `PROJ-123`) rather than a branch name. It reserves `PROJ-123` or
+the next unused `PROJ-123_N` from local refs, retained catalogue history
+(including removed environments), and current `origin` heads, then creates
+the worktree from the selected `--base`. The generated environment name is
+`<project>:<resolved-branch>`; the CLI does not expose a separate `--name`
+override. Both spellings are the same Click operation and no external tracker
+client is contacted.
 
 Catalogue lists are project-scoped by default. Use `--all-projects` when a
-global result is intended, for example `odcli backup list --all-projects` or
-`odcli resource list --all-projects`; Rich tables format byte values for
+global result is intended, for example `odcli backup ls --all-projects` or
+`odcli resource ls --all-projects`; Rich tables format byte values for
 people while JSON/TOON retain exact integer bytes. Project HTTP endpoints use
 the same precedence everywhere: explicit override, `preferred_http_port`, the
 effective `odoo.conf`, then the default port.
@@ -171,7 +176,7 @@ effective `odoo.conf`, then the default port.
 
 ```bash
 odcli test --changed
-odcli module list
+odcli module ls
 odcli module update sale
 odcli module test sale
 odcli deps verify
@@ -191,7 +196,7 @@ approve the image digest, then start and inspect the cluster:
 ```bash
 odcli postgres approve-image
 odcli postgres up
-odcli postgres status
+odcli postgres ps
 odcli postgres stop
 ```
 
@@ -236,15 +241,16 @@ credentials.
 To remove a database, use the CLI-private, cluster-bound operation:
 
 ```bash
-odcli db drop feature_customer_credit --dry-run
-odcli db drop feature_customer_credit --yes
-odcli db drop feature_customer_credit --force-connections --yes
+odcli db rm feature_customer_credit --dry-run
+odcli db rm feature_customer_credit --yes
+odcli db rm feature_customer_credit --force-connections --yes
 ```
 
 The dry-run checks the exact database name, protected `postgres`/`template0`/
 `template1` names, template/default status, and active sessions without
 connecting to Odoo or mutating the catalogue.  A normal Rich invocation asks
-for confirmation; JSON/TOON and `--json` require `--yes` and never prompt.
+for confirmation; `--format json` and `--format toon` require `--yes` and never
+prompt.
 `--force-connections` terminates sessions belonging only to the exact target.
 Remote instances, configured defaults, and template databases remain refused.
 
@@ -279,10 +285,10 @@ Backup point commands use the exact full UUID and do not require an Odoo
 worktree context. List or inspect retained records before a mutation:
 
 ```bash
-odcli backup list --format toon
-odcli backup show 01234567-89ab-cdef-0123-456789abcdef --format json
+odcli backup ls --format toon
+odcli backup inspect 01234567-89ab-cdef-0123-456789abcdef --format json
 odcli backup validate 01234567-89ab-cdef-0123-456789abcdef --format json
-odcli backup delete 01234567-89ab-cdef-0123-456789abcdef --dry-run --format json
+odcli backup rm 01234567-89ab-cdef-0123-456789abcdef --dry-run --format json
 ```
 
 Restore previews are immutable. Rich mode confirms only after all preflight
@@ -297,15 +303,69 @@ environments, logs, filestores, and owned volumes without reconciliation or
 deletion:
 
 ```bash
-odcli resource list
-odcli resource list --format json
+odcli resource ls
+odcli resource ls --format json
 odcli resource doctor --format toon
 ```
 
 Logical database bytes are not host-reclamation claims. Unknown ownership,
 unavailable probes, crash-left `.part` files, and cleanup failures remain
-visible with sanitized paths and recommendations. `resource list` and
+visible with sanitized paths and recommendations. `resource ls` and
 `resource doctor` never add, repair, delete, or reclassify lifecycle state.
+
+### Storage migration and absolute paths
+
+Global SDK state lives below `~/.odcli/`: configuration, the SQLite catalogue,
+environments, projects, backups, locks, and pgAdmin data share this root. The
+first catalogue-backed operation runs one locked, journaled migration from
+legacy platformdirs locations. A conflicting destination or interrupted stage
+keeps the source data and journal so the next invocation can report the exact
+problem and retry safely; sources are removed only after verification. The
+repository-local `.odcli/` project manifest and generated config are not part
+of this migration.
+
+Global storage paths and machine-readable output retain absolute paths. Human
+Rich tables may shorten paths beneath `HOME`, but `odcli env path` always emits
+the absolute worktree path for safe shell navigation. Do not copy a displayed
+`~` shorthand into JSON or use a project-local `.odcli/` path as global state.
+
+### Module, translation, and Git workflows
+
+Module discovery reads safe literal `__manifest__.py` files on demand; it does
+not execute manifests or maintain a second module index. The first configured
+add-ons root wins, shadowed modules are reported, dependencies are ordered
+deterministically, and changed-module updates reuse the Git diff snapshot:
+
+```bash
+odcli module info sale
+odcli module where sale
+odcli module deps sale
+odcli module install-order sale
+odcli module update --changed --dry-run
+```
+
+Translation export remains a separate operation. It optionally captures the
+absolute `msgfmt` executable with generated PO input and `LC_ALL=C`; missing
+`msgfmt` is a typed unavailable result, not a Python dependency or an implicit
+installer. Dry-run is inert and publication remains atomic:
+
+```bash
+odcli translations export --module sale --language en_US --dry-run --format json
+```
+
+Git operations are staged-only where applicable and use the shared immutable
+plan boundary. `git commit` generates a tracker-neutral `[TAG] module:`
+message, `git check` validates history and protected-branch rules, `git absorb`
+is an optional captured `git-absorb` capability, and `git sync` fetches and
+rebases before an optional same-name SSH publication. Use `--dry-run` before
+mutation; a stale remote lease or conflict fails without an automatic retry:
+
+```bash
+odcli git commit "describe the staged change" --ticket PROJ-123 --dry-run
+odcli git check --base main --format json
+odcli git absorb --dry-run
+odcli git sync --base main --push --dry-run
+```
 
 ### Automation and shell access
 
@@ -330,9 +390,10 @@ odcli --env feature/customer-credit run --dry-run -- --stop-after-init -u sale
 odcli --env feature/customer-credit shell --dry-run --format toon -- --dev
 ```
 
-`--json` is the shorthand for `--format json`; both forms serialize the same
-captured plan. Supplying either output option without `--dry-run` is rejected
-by Click with exit `2` before SDK resolution or process launch. `logs
+`--format json` and `--format toon` serialize the same captured plan in their
+respective machine-readable forms. Supplying either output format without
+`--dry-run` is rejected by Click with exit `2` before SDK resolution or process
+launch. `logs
 --follow`, the monitor server, and normal interactive shell/run streams are
 documented native transports because they are intentionally unbounded or
 interactive rather than finite plan documents.
@@ -363,32 +424,41 @@ sentence; use the entry's `--help` for exact options.
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
-- `odcli resource list` — List retained local resources without lifecycle mutation.
+- `odcli env show` — Show one environment's selected runtime and ownership metadata.
+- `odcli resource ls` — List retained local resources without lifecycle mutation.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.
-- `odcli env checkout` — Plan or create an isolated Jira-ticket worktree and environment (`env create` is the same operation).
-- `odcli env list` — List registered environments, active-only unless `--all` is requested.
+- `odcli env create` — Plan or create an isolated Ticket worktree and environment (`env checkout` is the retained spelling).
+- `odcli env ls` — List registered environments, active-only unless `--all` is requested.
 - `odcli env path` — Print one active environment's absolute worktree path.
-- `odcli env remove` — Remove a registered environment and its owned artifacts safely.
+- `odcli env rm` — Remove a registered environment and its owned artifacts safely.
 - `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
 - `odcli stop` — Stop the selected environment's proven-owned runtime.
-- `odcli backup list` — List retained backup records with state and file presence.
-- `odcli backup show` — Show one exact backup UUID with history and relationships.
+- `odcli backup ls` — List retained backup records with state and file presence.
+- `odcli backup inspect` — Show one exact backup UUID with history and relationships.
 - `odcli backup validate` — Validate one exact backup and report invalid versus unavailable.
-- `odcli backup delete` — Preview, confirm, and delete one exact retained backup UUID.
+- `odcli backup rm` — Preview, confirm, and delete one exact retained backup UUID.
 - `odcli run` — Start resolved Odoo in the foreground from a project or environment.
 - `odcli logs` — Read retained Odoo logs, optionally following new output.
 - `odcli shell` — Open an interactive Odoo shell in the selected environment.
 - `odcli eval` — Evaluate one Python expression through the Odoo shell boundary.
 - `odcli exec` — Execute a Python script through the Odoo shell boundary.
 - `odcli test` — Select and run Odoo tests, including changed-add-on selection.
-- `odcli module list` — Discover installable modules visible to the environment.
+- `odcli module ls` — Discover installable modules visible to the environment.
+- `odcli module info` — Show one safely discovered module and manifest metadata.
+- `odcli module where` — Show the resolved absolute path for one module.
+- `odcli module deps` — Show direct dependencies and missing manifests.
+- `odcli module install-order` — Plan a stable dependency installation order.
 - `odcli module test` — Run tests for explicitly named modules.
 - `odcli module update` — Upgrade explicitly named modules in the selected database.
+- `odcli git commit` — Create one staged Odoo commit with a checked message.
+- `odcli git check` — Validate Odoo commit history and branch safety.
+- `odcli git absorb` — Absorb staged hunks with optional `git-absorb`.
+- `odcli git sync` — Fetch, rebase, validate, and optionally publish a branch.
 - `odcli translations export` — Export translations for a selected module and languages.
 - `odcli deps verify` — Verify Python and add-on dependency readiness.
 - `odcli vscode generate` — Generate VS Code launch configuration from project settings.
 - `odcli postgres approve-image` — Pin trust to the resolved PostgreSQL image digest.
-- `odcli postgres status` — Report the configured PostgreSQL cluster state and endpoint.
+- `odcli postgres ps` — Report the configured PostgreSQL cluster state and endpoint.
 - `odcli postgres up` — Start or verify the configured PostgreSQL cluster.
 - `odcli postgres stop` — Stop an SDK-owned PostgreSQL cluster without deleting its volume.
 - `odcli psql` — Run native `psql` with inherited terminal streams and bound identity.
@@ -397,12 +467,31 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db bloat` — Show estimated bloat and optional bounded exact measurements.
 - `odcli db init-monitoring` — Idempotently initialize supported monitoring extensions on an owned cluster.
 - `odcli db refresh` — Refresh an environment database from its configured source policy.
-- `odcli db list` — List databases from the bound PostgreSQL cluster and known provenance.
+- `odcli db ls` — List databases from the bound PostgreSQL cluster and known provenance.
 - `odcli db restore` — Restore one exact retained backup into a selected database target.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
-- `odcli db drop` — Safely remove one exact local cluster database after guarded checks.
+- `odcli db rm` — Safely remove one exact local cluster database after guarded checks.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
 <!-- cli-command-inventory:end -->
+
+Executable help is the source of truth for flags and retained aliases:
+
+```bash
+odcli --help
+odcli env create --help
+odcli module --help
+odcli git --help
+```
+
+Click also supplies shell completion from the same command tree. Generate the
+script with the shell-specific completion mode and install it using that
+shell's normal completion directory, for example:
+
+```bash
+_ODCLI_COMPLETE=zsh_source odcli
+_ODCLI_COMPLETE=bash_source odcli
+_ODCLI_COMPLETE=fish_source odcli
+```
 
 ## Python SDK
 
@@ -473,7 +562,7 @@ stored secrets or absolute catalog paths.
 
 Secrets are never written to the project manifest. Generated secret config and
 PostgreSQL credentials use restricted user-data files; the backup catalog uses
-the platform cache directory. Remote destructive database operations are
+the canonical `~/.odcli/` root. Remote destructive database operations are
 rejected. Repository-selected remote test instances require an exact external
 origin pin. Pinned HTTP origins are permitted for legacy deployments, but emit
 a warning because the master password crosses the network in cleartext; HTTPS

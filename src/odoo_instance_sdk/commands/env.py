@@ -5,8 +5,9 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import msgspec
 
@@ -32,6 +33,7 @@ from odoo_instance_sdk.commands.output import (
     emit,
     emit_json_envelope,
     fail,
+    field_schema,
     model_to_dict,
     output_options,
     resolve_output_mode,
@@ -63,8 +65,11 @@ from odoo_instance_sdk.models import (
     EnvironmentState,
     GitActivity,
     GitActivityState,
+    PgAdminEligibility,
     PidScope,
+    PortObservation,
     PostgresClusterState,
+    ProjectSummary,
     RuntimeMetrics,
     RuntimeState,
     Snapshot,
@@ -78,7 +83,62 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
-    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor, SnapshotSelection
+
+
+def select_snapshot_environment(
+    snapshot: Snapshot,
+    selector: str | None = None,
+    *,
+    cwd: Path | None = None,
+    worktree_paths: dict[str, str] | None = None,
+) -> SnapshotSelection:
+    """Select records without collecting another monitor snapshot."""
+    from odoo_instance_sdk.resources.monitor import select_snapshot_environment as select
+
+    return select(snapshot, selector, cwd=cwd, worktree_paths=worktree_paths)
+
+
+class _CliEnvironmentSnapshot(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    """The environment row actually emitted by the machine ``env list`` leaf."""
+
+    id: str
+    project_id: str
+    name: str
+    branch: str
+    short_sha: str | None
+    db_mode: Literal["shared", "copy"]
+    database: str | None
+    lifecycle_state: EnvironmentState
+    allocated_http_port: int | None
+    observed_port: PortObservation | None
+    artifacts: EnvironmentArtifacts
+    runtime: RuntimeMetrics
+    git: GitActivity
+    storage: StorageFootprint
+    pgadmin: PgAdminEligibility
+    worktree_path: str
+
+
+class _CliSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """The concrete machine result, including its CLI-only enrichment."""
+
+    schema_version: int
+    generated_at: Annotated[datetime, "odcli-structural"]
+    projects: tuple[ProjectSummary, ...]
+    environments: tuple[_CliEnvironmentSnapshot, ...]
+
+
+class _EnvShowResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Typed payload for the focused environment inspection leaf."""
+
+    generated_at: datetime
+    environment: EnvironmentSnapshot
+    project: ProjectSummary
+    cluster: ClusterSnapshot | None
+
 
 _ENV_LIST_COLUMNS = (
     "NAME",
@@ -98,26 +158,35 @@ _ENV_LIST_COLUMNS = (
     "ARTIFACTS",
     "WORKTREE",
 )
+_ENV_LIST_COMPACT_COLUMNS = (
+    "NAME",
+    "BRANCH / STATE",
+    "RUNTIME / PORT",
+    "DATABASE",
+    "GIT A/D",
+    "ARTIFACTS",
+)
+_ENV_LIST_MEDIUM_COLUMNS = (*_ENV_LIST_COMPACT_COLUMNS, "WORKTREE")
 
-_JIRA_TICKET_RE = re.compile(r"[A-Z][A-Z0-9]+-[1-9][0-9]*\Z")
-_JIRA_EVIDENCE_LIMIT = 32
+_TICKET_RE = re.compile(r"[A-Z][A-Z0-9]+-[1-9][0-9]*\Z")
+_TICKET_EVIDENCE_LIMIT = 32
 
 
-class _JiraTicketType(click.ParamType[str]):
-    name = "JIRA_TICKET"
+class _TicketType(click.ParamType[str]):
+    name = "TICKET"
 
     def convert(self, value: str, param: click.Parameter | None, ctx: click.Context | None) -> str:
         ticket = str(value)
-        if _JIRA_TICKET_RE.fullmatch(ticket) is None:
-            self.fail("expected Jira ticket like PROJ-123", param, ctx)
+        if _TICKET_RE.fullmatch(ticket) is None:
+            self.fail("expected ticket like PROJ-123", param, ctx)
         return ticket
 
 
-_JIRA_TICKET = _JiraTicketType()
+_TICKET = _TicketType()
 
 
 @dataclass(frozen=True, slots=True)
-class _JiraAllocation:
+class _TicketAllocation:
     ticket: str
     branch: str
     repo_root: Path
@@ -128,7 +197,7 @@ class _JiraAllocation:
     remote_heads: tuple[str, ...]
 
 
-def _jira_iteration(ticket: str, branch: str) -> int | None:
+def _ticket_iteration(ticket: str, branch: str) -> int | None:
     if branch == ticket:
         return 0
     match = re.fullmatch(rf"{re.escape(ticket)}_([1-9][0-9]*)", branch)
@@ -151,12 +220,12 @@ def _catalogue_branch_names(
     return tuple(sorted(names))
 
 
-def _resolve_jira_allocation(
+def _resolve_ticket_allocation(
     client: OdooClient,
     project_path: Path,
     ticket: str,
     base_ref_override: str | None,
-) -> _JiraAllocation:
+) -> _TicketAllocation:
     repo_root = rev_parse_toplevel(project_path)
     git_common_dir = rev_parse_git_common_dir(repo_root)
     project = ProjectConfig.load(repo_root)
@@ -168,11 +237,11 @@ def _resolve_jira_allocation(
     iterations = [
         iteration
         for branch in all_heads
-        if (iteration := _jira_iteration(ticket, branch)) is not None
+        if (iteration := _ticket_iteration(ticket, branch)) is not None
     ]
     next_iteration = max(iterations, default=-1) + 1
     branch = ticket if next_iteration == 0 else f"{ticket}_{next_iteration}"
-    return _JiraAllocation(
+    return _TicketAllocation(
         ticket=ticket,
         branch=branch,
         repo_root=repo_root,
@@ -184,7 +253,7 @@ def _resolve_jira_allocation(
     )
 
 
-def _revalidate_jira_absence(client: OdooClient, allocation: _JiraAllocation) -> None:
+def _revalidate_ticket_absence(client: OdooClient, allocation: _TicketAllocation) -> None:
     sources = (
         ("local", local_branch_names(allocation.repo_root)),
         (
@@ -196,45 +265,45 @@ def _revalidate_jira_absence(client: OdooClient, allocation: _JiraAllocation) ->
     for source, branches in sources:
         if allocation.branch in branches:
             raise StalePlanError(
-                "Jira branch allocation became stale",
+                "Ticket branch allocation became stale",
                 expected={"branch": allocation.branch, "absent": True},
                 actual={"source": source, "branch": allocation.branch},
             )
 
 
-def _bounded_jira_heads(heads: tuple[str, ...]) -> JsonObject:
+def _bounded_ticket_heads(heads: tuple[str, ...]) -> JsonObject:
     return {
-        "heads": list(heads[:_JIRA_EVIDENCE_LIMIT]),
+        "heads": list(heads[:_TICKET_EVIDENCE_LIMIT]),
         "total": len(heads),
-        "truncated": len(heads) > _JIRA_EVIDENCE_LIMIT,
+        "truncated": len(heads) > _TICKET_EVIDENCE_LIMIT,
     }
 
 
-def _jira_provenance(allocation: _JiraAllocation) -> JsonObject:
+def _ticket_provenance(allocation: _TicketAllocation) -> JsonObject:
     return {
-        "jira": {
+        "ticket_allocation": {
             "ticket": allocation.ticket,
             "resolved_branch": allocation.branch,
             "base_ref": allocation.base_ref,
             "evidence": {
-                "local": _bounded_jira_heads(allocation.local_heads),
-                "catalogue": _bounded_jira_heads(allocation.catalogue_heads),
-                "origin": _bounded_jira_heads(allocation.remote_heads),
+                "local": _bounded_ticket_heads(allocation.local_heads),
+                "catalogue": _bounded_ticket_heads(allocation.catalogue_heads),
+                "origin": _bounded_ticket_heads(allocation.remote_heads),
             },
         }
     }
 
 
-def _jira_rich_lines(document: OutputDocument) -> list[str]:
+def _ticket_rich_lines(document: OutputDocument) -> list[str]:
     if not isinstance(document.provenance, dict):
         return []
-    jira = document.provenance.get("jira")
-    if not isinstance(jira, dict):
+    ticket = document.provenance.get("ticket_allocation")
+    if not isinstance(ticket, dict):
         return []
     lines = [
-        f"Jira {jira.get('ticket')} -> {jira.get('resolved_branch')} (base {jira.get('base_ref')})"
+        f"Ticket {ticket.get('ticket')} -> {ticket.get('resolved_branch')} (base {ticket.get('base_ref')})"
     ]
-    evidence = jira.get("evidence")
+    evidence = ticket.get("evidence")
     if isinstance(evidence, dict):
         for source in ("local", "catalogue", "origin"):
             source_data = evidence.get(source)
@@ -245,17 +314,17 @@ def _jira_rich_lines(document: OutputDocument) -> list[str]:
                 )
                 suffix = ", truncated" if source_data.get("truncated") else ""
                 lines.append(
-                    f"Jira {source}: [{rendered_heads}] "
+                    f"Ticket {source}: [{rendered_heads}] "
                     f"({source_data.get('total')} captured head(s){suffix})"
                 )
     return lines
 
 
-def _jira_checkout_command(
+def _ticket_checkout_command(
     client: OdooClient,
     project_path: Path,
     options: EnvironmentCheckoutOptions,
-    allocation: _JiraAllocation,
+    allocation: _TicketAllocation,
 ) -> Command[DevelopmentEnvironment]:
     selected_options = msgspec.structs.replace(options, base_ref=allocation.base_ref)
     from odoo_instance_sdk.resources.environment import EnvironmentResource
@@ -266,30 +335,30 @@ def _jira_checkout_command(
             project_path,
             allocation.branch,
             options=selected_options,
-            branch_revalidator=lambda: _revalidate_jira_absence(client, allocation),
+            branch_revalidator=lambda: _revalidate_ticket_absence(client, allocation),
         )
     return environments.checkout_command(project_path, allocation.branch, options=selected_options)
 
 
-def _build_jira_checkout_command(
+def _build_ticket_checkout_command(
     client: OdooClient,
     project_path: Path,
-    jira_ticket: str,
+    ticket: str,
     base_ref: str | None,
     options: EnvironmentCheckoutOptions,
-) -> tuple[Command[DevelopmentEnvironment], _JiraAllocation | None]:
+) -> tuple[Command[DevelopmentEnvironment], _TicketAllocation | None]:
     from odoo_instance_sdk.resources.environment import EnvironmentResource
 
     if not isinstance(client.environments, EnvironmentResource):
         return (
-            client.environments.checkout_command(project_path, jira_ticket, options=options),
+            client.environments.checkout_command(project_path, ticket, options=options),
             None,
         )
     with exclusive_lock(provisioning_lock_path()):
-        allocation = _resolve_jira_allocation(
-            client, project_path, jira_ticket, base_ref_override=base_ref
+        allocation = _resolve_ticket_allocation(
+            client, project_path, ticket, base_ref_override=base_ref
         )
-        return _jira_checkout_command(client, project_path, options, allocation), allocation
+        return _ticket_checkout_command(client, project_path, options, allocation), allocation
 
 
 @click.group(help="Manage isolated development environments.")
@@ -298,11 +367,11 @@ def env_group() -> None:
 
 
 @env_group.command(
-    "checkout",
-    aliases=["create"],
-    help="Create an isolated environment from a Jira ticket branch.",
+    "create",
+    aliases=["checkout"],
+    help="Create an isolated environment from a Ticket branch.",
 )
-@click.argument("jira_ticket", type=_JIRA_TICKET)
+@click.argument("ticket", metavar="TICKET", type=_TICKET)
 @click.option("--base", "base_ref", default=None, help="Base ref (default HEAD).")
 @click.option(
     "--config", "config_path", type=click.Path(), default=None, help="Source odoo.conf path."
@@ -327,7 +396,7 @@ def env_group() -> None:
 @pass_cli_context
 def env_checkout(
     cli_ctx: CliContext,
-    jira_ticket: str,
+    ticket: str,
     base_ref: str | None,
     config_path: str | None,
     db_mode: str,
@@ -362,11 +431,11 @@ def env_checkout(
             create_venv=create_venv,
             http_port=http_port,
         )
-        command, allocation = _build_jira_checkout_command(
-            client, project_path, jira_ticket, base_ref, options
+        command, allocation = _build_ticket_checkout_command(
+            client, project_path, ticket, base_ref, options
         )
         plan = _checkout_public_plan(command)
-        jira_provenance = _jira_provenance(allocation) if allocation is not None else None
+        ticket_provenance = _ticket_provenance(allocation) if allocation is not None else None
 
         def checkout_rich(document: OutputDocument) -> str:
             payload = document.result
@@ -382,7 +451,7 @@ def env_checkout(
             plan_data = payload.get("plan")
             if isinstance(plan_data, dict):
                 lines.extend(_plan_lines("Checkout plan", plan_data))
-            lines.extend(_jira_rich_lines(document))
+            lines.extend(_ticket_rich_lines(document))
             return "\n".join(lines)
 
         _, captured = run_or_preview(
@@ -396,7 +465,7 @@ def env_checkout(
                 )
             ),
             emit_normal=False,
-            provenance=jira_provenance,
+            provenance=ticket_provenance,
             rich=checkout_rich,
             progress=True,
         )
@@ -419,7 +488,7 @@ def env_checkout(
             rendered = result.environment
             lines.append(f"Environment {rendered.name} ({rendered.id}) state={rendered.state}")
             lines.extend(_plan_lines("Checkout plan", model_to_dict(result.plan)))
-        lines.extend(_jira_rich_lines(document))
+        lines.extend(_ticket_rich_lines(document))
         if checkout_db_mode == EnvironmentDatabaseMode.SHARED:
             lines.append("Warning: code/process isolated, DB and filestore are NOT.")
         return "\n".join(lines)
@@ -439,7 +508,7 @@ def env_checkout(
             provenance={
                 "project_source": _project_provenance(cli_ctx),
                 "environment_source": "null",
-                **(jira_provenance or {}),
+                **(ticket_provenance or {}),
             },
             dry_run=dry_run,
         ),
@@ -449,7 +518,7 @@ def env_checkout(
 
 
 @env_group.command(
-    "list", aliases=["ls"], help="List initialized environments and their runtime state."
+    "ls", aliases=["list"], help="List initialized environments and their runtime state."
 )
 @click.option("--all", "all_envs", is_flag=True, default=False, help="Include removed.")
 @click.option(
@@ -466,6 +535,7 @@ def env_checkout(
     help="Seconds between Rich inventory refreshes.",
 )
 @output_options
+@field_schema(_CliSnapshot)
 @pass_cli_context
 def env_list(
     ctx: CliContext,
@@ -514,12 +584,11 @@ def env_list(
         fail(output_mode, "env.list", e, dry_run=False)
 
     if machine_output:
-        # ponytail: --json always wraps the non-removed Snapshot only; --all does
-        # NOT change the JSON payload. msgspec round-trips enums/datetimes to
+        # Machine output always wraps the non-removed Snapshot; --all does NOT
+        # change the machine payload. msgspec round-trips enums/datetimes to
         # plain JSON-safe builtins.
-        result = msgspec.to_builtins(snapshot)
         try:
-            _add_cli_worktree_paths(result, worktree_paths)
+            result = model_to_dict(_cli_snapshot(snapshot, worktree_paths))
         except Exception as e:
             fail(output_mode, "env.list", e, dry_run=False)
         emit_json_envelope(
@@ -536,6 +605,92 @@ def env_list(
 
     # Human output: grouped by project, with cluster summary + environment rows.
     _print_env_list_human(snapshot, worktree_paths)
+
+
+@env_group.command("show", help="Show one environment, its project, and PostgreSQL runtime facts.")
+@click.argument("environment", required=False, metavar="ENVIRONMENT")
+@output_options
+@field_schema(_EnvShowResult)
+@pass_cli_context
+def env_show(
+    ctx: CliContext,
+    environment: str | None,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    """Render one read-only environment view from one monitor snapshot."""
+    mode = resolve_output_mode(output_format, json_output)
+    if environment is None and ctx.env is not None:
+        fail(
+            mode,
+            "env.show",
+            "root --env is not accepted by env show; pass ENVIRONMENT",
+            dry_run=False,
+            usage=True,
+        )
+    try:
+        monitor = _monitor_class()()
+        snapshot = monitor.snapshot()
+        paths = (
+            _catalog_worktree_paths(monitor, include_removed=True) if environment is None else {}
+        )
+        selected = select_snapshot_environment(
+            snapshot, environment, cwd=Path.cwd(), worktree_paths=paths
+        )
+        payload = _EnvShowResult(
+            generated_at=snapshot.generated_at,
+            environment=selected.environment,
+            project=selected.project,
+            cluster=selected.cluster,
+        )
+        emit(
+            success_document(
+                command="env.show",
+                result=model_to_dict(payload),
+                provenance={
+                    "environment_source": "cwd" if environment is None else "explicit",
+                    "project_source": "worktree" if environment is None else "null",
+                },
+            ),
+            mode,
+            rich=_rich_env_show,
+        )
+    except Exception as exc:
+        fail(mode, "env.show", exc, dry_run=False)
+
+
+def _rich_env_show(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
+    environment = result.get("environment")
+    project = result.get("project")
+    cluster = result.get("cluster")
+    lines: list[str] = []
+    if isinstance(environment, dict):
+        lines.append(
+            f"Environment {environment.get('name')} ({environment.get('id')}) "
+            f"state={environment.get('lifecycle_state')}"
+        )
+        lines.append(
+            f"  branch={environment.get('branch')} database={environment.get('database') or '—'} "
+            f"runtime={_nested_value(environment, 'runtime', 'state') or '—'}"
+        )
+    if isinstance(project, dict):
+        lines.append(f"Project {project.get('name')} ({project.get('id')})")
+    if isinstance(cluster, dict):
+        lines.append(
+            f"PostgreSQL state={cluster.get('state')} "
+            f"metrics={'available' if cluster.get('metrics') is not None else 'unavailable'}"
+        )
+    else:
+        lines.append("PostgreSQL unavailable")
+    return sanitize_terminal_text("\n".join(lines), preserve_newlines=True)
+
+
+def _nested_value(value: dict[str, JsonValue], parent: str, key: str) -> JsonValue | None:
+    child = value.get(parent)
+    return child.get(key) if isinstance(child, dict) else None
 
 
 def _validate_watch_options(output_mode: OutputMode, *, watch: bool, interval: float) -> None:
@@ -576,7 +731,9 @@ def _run_env_list_live(
                     if snapshot.environments
                     else {}
                 )
-                last_renderable = _render_env_list_rich(snapshot, worktree_paths)
+                last_renderable = _render_env_list_rich(
+                    snapshot, worktree_paths, width=Console().width
+                )
                 live.update(last_renderable, refresh=True)
             except KeyboardInterrupt:
                 raise
@@ -645,27 +802,40 @@ def _catalog_worktree_paths(
     }
 
 
-def _add_cli_worktree_paths(result: JsonObject, worktree_paths: dict[str, str]) -> None:
-    """Add only the approved CLI projection field to machine environment rows."""
-    if not isinstance(result, dict):
-        raise TypeError("env list projection is not an environment result object")
-    environments = result.get("environments")
-    if not isinstance(environments, (list, tuple)):
-        raise TypeError("env list projection has no environment rows")
-    for environment in environments:
-        if not isinstance(environment, dict):
-            raise TypeError("environment catalogue join returned an invalid environment row")
-        environment_id = environment.get("id")
-        worktree_path = worktree_paths.get(str(environment_id))
-        if not isinstance(environment_id, str) or worktree_path is None:
-            raise RuntimeError(
-                "environment catalogue is missing a worktree path for an environment result"
-            )
-        environment["worktree_path"] = worktree_path
+def _cli_snapshot(snapshot: Snapshot, worktree_paths: dict[str, str]) -> _CliSnapshot:
+    """Join catalogue paths into the typed machine result before serialization."""
+    environments = tuple(
+        _CliEnvironmentSnapshot(
+            id=environment.id,
+            project_id=environment.project_id,
+            name=environment.name,
+            branch=environment.branch,
+            short_sha=environment.short_sha,
+            db_mode=environment.db_mode,
+            database=environment.database,
+            lifecycle_state=environment.lifecycle_state,
+            allocated_http_port=environment.allocated_http_port,
+            observed_port=environment.observed_port,
+            artifacts=environment.artifacts,
+            runtime=environment.runtime,
+            git=environment.git,
+            storage=environment.storage,
+            pgadmin=environment.pgadmin,
+            worktree_path=worktree_paths[environment.id],
+        )
+        for environment in snapshot.environments
+    )
+    return _CliSnapshot(
+        schema_version=snapshot.schema_version,
+        generated_at=snapshot.generated_at,
+        projects=snapshot.projects,
+        environments=environments,
+    )
 
 
 def _print_env_list_human(snapshot: Snapshot, worktree_paths: dict[str, str] | None = None) -> None:
-    Console().print(_render_env_list_rich(snapshot, worktree_paths))
+    console = Console()
+    console.print(_render_env_list_rich(snapshot, worktree_paths, width=console.width))
 
 
 def _project_provenance(cli_context: CliContext) -> str:
@@ -744,7 +914,10 @@ def env_path(
 
 
 def _render_env_list_rich(
-    snapshot: Snapshot, worktree_paths: dict[str, str] | None = None
+    snapshot: Snapshot,
+    worktree_paths: dict[str, str] | None = None,
+    *,
+    width: int = 300,
 ) -> Group:
     """Build the Rich inventory projection without collecting any data."""
     if worktree_paths is not None:
@@ -771,13 +944,60 @@ def _render_env_list_rich(
             )
         )
         table = Table(show_header=True, box=None, pad_edge=False)
-        for column in _ENV_LIST_COLUMNS:
-            table.add_column(column, overflow="fold", no_wrap=column == "WORKTREE")
+        columns = _env_columns_for_width(width)
         project_envs = sorted(envs_by_project.get(project.id, ()), key=lambda item: item.id)
+        if columns in {_ENV_LIST_COMPACT_COLUMNS, _ENV_LIST_MEDIUM_COLUMNS}:
+            sections.extend(
+                _rich_env_compact_rows(project_envs, paths, include_worktree=width >= 120)
+            )
+            continue
+        for column in columns:
+            table.add_column(column, overflow="fold", no_wrap=column == "WORKTREE")
         for env in project_envs:
-            table.add_row(*_rich_env_row(env, paths.get(env.id)))
+            row = _rich_env_row(env, paths.get(env.id))
+            table.add_row(*(row[_ENV_LIST_COLUMNS.index(column)] for column in columns))
         sections.append(table)
     return Group(*sections)
+
+
+def _env_columns_for_width(width: int) -> tuple[str, ...]:
+    """Keep semantic identity columns visible as terminal width decreases."""
+    if width < 120:
+        return _ENV_LIST_COMPACT_COLUMNS
+    if width < 240:
+        return _ENV_LIST_MEDIUM_COLUMNS
+    return _ENV_LIST_COLUMNS
+
+
+def _rich_env_compact_rows(
+    environments: list[EnvironmentSnapshot],
+    paths: dict[str, str],
+    *,
+    include_worktree: bool,
+) -> list[Text]:
+    """Keep required fields readable without forcing narrow tables to split words."""
+    rows: list[Text] = []
+    for env in environments:
+        values = _env_row_values(env, paths.get(env.id))
+        lines = [
+            f"Environment {values[0]}",
+            f"  branch={_compact_value(values[1], 42)} state={values[2]} "
+            f"runtime={values[3]} port={values[13]}",
+            f"  database={values[11]} {values[12] or '—'} git=ahead {values[8]} diff {values[9]}",
+            f"  artifacts={_compact_value(values[14], 52)}",
+        ]
+        if include_worktree:
+            lines.append(f"  worktree={_compact_value(values[15], 64)}")
+        rows.append(
+            Text(sanitize_terminal_text("\n".join(lines), preserve_newlines=True), style="")
+        )
+    return rows
+
+
+def _compact_value(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(1, limit - 1)] + "…"
 
 
 def _rich_env_row(env: EnvironmentSnapshot, worktree_path: str | None = None) -> tuple[Text, ...]:
@@ -823,7 +1043,7 @@ def _env_row_values(env: EnvironmentSnapshot, worktree_path: str | None = None) 
         env.database or "",
         _port_str(env),
         _artifacts_str(env.artifacts),
-        worktree_path or "—",
+        _display_path(worktree_path) if worktree_path else "—",
     )
 
 
@@ -846,8 +1066,18 @@ def _removed_env_row_values(
         env.database or "",
         str(env.allocated_http_port) if env.allocated_http_port is not None else "—",
         _artifacts_str(env.artifacts),
-        worktree_path or "—",
+        _display_path(worktree_path) if worktree_path else "—",
     )
+
+
+def _display_path(path: str) -> str:
+    """Shorten only Rich path presentation; machine paths stay absolute."""
+    candidate = Path(path)
+    try:
+        relative = candidate.resolve().relative_to(Path.home().resolve())
+    except (OSError, ValueError):
+        return path
+    return "~" if not relative.parts else f"~/{relative.as_posix()}"
 
 
 def _cluster_summary_line(cluster: ClusterSnapshot) -> str:
@@ -1003,7 +1233,7 @@ def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
     raise click.exceptions.Exit(1)
 
 
-@env_group.command("remove", aliases=["rm"], help="Remove an isolated development environment.")
+@env_group.command("rm", aliases=["remove"], help="Remove an isolated development environment.")
 @click.argument("environment", required=False)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation.")

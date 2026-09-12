@@ -92,7 +92,8 @@ def test_restore_replace_rejects_target_before_environment_resolution(
             "--target",
             "recorded_copy",
             "--yes",
-            "--json",
+            "--format",
+            "json",
         ],
     )
 
@@ -112,7 +113,7 @@ def test_restore_machine_confirmation_precedes_project_or_catalogue_access(
 
     result = CliRunner().invoke(
         cli,
-        ["db", "restore", "00000000-0000-0000-0000-000000000007", "--json"],
+        ["db", "restore", "00000000-0000-0000-0000-000000000007", "--format", "json"],
     )
 
     assert result.exit_code == 1
@@ -137,7 +138,7 @@ def test_restore_dry_run_uses_registered_source_and_emits_one_document(
 
     result = CliRunner().invoke(
         cli,
-        ["db", "restore", backup_id, "--target", "demo_copy", "--dry-run", "--json"],
+        ["db", "restore", backup_id, "--target", "demo_copy", "--dry-run", "--format", "json"],
     )
 
     assert result.exit_code == 0, result.output
@@ -167,7 +168,7 @@ def test_restore_interrupt_emits_sanitized_context_and_exit_130(
 
     result = CliRunner().invoke(
         cli,
-        ["db", "restore", str(backup_id), "--yes", "--json"],
+        ["db", "restore", str(backup_id), "--yes", "--format", "json"],
     )
 
     assert result.exit_code == 130
@@ -188,7 +189,7 @@ def test_restore_interrupt_emits_sanitized_context_and_exit_130(
             dry_run,
         )
         for root_args in ([], ["--env", "repo:PROJ-1"])
-        for format_args in (["--json"], ["--format", "toon"], [])
+        for format_args in (["--format", "json"], ["--format", "toon"], [])
         for dry_run in (True, False)
     ],
 )
@@ -237,7 +238,7 @@ def test_restore_replace_click_path_has_one_machine_envelope_for_both_context_sp
 
     assert result.exit_code == 0, result.output
     assert builder.call_args.args[:3] == (client, environment, backup_id)
-    if format_args == ["--json"]:
+    if format_args == ["--format", "json"]:
         payload = json.loads(result.stdout)
         assert payload["dry_run"] is dry_run
         assert payload["ok"] is True
@@ -273,7 +274,7 @@ def test_refresh_reset_option_is_click_usage_error_before_sdk_invocation(
     client.environments.refresh_database.assert_not_called()
 
 
-@pytest.mark.parametrize("format_args", [["--json"], ["--format", "json"], ["--format", "toon"]])
+@pytest.mark.parametrize("format_args", [["--format", "json"], ["--format", "toon"]])
 def test_refresh_show_command_output_is_rich_only_before_sdk_work(
     monkeypatch: pytest.MonkeyPatch, format_args: list[str]
 ) -> None:
@@ -317,7 +318,8 @@ def test_refresh_uses_project_context_options_and_typed_machine_result(
             "--reset-admin-password",
             "--source-branch",
             "release/19",
-            "--json",
+            "--format",
+            "json",
         ],
     )
 
@@ -434,7 +436,7 @@ def test_reset_delegates_only_for_exact_recorded_local_binding(
         lambda _ctx: _resolved_context(MagicMock(), environment, instance),
     )
 
-    result = CliRunner().invoke(cli, ["db", "reset-admin-password", "--json"])
+    result = CliRunner().invoke(cli, ["db", "reset-admin-password", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     document = json.loads(result.stdout)
@@ -444,7 +446,7 @@ def test_reset_delegates_only_for_exact_recorded_local_binding(
     instance.databases.reset_admin_password_command.assert_called_once_with()
 
     instance.config.configured_database_names = ("other",)
-    rejected = CliRunner().invoke(cli, ["db", "reset-admin-password", "--json"])
+    rejected = CliRunner().invoke(cli, ["db", "reset-admin-password", "--format", "json"])
     assert rejected.exit_code == 1
     assert "demo_copy" not in rejected.stdout
     assert "other" not in rejected.stdout
@@ -541,14 +543,16 @@ def test_restore_replace_machine_output_requires_yes_before_builder(
         builder,
     )
 
-    result = CliRunner().invoke(cli, ["db", "restore", str(uuid.uuid4()), "--replace", "--json"])
+    result = CliRunner().invoke(
+        cli, ["db", "restore", str(uuid.uuid4()), "--replace", "--format", "json"]
+    )
 
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]["code"] == "confirmation_required"
     builder.assert_not_called()
 
 
-@pytest.mark.parametrize("mode_args", [["--json"], ["--format", "toon"]])
+@pytest.mark.parametrize("mode_args", [["--format", "json"], ["--format", "toon"]])
 def test_restore_replace_execution_failure_is_one_machine_envelope(
     monkeypatch: pytest.MonkeyPatch, mode_args: list[str]
 ) -> None:
@@ -568,7 +572,7 @@ def test_restore_replace_execution_failure_is_one_machine_envelope(
     )
 
     assert result.exit_code == 1
-    if mode_args == ["--json"]:
+    if mode_args == ["--format", "json"]:
         document = json.loads(result.stdout)
     else:
         from toon import DecodeOptions, decode
@@ -611,7 +615,8 @@ def test_restore_replace_reset_failure_preserves_replacement_context(
             "--replace",
             "--reset-admin-password",
             "--yes",
-            "--json",
+            "--format",
+            "json",
         ],
     )
 
@@ -691,7 +696,8 @@ def test_restore_replace_rejects_unsafe_contexts_before_builder(
             str(uuid.uuid4()),
             "--replace",
             "--yes",
-            "--json",
+            "--format",
+            "json",
         ],
     )
 
@@ -724,7 +730,8 @@ def test_restore_replace_project_selector_rejects_before_builder(
             str(uuid.uuid4()),
             "--replace",
             "--yes",
-            "--json",
+            "--format",
+            "json",
         ],
     )
 
@@ -756,7 +763,8 @@ def test_restore_replace_ambiguous_selector_rejects_before_builder(
             str(uuid.uuid4()),
             "--replace",
             "--yes",
-            "--json",
+            "--format",
+            "json",
         ],
     )
 
@@ -765,7 +773,7 @@ def test_restore_replace_ambiguous_selector_rejects_before_builder(
     builder.assert_not_called()
 
 
-@pytest.mark.parametrize("mode_args", [["--json"], ["--format", "toon"], []])
+@pytest.mark.parametrize("mode_args", [["--format", "json"], ["--format", "toon"], []])
 def test_restore_replace_reset_option_reaches_builder_for_each_output_mode(
     monkeypatch: pytest.MonkeyPatch, mode_args: list[str]
 ) -> None:

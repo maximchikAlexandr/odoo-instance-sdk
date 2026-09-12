@@ -1331,7 +1331,7 @@ class TestCliEval:
                     duration=0.0,
                 )
             )
-            result = runner.invoke(cli, ["--env", str(env.id), "eval", "1+1", "--json"])
+            result = runner.invoke(cli, ["--env", str(env.id), "eval", "1+1", "--format", "json"])
         assert result.exit_code == 0
         envelope = json.loads(result.output)
         assert envelope["ok"] is True
@@ -1387,7 +1387,9 @@ class TestCliEval:
                     duration=0.0,
                 )
             )
-            result = CliRunner().invoke(cli, ["--env", str(env.id), "eval", "1", "--json"])
+            result = CliRunner().invoke(
+                cli, ["--env", str(env.id), "eval", "1", "--format", "json"]
+            )
 
         assert result.exit_code == 1
         envelope = json.loads(result.output)
@@ -1441,7 +1443,9 @@ class TestCliEval:
                 ),
             ),
         ):
-            result = CliRunner().invoke(cli, ["--env", str(env.id), "eval", "1", "--json"])
+            result = CliRunner().invoke(
+                cli, ["--env", str(env.id), "eval", "1", "--format", "json"]
+            )
 
         assert result.exit_code == 1
         envelope = json.loads(result.output)
@@ -1507,7 +1511,7 @@ class TestCliEval:
         ):
             result = CliRunner().invoke(
                 cli,
-                ["--env", str(env.id), "exec", "--json", str(script), "--", "arg1"],
+                ["--env", str(env.id), "exec", "--format", "json", str(script), "--", "arg1"],
             )
 
         assert result.exit_code == 1
@@ -1648,7 +1652,8 @@ class TestCliModuleUpdate:
                 )
             )
             result = runner.invoke(
-                cli, ["--env", str(env.id), "module", "update", "base", "--dry-run", "--json"]
+                cli,
+                ["--env", str(env.id), "module", "update", "base", "--dry-run", "--format", "json"],
             )
         assert result.exit_code == 0
         env_json = json.loads(result.output)
@@ -1701,7 +1706,7 @@ class TestCliExecStdin:
             )
             result = runner.invoke(
                 cli,
-                ["--env", str(env.id), "exec", "--json", "-", "--", "arg1"],
+                ["--env", str(env.id), "exec", "--format", "json", "-", "--", "arg1"],
                 input="print('hi')\n",
             )
         assert result.exit_code == 0
@@ -1751,7 +1756,7 @@ class TestCliExecStdin:
         ):
             result = CliRunner().invoke(
                 cli,
-                ["--env", str(env.id), "exec", "--json", str(script)],
+                ["--env", str(env.id), "exec", "--format", "json", str(script)],
             )
 
         assert result.exit_code == 1
@@ -1801,7 +1806,16 @@ class TestCliModuleList:
             )
             result = runner.invoke(
                 cli,
-                ["--env", str(env.id), "module", "list", "--state", "installed", "--json"],
+                [
+                    "--env",
+                    str(env.id),
+                    "module",
+                    "list",
+                    "--state",
+                    "installed",
+                    "--format",
+                    "json",
+                ],
             )
         assert result.exit_code == 0
         env_json = json.loads(result.output)
@@ -1812,7 +1826,7 @@ class TestNoNewPublicResources:
     def test_no_module_resource(self) -> None:
         from odoo_instance_sdk import resources as r
 
-        assert not hasattr(r, "ModuleResource")
+        assert hasattr(r, "ModuleResource")
 
     def test_no_translation_resource(self) -> None:
         from odoo_instance_sdk import resources as r

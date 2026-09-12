@@ -21,6 +21,7 @@ from odoo_instance_sdk.exceptions import (
     PostgresClusterError,
     ProjectManifestNotFoundError,
 )
+from odoo_instance_sdk.internal import paths as _paths
 from odoo_instance_sdk.internal.address import probe_address
 from odoo_instance_sdk.internal.cluster_resources import (
     BatchClusterRequest,
@@ -33,7 +34,6 @@ from odoo_instance_sdk.internal.git_activity import (
     collect_git_activity_from_identity,
 )
 from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
-from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.postgres_compose import (
     ComposeRunner,
     SubprocessComposeRunner,
@@ -132,6 +132,68 @@ class _EnvironmentPlan:
 
     row: sqlite3.Row
     runtime: sqlite3.Row | None
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotSelection:
+    """The records selected from one already-collected monitor snapshot."""
+
+    environment: EnvironmentSnapshot
+    project: ProjectSummary
+    cluster: ClusterSnapshot | None
+
+
+def select_snapshot_environment(
+    snapshot: Snapshot,
+    selector: str | None = None,
+    *,
+    cwd: Path | None = None,
+    worktree_paths: Mapping[str, str] | None = None,
+) -> SnapshotSelection:
+    """Select an environment, project, and cluster without recollecting metrics."""
+    candidates = list(snapshot.environments)
+    if selector is None:
+        current = (cwd or Path.cwd()).resolve()
+        paths = worktree_paths or {}
+        candidates = [
+            item
+            for item in candidates
+            if item.id in paths and _path_contains(current, Path(paths[item.id]))
+        ]
+        if not candidates:
+            raise ValueError("No environment matches the current working directory")
+    else:
+        by_id = [item for item in candidates if item.id == selector]
+        by_name = [item for item in candidates if item.name == selector]
+        candidates = by_id or by_name
+        if not candidates:
+            raise ValueError(f"Environment not found: {selector}")
+        if len(candidates) > 1:
+            raise ValueError(
+                f"Ambiguous environment selector {selector!r}: "
+                + ", ".join(item.id for item in candidates)
+            )
+    if len(candidates) > 1:
+        raise ValueError(
+            "Ambiguous current environment: " + ", ".join(item.id for item in candidates)
+        )
+    environment = candidates[0]
+    project = next((item for item in snapshot.projects if item.id == environment.project_id), None)
+    if project is None:
+        raise ValueError(f"Environment owner project not found: {environment.project_id}")
+    return SnapshotSelection(environment=environment, project=project, cluster=project.cluster)
+
+
+select_environment_snapshot = select_snapshot_environment
+select_snapshot = select_snapshot_environment
+
+
+def _path_contains(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,7 +493,7 @@ class EnvironmentMonitor:
         """
         from odoo_instance_sdk.internal.proc import PreparedStep
 
-        db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
+        db_path = self.catalog_path if self.catalog_path is not None else _paths.get_catalog_path()
         try:
             catalog = BackupCatalog(db_path=db_path)
             try:
@@ -707,7 +769,7 @@ class EnvironmentMonitor:
     ) -> Snapshot:
         """Perform one coherent collection pass and return an immutable snapshot."""
         generated_at = datetime.now(UTC)
-        db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
+        db_path = self.catalog_path if self.catalog_path is not None else _paths.get_catalog_path()
         try:
             catalog = BackupCatalog(db_path=db_path)
         except (BackupCatalogError, sqlite3.Error) as exc:

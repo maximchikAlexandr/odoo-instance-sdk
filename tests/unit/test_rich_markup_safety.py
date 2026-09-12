@@ -4,15 +4,12 @@ from collections.abc import Callable
 
 import pytest
 
-from odoo_instance_sdk.cli import (
-    _rich_module_list,
-    _rich_module_update,
-    _rich_translation_export,
-    _rich_vscode_generate,
-)
+from odoo_instance_sdk.cli import _rich_vscode_generate
 from odoo_instance_sdk.commands import backup, db, pg, resource
+from odoo_instance_sdk.commands.module import _rich_module_list, _rich_module_update
 from odoo_instance_sdk.commands.output import OutputDocument
 from odoo_instance_sdk.commands.test import rich_test_result
+from odoo_instance_sdk.commands.translations import _rich_translation_export
 from odoo_instance_sdk.execution import JsonValue
 
 _DYNAMIC = "[/] markup-like \x1b[31mdata"

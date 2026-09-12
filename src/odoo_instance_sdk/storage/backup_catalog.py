@@ -43,7 +43,16 @@ type CatalogValue = JsonValue | Path | datetime | uuid.UUID | tuple[str, ...]
 
 P = ParamSpec("P")
 T = TypeVar("T")
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 16
+_READ_ONLY_PROJECT_SCOPE = (
+    "(project_id = ? OR (project_id IS NULL AND ? IN ("
+    "SELECT MIN(p.project_id) FROM environments e "
+    "JOIN projects p ON p.repository_root = e.repository_root "
+    "AND p.git_common_dir = e.git_common_dir "
+    "WHERE e.backup_id = backups.id "
+    "GROUP BY e.backup_id "
+    "HAVING COUNT(DISTINCT p.project_id) = 1)))"
+)
 
 
 class CopyJournalStage(StrEnum):
@@ -135,9 +144,19 @@ def _translate_sqlite_error(func: Callable[P, T]) -> Callable[P, T]:
 class BackupCatalog:
     db_path: Path
     _conn: sqlite3.Connection = field(init=False, repr=False)
+    _read_only: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
         try:
+            from odoo_instance_sdk.internal.paths import _user_root
+
+            if (
+                self.db_path.resolve(strict=False)
+                == _user_root(ensure_exists=False) / "catalog.sqlite3"
+            ):
+                from odoo_instance_sdk.internal.storage_migration import ensure_storage_migrated
+
+                ensure_storage_migrated()
             self._conn = sqlite3.connect(str(self.db_path), timeout=5.0)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -158,6 +177,16 @@ class BackupCatalog:
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript("""
+            CREATE TABLE IF NOT EXISTS projects (
+                project_id TEXT PRIMARY KEY,
+                repository_root TEXT NOT NULL,
+                git_common_dir TEXT NOT NULL,
+                registered_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS projects_identity_idx
+                ON projects(repository_root, git_common_dir);
+
             CREATE TABLE IF NOT EXISTS backups (
                 id TEXT PRIMARY KEY,
                 source_base_url TEXT NOT NULL,
@@ -175,6 +204,7 @@ class BackupCatalog:
                 deleted_at TEXT,
                 error_type TEXT,
                 error_message TEXT,
+                project_id TEXT REFERENCES projects(project_id),
                 source_git_branch TEXT
             );
             CREATE INDEX IF NOT EXISTS backups_lookup_idx ON backups (source_base_url, database_name, downloaded_at DESC);
@@ -375,6 +405,126 @@ class BackupCatalog:
             self._migrate_v15_applied_settings(conn)
             conn.execute("PRAGMA user_version = 15")
             conn.commit()
+            user_version = 15
+        if user_version < 16:
+            self._migrate_v16_backup_project_ownership(conn)
+            conn.execute("PRAGMA user_version = 16")
+            conn.commit()
+
+    def _migrate_v16_backup_project_ownership(self, conn: sqlite3.Connection) -> None:
+        """Add nullable direct backup ownership and backfill only unique evidence."""
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(backups)")}
+        if "project_id" not in columns:
+            conn.execute("ALTER TABLE backups ADD COLUMN project_id TEXT")
+
+        # A backup may have been linked to several historical environments.  It
+        # is safe to infer ownership only when all those environments resolve to
+        # exactly one registered project.
+        environment_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(environments)")
+        }
+        if "backup_id" in environment_columns:
+            conn.execute(
+                """UPDATE backups
+                   SET project_id = (
+                       SELECT MIN(p.project_id)
+                       FROM environments e
+                       JOIN projects p ON p.repository_root = e.repository_root
+                                      AND p.git_common_dir = e.git_common_dir
+                       WHERE e.backup_id = backups.id
+                   )
+                   WHERE project_id IS NULL
+                     AND (SELECT COUNT(DISTINCT p.project_id)
+                          FROM environments e
+                          JOIN projects p ON p.repository_root = e.repository_root
+                                         AND p.git_common_dir = e.git_common_dir
+                          WHERE e.backup_id = backups.id) = 1"""
+            )
+
+        foreign_keys = {
+            (str(row[3]), str(row[2]), str(row[4]))
+            for row in conn.execute("PRAGMA foreign_key_list(backups)")
+        }
+        if ("project_id", "projects", "project_id") not in foreign_keys:
+            # SQLite only applies PRAGMA foreign_keys outside a transaction.
+            # Commit the column/backfill step before rebuilding the parent so
+            # existing backup_events/restores/environment references survive.
+            conn.commit()
+            self._rebuild_backups_with_project_foreign_key(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS backups_project_idx ON backups(project_id)")
+
+    def _rebuild_backups_with_project_foreign_key(self, conn: sqlite3.Connection) -> None:
+        """Install the FK without losing rows or the backup event relation."""
+        columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(backups)")]
+        required = {
+            "id",
+            "source_base_url",
+            "database_name",
+            "format",
+            "filestore_requested",
+            "path",
+            "filename",
+            "size_bytes",
+            "sha256",
+            "state",
+            "started_at",
+            "downloaded_at",
+            "failed_at",
+            "deleted_at",
+            "error_type",
+            "error_message",
+            "project_id",
+            "source_git_branch",
+        }
+        if not required <= set(columns):
+            # Very old minimal catalogues are completed by the base schema and
+            # cannot be safely rebuilt until their later migrations add fields.
+            return
+        index_names = [str(row[1]) for row in conn.execute("PRAGMA index_list(backups)")]
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        try:
+            for index_name in index_names:
+                if not index_name.startswith("sqlite_autoindex"):
+                    conn.execute(
+                        f'DROP INDEX IF EXISTS "{index_name.replace(chr(34), chr(34) * 2)}"'
+                    )
+            conn.execute("ALTER TABLE backups RENAME TO backups_v16_old")
+            conn.execute(
+                """CREATE TABLE backups (
+                    id TEXT PRIMARY KEY,
+                    source_base_url TEXT NOT NULL,
+                    database_name TEXT NOT NULL,
+                    format TEXT NOT NULL CHECK (format IN ('zip', 'dump')),
+                    filestore_requested INTEGER NOT NULL CHECK (filestore_requested IN (0, 1)),
+                    path TEXT,
+                    filename TEXT,
+                    size_bytes INTEGER,
+                    sha256 TEXT,
+                    state TEXT NOT NULL CHECK (state IN ('downloading', 'available', 'failed', 'deleted')),
+                    started_at TEXT NOT NULL,
+                    downloaded_at TEXT,
+                    failed_at TEXT,
+                    deleted_at TEXT,
+                    error_type TEXT,
+                    error_message TEXT,
+                    project_id TEXT REFERENCES projects(project_id),
+                    source_git_branch TEXT
+                )"""
+            )
+            selected = ", ".join(columns)
+            conn.execute(f"INSERT INTO backups ({selected}) SELECT {selected} FROM backups_v16_old")
+            conn.execute("DROP TABLE backups_v16_old")
+            conn.execute(
+                "CREATE INDEX backups_lookup_idx ON backups (source_base_url, database_name, downloaded_at DESC)"
+            )
+            conn.execute("CREATE INDEX backups_state_idx ON backups (state)")
+            conn.execute(
+                "CREATE INDEX backups_point_order_idx ON backups (COALESCE(downloaded_at, started_at) DESC, id ASC)"
+            )
+        finally:
+            conn.execute("PRAGMA legacy_alter_table=OFF")
+            conn.execute("PRAGMA foreign_keys=ON")
 
     def _migrate_v15_applied_settings(self, conn: sqlite3.Connection) -> None:
         """Add secret-free applied evidence without inferring legacy values."""
@@ -815,9 +965,10 @@ class BackupCatalog:
         path: Path,
         *,
         source_git_branch: str | None = None,
+        project_id: str | None = None,
     ) -> None:
         self._conn.execute(
-            "INSERT INTO backups (id, source_base_url, database_name, format, filestore_requested, path, state, started_at, source_git_branch) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)",
+            "INSERT INTO backups (id, source_base_url, database_name, format, filestore_requested, path, state, started_at, source_git_branch, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)",
             (
                 backup_id,
                 source_base_url,
@@ -827,6 +978,7 @@ class BackupCatalog:
                 str(path),
                 BackupState.DOWNLOADING.value,
                 source_git_branch,
+                project_id,
             ),
         )
         self._add_event(backup_id, "download_started", path=str(path))
@@ -1039,6 +1191,7 @@ class BackupCatalog:
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise BackupCatalogError("Backup limit must be an integer between 1 and 1000")
         after: tuple[str, str] | None = None
+        self._backfill_deterministic_backup_ownership()
         if cursor is not None:
             after = self._decode_backup_cursor(cursor)
         clauses: list[str] = []
@@ -1056,15 +1209,8 @@ class BackupCatalog:
             clauses.append("format = ?")
             params.append(format)
         if project_id is not None:
-            clauses.append(
-                "EXISTS ("
-                "SELECT 1 FROM environments e "
-                "JOIN projects p ON p.repository_root = e.repository_root "
-                "AND p.git_common_dir = e.git_common_dir "
-                "WHERE e.backup_id = backups.id AND p.project_id = ?"
-                ")"
-            )
-            params.append(project_id)
+            clauses.append(_READ_ONLY_PROJECT_SCOPE if self._read_only else "project_id = ?")
+            params.extend((project_id, project_id) if self._read_only else (project_id,))
         if after is not None:
             clauses.append(
                 "(COALESCE(downloaded_at, started_at) < ? OR "
@@ -1104,7 +1250,9 @@ class BackupCatalog:
         source_base_url: str | None = None,
         database_name: str | None = None,
         format: str | None = None,
+        project_id: str | None = None,
     ) -> list[Backup]:
+        self._backfill_deterministic_backup_ownership()
         query = "SELECT * FROM backups WHERE state = ?"
         params: list[str | int | None] = [BackupState.AVAILABLE.value]
         if source_base_url is not None:
@@ -1116,6 +1264,9 @@ class BackupCatalog:
         if format is not None:
             query += " AND format = ?"
             params.append(format)
+        if project_id is not None:
+            query += " AND project_id = ?"
+            params.append(project_id)
         query += " ORDER BY downloaded_at DESC, id DESC"
         rows = self._conn.execute(query, params).fetchall()
         result = []
@@ -1131,7 +1282,9 @@ class BackupCatalog:
         source_base_url: str,
         database_name: str,
         format: str | None = None,
+        project_id: str | None = None,
     ) -> Backup | None:
+        self._backfill_deterministic_backup_ownership()
         query = (
             "SELECT * FROM backups WHERE state = ? AND source_base_url = ? AND database_name = ?"
         )
@@ -1143,11 +1296,42 @@ class BackupCatalog:
         if format is not None:
             query += " AND format = ?"
             params.append(format)
+        if project_id is not None:
+            query += " AND project_id = ?"
+            params.append(project_id)
         query += " ORDER BY downloaded_at DESC, id DESC LIMIT 1"
         row = self._conn.execute(query, params).fetchone()
         if row is None:
             return None
         return _row_to_backup(row)
+
+    @_translate_sqlite_error
+    def _backfill_deterministic_backup_ownership(self) -> None:
+        """Repair only legacy rows whose environment evidence has one owner."""
+        if self._read_only:
+            return
+        environment_columns = {
+            str(row[1]) for row in self._conn.execute("PRAGMA table_info(environments)")
+        }
+        if "backup_id" not in environment_columns:
+            return
+        self._conn.execute(
+            """UPDATE backups
+               SET project_id = (
+                   SELECT MIN(p.project_id)
+                   FROM environments e
+                   JOIN projects p ON p.repository_root = e.repository_root
+                                  AND p.git_common_dir = e.git_common_dir
+                   WHERE e.backup_id = backups.id
+               )
+               WHERE project_id IS NULL
+                 AND (SELECT COUNT(DISTINCT p.project_id)
+                      FROM environments e
+                      JOIN projects p ON p.repository_root = e.repository_root
+                                     AND p.git_common_dir = e.git_common_dir
+                      WHERE e.backup_id = backups.id) = 1"""
+        )
+        self._conn.commit()
 
     @_translate_sqlite_error
     def get_backup_history(

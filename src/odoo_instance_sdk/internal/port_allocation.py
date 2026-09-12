@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError
+from odoo_instance_sdk.internal import paths as _paths
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
-from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.project import ProjectConfig
 
 if TYPE_CHECKING:
@@ -86,7 +86,7 @@ def _collect_used_ports(
     rows = (
         catalog.list_environments()
         if catalog is not None
-        else _read_environment_paths(get_catalog_path(ensure_exists=False))
+        else _read_environment_paths(_paths.get_catalog_path(ensure_exists=False))
     )
     for row in rows:
         repo_root = Path(str(row["repository_root"]))

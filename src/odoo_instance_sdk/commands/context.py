@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -28,6 +29,7 @@ ContextProvenance = Literal["explicit", "worktree", "cwd"]
 RuntimeSource = DevelopmentEnvironment | ProjectConfig
 OwnerKind = Literal["environment", "project"]
 BaseProvenance = Literal["environment", "project"]
+_DIAGNOSTIC_MODE: ContextVar[bool] = ContextVar("odoo_cli_diagnostic_mode", default=False)
 
 
 @dataclass(slots=True)
@@ -75,6 +77,7 @@ class ResolvedContext:
     instance: OdooInstance
     source: RuntimeSource
     provenance: ContextProvenance
+    materialization_error: str | None = None
 
     @property
     def is_environment(self) -> bool:
@@ -313,6 +316,7 @@ def ready_instance(cli_context: CliContext) -> ResolvedContext:
     """
     from odoo_instance_sdk.internal import context as _resolution
 
+    diagnostic = _DIAGNOSTIC_MODE.get()
     client = _client_class()(config=_client_config_class()(executable="odoo"))
     try:
         env_obj = resolve_environment(
@@ -324,7 +328,18 @@ def ready_instance(cli_context: CliContext) -> ResolvedContext:
         if cli_context.env is not None:
             raise
         project = _project_for_context(cli_context)
-        instance = client.instance.from_project(project)
+        try:
+            instance = client.instance.from_project(project)
+        except Exception as exc:
+            if not diagnostic:
+                raise
+            return _diagnostic_context(
+                client,
+                project,
+                provenance=None,
+                error=exc,
+                cli_context=cli_context,
+            )
         provenance: ContextProvenance = "explicit"
         if cli_context.project is None:
             provenance = (
@@ -340,16 +355,81 @@ def ready_instance(cli_context: CliContext) -> ResolvedContext:
         )
 
     if env_obj.state != EnvironmentState.READY:
-        raise RuntimeError(
+        error = RuntimeError(
             f"Environment {env_obj.name} ({env_obj.id}) is not ready (state={env_obj.state})"
         )
-    _resolution._verify_env_runtime(env_obj)
-    instance = client.instance.from_environment(env_obj)
+        if diagnostic:
+            return _diagnostic_context(
+                client,
+                env_obj,
+                provenance="explicit" if cli_context.env is not None else "worktree",
+                error=error,
+                cli_context=cli_context,
+            )
+        raise error
+    try:
+        _resolution._verify_env_runtime(env_obj)
+        instance = client.instance.from_environment(env_obj)
+    except Exception as exc:
+        if not diagnostic:
+            raise
+        return _diagnostic_context(
+            client,
+            env_obj,
+            provenance="explicit" if cli_context.env is not None else "worktree",
+            error=exc,
+            cli_context=cli_context,
+        )
     return ResolvedContext(
         client=client,
         instance=instance,
         source=env_obj,
         provenance="explicit" if cli_context.env is not None else "worktree",
+    )
+
+
+def _ready_instance_for_doctor(cli_context: CliContext) -> ResolvedContext:
+    """Resolve a doctor owner while retaining runtime validation failures."""
+    token = _DIAGNOSTIC_MODE.set(True)
+    try:
+        return ready_instance(cli_context)
+    finally:
+        _DIAGNOSTIC_MODE.reset(token)
+
+
+def _diagnostic_context(
+    client: OdooClient,
+    source: RuntimeSource,
+    *,
+    provenance: ContextProvenance | None,
+    error: Exception,
+    cli_context: CliContext,
+) -> ResolvedContext:
+    """Keep the selected owner available to doctor after runtime validation fails."""
+    from odoo_instance_sdk.config import InstanceConfig
+    from odoo_instance_sdk.internal import context as _resolution
+    from odoo_instance_sdk.resources.instance import OdooInstance
+
+    if isinstance(source, ProjectConfig):
+        owner_provenance: ContextProvenance = "explicit"
+        if cli_context.project is None:
+            owner_provenance = (
+                "worktree"
+                if _resolution._project_from_registered_worktree(Path.cwd()) is not None
+                else "cwd"
+            )
+        base_url = "http://127.0.0.1:8069"
+    else:
+        owner_provenance = provenance or "worktree"
+        base_url = f"http://{source.http_interface}:{source.http_port}"
+    instance = OdooInstance(config=InstanceConfig(base_url=base_url), _client=client)
+    message = str(error) or type(error).__name__
+    return ResolvedContext(
+        client=client,
+        instance=instance,
+        source=source,
+        provenance=owner_provenance,
+        materialization_error=message,
     )
 
 

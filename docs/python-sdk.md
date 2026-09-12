@@ -3,7 +3,10 @@
 These examples use only the public `odoo_instance_sdk` package. They are
 syntax-checked and import-checked in the offline test suite. Operations that
 connect to Odoo, Git, Docker, or PostgreSQL require the corresponding local
-service and configuration.
+service and configuration. Global SDK state is stored below `~/.odcli`; the
+first catalogue-backed operation migrates legacy platformdirs locations with a
+locked, journaled, retry-safe migration. Repository-local `.odcli` manifests
+are separate project data and are never migrated into that global root.
 
 ## Create a client and instance
 
@@ -194,7 +197,7 @@ CLI from an initialized project when local ownership and storage evidence is
 needed:
 
 ```bash
-odcli resource list --format json
+odcli resource ls --format json
 odcli resource doctor --format toon
 ```
 
@@ -210,7 +213,61 @@ Use `db restore UUID --dry-run` to inspect a local restore before confirmation.
 The default changes only after restore, neutralization, postcondition, audit,
 and optional admin reset complete. Ctrl-C returns exit `130`; JSON/TOON keep
 one progress-free document on stdout and put sanitized diagnostics on stderr.
-The public SDK method inventory remains unchanged.
+The public SDK exposes these typed operations directly while CLI-only resource
+diagnosis remains CLI-private.
+
+## Modules and translations
+
+Module discovery is exposed from an instance and reads safe literal manifests
+on demand. It does not execute `__manifest__.py` or persist a second catalogue:
+
+```python
+for module in instance.modules.catalogue():
+    print(module.name, module.path, module.depends)
+
+order = instance.modules.install_order(("sale",))
+print(order.modules)
+```
+
+The CLI adds `module info`, `module where`, `module deps`, and
+`module install-order`; `module update --changed` reuses the captured changed
+file selection and fails closed for unmapped or not-installed modules.
+Translation export remains a CLI workflow. It optionally validates generated
+PO input with an absolute `msgfmt` executable and `LC_ALL=C`; an unavailable
+tool is reported as a typed result and is never installed as a package
+dependency. Publication is atomic and `--dry-run` does not write output.
+
+## Git workflow
+
+The public instance exposes a concrete tracker-neutral Git resource. It uses
+staged files, the shared immutable command boundary, and the module catalogue
+for scope inference:
+
+```python
+context = instance.git.commit_context(
+    "describe the staged change", ticket="PROJ-123", tag="DOC"
+)
+print(context.message)
+
+check = instance.git.check(base="main")
+print(check.valid, check.issues)
+
+commit = instance.git.commit_command(context)
+print(commit.plan)
+```
+
+`git absorb` is an optional captured `git-absorb` adapter. `git sync` fetches,
+rebases, validates the result, and can publish only the same branch to an SSH
+`origin`; a stale remote lease or conflict fails without an automatic retry.
+Configured ticket links use `ticket_link_enabled` and `ticket_base_url` in the
+project manifest. Historical vendor-specific settings are rejected or require
+actionable migration, and no external tracker or forge client is contacted.
+
+Machine-readable CLI output uses the explicit leaf-local `--format json` or
+`--format toon` selector; the removed `--json` option is not a compatibility
+alias. Eligible bounded results may additionally use typed dotted `--fields`
+projection. Machine documents and `env path` preserve absolute paths; only
+human Rich presentation may shorten paths beneath `HOME`.
 
 ## Snapshot monitoring
 

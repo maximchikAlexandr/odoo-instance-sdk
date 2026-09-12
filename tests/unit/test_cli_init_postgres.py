@@ -315,6 +315,93 @@ def test_init_compose_refuses_pretracked_generated_config_without_secret_write(
     assert tracked.returncode == 0
 
 
+def test_reinit_validates_generated_target_before_noop_and_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    args = [
+        *_base_args(tmp_path),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+    ]
+    runner = CliRunner()
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    original = generated.read_bytes()
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-f", str(generated)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.email=test@test.com",
+            "-c",
+            "user.name=Test",
+            "commit",
+            "-qm",
+            "tracked-runtime-config",
+        ],
+        check=True,
+    )
+
+    no_op = runner.invoke(cli, args)
+    assert no_op.exit_code == 1
+    assert "tracked" in no_op.output.lower()
+    assert generated.read_bytes() == original
+
+    generated.unlink()
+    generated.symlink_to(tmp_path / "odoo.conf")
+    dry_run = runner.invoke(cli, [*args, "--dry-run"])
+    assert dry_run.exit_code == 1
+    assert "symlink" in dry_run.output.lower()
+    assert generated.is_symlink()
+
+
+def test_reinit_repairs_stale_generated_config_without_manifest_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    args = [
+        *_base_args(tmp_path),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+    ]
+    runner = CliRunner()
+    first = runner.invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    manifest = tmp_path / ".odcli" / "project.toml"
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    manifest_bytes = manifest.read_bytes()
+    generated.write_text(generated.read_text() + "\ncustom = drift\n")
+
+    repaired = runner.invoke(cli, args)
+    assert repaired.exit_code == 0, repaired.output
+    assert "repaired" in repaired.output.lower()
+    assert manifest.read_bytes() == manifest_bytes
+    assert "custom = drift" not in generated.read_text()
+    assert generated.stat().st_mode & 0o777 == 0o600
+
+
 def test_init_compose_fails_closed_when_git_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -470,7 +557,8 @@ def test_init_dry_run_json_reports_postgres_plan(tmp_path: Path) -> None:
         [
             *_base_args(tmp_path),
             "--dry-run",
-            "--json",
+            "--format",
+            "json",
             "--postgres",
             "compose",
             "--postgres-image",
@@ -582,7 +670,8 @@ def test_init_postgres_provenance_recorded(tmp_path: Path) -> None:
         [
             *_base_args(tmp_path),
             "--dry-run",
-            "--json",
+            "--format",
+            "json",
             "--postgres",
             "compose",
             "--postgres-image",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import contextlib
+import io
 import os
 import tempfile
 from pathlib import Path
@@ -31,7 +32,7 @@ def _rebase_path(entry: str, repo_root: Path, worktree: Path) -> str:
     return str((worktree / rel).resolve())
 
 
-def generate_config(
+def render_config(
     source_config: Path | None,
     dest: Path,
     *,
@@ -44,7 +45,7 @@ def generate_config(
     db_port: int | None = None,
     db_user: str | None = None,
     db_password: str | None = None,
-) -> None:
+) -> str:
     src = configparser.RawConfigParser(interpolation=None)
     if source_config is not None:
         src.read(str(source_config))
@@ -79,11 +80,43 @@ def generate_config(
     if options.get("logfile", "").strip():
         options["logfile"] = str((dest.parent / "odoo.log").resolve())
 
+    output = io.StringIO()
+    src.write(output)
+    return output.getvalue()
+
+
+def generate_config(
+    source_config: Path | None,
+    dest: Path,
+    *,
+    repo_root: Path,
+    worktree: Path,
+    http_interface: str,
+    http_port: int,
+    db_name: str,
+    db_host: str | None = None,
+    db_port: int | None = None,
+    db_user: str | None = None,
+    db_password: str | None = None,
+) -> None:
+    content = render_config(
+        source_config,
+        dest,
+        repo_root=repo_root,
+        worktree=worktree,
+        http_interface=http_interface,
+        http_port=http_port,
+        db_name=db_name,
+        db_host=db_host,
+        db_port=db_port,
+        db_user=db_user,
+        db_password=db_password,
+    )
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(dest.parent), prefix=dest.name + ".", suffix=".tmp")
     try:
-        with open(fd, "w") as f:
-            src.write(f)
+        with open(fd, "w", encoding="utf-8") as f:
+            f.write(content)
         os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, str(dest))
     except BaseException:

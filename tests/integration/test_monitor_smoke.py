@@ -69,10 +69,6 @@ def test_monitor_headless_api_multi_project_snapshot(
 
     catalog_path = tmp_path / "catalog.sqlite3"
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.get_catalog_path",
-        lambda **_kwargs: catalog_path,
-    )
-    monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_catalog_path",
         lambda **_kwargs: catalog_path,
     )

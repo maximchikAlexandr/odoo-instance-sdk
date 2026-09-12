@@ -113,7 +113,7 @@ def test_http_allocation_reads_existing_catalog_without_opening_it(
     _register_env(catalog, project_a, generated)
     catalog.close()
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.port_allocation.get_catalog_path",
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
         lambda **_kwargs: catalog_path,
     )
 

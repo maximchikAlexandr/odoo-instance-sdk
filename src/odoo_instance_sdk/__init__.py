@@ -109,9 +109,14 @@ if TYPE_CHECKING:
         EnvironmentCheckoutResult,
         EnvironmentPythonMode,
         EnvironmentState,
+        GitAbsorbResult,
         GitActivity,
         GitActivityState,
+        GitCheckIssue,
+        GitCheckResult,
+        GitCommitContext,
         GitDiff,
+        GitSyncResult,
         HttpError,
         HttpErrorCode,
         IndexBloat,
@@ -165,7 +170,9 @@ if TYPE_CHECKING:
         EnvironmentDatabaseMode,
         EnvironmentResource,
     )
+    from odoo_instance_sdk.resources.git import GitResource
     from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
+    from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -192,6 +199,8 @@ if TYPE_CHECKING:
             | EnvironmentMonitor
             | InstanceFactory
             | OdooInstance
+            | ModuleResource
+            | GitResource
             | PostgresCluster
         ]
         | _CanonicalBytes
@@ -230,6 +239,20 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "ClusterResourceSnapshot": ("odoo_instance_sdk.models", "ClusterResourceSnapshot"),
     "ClusterSnapshot": ("odoo_instance_sdk.models", "ClusterSnapshot"),
     "CommandResult": ("odoo_instance_sdk.models", "CommandResult"),
+    "Module": ("odoo_instance_sdk.models", "Module"),
+    "ModuleInfo": ("odoo_instance_sdk.models", "ModuleInfo"),
+    "ModuleDependencies": ("odoo_instance_sdk.models", "ModuleDependencies"),
+    "ModuleDependencyResult": ("odoo_instance_sdk.models", "ModuleDependencyResult"),
+    "ModuleDependency": ("odoo_instance_sdk.models", "ModuleDependency"),
+    "ModuleInstallOrder": ("odoo_instance_sdk.models", "ModuleInstallOrder"),
+    "ModuleInstallOrderResult": ("odoo_instance_sdk.models", "ModuleInstallOrderResult"),
+    "ModuleOperationInProgressError": (
+        "odoo_instance_sdk.exceptions",
+        "ModuleOperationInProgressError",
+    ),
+    "ModuleResource": ("odoo_instance_sdk.resources.module", "ModuleResource"),
+    "ModuleUpdatePlan": ("odoo_instance_sdk.models", "ModuleUpdatePlan"),
+    "ModuleUpdateResult": ("odoo_instance_sdk.models", "ModuleUpdateResult"),
     "BloatCapabilities": ("odoo_instance_sdk.models", "BloatCapabilities"),
     "CommandTimeoutError": ("odoo_instance_sdk.exceptions", "CommandTimeoutError"),
     "ConfigError": ("odoo_instance_sdk.exceptions", "ConfigError"),
@@ -279,7 +302,17 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "EnvironmentState": ("odoo_instance_sdk.models", "EnvironmentState"),
     "GitActivity": ("odoo_instance_sdk.models", "GitActivity"),
     "GitActivityState": ("odoo_instance_sdk.models", "GitActivityState"),
+    "GitAbsorbNotFoundError": ("odoo_instance_sdk.exceptions", "GitAbsorbNotFoundError"),
+    "GitAbsorbResult": ("odoo_instance_sdk.models", "GitAbsorbResult"),
+    "GitCheckIssue": ("odoo_instance_sdk.models", "GitCheckIssue"),
+    "GitCheckResult": ("odoo_instance_sdk.models", "GitCheckResult"),
+    "GitCommitContext": ("odoo_instance_sdk.models", "GitCommitContext"),
     "GitDiff": ("odoo_instance_sdk.models", "GitDiff"),
+    "GitResource": ("odoo_instance_sdk.resources.git", "GitResource"),
+    "GitScopeError": ("odoo_instance_sdk.exceptions", "GitScopeError"),
+    "GitSyncError": ("odoo_instance_sdk.exceptions", "GitSyncError"),
+    "GitSyncResult": ("odoo_instance_sdk.models", "GitSyncResult"),
+    "GitWorkflowError": ("odoo_instance_sdk.exceptions", "GitWorkflowError"),
     "HttpError": ("odoo_instance_sdk.models", "HttpError"),
     "HttpErrorCode": ("odoo_instance_sdk.models", "HttpErrorCode"),
     "IndexBloat": ("odoo_instance_sdk.models", "IndexBloat"),
@@ -499,9 +532,19 @@ __all__ = [
     "EnvironmentSnapshot",
     "EnvironmentState",
     "ExecutionPlan",
+    "GitAbsorbNotFoundError",
+    "GitAbsorbResult",
     "GitActivity",
     "GitActivityState",
+    "GitCheckIssue",
+    "GitCheckResult",
+    "GitCommitContext",
     "GitDiff",
+    "GitResource",
+    "GitScopeError",
+    "GitSyncError",
+    "GitSyncResult",
+    "GitWorkflowError",
     "HttpError",
     "HttpErrorCode",
     "IndexBloat",

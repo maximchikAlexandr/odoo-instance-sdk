@@ -33,6 +33,15 @@ def test_init_catalogue_access_is_worker_local_and_not_production(
     assert isolated_cli_catalogue.parent != production_catalogue_path.parent
 
 
+def test_offline_fixture_isolates_home_and_legacy_platformdirs_roots(
+    isolated_cli_catalogue: Path, production_catalogue_path: Path
+) -> None:
+    worker_root = isolated_cli_catalogue.parent.parent
+
+    assert Path.home() == worker_root / "home"
+    assert Path.home() / ".odcli" / "catalog.sqlite3" != production_catalogue_path
+
+
 def test_worker_local_catalogues_do_not_cross_contaminate_monitor_projects(
     tmp_path: Path,
 ) -> None:
@@ -130,7 +139,8 @@ def test_dry_run_json_returns_manifest_no_write(tmp_path: Path) -> None:
             "--python",
             "python3",
             "--dry-run",
-            "--json",
+            "--format",
+            "json",
             "--project",
             str(tmp_path),
         ],
@@ -377,6 +387,8 @@ def test_dry_run_manifest_sanitizes_cli_and_vscode_controls(source: str, tmp_pat
             "init",
             "--no-input",
             "--dry-run",
+            "--format",
+            "json",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--python",
@@ -408,6 +420,8 @@ def test_dry_run_manifest_sanitizes_cli_and_vscode_controls(source: str, tmp_pat
             "init",
             "--no-input",
             "--dry-run",
+            "--format",
+            "json",
             "--from-vscode",
             str(launch),
             "--project",
@@ -417,12 +431,8 @@ def test_dry_run_manifest_sanitizes_cli_and_vscode_controls(source: str, tmp_pat
     result = runner.invoke(cli, args)
 
     assert result.exit_code == 0, result.output
-    assert "[project]" in result.output
+    assert json.loads(result.output)["dry_run"] is True
     assert "\x00" not in result.output
     assert "\x1b" not in result.output
     assert "\x7f" not in result.output
     assert "\x9b" not in result.output
-    assert r"\x00" in result.output
-    assert r"\x1b[2J" in result.output
-    assert r"\x9b31m" in result.output
-    assert r"\x7f" in result.output

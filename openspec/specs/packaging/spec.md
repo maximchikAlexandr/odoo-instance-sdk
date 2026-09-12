@@ -189,3 +189,10 @@ CI and `make pr` SHALL run source-level gates that reject direct production subp
 - **WHEN** a contributor opens repository-local `AGENTS.md`
 - **THEN** the required execution, output, typing, and minimal-abstraction invariants are explicit and match the enforced gates
 
+### Requirement: Optional host tools are not package dependencies
+Neither `msgfmt` nor `git-absorb`, any wrapper/downloader/installer, or an `odcli-absorb` package SHALL appear in core or optional Python dependency metadata. Commands SHALL discover these host executables on demand and doctor SHALL report optional capability without making unrelated health fail. [Sources: GH#54; GH#65]
+
+#### Scenario: Build package metadata
+- **WHEN** wheel, sdist, and dependency inventories are checked
+- **THEN** no gettext or git-absorb package boundary has been introduced
+

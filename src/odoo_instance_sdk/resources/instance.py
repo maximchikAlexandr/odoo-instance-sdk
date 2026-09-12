@@ -10,6 +10,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -93,6 +94,8 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.internal.project_runtime import DeferredProjectRuntime
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
+    from odoo_instance_sdk.resources.git import GitResource
+    from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
@@ -831,6 +834,8 @@ class OdooInstance:
     config: InstanceConfig
     _client: OdooClient
     databases: DatabaseResource = field(init=False)
+    modules: ModuleResource = field(init=False)
+    git: GitResource = field(init=False)
     _artifact_lock_path: Path | None = field(default=None, repr=False)
     _postgres_cluster: PostgresCluster | None = field(default=None, repr=False)
     _environment_id: str | None = field(default=None, repr=False)
@@ -842,6 +847,11 @@ class OdooInstance:
             master_password=self.config.master_password,
             _instance=self,
         )
+        from odoo_instance_sdk.resources.git import GitResource
+        from odoo_instance_sdk.resources.module import ModuleResource
+
+        self.modules = ModuleResource(self)
+        self.git = GitResource(self)
 
     def __repr__(self) -> str:
         return f"OdooInstance(base_url={self.config.base_url!r}, databases=<DatabaseResource>)"
@@ -1002,6 +1012,7 @@ class OdooInstance:
         )
 
         def execute(context: RunContext[OdooProcess]) -> OdooProcess:
+            _assert_http_port_free(config)
             self._ensure_dependencies_ready(
                 context,
                 dependency_steps=dependency_steps,
@@ -1178,10 +1189,8 @@ class OdooInstance:
             return
         try:
             catalog = cast("_RuntimeCatalog", self._client.get_catalog())
-            if binding is not None:
-                catalog._clear_runtime(binding.owner_kind, binding.owner_id)
-            elif environment_id is not None:
-                catalog._clear_runtime("environment", environment_id)
+            owner = _runtime_owner(binding, environment_id)
+            catalog._clear_runtime(*owner)
         except Exception as e:
             print(f"failed to clear environment runtime: {e}", file=sys.stderr)
 
@@ -1849,10 +1858,238 @@ class OdooInstance:
         )
 
 
+def _runtime_owner(binding: _RuntimeBinding | None, environment_id: str | None) -> tuple[str, str]:
+    if binding is not None:
+        return binding.owner_kind, binding.owner_id
+    return "environment", environment_id or ""
+
+
+def _auxiliary_start_step(instance: OdooInstance) -> tuple[PreparedStep, StartConfig, str | None]:
+    """Capture the exact private launch inputs for a restore helper."""
+    config = instance.config.start_config
+    if config is None:
+        raise InstanceConfigurationError(
+            "stopped-project restore requires a project StartConfig; run `odcli init`"
+        )
+    snapshot, cli_args, secret_path, _ = _snapshot_start_inputs(config)
+    environment_snapshot, environment_overrides = captured_child_environment(
+        None, project_environment=instance.config.project_environment
+    )
+    step = PreparedStep(
+        step_id="database.restore.auxiliary.start",
+        argv=(*instance._executable_prefix(), *cli_args),
+        cwd=None if instance.config.default_cwd is None else str(instance.config.default_cwd),
+        environment=environment_overrides,
+        environment_snapshot=environment_snapshot,
+        environment_overrides=environment_overrides,
+        secret_config_path=secret_path,
+        secret_values=tuple(value for value in (snapshot.db_password, secret_path) if value),
+        mode="long-running",
+        mutating=True,
+        long_running=True,
+        start_new_session=True,
+    )
+    return step, snapshot, secret_path
+
+
+def auxiliary_restore_session(instance: OdooInstance) -> AuxiliaryRestoreSession:
+    step, secret_config, secret_path = _auxiliary_start_step(instance)
+    return AuxiliaryRestoreSession(
+        instance=instance,
+        start_step=step,
+        ready_action=PreparedAction(
+            step_id="database.restore.auxiliary.ready",
+            action="wait-auxiliary-database-manager",
+            description="Wait for the owned auxiliary Database Manager",
+            read_only=True,
+        ),
+        cleanup_action=PreparedAction(
+            step_id="database.restore.auxiliary.cleanup",
+            action="stop-auxiliary-database-manager",
+            description="Stop the owned auxiliary Database Manager",
+            mutating=True,
+        ),
+        secret_config=secret_config,
+        secret_path=secret_path,
+    )
+
+
+@dataclass(slots=True)
+class AuxiliaryRestoreSession:
+    """Own one bounded Odoo process used only by a stopped-project restore."""
+
+    instance: OdooInstance
+    start_step: PreparedStep
+    ready_action: PreparedAction
+    cleanup_action: PreparedAction
+    secret_config: StartConfig | None = None
+    secret_path: str | None = None
+    process: OdooProcess | None = None
+    using_existing_runtime: bool = False
+
+    def ensure_started(self, context: RunContext[PrivateJsonValue]) -> None:
+        if self.process is not None or self.using_existing_runtime:
+            return
+        config = self.instance.config.start_config
+        if config is None:
+            raise InstanceConfigurationError(
+                "stopped-project restore has no auxiliary Odoo configuration; "
+                "run `odcli init` and retry"
+            )
+        if _project_runtime_owns_port(self.instance, config):
+            self.using_existing_runtime = True
+            return
+        _assert_http_port_free(config)
+        if self.secret_config is not None and self.secret_path is not None:
+            _write_secret_config(self.secret_config, self.secret_path)
+        handle: ProcessHandle | None = None
+        try:
+            handle = context.spawn(self.start_step.step_id)
+            process = OdooProcess(
+                id=uuid.uuid4().hex,
+                pid=handle.pid,
+                args=list(self.start_step.argv),
+                started_at=time.time(),
+            )
+            self.instance._client.register_process(process, handle.process, self.secret_path)
+            self.process = process
+            context.action(self.ready_action.step_id)
+            try:
+                self.instance.wait_ready(process, timeout=60.0)
+            except BaseException as error:
+                context.fail_action(self.ready_action.step_id, error)
+                from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
+
+                raise DatabaseManagerUnavailableError(
+                    "auxiliary database manager failed readiness; "
+                    "resolve the project runtime and retry, or run `odcli run`"
+                ) from None
+            context.complete_action(self.ready_action.step_id)
+        except BaseException:
+            if self.process is None:
+                if handle is not None:
+                    with contextlib.suppress(BaseException):
+                        terminate(handle, process_group_id=handle.process_group_id, timeout=10.0)
+                cleanup_secret_config(self.secret_path)
+            if handle is None:
+                from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
+
+                raise DatabaseManagerUnavailableError(
+                    "auxiliary database manager failed to start; "
+                    "resolve the project runtime and retry, or run `odcli run`"
+                ) from None
+            raise
+
+    def _skip_unconsumed_steps(self, context: RunContext[PrivateJsonValue]) -> None:
+        for step_id in (
+            self.start_step.step_id,
+            self.ready_action.step_id,
+            self.cleanup_action.step_id,
+        ):
+            if context.planned(step_id) and not context.consumed(step_id):
+                context.skip(step_id)
+
+    def cleanup(self, context: RunContext[PrivateJsonValue]) -> None:
+        if self.using_existing_runtime:
+            self._skip_unconsumed_steps(context)
+            return
+        if self.process is None:
+            self._skip_unconsumed_steps(context)
+            cleanup_secret_config(self.secret_path)
+            return
+        if context.planned(self.cleanup_action.step_id) and not context.consumed(
+            self.cleanup_action.step_id
+        ):
+            context.action(self.cleanup_action.step_id)
+        secret_path = self.secret_path
+        try:
+            owned, registered_secret_path = self.instance._client.unregister_process(
+                self.process.id
+            )
+            secret_path = registered_secret_path or secret_path
+            if owned is not None:
+                terminate(
+                    ProcessHandle(
+                        process=owned,
+                        argv=(),
+                        process_group_id=owned.pid,
+                        session_id=owned.pid,
+                        inherited_stdio=False,
+                    ),
+                    process_group_id=owned.pid,
+                    timeout=10.0,
+                )
+        finally:
+            try:
+                cleanup_secret_config(secret_path)
+            except BaseException:
+                if sys.exc_info()[1] is None:
+                    raise
+        if context.planned(self.cleanup_action.step_id) and context.consumed(
+            self.cleanup_action.step_id
+        ):
+            context.complete_action(self.cleanup_action.step_id)
+
+
+_ACTIVE_AUXILIARY_RESTORE: ContextVar[AuxiliaryRestoreSession | None] = ContextVar(
+    "odcli_auxiliary_restore", default=None
+)
+
+
 def _resolve_project_python(root: Path, value: str | Path | None) -> Path:
     from odoo_instance_sdk.internal.project_runtime import resolve_project_runtime
 
     return resolve_project_runtime(root, value, field="python")
+
+
+def active_auxiliary_restore_session() -> AuxiliaryRestoreSession | None:
+    return _ACTIVE_AUXILIARY_RESTORE.get()
+
+
+def activate_auxiliary_restore_session(
+    session: AuxiliaryRestoreSession,
+) -> Token[AuxiliaryRestoreSession | None]:
+    return _ACTIVE_AUXILIARY_RESTORE.set(session)
+
+
+def reset_auxiliary_restore_session(token: Token[AuxiliaryRestoreSession | None]) -> None:
+    _ACTIVE_AUXILIARY_RESTORE.reset(token)
+
+
+def _project_runtime_owns_port(instance: OdooInstance, config: StartConfig) -> bool:
+    """Prove that an occupied project port belongs to its recorded runtime.
+
+    A listening port is never trusted on connection failure.  The only safe
+    exception is the runtime row persisted for this exact project, with the
+    same port and a live process whose create time still matches the row.
+    """
+    binding = instance._runtime_binding
+    if binding is None or binding.owner_kind != "project":
+        return False
+    catalog = cast("_RuntimeCatalog", instance._client.get_catalog())
+    snapshot_reader = getattr(catalog, "_monitor_snapshot_rows", None)
+    if not callable(snapshot_reader):
+        return False
+    try:
+        snapshot = snapshot_reader(project_id=binding.project_id)
+        runtimes = getattr(snapshot, "project_runtimes", ())
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+    for runtime in runtimes:
+        try:
+            if str(runtime["owner_id"]) != binding.owner_id:
+                continue
+            if int(str(runtime["http_port"])) != config.http_port:
+                continue
+            root_pid = int(str(runtime["root_pid"]))
+            recorded_create_time = float(str(runtime["create_time"]))
+            process = psutil.Process(root_pid)
+            if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+                continue
+            return float(process.create_time()) == recorded_create_time
+        except (KeyError, OSError, TypeError, ValueError, psutil.Error):
+            continue
+    return False
 
 
 def _project_runtime_binding(

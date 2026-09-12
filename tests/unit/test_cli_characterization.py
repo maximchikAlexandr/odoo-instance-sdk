@@ -53,6 +53,7 @@ ROOT_HELP_DESCRIPTIONS = (
     "Select and run Odoo tests.",
     "Export Odoo module translations.",
     "Generate VS Code launch configuration.",
+    "Generate and safely synchronize Odoo Git workflows.",
 )
 
 
@@ -182,6 +183,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "exec",
         "test",
         "module",
+        "git",
         "translations",
         "deps",
         "vscode",
@@ -210,7 +212,7 @@ def test_rich_click_help_covers_root_nested_and_typed_leaf() -> None:
     assert "[required]" in typed_help
     assert "--format" in typed_help
     assert "[rich|json|toon]" in typed_help
-    assert "--json" in typed_help
+    assert "--json" not in typed_help
 
 
 def test_rich_click_help_uses_bounded_panels_without_ansi_when_redirected() -> None:
@@ -276,27 +278,28 @@ def test_shell_completion_still_discovers_nested_commands() -> None:
     )
 
     assert result.exit_code == 0
+    assert "plain,ls" in result.stdout
     assert "plain,list" in result.stdout
     assert "plain,test" in result.stdout
     assert "plain,update" in result.stdout
 
 
-def test_command_local_json_placement_is_stable() -> None:
+def test_command_local_json_alias_is_removed() -> None:
     for case in PUBLIC_LEAF_CASES:
         if not case.is_bounded:
             continue
         path = case.path
         command = _command(path)
-        assert "--json" in _option_names(command), path
+        assert "--json" not in _option_names(command), path
         help_result = CliRunner().invoke(cli, [*path, "--help"])
         assert help_result.exit_code == 0
-        assert "--json" in help_result.output
+        assert "--json" not in help_result.output
 
     for path in (("logs",), ("monitor",)):
         assert "--json" not in _option_names(_command(path)), path
     for path in (("run",), ("shell",)):
         assert "--dry-run" in _option_names(_command(path)), path
-        assert "--json" in _option_names(_command(path)), path
+        assert "--json" not in _option_names(_command(path)), path
 
     root_json = CliRunner().invoke(cli, ["--json", "env", "list"])
     assert root_json.exit_code == 2
@@ -308,12 +311,9 @@ def test_command_local_json_placement_is_stable() -> None:
 @pytest.mark.parametrize(
     "option",
     [
-        ("--json",),
         ("--format", "rich"),
         ("--format", "json"),
         ("--format", "toon"),
-        ("--json", "--format", "json"),
-        ("--format", "json", "--json"),
     ],
 )
 def test_raw_stream_output_options_require_dry_run_before_sdk_resolution(
@@ -325,7 +325,7 @@ def test_raw_stream_output_options_require_dry_run_before_sdk_resolution(
     ):
         result = CliRunner().invoke(cli, [leaf, *option])
     assert result.exit_code == 2
-    assert "require --dry-run" in result.stderr
+    assert "requires --dry-run" in result.stderr
 
 
 @pytest.mark.parametrize("leaf", ["run", "shell"])
@@ -336,7 +336,6 @@ def test_raw_stream_output_options_require_dry_run_before_sdk_resolution(
         ("--format", "rich"),
         ("--format", "json"),
         ("--format", "toon"),
-        ("--json",),
     ],
 )
 def test_raw_stream_dry_run_emits_one_captured_command_without_running(
@@ -392,7 +391,7 @@ def test_raw_stream_dry_run_emits_one_captured_command_without_running(
         assert "Plan: " + leaf in result.stdout
         assert "instance." + leaf in result.stdout
     else:
-        if option == ("--format", "json") or option == ("--json",):
+        if option == ("--format", "json"):
             payload = json.loads(result.stdout)
         else:
             from toon import DecodeOptions, decode
@@ -405,7 +404,7 @@ def test_raw_stream_dry_run_emits_one_captured_command_without_running(
 
 
 @pytest.mark.parametrize("leaf", ["run", "shell"])
-def test_raw_stream_json_alias_matches_format_json_on_one_captured_command(leaf: str) -> None:
+def test_raw_stream_format_json_is_stable_on_one_captured_command(leaf: str) -> None:
     _command, executor, effects, instance = _captured_raw_command(leaf)
     suffix = ["--", "--dev"]
 
@@ -422,16 +421,15 @@ def test_raw_stream_json_alias_matches_format_json_on_one_captured_command(leaf:
         ):
             return CliRunner().invoke(cli, [leaf, *options, *suffix])
 
-    alias_result = invoke(["--dry-run", "--json"])
     format_result = invoke(["--dry-run", "--format", "json"])
 
-    assert alias_result.exit_code == format_result.exit_code == 0
-    assert json.loads(alias_result.stdout) == json.loads(format_result.stdout)
-    assert alias_result.stderr == format_result.stderr == ""
+    assert format_result.exit_code == 0
+    assert json.loads(format_result.stdout)["dry_run"] is True
+    assert format_result.stderr == ""
     assert effects == []
     assert executor.executed == []
     method = instance.run_foreground_command if leaf == "run" else instance.shell_command
-    assert method.call_count == 2
+    assert method.call_count == 1
     expected_args: tuple[str, ...] | list[str] = ("--dev",) if leaf == "run" else ["--dev"]
     assert all(call.kwargs == {"args": expected_args} for call in method.call_args_list)
 
@@ -440,8 +438,6 @@ def test_raw_stream_json_alias_matches_format_json_on_one_captured_command(leaf:
 @pytest.mark.parametrize(
     "options",
     [
-        ("--dry-run", "--json"),
-        ("--json", "--dry-run"),
         ("--dry-run", "--format", "rich"),
         ("--format", "rich", "--dry-run"),
         ("--dry-run", "--format", "json"),
@@ -645,7 +641,8 @@ def test_json_success_envelope_v1_is_complete_and_result_equals_data(tmp_path: P
             "init",
             "--no-input",
             "--dry-run",
-            "--json",
+            "--format",
+            "json",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--project",
@@ -673,7 +670,7 @@ def test_json_failure_envelope_v1_is_complete_and_sanitized() -> None:
         "odoo_instance_sdk.cli.cli_context.ready_instance",
         side_effect=RuntimeError(diagnostic),
     ):
-        result = CliRunner().invoke(cli, ["eval", "1", "--json"])
+        result = CliRunner().invoke(cli, ["eval", "1", "--format", "json"])
 
     assert result.exit_code == 1
     assert result.stderr == ""
@@ -701,7 +698,7 @@ def test_non_json_failure_is_sanitized_to_stderr_only() -> None:
 
 
 def test_click_parse_failure_remains_native_usage_error() -> None:
-    result = CliRunner().invoke(cli, ["eval", "1", "--json", "--not-an-option"])
+    result = CliRunner().invoke(cli, ["eval", "1", "--format", "json", "--not-an-option"])
 
     assert result.exit_code == 2
     assert result.stdout == ""
@@ -813,7 +810,7 @@ def test_run_native_exit_code_and_streams_remain_unwrapped() -> None:
 
 
 @pytest.mark.parametrize(
-    "output", [("--format", "rich"), ("--format", "json"), ("--format", "toon"), ("--json",)]
+    "output", [("--format", "rich"), ("--format", "json"), ("--format", "toon")]
 )
 def test_run_dry_run_formats_use_single_shared_rich_projection(
     output: tuple[str, ...],
@@ -946,7 +943,7 @@ def test_outside_project_all_projects_listing_does_not_require_context(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", return_value=empty
         ) as snapshot,
     ):
-        result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+        result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     envelope = json.loads(result.stdout)

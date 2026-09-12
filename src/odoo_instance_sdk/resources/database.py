@@ -575,6 +575,17 @@ class DatabaseResource:
 
     def names(self) -> tuple[str, ...]:
         """Return database names without touching the local audit catalog."""
+        from odoo_instance_sdk.internal.proc import active_context
+        from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
+
+        session = active_auxiliary_restore_session()
+        context = active_context()
+        if session is not None:
+            if context is None:
+                raise DatabaseManagerUnavailableError(
+                    "auxiliary database manager has no active execution context"
+                )
+            session.ensure_started(context)
         try:
             with self._http() as http:
                 resp = http.post(
@@ -920,6 +931,11 @@ class DatabaseResource:
         part_preexisted = part_path.exists()
         published = False
         catalog = self._instance._client.get_catalog()
+        project_id = (
+            self._instance._runtime_binding.project_id
+            if self._instance._runtime_binding is not None
+            else None
+        )
         catalog.start_download(
             backup_id=backup_id,
             source_base_url=self.base_url,
@@ -928,6 +944,7 @@ class DatabaseResource:
             filestore_requested=filestore,
             path=part_path,
             source_git_branch=source_git_branch,
+            project_id=project_id,
         )
 
         try:

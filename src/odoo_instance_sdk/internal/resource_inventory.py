@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
 
@@ -123,7 +123,7 @@ class ResourceInventory(msgspec.Struct, frozen=True, forbid_unknown_fields=True,
 
     resources: tuple[ResourceInventoryItem, ...]
     findings: tuple[ResourceFinding, ...]
-    complete: bool
+    complete: Annotated[bool, "odcli-structural"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +195,7 @@ def open_catalog_read_only(path: Path) -> BackupCatalog | None:
 
     catalog = BackupCatalog.__new__(BackupCatalog)
     catalog.db_path = path
+    catalog._read_only = True
     catalog._conn = sqlite3.connect(
         f"file:{quote(str(path.resolve()), safe='/')}?mode=ro", uri=True
     )

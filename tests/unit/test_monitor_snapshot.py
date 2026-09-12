@@ -1225,6 +1225,7 @@ def test_default_monitor_works_with_core_process_dependency(tmp_path: Path) -> N
 
 
 def test_cluster_status_cached_5s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.resources.monitor.time.monotonic", lambda: 0.0)
     catalog = _make_catalog(tmp_path)
     e1 = str(uuid.uuid4())
     wt = tmp_path / "wt"

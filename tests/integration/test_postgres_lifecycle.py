@@ -46,7 +46,7 @@ def test_init_up_preflight_stop_preserves_volume(
 ) -> None:
     _skip_if_no_docker()
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
     )
     # init a git repo so repo_key is stable.

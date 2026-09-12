@@ -3,6 +3,11 @@
 .PHONY: help lint types test targeted coverage mutation package compat dashboard pgadmin-smoke smoke live web-codegen web-codegen-check pr
 
 OFFLINE := not real_odoo and not packaging and not dashboard
+PYTEST_XDIST_AUTO_NUM_WORKERS ?= 1
+export PYTEST_XDIST_AUTO_NUM_WORKERS
+PYTEST_NOFILE_LIMIT ?= 4096
+DOCKER_CONFIG ?= $(HOME)/.docker
+export DOCKER_CONFIG
 
 help:
 	@printf '%s\n' 'make lint|types|test|targeted|coverage|mutation|package|compat|dashboard|pgadmin-smoke|smoke|live|web-codegen|web-codegen-check|pr'
@@ -16,12 +21,14 @@ types:
 	uv run mypy tests scripts --namespace-packages --explicit-package-bases --ignore-missing-imports --follow-imports=silent --check-untyped-defs
 
 test:
+	set -e; \
+	ulimit -n "$(PYTEST_NOFILE_LIMIT)"; \
 	uv run pytest -o addopts="" -v --tb=short --strict-markers \
 		-m "$(OFFLINE) and not serial" -n auto --dist loadscope \
-		--cov=odoo_instance_sdk --cov-branch --cov-report=
+		--cov=odoo_instance_sdk --cov-branch --cov-report=; \
 	uv run pytest -o addopts="" -v --tb=short --strict-markers \
 		-m "serial and $(OFFLINE)" --cov=odoo_instance_sdk --cov-branch --cov-append \
-		--cov-report=term-missing --cov-report=xml --cov-report=json
+		--cov-report=term-missing --cov-report=xml --cov-report=json; \
 	uv run python scripts/check_coverage.py --coverage-json coverage.json
 
 targeted:

@@ -255,7 +255,7 @@ def test_env_list_human_env_row_columns(monkeypatch: pytest.MonkeyPatch) -> None
     assert "4242 (+2)" in out
     assert "12.3%" in out
     assert "256.0 MiB" in out
-    machine = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    machine = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
     assert machine.exit_code == 0, machine.output
     assert (
         json.loads(machine.output)["result"]["environments"][0]["runtime"]["memory_bytes"]
@@ -290,7 +290,7 @@ def test_env_list_human_table_uses_rich_columns_and_json_is_sanitized(
     assert all(column in rendered for column in env_commands._ENV_LIST_COLUMNS)
     assert "\\x0d\\x0a" in rendered
 
-    encoded = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    encoded = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
     assert encoded.exit_code == 0, encoded.output
     assert (
         json.loads(encoded.output)["result"]["environments"][0]["name"]
@@ -349,7 +349,7 @@ def test_env_list_json_emits_snapshot_contract(monkeypatch: pytest.MonkeyPatch) 
     env = _env()
     _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
 
-    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
     assert result.exit_code == 0, result.output
     envelope = json.loads(result.output)
     assert envelope["ok"] is True
@@ -399,11 +399,12 @@ def test_env_list_joins_catalogue_worktree_by_environment_id(
     assert env_commands._catalog_worktree_paths(monitor, include_removed=False) == {
         env.id: str(worktree)
     }
-    machine_projection = msgspec.to_builtins(snapshot)
-    env_commands._add_cli_worktree_paths(machine_projection, {env.id: str(worktree)})
+    machine_projection = msgspec.to_builtins(
+        env_commands._cli_snapshot(snapshot, {env.id: str(worktree)})
+    )
     assert machine_projection["environments"][0]["worktree_path"] == str(worktree)
 
-    json_result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    json_result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
     assert json_result.exit_code == 0, json_result.output
     json_row = json.loads(json_result.output)["result"]["environments"][0]
     assert json_row.get("worktree_path") == str(worktree), json_result.output
@@ -422,6 +423,76 @@ def test_env_list_joins_catalogue_worktree_by_environment_id(
     rich_output = rich_console.export_text()
     assert "WORKTREE" in rich_output
     assert str(worktree) in rich_output
+
+
+@pytest.mark.unit
+def test_env_list_nested_cli_field_is_typed_and_rejected_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env()
+    snapshot = _snapshot((), (env,))
+    _patch_snapshot(monkeypatch, snapshot)
+
+    json_result = CliRunner().invoke(
+        cli,
+        [
+            "env",
+            "list",
+            "--all-projects",
+            "--format",
+            "json",
+            "--fields",
+            "environments.worktree_path",
+        ],
+    )
+    toon_result = CliRunner().invoke(
+        cli,
+        [
+            "env",
+            "list",
+            "--all-projects",
+            "--format",
+            "toon",
+            "--fields",
+            "environments.worktree_path",
+        ],
+    )
+    assert json_result.exit_code == 0, json_result.output
+    assert toon_result.exit_code == 0, toon_result.output
+    from toon import DecodeOptions, decode
+
+    json_document = json.loads(json_result.stdout)
+    toon_document = decode(toon_result.stdout, DecodeOptions(indent=2, strict=True))
+    assert json_document == toon_document
+    assert json_document["result"]["environments"][0]["worktree_path"] == "/worktree"
+    assert "generated_at" in json_document["result"]
+    assert "runtime" not in json_document["result"]["environments"][0]
+
+    called = False
+
+    def unexpected_snapshot(*_args: object, **_kwargs: object) -> Snapshot:
+        nonlocal called
+        called = True
+        return snapshot
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", unexpected_snapshot
+    )
+    rejected = CliRunner().invoke(
+        cli,
+        [
+            "env",
+            "list",
+            "--all-projects",
+            "--format",
+            "json",
+            "--fields",
+            "environments.worktree_path.missing",
+        ],
+    )
+    assert rejected.exit_code == 2
+    assert "unknown field" in rejected.output
+    assert not called
 
 
 @pytest.mark.unit
@@ -453,7 +524,7 @@ def test_env_list_fails_closed_when_catalogue_cannot_enrich(
     _patch_snapshot(monkeypatch, snapshot, use_catalogue=True)
     monkeypatch.setattr(env_commands, "_monitor_class", lambda: lambda: monitor)
 
-    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 1, result.output
     payload = json.loads(result.output)
@@ -487,13 +558,12 @@ def test_env_list_fails_closed_for_incomplete_uuid_join(
     _patch_snapshot(monkeypatch, snapshot, use_catalogue=True)
     monkeypatch.setattr(env_commands, "_monitor_class", lambda: lambda: monitor)
 
-    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 1, result.output
     payload = json.loads(result.output)
     assert payload["ok"] is False
-    assert "environment" in payload["error"]["message"]
-    assert "worktree" in payload["error"]["message"]
+    assert env.id in payload["error"]["message"]
 
 
 @pytest.mark.unit
@@ -540,8 +610,10 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
         },
     )
 
-    # --json --all: only non-removed snapshot; removed is NOT in the payload.
-    json_result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--all", "--json"])
+    # --format json --all: only non-removed snapshot; removed is NOT in the payload.
+    json_result = CliRunner().invoke(
+        cli, ["env", "list", "--all-projects", "--all", "--format", "json"]
+    )
     assert json_result.exit_code == 0, json_result.output
     payload = json.loads(json_result.output)["result"]
     ids = [e["id"] for e in payload["environments"]]
@@ -645,7 +717,7 @@ def test_env_list_uses_one_snapshot_without_constructing_client(
     )
     monkeypatch.setattr("odoo_instance_sdk.commands.env.OdooClient", client_constructor)
 
-    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--json"])
+    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     monitor_snapshot.assert_called_once_with(project_id=None, include_removed=False)

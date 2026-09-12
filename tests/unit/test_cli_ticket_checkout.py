@@ -28,7 +28,7 @@ def _allocation_client(rows: list[dict[str, str]]) -> SimpleNamespace:
     return SimpleNamespace(get_catalog=lambda: catalog)
 
 
-def test_jira_ticket_is_validated_before_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ticket_is_validated_before_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     called = False
 
     def resolve(*_: object, **__: object) -> object:
@@ -36,15 +36,15 @@ def test_jira_ticket_is_validated_before_resolution(monkeypatch: pytest.MonkeyPa
         called = True
         raise AssertionError("invalid ticket reached allocation")
 
-    monkeypatch.setattr(env, "_resolve_jira_allocation", resolve)
+    monkeypatch.setattr(env, "_resolve_ticket_allocation", resolve)
     result = CliRunner().invoke(cli, ["env", "checkout", "bad-ticket"])
 
     assert result.exit_code == 2
-    assert "expected Jira ticket like PROJ-123" in result.output
+    assert "expected ticket like PROJ-123" in result.stderr
     assert not called
 
 
-def test_jira_allocation_uses_sparse_union_and_removed_catalogue_rows(
+def test_ticket_allocation_uses_sparse_union_and_removed_catalogue_rows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = tmp_path.resolve()
@@ -69,13 +69,13 @@ def test_jira_allocation_uses_sparse_union_and_removed_catalogue_rows(
         ]
     )
 
-    allocation = env._resolve_jira_allocation(cast("OdooClient", client), root, "PROJ-123", None)
+    allocation = env._resolve_ticket_allocation(cast("OdooClient", client), root, "PROJ-123", None)
 
     assert allocation.branch == "PROJ-123_4"
     assert allocation.base_ref == "develop"
     assert allocation.catalogue_heads == ("PROJ-123_3",)
-    assert env._jira_provenance(allocation) == {
-        "jira": {
+    assert env._ticket_provenance(allocation) == {
+        "ticket_allocation": {
             "ticket": "PROJ-123",
             "resolved_branch": "PROJ-123_4",
             "base_ref": "develop",
@@ -100,7 +100,7 @@ def test_jira_allocation_uses_sparse_union_and_removed_catalogue_rows(
     }
 
 
-def test_jira_allocation_honors_explicit_base_and_exact_ticket(
+def test_ticket_allocation_honors_explicit_base_and_exact_ticket(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = tmp_path.resolve()
@@ -112,7 +112,7 @@ def test_jira_allocation_honors_explicit_base_and_exact_ticket(
     monkeypatch.setattr(env, "local_branch_names", lambda _: ())
     monkeypatch.setattr(env, "remote_branch_names", lambda _, __: ())
 
-    allocation = env._resolve_jira_allocation(
+    allocation = env._resolve_ticket_allocation(
         cast("OdooClient", _allocation_client([])), root, "PROJ-123", "release"
     )
 
@@ -121,12 +121,12 @@ def test_jira_allocation_honors_explicit_base_and_exact_ticket(
 
 
 @pytest.mark.parametrize("source", ["local", "catalogue", "origin"])
-def test_jira_allocation_revalidation_is_stale_without_reallocation(
+def test_ticket_allocation_revalidation_is_stale_without_reallocation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str
 ) -> None:
     root = tmp_path.resolve()
     common = root / ".git"
-    allocation = env._JiraAllocation(
+    allocation = env._TicketAllocation(
         ticket="PROJ-123",
         branch="PROJ-123_1",
         repo_root=root,
@@ -151,16 +151,16 @@ def test_jira_allocation_revalidation_is_stale_without_reallocation(
     )
 
     with pytest.raises(StalePlanError) as error:
-        env._revalidate_jira_absence(cast("OdooClient", _allocation_client([])), allocation)
+        env._revalidate_ticket_absence(cast("OdooClient", _allocation_client([])), allocation)
 
     assert error.value.actual == {"source": source, "branch": "PROJ-123_1"}
 
 
-def test_jira_checkout_passes_captured_base_to_existing_command() -> None:
+def test_ticket_checkout_passes_captured_base_to_existing_command() -> None:
     command = object()
     client = SimpleNamespace(environments=MagicMock())
     client.environments.checkout_command.return_value = command
-    allocation = env._JiraAllocation(
+    allocation = env._TicketAllocation(
         ticket="PROJ-123",
         branch="PROJ-123_2",
         repo_root=Path("/repo"),
@@ -171,7 +171,7 @@ def test_jira_checkout_passes_captured_base_to_existing_command() -> None:
         remote_heads=(),
     )
 
-    result = env._jira_checkout_command(
+    result = env._ticket_checkout_command(
         cast("OdooClient", client),
         Path("/repo"),
         EnvironmentCheckoutOptions(create_venv=True),
@@ -223,7 +223,7 @@ def test_origin_probe_is_ticket_aware_and_recorded_without_fetch(
 
 
 @pytest.mark.parametrize("unavailable", ["local", "catalogue", "origin"])
-def test_unavailable_jira_evidence_fails_before_checkout_mutation(
+def test_unavailable_ticket_evidence_fails_before_checkout_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unavailable: str
 ) -> None:
     root = tmp_path.resolve()
@@ -256,7 +256,7 @@ def test_unavailable_jira_evidence_fails_before_checkout_mutation(
     monkeypatch.setattr(env, "remote_branch_names", origin)
 
     with pytest.raises((GitError, RuntimeError)):
-        env._resolve_jira_allocation(
+        env._resolve_ticket_allocation(
             cast("OdooClient", _allocation_client([])), root, "PROJ-123", None
         )
 
@@ -267,14 +267,14 @@ def test_unavailable_jira_evidence_fails_before_checkout_mutation(
     ]
 
 
-def test_jira_provenance_is_present_in_rich_json_and_toon(
+def test_ticket_provenance_is_present_in_rich_json_and_toon(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from toon import DecodeOptions, decode
 
     from odoo_instance_sdk.commands.output import OutputMode, emit, success_document
 
-    allocation = env._JiraAllocation(
+    allocation = env._TicketAllocation(
         ticket="PROJ-123",
         branch="PROJ-123_2",
         repo_root=Path("/repo"),
@@ -284,7 +284,7 @@ def test_jira_provenance_is_present_in_rich_json_and_toon(
         catalogue_heads=("PROJ-123_1",),
         remote_heads=("PROJ-123_2",),
     )
-    expected = env._jira_provenance(allocation)
+    expected = env._ticket_provenance(allocation)
 
     rich_status = emit(
         success_document(
@@ -294,13 +294,13 @@ def test_jira_provenance_is_present_in_rich_json_and_toon(
             dry_run=True,
         ),
         OutputMode.RICH,
-        rich=lambda document: "\n".join(env._jira_rich_lines(document)),
+        rich=lambda document: "\n".join(env._ticket_rich_lines(document)),
     )
     rich_output = capsys.readouterr().out
     assert rich_status == 0
     assert "PROJ-123_2" in rich_output
     assert "base release" in rich_output
-    assert "Jira local: [PROJ-123]" in rich_output
+    assert "Ticket local: [PROJ-123]" in rich_output
 
     json_status = emit(
         success_document(
@@ -329,17 +329,17 @@ def test_jira_provenance_is_present_in_rich_json_and_toon(
     assert toon_payload["provenance"] == expected
 
 
-def test_checkout_and_create_help_share_jira_contract() -> None:
+def test_checkout_and_create_help_share_ticket_contract() -> None:
     runner = CliRunner()
     checkout = runner.invoke(cli, ["env", "checkout", "--help"])
     create = runner.invoke(cli, ["env", "create", "--help"])
 
     assert checkout.exit_code == create.exit_code == 0
-    assert "JIRA_TICKET" in checkout.output
+    assert "TICKET" in checkout.output
     assert "--name" not in checkout.output
-    assert "JIRA_TICKET" in create.output
+    assert "TICKET" in create.output
     assert "--name" not in create.output
-    assert "Jira ticket" in checkout.output
+    assert "Ticket branch" in checkout.output
 
 
 def test_env_shell_completion_keeps_both_checkout_spellings_visible() -> None:
@@ -355,13 +355,13 @@ def test_env_shell_completion_keeps_both_checkout_spellings_visible() -> None:
 
     assert result.exit_code == 0
     assert "plain,checkout" in result.stdout
-    assert "plain,create" not in result.stdout
+    assert "plain,create" in result.stdout
 
 
 @pytest.mark.parametrize("spelling", ["checkout", "create"])
 @pytest.mark.parametrize("mode", ["rich", "json", "toon"])
 @pytest.mark.parametrize("dry_run", [True, False])
-def test_cli_jira_checkout_emits_one_shared_envelope_for_both_spellings(
+def test_cli_ticket_checkout_emits_one_shared_envelope_for_both_spellings(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     spelling: str,
@@ -372,7 +372,7 @@ def test_cli_jira_checkout_emits_one_shared_envelope_for_both_spellings(
     from tests.unit.test_cli_output_modes import _matrix_checkout_plan, _matrix_public_environment
 
     plan = _matrix_checkout_plan()
-    allocation = env._JiraAllocation(
+    allocation = env._TicketAllocation(
         ticket="PROJ-123",
         branch="PROJ-123_2",
         repo_root=tmp_path,
@@ -415,16 +415,16 @@ def test_cli_jira_checkout_emits_one_shared_envelope_for_both_spellings(
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
         patch(
-            "odoo_instance_sdk.commands.env._build_jira_checkout_command",
+            "odoo_instance_sdk.commands.env._build_ticket_checkout_command",
             return_value=(command, allocation),
         ),
     ):
         result = CliRunner().invoke(cli, argv)
 
     assert result.exit_code == 0, result.output
-    expected_provenance = env._jira_provenance(allocation)
+    expected_provenance = env._ticket_provenance(allocation)
     if mode == "rich":
-        assert result.stdout.count("Jira PROJ-123") == 1
+        assert result.stdout.count("Ticket PROJ-123") == 1
         assert "PROJ-123_2" in result.stdout
         assert "base release" in result.stdout
         if dry_run:
@@ -438,4 +438,4 @@ def test_cli_jira_checkout_emits_one_shared_envelope_for_both_spellings(
         payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
     assert result.stdout.count("schema_version") == 1
     assert payload["dry_run"] is dry_run
-    assert payload["provenance"]["jira"] == expected_provenance["jira"]
+    assert payload["provenance"]["ticket_allocation"] == expected_provenance["ticket_allocation"]

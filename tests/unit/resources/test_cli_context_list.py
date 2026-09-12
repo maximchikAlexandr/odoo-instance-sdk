@@ -27,7 +27,9 @@ def _invoke(runner: CliRunner, client: OdooClient, args: list[str]) -> Result:
 
 
 @pytest.fixture(autouse=True)
-def _inject_monitor_process_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+def _inject_monitor_process_provider(
+    monkeypatch: pytest.MonkeyPatch, env_client: OdooClient
+) -> None:
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
     original_init = EnvironmentMonitor.__init__
@@ -37,6 +39,10 @@ def _inject_monitor_process_provider(monkeypatch: pytest.MonkeyPatch) -> None:
         original_init(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(EnvironmentMonitor, "__init__", init)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env._monitor_class",
+        lambda: lambda: EnvironmentMonitor(catalog_path=env_client.get_catalog().db_path),
+    )
 
 
 def test_nested_worktree_infers_remove_selector(
@@ -62,7 +68,7 @@ def test_nested_worktree_infers_remove_selector(
     )
     monkeypatch.chdir(nested)
 
-    result = _invoke(CliRunner(), env_client, ["env", "remove", "--dry-run", "--json"])
+    result = _invoke(CliRunner(), env_client, ["env", "remove", "--dry-run", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     envelope = json.loads(result.output)
@@ -75,7 +81,7 @@ def test_outside_context_lists_all_projects(
     env_client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    result = _invoke(CliRunner(), env_client, ["env", "list", "--json"])
+    result = _invoke(CliRunner(), env_client, ["env", "list", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     snapshot = json.loads(result.output)["result"]
@@ -84,7 +90,9 @@ def test_outside_context_lists_all_projects(
 
 
 def test_sync_rejects_root_env_as_usage_error(env_client: OdooClient) -> None:
-    result = _invoke(CliRunner(), env_client, ["--env", "anything", "env", "sync", "--json"])
+    result = _invoke(
+        CliRunner(), env_client, ["--env", "anything", "env", "sync", "--format", "json"]
+    )
 
     assert result.exit_code == 2
     envelope = json.loads(result.output)
@@ -113,7 +121,8 @@ def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
             "--source-db",
             "comerta",
             "--dry-run",
-            "--json",
+            "--format",
+            "json",
         ],
     )
 
@@ -149,7 +158,7 @@ def test_list_json_emits_snapshot_and_human_has_project_header(
     runner = CliRunner()
     args = ["--project", str(project_manifest), "env", "list"]
     human = _invoke(runner, env_client, args)
-    data = _invoke(runner, env_client, [*args, "--json"])
+    data = _invoke(runner, env_client, [*args, "--format", "json"])
 
     assert human.exit_code == 0
     # New grouped human format: project header + cluster line + env row.
@@ -170,10 +179,16 @@ def test_list_json_emits_snapshot_and_human_has_project_header(
 def test_list_reports_occupied_port(
     env_client: OdooClient, project_manifest: Path, fake_python: Path
 ) -> None:
+    port_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    port_probe.bind(("127.0.0.1", 0))
+    requested_port = port_probe.getsockname()[1]
+    port_probe.close()
     env = env_client.environments.checkout(
         project_manifest,
         "feat/list-port",
-        options=EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta"),
+        options=EnvironmentCheckoutOptions(
+            python=str(fake_python), source_database="comerta", http_port=requested_port
+        ),
     )
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind((env.http_interface, env.http_port))
@@ -207,7 +222,7 @@ def test_list_all_projects_works_outside_a_project(
     )
     monkeypatch.chdir(tmp_path)
 
-    result = _invoke(CliRunner(), env_client, ["env", "list", "--all-projects", "--json"])
+    result = _invoke(CliRunner(), env_client, ["env", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     assert [row["id"] for row in json.loads(result.output)["result"]["environments"]] == [
@@ -225,17 +240,17 @@ def test_list_excludes_removed_unless_all(
     )
     env_client.environments.remove(env)
     runner = CliRunner()
-    base = ["--project", str(project_manifest), "env", "list", "--json"]
+    base = ["--project", str(project_manifest), "env", "list", "--format", "json"]
 
     default = _invoke(runner, env_client, base)
-    all_json = _invoke(runner, env_client, [*base[:-1], "--all", "--json"])
+    all_json = _invoke(runner, env_client, [*base, "--all"])
     default_human = _invoke(runner, env_client, ["--project", str(project_manifest), "env", "list"])
     all_human = _invoke(
         runner, env_client, ["--project", str(project_manifest), "env", "list", "--all"]
     )
 
     assert default.exit_code == all_json.exit_code == 0
-    # --json always wraps non-removed Snapshot only; --all does NOT change JSON.
+    # --format json always wraps non-removed Snapshot only; --all does NOT change JSON.
     assert json.loads(default.output)["result"]["environments"] == []
     assert json.loads(all_json.output)["result"]["environments"] == []
     # --all is human-only: removed row appears in human output.
@@ -262,7 +277,8 @@ def test_explicit_project_and_environment_resolution_records_provenance(
             "remove",
             str(env.id),
             "--dry-run",
-            "--json",
+            "--format",
+            "json",
         ],
     )
 
@@ -286,7 +302,7 @@ def test_cwd_project_resolution_records_cwd_provenance(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         return_value=empty,
     ):
-        result = _invoke(CliRunner(), env_client, ["env", "list", "--json"])
+        result = _invoke(CliRunner(), env_client, ["env", "list", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["provenance"]["project_source"] == "cwd"
@@ -316,7 +332,7 @@ def test_cwd_environment_resolution_records_provenance_and_id(
     result = _invoke(
         CliRunner(),
         env_client,
-        ["env", "remove", "--dry-run", "--json"],
+        ["env", "remove", "--dry-run", "--format", "json"],
     )
 
     assert result.exit_code == 0, result.output

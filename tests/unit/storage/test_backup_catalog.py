@@ -14,7 +14,7 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import Backup, BackupFormat, BackupState, BackupValidationStatus
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.backup_catalog import CURRENT_SCHEMA_VERSION, BackupCatalog
 from tests.unit.monitor_support import make_env, runtime_kwargs
 
 
@@ -653,7 +653,7 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
     assert "database_events" in tables
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 15
+    assert version == CURRENT_SCHEMA_VERSION
 
     # Existing backups table still works
     path = _create_backup_file(tmp_path, "migrated.zip")
@@ -665,7 +665,7 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
 
 
 def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None:
-    """v0 → v8 migration MUST preserve existing backups and events."""
+    """v0 → v16 migration MUST preserve existing backups and events."""
     db = tmp_path / "test.db"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 0")
@@ -729,7 +729,7 @@ def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None
     assert event_row["event_type"] == "download_started"
 
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 15
+    assert version == CURRENT_SCHEMA_VERSION
 
     catalog.close()
 
@@ -738,12 +738,12 @@ def test_schema_creation_v2_reopen(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     catalog = BackupCatalog(db_path=db)
     version1 = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version1 == 15
+    assert version1 == CURRENT_SCHEMA_VERSION
     catalog.close()
 
     catalog2 = BackupCatalog(db_path=db)
     version2 = catalog2._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version2 == 15
+    assert version2 == CURRENT_SCHEMA_VERSION
     tables = {
         r[0]
         for r in catalog2._conn.execute(

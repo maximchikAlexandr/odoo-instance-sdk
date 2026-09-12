@@ -63,7 +63,7 @@ def test_eval_json_failure_is_single_sanitized_envelope(diagnostic: str, secret:
         "odoo_instance_sdk.internal.context.resolve_environment",
         side_effect=RuntimeError(diagnostic),
     ):
-        result = runner.invoke(cli, ["eval", "1", "--json"])
+        result = runner.invoke(cli, ["eval", "1", "--format", "json"])
 
     assert result.exit_code == 1
     assert result.stderr == ""
@@ -80,7 +80,9 @@ def test_eval_json_failure_is_single_sanitized_envelope(diagnostic: str, secret:
 
 def test_init_json_failure_is_single_stdout_envelope(tmp_path: pytest.TempPathFactory) -> None:
     runner = CliRunner()
-    result = runner.invoke(cli, ["init", "--no-input", "--json", "--project", str(tmp_path)])
+    result = runner.invoke(
+        cli, ["init", "--no-input", "--format", "json", "--project", str(tmp_path)]
+    )
 
     assert result.exit_code == 1
     assert result.stderr == ""
@@ -108,7 +110,8 @@ def test_init_json_success_has_stable_result_and_provenance(
             "init",
             "--no-input",
             "--dry-run",
-            "--json",
+            "--format",
+            "json",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--project",
@@ -175,7 +178,7 @@ def test_env_list_is_read_only_through_public_resources() -> None:
             return_value=empty_snapshot,
         ),
     ):
-        result = runner.invoke(cli, ["env", "list", "--all-projects", "--json"])
+        result = runner.invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     # The CLI body no longer calls client.environments.list / client.backups.list
@@ -405,7 +408,7 @@ def test_protected_native_argument_is_rejected_at_sdk_boundary_without_machine_d
     ):
         result = CliRunner().invoke(
             cli,
-            ["run", "--dry-run", "--json", "--", "--database", "other"],
+            ["run", "--dry-run", "--format", "json", "--", "--database", "other"],
         )
 
     assert result.exit_code == 1

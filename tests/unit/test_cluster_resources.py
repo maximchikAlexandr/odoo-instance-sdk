@@ -188,7 +188,10 @@ def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
         )
 
     monkeypatch.setattr(SubprocessComposeRunner, "run", run)
-    monkeypatch.setattr(postgres_module, "get_project_postgres_dir", lambda _project_id: tmp_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
+        lambda _project_id: tmp_path,
+    )
     monkeypatch.setattr(postgres_module, "docker_available", lambda: True)
     monkeypatch.setattr(cluster_resources_module, "docker_available", lambda: True)
     runner = SubprocessComposeRunner()

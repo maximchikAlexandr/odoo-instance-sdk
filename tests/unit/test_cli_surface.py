@@ -30,5 +30,6 @@ def test_top_level_click_surface_exposes_exactly_all_required_commands() -> None
         "monitor",
         "test",
         "resource",
+        "git",
         "stop",
     }

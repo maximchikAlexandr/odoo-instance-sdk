@@ -6,7 +6,7 @@ import uuid
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, TypeVar, cast
+from typing import Annotated, Literal, TypeVar, cast
 
 import msgspec
 
@@ -32,6 +32,10 @@ type ServerUnavailabilityReason = Literal[
 ]
 
 _TupleItem = TypeVar("_TupleItem")
+
+type ModuleJsonValue = (
+    None | bool | int | float | str | list["ModuleJsonValue"] | dict[str, "ModuleJsonValue"]
+)
 
 
 def _require_tuple(value: tuple[_TupleItem, ...], field: str) -> tuple[_TupleItem, ...]:
@@ -426,6 +430,72 @@ class StartConfig(msgspec.Struct, forbid_unknown_fields=True):
         return f"StartConfig({', '.join(parts)})"
 
 
+class Module(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """One safely discovered Odoo addon manifest."""
+
+    name: str
+    path: str
+    manifest_path: str
+    depends: tuple[str, ...] = ()
+    manifest: dict[str, ModuleJsonValue] = {}
+    shadowed_paths: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def dependencies(self) -> tuple[str, ...]:
+        return self.depends
+
+    @property
+    def version(self) -> str | None:
+        value = self.manifest.get("version")
+        return value if isinstance(value, str) else None
+
+
+class ModuleDependency(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """A direct dependency and its resolved addon path, when present."""
+
+    name: str
+    path: str | None = None
+    missing: bool = False
+
+
+class ModuleDependencies(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    module: Module
+    dependencies: tuple[ModuleDependency, ...] = ()
+
+
+class ModuleInstallOrder(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    modules: tuple[str, ...]
+
+
+class ModuleUpdatePlan(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Selection facts retained beside an immutable module update command."""
+
+    modules: tuple[str, ...] = ()
+    not_installed: tuple[str, ...] = ()
+    base_source: str | None = None
+    requested_base: str | None = None
+    resolved_base: str | None = None
+    merge_base: str | None = None
+    head: str | None = None
+    changed_files: tuple[str, ...] = ()
+    ignored_paths: tuple[str, ...] = ()
+    unmapped_paths: tuple[str, ...] = ()
+
+
+class ModuleUpdateResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    modules: tuple[str, ...] = ()
+    updated: tuple[str, ...] = ()
+    not_installed: tuple[str, ...] = ()
+
+
+# Descriptive compatibility names keep the public model vocabulary readable
+# for callers that prefer the operation-specific spelling.
+ModuleInfo = Module
+ModuleDependencyResult = ModuleDependencies
+ModuleInstallOrderResult = ModuleInstallOrder
+
+
 class CommandResult(msgspec.Struct):
     args: list[str]
     returncode: int
@@ -611,6 +681,61 @@ class GitActivity(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_on
     state: GitActivityState
 
 
+class GitCommitContext(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    module: str
+    tag: str
+    description: str
+    ticket: str | None
+    ticket_link: str | None
+    message: str
+    staged_paths: tuple[str, ...]
+    branch: str
+    repository: str
+    command: tuple[str, ...]
+    staged_entries: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    unrelated_paths: tuple[str, ...] = ()
+    index_tree: str = ""
+
+    @property
+    def scope(self) -> str:
+        return self.module
+
+
+class GitCheckIssue(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    code: str
+    message: str
+    commit: str | None = None
+    paths: tuple[str, ...] = ()
+
+
+class GitCheckResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    base: str
+    branch: str
+    valid: bool
+    commits: tuple[str, ...] = ()
+    issues: tuple[GitCheckIssue, ...] = ()
+    pending_fixups: tuple[str, ...] = ()
+
+
+class GitAbsorbResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    executable: str
+    base: str
+    returncode: int
+    stdout: str
+    stderr: str
+    unmapped_hunks: tuple[str, ...] = ()
+
+
+class GitSyncResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    branch: str
+    base: str
+    fetched_sha: str | None
+    rebased: bool
+    pushed: bool
+    returncode: int = 0
+    guidance: tuple[str, ...] = ()
+
+
 class PythonEnvFootprint(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     owned: bool
     bytes: int | None
@@ -752,9 +877,9 @@ class LockRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=T
 
 class LocksResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     database: str
-    captured_at: datetime
+    captured_at: Annotated[datetime, "odcli-structural"]
     rows: tuple[LockRow, ...]
-    warnings: tuple[DiagnosticWarning, ...]
+    warnings: Annotated[tuple[DiagnosticWarning, ...], "odcli-structural"]
 
     def __post_init__(self) -> None:
         _require_datetime(self.captured_at, "LocksResult.captured_at")
@@ -847,8 +972,8 @@ class PostgresStatsResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     summary: StatsSummary
     tables: tuple[TableStats, ...]
     indexes: tuple[IndexStats, ...]
-    capabilities: StatsCapabilities
-    warnings: tuple[DiagnosticWarning, ...]
+    capabilities: Annotated[StatsCapabilities, "odcli-structural"]
+    warnings: Annotated[tuple[DiagnosticWarning, ...], "odcli-structural"]
 
     def __post_init__(self) -> None:
         _require_tuple(self.tables, "PostgresStatsResult.tables")
@@ -929,11 +1054,11 @@ class IndexBloat(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_onl
 
 class PostgresBloatResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     database: str
-    captured_at: datetime
+    captured_at: Annotated[datetime, "odcli-structural"]
     tables: tuple[TableBloat, ...]
     indexes: tuple[IndexBloat, ...]
-    capabilities: BloatCapabilities
-    warnings: tuple[DiagnosticWarning, ...]
+    capabilities: Annotated[BloatCapabilities, "odcli-structural"]
+    warnings: Annotated[tuple[DiagnosticWarning, ...], "odcli-structural"]
 
     def __post_init__(self) -> None:
         _require_datetime(self.captured_at, "PostgresBloatResult.captured_at")
@@ -1085,6 +1210,6 @@ class ProjectSummary(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
 
 class Snapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     schema_version: int
-    generated_at: datetime
+    generated_at: Annotated[datetime, "odcli-structural"]
     projects: tuple[ProjectSummary, ...]
     environments: tuple[EnvironmentSnapshot, ...]

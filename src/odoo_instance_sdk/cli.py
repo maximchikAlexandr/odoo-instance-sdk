@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Hashable, Mapping, MutableMapping
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     import click
 else:
     import rich_click as click
 
+from click.shell_completion import CompletionItem
 from rich.console import Console
 from rich.table import Table
 
@@ -24,6 +26,7 @@ from odoo_instance_sdk.commands.backup import (
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.env import env_group
+from odoo_instance_sdk.commands.module import register_module_commands
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
@@ -59,12 +62,10 @@ from odoo_instance_sdk.commands.resource import (
     resource_group,
 )
 from odoo_instance_sdk.commands.test import (
-    project_execution_result,
-    resolve_module_test_selection,
-    rich_test_result,
+    resolve_module_test_selection,  # noqa: F401 - extracted module callback seam
     test_command,
 )
-from odoo_instance_sdk.config import OdooClientConfig
+from odoo_instance_sdk.commands.translations import register_translation_commands
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     LogfileAccessError,
@@ -72,23 +73,20 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.automation import (
     DepsVerifyResult,
-    ModuleRecord,
-    TranslationExportResult,
     eval_expression_command,
     exec_script_command,
-    export_translations_command,
-    list_modules_command,
-    module_records_from_result,
-    module_tests_command,
-    update_modules_command,
+    export_translations_command,  # noqa: F401 - extracted translation callback seam
+    list_modules_command,  # noqa: F401 - extracted module callback seam
+    module_tests_command,  # noqa: F401 - extracted module callback seam
+    update_modules_command,  # noqa: F401 - extracted module callback seam
     verify_deps_command,
 )
-from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
 from odoo_instance_sdk.internal.generated_config import (
     generate_config,
     project_generated_config_path,
+    render_config,
 )
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
@@ -103,7 +101,6 @@ from odoo_instance_sdk.internal.vscode_generate import (
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
 from odoo_instance_sdk.models import (
     CommandResult,
-    OdooTestSpec,
     PostgresClusterState,
     StartConfig,
 )
@@ -113,6 +110,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable as TypeCallback
 
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.commands.context import ResolvedContext
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.doctor import DoctorReport
     from odoo_instance_sdk.models import ClusterSnapshot
@@ -126,6 +124,15 @@ if TYPE_CHECKING:
         | TypeCallback[[ClusterSnapshot], int]
         | TypeCallback[[ClusterSnapshot], None]
     )
+
+    class _DoctorRunner(Protocol):
+        def __call__(
+            self,
+            client: OdooClient,
+            project_path: Path | None,
+            *,
+            resolved_context: ResolvedContext | None = None,
+        ) -> DoctorReport: ...
 
 
 def __getattr__(name: str) -> CliLazyExport:
@@ -353,9 +360,9 @@ def _client_class() -> type[OdooClient]:
     return cast("type[OdooClient]", getattr(sys.modules[__name__], "OdooClient"))
 
 
-def _run_doctor() -> Callable[[OdooClient, Path | None], DoctorReport]:
+def _run_doctor() -> _DoctorRunner:
     return cast(
-        "Callable[[OdooClient, Path | None], DoctorReport]",
+        "_DoctorRunner",
         getattr(sys.modules[__name__], "run_doctor"),
     )
 
@@ -374,96 +381,6 @@ def _cluster_rich(document: OutputDocument) -> str:
     return render_cluster(document)
 
 
-def _updated_modules(value: CommandResult | None) -> JsonValue:
-    if value is None:
-        return []
-    payload = parse_payload(value.stdout)
-    if not isinstance(payload, dict):
-        return []
-    nested = payload.get("result")
-    if not isinstance(nested, dict):
-        return []
-    return nested.get("updated", [])
-
-
-def _module_list_result(value: CommandResult | list[ModuleRecord]) -> JsonObject:
-    records = value if isinstance(value, list) else module_records_from_result(value)
-    return {"modules": [record.to_dict() for record in records]}
-
-
-def _rich_module_list(document: OutputDocument) -> str:
-    """Render module records as one human-oriented table."""
-    if not document.ok:
-        return document.error.message if document.error is not None else "operation failed"
-    result = document.result if isinstance(document.result, dict) else {}
-    records = result.get("modules", [])
-    if not isinstance(records, list):
-        return "No modules"
-    table = Table("NAME", "STATE", "VERSION")
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        table.add_row(
-            rich_cell(record.get("name", "")),
-            rich_cell(record.get("state", "")),
-            rich_cell(record.get("installed_version") or record.get("latest_version") or ""),
-        )
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(table)
-    return output.getvalue().rstrip()
-
-
-def _rich_module_update(document: OutputDocument) -> str:
-    if not document.ok:
-        return document.error.message if document.error is not None else "operation failed"
-    result = document.result if isinstance(document.result, dict) else {}
-    modules = result.get("modules", [])
-    updated = result.get("updated", [])
-    values = updated if isinstance(updated, list) and updated else modules
-    table = Table("Module", "Status", title="Module update")
-    if isinstance(values, list) and values:
-        status = "planned" if document.dry_run else "updated"
-        for module in values:
-            table.add_row(rich_cell(module), rich_cell(status))
-    else:
-        table.add_row("(none)", "no changes")
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print("Dry run — modules to update:" if document.dry_run else "Updated modules:")
-    console.print(table)
-    return output.getvalue().rstrip()
-
-
-def _rich_translation_export(document: OutputDocument) -> str:
-    if not document.ok:
-        return document.error.message if document.error is not None else "operation failed"
-    result = document.result if isinstance(document.result, dict) else {}
-    exports = result.get("exports", [])
-    table = Table("Module", "Language", "File", "Size", title="Translation export")
-    if isinstance(exports, list) and exports:
-        for item in exports:
-            if not isinstance(item, dict):
-                continue
-            size = item.get("bytes_written")
-            table.add_row(
-                rich_cell(item.get("module", "")),
-                rich_cell(item.get("requested_lang", "")),
-                rich_cell(item.get("actual_filename", "")),
-                rich_cell(
-                    _human_bytes(size)
-                    if isinstance(size, int) and not isinstance(size, bool)
-                    else "—"
-                ),
-            )
-    else:
-        table.add_row("(none)", "—", "—", "—")
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(table)
-    return output.getvalue().rstrip()
-
-
 @click.rich_config(  # type: ignore[operator]
     {
         "commands_before_options": True,
@@ -480,6 +397,7 @@ def _rich_translation_export(document: OutputDocument) -> str:
                     "commands": [
                         "test",
                         "module",
+                        "git",
                         "translations",
                         "deps",
                         "vscode",
@@ -515,6 +433,45 @@ cli.add_command(_postgres_group, name="postgres")
 register_database_commands(db_group)
 cli.add_command(_psql, name="psql")
 cli.add_command(resource_group, name="resource")
+
+
+class _LazyGitGroup(click.RichGroup):  # type: ignore[misc,valid-type]
+    """Expose Git help at the root without importing the Git execution stack."""
+
+    def __init__(self) -> None:
+        self._git_initializing = True
+        self._git_loaded = False
+        self._git_commands: MutableMapping[str, click.Command] = {}
+        super().__init__(name="git", help="Generate and safely synchronize Odoo Git workflows.")
+        self._git_initializing = False
+
+    @property
+    def commands(self) -> MutableMapping[str, click.Command]:
+        if self._git_initializing:
+            return self._git_commands
+        if not self._git_loaded:
+            self._git_commands = self._loaded().commands
+            self._git_loaded = True
+        return self._git_commands
+
+    @commands.setter
+    def commands(self, value: MutableMapping[str, click.Command]) -> None:
+        self._git_commands = value
+
+    @staticmethod
+    def _loaded() -> click.Group:
+        from odoo_instance_sdk.commands.git import git_group
+
+        return git_group
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        return self._loaded().list_commands(ctx)
+
+    def get_command(self, ctx: click.Context, name: str) -> click.Command | None:
+        return self._loaded().get_command(ctx, name)
+
+
+cli.add_command(_LazyGitGroup(), name="git")
 
 
 def _backup_catalog_path() -> Path:
@@ -672,33 +629,20 @@ def init(
         default_run_args=option_state.default_run_args,
         runtime_cwd=option_state.runtime_cwd,
         postgres=postgres_cfg,
+        ticket_link_enabled=False,
     )
+
+    if config.postgres is not None and config.postgres.mode == "compose":
+        try:
+            _validate_generated_config_target(project_generated_config_path(resolved_project))
+        except InstanceConfigurationError as exc:
+            fail(output_mode, "init", str(exc), dry_run=dry_run)
 
     existing = manifest_path(resolved_project)
     if existing.is_file() and _handle_existing_manifest(
         existing, resolved_project, config, no_input, yes, output_mode, dry_run=dry_run
     ):
         return
-    if not dry_run and config.postgres is not None and config.postgres.mode == "compose":
-        from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
-
-        try:
-            tracked = is_tracked_path(project_generated_config_path(resolved_project))
-        except GitError:
-            fail(
-                output_mode,
-                "init",
-                "unable to verify project-owned runtime config tracking; refusing secret write",
-                dry_run=dry_run,
-            )
-        if tracked:
-            fail(
-                output_mode,
-                "init",
-                "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf",
-                dry_run=dry_run,
-            )
-
     status, _ = run_or_preview(
         lambda: action_command(
             "init",
@@ -773,6 +717,81 @@ def _write_project_generated_config(project_path: Path, config: ProjectConfig) -
         db_user=postgres.user or "odoo",
         db_password=password,
     )
+
+
+def _validate_generated_config_target(path: Path) -> None:
+    """Reject unsafe targets before any generated-config or secret write."""
+    try:
+        target = path.lstat()
+    except FileNotFoundError:
+        return
+    if path.is_symlink() or not path.is_file():
+        raise InstanceConfigurationError(
+            f"generated config target must be a regular file, not a symlink or directory: {path}"
+        )
+    if target.st_uid != os.getuid():
+        raise InstanceConfigurationError(
+            f"generated config is not owned by the current user: {path}"
+        )
+    from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
+
+    try:
+        if is_tracked_path(path):
+            raise InstanceConfigurationError(
+                "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf"
+            )
+    except GitError as exc:
+        raise InstanceConfigurationError(
+            "unable to verify project-owned runtime config tracking; refusing secret write"
+        ) from exc
+
+
+def _generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> bool:
+    """Compare generated bytes to current inputs without creating anything."""
+    if config.postgres is None or config.postgres.mode != "compose":
+        return False
+    destination = project_generated_config_path(project_path)
+    try:
+        if destination.is_symlink() or not destination.is_file():
+            return True
+        if destination.stat().st_mode & 0o777 != 0o600:
+            return True
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        cluster = PostgresCluster.from_project(project_path)
+        if not cluster.password_file.is_file():
+            return True
+        password = cluster.password_file.read_text(encoding="utf-8").strip()
+        source = config.source_config
+        source_path = (
+            (project_path / source).resolve()
+            if source is not None and not source.is_absolute()
+            else source
+        )
+        if source_path is None:
+            candidate = project_path / "odoo.conf"
+            source_path = candidate if candidate.is_file() else None
+        if source_path is not None and not source_path.is_file():
+            return True
+        source_start = (
+            StartConfig.from_odoo_config(source_path) if source_path is not None else StartConfig()
+        )
+        expected = render_config(
+            source_path,
+            destination,
+            repo_root=project_path,
+            worktree=project_path,
+            http_interface=source_start.http_interface,
+            http_port=resolve_project_http_port(config.preferred_http_port, source_start.http_port),
+            db_name=config.default_source_database or source_start.db_name or "",
+            db_host=cluster.endpoint_host,
+            db_port=cluster.endpoint_port,
+            db_user=config.postgres.user or "odoo",
+            db_password=password,
+        )
+        return destination.read_text(encoding="utf-8") != expected
+    except (OSError, UnicodeError, InstanceConfigurationError, ValueError):
+        return True
 
 
 def _register_initialized_project(project_path: Path) -> None:
@@ -923,7 +942,7 @@ def _merge_vscode(
         state.runtime_cwd = vscode_cfg.runtime_cwd
 
 
-def _handle_existing_manifest(
+def _handle_existing_manifest(  # noqa: C901
     existing: Path,
     resolved_project: Path,
     config: ProjectConfig,
@@ -940,6 +959,46 @@ def _handle_existing_manifest(
     # Comparison excludes ``postgres_allocated`` (dry-run-only flag); both
     # sides default to False here.
     if _manifest_dict(existing_cfg) == _manifest_dict(config):
+        target = project_generated_config_path(resolved_project)
+        repair = _generated_config_needs_repair(resolved_project, existing_cfg)
+        if repair:
+            if dry_run:
+                result: JsonObject = {
+                    **_manifest_dict(config),
+                    "generated_config": cast("JsonValue", {"path": str(target), "repair": True}),
+                }
+                if output_mode is not OutputMode.RICH:
+                    emit_json_envelope(
+                        ok=True,
+                        command="init",
+                        result=result,
+                        provenance={},
+                        dry_run=True,
+                        mode=output_mode,
+                    )
+                else:
+                    rich_print(f"Dry run — generated config needs repair: {target}")
+                return True
+            try:
+                _validate_generated_config_target(target)
+            except InstanceConfigurationError as exc:
+                fail(output_mode, "init", str(exc), dry_run=dry_run)
+            _write_project_generated_config(resolved_project, existing_cfg)
+            _register_initialized_project(resolved_project)
+            if output_mode is not OutputMode.RICH:
+                emit_json_envelope(
+                    ok=True,
+                    command="init",
+                    result={
+                        **_manifest_dict(config),
+                        "generated_config": {"path": str(target), "repaired": True},
+                    },
+                    provenance={},
+                    mode=output_mode,
+                )
+            else:
+                rich_print(f"Repaired generated config: {target}; manifest unchanged.")
+            return True
         if not dry_run:
             _register_initialized_project(resolved_project)
         if output_mode is not OutputMode.RICH:
@@ -996,6 +1055,8 @@ def _manifest_dict(
         "source_config": str(config.source_config) if config.source_config else None,
         "default_source_database": config.default_source_database,
         "default_base_ref": config.default_base_ref,
+        "ticket_link_enabled": config.ticket_link_enabled is True,
+        "ticket_base_url": config.ticket_base_url,
         "refresh_after_hours": config.refresh_after_hours,
         "test_instance": test_instance,
         "preferred_http_port": config.preferred_http_port,
@@ -1013,9 +1074,12 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     try:
-        project_path = cli_context.resolve_project_path(ctx)
-        client = _client_class()(config=OdooClientConfig(executable="odoo"))
-        report = _run_doctor()(client, project_path if project_path != Path.cwd() else None)
+        resolved = cli_context._ready_instance_for_doctor(ctx)
+        report = _run_doctor()(
+            resolved.client,
+            resolved.project_root,
+            resolved_context=resolved,
+        )
     except Exception as e:
         fail(output_mode, "doctor", str(e), dry_run=False)
     if json_output:
@@ -1031,6 +1095,8 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
                         "detail": sanitize_diagnostic(c.detail),
                         "environment_id": c.environment_id,
                         "environment_name": c.environment_name,
+                        "remediations": [item.as_dict() for item in c.remediations],
+                        "facts": c.facts,
                     }
                     for c in report.checks
                 ],
@@ -1056,6 +1122,18 @@ def _print_doctor(report: DoctorReport) -> None:
             c.status, c.status
         )
         rich_print(f"  {marker:<5} {c.name}: {sanitize_diagnostic(c.detail)}")
+        if c.facts:
+            configured = c.facts.get("configured")
+            available = c.facts.get("available")
+            rich_print(f"    configured={configured} available={available}")
+        for remediation in c.remediations:
+            rich_print(
+                "    remediation: "
+                f"{sanitize_diagnostic(remediation.description)} "
+                f"argv={list(remediation.argv)!r} "
+                f"mutating={remediation.mutating} "
+                f"dry_run_supported={remediation.dry_run_supported}"
+            )
     for drift in report.drift:
         rich_print("")
         rich_print(f"[{drift.environment_id}] {drift.environment_name} drift")
@@ -1316,226 +1394,6 @@ def exec_cmd(
     sys.exit(status)
 
 
-@cli.group("module", help="Discover, test, and upgrade Odoo modules.")
-def module_group() -> None:
-    pass
-
-
-@module_group.command("list", aliases=["ls"], help="List installed or available Odoo modules.")
-@click.argument("modules", nargs=-1)
-@click.option("--state", "state", default=None, help="Filter by state.")
-@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
-@output_options
-@pass_cli_context
-def module_list(
-    ctx: CliContext,
-    modules: tuple[str, ...],
-    state: str | None,
-    dry_run: bool,
-    output_format: str | None,
-    json_output: bool,
-) -> None:
-    output_mode = resolve_output_mode(output_format, json_output)
-    try:
-        runtime_context = cli_context.ready_instance(ctx)
-        instance = runtime_context.instance
-        status, _records = run_or_preview(
-            lambda: list_modules_command(instance, names=tuple(modules), state=state),
-            command_name="module.list",
-            mode=output_mode,
-            dry_run=dry_run,
-            result=lambda value: (
-                _module_list_result(cast("CommandResult | list[ModuleRecord]", value))
-                if value is not None
-                else {"modules": []}
-            ),
-            rich=_rich_module_list,
-        )
-    except SystemExit:
-        raise
-    except Exception as e:
-        fail(output_mode, "module.list", e, dry_run=dry_run)
-    sys.exit(status)
-
-
-@module_group.command("update", help="Upgrade selected Odoo modules.")
-@click.argument("modules", nargs=-1, required=True)
-@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Plan only.")
-@click.option("--yes", "yes", is_flag=True, default=False, help="Confirm execution.")
-@output_options
-@pass_cli_context
-def module_update(
-    ctx: CliContext,
-    modules: tuple[str, ...],
-    dry_run: bool,
-    yes: bool,
-    output_format: str | None,
-    json_output: bool,
-) -> None:
-    output_mode = resolve_output_mode(output_format, json_output)
-    try:
-        runtime_context = cli_context.ready_instance(ctx)
-        runtime_context.runtime
-        instance = runtime_context.instance
-    except SystemExit:
-        raise
-    except Exception as e:
-        fail(output_mode, "module.update", str(e), dry_run=dry_run)
-    try:
-        selected_modules = tuple(modules)
-
-        def build_command() -> Command[CommandResult]:
-            return update_modules_command(instance, selected_modules)
-
-        status, _outcome = run_or_preview(
-            build_command,
-            command_name="module.update",
-            mode=output_mode,
-            dry_run=dry_run,
-            result=lambda value: {
-                "modules": list(selected_modules),
-                "updated": _updated_modules(value),
-            },
-            confirm=(
-                (
-                    lambda: fail(
-                        output_mode,
-                        "module.update",
-                        "module update requires --yes",
-                        dry_run=dry_run,
-                    )
-                )
-                if not yes
-                else None
-            ),
-            preview=lambda command: {
-                "modules": list(selected_modules),
-                "plan": model_to_dict(command.plan),
-                "dry_run": True,
-            },
-            rich=_rich_module_update,
-            progress=True,
-        )
-    except Exception as exc:
-        fail(output_mode, "module.update", exc, dry_run=dry_run)
-    sys.exit(status)
-
-
-@module_group.command("test", help="Run tests for selected Odoo modules.")
-@click.argument("modules", nargs=-1, required=True)
-@click.option("--test-tags", "test_tags", required=True, help="Test tags.")
-@click.option("--reload-tests", "reload_tests", is_flag=True, default=False)
-@click.option("--allow-empty", "allow_empty", is_flag=True, default=False)
-@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
-@output_options
-@pass_cli_context
-def module_test(
-    ctx: CliContext,
-    modules: tuple[str, ...],
-    test_tags: str,
-    reload_tests: bool,
-    allow_empty: bool,
-    dry_run: bool,
-    output_format: str | None,
-    json_output: bool,
-) -> None:
-    output_mode = resolve_output_mode(output_format, json_output)
-    try:
-        runtime_context = cli_context.ready_instance(ctx)
-        runtime = runtime_context.runtime
-        instance = runtime_context.instance
-        selection = resolve_module_test_selection(
-            runtime.root,
-            runtime.start_config,
-            tuple(modules),
-            test_tags,
-        )
-        spec = OdooTestSpec(
-            modules=tuple(sorted(set(modules))),
-            test_tags=test_tags,
-            reload_tests=reload_tests,
-            allow_empty=allow_empty,
-        )
-        status, outcome = run_or_preview(
-            lambda: module_tests_command(
-                instance,
-                spec,
-                http_interface=runtime.http_interface,
-                http_port=runtime.http_port,
-            ),
-            command_name="module.test",
-            mode=output_mode,
-            dry_run=dry_run,
-            result=lambda value: (
-                project_execution_result(runtime, selection, spec, value[0])
-                if value is not None
-                else {}
-            ),
-            rich=lambda document: rich_test_result(cast("dict[str, JsonValue]", document.result)),
-            progress=True,
-        )
-    except SystemExit:
-        raise
-    except Exception as e:
-        fail(output_mode, "module.test", e, dry_run=dry_run)
-    sys.exit(outcome[0].exit_code if outcome is not None and not dry_run else status)
-
-
-@cli.group("translations", help="Export Odoo module translations.")
-def translations_group() -> None:
-    pass
-
-
-@translations_group.command("export", help="Export selected module translations.")
-@click.option("--module", "modules", multiple=True, required=True, help="Module name.")
-@click.option("--language", "languages", multiple=True, required=True, help="Language code.")
-@click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
-@output_options
-@pass_cli_context
-def translations_export(
-    ctx: CliContext,
-    modules: tuple[str, ...],
-    languages: tuple[str, ...],
-    dry_run: bool,
-    output_format: str | None,
-    json_output: bool,
-) -> None:
-    output_mode = resolve_output_mode(output_format, json_output)
-    try:
-        runtime_context = cli_context.ready_instance(ctx)
-        instance = runtime_context.instance
-        status, _results = run_or_preview(
-            lambda: export_translations_command(
-                instance,
-                tuple(modules),
-                tuple(languages),
-                worktree_root=runtime_context.worktree_path(),
-            ),
-            command_name="translations.export",
-            mode=output_mode,
-            dry_run=dry_run,
-            result=lambda value: {
-                "exports": [
-                    {
-                        "module": item.module,
-                        "requested_lang": item.requested_lang,
-                        "actual_filename": item.actual_filename,
-                        "path": str(item.path),
-                        "bytes_written": item.bytes_written,
-                    }
-                    for item in cast("list[TranslationExportResult]", value or [])
-                ]
-            },
-            rich=_rich_translation_export,
-            progress=True,
-        )
-    except SystemExit:
-        raise
-    except Exception as e:
-        fail(output_mode, "translations.export", e, dry_run=dry_run)
-    sys.exit(status)
-
-
 @cli.group("deps", help="Verify Python and add-on dependencies.")
 def deps_group() -> None:
     pass
@@ -1712,6 +1570,84 @@ def vscode_generate(
 
 
 postgres_group = _postgres_group
+
+
+class _AliasCommandMap(dict[str, click.Command]):
+    """Keep compatibility names addressable without exposing duplicate rows."""
+
+    def __init__(self, commands: Mapping[str, click.Command]) -> None:
+        super().__init__(commands)
+        self._aliases: dict[str, str] = {}
+
+    def add_alias(self, alias: str, canonical: str) -> None:
+        self._aliases[alias] = canonical
+
+    def __contains__(self, name: Hashable) -> bool:
+        return dict.__contains__(self, name) or name in self._aliases
+
+    def __getitem__(self, name: str) -> click.Command:
+        return dict.__getitem__(self, self._aliases.get(name, name))
+
+
+def _register_short_alias(group_name: str, canonical: str, alternate: str) -> None:
+    """Promote a short spelling at the composition boundary without editing leaves."""
+    group = cli.commands.get(group_name)
+    if not isinstance(group, click.Group):
+        raise TypeError(f"CLI group is not registered: {group_name}")
+    command = group.commands.get(canonical) or group.commands.get(alternate)
+    if command is None:
+        raise RuntimeError(f"CLI command is not registered: {group_name} {alternate}")
+    group.commands.pop(canonical, None)
+    group.commands.pop(alternate, None)
+    command.name = canonical
+    setattr(command, "aliases", [alternate])
+    if not isinstance(group.commands, _AliasCommandMap):
+        group.commands = _AliasCommandMap(group.commands)
+    group.add_command(command, name=canonical)
+    group.commands.add_alias(alternate, canonical)
+    getattr(group, "_handle_extras_add_command")(command, name=canonical, aliases=[alternate])
+
+    aliases: list[str] | None = getattr(group, "_odcli_aliases", None)
+    if aliases is None:
+        aliases = []
+        setattr(group, "_odcli_aliases", aliases)
+        original_shell_complete = group.shell_complete
+
+        def shell_complete(ctx: click.Context, incomplete: str) -> list[CompletionItem[str]]:
+            completions = original_shell_complete(ctx, incomplete)
+            values = {item.value for item in completions}
+            for alias_name in aliases:
+                if alias_name.startswith(incomplete) and alias_name not in values:
+                    alias_command = group.commands[alias_name]
+                    if alias_command is not None and not alias_command.hidden:
+                        completions.append(
+                            CompletionItem(alias_name, help=alias_command.get_short_help_str())
+                        )
+            return completions
+
+        setattr(group, "shell_complete", shell_complete)
+    aliases.append(alternate)
+
+
+# Domain command groups register through stable seams owned by their modules.
+# Keep these calls at the composition boundary so later packages need not edit
+# this registry's individual leaf callbacks.
+register_module_commands(cli)
+register_translation_commands(cli)
+for _group, _canonical, _alternate in (
+    ("env", "create", "checkout"),
+    ("env", "ls", "list"),
+    ("env", "rm", "remove"),
+    ("backup", "ls", "list"),
+    ("backup", "inspect", "show"),
+    ("backup", "rm", "delete"),
+    ("db", "ls", "list"),
+    ("db", "rm", "drop"),
+    ("postgres", "ps", "status"),
+    ("resource", "ls", "list"),
+    ("module", "ls", "list"),
+):
+    _register_short_alias(_group, _canonical, _alternate)
 
 
 @cli.command("monitor")

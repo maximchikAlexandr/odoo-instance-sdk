@@ -22,9 +22,9 @@ from odoo_instance_sdk.exceptions import (
     PostgresClusterUnreachableError,
     PostgresImageNotTrustedError,
 )
+from odoo_instance_sdk.internal import paths as _paths
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
-from odoo_instance_sdk.internal.paths import get_catalog_path, get_project_postgres_dir
 from odoo_instance_sdk.internal.postgres_compose import (
     ComposeRunner,
     SubprocessComposeRunner,
@@ -212,7 +212,7 @@ class PostgresCluster:
         )
 
     def _compose_dir(self) -> Path:
-        return get_project_postgres_dir(self._project_id)
+        return _paths.get_project_postgres_dir(self._project_id)
 
     def _compose_file(self) -> Path:
         return self._compose_dir() / "compose.yaml"
@@ -226,14 +226,14 @@ class PostgresCluster:
 
     def _cluster_claim(self) -> PostgresClusterClaim | None:
         """Read this project's claim; an absent row denotes legacy/external state."""
-        catalog = BackupCatalog(db_path=get_catalog_path())
+        catalog = BackupCatalog(db_path=_paths.get_catalog_path())
         try:
             return catalog._get_postgres_cluster(self._project_id)
         finally:
             catalog.close()
 
     def _ensure_pending_cluster_claim(self) -> PostgresClusterClaim:
-        catalog = BackupCatalog(db_path=get_catalog_path())
+        catalog = BackupCatalog(db_path=_paths.get_catalog_path())
         try:
             return catalog._ensure_postgres_cluster_pending(
                 self._project_id,
@@ -244,7 +244,7 @@ class PostgresCluster:
             catalog.close()
 
     def _activate_cluster_claim(self, claim: PostgresClusterClaim) -> None:
-        catalog = BackupCatalog(db_path=get_catalog_path())
+        catalog = BackupCatalog(db_path=_paths.get_catalog_path())
         try:
             catalog._activate_postgres_cluster(
                 claim.cluster_id,

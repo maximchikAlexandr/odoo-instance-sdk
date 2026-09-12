@@ -22,17 +22,17 @@ CATALOG_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 NEXT_CATALOG_SCHEMA_VERSION = CATALOG_SCHEMA_VERSION + 1
 # These are the pre-change upgrade states represented by the migration tests;
 # keeping the list explicit makes a missing intermediate fixture fail loudly.
-MIGRATION_FIXTURE_VERSIONS = (5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+MIGRATION_FIXTURE_VERSIONS = (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 
 
 def test_next_catalog_migration_version_and_fixtures_are_sequential() -> None:
-    assert CATALOG_SCHEMA_VERSION == 15
-    assert NEXT_CATALOG_SCHEMA_VERSION == 16
+    assert CATALOG_SCHEMA_VERSION == 16
+    assert NEXT_CATALOG_SCHEMA_VERSION == 17
     contiguous_versions = tuple(range(MIGRATION_FIXTURE_VERSIONS[0], CATALOG_SCHEMA_VERSION))
     assert contiguous_versions == MIGRATION_FIXTURE_VERSIONS
 
 
-def test_fresh_install_creates_v15_directly(tmp_path: Path) -> None:
+def test_fresh_install_creates_v16_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
     version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
@@ -122,7 +122,7 @@ def test_v15_applied_settings_migration_is_additive_and_unknown(tmp_path: Path) 
     catalog = BackupCatalog(db_path=db)
     columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(environments)")}
     row = catalog.get_environment(env_id)
-    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
     assert "applied_settings_json" in columns
     assert row is not None
     assert row["applied_settings_json"] == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
@@ -314,7 +314,7 @@ def test_v13_migration_rolls_back_on_claim_index_conflict(tmp_path: Path) -> Non
     conn.commit()
     conn.close()
     reopened = BackupCatalog(db_path=db)
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
     reopened.close()
 
 
@@ -360,7 +360,7 @@ def test_v12_backup_order_index_migration_rolls_back_on_conflict(tmp_path: Path)
     conn.close()
 
     reopened = BackupCatalog(db_path=db)
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
     assert (
         reopened._conn.execute(
             "SELECT type FROM sqlite_master WHERE name='backups_point_order_idx'"
@@ -462,7 +462,7 @@ def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_
     conn.close()
 
     catalog = BackupCatalog(db_path=db)
-    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
     assert (
         catalog._conn.execute(
             "SELECT COUNT(*) FROM backup_events WHERE backup_id=?", (backup_id,)
@@ -489,8 +489,178 @@ def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_
     provenance = reopened.latest_restore_provenance("localhost", 5432, "restored")
     assert provenance is not None
     assert provenance.source_git_branch is None
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == 15
+    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
     reopened.close()
+
+
+def test_v15_catalog_migration_preserves_populated_backup_relations(tmp_path: Path) -> None:
+    """The v16 ownership column must not disturb populated v15 catalogue rows."""
+    db = tmp_path / "catalog.sqlite3"
+    backup_id = str(uuid.uuid4())
+    environment_id = str(uuid.uuid4())
+    project_id = "project_legacy-owner"
+    backup_path = tmp_path / "legacy.zip"
+    backup_path.write_bytes(b"legacy backup")
+
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA user_version = 15")
+    conn.executescript(
+        """
+        CREATE TABLE projects (
+            project_id TEXT PRIMARY KEY,
+            repository_root TEXT NOT NULL,
+            git_common_dir TEXT NOT NULL,
+            registered_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE backups (
+            id TEXT PRIMARY KEY,
+            source_base_url TEXT NOT NULL,
+            database_name TEXT NOT NULL,
+            format TEXT NOT NULL,
+            filestore_requested INTEGER NOT NULL,
+            path TEXT,
+            filename TEXT,
+            size_bytes INTEGER,
+            sha256 TEXT,
+            state TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            downloaded_at TEXT,
+            failed_at TEXT,
+            deleted_at TEXT,
+            error_type TEXT,
+            error_message TEXT,
+            source_git_branch TEXT
+        );
+        CREATE TABLE backup_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            backup_id TEXT NOT NULL REFERENCES backups(id),
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            path TEXT,
+            validator TEXT,
+            exit_code INTEGER,
+            message TEXT
+        );
+        CREATE TABLE restores (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            db_host TEXT NOT NULL,
+            db_port INTEGER NOT NULL,
+            database_name TEXT NOT NULL,
+            backup_id TEXT NOT NULL REFERENCES backups(id),
+            restored_at TEXT NOT NULL,
+            cluster_id TEXT,
+            data_directory TEXT
+        );
+        CREATE TABLE database_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            db_host TEXT NOT NULL,
+            db_port INTEGER NOT NULL,
+            database_name TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            backup_id TEXT REFERENCES backups(id),
+            cluster_id TEXT,
+            data_directory TEXT
+        );
+        CREATE TABLE environments (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            repository_root TEXT NOT NULL,
+            git_common_dir TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            backup_id TEXT REFERENCES backups(id)
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
+        (project_id, "/repo", "/repo/.git", "2026-01-01", "2026-01-01"),
+    )
+    conn.execute(
+        """INSERT INTO backups
+           (id, source_base_url, database_name, format, filestore_requested, path,
+            filename, size_bytes, sha256, state, started_at, downloaded_at,
+            source_git_branch)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            backup_id,
+            "https://example.test",
+            "legacy",
+            "zip",
+            1,
+            str(backup_path),
+            backup_path.name,
+            backup_path.stat().st_size,
+            "a" * 64,
+            "available",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:01+00:00",
+            "main",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO backup_events (backup_id, event_type, occurred_at, path) VALUES (?, ?, ?, ?)",
+        (backup_id, "download_succeeded", "2026-01-01T00:00:01+00:00", str(backup_path)),
+    )
+    conn.execute(
+        "INSERT INTO restores (db_host, db_port, database_name, backup_id, restored_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("localhost", 5432, "legacy", backup_id, "2026-01-02T00:00:00+00:00"),
+    )
+    conn.execute(
+        "INSERT INTO database_events "
+        "(db_host, db_port, database_name, event_type, occurred_at, backup_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("localhost", 5432, "legacy", "restored", "2026-01-02T00:00:00+00:00", backup_id),
+    )
+    conn.execute(
+        "INSERT INTO environments (id, name, repository_root, git_common_dir, branch, backup_id) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (environment_id, "legacy", "/repo", "/repo/.git", "main", backup_id),
+    )
+    conn.commit()
+    conn.close()
+
+    catalog = BackupCatalog(db_path=db)
+    row = catalog.get_by_id(backup_id)
+    assert row is not None
+    assert row["id"] == backup_id
+    assert row["project_id"] == project_id
+    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM backup_events WHERE backup_id = ?", (backup_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM restores WHERE backup_id = ?", (backup_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM database_events WHERE backup_id = ?", (backup_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        catalog._conn.execute(
+            "SELECT backup_id FROM environments WHERE id = ?", (environment_id,)
+        ).fetchone()[0]
+        == backup_id
+    )
+    foreign_keys = {
+        (item[3], item[2], item[4])
+        for item in catalog._conn.execute("PRAGMA foreign_key_list(backups)")
+    }
+    assert ("project_id", "projects", "project_id") in foreign_keys
+    indexes = {item[1] for item in catalog._conn.execute("PRAGMA index_list(backups)")}
+    assert "backups_project_idx" in indexes
+    catalog.close()
 
 
 def test_environment_methods_exist(tmp_path: Path) -> None:
@@ -604,12 +774,12 @@ def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None
     schema = catalog._conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='environment_copy_journal'"
     ).fetchone()[0]
-    assert version == 15
+    assert version == CATALOG_SCHEMA_VERSION
     assert "restore_pending" in schema
     catalog.close()
 
 
-def test_v8_catalog_upgrades_to_v13_environment_runtime_and_branch_column(tmp_path: Path) -> None:
+def test_v8_catalog_upgrades_to_v16_environment_runtime_and_branch_column(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
     conn = sqlite3.connect(str(db))
     conn.execute("PRAGMA user_version = 8")
@@ -633,7 +803,7 @@ def test_v8_catalog_upgrades_to_v13_environment_runtime_and_branch_column(tmp_pa
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    assert version == 15
+    assert version == CATALOG_SCHEMA_VERSION
     assert "runtime" in tables
     columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(backups)")}
     assert "source_git_branch" in columns
@@ -780,7 +950,7 @@ def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
         (env_id,),
     ).fetchone()
 
-    assert version == 15
+    assert version == CATALOG_SCHEMA_VERSION
     assert "http_port" not in columns
     assert "http_interface" not in columns
     assert "environments_one_active_branch" in indexes

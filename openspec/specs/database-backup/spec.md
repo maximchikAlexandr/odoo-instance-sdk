@@ -125,3 +125,10 @@ Interrupting local backup download SHALL close the HTTP response and file handle
 
 - **WHEN** Ctrl-C occurs after the archive was atomically published
 - **THEN** the available backup remains in the catalogue and on disk and is reported as retained
+
+### Requirement: Project ownership captured at download start
+Project-backed backup operations SHALL pass the resolved canonical project identifier into `start_download` for local and remote sources; source type SHALL NOT determine project ownership. [Source: GH#64 §1]
+
+#### Scenario: Start project download
+- **WHEN** backup download is planned and executed from a resolved project owner
+- **THEN** its catalogue row records that project before transfer state advances

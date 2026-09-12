@@ -924,11 +924,11 @@ def test_compose_claim_labels_and_retry_reuse_pending_identity(
     catalog_path = tmp_path / "catalog.sqlite3"
     compose_root = tmp_path / "postgres"
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
         lambda **_kwargs: catalog_path,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda _project_id: compose_root,
     )
     project = tmp_path / "project"
@@ -955,11 +955,11 @@ def test_compose_claim_mismatch_fails_closed_then_exact_retry_activates(
     catalog_path = tmp_path / "catalog.sqlite3"
     compose_root = tmp_path / "postgres"
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
         lambda **_kwargs: catalog_path,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda _project_id: compose_root,
     )
 
@@ -997,11 +997,11 @@ def test_compose_claim_survives_failure_before_volume_and_reuses_identity(
     catalog_path = tmp_path / "catalog.sqlite3"
     compose_root = tmp_path / "postgres"
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
         lambda **_kwargs: catalog_path,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda _project_id: compose_root,
     )
     project = tmp_path / "project"
