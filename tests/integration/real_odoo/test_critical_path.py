@@ -804,4 +804,4 @@ def test_source_backed_full_critical_path(  # noqa: C901
     evidence.chmod(0o600)
     assert evidence.is_file()
     assert evidence.stat().st_mode & 0o777 == 0o600
-    assert evidence.stat().st_size < 2 * 1024 * 1024
+    assert 0 < evidence.stat().st_size < 2 * 1024 * 1024
