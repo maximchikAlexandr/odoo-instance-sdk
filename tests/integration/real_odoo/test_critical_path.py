@@ -107,6 +107,20 @@ def _clone_pinned_source(repository: Path, destination: Path) -> None:
         raise AssertionError(f"cannot check out pinned Odoo source: {checkout.stderr[-4000:]}")
 
 
+def _resolved_postgres_digest(image: str) -> str:
+    result = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", image],
+        capture_output=True,
+        shell=False,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    resolved = result.stdout.strip()
+    assert resolved.rsplit("@", 1)[-1] == image.rsplit("@", 1)[-1]
+    return resolved
+
+
 def _invoke(
     runner: CliRunner,
     project: Path,
@@ -250,7 +264,8 @@ def _stop_owned(instance: Any, process: Any) -> None:
     instance._clear_runtime_identity()
 
 
-def test_source_backed_full_critical_path(
+@pytest.mark.timeout(600)
+def test_source_backed_full_critical_path(  # noqa: C901
     target_runtime: E2ERuntime,
     source_backup: ArchiveIdentity,
     record_property: Any,
@@ -260,12 +275,40 @@ def test_source_backed_full_critical_path(
     source_repository, odoo_bin_relative = _source_repository()
     runner = CliRunner()
     runtime = target_runtime
+    for key, value in runtime.environment.items():
+        monkeypatch.setenv(key, value)
     catalogue_path = (runtime.root / "catalog.sqlite3").resolve()
 
     def run_catalog_path(*, ensure_exists: bool = True) -> Path:
         if ensure_exists:
             catalogue_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         return catalogue_path
+
+    def run_data_root(*, ensure_exists: bool = True) -> Path:
+        if ensure_exists:
+            runtime.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return runtime.root
+
+    def run_state_root() -> Path:
+        path = runtime.root / "state"
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return path
+
+    def run_cache_root(*, ensure_exists: bool = True) -> Path:
+        path = runtime.root / "cache"
+        if ensure_exists:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return path
+
+    def run_locks_dir(**_kwargs: object) -> Path:
+        path = run_state_root() / "locks"
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_data_root", run_data_root)
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_state_root", run_state_root)
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", run_cache_root)
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_locks_dir", run_locks_dir)
 
     for provider in (
         "odoo_instance_sdk.cli.get_catalog_path",
@@ -384,8 +427,10 @@ def test_source_backed_full_critical_path(
         "postgres",
         "approve-image",
         "--image-digest",
-        E2E_PINS.postgres_image,
+        _resolved_postgres_digest(E2E_PINS.postgres_image),
     )
+    assert cluster.compose_file.parent.is_relative_to(runtime.root)
+    assert cluster.password_file.is_file()
     _invoke(runner, project, cli_environment, "postgres", "up")
     status = _invoke(runner, project, cli_environment, "postgres", "status")
     repeated_status = _invoke(runner, project, cli_environment, "postgres", "status")
@@ -396,7 +441,8 @@ def test_source_backed_full_critical_path(
     uv_version = subprocess.run(
         ["uv", "--version"], capture_output=True, shell=False, text=True, check=True
     ).stdout.strip()
-    assert uv_version.endswith(E2E_PINS.uv)
+    assert uv_version.split()[1] == E2E_PINS.uv
+    runtime.reservations[3].release()
 
     checkout = _invoke(
         runner,
@@ -472,8 +518,6 @@ def test_source_backed_full_critical_path(
 
     from odoo_instance_sdk import OdooClient, OdooClientConfig
 
-    for key, value in runtime.environment.items():
-        monkeypatch.setenv(key, value)
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     assert os.environ["ODCLI_E2E_CATALOG"] == runtime.environment["ODCLI_E2E_CATALOG"]
     assert Path(cli_environment["ODCLI_E2E_CATALOG"]).resolve() == catalogue_path
