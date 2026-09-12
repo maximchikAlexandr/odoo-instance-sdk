@@ -147,6 +147,7 @@ def _invoke_case(  # noqa: C901
     runtime: E2ERuntime,
     evidence: FailureEvidence,
     record_property: object,
+    source_backup: ArchiveIdentity,
 ) -> None:
     """Execute one canonical leaf through Click and assert its real contract."""
     args = list(case.args)
@@ -199,7 +200,7 @@ def _invoke_case(  # noqa: C901
         actual_args = ["db", "reset-admin-password", "--format", "json"]
         actual_input = None
         if case.path == ("shell",):
-            actual_args = ["shell", "--format", "json"]
+            actual_args = ["shell"]
             actual_input = "exit()\n"
         actual = CliRunner().invoke(
             cli,
@@ -214,12 +215,15 @@ def _invoke_case(  # noqa: C901
             input=actual_input,
         )
         assert actual.exit_code == repeated.exit_code == 0, actual.output
-        actual_document = json.loads(actual.stdout)
-        repeated_document = json.loads(repeated.stdout)
-        assert actual_document["ok"] is True and repeated_document["ok"] is True
-        target_database = runtime.topology.target_sentinel_database
-        assert actual_document["result"]["database"] == target_database
-        assert repeated_document["result"]["database"] == target_database
+        if case.path == ("shell",):
+            assert "Usage: odcli shell" not in actual.output
+        else:
+            actual_document = json.loads(actual.stdout)
+            repeated_document = json.loads(repeated.stdout)
+            assert actual_document["ok"] is True and repeated_document["ok"] is True
+            target_database = runtime.topology.target_sentinel_database
+            assert actual_document["result"]["database"] == target_database
+            assert repeated_document["result"]["database"] == target_database
         result = actual
     elif case.path == ("module", "test"):
         module_args = [item for item in args if item != "--dry-run"]
@@ -309,10 +313,33 @@ def _invoke_case(  # noqa: C901
         result, document = finite, None
     elif case.path == ("db", "drop"):
         owned_database = f"odcli_drop_{runtime.run_id.replace('-', '')[:20]}"
-        created = ComposeLifecycle(runtime.compose_file, runtime.topology.project_name).run(
-            "exec", "-T", "target_postgres", "createdb", "-U", "odoo", owned_database, timeout=30.0
+        backup_path = runtime.artifact_root / f"drop-{runtime.run_id}.zip"
+        shutil.copy2(source_backup.path, backup_path)
+        _seed_backup(
+            Path(runtime.environment["ODCLI_E2E_CATALOG"]),
+            backup_path,
+            database=runtime.topology.source_database,
         )
-        assert created.returncode == 0, created.stderr
+        restored = CliRunner().invoke(
+            cli,
+            [
+                "--project",
+                str(project),
+                "db",
+                "restore",
+                _BACKUP_ID,
+                "--target",
+                owned_database,
+                "--yes",
+                "--format",
+                "json",
+            ],
+            env=environment,
+        )
+        assert restored.exit_code == 0, restored.output
+        restored_document = json.loads(restored.stdout)
+        assert restored_document["ok"] is True
+        assert restored_document["result"]["restored_database"] == owned_database
         owned_args = ["db", "drop", owned_database, "--yes", "--format", "json"]
         first = CliRunner().invoke(
             cli,
@@ -346,6 +373,9 @@ def _invoke_case(  # noqa: C901
         assert (
             foreign_document is not None and foreign_document["error"]["code"] == "db_drop_failed"
         )
+        filestore = runtime.root / "target-data" / "filestore" / owned_database
+        if filestore.exists():
+            shutil.rmtree(filestore)
         result, document = first, first_document
     elif case.path == ("exec",):
         success_args = ["exec", "-", "--format", "json"]
@@ -684,6 +714,7 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
 def test_remaining_focused_public_leaves_use_canonical_inventory(
     case: PublicLeafCase,
     target_runtime: E2ERuntime,
+    source_backup: ArchiveIdentity,
     failure_evidence: FailureEvidence,
     record_property: object,
 ) -> None:
@@ -694,6 +725,7 @@ def test_remaining_focused_public_leaves_use_canonical_inventory(
         runtime=target_runtime,
         evidence=failure_evidence,
         record_property=record_property,
+        source_backup=source_backup,
     )
 
 
@@ -828,6 +860,12 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         "json",
     ]
     partial_document: dict[str, Any] = {}
+    scenario_ledger = ResourceLedger(run_id)
+    resource_ledger.record(
+        "recovery-scenario",
+        f"{run_id}-recovery-scenario",
+        scenario_ledger.unwind,
+    )
 
     original_restore = DatabaseResource.restore
 
@@ -862,12 +900,12 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         if result.returncode != 0:
             raise RuntimeError("database cleanup failed")
 
-    resource_ledger.record(
+    scenario_ledger.record(
         "database",
         f"{run_id}-{database}",
         drop_database,
     )
-    resource_ledger.record("filestore", f"{run_id}-filestore", lambda: shutil.rmtree(filestore))
+    scenario_ledger.record("filestore", f"{run_id}-filestore", lambda: shutil.rmtree(filestore))
 
     def delete_catalog_record() -> None:
         deleted = CliRunner().invoke(
@@ -887,15 +925,15 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         if deleted.exit_code != 0:
             raise RuntimeError(deleted.output)
 
-    resource_ledger.record("catalog", f"{run_id}-catalog", delete_catalog_record)
-    resource_ledger.record(
+    scenario_ledger.record("catalog", f"{run_id}-catalog", delete_catalog_record)
+    scenario_ledger.record(
         "cleanup",
         f"{run_id}-injected-cleanup",
         lambda: (_ for _ in ()).throw(RuntimeError("cleanup failure")),
     )
     observation = run_recovery_action(
         public_restore_failure,
-        ledger=resource_ledger,
+        ledger=scenario_ledger,
     )
     assert str(observation.primary_error) == partial_document["error"]["message"]
     assert observation.cleanup_errors == ("cleanup failure",)
