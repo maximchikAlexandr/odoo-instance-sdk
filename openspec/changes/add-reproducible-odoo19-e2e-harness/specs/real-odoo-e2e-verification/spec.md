@@ -10,7 +10,7 @@ The full real-Odoo tier SHALL run on Linux amd64 with Odoo Community 19 source c
 - **THEN** only the reference source-server and PostgreSQL dependencies SHALL run as Compose services
 
 #### Scenario: Pinned input changes are explicit
-- **WHEN** an Odoo, PostgreSQL, Python, `uv`, or GitHub Action pin changes
+- **WHEN** an Odoo, PostgreSQL, Python, `uv`, `pip-audit`, or GitHub Action pin changes
 - **THEN** the change SHALL update the pin manifest, expected cache keys, POC evidence, and reviewable dependency diff in one commit
 
 ### Requirement: Deterministic source fixture and genuine backup
@@ -119,11 +119,11 @@ Odoo source and `uv` downloads/wheels SHALL use content-addressed caches keyed b
 
 ### Requirement: Live audited Python resolution gate
 
-Before provisioning any source-backed full-tier resource, bootstrap SHALL verify the pinned Odoo/Python/platform hash-lock digest and audit-report digest, invoke exactly `pip-audit 2.10.1` against that exact lock, and fail unless the scanner completes successfully with parseable machine output. The gate SHALL normalize package names, retain exact versions and advisory identifiers, deduplicate tuples, and require exact set equality between scanned `(package, version, advisory ID)` tuples and the audit report's non-expired reviewed exceptions. The checked-in report SHALL require a non-empty owner, bounded scope and rationale, valid expiry date, exact package/version, and non-empty advisory set for every exception.
+Before provisioning any source-backed full-tier resource, the immutable pin manifest SHALL contain the exact scanner distribution pin `pip-audit==2.10.1` alongside the pinned Odoo/Python/platform hash-lock digest and audit-report digest. Bootstrap SHALL verify those values, invoke that exact scanner distribution against that exact lock, and fail unless the scanner completes successfully with parseable machine output. The gate SHALL normalize package names, retain exact versions and advisory identifiers, deduplicate tuples, and require exact set equality between scanned `(package, version, advisory ID)` tuples and the audit report's non-expired reviewed exceptions. The checked-in report SHALL require a non-empty owner, bounded scope and rationale, valid expiry date, exact package/version, and non-empty advisory set for every exception.
 
 #### Scenario: Pinned scanner failure stops before provisioning
 
-- **WHEN** the scanner identity differs from `pip-audit 2.10.1`, execution fails, output is malformed, or the scanned lock/digest differs from the pinned input
+- **WHEN** the scanner distribution differs from the manifest value `pip-audit==2.10.1`, execution fails, output is malformed, or the scanned lock/digest differs from the pinned input
 - **THEN** bootstrap SHALL fail before creating a run id, cache mutation, process, container, network, volume, port, database, filestore, worktree, XDG root, or catalogue record
 
 #### Scenario: Scanner and reviewed exceptions are exactly equal

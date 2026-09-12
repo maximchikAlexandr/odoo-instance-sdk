@@ -22,7 +22,7 @@
 
 ## Follow-up gaps
 
-These gaps are explicitly deferred and do not leave implementation choices in MYL-153 graph revision 2:
+These gaps are explicitly deferred and do not leave implementation choices in MYL-153 graph revision 3:
 
 - Additional Odoo majors require a separate change after the Odoo 19 full tier is stable.
 - Browser acceptance requires a separate product requirement; XML-RPC/HTTP verification is sufficient here.

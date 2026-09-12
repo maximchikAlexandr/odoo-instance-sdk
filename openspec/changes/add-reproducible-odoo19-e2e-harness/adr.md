@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-11
-- Decision scope: MYL-153 graph revision 2, based on `0c04dfcac56a4c0ccf34eb928bb6348f48348397`
+- Decision scope: MYL-153 graph revision 3, based on exact rebased candidate `af9e1b3e8d127145b9488f11ec79519f9442db46`
 
 ## Decision drivers
 
@@ -30,7 +30,7 @@ Reconsider the orchestration choice only if measured evidence shows Compose cann
 
 The reference source-server uses the pinned official Odoo index digest and a pinned `base`-only addon. The full target is the pinned Odoo Git commit and is created with public `odcli init`, `env checkout --create-venv`, environment synchronization, and lifecycle operations. PostgreSQL remains Compose-owned. The POC may use an image-backed target because it isolates the backup/restore/filestore risk; only the full tier can claim target-source coverage.
 
-No golden backup is stored or cached. No new production dependency, runner, CLI leaf, or SDK type is introduced. Graph revision 2 adds paired hash-lock path/digest parameters to the existing checkout and synchronization operations. Both operations share one neutral dependency-sync argv builder and the existing centralized process boundary; hash-lock mode is limited to an owned environment and captures `uv pip sync --require-hashes` without discovery or compile/install fallback. Test orchestration remains outside production and calls this public boundary.
+No golden backup is stored or cached. No new production dependency, runner, CLI leaf, or SDK type is introduced. Graph revision 3 retains the paired hash-lock path/digest parameters on the existing checkout and synchronization operations. Both operations share one neutral dependency-sync argv builder and the existing centralized process boundary; hash-lock mode is limited to an owned environment and captures `uv pip sync --require-hashes` without discovery or compile/install fallback. Test orchestration remains outside production and calls this public boundary.
 
 ## Consequences
 

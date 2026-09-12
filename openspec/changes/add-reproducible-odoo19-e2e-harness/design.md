@@ -18,7 +18,7 @@ The local POC in `poc/run_probe.py` used the pinned multi-arch Odoo and PostgreS
 **Non-Goals:**
 
 - Enterprise repositories, private credentials, business addons, browser acceptance, or Odoo majors other than 19.
-- A new production process runner, container abstraction, public CLI leaf, SDK type, or runtime dependency; graph revision 2 permits only the additive hash-lock parameters on the existing checkout and synchronization operations.
+- A new production process runner, container abstraction, public CLI leaf, SDK type, or runtime dependency; graph revision 3 retains only the additive hash-lock parameters on the existing checkout and synchronization operations.
 - Replacing offline/unit/characterization tests or publishing a custom production Odoo image.
 - Caching databases, filestore, mutable backups, catalogs, generated configs, or secrets.
 
@@ -66,11 +66,11 @@ The harness captures only bounded tails and structured manifests. Existing sanit
 
 ### 8. Make the audited lock a public environment-operation input
 
-Graph revision 2 extends the existing checkout and environment synchronization operations with paired `hash_lock` and `hash_lock_sha256` inputs, exposed by the CLI as `--hash-lock PATH` and `--hash-lock-sha256 SHA256`. Both values are required together. Hash-lock mode requires an OdCLI-owned environment, rejects `--upgrade`, resolves a regular lock file, verifies its lowercase SHA-256 before mutation, and captures the exact command `uv pip sync --python <owned-python> --require-hashes <canonical-lock>` through the centralized immutable process boundary. It does not discover or compile Odoo/project requirements and has no install fallback.
+Graph revision 3 retains the existing checkout and environment synchronization operations with paired `hash_lock` and `hash_lock_sha256` inputs, exposed by the CLI as `--hash-lock PATH` and `--hash-lock-sha256 SHA256`. Both values are required together. Hash-lock mode requires an OdCLI-owned environment, rejects `--upgrade`, resolves a regular lock file, verifies its lowercase SHA-256 before mutation, and captures the exact command `uv pip sync --python <owned-python> --require-hashes <canonical-lock>` through the centralized immutable process boundary. It does not discover or compile Odoo/project requirements and has no install fallback.
 
 `env checkout --create-venv` accepts the same paired inputs and uses the same neutral `src/odoo_instance_sdk/internal/dependency_sync.py` argv builder for its initial dependency step. The full scenario passes the reviewed lock to checkout and to both public `env sync` invocations. Consequently the first package operation after venv creation is hash-enforced and the scenario needs neither `_find_odoo_requirements` monkeypatching nor a direct test subprocess. The existing default compile/install behavior remains unchanged when hash-lock inputs are absent.
 
-The reviewed lock digest and audit-report digest are immutable manifest fields. Full bootstrap runs pinned `pip-audit 2.10.1` against the exact lock, canonicalizes unique `(normalized package, version, advisory ID)` tuples, and requires exact equality with non-expired reviewed exceptions. Missing, additional, version-mismatched, malformed, or expired entries fail before provisioning.
+The reviewed lock digest, audit-report digest, and exact scanner distribution pin `pip-audit==2.10.1` are immutable manifest fields. Full bootstrap runs that exact scanner distribution against the exact lock, canonicalizes unique `(normalized package, version, advisory ID)` tuples, and requires exact equality with non-expired reviewed exceptions. Missing, additional, version-mismatched, malformed, or expired entries fail before provisioning.
 
 ## Risks / Trade-offs
 

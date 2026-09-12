@@ -1,9 +1,9 @@
 ## 1. Canonical contracts and inventory
 
 - [ ] 1.1 [T01] Extend the existing test-only `PublicLeafCase` rows with one E2E disposition, rationale, and evidence identifier without creating another leaf-path registry.
-- [ ] 1.2 [T02] Add collection-time assertions and a deterministic generator/check that project `PUBLIC_LEAF_CASES` into the reviewed command matrix and fail on missing or stale classifications.
-- [ ] 1.3 [T03] Add the `e2e_smoke` and `e2e_full` pytest markers, immutable pin manifest including lock/audit SHA-256 and pinned scanner identity, phase-budget constants, and supported-platform validation.
-- [ ] 1.4 [T04] Add unit checks for every pin including malformed audit SHA-256, matrix generation, budget classification, and fail-closed prerequisite reporting.
+- [ ] 1.2 [T02] Add collection-time assertions and a deterministic generator/check that project all 50 rows of `PUBLIC_LEAF_CASES` into the reviewed command matrix, emit canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46` separately from original full-change audit base `0ff164636617c03a51277055af45cef009277368`, require byte-for-byte document equality, and fail on missing or stale classifications or provenance.
+- [ ] 1.3 [T03] Add the `e2e_smoke` and `e2e_full` pytest markers, immutable pin manifest including lock/audit SHA-256 and the exact scanner distribution pin `pip-audit==2.10.1`, phase-budget constants, and supported-platform validation.
+- [ ] 1.4 [T04] Add unit checks for every pin including malformed audit SHA-256 and any scanner value other than `pip-audit==2.10.1`, exact matrix generation, budget classification, and fail-closed prerequisite reporting.
 
 ## 2. Disposable source and target foundation
 
@@ -32,7 +32,7 @@
 ## 5. CI and operator evidence
 
 - [ ] 5.1 [T20] Add the required PR smoke job with pinned Actions/images, fail-closed bootstrap, 10-minute timeout, cold/warm measurements, and success/failure evidence limits.
-- [ ] 5.2 [T21] Add the scheduled/manual Linux-amd64 full job with pinned Odoo/Python/uv/scanner inputs, 25-minute timeout, content-addressed source/uv caches, no mutable-state caches, and a live audit gate requiring exact canonical equality between scanner results and non-expired reviewed exceptions.
+- [ ] 5.2 [T21] Add the scheduled/manual Linux-amd64 full job with pinned Odoo/Python/uv inputs and exact scanner distribution pin `pip-audit==2.10.1`, 25-minute timeout, content-addressed source/uv caches, no mutable-state caches, and a live audit gate requiring exact canonical equality between scanner results and non-expired reviewed exceptions.
 - [ ] 5.3 [T22] Add bounded log/resource/pin/timing/JUnit packaging, 7-day failure retention, 2/50 MiB gates, and a pre-upload secret-canary scan.
 - [ ] 5.4 [T23] Document the single local smoke/full bootstrap and pytest commands, supported arm64/amd64 behavior, debug retention, cache policy, budgets, and troubleshooting.
 
@@ -40,4 +40,4 @@
 
 - [ ] 6.1 [T24] Run formatting, lint, type, unit, inventory-generation, and strict OpenSpec checks without weakening existing suites or thresholds.
 - [ ] 6.2 [T25] Run smoke twice and full once as cache-miss plus once as cache-hit, record phase/bundle measurements, and require all post-run leak audits to be empty.
-- [ ] 6.3 [T26] Verify every `PUBLIC_LEAF_CASES` row maps to exactly one disposition/evidence entry and every spec scenario has executable evidence; audit the complete diff from original planning base `0ff164636617c03a51277055af45cef009277368`, allowing only the graph-revision-2 public hash-lock behavior in `resources/environment.py`, `commands/env.py`, and neutral `internal/dependency_sync.py` while rejecting any other production runner/API, Enterprise input, mutable backup, or hidden prerequisite; rebase the feature branch on fetched current `origin/main`, assess applicable upstream public behavior, run all local gates, publish with `--force-with-lease`, require terminal exact-head PR and Linux-amd64 full CI evidence, and record the repository-wide OpenSpec sync/archive audit plus strict validation.
+- [ ] 6.3 [T26] Verify every `PUBLIC_LEAF_CASES` row maps to exactly one disposition/evidence entry and every spec scenario has executable evidence; audit the complete diff from original planning base `0ff164636617c03a51277055af45cef009277368`, allowing only the graph-revision-3 public hash-lock behavior in `resources/environment.py`, `commands/env.py`, and neutral `internal/dependency_sync.py` while rejecting any other production runner/API, Enterprise input, mutable backup, or hidden prerequisite; rebase the feature branch on fetched current `origin/main`, assess applicable upstream public behavior, run all local gates, publish with `--force-with-lease`, require terminal exact-head PR and Linux-amd64 full CI evidence, and record the repository-wide OpenSpec sync/archive audit plus strict validation.

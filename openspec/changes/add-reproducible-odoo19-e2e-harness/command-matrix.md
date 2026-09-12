@@ -1,39 +1,44 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` from original planning base `0ff164636617c03a51277055af45cef009277368`, amended by MYL-153 graph revision 2 at `0c04dfcac56a4c0ccf34eb928bb6348f48348397`; it is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; a generator rewrites this table and a check fails on drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 50-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
 | `init` | mutating-or-spawning | yes | smoke | E2E-SM-01 / E2E-CP-01: manifest and target project |
 | `doctor` | bounded-read-only | no | critical | E2E-CP-14: final project diagnosis |
 | `stop` | mutating-or-spawning | yes | critical | E2E-CP-13: owned target process stop and repeat |
-| `resource list` | bounded-read-only | no | critical | E2E-CP-12: run-owned inventory |
+| `resource ls` | bounded-read-only | no | critical | E2E-CP-12: run-owned inventory |
 | `resource doctor` | bounded-read-only | no | smoke | E2E-SM-05 / E2E-CP-12: ownership and health |
-| `env checkout` | mutating-or-spawning | yes | critical | E2E-CP-02: pinned source, explicit owned venv, and audited hash-lock first install |
-| `env list` | bounded-read-only | no | critical | E2E-CP-03: registered environment identity |
+| `env create` | mutating-or-spawning | yes | critical | E2E-CP-02: pinned source, explicit owned venv, and audited hash-lock first install |
+| `env ls` | bounded-read-only | no | critical | E2E-CP-03: registered environment identity |
 | `env path` | bounded-read-only | no | critical | E2E-CP-03: worktree/config/venv paths |
-| `env remove` | mutating-or-spawning | yes | critical | E2E-CP-15: exact owned cleanup and repeat |
+| `env show` | bounded-read-only | no | not-applicable | upstream environment inspection is covered by focused command tests |
+| `env rm` | mutating-or-spawning | yes | critical | E2E-CP-15: exact owned cleanup and repeat |
 | `env sync` | mutating-or-spawning | yes | critical | E2E-CP-04: public `--hash-lock`/digest sync, `--require-hashes`, and idempotency |
-| `backup list` | bounded-read-only | no | critical | E2E-CP-09: downloaded catalog row |
-| `backup show` | bounded-read-only | no | critical | E2E-CP-09: exact size/SHA/source identity |
+| `backup ls` | bounded-read-only | no | critical | E2E-CP-09: downloaded catalog row |
+| `backup inspect` | bounded-read-only | no | critical | E2E-CP-09: exact size/SHA/source identity |
 | `backup validate` | bounded-read-only | no | smoke | E2E-SM-03 / E2E-CP-09: ZIP plus filestore validation |
-| `backup delete` | mutating-or-spawning | yes | focused | E2E-FC-09: owned artifact deletion and repeat |
+| `backup rm` | mutating-or-spawning | yes | focused | E2E-FC-09: owned artifact deletion and repeat |
 | `db refresh` | mutating-or-spawning | yes | smoke | E2E-SM-02 / E2E-CP-08: real remote download and restore |
 | `db restore` | mutating-or-spawning | yes | focused | E2E-FC-05: exact catalog restore, occupied/repeat cases |
-| `db list` | bounded-read-only | no | smoke | E2E-SM-04 / E2E-CP-10: restored DB visible |
+| `db ls` | bounded-read-only | no | smoke | E2E-SM-04 / E2E-CP-10: restored DB visible |
 | `db reset-admin-password` | mutating-or-spawning | yes | focused | E2E-FC-06: target Odoo shell reset and redaction |
-| `db drop` | mutating-or-spawning | yes | focused | E2E-FC-10: owned DB deletion; foreign DB refusal |
+| `db rm` | mutating-or-spawning | yes | focused | E2E-FC-10: owned DB deletion; foreign DB refusal |
 | `eval` | process-previewable-read-only | yes | critical | E2E-CP-11: restored model/attachment assertion |
 | `exec` | mutating-or-spawning | yes | focused | E2E-FC-07: framed script result and non-zero failure |
 | `test` | process-previewable-read-only | yes | critical | E2E-CP-07: probe module native runner report |
-| `module list` | process-previewable-read-only | yes | critical | E2E-CP-05: probe discovery/install state |
+| `module ls` | process-previewable-read-only | yes | critical | E2E-CP-05: probe discovery/install state |
 | `module update` | mutating-or-spawning | yes | critical | E2E-CP-06: deterministic update and repeat |
 | `module test` | mutating-or-spawning | yes | focused | E2E-FC-08: compatibility alias equals top-level test |
+| `module info` | bounded-read-only | no | not-applicable | upstream module inspection is covered by focused command tests |
+| `module where` | bounded-read-only | no | not-applicable | upstream filesystem inspection is outside the lifecycle fixture |
+| `module deps` | bounded-read-only | no | not-applicable | upstream dependency inspection is covered offline |
+| `module install-order` | process-previewable-read-only | yes | not-applicable | upstream planning leaf is outside the lifecycle fixture |
 | `translations export` | mutating-or-spawning | yes | not-applicable | Browser/localization/business behavior is outside the `base`-only fixture; existing command-plan tests remain authoritative |
 | `deps verify` | process-previewable-read-only | yes | critical | E2E-CP-04: owned Python/Odoo dependency preflight |
 | `vscode generate` | mutating-or-spawning | yes | not-applicable | Editor artifact generation is orthogonal to the server/database lifecycle and remains covered offline |
 | `postgres approve-image` | mutating-or-spawning | yes | critical | E2E-CP-01: exact trusted image digest |
-| `postgres status` | bounded-read-only | no | critical | E2E-CP-01: health/ownership snapshot |
+| `postgres ps` | bounded-read-only | no | critical | E2E-CP-01: health/ownership snapshot |
 | `postgres up` | mutating-or-spawning | yes | critical | E2E-CP-01: public owned cluster start |
 | `postgres stop` | mutating-or-spawning | yes | critical | E2E-CP-15: public stop plus harness volume cleanup |
 | `db locks` | bounded-read-only | no | focused | E2E-FC-11: bounded real PostgreSQL diagnostics |
@@ -45,6 +50,10 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `logs` | jsonl-stream | no | focused | E2E-FC-13: bounded subscription/cancellation and redaction |
 | `shell` | native-passthrough | yes | focused | E2E-FC-06: exact target database and exit semantics |
 | `monitor` | native-passthrough | no | not-applicable | Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle |
+| `git commit` | mutating-or-spawning | yes | not-applicable | upstream Git workflow is outside the disposable Odoo fixture |
+| `git check` | bounded-read-only | no | not-applicable | upstream Git policy inspection is covered by unit contracts |
+| `git absorb` | mutating-or-spawning | yes | not-applicable | upstream Git mutation is outside the disposable Odoo fixture |
+| `git sync` | mutating-or-spawning | yes | not-applicable | upstream remote Git publication is intentionally outside E2E |
 
 ## Scenario coverage
 

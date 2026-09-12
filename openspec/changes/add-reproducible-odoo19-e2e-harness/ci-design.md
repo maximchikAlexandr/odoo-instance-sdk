@@ -15,13 +15,13 @@
 | uv | `0.10.8` |
 | Odoo Python hash lock SHA-256 | `409063537bb93edb085304ac427effd7044a654393b5f9ff719fa105cd8c89d4` |
 | Odoo Python audit report SHA-256 | `70ce80ce32dd490e1c52b3d43a092fc735209ba538805942cba1de30caea2284` |
-| Python vulnerability scanner | `pip-audit 2.10.1` |
+| Python vulnerability scanner distribution pin | `pip-audit==2.10.1` |
 | `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` |
 | `astral-sh/setup-uv` | `d0cc045d04ccac9d8b7881df0226f9e82c39688e` |
 | `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
 | GitHub runner | `ubuntu-24.04`, Linux amd64; record `ImageOS` and `ImageVersion` in every run |
 
-The pin manifest is machine-readable and bootstrap verifies resolved Git/image identities, both Python-resolution digests, and scanner identity before creating resources. It runs the pinned scanner against the exact hash lock, canonicalizes unique `(package, version, advisory ID)` tuples, and requires exact equality with the non-expired exception manifest. A missing/additional/version-mismatched advisory, malformed or expired exception, or pin mismatch is a hard failure.
+The immutable pin manifest is machine-readable and contains the exact scanner distribution pin `pip-audit==2.10.1` alongside the resolved Git/image identities and both Python-resolution digests. Bootstrap verifies every manifest value before creating resources. It runs that exact scanner distribution against the exact hash lock, canonicalizes unique `(package, version, advisory ID)` tuples, and requires exact equality with the non-expired exception manifest. A missing/additional/version-mismatched advisory, malformed or expired exception, or pin mismatch is a hard failure.
 
 ## Jobs
 
