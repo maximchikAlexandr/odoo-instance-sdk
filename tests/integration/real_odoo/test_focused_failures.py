@@ -64,6 +64,25 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         check=True,
         capture_output=True,
     )
+    # The CI source cache is a bare repository populated with a detached
+    # commit (FETCH_HEAD), not a named branch.  A local clone does not
+    # advertise that detached object, so fetch the pinned object explicitly
+    # before checking it out.  This keeps the focused project on the exact
+    # immutable source revision used by the full tier.
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "fetch",
+            "--no-tags",
+            "--depth=1",
+            str(repository),
+            E2E_PINS.odoo_source_commit,
+        ],
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(
         ["git", "-C", str(root), "checkout", "--detach", E2E_PINS.odoo_source_commit],
         check=True,
@@ -525,12 +544,13 @@ def _seed_backup(
     *,
     backup_id: str = _BACKUP_ID,
     database: str = "demo",
+    source_base_url: str = "http://127.0.0.1:8069",
 ) -> None:
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     catalog = BackupCatalog(db_path=db_path)
     catalog.start_download(
         backup_id,
-        "http://127.0.0.1:8069",
+        source_base_url,
         database,
         "zip",
         True,
@@ -538,6 +558,29 @@ def _seed_backup(
     )
     catalog.success_download(backup_id, archive_path.name, archive_path.stat().st_size, digest)
     catalog.close()
+
+
+def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> None:
+    """Bind every already-imported public command catalog provider for a run."""
+
+    def provider(**_: object) -> Path:
+        return catalog_path
+
+    for target in (
+        "odoo_instance_sdk.cli.get_catalog_path",
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        "odoo_instance_sdk.internal.context.get_catalog_path",
+        "odoo_instance_sdk.commands.env.get_catalog_path",
+        "odoo_instance_sdk.internal.port_allocation.get_catalog_path",
+        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        "odoo_instance_sdk.resources.monitor.get_catalog_path",
+    ):
+        monkeypatch.setattr(target, provider)
+    from odoo_instance_sdk.commands import backup as backup_commands
+    from odoo_instance_sdk.commands import resource as resource_commands
+
+    monkeypatch.setattr(backup_commands._catalog_path_provider, "provider", provider)
+    monkeypatch.setattr(resource_commands._catalog_path_provider, "provider", provider)
 
 
 def _catalog_state(db_path: Path, backup_id: str = _BACKUP_ID) -> BackupState:
@@ -631,10 +674,24 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
 ) -> None:
     path = tmp_path / f"{variant}.zip"
     write_archive_variant(path, variant)  # type: ignore[arg-type]
-    catalog_path = tmp_path / "catalog.sqlite3"
-    _seed_backup(catalog_path, path, database=source_backup_plan.database)
-    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda **_: catalog_path)
-    result = CliRunner().invoke(cli, ["backup", "validate", _BACKUP_ID, "--format", "json"])
+    catalog_path = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])
+    _seed_backup(
+        catalog_path,
+        path,
+        database=source_backup_plan.database,
+        source_base_url=source_backup_plan.endpoint,
+    )
+    environment = {
+        **target_runtime.environment,
+        "ODCLI_E2E_CATALOG": str(catalog_path),
+        "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
+    }
+    _bind_catalog_path(monkeypatch, catalog_path)
+    result = CliRunner().invoke(
+        cli,
+        ["backup", "validate", _BACKUP_ID, "--format", "json"],
+        env=environment,
+    )
     if variant == "incompatible":
         assert result.exit_code == 0, result.output
         document = json.loads(result.stdout)
@@ -665,11 +722,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
                 "--format",
                 "json",
             ],
-            env={
-                **target_runtime.environment,
-                "ODCLI_E2E_CATALOG": str(catalog_path),
-                "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
-            },
+            env=environment,
         )
         assert restore.exit_code != 0
         restore_document, _ = _observe_failure(
@@ -721,6 +774,7 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
     record_property: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     archive_path = tmp_path / "restore.zip"
     shutil.copy2(source_backup.path, archive_path)
@@ -731,7 +785,9 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
         archive_path,
         backup_id=success_id,
         database=source_backup_plan.database,
+        source_base_url=source_backup_plan.endpoint,
     )
+    _bind_catalog_path(monkeypatch, catalog_path)
     project = _project(
         target_runtime,
         tmp_path / f"restore-project-{target_runtime.run_id}",
