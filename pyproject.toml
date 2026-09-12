@@ -82,6 +82,8 @@ markers = [
     "packaging: package artifact and isolated-install checks",
     "serial: must run without xdist parallelism",
     "real_odoo: opt-in disposable lifecycle test requiring explicit local Odoo prerequisites",
+    "e2e_smoke: PR smoke real-Odoo verification tier",
+    "e2e_full: source-backed full real-Odoo verification tier",
     "dashboard: requires dashboard extra; mandatory in dashboard CI job",
     "unpatched_xdg: exercise platformdirs against a fresh test-local XDG root",
 ]

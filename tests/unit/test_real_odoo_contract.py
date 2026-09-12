@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+import pytest
+
+from tests.integration.real_odoo.contracts import ContractError, check_matrix_document
+from tests.integration.real_odoo.pins import (
+    E2E_PINS,
+    PHASE_BUDGETS,
+    PrerequisiteError,
+    budget_for,
+    classify_cache,
+    normalize_platform,
+    pin_manifest_dict,
+    require_prerequisites,
+    validate_pins,
+    validate_platform,
+)
+from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+
+
+def test_generated_matrix_matches_canonical_inventory() -> None:
+    check_matrix_document(
+        "openspec/changes/add-reproducible-odoo19-e2e-harness/command-matrix.md",
+        PUBLIC_LEAF_CASES,
+    )
+
+
+def test_new_leaf_without_metadata_fails_closed() -> None:
+    incomplete = replace(
+        PUBLIC_LEAF_CASES[0], e2e_disposition=None, e2e_evidence=(), e2e_rationale=""
+    )
+    with pytest.raises(ContractError, match="missing E2E disposition"):
+        from tests.integration.real_odoo.contracts import validate_leaf_metadata
+
+        validate_leaf_metadata((incomplete,))
+
+
+def test_pins_are_exact_and_immutable() -> None:
+    validate_pins()
+    assert E2E_PINS.__dataclass_params__.frozen  # type: ignore[attr-defined]
+    assert pin_manifest_dict()["odoo_source_commit"] == "cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
+    with pytest.raises((AttributeError, TypeError)):
+        E2E_PINS.odoo_image = "latest"  # type: ignore[misc]
+    with pytest.raises(PrerequisiteError, match="image pin"):
+        validate_pins(replace(E2E_PINS, odoo_image="docker.io/library/odoo:latest"))
+
+
+def test_platforms_and_phase_budgets_are_normalized() -> None:
+    assert normalize_platform("Linux", "x86_64") == "linux/amd64"
+    assert normalize_platform("linux", "aarch64") == "linux/arm64"
+    assert validate_platform("LINUX/AMD64") == "linux/amd64"
+    assert budget_for("smoke", "cold").setup_seconds == 360
+    assert budget_for("full", "warm").setup_seconds == 420
+    assert classify_cache(source_hit=True, uv_hit=True) == "warm"
+    assert classify_cache(source_hit=True, uv_hit=False) == "cold"
+    with pytest.raises(PrerequisiteError, match="unsupported platform"):
+        validate_platform("darwin/arm64")
+    with pytest.raises(TypeError):
+        PHASE_BUDGETS[("smoke", "cold")] = budget_for("smoke", "cold")  # type: ignore[index]
+
+
+def test_missing_prerequisites_report_machine_readable_failure() -> None:
+    with pytest.raises(PrerequisiteError, match=r'"missing": \["docker"\]'):
+        require_prerequisites({"docker": False, "compose": True}, platform="linux/amd64")
