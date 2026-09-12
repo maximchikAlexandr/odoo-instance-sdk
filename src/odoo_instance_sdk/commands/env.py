@@ -83,7 +83,20 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
-    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor, SnapshotSelection
+
+
+def select_snapshot_environment(
+    snapshot: Snapshot,
+    selector: str | None = None,
+    *,
+    cwd: Path | None = None,
+    worktree_paths: dict[str, str] | None = None,
+) -> SnapshotSelection:
+    """Select records without collecting another monitor snapshot."""
+    from odoo_instance_sdk.resources.monitor import select_snapshot_environment as select
+
+    return select(snapshot, selector, cwd=cwd, worktree_paths=worktree_paths)
 
 
 class _CliEnvironmentSnapshot(
@@ -120,6 +133,15 @@ class _CliSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_o
     environments: tuple[_CliEnvironmentSnapshot, ...]
 
 
+class _EnvShowResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Typed payload for the focused environment inspection leaf."""
+
+    generated_at: datetime
+    environment: EnvironmentSnapshot
+    project: ProjectSummary
+    cluster: ClusterSnapshot | None
+
+
 _ENV_LIST_COLUMNS = (
     "NAME",
     "BRANCH",
@@ -138,6 +160,15 @@ _ENV_LIST_COLUMNS = (
     "ARTIFACTS",
     "WORKTREE",
 )
+_ENV_LIST_COMPACT_COLUMNS = (
+    "NAME",
+    "BRANCH / STATE",
+    "RUNTIME / PORT",
+    "DATABASE",
+    "GIT A/D",
+    "ARTIFACTS",
+)
+_ENV_LIST_MEDIUM_COLUMNS = (*_ENV_LIST_COMPACT_COLUMNS, "WORKTREE")
 
 _TICKET_RE = re.compile(r"[A-Z][A-Z0-9]+-[1-9][0-9]*\Z")
 _TICKET_EVIDENCE_LIMIT = 32
@@ -338,8 +369,8 @@ def env_group() -> None:
 
 
 @env_group.command(
-    "checkout",
-    aliases=["create"],
+    "create",
+    aliases=["checkout"],
     help="Create an isolated environment from a Ticket branch.",
 )
 @click.argument("ticket", metavar="TICKET", type=_TICKET)
@@ -489,7 +520,7 @@ def env_checkout(
 
 
 @env_group.command(
-    "list", aliases=["ls"], help="List initialized environments and their runtime state."
+    "ls", aliases=["list"], help="List initialized environments and their runtime state."
 )
 @click.option("--all", "all_envs", is_flag=True, default=False, help="Include removed.")
 @click.option(
@@ -578,6 +609,92 @@ def env_list(
     _print_env_list_human(snapshot, worktree_paths)
 
 
+@env_group.command("show", help="Show one environment, its project, and PostgreSQL runtime facts.")
+@click.argument("environment", required=False, metavar="ENVIRONMENT")
+@output_options
+@field_schema(_EnvShowResult)
+@pass_cli_context
+def env_show(
+    ctx: CliContext,
+    environment: str | None,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    """Render one read-only environment view from one monitor snapshot."""
+    mode = resolve_output_mode(output_format, json_output)
+    if environment is None and ctx.env is not None:
+        fail(
+            mode,
+            "env.show",
+            "root --env is not accepted by env show; pass ENVIRONMENT",
+            dry_run=False,
+            usage=True,
+        )
+    try:
+        monitor = _monitor_class()()
+        snapshot = monitor.snapshot()
+        paths = (
+            _catalog_worktree_paths(monitor, include_removed=True) if environment is None else {}
+        )
+        selected = select_snapshot_environment(
+            snapshot, environment, cwd=Path.cwd(), worktree_paths=paths
+        )
+        payload = _EnvShowResult(
+            generated_at=snapshot.generated_at,
+            environment=selected.environment,
+            project=selected.project,
+            cluster=selected.cluster,
+        )
+        emit(
+            success_document(
+                command="env.show",
+                result=model_to_dict(payload),
+                provenance={
+                    "environment_source": "cwd" if environment is None else "explicit",
+                    "project_source": "worktree" if environment is None else "null",
+                },
+            ),
+            mode,
+            rich=_rich_env_show,
+        )
+    except Exception as exc:
+        fail(mode, "env.show", exc, dry_run=False)
+
+
+def _rich_env_show(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
+    environment = result.get("environment")
+    project = result.get("project")
+    cluster = result.get("cluster")
+    lines: list[str] = []
+    if isinstance(environment, dict):
+        lines.append(
+            f"Environment {environment.get('name')} ({environment.get('id')}) "
+            f"state={environment.get('lifecycle_state')}"
+        )
+        lines.append(
+            f"  branch={environment.get('branch')} database={environment.get('database') or '—'} "
+            f"runtime={_nested_value(environment, 'runtime', 'state') or '—'}"
+        )
+    if isinstance(project, dict):
+        lines.append(f"Project {project.get('name')} ({project.get('id')})")
+    if isinstance(cluster, dict):
+        lines.append(
+            f"PostgreSQL state={cluster.get('state')} "
+            f"metrics={'available' if cluster.get('metrics') is not None else 'unavailable'}"
+        )
+    else:
+        lines.append("PostgreSQL unavailable")
+    return sanitize_terminal_text("\n".join(lines), preserve_newlines=True)
+
+
+def _nested_value(value: dict[str, JsonValue], parent: str, key: str) -> JsonValue | None:
+    child = value.get(parent)
+    return child.get(key) if isinstance(child, dict) else None
+
+
 def _validate_watch_options(output_mode: OutputMode, *, watch: bool, interval: float) -> None:
     """Reject live-mode combinations before resolving or collecting inventory."""
     if interval < 0.1:
@@ -616,7 +733,9 @@ def _run_env_list_live(
                     if snapshot.environments
                     else {}
                 )
-                last_renderable = _render_env_list_rich(snapshot, worktree_paths)
+                last_renderable = _render_env_list_rich(
+                    snapshot, worktree_paths, width=Console().width
+                )
                 live.update(last_renderable, refresh=True)
             except KeyboardInterrupt:
                 raise
@@ -717,7 +836,8 @@ def _cli_snapshot(snapshot: Snapshot, worktree_paths: dict[str, str]) -> _CliSna
 
 
 def _print_env_list_human(snapshot: Snapshot, worktree_paths: dict[str, str] | None = None) -> None:
-    Console().print(_render_env_list_rich(snapshot, worktree_paths))
+    console = Console()
+    console.print(_render_env_list_rich(snapshot, worktree_paths, width=console.width))
 
 
 def _project_provenance(cli_context: CliContext) -> str:
@@ -796,7 +916,10 @@ def env_path(
 
 
 def _render_env_list_rich(
-    snapshot: Snapshot, worktree_paths: dict[str, str] | None = None
+    snapshot: Snapshot,
+    worktree_paths: dict[str, str] | None = None,
+    *,
+    width: int = 300,
 ) -> Group:
     """Build the Rich inventory projection without collecting any data."""
     if worktree_paths is not None:
@@ -823,13 +946,60 @@ def _render_env_list_rich(
             )
         )
         table = Table(show_header=True, box=None, pad_edge=False)
-        for column in _ENV_LIST_COLUMNS:
-            table.add_column(column, overflow="fold", no_wrap=column == "WORKTREE")
+        columns = _env_columns_for_width(width)
         project_envs = sorted(envs_by_project.get(project.id, ()), key=lambda item: item.id)
+        if columns in {_ENV_LIST_COMPACT_COLUMNS, _ENV_LIST_MEDIUM_COLUMNS}:
+            sections.extend(
+                _rich_env_compact_rows(project_envs, paths, include_worktree=width >= 120)
+            )
+            continue
+        for column in columns:
+            table.add_column(column, overflow="fold", no_wrap=column == "WORKTREE")
         for env in project_envs:
-            table.add_row(*_rich_env_row(env, paths.get(env.id)))
+            row = _rich_env_row(env, paths.get(env.id))
+            table.add_row(*(row[_ENV_LIST_COLUMNS.index(column)] for column in columns))
         sections.append(table)
     return Group(*sections)
+
+
+def _env_columns_for_width(width: int) -> tuple[str, ...]:
+    """Keep semantic identity columns visible as terminal width decreases."""
+    if width < 120:
+        return _ENV_LIST_COMPACT_COLUMNS
+    if width < 240:
+        return _ENV_LIST_MEDIUM_COLUMNS
+    return _ENV_LIST_COLUMNS
+
+
+def _rich_env_compact_rows(
+    environments: list[EnvironmentSnapshot],
+    paths: dict[str, str],
+    *,
+    include_worktree: bool,
+) -> list[Text]:
+    """Keep required fields readable without forcing narrow tables to split words."""
+    rows: list[Text] = []
+    for env in environments:
+        values = _env_row_values(env, paths.get(env.id))
+        lines = [
+            f"Environment {values[0]}",
+            f"  branch={_compact_value(values[1], 42)} state={values[2]} "
+            f"runtime={values[3]} port={values[13]}",
+            f"  database={values[11]} {values[12] or '—'} git=ahead {values[8]} diff {values[9]}",
+            f"  artifacts={_compact_value(values[14], 52)}",
+        ]
+        if include_worktree:
+            lines.append(f"  worktree={_compact_value(values[15], 64)}")
+        rows.append(
+            Text(sanitize_terminal_text("\n".join(lines), preserve_newlines=True), style="")
+        )
+    return rows
+
+
+def _compact_value(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(1, limit - 1)] + "…"
 
 
 def _rich_env_row(env: EnvironmentSnapshot, worktree_path: str | None = None) -> tuple[Text, ...]:
@@ -875,7 +1045,7 @@ def _env_row_values(env: EnvironmentSnapshot, worktree_path: str | None = None) 
         env.database or "",
         _port_str(env),
         _artifacts_str(env.artifacts),
-        worktree_path or "—",
+        _display_path(worktree_path) if worktree_path else "—",
     )
 
 
@@ -898,8 +1068,18 @@ def _removed_env_row_values(
         env.database or "",
         str(env.allocated_http_port) if env.allocated_http_port is not None else "—",
         _artifacts_str(env.artifacts),
-        worktree_path or "—",
+        _display_path(worktree_path) if worktree_path else "—",
     )
+
+
+def _display_path(path: str) -> str:
+    """Shorten only Rich path presentation; machine paths stay absolute."""
+    candidate = Path(path)
+    try:
+        relative = candidate.resolve().relative_to(Path.home().resolve())
+    except (OSError, ValueError):
+        return path
+    return "~" if not relative.parts else f"~/{relative.as_posix()}"
 
 
 def _cluster_summary_line(cluster: ClusterSnapshot) -> str:
@@ -1055,7 +1235,7 @@ def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
     raise click.exceptions.Exit(1)
 
 
-@env_group.command("remove", aliases=["rm"], help="Remove an isolated development environment.")
+@env_group.command("rm", aliases=["remove"], help="Remove an isolated development environment.")
 @click.argument("environment", required=False)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation.")

@@ -20,17 +20,17 @@ class AliasCase:
 
 
 ALIASES = (
-    AliasCase("env", "create", "checkout", ("env", "checkout")),
-    AliasCase("env", "ls", "list", ("env", "list")),
-    AliasCase("env", "rm", "remove", ("env", "remove")),
-    AliasCase("backup", "ls", "list", ("backup", "list")),
-    AliasCase("backup", "inspect", "show", ("backup", "show")),
-    AliasCase("backup", "rm", "delete", ("backup", "delete")),
-    AliasCase("db", "ls", "list", ("db", "list")),
-    AliasCase("db", "rm", "drop", ("db", "drop")),
-    AliasCase("postgres", "ps", "status", ("postgres", "status")),
-    AliasCase("resource", "ls", "list", ("resource", "list")),
-    AliasCase("module", "ls", "list", ("module", "list")),
+    AliasCase("env", "create", "checkout", ("env", "create")),
+    AliasCase("env", "ls", "list", ("env", "ls")),
+    AliasCase("env", "rm", "remove", ("env", "rm")),
+    AliasCase("backup", "ls", "list", ("backup", "ls")),
+    AliasCase("backup", "inspect", "show", ("backup", "inspect")),
+    AliasCase("backup", "rm", "delete", ("backup", "rm")),
+    AliasCase("db", "ls", "list", ("db", "ls")),
+    AliasCase("db", "rm", "drop", ("db", "rm")),
+    AliasCase("postgres", "ps", "status", ("postgres", "ps")),
+    AliasCase("resource", "ls", "list", ("resource", "ls")),
+    AliasCase("module", "ls", "list", ("module", "ls")),
 )
 
 
@@ -43,7 +43,7 @@ def _group(name: str) -> click.Group:
 def _leaf_args(case: AliasCase, spelling: str) -> list[str]:
     public_case = next(item for item in PUBLIC_LEAF_CASES if item.path == case.public_path)
     args = list(public_case.args)
-    args[args.index(case.compatible)] = spelling
+    args[args.index(case.canonical)] = spelling
     return args
 
 

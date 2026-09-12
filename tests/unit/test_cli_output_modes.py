@@ -175,35 +175,34 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     ),
     PublicLeafCase(("doctor",), ("doctor",), "bounded-read-only", False),
     PublicLeafCase(("stop",), ("stop", "--dry-run"), "mutating-or-spawning", True),
-    PublicLeafCase(("resource", "list"), ("resource", "list"), "bounded-read-only", False),
+    PublicLeafCase(("resource", "ls"), ("resource", "ls"), "bounded-read-only", False),
     PublicLeafCase(("resource", "doctor"), ("resource", "doctor"), "bounded-read-only", False),
     PublicLeafCase(
-        ("env", "checkout"),
-        ("env", "checkout", "PROJ-123", "--dry-run"),
+        ("env", "create"),
+        ("env", "create", "PROJ-123", "--dry-run"),
         "mutating-or-spawning",
         True,
     ),
     PublicLeafCase(
-        ("env", "list"),
-        ("env", "list", "--all-projects"),
+        ("env", "ls"),
+        ("env", "ls", "--all-projects"),
         "bounded-read-only",
         False,
         variants=("rich-live",),
     ),
     PublicLeafCase(("env", "path"), ("env", "path", "env-1"), "bounded-read-only", False),
-    PublicLeafCase(
-        ("env", "remove"), ("env", "remove", "env-1", "--yes"), "mutating-or-spawning", True
-    ),
+    PublicLeafCase(("env", "show"), ("env", "show", "env-1"), "bounded-read-only", False),
+    PublicLeafCase(("env", "rm"), ("env", "rm", "env-1", "--yes"), "mutating-or-spawning", True),
     PublicLeafCase(("env", "sync"), ("env", "sync", "env-1"), "mutating-or-spawning", True),
     PublicLeafCase(
-        ("backup", "list"),
-        ("backup", "list"),
+        ("backup", "ls"),
+        ("backup", "ls"),
         "bounded-read-only",
         False,
     ),
     PublicLeafCase(
-        ("backup", "show"),
-        ("backup", "show", "00000000-0000-0000-0000-000000000007"),
+        ("backup", "inspect"),
+        ("backup", "inspect", "00000000-0000-0000-0000-000000000007"),
         "bounded-read-only",
         False,
     ),
@@ -214,10 +213,10 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         False,
     ),
     PublicLeafCase(
-        ("backup", "delete"),
+        ("backup", "rm"),
         (
             "backup",
-            "delete",
+            "rm",
             "00000000-0000-0000-0000-000000000007",
             "--dry-run",
         ),
@@ -236,20 +235,18 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "mutating-or-spawning",
         True,
     ),
-    PublicLeafCase(("db", "list"), ("db", "list"), "bounded-read-only", False),
+    PublicLeafCase(("db", "ls"), ("db", "ls"), "bounded-read-only", False),
     PublicLeafCase(
         ("db", "reset-admin-password"), ("db", "reset-admin-password"), "mutating-or-spawning", True
     ),
-    PublicLeafCase(
-        ("db", "drop"), ("db", "drop", "demo", "--dry-run"), "mutating-or-spawning", True
-    ),
+    PublicLeafCase(("db", "rm"), ("db", "rm", "demo", "--dry-run"), "mutating-or-spawning", True),
     PublicLeafCase(("eval",), ("eval", "1"), "process-previewable-read-only", True),
     PublicLeafCase(("exec",), ("exec", "-"), "mutating-or-spawning", True),
     PublicLeafCase(
         ("test",), ("test", "--changed", "--dry-run"), "process-previewable-read-only", True
     ),
     PublicLeafCase(
-        ("module", "list"), ("module", "list", "sale"), "process-previewable-read-only", True
+        ("module", "ls"), ("module", "ls", "sale"), "process-previewable-read-only", True
     ),
     PublicLeafCase(("module", "info"), ("module", "info", "sale"), "bounded-read-only", False),
     PublicLeafCase(("module", "where"), ("module", "where", "sale"), "bounded-read-only", False),
@@ -288,7 +285,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "mutating-or-spawning",
         True,
     ),
-    PublicLeafCase(("postgres", "status"), ("postgres", "status"), "bounded-read-only", False),
+    PublicLeafCase(("postgres", "ps"), ("postgres", "ps"), "bounded-read-only", False),
     PublicLeafCase(("postgres", "up"), ("postgres", "up"), "mutating-or-spawning", True),
     PublicLeafCase(("postgres", "stop"), ("postgres", "stop"), "mutating-or-spawning", True),
     PublicLeafCase(("db", "locks"), ("db", "locks", "demo"), "bounded-read-only", False),
@@ -401,18 +398,18 @@ def test_bounded_catalogue_list_inventory_is_explicit() -> None:
         for case in PUBLIC_LEAF_CASES
         if case.path
         in {
-            ("backup", "list"),
-            ("db", "list"),
-            ("resource", "list"),
-            ("module", "list"),
-            ("env", "list"),
+            ("backup", "ls"),
+            ("db", "ls"),
+            ("resource", "ls"),
+            ("module", "ls"),
+            ("env", "ls"),
         }
     } == {
-        ("backup", "list"),
-        ("db", "list"),
-        ("resource", "list"),
-        ("module", "list"),
-        ("env", "list"),
+        ("backup", "ls"),
+        ("db", "ls"),
+        ("resource", "ls"),
+        ("module", "ls"),
+        ("env", "ls"),
     }
 
 
@@ -554,8 +551,11 @@ def _patch_leaf_external(  # noqa: C901
         return
 
     if path == ("doctor",):
+        source = _matrix_environment()
+        source.repository_root = str(tmp_path)
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.cli_context.resolve_project_path", lambda _ctx: tmp_path
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            lambda _ctx: _resolved_context(MagicMock(), source, MagicMock()),
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.run_doctor",
@@ -592,7 +592,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path[:2] == ("env", "checkout"):
+    if path[:2] == ("env", "create"):
         client = MagicMock()
         plan = _matrix_checkout_plan()
         if failing:
@@ -683,7 +683,7 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_kwargs: client)
         return
 
-    if path == ("db", "list"):
+    if path == ("db", "ls"):
         instance = MagicMock()
         inventory = DatabaseInventoryResult(
             cluster="127.0.0.1:5432",
@@ -714,7 +714,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path == ("db", "drop"):
+    if path == ("db", "rm"):
         instance = MagicMock()
         instance._postgres_cluster = SimpleNamespace(endpoint="127.0.0.1:5432")
         drop_command = _matrix_command(
@@ -734,7 +734,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path[:2] == ("env", "list"):
+    if path[:2] == ("env", "ls"):
         snapshot = Snapshot(
             schema_version=3,
             generated_at=datetime(2020, 1, 1, tzinfo=UTC),
@@ -761,6 +761,40 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
+    if path[:2] == ("env", "show"):
+        from tests.unit.test_cli_env_list_grouping import _env, _runtime, _snapshot
+
+        stable_time = datetime(2020, 1, 1, tzinfo=UTC)
+        snapshot = _snapshot(
+            (
+                ProjectSummary(
+                    id="project_comerta_abc12345",
+                    name="comerta",
+                    display_hint="comerta_abc12345",
+                    environment_count=1,
+                    cluster=None,
+                    runtime=None,
+                ),
+            ),
+            (
+                _env(
+                    env_id="env-1",
+                    runtime=msgspec.structs.replace(_runtime(), started_at=stable_time),
+                ),
+            ),
+        )
+        snapshot = msgspec.structs.replace(snapshot, generated_at=stable_time)
+
+        def snapshot_operation(*_args: object, **_kwargs: object) -> Snapshot:
+            if failing:
+                raise RuntimeError("isolated external operation failed")
+            return snapshot
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot_operation
+        )
+        return
+
     if path[:2] == ("env", "path"):
         worktree = tmp_path / "worktree"
         worktree.mkdir(exist_ok=True)
@@ -775,7 +809,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path[:2] in {("env", "remove"), ("env", "sync")}:
+    if path[:2] in {("env", "rm"), ("env", "sync")}:
         client = MagicMock()
         env = _matrix_environment()
         client.environments.get.return_value = env
@@ -787,7 +821,7 @@ def _patch_leaf_external(  # noqa: C901
             env,
             error=RuntimeError("isolated external operation failed") if failing else None,
         )
-        if failing and path[1] == "remove":
+        if failing and path[1] == "rm":
             client.environments.get.side_effect = fail_operation
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.resolve_project_path", lambda _ctx: tmp_path
@@ -860,7 +894,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path == ("module", "list"):
+    if path == ("module", "ls"):
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.list_modules_command",
             fail_operation
@@ -1117,7 +1151,7 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     for mode in ("json", "toon"):
         with monkeypatch.context() as isolated:
             args = list(case.args)
-            if case.path in (("backup", "list"), ("resource", "list")):
+            if case.path in (("backup", "ls"), ("resource", "ls")):
                 args.append("--all-projects")
             if case.path == ("init",):
                 args.append(str(tmp_path))
@@ -1215,7 +1249,7 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
                 validating_projection,
             )
             args = list(case.args)
-            if case.path in (("backup", "list"), ("resource", "list")):
+            if case.path in (("backup", "ls"), ("resource", "ls")):
                 args.append("--all-projects")
             if case.path == ("init",):
                 args.append(str(tmp_path))
@@ -1234,6 +1268,8 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
         assert not re.search(r"\]\s*\n\s*\[", invoked.stdout)
         if case.path == ("env", "path"):
             assert invoked.stdout == str(tmp_path / "worktree") + "\n"
+        elif case.path == ("env", "show"):
+            assert "Environment" in invoked.stdout
         else:
             key_value_lines = [
                 line
@@ -3072,6 +3108,7 @@ def test_machine_env_remove_requires_yes_without_prompt_or_operation(
         http_port=8069,
         worktree_path="/worktree",
     )
+    env.repository_root = str(tmp_path)
     client = MagicMock()
     client.environments.get.return_value = env
     with (
@@ -3101,6 +3138,7 @@ def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path
         http_port=8069,
         worktree_path="/worktree",
     )
+    env.repository_root = str(tmp_path)
     client = MagicMock()
     client.environments.get.return_value = env
     client.environments.remove_command.return_value = _matrix_command(None)
@@ -3336,6 +3374,7 @@ def test_public_human_callbacks_neutralize_terminal_controls(
         http_port=8069,
         worktree_path="/worktree",
     )
+    env.repository_root = str(tmp_path)
     client = MagicMock()
     runner = CliRunner()
 
@@ -3352,8 +3391,10 @@ def test_public_human_callbacks_neutralize_terminal_controls(
             ]
         )
         with (
-            patch("odoo_instance_sdk.cli.cli_context.resolve_project_path", return_value=tmp_path),
-            patch("odoo_instance_sdk.cli.OdooClient", return_value=client),
+            patch(
+                "odoo_instance_sdk.cli.cli_context.ready_instance",
+                return_value=_resolved_context(client, env, MagicMock()),
+            ),
             patch("odoo_instance_sdk.cli.run_doctor", return_value=report),
         ):
             result = runner.invoke(cli, ["doctor"])

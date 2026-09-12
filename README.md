@@ -49,18 +49,18 @@ odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --config ./odoo.conf
 odcli doctor
 odcli run --dry-run
 odcli run
-odcli env checkout PROJ-123 --dry-run
-odcli env checkout PROJ-123
+odcli env create PROJ-123 --dry-run
+odcli env create PROJ-123
 odcli --env PROJ-123 run -- --dev=reload
 odcli --env PROJ-123 logs
-odcli env list
+odcli env ls
 ```
 
 `odcli run` resolves an explicit `--env` first, then an exact registered
 worktree, then the initialized project containing the current directory. A
 project run reads Python, `odoo-bin`, source config, working directory, port,
 database, and default run arguments from `.odcli/project.toml`; it does not
-create an environment or add the main checkout to `odcli env list`.
+create an environment or add the main checkout to `odcli env ls`.
 
 Project-local child variables may be placed in `.odcli/.env`. The file is
 ignored by Git, must be owner-readable only (`0600` or another mode with no
@@ -85,7 +85,7 @@ and keeps the cluster password out of the manifest and command output.
 
 Global selectors such as `--project` and `--env` belong before the subcommand.
 Exact flags are intentionally delegated to executable help, for example
-`odcli env checkout --help`. Structured output is leaf-local, not a root command
+`odcli env create --help`. Structured output is leaf-local, not a root command
 promise: commands that support it expose `--format rich|json|toon` and/or
 `--json`. Supplying `--json` with `--format json` is allowed where both are
 documented. TOON is the compact structured form.
@@ -105,7 +105,7 @@ identified progress lines use the captured step ID, operation, target, elapsed
 time, and process exit status. For example:
 
 ```bash
-odcli env checkout PROJ-123 --dry-run
+odcli env create PROJ-123 --dry-run
 odcli db restore 01234567-89ab-cdef-0123-456789abcdef --dry-run
 ```
 
@@ -115,10 +115,10 @@ The current release includes the nine GitHub #61 contracts below. They all
 reuse the existing captured-command, catalogue, locking, redaction, and
 confirmation boundaries:
 
-- Owned `env checkout --create-venv` runs one bounded `<python> <odoo-bin>
+- Owned `env create --create-venv` runs one bounded `<python> <odoo-bin>
   --help` readiness probe before `ready`; shared runtimes do not receive that
   probe.
-- COPY `env remove` drops only the proven target through guarded PostgreSQL
+- COPY `env rm` drops only the proven target through guarded PostgreSQL
   ownership checks, does not depend on an Odoo listener or HTTP-port state, and
   retries retained `cleanup_failed` evidence idempotently.
 - Canonical aliases (`env create|ls|rm`, `backup ls|inspect|rm`, `db ls|rm`,
@@ -150,7 +150,7 @@ confirmation boundaries:
 this delivery. A future reusable `env show` projection is also deliberately
 outside the current CLI scope; use `odcli doctor` for read-only drift today.
 
-`odcli env checkout` (also spelled `odcli env create`) accepts a Jira ticket
+`odcli env create` (also spelled `odcli env checkout`) accepts a Jira ticket
 (`JIRA_TICKET`, for example `PROJ-123`) rather than a branch name. It reserves
 `PROJ-123` or the next unused `PROJ-123_N` from local refs, retained catalogue
 history (including removed environments), and current `origin` heads, then
@@ -159,8 +159,8 @@ name is `<project>:<resolved-branch>`; the CLI does not expose a separate
 `--name` override. Both spellings are the same Click operation.
 
 Catalogue lists are project-scoped by default. Use `--all-projects` when a
-global result is intended, for example `odcli backup list --all-projects` or
-`odcli resource list --all-projects`; Rich tables format byte values for
+global result is intended, for example `odcli backup ls --all-projects` or
+`odcli resource ls --all-projects`; Rich tables format byte values for
 people while JSON/TOON retain exact integer bytes. Project HTTP endpoints use
 the same precedence everywhere: explicit override, `preferred_http_port`, the
 effective `odoo.conf`, then the default port.
@@ -171,7 +171,7 @@ effective `odoo.conf`, then the default port.
 
 ```bash
 odcli test --changed
-odcli module list
+odcli module ls
 odcli module update sale
 odcli module test sale
 odcli deps verify
@@ -191,7 +191,7 @@ approve the image digest, then start and inspect the cluster:
 ```bash
 odcli postgres approve-image
 odcli postgres up
-odcli postgres status
+odcli postgres ps
 odcli postgres stop
 ```
 
@@ -236,9 +236,9 @@ credentials.
 To remove a database, use the CLI-private, cluster-bound operation:
 
 ```bash
-odcli db drop feature_customer_credit --dry-run
-odcli db drop feature_customer_credit --yes
-odcli db drop feature_customer_credit --force-connections --yes
+odcli db rm feature_customer_credit --dry-run
+odcli db rm feature_customer_credit --yes
+odcli db rm feature_customer_credit --force-connections --yes
 ```
 
 The dry-run checks the exact database name, protected `postgres`/`template0`/
@@ -279,10 +279,10 @@ Backup point commands use the exact full UUID and do not require an Odoo
 worktree context. List or inspect retained records before a mutation:
 
 ```bash
-odcli backup list --format toon
-odcli backup show 01234567-89ab-cdef-0123-456789abcdef --format json
+odcli backup ls --format toon
+odcli backup inspect 01234567-89ab-cdef-0123-456789abcdef --format json
 odcli backup validate 01234567-89ab-cdef-0123-456789abcdef --format json
-odcli backup delete 01234567-89ab-cdef-0123-456789abcdef --dry-run --format json
+odcli backup rm 01234567-89ab-cdef-0123-456789abcdef --dry-run --format json
 ```
 
 Restore previews are immutable. Rich mode confirms only after all preflight
@@ -297,14 +297,14 @@ environments, logs, filestores, and owned volumes without reconciliation or
 deletion:
 
 ```bash
-odcli resource list
-odcli resource list --format json
+odcli resource ls
+odcli resource ls --format json
 odcli resource doctor --format toon
 ```
 
 Logical database bytes are not host-reclamation claims. Unknown ownership,
 unavailable probes, crash-left `.part` files, and cleanup failures remain
-visible with sanitized paths and recommendations. `resource list` and
+visible with sanitized paths and recommendations. `resource ls` and
 `resource doctor` never add, repair, delete, or reclassify lifecycle state.
 
 ### Automation and shell access
@@ -363,25 +363,26 @@ sentence; use the entry's `--help` for exact options.
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
-- `odcli resource list` — List retained local resources without lifecycle mutation.
+- `odcli env show` — Show one environment's selected runtime and ownership metadata.
+- `odcli resource ls` — List retained local resources without lifecycle mutation.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.
-- `odcli env checkout` — Plan or create an isolated Jira-ticket worktree and environment (`env create` is the same operation).
-- `odcli env list` — List registered environments, active-only unless `--all` is requested.
+- `odcli env create` — Plan or create an isolated Jira-ticket worktree and environment (`env checkout` is the retained spelling).
+- `odcli env ls` — List registered environments, active-only unless `--all` is requested.
 - `odcli env path` — Print one active environment's absolute worktree path.
-- `odcli env remove` — Remove a registered environment and its owned artifacts safely.
+- `odcli env rm` — Remove a registered environment and its owned artifacts safely.
 - `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
 - `odcli stop` — Stop the selected environment's proven-owned runtime.
-- `odcli backup list` — List retained backup records with state and file presence.
-- `odcli backup show` — Show one exact backup UUID with history and relationships.
+- `odcli backup ls` — List retained backup records with state and file presence.
+- `odcli backup inspect` — Show one exact backup UUID with history and relationships.
 - `odcli backup validate` — Validate one exact backup and report invalid versus unavailable.
-- `odcli backup delete` — Preview, confirm, and delete one exact retained backup UUID.
+- `odcli backup rm` — Preview, confirm, and delete one exact retained backup UUID.
 - `odcli run` — Start resolved Odoo in the foreground from a project or environment.
 - `odcli logs` — Read retained Odoo logs, optionally following new output.
 - `odcli shell` — Open an interactive Odoo shell in the selected environment.
 - `odcli eval` — Evaluate one Python expression through the Odoo shell boundary.
 - `odcli exec` — Execute a Python script through the Odoo shell boundary.
 - `odcli test` — Select and run Odoo tests, including changed-add-on selection.
-- `odcli module list` — Discover installable modules visible to the environment.
+- `odcli module ls` — Discover installable modules visible to the environment.
 - `odcli module info` — Show one safely discovered module and manifest metadata.
 - `odcli module where` — Show the resolved absolute path for one module.
 - `odcli module deps` — Show direct dependencies and missing manifests.
@@ -392,7 +393,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli deps verify` — Verify Python and add-on dependency readiness.
 - `odcli vscode generate` — Generate VS Code launch configuration from project settings.
 - `odcli postgres approve-image` — Pin trust to the resolved PostgreSQL image digest.
-- `odcli postgres status` — Report the configured PostgreSQL cluster state and endpoint.
+- `odcli postgres ps` — Report the configured PostgreSQL cluster state and endpoint.
 - `odcli postgres up` — Start or verify the configured PostgreSQL cluster.
 - `odcli postgres stop` — Stop an SDK-owned PostgreSQL cluster without deleting its volume.
 - `odcli psql` — Run native `psql` with inherited terminal streams and bound identity.
@@ -401,10 +402,10 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db bloat` — Show estimated bloat and optional bounded exact measurements.
 - `odcli db init-monitoring` — Idempotently initialize supported monitoring extensions on an owned cluster.
 - `odcli db refresh` — Refresh an environment database from its configured source policy.
-- `odcli db list` — List databases from the bound PostgreSQL cluster and known provenance.
+- `odcli db ls` — List databases from the bound PostgreSQL cluster and known provenance.
 - `odcli db restore` — Restore one exact retained backup into a selected database target.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
-- `odcli db drop` — Safely remove one exact local cluster database after guarded checks.
+- `odcli db rm` — Safely remove one exact local cluster database after guarded checks.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
 <!-- cli-command-inventory:end -->
 

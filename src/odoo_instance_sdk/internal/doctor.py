@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeView
+from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.exceptions import (
     ConfigError,
     OdooInstanceSdkError,
@@ -34,7 +36,7 @@ from odoo_instance_sdk.internal.git_worktree import (
 )
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.postgres_compose import docker_available
-from odoo_instance_sdk.models import PostgresClusterState
+from odoo_instance_sdk.models import DevelopmentEnvironment, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import (
     _APPLIED_CONFIG_BINDINGS,
@@ -68,6 +70,7 @@ class CheckResult:
     environment_id: str | None = None
     environment_name: str | None = None
     remediations: tuple[DoctorRemediation, ...] = ()
+    facts: dict[str, JsonValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,10 +151,19 @@ class DoctorReport:
         return [c.detail for c in self.checks if c.status == STATUS_WARN]
 
 
-def run_doctor(client: OdooClient, project_path: Path | None) -> DoctorReport:
+def run_doctor(
+    client: OdooClient,
+    project_path: Path | None,
+    *,
+    resolved_context: ResolvedContext | None = None,
+) -> DoctorReport:
     report = DoctorReport()
 
-    project_root = _resolve_project_root(project_path)
+    project_root = (
+        resolved_context.project_root
+        if resolved_context is not None
+        else _resolve_project_root(project_path)
+    )
     if project_root is None:
         report.context["project_source"] = None
         report.checks.append(
@@ -163,8 +175,35 @@ def run_doctor(client: OdooClient, project_path: Path | None) -> DoctorReport:
         )
         envs = client.environments.list()
     else:
-        report.context["project_source"] = "explicit" if project_path is not None else "cwd"
+        if resolved_context is not None:
+            report.context["project_source"] = resolved_context.output_provenance.get(
+                "project_source"
+            )
+        else:
+            report.context["project_source"] = "explicit" if project_path is not None else "cwd"
         _check_manifest(report, project_root)
+        if resolved_context is not None and not isinstance(resolved_context.source, ProjectConfig):
+            selected_environment = resolved_context.source
+            _check_environment_runtime(
+                report,
+                client,
+                selected_environment,
+                resolved_context=resolved_context,
+            )
+        else:
+            _check_project_runtime(
+                report,
+                client,
+                project_root,
+                selection_source=(
+                    resolved_context.provenance
+                    if resolved_context is not None
+                    else "explicit"
+                    if project_path is not None
+                    else "cwd"
+                ),
+                resolved_context=resolved_context,
+            )
         envs = client.environments.list(project=project_root, include_removed=True)
 
     _check_uv(report)
@@ -174,6 +213,8 @@ def run_doctor(client: OdooClient, project_path: Path | None) -> DoctorReport:
     _check_postgres(report, project_root)
 
     for env in envs:
+        if resolved_context is None:
+            _check_environment_runtime(report, client, env)
         _check_environment(report, client, env)
         row = client.get_catalog().get_environment(str(env.id))
         raw_applied = row["applied_settings_json"] if row is not None else None
@@ -181,6 +222,373 @@ def run_doctor(client: OdooClient, project_path: Path | None) -> DoctorReport:
 
     report.checks.sort(key=lambda c: _ORDER.get(c.status, 0))
     return report
+
+
+def _check_project_runtime(
+    report: DoctorReport,
+    client: OdooClient,
+    project_root: Path,
+    *,
+    selection_source: Literal["explicit", "cwd", "worktree"] = "cwd",
+    resolved_context: ResolvedContext | None = None,
+) -> None:
+    """Report configured and available project runtime values without starting it."""
+    project: ProjectConfig | None = None
+    config_path: Path | None = None
+    start = StartConfig()
+    try:
+        if resolved_context is not None and isinstance(resolved_context.source, ProjectConfig):
+            project = resolved_context.source
+        else:
+            project = ProjectConfig.load(project_root)
+        config_path = _resolve_source_config(project, project_root)
+        if project.postgres is not None and project.postgres.mode == "compose":
+            generated = project_root / ".odcli" / "odoo.conf"
+            if generated.is_file():
+                config_path = generated
+        start = (
+            StartConfig.from_odoo_config(config_path) if config_path is not None else StartConfig()
+        )
+        database = project.default_source_database or start.db_name
+        database_available = _database_available(project_root, database)
+        view = (
+            resolved_context.runtime
+            if resolved_context is not None
+            else _runtime_view(
+                project,
+                start=start,
+                command_prefix=_project_command_prefix(project),
+                client=client,
+                provenance="cwd",
+            )
+        )
+        facts = _runtime_facts(
+            view,
+            configured_python=str(project.python) if project.python is not None else None,
+            configured_odoo_bin=str(project.odoo_bin) if project.odoo_bin is not None else None,
+            config_path=str(config_path) if config_path is not None else None,
+            database=database,
+            database_available=database_available,
+            database_status=(
+                "available" if database_available else _database_status(project_root, database)
+            ),
+            selection_source=selection_source,
+        )
+        if resolved_context is not None and resolved_context.materialization_error is not None:
+            facts["resolution_error"] = resolved_context.materialization_error
+        runtime_available = _runtime_is_available(facts) and (
+            resolved_context is None or resolved_context.materialization_error is None
+        )
+        report.checks.append(
+            CheckResult(
+                "runtime",
+                STATUS_OK if runtime_available else STATUS_WARN,
+                _runtime_detail(facts),
+                facts=facts,
+                remediations=()
+                if runtime_available
+                else (
+                    DoctorRemediation(
+                        description="Inspect project initialization inputs",
+                        argv=("odcli", "init", "--dry-run"),
+                        mutating=True,
+                        dry_run_supported=True,
+                    ),
+                ),
+            )
+        )
+    except Exception as exc:
+        if project is None:
+            report.checks.append(
+                CheckResult("runtime", STATUS_WARN, f"configured runtime unavailable: {exc}")
+            )
+            return
+        database = project.default_source_database or start.db_name
+        database_available = _database_available(project_root, database)
+        facts = _unresolved_runtime_facts(
+            project,
+            config_path=config_path,
+            start=start,
+            database=database,
+            database_available=database_available,
+            database_status=(
+                "available" if database_available else _database_status(project_root, database)
+            ),
+            selection_source=selection_source,
+            resolution_error=str(exc),
+        )
+        report.checks.append(
+            CheckResult(
+                "runtime",
+                STATUS_WARN,
+                _runtime_detail(facts),
+                facts=facts,
+                remediations=(
+                    DoctorRemediation(
+                        description="Inspect project initialization inputs",
+                        argv=("odcli", "init", "--dry-run"),
+                        mutating=True,
+                        dry_run_supported=True,
+                    ),
+                ),
+            )
+        )
+
+
+def _check_environment_runtime(
+    report: DoctorReport,
+    client: OdooClient,
+    env: DevelopmentEnvironment,
+    *,
+    selection_source: Literal["explicit", "cwd", "worktree"] = "worktree",
+    resolved_context: ResolvedContext | None = None,
+) -> None:
+    runtime_row = client.get_catalog().get_environment_runtime(str(env.id))
+    odoo_bin = runtime_row["odoo_bin"] if runtime_row is not None else None
+    try:
+        start = StartConfig.from_odoo_config(env.generated_config_path)
+    except Exception:
+        start = StartConfig(http_interface=env.http_interface, http_port=env.http_port)
+    try:
+        view = (
+            resolved_context.runtime
+            if resolved_context is not None
+            else _runtime_view(
+                env,
+                start=start,
+                command_prefix=(str(env.python_environment_path), str(odoo_bin))
+                if odoo_bin is not None
+                else None,
+                client=client,
+                provenance="worktree",
+            )
+        )
+        facts = _runtime_facts(
+            view,
+            configured_python=env.python_environment_path,
+            configured_odoo_bin=str(odoo_bin) if odoo_bin is not None else None,
+            config_path=env.generated_config_path,
+            database=env.target_db_name or env.source_db_name or start.db_name,
+            database_available=_database_available(
+                Path(env.repository_root), env.target_db_name or env.source_db_name or start.db_name
+            ),
+            database_status=_database_status(
+                Path(env.repository_root), env.target_db_name or env.source_db_name or start.db_name
+            ),
+            selection_source=(
+                resolved_context.provenance if resolved_context is not None else selection_source
+            ),
+        )
+        if resolved_context is not None and resolved_context.materialization_error is not None:
+            facts["resolution_error"] = resolved_context.materialization_error
+    except Exception as exc:
+        facts = {
+            "owner_kind": "environment",
+            "selection_source": (
+                resolved_context.provenance if resolved_context is not None else selection_source
+            ),
+            "configured": {
+                "python": env.python_environment_path,
+                "odoo_bin": str(odoo_bin) if odoo_bin is not None else None,
+                "config": env.generated_config_path,
+                "database": env.target_db_name or env.source_db_name or start.db_name,
+                "http_url": f"http://{start.http_interface}:{start.http_port}",
+            },
+            "resolved": {},
+            "available": {
+                "python": False,
+                "odoo_bin": False,
+                "config": False,
+                "database": False,
+                "http": False,
+            },
+            "resolution_error": str(exc),
+        }
+    status = STATUS_OK if _runtime_is_available(facts) else STATUS_WARN
+    report.checks.append(
+        CheckResult(
+            "runtime",
+            status,
+            _runtime_detail(facts),
+            environment_id=str(env.id),
+            environment_name=env.name,
+            facts=facts,
+            remediations=()
+            if status == STATUS_OK
+            else (
+                DoctorRemediation(
+                    description="Repair or synchronize environment runtime artifacts",
+                    argv=("odcli", "env", "sync", str(env.id), "--dry-run"),
+                    mutating=True,
+                    dry_run_supported=True,
+                ),
+            ),
+        )
+    )
+
+
+def _runtime_facts(
+    view: RuntimeView,
+    *,
+    configured_python: str | None,
+    configured_odoo_bin: str | None,
+    config_path: str | None,
+    database: str | None,
+    database_available: bool,
+    database_status: str,
+    selection_source: Literal["explicit", "cwd", "worktree"],
+) -> dict[str, JsonValue]:
+    configured = {
+        "python": configured_python,
+        "odoo_bin": configured_odoo_bin,
+        "config": config_path,
+        "database": database,
+        "http_url": view.http_url,
+    }
+    resolved_python = str(view.python_path)
+    resolved_odoo_bin = str(view.command_prefix[-1]) if view.command_prefix else None
+    available = {
+        "python": _path_available(resolved_python),
+        "odoo_bin": _path_available(resolved_odoo_bin),
+        "config": _path_available(config_path),
+        "database": database_available,
+        "http": _http_available(view.http_interface, view.http_port),
+    }
+    return {
+        "owner_kind": view.owner_kind,
+        "selection_source": selection_source,
+        "database_status": database_status,
+        "configured": cast("JsonValue", configured),
+        "resolved": cast("JsonValue", {"python": resolved_python, "odoo_bin": resolved_odoo_bin}),
+        "available": cast("JsonValue", available),
+    }
+
+
+def _unresolved_runtime_facts(
+    project: ProjectConfig,
+    *,
+    config_path: Path | None,
+    start: StartConfig,
+    database: str | None,
+    database_available: bool,
+    database_status: str,
+    selection_source: Literal["explicit", "cwd", "worktree"],
+    resolution_error: str,
+) -> dict[str, JsonValue]:
+    """Keep useful configured facts when RuntimeView cannot resolve an owner."""
+    configured_odoo_bin = str(project.odoo_bin) if project.odoo_bin is not None else None
+    return {
+        "owner_kind": "project",
+        "selection_source": selection_source,
+        "database_status": database_status,
+        "configured": cast(
+            "JsonValue",
+            {
+                "python": str(project.python) if project.python is not None else None,
+                "odoo_bin": configured_odoo_bin,
+                "config": str(config_path) if config_path is not None else None,
+                "database": database,
+                "http_url": f"http://{start.http_interface}:{start.http_port}",
+            },
+        ),
+        "resolved": cast("JsonValue", {"python": None, "odoo_bin": configured_odoo_bin}),
+        "available": cast(
+            "JsonValue",
+            {
+                "python": False,
+                "odoo_bin": _path_available(configured_odoo_bin),
+                "config": _path_available(str(config_path) if config_path is not None else None),
+                "database": database_available,
+                "http": _http_available(start.http_interface, start.http_port),
+            },
+        ),
+        "resolution_error": resolution_error,
+    }
+
+
+def _runtime_view(
+    source: ProjectConfig | DevelopmentEnvironment,
+    *,
+    start: StartConfig,
+    command_prefix: tuple[str, ...] | None,
+    client: OdooClient | None,
+    provenance: Literal["cwd", "worktree"],
+) -> RuntimeView:
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.resources.instance import OdooInstance
+
+    runtime_client = client or OdooClient(config=OdooClientConfig(executable="odoo"))
+    instance = OdooInstance(
+        config=InstanceConfig(
+            base_url=f"http://{start.http_interface}:{start.http_port}",
+            start_config=start,
+            command_prefix=command_prefix,
+        ),
+        _client=runtime_client,
+    )
+    return ResolvedContext(
+        client=runtime_client,
+        instance=instance,
+        source=source,
+        provenance=provenance,
+    ).runtime
+
+
+def _project_command_prefix(project: ProjectConfig) -> tuple[str, ...] | None:
+    if project.odoo_bin is None:
+        return None
+    from odoo_instance_sdk.internal.project_runtime import resolve_project_runtime
+
+    try:
+        odoo_bin = resolve_project_runtime(
+            project.repository_root, project.odoo_bin, field="odoo_bin"
+        )
+    except Exception:
+        odoo_bin = project.odoo_bin
+    return (str(project.python) if project.python is not None else "python", str(odoo_bin))
+
+
+def _database_available(project_root: Path, database: str | None) -> bool:
+    return _database_status(project_root, database) == "available"
+
+
+def _database_status(
+    project_root: Path, database: str | None
+) -> Literal["available", "missing", "ambiguous", "unavailable"]:
+    if not database or not database.strip():
+        return "missing"
+    if len([name for name in database.split(",") if name.strip()]) != 1:
+        return "ambiguous"
+    try:
+        if PostgresCluster.from_project(project_root).status() is PostgresClusterState.HEALTHY:
+            return "available"
+    except Exception:
+        pass
+    return "unavailable"
+
+
+def _http_available(host: str, port: int) -> bool:
+    return probe_address(host, port) is AddressState.OCCUPIED
+
+
+def _path_available(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        return Path(value).exists()
+    except OSError:
+        return False
+
+
+def _runtime_detail(facts: dict[str, JsonValue]) -> str:
+    configured = facts["configured"]
+    available = facts["available"]
+    return f"owner={facts['owner_kind']} configured={configured} available={available}"
+
+
+def _runtime_is_available(facts: dict[str, JsonValue]) -> bool:
+    available = facts.get("available")
+    return isinstance(available, dict) and all(value is True for value in available.values())
 
 
 def _resolve_project_root(project_path: Path | None) -> Path | None:

@@ -21,6 +21,7 @@ from rich.table import Table
 
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context, resolve_catalogue_scope
 from odoo_instance_sdk.commands.output import (
+    JsonObject,
     OutputDocument,
     OutputMode,
     emit,
@@ -252,6 +253,67 @@ def _rich_detail(document: OutputDocument) -> str:
     return output.getvalue().rstrip()
 
 
+def _rich_validation(document: OutputDocument) -> str:
+    """Render the typed validation result without exposing machine syntax."""
+    result: JsonObject
+    if document.ok:
+        result = document.result if isinstance(document.result, dict) else {}
+    else:
+        details = document.error.details if document.error is not None else None
+        result = details if details is not None else {}
+    status = (
+        "valid"
+        if document.ok
+        else (
+            "invalid"
+            if document.error is not None and document.error.code == "backup_validate_invalid"
+            else "unavailable"
+        )
+    )
+    table = Table("Field", "Value", title="Backup validation")
+    table.columns[0].no_wrap = True
+    table.columns[1].no_wrap = True
+    table.columns[0].overflow = "ellipsis"
+    table.columns[1].overflow = "ellipsis"
+    table.add_row("Status", rich_cell(status))
+    for field in ("db_name", "db_version"):
+        if result.get(field) is not None:
+            table.add_row(
+                field.replace("_", " ").title(),
+                rich_cell(result[field]),
+            )
+    errors = result.get("errors")
+    if isinstance(errors, list) and errors:
+        for error in errors:
+            table.add_row("Error", rich_cell(error))
+    elif not document.ok and document.error is not None:
+        table.add_row("Error", rich_cell(document.error.message))
+    terminal_width = Console().width
+    if not document.ok:
+        return _validation_error_line(result, status, document, terminal_width)
+    output = StringIO()
+    Console(file=output, color_system=None, width=terminal_width).print(table)
+    return output.getvalue().rstrip()
+
+
+def _validation_error_line(
+    result: JsonObject,
+    status: str,
+    document: OutputDocument,
+    terminal_width: int,
+) -> str:
+    fields = [f"Backup validation: {status}"]
+    for field in ("db_name", "db_version"):
+        if result.get(field) is not None:
+            fields.append(f"{field}={result[field]}")
+    errors = result.get("errors")
+    if isinstance(errors, list) and errors:
+        fields.extend(f"error={error}" for error in errors)
+    elif document.error is not None:
+        fields.append(f"error={document.error.message}")
+    return " | ".join(fields)[:terminal_width]
+
+
 def _rich_delete(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
@@ -287,7 +349,7 @@ def backup_group() -> None:
     """Inspect and manage retained backups."""
 
 
-@backup_group.command("list", aliases=["ls"], help="List retained backup catalogue records.")
+@backup_group.command("ls", aliases=["list"], help="List retained backup catalogue records.")
 @click.option("--source", "source_base_url", default=None, help="Filter by source base URL.")
 @click.option("--database", "database_name", default=None, help="Filter by database name.")
 @click.option(
@@ -343,7 +405,7 @@ def backup_list(
 
 
 @backup_group.command(
-    "show", aliases=["inspect"], help="Show one retained backup by its complete UUID."
+    "inspect", aliases=["show"], help="Show one retained backup by its complete UUID."
 )
 @click.argument("backup_id")
 @output_options
@@ -403,7 +465,7 @@ def backup_validate(backup_id: str, output_format: str | None, json_output: bool
                     error_details=payload,
                 ),
                 mode,
-                rich=_rich_detail,
+                rich=_rich_validation,
             )
             raise click.exceptions.Exit(1)  # noqa: TRY301
         if validation_status is BackupValidationStatus.UNAVAILABLE:
@@ -416,10 +478,12 @@ def backup_validate(backup_id: str, output_format: str | None, json_output: bool
                     error_details=payload,
                 ),
                 mode,
-                rich=_rich_detail,
+                rich=_rich_validation,
             )
             raise click.exceptions.Exit(1)  # noqa: TRY301
-        emit(success_document(command="backup.validate", result=payload), mode, rich=_rich_detail)
+        emit(
+            success_document(command="backup.validate", result=payload), mode, rich=_rich_validation
+        )
     except click.exceptions.Exit:
         raise
     except BackupValidationUnavailableError as exc:
@@ -447,7 +511,7 @@ def _backup_resource(catalog: BackupCatalog) -> tuple[OdooClient, BackupResource
 
 
 @backup_group.command(
-    "delete", aliases=["rm"], help="Delete one retained backup by its complete UUID."
+    "rm", aliases=["delete"], help="Delete one retained backup by its complete UUID."
 )
 @click.argument("backup_id")
 @click.option("--dry-run", is_flag=True, default=False, help="Show the immutable deletion plan.")

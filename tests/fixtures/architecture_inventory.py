@@ -18,9 +18,9 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 1095),
-        ("src/odoo_instance_sdk/cli.py", 1096),
-        ("src/odoo_instance_sdk/commands/env.py", 720),
+        ("src/odoo_instance_sdk/cli.py", 1216),
+        ("src/odoo_instance_sdk/cli.py", 1217),
+        ("src/odoo_instance_sdk/commands/backup.py", 295),
         ("src/odoo_instance_sdk/commands/output.py", 478),
         ("src/odoo_instance_sdk/commands/output.py", 621),
         ("src/odoo_instance_sdk/commands/output.py", 623),
@@ -32,14 +32,14 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
 
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
-    ("src/odoo_instance_sdk/commands/env.py", 720): "existing Rich live inventory transport",
     ("src/odoo_instance_sdk/commands/output.py", 478): "shared Rich output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 621): "shared TOON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 623): "shared JSON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 630): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/commands/output.py", 632): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/cli.py", 1095): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 1096): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 1216): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/cli.py", 1217): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/commands/backup.py", 295): "shared Rich output boundary",
     ("src/odoo_instance_sdk/resources/instance.py", 1191): "lifecycle cleanup diagnostic transport",
 }
 

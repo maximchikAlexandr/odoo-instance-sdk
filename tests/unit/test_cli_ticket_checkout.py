@@ -355,7 +355,7 @@ def test_env_shell_completion_keeps_both_checkout_spellings_visible() -> None:
 
     assert result.exit_code == 0
     assert "plain,checkout" in result.stdout
-    assert "plain,create" not in result.stdout
+    assert "plain,create" in result.stdout
 
 
 @pytest.mark.parametrize("spelling", ["checkout", "create"])

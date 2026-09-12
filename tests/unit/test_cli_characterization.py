@@ -276,6 +276,7 @@ def test_shell_completion_still_discovers_nested_commands() -> None:
     )
 
     assert result.exit_code == 0
+    assert "plain,ls" in result.stdout
     assert "plain,list" in result.stdout
     assert "plain,test" in result.stdout
     assert "plain,update" in result.stdout

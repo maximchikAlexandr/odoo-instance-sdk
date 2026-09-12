@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     import click
 else:
     import rich_click as click
 
+from click.shell_completion import CompletionItem
 from rich.console import Console
 from rich.table import Table
 
@@ -64,7 +66,6 @@ from odoo_instance_sdk.commands.test import (
     test_command,
 )
 from odoo_instance_sdk.commands.translations import register_translation_commands
-from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     LogfileAccessError,
@@ -85,6 +86,7 @@ from odoo_instance_sdk.internal.database_preparation import _planned_project_ide
 from odoo_instance_sdk.internal.generated_config import (
     generate_config,
     project_generated_config_path,
+    render_config,
 )
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
@@ -108,6 +110,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable as TypeCallback
 
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.commands.context import ResolvedContext
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.doctor import DoctorReport
     from odoo_instance_sdk.models import ClusterSnapshot
@@ -121,6 +124,15 @@ if TYPE_CHECKING:
         | TypeCallback[[ClusterSnapshot], int]
         | TypeCallback[[ClusterSnapshot], None]
     )
+
+    class _DoctorRunner(Protocol):
+        def __call__(
+            self,
+            client: OdooClient,
+            project_path: Path | None,
+            *,
+            resolved_context: ResolvedContext | None = None,
+        ) -> DoctorReport: ...
 
 
 def __getattr__(name: str) -> CliLazyExport:
@@ -348,9 +360,9 @@ def _client_class() -> type[OdooClient]:
     return cast("type[OdooClient]", getattr(sys.modules[__name__], "OdooClient"))
 
 
-def _run_doctor() -> Callable[[OdooClient, Path | None], DoctorReport]:
+def _run_doctor() -> _DoctorRunner:
     return cast(
-        "Callable[[OdooClient, Path | None], DoctorReport]",
+        "_DoctorRunner",
         getattr(sys.modules[__name__], "run_doctor"),
     )
 
@@ -580,31 +592,17 @@ def init(
         ticket_link_enabled=False,
     )
 
+    if config.postgres is not None and config.postgres.mode == "compose":
+        try:
+            _validate_generated_config_target(project_generated_config_path(resolved_project))
+        except InstanceConfigurationError as exc:
+            fail(output_mode, "init", str(exc), dry_run=dry_run)
+
     existing = manifest_path(resolved_project)
     if existing.is_file() and _handle_existing_manifest(
         existing, resolved_project, config, no_input, yes, output_mode, dry_run=dry_run
     ):
         return
-    if not dry_run and config.postgres is not None and config.postgres.mode == "compose":
-        from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
-
-        try:
-            tracked = is_tracked_path(project_generated_config_path(resolved_project))
-        except GitError:
-            fail(
-                output_mode,
-                "init",
-                "unable to verify project-owned runtime config tracking; refusing secret write",
-                dry_run=dry_run,
-            )
-        if tracked:
-            fail(
-                output_mode,
-                "init",
-                "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf",
-                dry_run=dry_run,
-            )
-
     status, _ = run_or_preview(
         lambda: action_command(
             "init",
@@ -679,6 +677,81 @@ def _write_project_generated_config(project_path: Path, config: ProjectConfig) -
         db_user=postgres.user or "odoo",
         db_password=password,
     )
+
+
+def _validate_generated_config_target(path: Path) -> None:
+    """Reject unsafe targets before any generated-config or secret write."""
+    try:
+        target = path.lstat()
+    except FileNotFoundError:
+        return
+    if path.is_symlink() or not path.is_file():
+        raise InstanceConfigurationError(
+            f"generated config target must be a regular file, not a symlink or directory: {path}"
+        )
+    if target.st_uid != os.getuid():
+        raise InstanceConfigurationError(
+            f"generated config is not owned by the current user: {path}"
+        )
+    from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
+
+    try:
+        if is_tracked_path(path):
+            raise InstanceConfigurationError(
+                "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf"
+            )
+    except GitError as exc:
+        raise InstanceConfigurationError(
+            "unable to verify project-owned runtime config tracking; refusing secret write"
+        ) from exc
+
+
+def _generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> bool:
+    """Compare generated bytes to current inputs without creating anything."""
+    if config.postgres is None or config.postgres.mode != "compose":
+        return False
+    destination = project_generated_config_path(project_path)
+    try:
+        if destination.is_symlink() or not destination.is_file():
+            return True
+        if destination.stat().st_mode & 0o777 != 0o600:
+            return True
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        cluster = PostgresCluster.from_project(project_path)
+        if not cluster.password_file.is_file():
+            return True
+        password = cluster.password_file.read_text(encoding="utf-8").strip()
+        source = config.source_config
+        source_path = (
+            (project_path / source).resolve()
+            if source is not None and not source.is_absolute()
+            else source
+        )
+        if source_path is None:
+            candidate = project_path / "odoo.conf"
+            source_path = candidate if candidate.is_file() else None
+        if source_path is not None and not source_path.is_file():
+            return True
+        source_start = (
+            StartConfig.from_odoo_config(source_path) if source_path is not None else StartConfig()
+        )
+        expected = render_config(
+            source_path,
+            destination,
+            repo_root=project_path,
+            worktree=project_path,
+            http_interface=source_start.http_interface,
+            http_port=resolve_project_http_port(config.preferred_http_port, source_start.http_port),
+            db_name=config.default_source_database or source_start.db_name or "",
+            db_host=cluster.endpoint_host,
+            db_port=cluster.endpoint_port,
+            db_user=config.postgres.user or "odoo",
+            db_password=password,
+        )
+        return destination.read_text(encoding="utf-8") != expected
+    except (OSError, UnicodeError, InstanceConfigurationError, ValueError):
+        return True
 
 
 def _register_initialized_project(project_path: Path) -> None:
@@ -829,7 +902,7 @@ def _merge_vscode(
         state.runtime_cwd = vscode_cfg.runtime_cwd
 
 
-def _handle_existing_manifest(
+def _handle_existing_manifest(  # noqa: C901
     existing: Path,
     resolved_project: Path,
     config: ProjectConfig,
@@ -846,6 +919,46 @@ def _handle_existing_manifest(
     # Comparison excludes ``postgres_allocated`` (dry-run-only flag); both
     # sides default to False here.
     if _manifest_dict(existing_cfg) == _manifest_dict(config):
+        target = project_generated_config_path(resolved_project)
+        repair = _generated_config_needs_repair(resolved_project, existing_cfg)
+        if repair:
+            if dry_run:
+                result: JsonObject = {
+                    **_manifest_dict(config),
+                    "generated_config": cast("JsonValue", {"path": str(target), "repair": True}),
+                }
+                if output_mode is not OutputMode.RICH:
+                    emit_json_envelope(
+                        ok=True,
+                        command="init",
+                        result=result,
+                        provenance={},
+                        dry_run=True,
+                        mode=output_mode,
+                    )
+                else:
+                    rich_print(f"Dry run — generated config needs repair: {target}")
+                return True
+            try:
+                _validate_generated_config_target(target)
+            except InstanceConfigurationError as exc:
+                fail(output_mode, "init", str(exc), dry_run=dry_run)
+            _write_project_generated_config(resolved_project, existing_cfg)
+            _register_initialized_project(resolved_project)
+            if output_mode is not OutputMode.RICH:
+                emit_json_envelope(
+                    ok=True,
+                    command="init",
+                    result={
+                        **_manifest_dict(config),
+                        "generated_config": {"path": str(target), "repaired": True},
+                    },
+                    provenance={},
+                    mode=output_mode,
+                )
+            else:
+                rich_print(f"Repaired generated config: {target}; manifest unchanged.")
+            return True
         if not dry_run:
             _register_initialized_project(resolved_project)
         if output_mode is not OutputMode.RICH:
@@ -921,9 +1034,12 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     try:
-        project_path = cli_context.resolve_project_path(ctx)
-        client = _client_class()(config=OdooClientConfig(executable="odoo"))
-        report = _run_doctor()(client, project_path if project_path != Path.cwd() else None)
+        resolved = cli_context._ready_instance_for_doctor(ctx)
+        report = _run_doctor()(
+            resolved.client,
+            resolved.project_root,
+            resolved_context=resolved,
+        )
     except Exception as e:
         fail(output_mode, "doctor", str(e), dry_run=False)
     if json_output:
@@ -940,6 +1056,7 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
                         "environment_id": c.environment_id,
                         "environment_name": c.environment_name,
                         "remediations": [item.as_dict() for item in c.remediations],
+                        "facts": c.facts,
                     }
                     for c in report.checks
                 ],
@@ -965,6 +1082,10 @@ def _print_doctor(report: DoctorReport) -> None:
             c.status, c.status
         )
         rich_print(f"  {marker:<5} {c.name}: {sanitize_diagnostic(c.detail)}")
+        if c.facts:
+            configured = c.facts.get("configured")
+            available = c.facts.get("available")
+            rich_print(f"    configured={configured} available={available}")
         for remediation in c.remediations:
             rich_print(
                 "    remediation: "
@@ -1411,11 +1532,82 @@ def vscode_generate(
 postgres_group = _postgres_group
 
 
+class _AliasCommandMap(dict[str, click.Command]):
+    """Keep compatibility names addressable without exposing duplicate rows."""
+
+    def __init__(self, commands: Mapping[str, click.Command]) -> None:
+        super().__init__(commands)
+        self._aliases: dict[str, str] = {}
+
+    def add_alias(self, alias: str, canonical: str) -> None:
+        self._aliases[alias] = canonical
+
+    def __contains__(self, name: Hashable) -> bool:
+        return dict.__contains__(self, name) or name in self._aliases
+
+    def __getitem__(self, name: str) -> click.Command:
+        return dict.__getitem__(self, self._aliases.get(name, name))
+
+
+def _register_short_alias(group_name: str, canonical: str, alternate: str) -> None:
+    """Promote a short spelling at the composition boundary without editing leaves."""
+    group = cli.commands.get(group_name)
+    if not isinstance(group, click.Group):
+        raise TypeError(f"CLI group is not registered: {group_name}")
+    command = group.commands.get(canonical) or group.commands.get(alternate)
+    if command is None:
+        raise RuntimeError(f"CLI command is not registered: {group_name} {alternate}")
+    group.commands.pop(canonical, None)
+    group.commands.pop(alternate, None)
+    command.name = canonical
+    setattr(command, "aliases", [alternate])
+    if not isinstance(group.commands, _AliasCommandMap):
+        group.commands = _AliasCommandMap(group.commands)
+    group.add_command(command, name=canonical)
+    group.commands.add_alias(alternate, canonical)
+    getattr(group, "_handle_extras_add_command")(command, name=canonical, aliases=[alternate])
+
+    aliases: list[str] | None = getattr(group, "_odcli_aliases", None)
+    if aliases is None:
+        aliases = []
+        setattr(group, "_odcli_aliases", aliases)
+        original_shell_complete = group.shell_complete
+
+        def shell_complete(ctx: click.Context, incomplete: str) -> list[CompletionItem[str]]:
+            completions = original_shell_complete(ctx, incomplete)
+            values = {item.value for item in completions}
+            for alias_name in aliases:
+                if alias_name.startswith(incomplete) and alias_name not in values:
+                    alias_command = group.commands[alias_name]
+                    if alias_command is not None and not alias_command.hidden:
+                        completions.append(
+                            CompletionItem(alias_name, help=alias_command.get_short_help_str())
+                        )
+            return completions
+
+        setattr(group, "shell_complete", shell_complete)
+    aliases.append(alternate)
+
+
 # Domain command groups register through stable seams owned by their modules.
 # Keep these calls at the composition boundary so later packages need not edit
 # this registry's individual leaf callbacks.
 register_module_commands(cli)
 register_translation_commands(cli)
+for _group, _canonical, _alternate in (
+    ("env", "create", "checkout"),
+    ("env", "ls", "list"),
+    ("env", "rm", "remove"),
+    ("backup", "ls", "list"),
+    ("backup", "inspect", "show"),
+    ("backup", "rm", "delete"),
+    ("db", "ls", "list"),
+    ("db", "rm", "drop"),
+    ("postgres", "ps", "status"),
+    ("resource", "ls", "list"),
+    ("module", "ls", "list"),
+):
+    _register_short_alias(_group, _canonical, _alternate)
 
 
 @cli.command("monitor")

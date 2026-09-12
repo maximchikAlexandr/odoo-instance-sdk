@@ -19,13 +19,19 @@ from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 BACKUP_ID = "00000000-0000-0000-0000-000000000007"
 
 
-def _seed_backup(tmp_path: Path, *, fmt: str = "zip", valid_zip: bool = True) -> tuple[Path, Path]:
+def _seed_backup(
+    tmp_path: Path,
+    *,
+    fmt: str = "zip",
+    valid_zip: bool = True,
+    database_name: str = "demo",
+) -> tuple[Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     db_path = tmp_path / "catalog.sqlite3"
     backup_path = tmp_path / f"backup.{fmt}"
     if fmt == "zip" and valid_zip:
         with ZipFile(backup_path, "w") as archive:
-            archive.writestr("manifest.json", '{"db_name": "demo"}')
+            archive.writestr("manifest.json", json.dumps({"db_name": database_name}))
             archive.writestr("dump.sql", "-- test")
     else:
         backup_path.write_bytes(b"not-a-valid-archive")
@@ -33,7 +39,7 @@ def _seed_backup(tmp_path: Path, *, fmt: str = "zip", valid_zip: bool = True) ->
     catalog.start_download(
         BACKUP_ID,
         "http://localhost:8069",
-        "demo",
+        database_name,
         fmt,
         True,
         backup_path,

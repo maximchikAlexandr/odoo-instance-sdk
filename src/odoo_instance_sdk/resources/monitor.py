@@ -135,6 +135,68 @@ class _EnvironmentPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotSelection:
+    """The records selected from one already-collected monitor snapshot."""
+
+    environment: EnvironmentSnapshot
+    project: ProjectSummary
+    cluster: ClusterSnapshot | None
+
+
+def select_snapshot_environment(
+    snapshot: Snapshot,
+    selector: str | None = None,
+    *,
+    cwd: Path | None = None,
+    worktree_paths: Mapping[str, str] | None = None,
+) -> SnapshotSelection:
+    """Select an environment, project, and cluster without recollecting metrics."""
+    candidates = list(snapshot.environments)
+    if selector is None:
+        current = (cwd or Path.cwd()).resolve()
+        paths = worktree_paths or {}
+        candidates = [
+            item
+            for item in candidates
+            if item.id in paths and _path_contains(current, Path(paths[item.id]))
+        ]
+        if not candidates:
+            raise ValueError("No environment matches the current working directory")
+    else:
+        by_id = [item for item in candidates if item.id == selector]
+        by_name = [item for item in candidates if item.name == selector]
+        candidates = by_id or by_name
+        if not candidates:
+            raise ValueError(f"Environment not found: {selector}")
+        if len(candidates) > 1:
+            raise ValueError(
+                f"Ambiguous environment selector {selector!r}: "
+                + ", ".join(item.id for item in candidates)
+            )
+    if len(candidates) > 1:
+        raise ValueError(
+            "Ambiguous current environment: " + ", ".join(item.id for item in candidates)
+        )
+    environment = candidates[0]
+    project = next((item for item in snapshot.projects if item.id == environment.project_id), None)
+    if project is None:
+        raise ValueError(f"Environment owner project not found: {environment.project_id}")
+    return SnapshotSelection(environment=environment, project=project, cluster=project.cluster)
+
+
+select_environment_snapshot = select_snapshot_environment
+select_snapshot = select_snapshot_environment
+
+
+def _path_contains(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+@dataclass(frozen=True, slots=True)
 class _SnapshotPlan:
     """The catalog-derived, immutable input to one collection pass.
 
