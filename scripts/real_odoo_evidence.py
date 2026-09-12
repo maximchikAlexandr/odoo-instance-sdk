@@ -125,6 +125,75 @@ def _required_files(source: Path, status: Status) -> None:
         raise ValueError(f"missing evidence contract files: {', '.join(missing)}")
 
 
+def _load_json(path: Path, label: str) -> dict[str, object]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise TypeError(f"{label} must be a JSON object")
+    return value
+
+
+def _validate_bootstrap(source: Path) -> dict[str, object]:
+    manifest = _load_json(source / "bootstrap.json", "bootstrap manifest")
+    if manifest.get("ok") is not True:
+        raise ValueError("evidence requires successful bootstrap")
+    platform = manifest.get("platform")
+    architecture = manifest.get("architecture")
+    cache = manifest.get("cache")
+    pins = manifest.get("pins")
+    if not isinstance(platform, str) or not isinstance(architecture, str):
+        raise ValueError("bootstrap manifest lacks platform identity")  # noqa: TRY004
+    if not isinstance(cache, dict) or not isinstance(pins, dict) or not pins:
+        raise ValueError("bootstrap manifest lacks cache or pin identity")
+    if cache.get("class") not in {"cold", "warm"}:
+        raise ValueError("bootstrap manifest lacks cache class")
+    if not isinstance(cache.get("source_hit"), bool) or not isinstance(cache.get("uv_hit"), bool):
+        raise ValueError("bootstrap manifest lacks individual cache hits")  # noqa: TRY004
+    if not isinstance(cache.get("source_key"), str) or not isinstance(cache.get("uv_key"), str):
+        raise ValueError("bootstrap manifest lacks cache keys")  # noqa: TRY004
+    return manifest
+
+
+def _junit_counts(junit: Path) -> tuple[int, int]:
+    root = ET.parse(junit).getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.findall(".//testsuite"))
+    if not suites:
+        raise ValueError("JUnit has no testsuite element")
+    tests = sum(int(suite.get("tests", "0")) for suite in suites)
+    failures = sum(
+        int(suite.get("failures", "0")) + int(suite.get("errors", "0")) for suite in suites
+    )
+    return tests, failures
+
+
+def _validate_junit(junit: Path, status: Status) -> None:
+    tests, failures = _junit_counts(junit)
+    if tests <= 0:
+        raise ValueError("evidence JUnit has no executed tests")
+    if status == "success" and failures:
+        raise ValueError("successful evidence JUnit reports test failures")
+    if status == "failure" and not failures:
+        raise ValueError("failure evidence JUnit has no failed tests")
+
+
+def _validate_resource_manifest(source: Path, tier: str) -> dict[str, object]:
+    manifest = _load_json(source / "resource-manifest.json", "resource manifest")
+    audit = manifest.get("audit")
+    if not isinstance(audit, dict) or audit.get("state") != "clean" or audit.get("leaks") != []:
+        raise ValueError("resource manifest lacks a clean final leak audit")
+    if tier == "full" and manifest.get("source_cache_consumed") is not True:
+        raise ValueError("full evidence lacks source-cache consumption audit")
+    return manifest
+
+
+def _validate_semantic_contract(
+    source: Path, *, status: Status, tier: Literal["smoke", "full"]
+) -> tuple[dict[str, object], dict[str, object]]:
+    bootstrap = _validate_bootstrap(source)
+    _validate_junit(source / "junit.xml", status)
+    resource = _validate_resource_manifest(source, tier)
+    return bootstrap, resource
+
+
 def _phase_seconds(timing: Path) -> dict[str, float]:
     value = json.loads(timing.read_text(encoding="utf-8"))
     phases = value.get("phases") if isinstance(value, dict) else None
@@ -201,6 +270,7 @@ def _update_metrics(
     cache_class: Literal["cold", "warm"],
     artifact_bytes: int,
 ) -> dict[str, object]:
+    bootstrap, resource = _validate_semantic_contract(source, status=status, tier=tier)
     report = _budget_report(
         timing,
         status=status,
@@ -214,16 +284,53 @@ def _update_metrics(
     timing_value["budget"] = report
     timing.write_text(json.dumps(timing_value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     timing.chmod(0o600)
-    bootstrap = json.loads((source / "bootstrap.json").read_text(encoding="utf-8"))
-    pins = bootstrap.get("pins", {}) if isinstance(bootstrap, dict) else {}
-    properties = {
+    pins = bootstrap.get("pins", {})
+    properties: dict[str, object] = {
         f"budget_{key}": value
         for key, value in report.items()
         if isinstance(value, (str, int, float, bool))
     }
+    properties.update(
+        {
+            f"timing_{key}": value
+            for key, value in report.items()
+            if key.endswith("_seconds") and isinstance(value, (int, float))
+        }
+    )
     if isinstance(pins, dict):
         properties.update({f"pin_{key}": value for key, value in pins.items()})
+    cache = bootstrap["cache"]
+    audit = resource["audit"]
+    if not isinstance(cache, dict) or not isinstance(audit, dict):
+        raise TypeError("validated evidence identity is malformed")
+    properties.update(
+        {
+            "platform": bootstrap["platform"],
+            "architecture": bootstrap["architecture"],
+            "cache_class": cache["class"],
+            "cache_source_hit": cache["source_hit"],
+            "cache_uv_hit": cache["uv_hit"],
+            "cache_source_key": cache["source_key"],
+            "cache_uv_key": cache["uv_key"],
+            "audit_state": audit["state"],
+            "artifact_bytes": report["artifact_bytes"],
+        }
+    )
     _write_junit_properties(junit, properties)
+    resource["evidence"] = {
+        "platform": bootstrap["platform"],
+        "architecture": bootstrap["architecture"],
+        "cache": cache,
+        "pins": pins,
+        "timing": report,
+        "artifact_bytes": artifact_bytes,
+        "audit_state": audit["state"],
+    }
+    resource_path = source / "resource-manifest.json"
+    resource_path.write_text(
+        json.dumps(resource, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    resource_path.chmod(0o600)
     return report
 
 
@@ -279,6 +386,11 @@ def package_evidence(  # noqa: C901
             for _ in range(2):
                 _copy_bounded(source / "timing.json", staging / "timing.json", canary)
                 _copy_bounded(source / "junit.xml", staging / "junit.xml", canary)
+                _copy_bounded(
+                    source / "resource-manifest.json",
+                    staging / "resource-manifest.json",
+                    canary,
+                )
                 _archive_staging(staging, output, status)
                 if report["artifact_bytes"] == output.stat().st_size:
                     break
@@ -296,6 +408,31 @@ def package_evidence(  # noqa: C901
             if report["artifact_bytes"] != output.stat().st_size:
                 raise ValueError("artifact size changed while packaging")  # noqa: TRY301
     except (OSError, ET.ParseError, TypeError, UnicodeError, ValueError) as error:
+        junit = source / "junit.xml"
+        if junit.is_file():
+            try:
+                clean = _bounded_text(junit)
+                if canary_file is not None and canary_file.read_bytes().strip() in clean:
+                    raise ValueError("secret canary detected in JUnit")  # noqa: TRY301
+                junit.write_bytes(clean)
+                junit.chmod(0o600)
+            except (OSError, ValueError):
+                junit.write_text(
+                    '<testsuite tests="0" failures="1"><properties>'
+                    '<property name="packaging_error" value="redacted"/>'
+                    "</properties></testsuite>\n",
+                    encoding="utf-8",
+                )
+                junit.chmod(0o600)
+        else:
+            junit.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            junit.write_text(
+                '<testsuite tests="0" failures="1"><properties>'
+                '<property name="packaging_error" value="redacted"/>'
+                "</properties></testsuite>\n",
+                encoding="utf-8",
+            )
+            junit.chmod(0o600)
         _write_packaging_error(output, str(error))
         raise
     manifest = {

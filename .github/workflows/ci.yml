@@ -21,16 +21,13 @@ jobs:
           version: "0.10.8"
           enable-cache: false
       - name: Start monotonic setup measurement
-        run: uv run python scripts/real_odoo_timing.py start --phase setup --output .artifacts/real-odoo-e2e/timing.json
+        run: uv run --no-project python scripts/real_odoo_timing.py start --phase setup --output .artifacts/real-odoo-e2e/timing.json
       - name: Create upload canary outside evidence root
         run: |
           mkdir -p .artifacts/real-odoo-e2e
           umask 077
           python -c 'import secrets; print(secrets.token_urlsafe(24))' > .artifacts/real-odoo-e2e-secret-canary
-          printf '%s\n' '{"ok": false, "pins": {}}' > .artifacts/real-odoo-e2e/bootstrap.json
-          printf '%s\n' '{"resources": [], "leaks": []}' > .artifacts/real-odoo-e2e/resource-manifest.json
           printf '%s\n' '<testsuite tests="0" failures="1"/>' > .artifacts/real-odoo-e2e/junit.xml
-          for log in compose.log odoo.log postgres.log; do printf '%s\n' 'bootstrap did not reach services' > ".artifacts/real-odoo-e2e/$log"; done
       - run: uv sync --frozen --group test
       - name: Bootstrap required smoke prerequisites
         id: bootstrap
@@ -40,26 +37,16 @@ jobs:
           --output .artifacts/real-odoo-e2e/bootstrap.json
       - name: Finish monotonic setup measurement
         if: always()
-        run: uv run python scripts/real_odoo_timing.py finish --phase setup --output .artifacts/real-odoo-e2e/timing.json
+        run: uv run --no-project python scripts/real_odoo_timing.py finish --phase setup --output .artifacts/real-odoo-e2e/timing.json
       - name: Start monotonic test measurement
-        if: always()
-        run: uv run python scripts/real_odoo_timing.py start --phase test --output .artifacts/real-odoo-e2e/timing.json
+        if: steps.bootstrap.outcome == 'success'
+        run: uv run --no-project python scripts/real_odoo_timing.py start --phase test --output .artifacts/real-odoo-e2e/timing.json
       - name: Run PR smoke E2E
         id: pytest
         if: steps.bootstrap.outcome == 'success'
-        run: |
-          set +e
-          uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
-          test_status=$?
-          exit "$test_status"
-      - name: Finish monotonic test measurement
-        if: always()
-        run: uv run python scripts/real_odoo_timing.py finish --phase test --output .artifacts/real-odoo-e2e/timing.json
-      - name: Record cleanup measurement after fixture finalization
-        if: always()
-        run: |
-          uv run python scripts/real_odoo_timing.py start --phase cleanup --output .artifacts/real-odoo-e2e/timing.json
-          uv run python scripts/real_odoo_timing.py finish --phase cleanup --output .artifacts/real-odoo-e2e/timing.json
+        env:
+          ODCLI_E2E_TIMING_FILE: .artifacts/real-odoo-e2e/timing.json
+        run: uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
       - name: Package bounded E2E evidence
         if: always()
         run: >-
@@ -78,6 +65,9 @@ jobs:
             .artifacts/real-odoo-e2e/*-evidence.tar.gz
             .artifacts/real-odoo-e2e/evidence-manifest.json
             .artifacts/real-odoo-e2e/bootstrap.json
+            .artifacts/real-odoo-e2e/junit.xml
+            .artifacts/real-odoo-e2e/timing.json
+            .artifacts/real-odoo-e2e/resource-manifest.json
             .artifacts/real-odoo-e2e/packaging-error.json
           retention-days: 7
 

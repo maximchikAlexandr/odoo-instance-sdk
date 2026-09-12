@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Final, Literal
 
@@ -54,6 +56,29 @@ def finish(path: Path, phase: Phase, *, now: float | None = None) -> float:
     record["duration_seconds"] = duration
     _write(path, manifest)
     return duration
+
+
+def pytest_sessionfinish(_session: object, _exitstatus: int) -> Iterator[None]:
+    """Measure test completion separately from session-fixture cleanup."""
+    configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
+    if not configured:
+        yield
+        return
+    path = Path(configured)
+    finish(path, "test")
+    start(path, "cleanup")
+    try:
+        yield
+    finally:
+        finish(path, "cleanup")
+
+
+try:
+    import pytest
+except ImportError:
+    pass
+else:
+    pytest.hookimpl(hookwrapper=True, tryfirst=True)(pytest_sessionfinish)
 
 
 def main() -> int:

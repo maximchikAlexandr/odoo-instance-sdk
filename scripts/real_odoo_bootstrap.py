@@ -50,6 +50,13 @@ def uv_cache_key(
     return f"uv-{os_name}-{architecture}-{E2E_PINS.cpython}-{E2E_PINS.uv}-{digest}"
 
 
+def _configured_cache_key(name: str, computed: str) -> str:
+    configured = os.environ.get(name)
+    if configured is not None and configured != computed:
+        raise PrerequisiteError(f"{name} does not match computed cache key")
+    return configured or computed
+
+
 def _run(
     command: list[str], *, timeout: float = MAX_PROBE_SECONDS
 ) -> subprocess.CompletedProcess[str]:
@@ -277,16 +284,20 @@ def bootstrap(
         manifest["platform"] = resolved
         manifest["pins"] = pin_manifest_dict()
         cache_os, cache_arch = _cache_os_arch()
+        manifest["architecture"] = cache_arch
         cache = manifest["cache"]
         if isinstance(cache, dict):
-            cache["source_key"] = os.environ.get(
+            cache["source_key"] = _configured_cache_key(
                 "ODCLI_E2E_SOURCE_CACHE_KEY", source_cache_key(cache_os, cache_arch)
             )
+        checks = prerequisite_checks(tier, resolved)
+        manifest["prerequisites"] = checks
+        if isinstance(cache, dict):
             requirements_path = os.environ.get(
                 "ODCLI_E2E_ODOO_REQUIREMENTS", str(ROOT / ".cache" / "odoo-requirements.txt")
             )
             requirements = Path(requirements_path)
-            cache["uv_key"] = os.environ.get(
+            cache["uv_key"] = _configured_cache_key(
                 "ODCLI_E2E_UV_CACHE_KEY",
                 uv_cache_key(
                     cache_os,
@@ -295,10 +306,8 @@ def bootstrap(
                     (ROOT / "uv.lock").read_bytes(),
                 ),
             )
-        checks = prerequisite_checks(tier, resolved)
         if os.environ.get("CI", "").lower() == "true":
             checks["ci_platform_linux_amd64"] = resolved == "linux/amd64"
-        manifest["prerequisites"] = checks
         missing = sorted(name for name, available in checks.items() if not available)
         manifest["missing"] = missing
         manifest["ok"] = not missing

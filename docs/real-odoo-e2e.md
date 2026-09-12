@@ -11,14 +11,14 @@ Install the frozen development environment, then run the tier you need:
 ```bash
 uv sync --frozen --group test
 uv run python scripts/real_odoo_bootstrap.py --tier smoke --output .artifacts/real-odoo-e2e/bootstrap.json
-uv run pytest -o addopts='' -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
+uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
 ```
 
 The single local full command is:
 
 ```bash
 uv run python scripts/real_odoo_bootstrap.py --tier full --output .artifacts/real-odoo-e2e/bootstrap.json
-uv run pytest -o addopts='' -m 'real_odoo and e2e_full' tests/integration/real_odoo
+uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -m 'real_odoo and e2e_full' tests/integration/real_odoo
 ```
 
 Linux amd64 is the required CI platform. Docker Desktop arm64 is supported
@@ -33,6 +33,11 @@ only complete source and uv hits are warm. Setup budgets are 360/180 seconds
 (smoke cold/warm) and 900/420 seconds (full cold/warm); full test runtime is
 limited to 600 seconds. Job limits are 10 minutes for smoke and 25 minutes
 for full.
+
+The source cache key includes the pinned Odoo commit. The uv key is computed
+from the exact bytes of the pinned Odoo `requirements.txt` followed by the
+repository `uv.lock`; the same helper supplies the restore, save, and bootstrap
+keys.
 
 Failure packaging sanitizes and caps each text file at 2 MiB and the
 compressed failure bundle at 50 MiB. Successful evidence is capped at 2 MiB;
