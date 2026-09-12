@@ -12,6 +12,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Final, Literal
 
@@ -84,15 +85,81 @@ def _image_manifest_is_pinned(image: str, expected_platform_digest: str) -> bool
     )
 
 
+def _source_cache_path() -> Path:
+    configured = os.environ.get("ODCLI_E2E_SOURCE_CACHE", ".cache/odoo-source")
+    path = Path(configured)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _write_cached_requirements(cache: Path) -> bool:
+    requirements = _run(
+        [
+            "git",
+            "-C",
+            str(cache),
+            "show",
+            f"{E2E_PINS.odoo_source_commit}:requirements.txt",
+        ]
+    )
+    if requirements.returncode:
+        return False
+    requirements_path = ROOT / ".cache" / "odoo-requirements.txt"
+    requirements_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    requirements_path.write_text(requirements.stdout, encoding="utf-8")
+    requirements_path.chmod(0o600)
+    return True
+
+
 def _source_revision_is_available() -> bool:
+    """Populate and verify the pinned commit in the executable bare cache."""
+    cache = _source_cache_path()
     try:
+        if not cache.exists():
+            cache.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            result = _run(["git", "init", "--bare", str(cache)])
+            if result.returncode:
+                return False
+        check = _run(
+            [
+                "git",
+                "-C",
+                str(cache),
+                "cat-file",
+                "-e",
+                f"{E2E_PINS.odoo_source_commit}^{{commit}}",
+            ]
+        )
+        if check.returncode == 0:
+            return _write_cached_requirements(cache)
         result = _run(
-            ["git", "ls-remote", ODOO_REPOSITORY, E2E_PINS.odoo_source_commit],
-            timeout=MAX_PROBE_SECONDS,
+            [
+                "git",
+                "-C",
+                str(cache),
+                "fetch",
+                "--depth=1",
+                ODOO_REPOSITORY,
+                E2E_PINS.odoo_source_commit,
+            ],
+            timeout=600.0,
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return result.returncode == 0 and E2E_PINS.odoo_source_commit in result.stdout
+    if result.returncode:
+        return False
+    check = _run(
+        [
+            "git",
+            "-C",
+            str(cache),
+            "cat-file",
+            "-e",
+            f"{E2E_PINS.odoo_source_commit}^{{commit}}",
+        ]
+    )
+    if check.returncode:
+        return False
+    return _write_cached_requirements(cache)
 
 
 def _runner_metadata() -> dict[str, str]:
@@ -149,6 +216,14 @@ def _json_write(path: Path, value: dict[str, object]) -> None:
     path.chmod(0o600)
 
 
+def _cache_os_arch() -> tuple[str, str]:
+    os_name = os.environ.get("RUNNER_OS", "Linux")
+    architecture = os.environ.get("RUNNER_ARCH")
+    if not architecture:
+        architecture = "ARM64" if _resolve_platform() == "linux/arm64" else "X64"
+    return os_name, architecture
+
+
 def bootstrap(
     tier: Tier,
     output: Path,
@@ -166,6 +241,7 @@ def bootstrap(
         raise ValueError(f"unsupported tier: {tier}")
     chosen_run_id = run_id or secrets.token_hex(16)
     root = artifact_root or output.parent / chosen_run_id
+    started = time.monotonic()
     source_hit = os.environ.get("ODCLI_E2E_SOURCE_CACHE_HIT") == "true"
     uv_hit = os.environ.get("ODCLI_E2E_UV_CACHE_HIT") == "true"
     cache_class = classify_cache(source_hit=source_hit, uv_hit=uv_hit)
@@ -193,18 +269,31 @@ def bootstrap(
         "prerequisites": {},
         "missing": [],
         "artifact_root": str(root),
+        "bootstrap_seconds": None,
     }
     try:
         validate_pins()
         resolved = _supported_platform(platform_name or _resolve_platform())
         manifest["platform"] = resolved
         manifest["pins"] = pin_manifest_dict()
-        architecture = resolved.rsplit("/", 1)[1]
+        cache_os, cache_arch = _cache_os_arch()
         cache = manifest["cache"]
         if isinstance(cache, dict):
-            cache["source_key"] = source_cache_key("Linux", architecture)
-            cache["uv_key"] = uv_cache_key(
-                "Linux", architecture, b"", (ROOT / "uv.lock").read_bytes()
+            cache["source_key"] = os.environ.get(
+                "ODCLI_E2E_SOURCE_CACHE_KEY", source_cache_key(cache_os, cache_arch)
+            )
+            requirements_path = os.environ.get(
+                "ODCLI_E2E_ODOO_REQUIREMENTS", str(ROOT / ".cache" / "odoo-requirements.txt")
+            )
+            requirements = Path(requirements_path)
+            cache["uv_key"] = os.environ.get(
+                "ODCLI_E2E_UV_CACHE_KEY",
+                uv_cache_key(
+                    cache_os,
+                    cache_arch,
+                    requirements.read_bytes() if requirements.is_file() else b"",
+                    (ROOT / "uv.lock").read_bytes(),
+                ),
             )
         checks = prerequisite_checks(tier, resolved)
         if os.environ.get("CI", "").lower() == "true":
@@ -217,6 +306,7 @@ def bootstrap(
         manifest["error"] = str(error)
         if not manifest["missing"]:
             manifest["missing"] = ["bootstrap"]
+    manifest["bootstrap_seconds"] = round(time.monotonic() - started, 6)
     _json_write(output, manifest)
     if bool(manifest["ok"]):
         root.mkdir(mode=0o700, parents=True, exist_ok=True)

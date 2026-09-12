@@ -7,10 +7,13 @@ import argparse
 import json
 import tarfile
 import tempfile
+import xml.etree.ElementTree as ET
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal
 
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
+from tests.integration.real_odoo.pins import PhaseBudget, budget_for
 
 Status = Literal["success", "failure"]
 TEXT_LIMIT_BYTES: Final[int] = 2 * 1024 * 1024
@@ -18,6 +21,10 @@ SUCCESS_LIMIT_BYTES: Final[int] = 2 * 1024 * 1024
 FAILURE_BUNDLE_LIMIT_BYTES: Final[int] = 50 * 1024 * 1024
 RETENTION_DAYS: Final[int] = 7
 TEXT_SUFFIXES = frozenset({".json", ".log", ".txt", ".xml", ".md", ".yml", ".yaml"})
+REQUIRED_SUCCESS = frozenset(
+    {"bootstrap.json", "junit.xml", "resource-manifest.json", "timing.json"}
+)
+REQUIRED_FAILURE = REQUIRED_SUCCESS | frozenset({"compose.log", "odoo.log", "postgres.log"})
 
 
 def _bounded_text(path: Path) -> bytes:
@@ -32,6 +39,8 @@ def _copy_bounded(source: Path, destination: Path, canary: bytes) -> None:
     if source.is_symlink() or not source.is_file():
         return
     if source.suffix.lower() in TEXT_SUFFIXES:
+        if source.stat().st_size > TEXT_LIMIT_BYTES:
+            raise ValueError(f"text evidence input exceeds {TEXT_LIMIT_BYTES} bytes: {source.name}")
         content = _bounded_text(source)
     else:
         content = source.read_bytes()
@@ -75,14 +84,25 @@ def _write_packaging_error(output: Path, message: str) -> None:
 
 
 def _check_bundle_size(files: tuple[Path, ...], status: Status) -> None:
-    if status == "success" and sum(path.stat().st_size for path in files) > SUCCESS_LIMIT_BYTES:
-        raise ValueError("successful evidence exceeds 2 MiB")
+    total = sum(path.stat().st_size for path in files)
+    limit = SUCCESS_LIMIT_BYTES if status == "success" else FAILURE_BUNDLE_LIMIT_BYTES
+    if total > limit:
+        raise ValueError(f"evidence input exceeds {limit} bytes")
 
 
 def _check_archive_size(output: Path, status: Status) -> None:
     limit = SUCCESS_LIMIT_BYTES if status == "success" else FAILURE_BUNDLE_LIMIT_BYTES
     if output.stat().st_size > limit:
         raise ValueError(f"evidence bundle exceeds {limit} bytes")
+
+
+def _archive_staging(staging: Path, output: Path, status: Status) -> None:
+    output.unlink(missing_ok=True)
+    with tarfile.open(output, "w:gz") as archive:
+        for path in staging.rglob("*"):
+            if path.is_file():
+                archive.add(path, arcname=path.relative_to(staging))
+    _check_archive_size(output, status)
 
 
 def _read_canary(canary_file: Path | None) -> bytes:
@@ -92,17 +112,137 @@ def _read_canary(canary_file: Path | None) -> bytes:
     return canary
 
 
-def package_evidence(
+def _required_files(source: Path, status: Status) -> None:
+    required = REQUIRED_SUCCESS if status == "success" else REQUIRED_FAILURE
+    missing = sorted(
+        name
+        for name in required
+        if not (source / name).is_file()
+        or (source / name).is_symlink()
+        or (source / name).stat().st_size == 0
+    )
+    if missing:
+        raise ValueError(f"missing evidence contract files: {', '.join(missing)}")
+
+
+def _phase_seconds(timing: Path) -> dict[str, float]:
+    value = json.loads(timing.read_text(encoding="utf-8"))
+    phases = value.get("phases") if isinstance(value, dict) else None
+    if not isinstance(phases, dict):
+        raise TypeError("timing manifest has no phases")
+    durations: dict[str, float] = {}
+    for phase in ("setup", "test", "cleanup"):
+        record = phases.get(phase)
+        duration = record.get("duration_seconds") if isinstance(record, dict) else None
+        if not isinstance(duration, (int, float)) or duration < 0:
+            raise ValueError(f"timing manifest is missing completed phase: {phase}")
+        durations[phase] = float(duration)
+    return durations
+
+
+def _budget_report(
+    timing: Path,
+    *,
+    status: Status,
+    tier: Literal["smoke", "full"],
+    cache_class: Literal["cold", "warm"],
+    artifact_bytes: int,
+) -> dict[str, object]:
+    durations = _phase_seconds(timing)
+    budget: PhaseBudget = budget_for(tier, cache_class)
+    total = sum(durations.values())
+    artifact_budget = SUCCESS_LIMIT_BYTES if status == "success" else FAILURE_BUNDLE_LIMIT_BYTES
+    return {
+        "status": status,
+        "tier": tier,
+        "cache_class": cache_class,
+        "setup_seconds": durations["setup"],
+        "test_seconds": durations["test"],
+        "cleanup_seconds": durations["cleanup"],
+        "job_seconds": total,
+        "artifact_bytes": artifact_bytes,
+        "setup_budget_seconds": budget.setup_seconds,
+        "test_budget_seconds": budget.test_seconds,
+        "job_budget_seconds": budget.job_seconds,
+        "artifact_budget_bytes": artifact_budget,
+        "ok": (
+            durations["setup"] <= budget.setup_seconds
+            and durations["test"] <= budget.test_seconds
+            and total <= budget.job_seconds
+            and artifact_bytes <= artifact_budget
+        ),
+    }
+
+
+def _write_junit_properties(junit: Path, properties: Mapping[str, object]) -> None:
+    root = ET.parse(junit).getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.findall(".//testsuite"))
+    if not suites:
+        raise ValueError("JUnit has no testsuite element")
+    for suite in suites:
+        existing = suite.find("properties")
+        if existing is None:
+            existing = ET.SubElement(suite, "properties")
+        for child in list(existing):
+            existing.remove(child)
+        for key, value in sorted(properties.items()):
+            ET.SubElement(existing, "property", name=key, value=str(value))
+    ET.ElementTree(root).write(junit, encoding="utf-8", xml_declaration=True)
+    junit.chmod(0o600)
+
+
+def _update_metrics(
+    source: Path,
+    *,
+    status: Status,
+    timing: Path,
+    junit: Path,
+    tier: Literal["smoke", "full"],
+    cache_class: Literal["cold", "warm"],
+    artifact_bytes: int,
+) -> dict[str, object]:
+    report = _budget_report(
+        timing,
+        status=status,
+        tier=tier,
+        cache_class=cache_class,
+        artifact_bytes=artifact_bytes,
+    )
+    timing_value = json.loads(timing.read_text(encoding="utf-8"))
+    if not isinstance(timing_value, dict):
+        raise TypeError("invalid timing manifest")
+    timing_value["budget"] = report
+    timing.write_text(json.dumps(timing_value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    timing.chmod(0o600)
+    bootstrap = json.loads((source / "bootstrap.json").read_text(encoding="utf-8"))
+    pins = bootstrap.get("pins", {}) if isinstance(bootstrap, dict) else {}
+    properties = {
+        f"budget_{key}": value
+        for key, value in report.items()
+        if isinstance(value, (str, int, float, bool))
+    }
+    if isinstance(pins, dict):
+        properties.update({f"pin_{key}": value for key, value in pins.items()})
+    _write_junit_properties(junit, properties)
+    return report
+
+
+def package_evidence(  # noqa: C901
     source: Path,
     output: Path,
     *,
     status: Status,
     canary_file: Path | None = None,
+    tier: Literal["smoke", "full"] | None = None,
+    cache_class: Literal["cold", "warm"] | None = None,
 ) -> dict[str, object]:
     """Create a bounded tar.gz and return its redacted packaging manifest."""
     if status not in {"success", "failure"}:
         raise ValueError(f"unsupported status: {status}")
     try:
+        _required_files(source, status)
+        if canary_file is None:
+            raise ValueError("secret canary file is required")  # noqa: TRY301
         canary = _read_canary(canary_file)
         with tempfile.TemporaryDirectory(prefix="odcli-e2e-evidence-") as temporary:
             staging = Path(temporary) / "evidence"
@@ -116,12 +256,46 @@ def package_evidence(
             files = tuple(path for path in staging.rglob("*") if path.is_file())
             _check_bundle_size(files, status)
             output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            output.unlink(missing_ok=True)
-            with tarfile.open(output, "w:gz") as archive:
-                for path in files:
-                    archive.add(path, arcname=path.relative_to(staging))
-            _check_archive_size(output, status)
-    except (OSError, ValueError) as error:
+            _archive_staging(staging, output, status)
+            if tier is None or cache_class is None:
+                raise ValueError(  # noqa: TRY301
+                    "tier and cache class are required for budget evidence"
+                )
+            timing = next((path for path in files if path.name == "timing.json"), None)
+            junit = next((path for path in files if path.name == "junit.xml"), None)
+            if timing is None or junit is None:
+                raise ValueError(  # noqa: TRY301
+                    "timing.json and junit.xml are required for budget evidence"
+                )
+            report = _update_metrics(
+                source,
+                status=status,
+                timing=source / "timing.json",
+                junit=source / "junit.xml",
+                tier=tier,
+                cache_class=cache_class,
+                artifact_bytes=output.stat().st_size,
+            )
+            for _ in range(2):
+                _copy_bounded(source / "timing.json", staging / "timing.json", canary)
+                _copy_bounded(source / "junit.xml", staging / "junit.xml", canary)
+                _archive_staging(staging, output, status)
+                if report["artifact_bytes"] == output.stat().st_size:
+                    break
+                report = _update_metrics(
+                    source,
+                    status=status,
+                    timing=source / "timing.json",
+                    junit=source / "junit.xml",
+                    tier=tier,
+                    cache_class=cache_class,
+                    artifact_bytes=output.stat().st_size,
+                )
+            if not bool(report["ok"]):
+                raise ValueError("E2E phase or artifact budget exceeded")  # noqa: TRY301
+            if report["artifact_bytes"] != output.stat().st_size:
+                raise ValueError("artifact size changed while packaging")  # noqa: TRY301
+    except (OSError, ET.ParseError, TypeError, UnicodeError, ValueError) as error:
         _write_packaging_error(output, str(error))
         raise
     manifest = {
@@ -135,6 +309,7 @@ def package_evidence(
         "success_limit_bytes": SUCCESS_LIMIT_BYTES,
         "retention_days": RETENTION_DAYS,
         "secret_canary": "scanned-not-recorded",
+        "budget": report,
     }
     manifest_path = output.with_name("evidence-manifest.json")
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
@@ -148,6 +323,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--status", choices=("success", "failure"), required=True)
     parser.add_argument("--canary-file", type=Path)
+    parser.add_argument("--tier", choices=("smoke", "full"), required=True)
+    parser.add_argument("--cache-class", choices=("cold", "warm"), required=True)
     args = parser.parse_args()
     print(
         json.dumps(
@@ -156,6 +333,8 @@ def main() -> int:
                 args.output,
                 status=args.status,
                 canary_file=args.canary_file,
+                tier=args.tier,
+                cache_class=args.cache_class,
             ),
             sort_keys=True,
         )
