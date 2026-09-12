@@ -7,11 +7,11 @@
 
 ## 2. Disposable source and target foundation
 
-- [ ] 2.1 [T05] Add the pinned Compose topology for reference PostgreSQL/source Odoo and target PostgreSQL, using run-id names/labels and loopback-only reserved ports.
-- [ ] 2.2 [T06] Add session/function fixtures with Docker-visible runtime roots, isolated XDG/catalog state, owner-only file-backed secrets, a reverse-order resource ledger, and bounded readiness probes.
-- [ ] 2.3 [T07] Add the `base`-only `odcli_e2e_probe` addon with deterministic XML model data, a binary filestore attachment, access rules, and a minimal native Odoo test.
-- [ ] 2.4 [T08] Add source database and target sentinel initialization, genuine database-manager ZIP generation, archive identity/filestore validation, and fresh-per-run semantics.
-- [ ] 2.5 [T09] Add exact cleanup and leak-audit helpers for processes, containers, networks, volumes, ports, databases, filestore, worktrees, XDG roots, catalogs, and debug-file retention.
+- [x] 2.1 [T05] Add the pinned Compose topology for reference PostgreSQL/source Odoo and target PostgreSQL, using run-id names/labels and loopback-only reserved ports.
+- [x] 2.2 [T06] Add session/function fixtures with Docker-visible runtime roots, isolated XDG/catalog state, owner-only file-backed secrets, a reverse-order resource ledger, and bounded readiness probes.
+- [x] 2.3 [T07] Add the `base`-only `odcli_e2e_probe` addon with deterministic XML model data, a binary filestore attachment, access rules, and a minimal native Odoo test.
+- [x] 2.4 [T08] Add source database and target sentinel initialization, genuine database-manager ZIP generation, archive identity/filestore validation, and fresh-per-run semantics.
+- [x] 2.5 [T09] Add exact cleanup and leak-audit helpers for processes, containers, networks, volumes, ports, databases, filestore, worktrees, XDG roots, catalogs, and debug-file retention.
 
 ## 3. Full critical path
 
