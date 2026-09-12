@@ -16,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from scripts.real_odoo_bootstrap import PYTHON_RESOLUTION_LOCK
 
 from .archive import ArchiveIdentity
 from .cleanup import audit_no_leaks, compose_down, write_odoo_config
@@ -511,10 +512,35 @@ def test_source_backed_full_critical_path(  # noqa: C901
     sync = _invoke(runner, project, cli_environment, "env", "sync", environment_id)
     repeated_sync = _invoke(runner, project, cli_environment, "env", "sync", environment_id)
     assert sync == repeated_sync
+    locked_install = subprocess.run(
+        [
+            "uv",
+            "pip",
+            "sync",
+            "--require-hashes",
+            "--python",
+            str(python),
+            str(PYTHON_RESOLUTION_LOCK),
+        ],
+        cwd=project,
+        capture_output=True,
+        shell=False,
+        text=True,
+        check=False,
+    )
+    assert locked_install.returncode == 0, locked_install.stdout + locked_install.stderr
     deps = _invoke(runner, project, cli_environment, "--env", environment_id, "deps", "verify")
     assert deps.get("pip_check_ok") is True
     assert deps.get("missing_imports") == []
-    _record(record_property, "E2E-CP-04", {"python": E2E_PINS.cpython, "uv": E2E_PINS.uv})
+    _record(
+        record_property,
+        "E2E-CP-04",
+        {
+            "python": E2E_PINS.cpython,
+            "uv": E2E_PINS.uv,
+            "resolution_lock": E2E_PINS.odoo_python_lock_sha256,
+        },
+    )
 
     from odoo_instance_sdk import OdooClient, OdooClientConfig
 

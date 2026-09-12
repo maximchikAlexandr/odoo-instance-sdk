@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
 import signal
 import subprocess
 import time
-import zipfile
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -23,7 +21,6 @@ from odoo_instance_sdk.models import BackupState
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.project import TestInstanceProjectConfig as _TestInstanceConfig
 from odoo_instance_sdk.resources.database import DatabaseResource
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES, PublicLeafCase
 
 from .archive import ArchiveIdentity, SourceBackupPlan
@@ -36,17 +33,25 @@ from .failures import (
     write_archive_variant,
     write_failure_evidence,
 )
+from .focused_handlers import invoke_case as _invoke_case
+from .focused_support import (
+    BACKUP_ID as _BACKUP_ID,
+)
+from .focused_support import (
+    catalog_state as _catalog_state,
+)
+from .focused_support import (
+    observe_failure as _observe_failure,
+)
+from .focused_support import (
+    record as _record,
+)
+from .focused_support import (
+    seed_backup as _seed_backup,
+)
 from .pins import E2E_PINS
 
 pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_full, pytest.mark.serial]
-
-_BACKUP_ID = "00000000-0000-0000-0000-000000000007"
-
-
-def _record(record_property: object, evidence: str, value: object = "passed") -> None:
-    getattr(record_property, "__call__")(
-        evidence.lower().replace("-", "_"), json.dumps(value, default=str, sort_keys=True)
-    )
 
 
 def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None = None) -> Path:
@@ -226,340 +231,6 @@ def _failure_text(result: object) -> str:
     )
 
 
-def _observe_failure(
-    result: object,
-    *,
-    runtime: E2ERuntime,
-    evidence: FailureEvidence,
-    name: str,
-    argv: object = (),
-) -> tuple[dict[str, Any] | None, tuple[Path, ...]]:
-    """Audit every real CLI failure across output, exception, and artifacts."""
-    text = _failure_text(result)
-    assert_secret_free(
-        {
-            "argv": argv,
-            "machine_output": text,
-            "pytest_output": getattr(result, "output", ""),
-            "fingerprint": getattr(result, "fingerprint", ""),
-            "exception_graph": getattr(result, "exception", ""),
-        },
-        evidence.secret_canary,
-    )
-    files = write_failure_evidence(evidence, logs={name: text})
-    assert_secret_free(files, evidence.secret_canary)
-    stdout = str(getattr(result, "stdout", ""))
-    if not stdout.strip():
-        return None, files
-    try:
-        document = json.loads(stdout)
-    except json.JSONDecodeError:
-        return None, files
-    assert isinstance(document, dict) and document.get("ok") is False
-    return document, files
-
-
-def _invoke_case(  # noqa: C901
-    case: PublicLeafCase,
-    *,
-    project: Path,
-    runtime: E2ERuntime,
-    evidence: FailureEvidence,
-    record_property: object,
-    source_backup: ArchiveIdentity,
-) -> None:
-    """Execute one canonical leaf through Click and assert its real contract."""
-    args = list(case.args)
-    if "demo" in args:
-        args[args.index("demo")] = runtime.topology.target_sentinel_database
-    if case.requires_dry_run and "--dry-run" not in args:
-        args.append("--dry-run")
-    if case.path == ("logs",):
-        args = ["logs", "--tail", "1"]
-    if case.path == ("db", "drop"):
-        args = ["db", "drop", runtime.topology.target_sentinel_database, "--yes"]
-    if case.path == ("backup", "delete"):
-        backup_path = runtime.artifact_root / f"leaf-{runtime.run_id}.zip"
-        with zipfile.ZipFile(backup_path, "w") as archive:
-            archive.writestr("manifest.json", '{"db_name": "demo"}')
-            archive.writestr("dump.sql", "-- database: demo\n")
-            archive.writestr("filestore/demo/blob", b"fixture")
-        _seed_backup(Path(runtime.environment["ODCLI_E2E_CATALOG"]), backup_path)
-        args = ["backup", "delete", _BACKUP_ID, "--yes"]
-    machine = case.classification not in {"native-passthrough", "jsonl-stream"}
-    if machine:
-        args.extend(("--format", "json"))
-    environment = {
-        **runtime.environment,
-        "ODCLI_E2E_KEEP_FAILED": "1",
-        "ODCLI_TEST_MASTER_PASSWORD": evidence.secret_canary,
-    }
-    document: dict[str, Any] | None
-    if case.path == ("backup", "delete"):
-        first = CliRunner().invoke(cli, ["--project", str(project), *args], env=environment)
-        second = CliRunner().invoke(cli, ["--project", str(project), *args], env=environment)
-        assert first.exit_code == second.exit_code == 0
-        first_document = json.loads(first.stdout)
-        second_document = json.loads(second.stdout)
-        assert first_document["ok"] is True and second_document["ok"] is True
-        assert first_document["result"]["already_deleted"] is False
-        assert second_document["result"]["already_deleted"] is True
-        assert _catalog_state(Path(environment["ODCLI_E2E_CATALOG"])) is BackupState.DELETED
-        assert not Path(runtime.artifact_root / f"leaf-{runtime.run_id}.zip").exists()
-        result, document = first, first_document
-    elif case.path in {("db", "reset-admin-password"), ("shell",)}:
-        if case.path == ("shell",):
-            args.append("--format")
-            args.append("json")
-        first = CliRunner().invoke(cli, ["--project", str(project), *args], env=environment)
-        second = CliRunner().invoke(cli, ["--project", str(project), *args], env=environment)
-        assert first.exit_code == second.exit_code == 0, first.output
-        document = json.loads(first.stdout)
-        assert document["ok"] is True and json.loads(second.stdout) == document
-        actual_args = ["db", "reset-admin-password", "--format", "json"]
-        actual_input = None
-        if case.path == ("shell",):
-            actual_args = ["shell"]
-            actual_input = "exit()\n"
-        actual = CliRunner().invoke(
-            cli,
-            ["--project", str(project), *actual_args],
-            env=environment,
-            input=actual_input,
-        )
-        repeated = CliRunner().invoke(
-            cli,
-            ["--project", str(project), *actual_args],
-            env=environment,
-            input=actual_input,
-        )
-        assert actual.exit_code == repeated.exit_code == 0, actual.output
-        if case.path == ("shell",):
-            assert "Usage: odcli shell" not in actual.output
-        else:
-            actual_document = json.loads(actual.stdout)
-            repeated_document = json.loads(repeated.stdout)
-            assert actual_document["ok"] is True and repeated_document["ok"] is True
-            target_database = runtime.topology.target_sentinel_database
-            assert actual_document["result"]["database"] == target_database
-            assert repeated_document["result"]["database"] == target_database
-        result = actual
-    elif case.path == ("module", "test"):
-        module_args = [item for item in args if item != "--dry-run"]
-        module = CliRunner().invoke(
-            cli,
-            ["--project", str(project), *module_args],
-            env=environment,
-        )
-        tags = module_args[module_args.index("--test-tags") + 1]
-        top_level = CliRunner().invoke(
-            cli,
-            [
-                "--project",
-                str(project),
-                "test",
-                "sale",
-                "--tags",
-                tags,
-                "--allow-empty",
-                "--format",
-                "json",
-            ],
-            env=environment,
-        )
-        assert module.exit_code == top_level.exit_code == 0, module.output + top_level.output
-        module_document = json.loads(module.stdout)
-        top_document = json.loads(top_level.stdout)
-        assert module_document["ok"] is True and top_document["ok"] is True
-        assert module_document["result"]["modules"] == top_document["result"]["modules"]
-        result, document = module, module_document
-    elif case.path == ("db", "init-monitoring"):
-        actual_args = [item for item in args if item != "--dry-run"]
-        first = CliRunner().invoke(cli, ["--project", str(project), *actual_args], env=environment)
-        second = CliRunner().invoke(cli, ["--project", str(project), *actual_args], env=environment)
-        assert first.exit_code == second.exit_code == 0, first.output
-        first_document = json.loads(first.stdout)
-        second_document = json.loads(second.stdout)
-        assert first_document["ok"] is True and second_document["ok"] is True
-        assert first_document["result"]["database"] == second_document["result"]["database"]
-        result, document = first, first_document
-    elif case.path == ("psql",):
-        dry_run = CliRunner().invoke(cli, ["--project", str(project), *args], env=environment)
-        assert dry_run.exit_code == 0, dry_run.output
-        result = CliRunner().invoke(
-            cli,
-            ["--project", str(project), "psql", "-c", "SELECT 1"],
-            env=environment,
-        )
-        assert result.exit_code == 0, result.output
-        document = None
-    elif case.path == ("logs",):
-        finite = CliRunner().invoke(
-            cli,
-            ["--project", str(project), "logs", "--tail", "1"],
-            env=environment,
-        )
-        assert finite.exit_code == 0 and "redacted" in finite.stdout
-        command = shutil.which("odcli")
-        assert command is not None
-        followed = subprocess.Popen(
-            [command, "--project", str(project), "logs", "--follow", "--tail", "1"],
-            cwd=project,
-            env=environment,
-            start_new_session=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            time.sleep(0.2)
-            os.killpg(followed.pid, signal.SIGINT)
-            followed_stdout, followed_stderr = followed.communicate(timeout=30)
-        finally:
-            if followed.poll() is None:
-                os.killpg(followed.pid, signal.SIGKILL)
-                followed.communicate(timeout=30)
-        assert followed.returncode == 130
-        assert "redacted" in followed_stdout
-        assert_secret_free(
-            {
-                "argv": [command, "logs", "--follow"],
-                "machine_output": followed_stdout,
-                "pytest_output": followed_stderr,
-            },
-            evidence.secret_canary,
-        )
-        result, document = finite, None
-    elif case.path == ("db", "drop"):
-        owned_database = f"odcli_drop_{runtime.run_id.replace('-', '')[:20]}"
-        backup_path = runtime.artifact_root / f"drop-{runtime.run_id}.zip"
-        shutil.copy2(source_backup.path, backup_path)
-        _seed_backup(
-            Path(runtime.environment["ODCLI_E2E_CATALOG"]),
-            backup_path,
-            database=runtime.topology.source_database,
-        )
-        restored = CliRunner().invoke(
-            cli,
-            [
-                "--project",
-                str(project),
-                "db",
-                "restore",
-                _BACKUP_ID,
-                "--target",
-                owned_database,
-                "--yes",
-                "--format",
-                "json",
-            ],
-            env=environment,
-        )
-        assert restored.exit_code == 0, restored.output
-        restored_document = json.loads(restored.stdout)
-        assert restored_document["ok"] is True
-        assert restored_document["result"]["restored_database"] == owned_database
-        owned_args = ["db", "drop", owned_database, "--yes", "--format", "json"]
-        first = CliRunner().invoke(
-            cli,
-            ["--project", str(project), *owned_args],
-            env=environment,
-        )
-        assert first.exit_code == 0, first.output
-        first_document = json.loads(first.stdout)
-        assert first_document["ok"] is True
-        repeated = CliRunner().invoke(
-            cli, ["--project", str(project), *owned_args], env=environment
-        )
-        assert repeated.exit_code != 0
-        repeated_document, _ = _observe_failure(
-            repeated,
-            runtime=runtime,
-            evidence=evidence,
-            name="leaf-db-drop-repeat",
-            argv=owned_args,
-        )
-        assert repeated_document is not None
-        foreign = CliRunner().invoke(
-            cli,
-            ["--project", str(project), "db", "drop", "postgres", "--yes", "--format", "json"],
-            env=environment,
-        )
-        assert foreign.exit_code != 0
-        foreign_document, _ = _observe_failure(
-            foreign, runtime=runtime, evidence=evidence, name="leaf-db-drop-foreign"
-        )
-        assert (
-            foreign_document is not None and foreign_document["error"]["code"] == "db_drop_failed"
-        )
-        filestore = runtime.root / "target-data" / "filestore" / owned_database
-        if filestore.exists():
-            shutil.rmtree(filestore)
-        result, document = first, first_document
-    elif case.path == ("exec",):
-        success_args = ["exec", "-", "--format", "json"]
-        success = CliRunner().invoke(
-            cli,
-            ["--project", str(project), *success_args],
-            env=environment,
-            input="print('focused exec')\n",
-        )
-        assert success.exit_code == 0, success.output
-        success_document = json.loads(success.stdout)
-        assert success_document["ok"] is True
-        failure = CliRunner().invoke(
-            cli,
-            ["--project", str(project), *success_args],
-            env=environment,
-            input="raise RuntimeError('focused exec failure')\n",
-        )
-        assert failure.exit_code != 0
-        document, _ = _observe_failure(
-            failure, runtime=runtime, evidence=evidence, name="leaf-exec", argv=success_args
-        )
-        assert document is not None and document["error"]["code"] == "exec_user_code_failed"
-        result = failure
-    else:
-        result = CliRunner().invoke(
-            cli,
-            ["--project", str(project), *args],
-            env=environment,
-            input="raise RuntimeError('focused leaf failure')\n",
-        )
-        if case.path not in {("psql",), ("logs",)}:
-            assert result.exit_code == 0, result.output
-            document = json.loads(result.stdout)
-            assert document["ok"] is True
-    assert_secret_free(
-        {"argv": args, "machine_output": result.stdout, "pytest_output": result.output},
-        evidence.secret_canary,
-    )
-    for evidence_id in case.e2e_evidence:
-        _record(record_property, evidence_id, {"path": case.path, "exit_code": result.exit_code})
-
-
-def _seed_backup(
-    db_path: Path,
-    archive_path: Path,
-    *,
-    backup_id: str = _BACKUP_ID,
-    database: str = "demo",
-    source_base_url: str = "http://127.0.0.1:8069",
-) -> None:
-    digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-    catalog = BackupCatalog(db_path=db_path)
-    catalog.start_download(
-        backup_id,
-        source_base_url,
-        database,
-        "zip",
-        True,
-        archive_path,
-    )
-    catalog.success_download(backup_id, archive_path.name, archive_path.stat().st_size, digest)
-    catalog.close()
-
-
 def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> None:
     """Bind every already-imported public command catalog provider for a run."""
 
@@ -581,14 +252,6 @@ def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> N
 
     monkeypatch.setattr(backup_commands._catalog_path_provider, "provider", provider)
     monkeypatch.setattr(resource_commands._catalog_path_provider, "provider", provider)
-
-
-def _catalog_state(db_path: Path, backup_id: str = _BACKUP_ID) -> BackupState:
-    catalog = BackupCatalog(db_path=db_path)
-    row = catalog.get_by_id(backup_id)
-    catalog.close()
-    assert row is not None
-    return BackupState(str(row["state"]))
 
 
 def test_remote_auth_and_unreachable_source_fail_closed(

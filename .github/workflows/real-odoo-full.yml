@@ -11,6 +11,7 @@ permissions:
 env:
   ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source
   UV_CACHE_DIR: .cache/uv
+  ODCLI_E2E_SECRET_REGISTRY: .artifacts/real-odoo-e2e-secret-registry.json
 
 jobs:
   real-odoo-full:
@@ -65,7 +66,7 @@ jobs:
       - name: Compute immutable uv cache key
         id: uv-key
         run: >-
-          echo "key=$(uv run --no-project python -c 'from pathlib import Path; from scripts.real_odoo_bootstrap import uv_cache_key; print(uv_cache_key(__import__("os").environ["RUNNER_OS"], __import__("os").environ["RUNNER_ARCH"], Path(".cache/odoo-requirements.txt").read_bytes(), Path("uv.lock").read_bytes()))')" >> "$GITHUB_OUTPUT"
+          echo "key=$(uv run --no-project python -c 'from pathlib import Path; from scripts.real_odoo_bootstrap import uv_cache_key; print(uv_cache_key(__import__("os").environ["RUNNER_OS"], __import__("os").environ["RUNNER_ARCH"], Path(".cache/odoo-requirements.txt").read_bytes(), Path("uv.lock").read_bytes(), Path("tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.lock").read_bytes()))')" >> "$GITHUB_OUTPUT"
       - name: Restore content-addressed uv cache
         id: uv-cache
         uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
@@ -130,6 +131,7 @@ jobs:
           --source .artifacts/real-odoo-e2e
           --output .artifacts/real-odoo-e2e/full-evidence.tar.gz
           --canary-file .artifacts/real-odoo-e2e-secret-canary
+          --secret-registry .artifacts/real-odoo-e2e-secret-registry.json
           --tier full
           --cache-class ${{ steps.bootstrap.outputs.cache_class || 'cold' }}
           --status ${{ steps.pytest.outcome == 'success' && 'success' || 'failure' }}

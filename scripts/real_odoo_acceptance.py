@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 from tests.integration.real_odoo.pins import E2E_PINS  # noqa: E402
 
 CHANGE: Final[Path] = ROOT / "openspec/changes/add-reproducible-odoo19-e2e-harness"
+PLANNING_BASE_SHA: Final[str] = "0ff164636617c03a51277055af45cef009277368"
 TASKS: Final[Path] = CHANGE / "tasks.md"
 MATRIX: Final[Path] = CHANGE / "command-matrix.md"
 EVIDENCE_ID = re.compile(r"E2E-(?:SM|CP|FC|REC|SEC)-\d{2}")
@@ -366,6 +367,37 @@ def _scenario_mapping_errors(
     return tuple(sorted(errors))
 
 
+def _scope_contract() -> dict[str, object]:
+    tracked = subprocess.run(
+        ["git", "diff", "--name-only", PLANNING_BASE_SHA],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.splitlines()
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.splitlines()
+    changed = sorted(set(tracked) | set(untracked))
+    forbidden = [
+        path
+        for path in changed
+        if path.startswith("src/")
+        or path.endswith((".zip", ".dump"))
+        or "enterprise" in path.casefold()
+    ]
+    return {
+        "base": PLANNING_BASE_SHA,
+        "changed_files": changed,
+        "forbidden_changed_files": forbidden,
+        "out_of_scope": not forbidden,
+    }
+
+
 def _junit_evidence_ids(root: ET.Element) -> frozenset[str]:
     return frozenset(
         normalized
@@ -423,28 +455,7 @@ def _static_contract() -> dict[str, object]:
             if identifier in executor_error_ids
         }
     )
-    tracked = subprocess.run(
-        ["git", "diff", "--name-only", "1eec99e4e7986deebae1a6a14ecc5ad47cf47f65"],
-        cwd=ROOT,
-        capture_output=True,
-        check=True,
-        text=True,
-    ).stdout.splitlines()
-    untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        cwd=ROOT,
-        capture_output=True,
-        check=True,
-        text=True,
-    ).stdout.splitlines()
-    changed = sorted(set(tracked) | set(untracked))
-    forbidden = [
-        path
-        for path in changed
-        if path.startswith("src/")
-        or path.endswith((".zip", ".dump"))
-        or "enterprise" in path.casefold()
-    ]
+    scope = _scope_contract()
     return {
         "tasks": {
             "expected": expected_tasks,
@@ -474,10 +485,7 @@ def _static_contract() -> dict[str, object]:
             "scenario_missing_evidence": scenario_missing_evidence,
         },
         "scope": {
-            "base": "1eec99e4e7986deebae1a6a14ecc5ad47cf47f65",
-            "changed_files": changed,
-            "forbidden_changed_files": forbidden,
-            "out_of_scope": not forbidden,
+            **scope,
         },
     }
 
@@ -732,6 +740,7 @@ def main() -> int:
                 "-q",
                 "tests/unit/test_real_odoo_contract.py",
                 "tests/unit/test_real_odoo_ci.py",
+                "tests/unit/test_real_odoo_ci_components.py",
                 "tests/unit/test_real_odoo_foundation.py",
                 "tests/unit/test_real_odoo_failures.py",
             ],

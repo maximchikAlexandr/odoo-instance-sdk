@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 10
     env:
       UV_CACHE_DIR: .cache/uv
+      ODCLI_E2E_SECRET_REGISTRY: .artifacts/real-odoo-e2e-secret-registry.json
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
@@ -35,7 +36,7 @@ jobs:
         run: >-
           key=$(uv run --no-project python -c
           'from pathlib import Path; import os; from scripts.real_odoo_bootstrap import uv_cache_key;
-          print(uv_cache_key(os.environ.get("RUNNER_OS", "Linux"), os.environ.get("RUNNER_ARCH", "X64"), b"", Path("uv.lock").read_bytes()))')
+          print(uv_cache_key(os.environ.get("RUNNER_OS", "Linux"), os.environ.get("RUNNER_ARCH", "X64"), b"", Path("uv.lock").read_bytes(), Path("tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.lock").read_bytes()))')
           && printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
       - name: Force cold smoke cache miss
         run: rm -rf .cache/uv
@@ -85,6 +86,7 @@ jobs:
           --source .artifacts/real-odoo-e2e
           --output .artifacts/real-odoo-e2e/smoke-evidence.tar.gz
           --canary-file .artifacts/real-odoo-e2e-secret-canary
+          --secret-registry .artifacts/real-odoo-e2e-secret-registry.json
           --tier smoke
           --cache-class ${{ steps.bootstrap.outputs.cache_class || 'cold' }}
           --status ${{ steps.pytest.outcome == 'success' && 'success' || 'failure' }}
@@ -123,6 +125,7 @@ jobs:
     timeout-minutes: 10
     env:
       UV_CACHE_DIR: .cache/uv
+      ODCLI_E2E_SECRET_REGISTRY: .artifacts/real-odoo-e2e-secret-registry.json
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
@@ -143,7 +146,7 @@ jobs:
         run: >-
           key=$(uv run --no-project python -c
           'from pathlib import Path; import os; from scripts.real_odoo_bootstrap import uv_cache_key;
-          print(uv_cache_key(os.environ.get("RUNNER_OS", "Linux"), os.environ.get("RUNNER_ARCH", "X64"), b"", Path("uv.lock").read_bytes()))')
+          print(uv_cache_key(os.environ.get("RUNNER_OS", "Linux"), os.environ.get("RUNNER_ARCH", "X64"), b"", Path("uv.lock").read_bytes(), Path("tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.lock").read_bytes()))')
           && printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
       - name: Restore warm smoke uv cache
         id: uv-cache
@@ -194,6 +197,7 @@ jobs:
           --source .artifacts/real-odoo-e2e
           --output .artifacts/real-odoo-e2e/smoke-evidence.tar.gz
           --canary-file .artifacts/real-odoo-e2e-secret-canary
+          --secret-registry .artifacts/real-odoo-e2e-secret-registry.json
           --tier smoke
           --cache-class ${{ steps.bootstrap.outputs.cache_class || 'cold' }}
           --status ${{ steps.pytest.outcome == 'success' && 'success' || 'failure' }}

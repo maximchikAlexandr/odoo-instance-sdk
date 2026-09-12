@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts.real_odoo_secrets import write_secret_registry
+
 from .archive import ArchiveIdentity, SourceBackupPlan, source_database_name
 from .cleanup import (
     FailureEvidence,
@@ -50,6 +52,7 @@ class E2ERuntime:
     artifact_root: Path
     source_config_file: Path
     master_password_file: Path
+    secret_registry_file: Path
     scope: str
     failed: bool = False
 
@@ -109,8 +112,17 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
         (root / name).mkdir(mode=0o700)
     secret_file = root / "secrets" / "pg-password"
     master_password_file = root / "secrets" / "master-password"
-    write_owner_only_secret(secret_file, secrets.token_urlsafe(32))
-    write_owner_only_secret(master_password_file, secrets.token_urlsafe(32))
+    database_password = secrets.token_urlsafe(32)
+    master_password = secrets.token_urlsafe(32)
+    write_owner_only_secret(secret_file, database_password)
+    write_owner_only_secret(master_password_file, master_password)
+    registry_value = os.environ.get("ODCLI_E2E_SECRET_REGISTRY")
+    secret_registry_file = (
+        Path(registry_value)
+        if registry_value
+        else artifact_root.with_name(f"{artifact_root.name}-secret-registry.json")
+    )
+    write_secret_registry(secret_registry_file, (database_password, master_password))
     if not secret_file.is_file() or not secret_file.parent.is_dir():
         raise RuntimeError(f"Docker cannot bind the fixture secret path: {secret_file}")
     reservations = reserve_ports(4)
@@ -191,6 +203,7 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
         artifact_root,
         source_config_file,
         master_password_file,
+        secret_registry_file,
         scope,
     )
 
@@ -295,6 +308,8 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
 
 def _remove_runtime_files(runtime: E2ERuntime) -> None:
     remove_owned_root(runtime.root, run_id=runtime.run_id)
+    if "ODCLI_E2E_SECRET_REGISTRY" not in os.environ:
+        runtime.secret_registry_file.unlink(missing_ok=True)
     if not runtime.failed or os.environ.get("ODCLI_E2E_KEEP_FAILED") != "1":
         remove_owned_root(runtime.artifact_root, run_id=runtime.run_id)
 

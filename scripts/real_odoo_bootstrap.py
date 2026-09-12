@@ -32,6 +32,9 @@ Tier = Literal["smoke", "full"]
 MAX_PROBE_SECONDS: Final[float] = 30.0
 ODOO_REPOSITORY: Final[str] = "https://github.com/odoo/odoo.git"
 ACTIONS_CACHE: Final[str] = "6849a6489940f00c2f30c0fb92c6274307ccb58a"
+PYTHON_RESOLUTION_LOCK: Final[Path] = (
+    ROOT / "tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.lock"
+)
 
 
 def source_cache_key(os_name: str, architecture: str) -> str:
@@ -44,10 +47,23 @@ def uv_cache_key(
     architecture: str,
     odoo_requirements: bytes,
     repository_lock: bytes,
+    resolution_lock: bytes = b"",
 ) -> str:
     """Return the content-addressed uv cache key."""
-    digest = hashlib.sha256(odoo_requirements + repository_lock).hexdigest()
+    digest = hashlib.sha256(odoo_requirements + repository_lock + resolution_lock).hexdigest()
     return f"uv-{os_name}-{architecture}-{E2E_PINS.cpython}-{E2E_PINS.uv}-{digest}"
+
+
+def python_resolution_lock_is_valid(path: Path | None = None) -> bool:
+    path = path or PYTHON_RESOLUTION_LOCK
+    try:
+        content = path.read_bytes()
+    except OSError:
+        return False
+    return (
+        hashlib.sha256(content).hexdigest() == E2E_PINS.odoo_python_lock_sha256
+        and b"--hash=sha256:" in content
+    )
 
 
 def _configured_cache_key(name: str, computed: str) -> str:
@@ -207,6 +223,7 @@ def prerequisite_checks(tier: Tier, resolved_platform: str) -> dict[str, bool]:
     }
     if tier == "full":
         checks["odoo_source_revision"] = _source_revision_is_available()
+        checks["python_resolution_lock"] = python_resolution_lock_is_valid()
     return checks
 
 
@@ -311,6 +328,9 @@ def bootstrap(
                     cache_arch,
                     requirements.read_bytes() if requirements.is_file() else b"",
                     (ROOT / "uv.lock").read_bytes(),
+                    PYTHON_RESOLUTION_LOCK.read_bytes()
+                    if PYTHON_RESOLUTION_LOCK.is_file()
+                    else b"",
                 ),
             )
         if os.environ.get("CI", "").lower() == "true":

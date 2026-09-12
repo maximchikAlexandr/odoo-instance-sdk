@@ -30,6 +30,7 @@ class E2EPinManifest:
     postgres_linux_arm64_manifest: str
     cpython: str
     uv: str
+    odoo_python_lock_sha256: str
     actions_checkout: str
     setup_uv: str
     upload_artifact: str
@@ -46,6 +47,7 @@ E2E_PINS = E2EPinManifest(
     postgres_linux_arm64_manifest="sha256:738d1359df5aa0b6d50a9071e989c49fdd39152a2a805c6ff131bf5e2243e0b3",
     cpython="3.12.13",
     uv="0.10.8",
+    odoo_python_lock_sha256="5a907f2d7c3e93c3743288f8497f74c778eb0ef0d868a69aa407b6b8c1943881",
     actions_checkout="11d5960a326750d5838078e36cf38b85af677262",
     setup_uv="d0cc045d04ccac9d8b7881df0226f9e82c39688e",
     upload_artifact="ea165f8d65b6e75b540449e92b4886f43607fa02",
@@ -134,6 +136,8 @@ def _validate_pin_values(pins: E2EPinManifest) -> None:
             raise PrerequisiteError(f"GitHub Action is not pinned to a commit SHA: {action}")
     if pins.cpython != "3.12.13" or pins.uv != "0.10.8" or pins.github_runner != "ubuntu-24.04":
         raise PrerequisiteError("runtime or runner pin changed without a contract revision")
+    if not _SHA256.fullmatch(pins.odoo_python_lock_sha256):
+        raise PrerequisiteError("Python resolution lock must be pinned by SHA-256")
 
 
 def validate_pins(pins: E2EPinManifest = E2E_PINS) -> None:

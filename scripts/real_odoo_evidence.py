@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
+from scripts.real_odoo_secrets import assert_secret_free, read_secret_registry
 from tests.integration.real_odoo.pins import PhaseBudget, budget_for
 
 Status = Literal["success", "failure"]
@@ -42,17 +43,20 @@ def _bounded_text(path: Path) -> bytes:
     return text.encode("utf-8")[:TEXT_LIMIT_BYTES]
 
 
-def _copy_bounded(source: Path, destination: Path, canary: bytes) -> None:
+def _copy_bounded(source: Path, destination: Path, secrets: tuple[str, ...]) -> None:
     if source.is_symlink() or not source.is_file():
         return
+    raw_content = source.read_bytes()
+    if secrets and secrets[0].encode() in raw_content:
+        raise ValueError("secret canary detected in evidence")
+    assert_secret_free(raw_content, secrets)
     if source.suffix.lower() in TEXT_SUFFIXES:
         if source.stat().st_size > TEXT_LIMIT_BYTES:
             raise ValueError(f"text evidence input exceeds {TEXT_LIMIT_BYTES} bytes: {source.name}")
         content = _bounded_text(source)
     else:
-        content = source.read_bytes()
-    if canary and canary in content:
-        raise ValueError("secret canary detected in evidence")
+        content = raw_content
+    assert_secret_free(content, secrets)
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     destination.write_bytes(content)
     destination.chmod(0o600)
@@ -363,6 +367,7 @@ def package_evidence(  # noqa: C901
     *,
     status: Status,
     canary_file: Path | None = None,
+    secret_registry_file: Path | None = None,
     tier: Literal["smoke", "full"] | None = None,
     cache_class: Literal["cold", "warm"] | None = None,
 ) -> dict[str, object]:
@@ -373,7 +378,9 @@ def package_evidence(  # noqa: C901
         _required_files(source, status, tier)
         if canary_file is None:
             raise ValueError("secret canary file is required")  # noqa: TRY301
-        canary = _read_canary(canary_file)
+        canary = _read_canary(canary_file).decode("utf-8")
+        registry = read_secret_registry(secret_registry_file) if secret_registry_file else ()
+        secrets = (canary, *registry)
         with tempfile.TemporaryDirectory(prefix="odcli-e2e-evidence-") as temporary:
             staging = Path(temporary) / "evidence"
             for path in sorted(source.rglob("*")):
@@ -382,7 +389,7 @@ def package_evidence(  # noqa: C901
                     continue
                 if not _include(path, status):
                     continue
-                _copy_bounded(path, staging / relative, canary)
+                _copy_bounded(path, staging / relative, secrets)
             files = tuple(path for path in staging.rglob("*") if path.is_file())
             _check_bundle_size(files, status)
             output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -407,12 +414,12 @@ def package_evidence(  # noqa: C901
                 artifact_bytes=output.stat().st_size,
             )
             for _ in range(2):
-                _copy_bounded(source / "timing.json", staging / "timing.json", canary)
-                _copy_bounded(source / "junit.xml", staging / "junit.xml", canary)
+                _copy_bounded(source / "timing.json", staging / "timing.json", secrets)
+                _copy_bounded(source / "junit.xml", staging / "junit.xml", secrets)
                 _copy_bounded(
                     source / "resource-manifest.json",
                     staging / "resource-manifest.json",
-                    canary,
+                    secrets,
                 )
                 _archive_staging(staging, output, status)
                 if report["artifact_bytes"] == output.stat().st_size:
@@ -467,6 +474,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--status", choices=("success", "failure"), required=True)
     parser.add_argument("--canary-file", type=Path)
+    parser.add_argument("--secret-registry", type=Path)
     parser.add_argument("--tier", choices=("smoke", "full"), required=True)
     parser.add_argument("--cache-class", choices=("cold", "warm"), required=True)
     args = parser.parse_args()
@@ -477,6 +485,7 @@ def main() -> int:
                 args.output,
                 status=args.status,
                 canary_file=args.canary_file,
+                secret_registry_file=args.secret_registry,
                 tier=args.tier,
                 cache_class=args.cache_class,
             ),
