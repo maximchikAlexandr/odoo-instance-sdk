@@ -141,7 +141,10 @@ def write_archive_variant(path: Path, variant: Literal["truncated", "incompatibl
         return
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("manifest.json", '{"db_name": "not-the-catalogue-database"}')
-        archive.writestr("dump.sql", "-- database: not-the-catalogue-database\n")
+        archive.writestr(
+            "dump.sql",
+            "-- database: not-the-catalogue-database\n\\connect not-the-catalogue-database\n",
+        )
         archive.writestr("filestore/not-the-catalogue-database/blob", b"fixture")
     path.chmod(0o600)
 

@@ -22,6 +22,7 @@ from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.models import BackupState
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.project import TestInstanceProjectConfig as _TestInstanceConfig
+from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES, PublicLeafCase
 
@@ -206,20 +207,146 @@ def _invoke_case(  # noqa: C901
             env=environment,
             input=actual_input,
         )
-        assert actual.exit_code == 0, actual.output
-        result = actual
-    elif case.path == ("db", "drop"):
-        result = CliRunner().invoke(
+        repeated = CliRunner().invoke(
             cli,
-            ["--project", str(project), *args, "--format", "json"],
+            ["--project", str(project), *actual_args],
+            env=environment,
+            input=actual_input,
+        )
+        assert actual.exit_code == repeated.exit_code == 0, actual.output
+        actual_document = json.loads(actual.stdout)
+        repeated_document = json.loads(repeated.stdout)
+        assert actual_document["ok"] is True and repeated_document["ok"] is True
+        target_database = runtime.topology.target_sentinel_database
+        assert actual_document["result"]["database"] == target_database
+        assert repeated_document["result"]["database"] == target_database
+        result = actual
+    elif case.path == ("module", "test"):
+        module_args = [item for item in args if item != "--dry-run"]
+        module = CliRunner().invoke(
+            cli,
+            ["--project", str(project), *module_args],
             env=environment,
         )
-        assert result.exit_code != 0
-        document, _ = _observe_failure(
-            result, runtime=runtime, evidence=evidence, name="leaf-db-drop", argv=args
+        tags = module_args[module_args.index("--test-tags") + 1]
+        top_level = CliRunner().invoke(
+            cli,
+            [
+                "--project",
+                str(project),
+                "test",
+                "sale",
+                "--tags",
+                tags,
+                "--allow-empty",
+                "--format",
+                "json",
+            ],
+            env=environment,
         )
-        assert document is not None
-        assert document["error"]["code"] == "db_drop_failed"
+        assert module.exit_code == top_level.exit_code == 0, module.output + top_level.output
+        module_document = json.loads(module.stdout)
+        top_document = json.loads(top_level.stdout)
+        assert module_document["ok"] is True and top_document["ok"] is True
+        assert module_document["result"]["modules"] == top_document["result"]["modules"]
+        result, document = module, module_document
+    elif case.path == ("db", "init-monitoring"):
+        actual_args = [item for item in args if item != "--dry-run"]
+        first = CliRunner().invoke(cli, ["--project", str(project), *actual_args], env=environment)
+        second = CliRunner().invoke(cli, ["--project", str(project), *actual_args], env=environment)
+        assert first.exit_code == second.exit_code == 0, first.output
+        first_document = json.loads(first.stdout)
+        second_document = json.loads(second.stdout)
+        assert first_document["ok"] is True and second_document["ok"] is True
+        assert first_document["result"]["database"] == second_document["result"]["database"]
+        result, document = first, first_document
+    elif case.path == ("psql",):
+        dry_run = CliRunner().invoke(cli, ["--project", str(project), *args], env=environment)
+        assert dry_run.exit_code == 0, dry_run.output
+        result = CliRunner().invoke(
+            cli,
+            ["--project", str(project), "psql", "-c", "SELECT 1"],
+            env=environment,
+        )
+        assert result.exit_code == 0, result.output
+        document = None
+    elif case.path == ("logs",):
+        finite = CliRunner().invoke(
+            cli,
+            ["--project", str(project), "logs", "--tail", "1"],
+            env=environment,
+        )
+        assert finite.exit_code == 0 and "redacted" in finite.stdout
+        command = shutil.which("odcli")
+        assert command is not None
+        followed = subprocess.Popen(
+            [command, "--project", str(project), "logs", "--follow", "--tail", "1"],
+            cwd=project,
+            env=environment,
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            time.sleep(0.2)
+            os.killpg(followed.pid, signal.SIGINT)
+            followed_stdout, followed_stderr = followed.communicate(timeout=30)
+        finally:
+            if followed.poll() is None:
+                os.killpg(followed.pid, signal.SIGKILL)
+                followed.communicate(timeout=30)
+        assert followed.returncode == 130
+        assert "redacted" in followed_stdout
+        assert_secret_free(
+            {
+                "argv": [command, "logs", "--follow"],
+                "machine_output": followed_stdout,
+                "pytest_output": followed_stderr,
+            },
+            evidence.secret_canary,
+        )
+        result, document = finite, None
+    elif case.path == ("db", "drop"):
+        owned_database = f"odcli_drop_{runtime.run_id.replace('-', '')[:20]}"
+        created = ComposeLifecycle(runtime.compose_file, runtime.topology.project_name).run(
+            "exec", "-T", "target_postgres", "createdb", "-U", "odoo", owned_database, timeout=30.0
+        )
+        assert created.returncode == 0, created.stderr
+        owned_args = ["db", "drop", owned_database, "--yes", "--format", "json"]
+        first = CliRunner().invoke(
+            cli,
+            ["--project", str(project), *owned_args],
+            env=environment,
+        )
+        assert first.exit_code == 0, first.output
+        first_document = json.loads(first.stdout)
+        assert first_document["ok"] is True
+        repeated = CliRunner().invoke(
+            cli, ["--project", str(project), *owned_args], env=environment
+        )
+        assert repeated.exit_code != 0
+        repeated_document, _ = _observe_failure(
+            repeated,
+            runtime=runtime,
+            evidence=evidence,
+            name="leaf-db-drop-repeat",
+            argv=owned_args,
+        )
+        assert repeated_document is not None
+        foreign = CliRunner().invoke(
+            cli,
+            ["--project", str(project), "db", "drop", "postgres", "--yes", "--format", "json"],
+            env=environment,
+        )
+        assert foreign.exit_code != 0
+        foreign_document, _ = _observe_failure(
+            foreign, runtime=runtime, evidence=evidence, name="leaf-db-drop-foreign"
+        )
+        assert (
+            foreign_document is not None and foreign_document["error"]["code"] == "db_drop_failed"
+        )
+        result, document = first, first_document
     elif case.path == ("exec",):
         success_args = ["exec", "-", "--format", "json"]
         success = CliRunner().invoke(
@@ -250,14 +377,7 @@ def _invoke_case(  # noqa: C901
             env=environment,
             input="raise RuntimeError('focused leaf failure')\n",
         )
-        if case.path == ("psql",):
-            assert result.exit_code == 0, result.output
-            document = None
-        elif case.path == ("logs",):
-            assert result.exit_code == 0, result.output
-            assert "redacted" in result.stdout
-            document = None
-        else:
+        if case.path not in {("psql",), ("logs",)}:
             assert result.exit_code == 0, result.output
             document = json.loads(result.stdout)
             assert document["ok"] is True
@@ -372,6 +492,7 @@ def test_remote_auth_and_unreachable_source_fail_closed(
 @pytest.mark.parametrize("variant", ["truncated", "incompatible"])
 def test_archive_and_restore_boundaries_publish_no_unowned_state(
     tmp_path: Path,
+    source_backup_plan: SourceBackupPlan,
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
     variant: str,
@@ -381,7 +502,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
     path = tmp_path / f"{variant}.zip"
     write_archive_variant(path, variant)  # type: ignore[arg-type]
     catalog_path = tmp_path / "catalog.sqlite3"
-    _seed_backup(catalog_path, path)
+    _seed_backup(catalog_path, path, database=source_backup_plan.database)
     monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda **_: catalog_path)
     result = CliRunner().invoke(cli, ["backup", "validate", _BACKUP_ID, "--format", "json"])
     if variant == "incompatible":
@@ -389,14 +510,17 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
         document = json.loads(result.stdout)
         assert document["ok"] is True
         assert document["result"]["db_name"] == "not-the-catalogue-database"
-        assert document["result"]["db_name"] != "demo"
+        assert document["result"]["db_name"] != source_backup_plan.database
         files = write_failure_evidence(
             failure_evidence, logs={"archive-incompatible": result.stdout}
         )
         assert_secret_free(files, failure_evidence.secret_canary)
         project = _project(
-            target_runtime, tmp_path / f"incompatible-restore-{target_runtime.run_id}"
+            target_runtime,
+            tmp_path / f"incompatible-restore-{target_runtime.run_id}",
+            source=source_backup_plan,
         )
+        target = f"odcli_incompatible_{target_runtime.run_id.replace('-', '')[:20]}"
         restore = CliRunner().invoke(
             cli,
             [
@@ -406,7 +530,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
                 "restore",
                 _BACKUP_ID,
                 "--target",
-                target_runtime.topology.target_sentinel_database,
+                target,
                 "--yes",
                 "--format",
                 "json",
@@ -414,6 +538,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
             env={
                 **target_runtime.environment,
                 "ODCLI_E2E_CATALOG": str(catalog_path),
+                "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
             },
         )
         assert restore.exit_code != 0
@@ -425,6 +550,27 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
         )
         assert restore_document is not None
         assert restore_document["error"]["code"] == "db_restore_failed"
+        assert "database" in restore_document["error"]["message"].lower()
+        assert _catalog_state(catalog_path) is BackupState.AVAILABLE
+        assert not (target_runtime.root / "target-data" / "filestore" / target).exists()
+        probe = ComposeLifecycle(
+            target_runtime.compose_file, target_runtime.topology.project_name
+        ).run(
+            "exec",
+            "-T",
+            "target_postgres",
+            "psql",
+            "-U",
+            "odoo",
+            "-d",
+            "postgres",
+            "-At",
+            "-c",
+            f"SELECT datname FROM pg_database WHERE datname = '{target}';",
+            timeout=30.0,
+        )
+        assert probe.returncode == 0
+        assert probe.stdout.strip() != target
     else:
         assert result.exit_code != 0
         document, _ = _observe_failure(
@@ -441,6 +587,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
 def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     tmp_path: Path,
     source_backup: ArchiveIdentity,
+    source_backup_plan: SourceBackupPlan,
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
     record_property: object,
@@ -453,9 +600,13 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
         catalog_path,
         archive_path,
         backup_id=success_id,
-        database=target_runtime.topology.source_database,
+        database=source_backup_plan.database,
     )
-    project = _project(target_runtime, tmp_path / f"restore-project-{target_runtime.run_id}")
+    project = _project(
+        target_runtime,
+        tmp_path / f"restore-project-{target_runtime.run_id}",
+        source=source_backup_plan,
+    )
     target = f"odcli_restore_{target_runtime.run_id.replace('-', '')[:24]}"
     args = [
         "--project",
@@ -552,6 +703,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     failure_evidence: FailureEvidence,
     resource_ledger: ResourceLedger,
     record_property: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run_id = target_runtime.run_id
     archive_path = target_runtime.artifact_root / f"recovery-{run_id}.zip"
@@ -564,15 +716,6 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         backup_id=backup_id,
         database=target_runtime.topology.source_database,
     )
-    invalid_path = target_runtime.artifact_root / f"recovery-invalid-{run_id}.zip"
-    write_archive_variant(invalid_path, "truncated")
-    invalid_id = "00000000-0000-0000-0000-000000000010"
-    _seed_backup(
-        catalog_path,
-        invalid_path,
-        backup_id=invalid_id,
-        database=target_runtime.topology.source_database,
-    )
     project = _project(target_runtime, target_runtime.root / f"recovery-{run_id}")
     target = f"odcli_interrupt_{run_id.replace('-', '')[:20]}"
     command = shutil.which("odcli")
@@ -583,32 +726,6 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         **target_runtime.environment,
         "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
     }
-    partial_project = _project(target_runtime, target_runtime.root / f"partial-{run_id}")
-    partial_result = CliRunner().invoke(
-        cli,
-        [
-            "--project",
-            str(partial_project),
-            "db",
-            "restore",
-            invalid_id,
-            "--target",
-            f"odcli_partial_{run_id.replace('-', '')[:20]}",
-            "--yes",
-            "--format",
-            "json",
-        ],
-        env=environment,
-    )
-    assert partial_result.exit_code != 0
-    partial_document, _ = _observe_failure(
-        partial_result,
-        runtime=target_runtime,
-        evidence=failure_evidence,
-        name="recovery-partial-public-restore",
-    )
-    assert partial_document is not None
-    assert partial_document["error"]["code"] == "db_restore_failed"
     process = subprocess.Popen(
         [
             command,
@@ -651,7 +768,19 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     _record(record_property, "E2E-REC-01", interrupted)
 
     timeout_process = subprocess.Popen(
-        [command, "--project", str(project), "run", "--format", "json"],
+        [
+            command,
+            "--project",
+            str(project),
+            "db",
+            "init-monitoring",
+            target_runtime.topology.target_sentinel_database,
+            "--yes",
+            "--timeout",
+            "0.001",
+            "--format",
+            "json",
+        ],
         cwd=project,
         env=environment,
         start_new_session=True,
@@ -668,11 +797,12 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
             else None
         ),
     )
-    with pytest.raises(subprocess.TimeoutExpired):
-        timeout_process.communicate(timeout=0.1)
-    os.killpg(timeout_process.pid, signal.SIGTERM)
     timeout_stdout, timeout_stderr = timeout_process.communicate(timeout=30)
-    assert timeout_process.returncode is not None
+    assert timeout_process.returncode != 0
+    timeout_document = json.loads(timeout_stdout)
+    assert timeout_document["ok"] is False
+    assert timeout_document["error"]["code"] == "db_init_monitoring_failed"
+    assert "timeout" in timeout_document["error"]["message"].lower()
     assert_secret_free(
         {"argv": command, "machine_output": timeout_stdout, "pytest_output": timeout_stderr},
         failure_evidence.secret_canary,
@@ -680,18 +810,50 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     _record(
         record_property,
         "E2E-REC-02",
-        {"exit_code": timeout_process.returncode, "stderr": timeout_stderr[-1024:]},
+        timeout_document,
     )
 
-    root = target_runtime.root / f"publication-{run_id}"
-    scenario_ledger = ResourceLedger(run_id)
+    partial_project = _project(target_runtime, target_runtime.root / f"partial-{run_id}")
     database = f"odcli_partial_{run_id.replace('-', '')[:20]}"
-    database_result = ComposeLifecycle(
-        target_runtime.compose_file, target_runtime.topology.project_name
-    ).run("exec", "-T", "target_postgres", "createdb", "-U", "odoo", database, timeout=30.0)
-    assert database_result.returncode == 0, database_result.stderr
-    filestore = root / "filestore" / database
-    filestore.mkdir(mode=0o700, parents=True)
+    partial_args = [
+        "--project",
+        str(partial_project),
+        "db",
+        "restore",
+        backup_id,
+        "--target",
+        database,
+        "--yes",
+        "--format",
+        "json",
+    ]
+    partial_document: dict[str, Any] = {}
+
+    original_restore = DatabaseResource.restore
+
+    def restore_then_fail(
+        resource: DatabaseResource, *restore_args: Any, **restore_kwargs: Any
+    ) -> Any:
+        original_restore(resource, *restore_args, **restore_kwargs)
+        raise RuntimeError("injected restore failure after database and filestore publication")
+
+    monkeypatch.setattr(DatabaseResource, "restore", restore_then_fail)
+    filestore = target_runtime.root / "target-data" / "filestore" / database
+
+    def public_restore_failure() -> None:
+        failed = CliRunner().invoke(cli, partial_args, env=environment)
+        assert failed.exit_code != 0
+        observed, _ = _observe_failure(
+            failed,
+            runtime=target_runtime,
+            evidence=failure_evidence,
+            name="recovery-partial-public-restore",
+            argv=partial_args,
+        )
+        assert observed is not None
+        assert filestore.is_dir()
+        partial_document.update(observed)
+        raise RuntimeError(observed["error"]["message"])
 
     def drop_database() -> None:
         result = ComposeLifecycle(
@@ -700,24 +862,64 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         if result.returncode != 0:
             raise RuntimeError("database cleanup failed")
 
-    scenario_ledger.record(
+    resource_ledger.record(
         "database",
         f"{run_id}-{database}",
         drop_database,
     )
-    scenario_ledger.record("filestore", f"{run_id}-filestore", lambda: shutil.rmtree(root))
-    scenario_ledger.record(
+    resource_ledger.record("filestore", f"{run_id}-filestore", lambda: shutil.rmtree(filestore))
+
+    def delete_catalog_record() -> None:
+        deleted = CliRunner().invoke(
+            cli,
+            [
+                "--project",
+                str(partial_project),
+                "backup",
+                "delete",
+                backup_id,
+                "--yes",
+                "--format",
+                "json",
+            ],
+            env=environment,
+        )
+        if deleted.exit_code != 0:
+            raise RuntimeError(deleted.output)
+
+    resource_ledger.record("catalog", f"{run_id}-catalog", delete_catalog_record)
+    resource_ledger.record(
         "cleanup",
         f"{run_id}-injected-cleanup",
         lambda: (_ for _ in ()).throw(RuntimeError("cleanup failure")),
     )
     observation = run_recovery_action(
-        lambda: (_ for _ in ()).throw(RuntimeError(partial_document["error"]["message"])),
-        ledger=scenario_ledger,
+        public_restore_failure,
+        ledger=resource_ledger,
     )
     assert str(observation.primary_error) == partial_document["error"]["message"]
     assert observation.cleanup_errors == ("cleanup failure",)
-    assert not root.exists()
+    assert not filestore.exists()
+    assert _catalog_state(catalog_path, backup_id) is BackupState.DELETED
+    assert not archive_path.exists()
+    database_probe = ComposeLifecycle(
+        target_runtime.compose_file, target_runtime.topology.project_name
+    ).run(
+        "exec",
+        "-T",
+        "target_postgres",
+        "psql",
+        "-U",
+        "odoo",
+        "-d",
+        "postgres",
+        "-At",
+        "-c",
+        f"SELECT datname FROM pg_database WHERE datname = '{database}';",
+        timeout=30.0,
+    )
+    assert database_probe.returncode == 0
+    assert database_probe.stdout.strip() != database
     _record(
         record_property,
         "E2E-REC-03",
@@ -728,12 +930,17 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     )
     files = write_failure_evidence(
         failure_evidence,
-        logs={"recovery-interrupt": stdout, "recovery-timeout": timeout_stdout},
+        logs={
+            "recovery-interrupt": stdout,
+            "recovery-timeout": timeout_stdout,
+            "recovery-partial": json.dumps(partial_document, sort_keys=True),
+        },
     )
     assert_secret_free(files, failure_evidence.secret_canary)
 
 
 def test_failed_debug_retention_contains_only_sanitized_files(
+    source_backup_plan: SourceBackupPlan,
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
     record_property: object,
@@ -744,10 +951,14 @@ def test_failed_debug_retention_contains_only_sanitized_files(
         "ODCLI_E2E_KEEP_FAILED": "1",
         "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
     }
-    project = _project(target_runtime, target_runtime.root / f"retention-{target_runtime.run_id}")
+    project = _project(
+        target_runtime,
+        target_runtime.root / f"retention-{target_runtime.run_id}",
+        source=source_backup_plan,
+    )
     result = CliRunner().invoke(
         cli,
-        ["--project", str(project), "db", "drop", "missing", "--format", "json"],
+        ["--project", str(project), "db", "refresh", "--format", "json"],
         env=environment,
     )
     assert result.exit_code != 0
