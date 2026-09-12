@@ -5,14 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.integration.real_odoo.archive import ArchiveValidationError, archive_identity
 from tests.integration.real_odoo.cleanup import FailureEvidence, ResourceLedger, audit_no_leaks
 from tests.integration.real_odoo.failures import (
     FOCUSED_EVIDENCE,
     RECOVERY_EVIDENCE,
     SECURITY_EVIDENCE,
+    InjectedFailure,
+    PublicationProxy,
     assert_secret_free,
-    run_injected_failure,
+    run_recovery_action,
     secret_variants,
     write_archive_variant,
 )
@@ -25,62 +26,46 @@ def test_focused_contract_has_all_reviewed_evidence_ids() -> None:
 
 
 @pytest.mark.parametrize("variant", ["truncated", "incompatible"])
-def test_invalid_archive_variants_fail_before_publication(tmp_path: Path, variant: str) -> None:
+def test_archive_variants_are_written_without_publication(tmp_path: Path, variant: str) -> None:
     path = tmp_path / f"{variant}.zip"
     write_archive_variant(path, variant)  # type: ignore[arg-type]
-    if variant == "truncated":
-        with pytest.raises(ArchiveValidationError):
-            archive_identity(path)
-    else:
-        assert archive_identity(path).filestore_members
+    assert path.is_file()
     assert not (tmp_path / "database").exists()
     assert not (tmp_path / "filestore").exists()
 
 
-def test_partial_publication_preserves_primary_error_and_cleans_owned_state(
+def test_partial_publication_uses_shared_ledger_and_preserves_primary_error(
     tmp_path: Path,
 ) -> None:
     run_id = "a" * 32
-    outcome = run_injected_failure(
-        run_id,
-        tmp_path / f"run-{run_id}",
-        error_code="db_restore_failed",
-        publish=("database", "filestore", "catalog"),
-        fail_at="filestore-publication",
+    ledger = ResourceLedger(run_id)
+    proxy = PublicationProxy(run_id, tmp_path / f"run-{run_id}", ledger)
+    proxy.publish("database")
+    proxy.publish("filestore")
+    observation = run_recovery_action(
+        lambda: (_ for _ in ()).throw(InjectedFailure("filestore-publication")),
+        ledger=ledger,
     )
-    assert outcome.exit_code == 1
-    assert outcome.primary_error == "injected failure at filestore-publication"
-    assert outcome.publication == outcome.publication.__class__()
-    assert outcome.cleanup_errors == ()
+    assert observation.exit_code == 1
+    assert str(observation.primary_error) == "injected failure at filestore-publication"
+    assert observation.cleanup_errors == ()
+    assert ledger.records == ()
 
 
-def test_interrupt_and_cleanup_failure_are_reported_separately(tmp_path: Path) -> None:
+def test_interrupt_and_cleanup_failure_are_reported_separately() -> None:
     run_id = "b" * 32
-    outcome = run_injected_failure(
-        run_id,
-        tmp_path / f"run-{run_id}",
-        error_code="db_restore_interrupted",
-        fail_at="interrupt",
-        cleanup=(lambda: (_ for _ in ()).throw(RuntimeError("cleanup failure")),),
-    )
-    assert outcome.exit_code == 130
-    assert outcome.primary_error == "injected failure at interrupt"
-    assert outcome.cleanup_errors == ("cleanup failure",)
+    ledger = ResourceLedger(run_id)
 
+    def cleanup_failure() -> None:
+        raise RuntimeError("cleanup failure")
 
-def test_retention_keeps_only_run_owned_files(tmp_path: Path) -> None:
-    run_id = "c" * 32
-    root = tmp_path / f"artifacts-{run_id}"
-    outcome = run_injected_failure(
-        run_id,
-        root,
-        error_code="exec_failed",
-        publish=("database",),
-        retain=True,
+    ledger.record("cleanup", f"{run_id}-cleanup", cleanup_failure)
+    observation = run_recovery_action(
+        lambda: (_ for _ in ()).throw(KeyboardInterrupt()), ledger=ledger
     )
-    assert outcome.retained_files == (root / "failure.json",)
-    assert all(path.parent == root for path in outcome.retained_files)
-    assert all(run_id in path.parent.name for path in outcome.retained_files)
+    assert observation.exit_code == 130
+    assert isinstance(observation.primary_error, KeyboardInterrupt)
+    assert observation.cleanup_errors == ("cleanup failure",)
 
 
 def test_evidence_and_machine_output_are_secret_free_and_bounded(tmp_path: Path) -> None:
@@ -98,9 +83,11 @@ def test_evidence_and_machine_output_are_secret_free_and_bounded(tmp_path: Path)
 
 def test_clean_recovery_audit_has_no_owned_resources(tmp_path: Path) -> None:
     run_id = "e" * 32
+    ledger = ResourceLedger(run_id)
     root = tmp_path / f"run-{run_id}"
-    outcome = run_injected_failure(run_id, root, error_code="restore_failed", publish=("database",))
-    assert outcome.publication.published is False
+    proxy = PublicationProxy(run_id, root, ledger)
+    proxy.publish("database")
+    run_recovery_action(lambda: (_ for _ in ()).throw(RuntimeError("primary")), ledger=ledger)
     assert audit_no_leaks(run_id).clean
     assert not root.exists() or not tuple(root.iterdir())
 

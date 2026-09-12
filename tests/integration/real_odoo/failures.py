@@ -1,7 +1,8 @@
-"""Failure-injection and recovery contracts for focused real-Odoo tests.
+"""Small, shared helpers for observing real-Odoo failure boundaries.
 
-The helpers in this module model publication and cleanup at the test boundary.
-They deliberately do not add a second process or container lifecycle.
+These helpers deliberately do not manufacture a public result.  The focused
+tests obtain the result from OdCLI, then use this module only to retain the
+primary exception while the shared run ledger unwinds.
 """
 
 from __future__ import annotations
@@ -48,29 +49,15 @@ class PublicationState:
 
 
 @dataclass(frozen=True, slots=True)
-class FailureOutcome:
-    """Stable machine-facing result of one injected failure."""
+class RecoveryObservation:
+    """Observed exception and cleanup state from one real boundary call."""
 
-    error_code: str
-    exit_code: int
-    publication: PublicationState
-    primary_error: str
+    primary_error: BaseException
     cleanup_errors: tuple[str, ...] = ()
-    retained_files: tuple[Path, ...] = ()
 
-    def as_machine_output(self) -> dict[str, object]:
-        return {
-            "ok": False,
-            "error": {"code": self.error_code, "message": self.primary_error},
-            "exit_code": self.exit_code,
-            "publication": {
-                "database": self.publication.database,
-                "filestore": self.publication.filestore,
-                "catalog": self.publication.catalog,
-            },
-            "cleanup_errors": list(self.cleanup_errors),
-            "retained_files": [str(path) for path in self.retained_files],
-        }
+    @property
+    def exit_code(self) -> int:
+        return 130 if isinstance(self.primary_error, KeyboardInterrupt) else 1
 
 
 class InjectedFailure(RuntimeError):
@@ -112,66 +99,30 @@ class PublicationProxy:
         return path
 
 
-def run_injected_failure(
-    run_id: str,
-    root: Path,
+def run_recovery_action(
+    action: Callable[[], object],
     *,
-    error_code: str,
-    publish: Iterable[Literal["database", "filestore", "catalog"]] = (),
-    fail_at: FailureStage = "restore",
-    cleanup: Iterable[Callable[[], None]] = (),
-    retain: bool = False,
-) -> FailureOutcome:
-    """Run a small publication transaction and retain primary error semantics."""
-    ledger = ResourceLedger(run_id)
-    proxy = PublicationProxy(run_id, root, ledger)
-    for kind in publish:
-        proxy.publish(kind)
-    for index, callback in enumerate(cleanup):
-        ledger.record("cleanup", f"{run_id}-cleanup-{index}", callback)
-    primary = InjectedFailure(fail_at)
-    cleanup_errors: list[str] = []
+    ledger: ResourceLedger,
+) -> RecoveryObservation:
+    """Run a real action and unwind the caller's shared ledger.
+
+    ``action`` is intentionally supplied by the test.  In particular, this
+    function never chooses an error code, exit status, or publication state;
+    those values must come from the public CLI/SDK boundary under test.
+    """
     try:
-        ledger.unwind(primary_failure=primary)
-    except BaseException as error:
-        messages = _exception_messages(error)
-        primary_text = str(primary)
-        cleanup_errors.extend(message for message in messages if message != primary_text)
-    state = PublicationState(
-        database=(root / f"{run_id}-database").exists(),
-        filestore=(root / f"{run_id}-filestore").exists(),
-        catalog=(root / f"{run_id}-catalog").exists(),
-    )
-    retained_files: tuple[Path, ...] = ()
-    if retain:
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        retained = root / "failure.json"
-        retained.write_text(
-            json.dumps(
-                {
-                    "error_code": error_code,
-                    "exit_code": 130 if fail_at == "interrupt" else 1,
-                    "publication": {
-                        "database": state.database,
-                        "filestore": state.filestore,
-                        "catalog": state.catalog,
-                    },
-                },
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        retained.chmod(0o600)
-        retained_files = (retained,)
-    return FailureOutcome(
-        error_code=error_code,
-        exit_code=130 if fail_at == "interrupt" else 1,
-        publication=state,
-        primary_error=str(primary),
-        cleanup_errors=tuple(cleanup_errors),
-        retained_files=retained_files,
-    )
+        action()
+    except BaseException as primary:
+        cleanup_errors: list[str] = []
+        try:
+            ledger.unwind(primary_failure=primary)
+        except BaseException as error:
+            for message in _exception_messages(error):
+                if message != str(primary):
+                    cleanup_errors.append(message)
+        return RecoveryObservation(primary, tuple(cleanup_errors))
+    ledger.unwind()
+    raise AssertionError("recovery action unexpectedly succeeded")
 
 
 def _exception_messages(error: BaseException) -> tuple[str, ...]:
@@ -229,12 +180,12 @@ __all__ = [
     "FOCUSED_EVIDENCE",
     "RECOVERY_EVIDENCE",
     "SECURITY_EVIDENCE",
-    "FailureOutcome",
     "InjectedFailure",
     "PublicationProxy",
     "PublicationState",
+    "RecoveryObservation",
     "assert_secret_free",
-    "run_injected_failure",
+    "run_recovery_action",
     "secret_variants",
     "write_archive_variant",
     "write_failure_evidence",
