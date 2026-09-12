@@ -24,13 +24,14 @@ TEXT_SUFFIXES = frozenset({".json", ".log", ".txt", ".xml", ".md", ".yml", ".yam
 REQUIRED_SUCCESS = frozenset(
     {
         "bootstrap.json",
-        "command-matrix.md",
         "junit.xml",
         "resource-manifest.json",
         "timing.json",
     }
 )
-REQUIRED_FAILURE = REQUIRED_SUCCESS | frozenset({"compose.log", "odoo.log", "postgres.log"})
+REQUIRED_FAILURE = REQUIRED_SUCCESS | frozenset(
+    {"command-matrix.md", "compose.log", "odoo.log", "postgres.log"}
+)
 
 
 def _bounded_text(path: Path) -> bytes:
@@ -67,19 +68,7 @@ def _include(source: Path, status: Status) -> bool:
     name = source.name.lower()
     return any(
         token in name
-        for token in (
-            "bootstrap",
-            "command-matrix",
-            "junit",
-            "timing",
-            "phase",
-            "pin",
-            "resource",
-            "manifest",
-            "odoo",
-            "postgres",
-            "compose",
-        )
+        for token in ("bootstrap", "junit", "timing", "phase", "pin", "resource", "manifest")
     )
 
 
@@ -131,8 +120,10 @@ def _read_canary(canary_file: Path | None) -> bytes:
     return canary
 
 
-def _required_files(source: Path, status: Status) -> None:
+def _required_files(source: Path, status: Status, tier: str | None) -> None:
     required = REQUIRED_SUCCESS if status == "success" else REQUIRED_FAILURE
+    if status == "failure" and tier == "full":
+        required |= {"target-odoo.log"}
     missing = sorted(
         name
         for name in required
@@ -379,7 +370,7 @@ def package_evidence(  # noqa: C901
     if status not in {"success", "failure"}:
         raise ValueError(f"unsupported status: {status}")
     try:
-        _required_files(source, status)
+        _required_files(source, status, tier)
         if canary_file is None:
             raise ValueError("secret canary file is required")  # noqa: TRY301
         canary = _read_canary(canary_file)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -17,6 +18,7 @@ _RUNTIMES: list[Any] = []
 _RESOURCE_SNAPSHOTS: list[list[dict[str, object]]] = []
 _SOURCE_CACHE_CONSUMED: list[bool] = []
 _ORIGINAL_FINALIZE: Callable[..., Any] | None = None
+_ORIGINAL_UNWIND: Callable[..., Any] | None = None
 
 
 def _evidence_root() -> Path:
@@ -182,9 +184,53 @@ def _runtime_consumed_source_cache(runtime: Any) -> bool:
     return False
 
 
+def _remember_source_cache_consumption(runtime: Any | None = None) -> None:
+    if runtime is not None and _runtime_consumed_source_cache(runtime):
+        _SOURCE_CACHE_CONSUMED.append(True)
+        return
+    cache_path = _source_cache_path()
+    if cache_path is None:
+        return
+    for root in (Path.cwd() / ".odcli-e2e", Path(tempfile.gettempdir())):
+        if not root.is_dir():
+            continue
+        for alternate_file in root.rglob("alternates"):
+            if alternate_file.parent.name != "info":
+                continue
+            try:
+                project = alternate_file.parents[3]
+                lines = alternate_file.read_text(encoding="utf-8").splitlines()
+                head = subprocess.run(
+                    ["git", "-C", str(project), "rev-parse", "HEAD"],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=30.0,
+                )
+                if (
+                    head.returncode == 0
+                    and head.stdout.strip() == "cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
+                    and any(
+                        Path(line).resolve() == (cache_path / "objects").resolve()
+                        for line in lines
+                        if line
+                    )
+                ):
+                    _SOURCE_CACHE_CONSUMED.append(True)
+                    return
+            except (OSError, subprocess.SubprocessError, IndexError):
+                continue
+
+
 def _source_cache_consumed() -> bool:
     """Report whether the real source-backed OdCLI checkout used the bare cache."""
     return _source_cache_path() is not None and any(_SOURCE_CACHE_CONSUMED)
+
+
+def _instrumented_unwind(ledger: Any, *args: Any, **kwargs: Any) -> Any:
+    _remember_source_cache_consumption()
+    assert _ORIGINAL_UNWIND is not None
+    return _ORIGINAL_UNWIND(ledger, *args, **kwargs)
 
 
 def _write_command_matrix() -> None:
@@ -226,7 +272,7 @@ def _write_resource_manifest() -> None:
 def _instrumented_finalize(runtime: Any, primary_failure: BaseException | None = None) -> None:
     _RUNTIMES.append(runtime)
     _RESOURCE_SNAPSHOTS.append(_snapshot_resources(runtime))
-    _SOURCE_CACHE_CONSUMED.append(_runtime_consumed_source_cache(runtime))
+    _remember_source_cache_consumption(runtime)
     _capture_service_logs(runtime)
     configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
     started = time.monotonic()
@@ -243,7 +289,7 @@ def _instrumented_finalize(runtime: Any, primary_failure: BaseException | None =
 
 
 def pytest_configure(_config: object) -> None:
-    global _ORIGINAL_FINALIZE  # noqa: PLW0603
+    global _ORIGINAL_FINALIZE, _ORIGINAL_UNWIND  # noqa: PLW0603
     if _ORIGINAL_FINALIZE is not None:
         return
     try:
@@ -253,3 +299,7 @@ def pytest_configure(_config: object) -> None:
     _write_command_matrix()
     _ORIGINAL_FINALIZE = conftest._finalize
     conftest._finalize = _instrumented_finalize
+    from tests.integration.real_odoo.cleanup import ResourceLedger
+
+    _ORIGINAL_UNWIND = ResourceLedger.unwind
+    setattr(ResourceLedger, "unwind", _instrumented_unwind)

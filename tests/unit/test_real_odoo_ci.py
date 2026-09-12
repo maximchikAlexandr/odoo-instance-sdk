@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -12,6 +13,7 @@ from scripts import real_odoo_bootstrap as bootstrap
 from scripts import real_odoo_ci as ci
 from scripts import real_odoo_evidence as evidence
 from scripts import real_odoo_timing as timing
+from tests.integration.real_odoo.cleanup import ResourceLedger
 
 
 def _evidence_contract(
@@ -133,6 +135,12 @@ def test_evidence_is_bounded_and_canary_safe(tmp_path: Path) -> None:
     assert result["retention_days"] == 7
     assert '"ok": true' in (source / "timing.json").read_text()
     assert "setup_seconds" in (source / "junit.xml").read_text()
+    with tarfile.open(output, "r:gz") as archive:
+        names = archive.getnames()
+        assert "command-matrix.md" not in names
+        assert "odoo.log" not in names
+        assert "postgres.log" not in names
+        assert "compose.log" not in names
 
 
 def test_evidence_rejects_canary_and_writes_minimal_error(tmp_path: Path) -> None:
@@ -349,6 +357,25 @@ def test_failure_evidence_keeps_non_clean_completed_audit(tmp_path: Path) -> Non
     )
     with tarfile.open(tmp_path / "failure.tar.gz", "r:gz") as archive:
         assert "command-matrix.md" in archive.getnames()
+
+
+def test_full_failure_evidence_requires_host_target_log(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _evidence_contract(source, junit_failures=1)
+    for name in ("compose.log", "odoo.log", "postgres.log"):
+        (source / name).write_text("bounded service tail\n")
+    canary = tmp_path / "canary"
+    canary.write_text("canary-value-1234\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"target-odoo\.log"):
+        evidence.package_evidence(
+            source,
+            tmp_path / "missing-target-log.tar.gz",
+            status="failure",
+            canary_file=canary,
+            tier="full",
+            cache_class="cold",
+        )
 
 
 def test_evidence_exercises_warm_budget_classification(tmp_path: Path) -> None:
@@ -573,6 +600,37 @@ def test_source_cache_consumption_requires_actual_shared_checkout(
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert ci._runtime_consumed_source_cache(runtime)
     ci._SOURCE_CACHE_CONSUMED[:] = [True]
+    assert ci._source_cache_consumed()
+
+
+def test_source_cache_consumption_survives_in_test_unwind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "odoo.git"
+    alternates = tmp_path / "runtime" / "project" / ".git" / "objects" / "info"
+    alternates.mkdir(parents=True)
+    objects = cache / "objects"
+    objects.mkdir(parents=True)
+    (alternates / "alternates").write_text(str(objects) + "\n", encoding="utf-8")
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("ODCLI_E2E_ODOO_SOURCE_CACHE", str(cache))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, "cd992ceebbaf343c03e1941d39cfe423d35ba6c6\n", ""
+        ),
+    )
+    ci._SOURCE_CACHE_CONSUMED.clear()
+    ledger = ResourceLedger("run")
+    ledger.record("runtime-root", "run-root", lambda: shutil.rmtree(runtime_root))
+    original_unwind = ci._ORIGINAL_UNWIND
+    ci._ORIGINAL_UNWIND = ResourceLedger.unwind
+    try:
+        ci._instrumented_unwind(ledger)
+    finally:
+        ci._ORIGINAL_UNWIND = original_unwind
+    assert not runtime_root.exists()
     assert ci._source_cache_consumed()
 
 
