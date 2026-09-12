@@ -7,6 +7,8 @@
 - A `base`-only technical addon, deterministic semantic fixture, and fresh real database-plus-filestore ZIP.
 - Canonical `PUBLIC_LEAF_CASES` traceability, one critical path, focused failures, recovery, redaction, and cleanup audits.
 - Required PR smoke, scheduled/manual full E2E, cold/warm measurements, content caches, and bounded evidence.
+- An additive public hash-lock mode on the existing environment checkout/sync operations, implemented through the existing process boundary and one neutral dependency-sync argv builder; directly related product and CLI tests are included.
+- Live pinned vulnerability scanning with exact scanner-result/non-expired-exception equality for the reviewed Odoo resolution.
 
 ## Out of scope
 
@@ -14,13 +16,13 @@
 - Sales, inventory, accounting, website, browser/UI acceptance, and other business addon stacks.
 - Odoo versions other than pinned 19 Community.
 - A custom production Odoo image or a mutable golden backup committed to Git or cached by CI.
-- A new production process/container runner, public SDK type, public CLI leaf, output mode, or change to existing product behavior.
+- A new production process/container runner, public SDK type, public CLI leaf, output mode, or any product behavior beyond the approved paired hash-lock parameters and owned-environment synchronization semantics.
 - Replacing existing unit, characterization, packaging, dashboard, PostgreSQL, or opt-in developer tests.
 - Making the source-backed full tier a required per-PR gate before its scheduled/manual budgets are demonstrated.
 
 ## Follow-up gaps
 
-These gaps are explicitly deferred and do not leave implementation choices in MYL-149:
+These gaps are explicitly deferred and do not leave implementation choices in MYL-153 graph revision 2:
 
 - Additional Odoo majors require a separate change after the Odoo 19 full tier is stable.
 - Browser acceptance requires a separate product requirement; XML-RPC/HTTP verification is sufficient here.

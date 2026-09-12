@@ -13,11 +13,12 @@ The local POC in `poc/run_probe.py` used the pinned multi-arch Odoo and PostgreS
 - Generate deterministic fixture state and a fresh genuine database-plus-filestore ZIP from pinned inputs.
 - Preserve strict ownership, redaction, bounded evidence, parallel-run isolation, and complete cleanup on all exits.
 - Split a fast image-backed PR smoke from a pinned source-backed scheduled/manual full tier with measurable cold/warm budgets.
+- Make the first dependency installation for the source-backed target a public, immutable, hash-verified OdCLI operation.
 
 **Non-Goals:**
 
 - Enterprise repositories, private credentials, business addons, browser acceptance, or Odoo majors other than 19.
-- A new production process runner, container abstraction, public CLI leaf, SDK type, or runtime dependency.
+- A new production process runner, container abstraction, public CLI leaf, SDK type, or runtime dependency; graph revision 2 permits only the additive hash-lock parameters on the existing checkout and synchronization operations.
 - Replacing offline/unit/characterization tests or publishing a custom production Odoo image.
 - Caching databases, filestore, mutable backups, catalogs, generated configs, or secrets.
 
@@ -63,6 +64,14 @@ The first full job on a cache miss is cold; a cache-hit job is warm. Phase metri
 
 The harness captures only bounded tails and structured manifests. Existing sanitizers process argv, errors, logs, and plans; a generated random canary secret is asserted absent from every artifact before upload. Text files cap at 2 MiB, failure bundles at 50 MiB compressed, and successful evidence at 2 MiB. Missing prerequisites fail in bootstrap rather than becoming pytest skips.
 
+### 8. Make the audited lock a public environment-operation input
+
+Graph revision 2 extends the existing checkout and environment synchronization operations with paired `hash_lock` and `hash_lock_sha256` inputs, exposed by the CLI as `--hash-lock PATH` and `--hash-lock-sha256 SHA256`. Both values are required together. Hash-lock mode requires an OdCLI-owned environment, rejects `--upgrade`, resolves a regular lock file, verifies its lowercase SHA-256 before mutation, and captures the exact command `uv pip sync --python <owned-python> --require-hashes <canonical-lock>` through the centralized immutable process boundary. It does not discover or compile Odoo/project requirements and has no install fallback.
+
+`env checkout --create-venv` accepts the same paired inputs and uses the same neutral `src/odoo_instance_sdk/internal/dependency_sync.py` argv builder for its initial dependency step. The full scenario passes the reviewed lock to checkout and to both public `env sync` invocations. Consequently the first package operation after venv creation is hash-enforced and the scenario needs neither `_find_odoo_requirements` monkeypatching nor a direct test subprocess. The existing default compile/install behavior remains unchanged when hash-lock inputs are absent.
+
+The reviewed lock digest and audit-report digest are immutable manifest fields. Full bootstrap runs pinned `pip-audit 2.10.1` against the exact lock, canonicalizes unique `(normalized package, version, advisory ID)` tuples, and requires exact equality with non-expired reviewed exceptions. Missing, additional, version-mismatched, malformed, or expired entries fail before provisioning.
+
 ## Risks / Trade-offs
 
 - **[Pinned Odoo source becomes incompatible with upstream package indexes]** → `uv` resolves only from the pinned requirements and recorded lock inputs; dependency-pin updates require a reviewed pin/evidence revision.
@@ -72,6 +81,8 @@ The harness captures only bounded tails and structured manifests. Existing sanit
 - **[Port allocation races]** → hold loopback reservation sockets until the instant before Compose/Odoo launch, then verify the actual binding and ownership label before use.
 - **[Backup bytes vary across identical semantic inputs]** → verify semantic database/attachment content and record each archive SHA rather than asserting a golden SHA.
 - **[Inventory metadata creates coupling in a unit-test module]** → keep the metadata test-only and co-located with the already canonical registry; do not expose it through production imports.
+- **[Hash-lock mode could erase tools from a reused environment]** → allow it only for an OdCLI-owned venv and use `uv pip sync`; the legacy reused-environment install behavior remains unchanged.
+- **[Lock bytes could change between planning and execution]** → require the caller-supplied SHA-256, validate the file before mutation, and keep the canonical lock path plus digest in the immutable command/evidence projection.
 
 ## Migration Plan
 
@@ -79,7 +90,9 @@ The harness captures only bounded tails and structured manifests. Existing sanit
 2. Add pinned Compose/source fixtures, technical addon, cleanup ledger, and prerequisite bootstrap.
 3. Replace prerequisite-only real-Odoo cases with the critical and focused self-provisioning suites while retaining the `real_odoo` opt-in marker locally.
 4. Add required PR smoke and scheduled/manual full workflows with immutable Actions, budgets, and evidence upload.
-5. Run one cache-miss and one cache-hit full job, verify the leak audit and budgets, then make smoke required. Rollback disables the new workflow jobs and removes the new test fixtures; no product data or API migration is involved.
+5. Add focused red/green coverage for paired hash-lock validation, owned-environment enforcement, immutable argv, dry-run, legacy-mode compatibility, and first-install ordering; then exercise the public mode in the full critical path.
+6. Rebase `agent/planner/a451a6ea752f` on the fetched current `origin/main`, review every public command/contract/behavior added since `0ff164636617c03a51277055af45cef009277368`, and add meaningful canonical inventory/scenario coverage for applicable changes. Publish the rewritten existing branch with `--force-with-lease`; never create a replacement PR.
+7. Run one cache-miss and one cache-hit full job, verify the leak audit and budgets, obtain terminal PR #71 CI results on the exact final head, then perform the repository-wide OpenSpec completion/sync/archive audit and strict validation. Rollback disables the new workflow jobs and reverts the additive hash-lock parameters; no product data migration is involved.
 
 ## Open Questions
 

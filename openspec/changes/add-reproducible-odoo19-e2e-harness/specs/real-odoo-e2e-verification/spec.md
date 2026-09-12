@@ -43,7 +43,13 @@ Every run SHALL derive a DNS-safe Compose project name, database names, containe
 
 ### Requirement: End-to-end public critical path
 
-One serial critical-path test SHALL use the public CLI or public SDK for project initialization, valid `.odcli/project.toml` inspection, Odoo 19 source checkout, owned `uv` environment creation/synchronization, PostgreSQL status/up/stop, target Odoo start/readiness/stop, probe addon discovery/install/update/test, remote backup download, database and filestore restore, restored-data verification, environment list/path/sync/remove, resource list/doctor, database list/diagnostics, backup list/show/validate, dependency verification, and top-level doctor. The critical path SHALL invoke `env checkout --create-venv` because the existing development-environment contract makes that explicit flag the sole product path that creates an owned `uv` environment.
+One serial critical-path test SHALL use the public CLI or public SDK for project initialization, valid `.odcli/project.toml` inspection, Odoo 19 source checkout, owned `uv` environment creation/synchronization, PostgreSQL status/up/stop, target Odoo start/readiness/stop, probe addon discovery/install/update/test, remote backup download, database and filestore restore, restored-data verification, environment list/path/sync/remove, resource list/doctor, database list/diagnostics, backup list/show/validate, dependency verification, and top-level doctor. The critical path SHALL invoke `env checkout --create-venv --hash-lock PATH --hash-lock-sha256 SHA256` and `env sync --hash-lock PATH --hash-lock-sha256 SHA256` because the development-environment contract makes the explicit flag the sole product path that creates an owned `uv` environment and the paired hash-lock inputs the product path for the audited resolution. The scenario SHALL NOT monkeypatch requirements discovery or invoke a direct test-owned package-install subprocess.
+
+#### Scenario: Public synchronization owns the trusted first install
+
+- **WHEN** the source-backed full tier creates and synchronizes its target environment
+- **THEN** checkout and every repeated `env sync` SHALL consume the reviewed lock and matching digest through the public hash-lock contract
+- **THEN** the first package operation after owned-venv creation SHALL be the captured `uv pip sync --require-hashes` command and no unhashed discovery/compile/install SHALL precede it
 
 #### Scenario: Restored state is verified through Odoo
 - **WHEN** OdCLI completes the remote download and restore
@@ -110,6 +116,31 @@ Odoo source and `uv` downloads/wheels SHALL use content-addressed caches keyed b
 - **WHEN** a CI run completes setup and the critical path
 - **THEN** JUnit properties and the resource manifest SHALL record cache hit/miss, setup seconds, test seconds, artifact bytes, architecture, and every resolved pin
 - **THEN** exceeding an applicable budget SHALL fail the job
+
+### Requirement: Live audited Python resolution gate
+
+Before provisioning any source-backed full-tier resource, bootstrap SHALL verify the pinned Odoo/Python/platform hash-lock digest and audit-report digest, invoke exactly `pip-audit 2.10.1` against that exact lock, and fail unless the scanner completes successfully with parseable machine output. The gate SHALL normalize package names, retain exact versions and advisory identifiers, deduplicate tuples, and require exact set equality between scanned `(package, version, advisory ID)` tuples and the audit report's non-expired reviewed exceptions. The checked-in report SHALL require a non-empty owner, bounded scope and rationale, valid expiry date, exact package/version, and non-empty advisory set for every exception.
+
+#### Scenario: Pinned scanner failure stops before provisioning
+
+- **WHEN** the scanner identity differs from `pip-audit 2.10.1`, execution fails, output is malformed, or the scanned lock/digest differs from the pinned input
+- **THEN** bootstrap SHALL fail before creating a run id, cache mutation, process, container, network, volume, port, database, filestore, worktree, XDG root, or catalogue record
+
+#### Scenario: Scanner and reviewed exceptions are exactly equal
+
+- **WHEN** the scanner returns a canonical tuple absent from the reviewed exceptions, an exception tuple is absent from scanner output, or a package/advisory appears at a different version
+- **THEN** bootstrap SHALL fail and report only sanitized bounded tuple differences
+- **THEN** no unknown advisory, stale/missing exception, or version mismatch SHALL be accepted by updating only the report digest
+
+#### Scenario: Exception metadata is valid and current
+
+- **WHEN** an exception has a malformed or expired date, empty owner/scope/rationale/advisory set, duplicate tuple, or malformed package/version/advisory value
+- **THEN** bootstrap SHALL fail before provisioning even when the audit-report SHA-256 matches the pin manifest
+
+#### Scenario: Approved scan permits provisioning
+
+- **WHEN** the pinned scanner succeeds and its canonical tuple set exactly equals all valid non-expired reviewed exception tuples
+- **THEN** bootstrap SHALL record scanner/lock/report identities and the equality result in bounded evidence before provisioning proceeds
 
 ### Requirement: Bounded failure evidence
 

@@ -1,6 +1,6 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at base `0ff164636617c03a51277055af45cef009277368`, not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; a generator rewrites this table and a check fails on drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` from original planning base `0ff164636617c03a51277055af45cef009277368`, amended by MYL-153 graph revision 2 at `0c04dfcac56a4c0ccf34eb928bb6348f48348397`; it is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; a generator rewrites this table and a check fails on drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
@@ -9,11 +9,11 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `stop` | mutating-or-spawning | yes | critical | E2E-CP-13: owned target process stop and repeat |
 | `resource list` | bounded-read-only | no | critical | E2E-CP-12: run-owned inventory |
 | `resource doctor` | bounded-read-only | no | smoke | E2E-SM-05 / E2E-CP-12: ownership and health |
-| `env checkout` | mutating-or-spawning | yes | critical | E2E-CP-02: pinned source plus explicit owned venv |
+| `env checkout` | mutating-or-spawning | yes | critical | E2E-CP-02: pinned source, explicit owned venv, and audited hash-lock first install |
 | `env list` | bounded-read-only | no | critical | E2E-CP-03: registered environment identity |
 | `env path` | bounded-read-only | no | critical | E2E-CP-03: worktree/config/venv paths |
 | `env remove` | mutating-or-spawning | yes | critical | E2E-CP-15: exact owned cleanup and repeat |
-| `env sync` | mutating-or-spawning | yes | critical | E2E-CP-04: pinned requirements sync and idempotency |
+| `env sync` | mutating-or-spawning | yes | critical | E2E-CP-04: public `--hash-lock`/digest sync, `--require-hashes`, and idempotency |
 | `backup list` | bounded-read-only | no | critical | E2E-CP-09: downloaded catalog row |
 | `backup show` | bounded-read-only | no | critical | E2E-CP-09: exact size/SHA/source identity |
 | `backup validate` | bounded-read-only | no | smoke | E2E-SM-03 / E2E-CP-09: ZIP plus filestore validation |

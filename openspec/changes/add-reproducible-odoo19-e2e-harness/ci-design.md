@@ -13,12 +13,15 @@
 | PostgreSQL linux/arm64 image manifest | `sha256:738d1359df5aa0b6d50a9071e989c49fdd39152a2a805c6ff131bf5e2243e0b3` |
 | CPython | `3.12.13` |
 | uv | `0.10.8` |
+| Odoo Python hash lock SHA-256 | `409063537bb93edb085304ac427effd7044a654393b5f9ff719fa105cd8c89d4` |
+| Odoo Python audit report SHA-256 | `70ce80ce32dd490e1c52b3d43a092fc735209ba538805942cba1de30caea2284` |
+| Python vulnerability scanner | `pip-audit 2.10.1` |
 | `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` |
 | `astral-sh/setup-uv` | `d0cc045d04ccac9d8b7881df0226f9e82c39688e` |
 | `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
 | GitHub runner | `ubuntu-24.04`, Linux amd64; record `ImageOS` and `ImageVersion` in every run |
 
-The pin manifest is machine-readable and bootstrap verifies resolved Git/image identities before creating resources. A mismatch is a hard failure.
+The pin manifest is machine-readable and bootstrap verifies resolved Git/image identities, both Python-resolution digests, and scanner identity before creating resources. It runs the pinned scanner against the exact hash lock, canonicalizes unique `(package, version, advisory ID)` tuples, and requires exact equality with the non-expired exception manifest. A missing/additional/version-mismatched advisory, malformed or expired exception, or pin mismatch is a hard failure.
 
 ## Jobs
 
@@ -56,7 +59,7 @@ The local arm64 POC warm baseline is 27.871 seconds for the image-backed backup 
 ## Cache contract
 
 - Odoo bare source cache key: `odoo19-<os>-<arch>-cd992ceebbaf343c03e1941d39cfe423d35ba6c6`.
-- uv cache key: `uv-<os>-<arch>-3.12.13-0.10.8-<sha256(odoo requirements.txt bytes + repository uv.lock bytes)>`.
+- uv cache key: `uv-<os>-<arch>-3.12.13-0.10.8-409063537bb93edb085304ac427effd7044a654393b5f9ff719fa105cd8c89d4`; changing the reviewed hash lock or audit contract invalidates the cache.
 - Restore keys use the same prefixes without dropping commit, version, architecture, or input hash components.
 - Checked-out target worktrees are recreated and verified at the pinned commit; they are not cached as mutable worktrees.
 - Databases, volumes, filestore, backups, catalogs, XDG roots, configs, ports, logs, and secret files are never cache inputs or outputs.
