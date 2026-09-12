@@ -11,6 +11,7 @@ from typing import Literal, cast
 
 import pytest
 
+from odoo_instance_sdk.internal.dependency_sync import build_trusted_sync_argv
 from scripts import real_odoo_acceptance as acceptance
 from scripts import real_odoo_bootstrap as bootstrap
 from scripts import real_odoo_ci as ci
@@ -19,7 +20,6 @@ from scripts import real_odoo_timing as timing
 from scripts.real_odoo_secrets import secret_variants, write_secret_registry
 from tests.integration.real_odoo import test_smoke as smoke
 from tests.integration.real_odoo.conftest import E2ERuntime
-from tests.integration.real_odoo.test_critical_path import _trusted_python_sync_argv
 
 
 def _evidence_contract(
@@ -228,7 +228,8 @@ def test_scope_proof_uses_frozen_planning_base(monkeypatch: pytest.MonkeyPatch) 
     assert scope["base"] == "0ff164636617c03a51277055af45cef009277368"
     assert scope["out_of_scope"] is False
     assert scope["forbidden_changed_files"] == ["src/introduced-before-review.py"]
-    assert calls[0][-1] == scope["base"]
+    assert scope["scope_base"] == "origin/main...HEAD"
+    assert calls[0][-1] == scope["scope_base"]
 
 
 def test_real_pytest_plugins_load_through_collection(tmp_path: Path) -> None:
@@ -283,12 +284,20 @@ def test_full_python_resolution_lock_rejects_regeneration_or_hash_drift(
 def test_full_python_resolution_audit_rejects_lock_or_report_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """E2E-SEC-06: pinned audit metadata and expiry remain fail-closed."""
+    "E2E-SEC-06"
     lock = tmp_path / "odoo.lock"
     audit = tmp_path / "odoo.audit.json"
     lock.write_bytes(bootstrap.PYTHON_RESOLUTION_LOCK.read_bytes())
     audit.write_bytes(bootstrap.PYTHON_RESOLUTION_AUDIT.read_bytes())
     monkeypatch.setattr(bootstrap, "PYTHON_RESOLUTION_LOCK", lock)
     monkeypatch.setattr(bootstrap, "PYTHON_RESOLUTION_AUDIT", audit)
+    expected = {
+        (item["package"], item["version"], advisory)
+        for item in json.loads(audit.read_text(encoding="utf-8"))["exceptions"]
+        for advisory in item["advisories"]
+    }
+    monkeypatch.setattr(bootstrap, "_run_pinned_python_audit", lambda _lock: expected)
     assert bootstrap.python_resolution_audit_is_valid()
     lock.write_bytes(lock.read_bytes() + b"\n")
     assert bootstrap.python_resolution_audit_is_valid() is False
@@ -298,11 +307,44 @@ def test_full_python_resolution_audit_rejects_lock_or_report_drift(
 
 
 def test_full_critical_path_uses_only_hash_required_trusted_sync() -> None:
-    argv = _trusted_python_sync_argv(Path("/venv/bin/python"))
+    argv = build_trusted_sync_argv(Path("/venv/bin/python"), Path("/lock.txt"))
 
-    assert argv[:4] == ["uv", "pip", "sync", "--require-hashes"]
+    assert argv == (
+        "uv",
+        "pip",
+        "sync",
+        "--python",
+        "/venv/bin/python",
+        "--require-hashes",
+        "/lock.txt",
+    )
     assert "compile" not in argv
     assert "install" not in argv
+
+
+def _fixture_audit_findings() -> set[tuple[str, str, str]]:
+    value = json.loads(bootstrap.PYTHON_RESOLUTION_AUDIT.read_text(encoding="utf-8"))
+    return {
+        (item["package"], item["version"], advisory)
+        for item in value["exceptions"]
+        for advisory in item["advisories"]
+    }
+
+
+def test_python_resolution_audit_rejects_unknown_scanner_finding() -> None:
+    """E2E-SEC-04: an unknown live scanner tuple stops provisioning."""
+    "E2E-SEC-04"
+    findings = _fixture_audit_findings()
+    findings.add(("unexpected", "1.0", "CVE-unknown"))
+    assert bootstrap.python_resolution_audit_is_valid(scanner_result=findings) is False
+
+
+def test_python_resolution_audit_rejects_missing_scanner_finding() -> None:
+    """E2E-SEC-05: a missing live scanner tuple stops provisioning."""
+    "E2E-SEC-05"
+    findings = _fixture_audit_findings()
+    findings.pop()
+    assert bootstrap.python_resolution_audit_is_valid(scanner_result=findings) is False
 
 
 def test_bootstrap_emits_fail_closed_machine_manifest(

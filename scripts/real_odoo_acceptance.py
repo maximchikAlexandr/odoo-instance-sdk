@@ -37,6 +37,13 @@ REQUIRED_RUNS: Final[tuple[tuple[str, str], ...]] = (
 )
 SUCCESS_ARTIFACT_LIMIT_BYTES: Final[int] = 2 * 1024 * 1024
 FAILURE_BUNDLE_LIMIT_BYTES: Final[int] = 50 * 1024 * 1024
+WP03_HASH_LOCK_SOURCE_PATHS: Final[frozenset[str]] = frozenset(
+    {
+        "src/odoo_instance_sdk/commands/env.py",
+        "src/odoo_instance_sdk/internal/dependency_sync.py",
+        "src/odoo_instance_sdk/resources/environment.py",
+    }
+)
 
 # This is deliberately a registry of executable selectors, rather than a
 # search for evidence-id strings in source.  A selector is executable only if
@@ -92,11 +99,11 @@ EVIDENCE_EXECUTORS: Final[dict[str, tuple[str, ...]]] = {
     ),
     "E2E-FC-09": (
         "tests/integration/real_odoo/test_focused_failures.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[backup.delete]",
+        "test_remaining_focused_public_leaves_use_canonical_inventory[backup.rm]",
     ),
     "E2E-FC-10": (
         "tests/integration/real_odoo/test_focused_failures.py::"
-        "test_remaining_focused_public_leaves_use_canonical_inventory[db.drop]",
+        "test_remaining_focused_public_leaves_use_canonical_inventory[db.rm]",
     ),
     "E2E-FC-11": (
         "tests/integration/real_odoo/test_focused_failures.py::"
@@ -135,6 +142,18 @@ EVIDENCE_EXECUTORS: Final[dict[str, tuple[str, ...]]] = {
         "tests/integration/real_odoo/test_focused_failures.py::"
         "test_failed_debug_retention_contains_only_sanitized_files",
     ),
+    "E2E-SEC-04": (
+        "tests/unit/test_real_odoo_ci.py::test_python_resolution_audit_rejects_unknown_scanner_finding",
+    ),
+    "E2E-SEC-05": (
+        "tests/unit/test_real_odoo_ci.py::test_python_resolution_audit_rejects_missing_scanner_finding",
+    ),
+    "E2E-SEC-06": (
+        "tests/unit/test_real_odoo_ci.py::test_full_python_resolution_audit_rejects_lock_or_report_drift",
+    ),
+    "E2E-SEC-07": (
+        "tests/unit/test_dependency_sync.py::test_hash_lock_validation_requires_a_complete_immutable_pair",
+    ),
 }
 
 SCENARIO_EVIDENCE: Final[dict[str, tuple[str, ...]]] = {
@@ -144,6 +163,7 @@ SCENARIO_EVIDENCE: Final[dict[str, tuple[str, ...]]] = {
     "Fixture remains lightweight": ("E2E-CP-05", "E2E-CP-07"),
     "Concurrent runs do not share mutable state": ("E2E-SM-01",),
     "Readiness is semantic": ("E2E-CP-01",),
+    "Public synchronization owns the trusted first install": ("E2E-CP-04", "E2E-SEC-07"),
     "Restored state is verified through Odoo": ("E2E-CP-10", "E2E-CP-11"),
     "Repeated public workflow is idempotent": ("E2E-CP-03", "E2E-CP-06", "E2E-CP-13"),
     "New CLI leaf cannot escape classification": ("E2E-CP-12",),
@@ -156,6 +176,10 @@ SCENARIO_EVIDENCE: Final[dict[str, tuple[str, ...]]] = {
     "Budget classification is measurable": ("E2E-SEC-03",),
     "Failure artifact is useful and secret-free": ("E2E-SEC-01", "E2E-SEC-03"),
     "Unsupported platform fails explicitly": ("E2E-SEC-02",),
+    "Pinned scanner failure stops before provisioning": ("E2E-SEC-04",),
+    "Scanner and reviewed exceptions are exactly equal": ("E2E-SEC-04", "E2E-SEC-05"),
+    "Exception metadata is valid and current": ("E2E-SEC-06",),
+    "Approved scan permits provisioning": ("E2E-SEC-06",),
 }
 
 REQUIRED_TIER_EVIDENCE: Final[dict[str, tuple[str, ...]]] = {
@@ -369,7 +393,7 @@ def _scenario_mapping_errors(
 
 def _scope_contract() -> dict[str, object]:
     tracked = subprocess.run(
-        ["git", "diff", "--name-only", PLANNING_BASE_SHA],
+        ["git", "diff", "--name-only", "origin/main...HEAD"],
         cwd=ROOT,
         capture_output=True,
         check=True,
@@ -386,12 +410,13 @@ def _scope_contract() -> dict[str, object]:
     forbidden = [
         path
         for path in changed
-        if path.startswith("src/")
+        if (path.startswith("src/") and path not in WP03_HASH_LOCK_SOURCE_PATHS)
         or path.endswith((".zip", ".dump"))
         or "enterprise" in path.casefold()
     ]
     return {
         "base": PLANNING_BASE_SHA,
+        "scope_base": "origin/main...HEAD",
         "changed_files": changed,
         "forbidden_changed_files": forbidden,
         "out_of_scope": not forbidden,

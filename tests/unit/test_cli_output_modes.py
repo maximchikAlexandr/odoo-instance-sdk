@@ -161,8 +161,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="owned target process stop and repeat",
     ),
     PublicLeafCase(
-        ("resource", "list"),
-        ("resource", "list"),
+        ("resource", "ls"),
+        ("resource", "ls"),
         "bounded-read-only",
         False,
         e2e_disposition="critical",
@@ -179,17 +179,17 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="ownership and health",
     ),
     PublicLeafCase(
-        ("env", "checkout"),
-        ("env", "checkout", "PROJ-123", "--dry-run"),
+        ("env", "create"),
+        ("env", "create", "PROJ-123", "--dry-run"),
         "mutating-or-spawning",
         True,
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-02",),
-        e2e_rationale="pinned source plus explicit owned venv",
+        e2e_rationale="pinned source, explicit owned venv, and audited hash-lock first install",
     ),
     PublicLeafCase(
-        ("env", "list"),
-        ("env", "list", "--all-projects"),
+        ("env", "ls"),
+        ("env", "ls", "--all-projects"),
         "bounded-read-only",
         False,
         variants=("rich-live",),
@@ -207,8 +207,16 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="worktree/config/venv paths",
     ),
     PublicLeafCase(
-        ("env", "remove"),
-        ("env", "remove", "env-1", "--yes"),
+        ("env", "show"),
+        ("env", "show", "env-1"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream environment inspection is covered by focused command tests",
+    ),
+    PublicLeafCase(
+        ("env", "rm"),
+        ("env", "rm", "env-1", "--yes"),
         "mutating-or-spawning",
         True,
         e2e_disposition="critical",
@@ -222,11 +230,11 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         True,
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-04",),
-        e2e_rationale="pinned requirements sync and idempotency",
+        e2e_rationale="public `--hash-lock`/digest sync, `--require-hashes`, and idempotency",
     ),
     PublicLeafCase(
-        ("backup", "list"),
-        ("backup", "list"),
+        ("backup", "ls"),
+        ("backup", "ls"),
         "bounded-read-only",
         False,
         e2e_disposition="critical",
@@ -234,8 +242,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="downloaded catalog row",
     ),
     PublicLeafCase(
-        ("backup", "show"),
-        ("backup", "show", "00000000-0000-0000-0000-000000000007"),
+        ("backup", "inspect"),
+        ("backup", "inspect", "00000000-0000-0000-0000-000000000007"),
         "bounded-read-only",
         False,
         e2e_disposition="critical",
@@ -252,8 +260,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="ZIP plus filestore validation",
     ),
     PublicLeafCase(
-        ("backup", "delete"),
-        ("backup", "delete", "00000000-0000-0000-0000-000000000007", "--dry-run"),
+        ("backup", "rm"),
+        ("backup", "rm", "00000000-0000-0000-0000-000000000007", "--dry-run"),
         "mutating-or-spawning",
         True,
         e2e_disposition="focused",
@@ -279,8 +287,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="exact catalog restore, occupied/repeat cases",
     ),
     PublicLeafCase(
-        ("db", "list"),
-        ("db", "list"),
+        ("db", "ls"),
+        ("db", "ls"),
         "bounded-read-only",
         False,
         e2e_disposition="smoke",
@@ -297,8 +305,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="target Odoo shell reset and redaction",
     ),
     PublicLeafCase(
-        ("db", "drop"),
-        ("db", "drop", "demo", "--dry-run"),
+        ("db", "rm"),
+        ("db", "rm", "demo", "--dry-run"),
         "mutating-or-spawning",
         True,
         e2e_disposition="focused",
@@ -333,8 +341,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="probe module native runner report",
     ),
     PublicLeafCase(
-        ("module", "list"),
-        ("module", "list", "sale"),
+        ("module", "ls"),
+        ("module", "ls", "sale"),
         "process-previewable-read-only",
         True,
         e2e_disposition="critical",
@@ -358,6 +366,38 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-08",),
         e2e_rationale="compatibility alias equals top-level test",
+    ),
+    PublicLeafCase(
+        ("module", "info"),
+        ("module", "info", "sale"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream module inspection is covered by focused command tests",
+    ),
+    PublicLeafCase(
+        ("module", "where"),
+        ("module", "where", "sale"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream filesystem inspection is outside the lifecycle fixture",
+    ),
+    PublicLeafCase(
+        ("module", "deps"),
+        ("module", "deps", "sale"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream dependency inspection is covered offline",
+    ),
+    PublicLeafCase(
+        ("module", "install-order"),
+        ("module", "install-order", "sale"),
+        "process-previewable-read-only",
+        True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream planning leaf is outside the lifecycle fixture",
     ),
     PublicLeafCase(
         ("translations", "export"),
@@ -399,8 +439,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_rationale="exact trusted image digest",
     ),
     PublicLeafCase(
-        ("postgres", "status"),
-        ("postgres", "status"),
+        ("postgres", "ps"),
+        ("postgres", "ps"),
         "bounded-read-only",
         False,
         e2e_disposition="critical",
@@ -510,6 +550,38 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_disposition="not-applicable",
         e2e_rationale="Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle",
     ),
+    PublicLeafCase(
+        ("git", "commit"),
+        ("git", "commit", "--message", "fixture"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream Git workflow is outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("git", "check"),
+        ("git", "check"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream Git policy inspection is covered by unit contracts",
+    ),
+    PublicLeafCase(
+        ("git", "absorb"),
+        ("git", "absorb", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream Git mutation is outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("git", "sync"),
+        ("git", "sync", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream remote Git publication is intentionally outside E2E",
+    ),
 )
 
 PUBLIC_LEAF_CASES = tuple(_PUBLIC_LEAF_DATA)
@@ -580,18 +652,18 @@ def test_bounded_catalogue_list_inventory_is_explicit() -> None:
         for case in PUBLIC_LEAF_CASES
         if case.path
         in {
-            ("backup", "list"),
-            ("db", "list"),
-            ("resource", "list"),
-            ("module", "list"),
-            ("env", "list"),
+            ("backup", "ls"),
+            ("db", "ls"),
+            ("resource", "ls"),
+            ("module", "ls"),
+            ("env", "ls"),
         }
     } == {
-        ("backup", "list"),
-        ("db", "list"),
-        ("resource", "list"),
-        ("module", "list"),
-        ("env", "list"),
+        ("backup", "ls"),
+        ("db", "ls"),
+        ("resource", "ls"),
+        ("module", "ls"),
+        ("env", "ls"),
     }
 
 
@@ -771,7 +843,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path[:2] == ("env", "checkout"):
+    if path[:2] == ("env", "create"):
         client = MagicMock()
         plan = _matrix_checkout_plan()
         if failing:
@@ -862,7 +934,7 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_kwargs: client)
         return
 
-    if path == ("db", "list"):
+    if path == ("db", "ls"):
         instance = MagicMock()
         inventory = DatabaseInventoryResult(
             cluster="127.0.0.1:5432",
@@ -893,7 +965,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path == ("db", "drop"):
+    if path == ("db", "rm"):
         instance = MagicMock()
         instance._postgres_cluster = SimpleNamespace(endpoint="127.0.0.1:5432")
         drop_command = _matrix_command(
@@ -913,7 +985,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path[:2] == ("env", "list"):
+    if path[:2] == ("env", "ls"):
         snapshot = Snapshot(
             schema_version=3,
             generated_at=datetime(2020, 1, 1, tzinfo=UTC),
@@ -954,7 +1026,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path[:2] in {("env", "remove"), ("env", "sync")}:
+    if path[:2] in {("env", "rm"), ("env", "sync")}:
         client = MagicMock()
         env = _matrix_environment()
         client.environments.get.return_value = env
@@ -1015,7 +1087,7 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path == ("module", "list"):
+    if path == ("module", "ls"):
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.list_modules_command",
             fail_operation
@@ -1272,7 +1344,7 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     for mode in ("json", "toon"):
         with monkeypatch.context() as isolated:
             args = list(case.args)
-            if case.path in (("backup", "list"), ("resource", "list")):
+            if case.path in (("backup", "ls"), ("resource", "ls")):
                 args.append("--all-projects")
             if case.path == ("init",):
                 args.append(str(tmp_path))
@@ -1370,7 +1442,7 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
                 validating_projection,
             )
             args = list(case.args)
-            if case.path in (("backup", "list"), ("resource", "list")):
+            if case.path in (("backup", "ls"), ("resource", "ls")):
                 args.append("--all-projects")
             if case.path == ("init",):
                 args.append(str(tmp_path))
@@ -1562,7 +1634,7 @@ def test_public_cli_leaf_matrix_rejects_env_list_watch_json(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda *_args, **_kwargs: pytest.fail("watch rejection must precede collection"),
     )
-    result = CliRunner().invoke(cli, ["env", "list", "--watch", "--json"])
+    result = CliRunner().invoke(cli, ["env", "ls", "--watch", "--json"])
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "--watch is only available with Rich output" in result.stderr
@@ -1611,7 +1683,7 @@ def test_machine_db_drop_requires_yes_before_project_resolution(args: list[str])
         "odoo_instance_sdk.commands.pg._database_instance",
         side_effect=AssertionError("confirmation must precede database resolution"),
     ):
-        result = CliRunner().invoke(cli, ["db", "drop", "demo", *args])
+        result = CliRunner().invoke(cli, ["db", "rm", "demo", *args])
 
     assert result.exit_code == 1, result.output
     assert "confirmation_required" in result.output
@@ -1632,7 +1704,7 @@ def test_db_drop_dry_run_emits_plan_without_running_mutation(
     )
     monkeypatch.setattr("odoo_instance_sdk.internal.pg.drop.build_database_drop_command", builder)
 
-    result = CliRunner().invoke(cli, ["db", "drop", "demo", "--dry-run", "--format", "json"])
+    result = CliRunner().invoke(cli, ["db", "rm", "demo", "--dry-run", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["dry_run"] is True
@@ -1697,7 +1769,7 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         ("db", "locks"),
         ("db", "stats"),
         ("db", "bloat"),
-        ("postgres", "status"),
+        ("postgres", "ps"),
     ):
         assert "--dry-run" not in _option_names(_command(path)), path
     assert "--dry-run" in _option_names(_command(("db", "init-monitoring")))
@@ -1708,7 +1780,7 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         assert "--format" in options, path
         assert "--json" in options, path
 
-    root_result = CliRunner().invoke(cli, ["--format", "json", "env", "list"])
+    root_result = CliRunner().invoke(cli, ["--format", "json", "env", "ls"])
     assert root_result.exit_code == 2
     assert root_result.stdout == ""
     assert "No such option" in root_result.stderr
@@ -1723,7 +1795,7 @@ def test_format_resolution_accepts_json_alias_and_rejects_conflicts_before_opera
 
 
 def test_invalid_format_uses_native_click_parse_failure() -> None:
-    result = CliRunner().invoke(cli, ["env", "list", "--format", "invalid"])
+    result = CliRunner().invoke(cli, ["env", "ls", "--format", "invalid"])
     assert result.exit_code == 2
     assert "Invalid value for '--format'" in result.stderr
 
@@ -2698,7 +2770,7 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                     "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
                     lambda *_args, **_kwargs: snapshot,
                 )
-                args = ["env", "list", "--all-projects"]
+                args = ["env", "ls", "--all-projects"]
             result = CliRunner().invoke(cli, [*args, "--format", mode])
             assert result.exit_code == 0, result.output
             assert result.stderr == ""
@@ -2849,7 +2921,7 @@ def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) 
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda self, project_id=None, *, include_removed=False: snapshot,
     )
-    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "toon"])
+    result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "toon"])
     assert result.exit_code == 0, result.output
     from toon import DecodeOptions, decode
 
@@ -2882,7 +2954,7 @@ def test_resource_machine_projection_is_read_only_and_one_document(
         lambda **_kwargs: tmp_path / "backups",
     )
 
-    result = CliRunner().invoke(cli, ["resource", "list", "--all-projects", "--format", mode])
+    result = CliRunner().invoke(cli, ["resource", "ls", "--all-projects", "--format", mode])
 
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
@@ -2903,8 +2975,8 @@ def test_resource_rich_projections_are_bounded_and_deterministic(
     )
     runner = CliRunner()
 
-    first = runner.invoke(cli, ["resource", "list", "--all-projects"])
-    second = runner.invoke(cli, ["resource", "list", "--all-projects"])
+    first = runner.invoke(cli, ["resource", "ls", "--all-projects"])
+    second = runner.invoke(cli, ["resource", "ls", "--all-projects"])
     doctor = runner.invoke(cli, ["resource", "doctor"])
 
     assert first.exit_code == second.exit_code == doctor.exit_code == 0
@@ -3128,7 +3200,7 @@ def test_env_list_json_aliases_have_identical_v1_envelopes(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda self, project_id=None, *, include_removed=False: snapshot,
     )
-    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", *args])
+    result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", *args])
     assert result.exit_code == 0, result.output
     document = json.loads(result.stdout)
     assert document["schema_version"] == 1
@@ -3138,9 +3210,7 @@ def test_env_list_json_aliases_have_identical_v1_envelopes(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
             lambda self, project_id=None, *, include_removed=False: snapshot,
         )
-        alias_result = CliRunner().invoke(
-            cli, ["env", "list", "--all-projects", "--format", "json"]
-        )
+        alias_result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "json"])
         assert json.loads(alias_result.stdout) == document
 
 
@@ -3155,7 +3225,7 @@ def test_conflicting_machine_alias_is_rejected_before_snapshot(
         raise AssertionError("conflicting mode must fail before operation")
 
     monkeypatch.setattr("odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot)
-    result = CliRunner().invoke(cli, ["env", "list", "--json", "--format", "toon"])
+    result = CliRunner().invoke(cli, ["env", "ls", "--json", "--format", "toon"])
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "conflicts" in result.stderr
@@ -3182,7 +3252,7 @@ def test_machine_env_remove_requires_yes_without_prompt_or_operation(
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
         patch("odoo_instance_sdk.commands.env.click.confirm") as confirm,
     ):
-        result = CliRunner().invoke(cli, ["env", "remove", "env-1", *args])
+        result = CliRunner().invoke(cli, ["env", "rm", "env-1", *args])
 
     assert result.exit_code == 1, result.output
     assert result.stderr == ""
@@ -3212,7 +3282,7 @@ def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
         patch("odoo_instance_sdk.commands.env.click.confirm") as confirm,
     ):
-        result = CliRunner().invoke(cli, ["env", "remove", "env-1", "--yes", *args])
+        result = CliRunner().invoke(cli, ["env", "rm", "env-1", "--yes", *args])
 
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
@@ -3238,7 +3308,7 @@ def test_rich_env_remove_retains_confirmation_prompt(tmp_path: object) -> None:
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        result = CliRunner().invoke(cli, ["env", "remove", "env-1"], input="n\n")
+        result = CliRunner().invoke(cli, ["env", "rm", "env-1"], input="n\n")
 
     assert result.exit_code == 0, result.output
     assert "Aborted." in result.output
@@ -3276,7 +3346,7 @@ def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) 
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        result = CliRunner().invoke(cli, ["env", "checkout", "PROJ-123"])
+        result = CliRunner().invoke(cli, ["env", "create", "PROJ-123"])
 
     assert result.exit_code == 0, result.output
     assert "Environment demo" in result.output
@@ -3357,7 +3427,7 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        dry_result = CliRunner().invoke(cli, ["env", "checkout", "PROJ-123", "--dry-run", "--json"])
+        dry_result = CliRunner().invoke(cli, ["env", "create", "PROJ-123", "--dry-run", "--json"])
 
     assert dry_result.exit_code == 0, dry_result.output
     dry_payload = json.loads(dry_result.stdout)["result"]
@@ -3394,7 +3464,7 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        run_result = CliRunner().invoke(cli, ["env", "checkout", "PROJ-123"])
+        run_result = CliRunner().invoke(cli, ["env", "create", "PROJ-123"])
 
     assert run_result.exit_code == 0, run_result.output
     assert run_effects == ["run"]
@@ -3474,8 +3544,8 @@ def test_public_human_callbacks_neutralize_terminal_controls(
             patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
         ):
             args = {
-                "checkout": ["env", "checkout", "PROJ-123"],
-                "remove": ["env", "remove", "env-1", "--yes"],
+                "checkout": ["env", "create", "PROJ-123"],
+                "remove": ["env", "rm", "env-1", "--yes"],
                 "sync": ["env", "sync", "env-1"],
             }[command]
             result = runner.invoke(cli, args)

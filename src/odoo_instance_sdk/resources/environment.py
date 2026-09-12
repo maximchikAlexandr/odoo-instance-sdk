@@ -51,6 +51,10 @@ from odoo_instance_sdk.internal.database_preparation import (
     compare_provenance,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
+from odoo_instance_sdk.internal.dependency_sync import (
+    build_trusted_sync_argv,
+    resolve_hash_lock,
+)
 from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.locks import (
     environment_lock_path,
@@ -161,6 +165,8 @@ class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
     python: str | Path | None = None
     create_venv: bool = False
     http_port: int | None = None
+    hash_lock: str | Path | None = None
+    hash_lock_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +255,7 @@ class _CheckoutPlan:
     odoo_bin: str
     runtime_cwd: str
     dependency_inputs: tuple[str, ...]
+    hash_lock: Path | None
     worktree_argv: tuple[str, ...]
     created_at: str
     options: EnvironmentCheckoutOptions
@@ -325,7 +332,7 @@ _StrList = list[str]
 class EnvironmentResource:
     _client: OdooClient
 
-    def _prepare_checkout(
+    def _prepare_checkout(  # noqa: C901
         self,
         project: ProjectConfig | Path,
         branch: str,
@@ -357,6 +364,14 @@ class EnvironmentResource:
         repo_root = rev_parse_toplevel(project_path)
         git_common = rev_parse_git_common_dir(repo_root)
         git_common_str = str(git_common)
+
+        hash_lock = resolve_hash_lock(
+            options.hash_lock,
+            options.hash_lock_sha256,
+            base_dir=repo_root,
+        )
+        if hash_lock is not None and not options.create_venv:
+            raise ConfigError("hash-locked dependency sync requires an owned environment")
 
         self._verify_tools()
 
@@ -445,11 +460,16 @@ class EnvironmentResource:
         now = datetime.now(UTC).isoformat()
         odoo_bin = self._resolve_odoo_bin(options, project_cfg, repo_root)
         runtime_cwd = self._resolve_runtime_cwd(project_cfg, repo_root, worktree)
-        dependency_paths = list(project_cfg.requirements)
-        odoo_requirements = _find_odoo_requirements(repo_root)
-        if odoo_requirements is not None and str(odoo_requirements) not in dependency_paths:
-            dependency_paths.append(str(odoo_requirements))
-        dependency_inputs = tuple(_rebase_requirement_paths(dependency_paths, repo_root, worktree))
+        if hash_lock is None:
+            dependency_paths = list(project_cfg.requirements)
+            odoo_requirements = _find_odoo_requirements(repo_root)
+            if odoo_requirements is not None and str(odoo_requirements) not in dependency_paths:
+                dependency_paths.append(str(odoo_requirements))
+            dependency_inputs = tuple(
+                _rebase_requirement_paths(dependency_paths, repo_root, worktree)
+            )
+        else:
+            dependency_inputs = ()
 
         return _CheckoutPlan(
             project=project_cfg,
@@ -477,6 +497,7 @@ class EnvironmentResource:
             odoo_bin=odoo_bin,
             runtime_cwd=runtime_cwd,
             dependency_inputs=dependency_inputs,
+            hash_lock=hash_lock,
             base_revision=base_revision,
             worktree_argv=worktree_argv,
             created_at=now,
@@ -982,15 +1003,16 @@ class EnvironmentResource:
 
             env_obj = self._get_env_row(cat, plan.env_id)
             with exclusive_lock(python_env_lock_path(env_obj.python_environment_path)):
-                if plan.dependency_inputs:
-                    compile_result = cast(
-                        "ProcessResult", context.process("checkout.dependencies.compile")
-                    )
-                    if compile_result.returncode != 0 and not plan.dependency_lock.is_file():
-                        raise ConfigError(  # noqa: TRY301
-                            "uv pip compile failed and no prior lock: "
-                            f"{_process_stderr(compile_result)}"
+                if plan.hash_lock is not None or plan.dependency_inputs:
+                    if plan.hash_lock is None:
+                        compile_result = cast(
+                            "ProcessResult", context.process("checkout.dependencies.compile")
                         )
+                        if compile_result.returncode != 0 and not plan.dependency_lock.is_file():
+                            raise ConfigError(  # noqa: TRY301
+                                "uv pip compile failed and no prior lock: "
+                                f"{_process_stderr(compile_result)}"
+                            )
                     install_result = cast(
                         "ProcessResult", context.process("checkout.dependencies.install")
                     )
@@ -998,7 +1020,8 @@ class EnvironmentResource:
                         raise ConfigError(  # noqa: TRY301
                             f"uv pip install failed: {_process_stderr(install_result)}".strip()
                         )
-                    created_paths.append(plan.dependency_lock)
+                    if plan.hash_lock is None:
+                        created_paths.append(plan.dependency_lock)
 
             if plan.python_owned:
                 preflight = cast("ProcessResult", context.process("checkout.runtime.preflight"))
@@ -1359,14 +1382,23 @@ class EnvironmentResource:
         selector: EnvironmentSelector,
         *,
         upgrade: bool = False,
+        hash_lock: str | Path | None = None,
+        hash_lock_sha256: str | None = None,
     ) -> DevelopmentEnvironment:
-        return self.sync_python_command(selector, upgrade=upgrade).run()
+        return self.sync_python_command(
+            selector,
+            upgrade=upgrade,
+            hash_lock=hash_lock,
+            hash_lock_sha256=hash_lock_sha256,
+        ).run()
 
     def sync_python_command(  # noqa: C901
         self,
         selector: EnvironmentSelector,
         *,
         upgrade: bool = False,
+        hash_lock: str | Path | None = None,
+        hash_lock_sha256: str | None = None,
     ) -> Command[DevelopmentEnvironment]:
         """Capture one immutable uv synchronization operation."""
         from odoo_instance_sdk.execution import Command
@@ -1385,12 +1417,32 @@ class EnvironmentResource:
         project = _load_project(env)
         worktree = Path(env.worktree_path)
         repo_root = Path(env.repository_root)
-        inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
-        odoo_req = _find_odoo_requirements(worktree)
-        if odoo_req is not None and str(odoo_req) not in inputs:
-            inputs.append(str(odoo_req))
+        trusted_lock = resolve_hash_lock(hash_lock, hash_lock_sha256, base_dir=repo_root)
+        if trusted_lock is not None:
+            if not env.python_environment_owned:
+                raise ConfigError("hash-locked dependency sync requires an owned environment")
+            if upgrade:
+                raise ConfigError("upgrade cannot be combined with a hash-locked sync")
+            inputs: list[str] = []
+        else:
+            inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
+            odoo_req = _find_odoo_requirements(worktree)
+            if odoo_req is not None and str(odoo_req) not in inputs:
+                inputs.append(str(odoo_req))
         steps: list[Step] = []
-        if inputs:
+        if trusted_lock is not None:
+            install_argv = build_trusted_sync_argv(
+                _owned_python_executable(Path(env.python_environment_path)), trusted_lock
+            )
+            steps.append(
+                PreparedStep(
+                    step_id="environment.sync.install",
+                    argv=install_argv,
+                    cwd=str(worktree),
+                    mutating=True,
+                )
+            )
+        elif inputs:
             compile_argv = ["uv", "pip", "compile", *inputs]
             if upgrade:
                 compile_argv.append("--upgrade")
@@ -1404,7 +1456,7 @@ class EnvironmentResource:
                 )
             )
             if env.python_environment_owned:
-                install_argv: tuple[str, ...] = (
+                install_argv = (
                     "uv",
                     "pip",
                     "sync",
@@ -1435,7 +1487,7 @@ class EnvironmentResource:
                 step_id="environment.sync",
                 action="sync_python",
                 description="Record Python dependency synchronization",
-                mutating=bool(inputs),
+                mutating=trusted_lock is not None or bool(inputs),
             )
         )
         prepared_steps = tuple(steps)
@@ -1450,7 +1502,15 @@ class EnvironmentResource:
                     exclusive_lock(environment_lock_path(str(env.id))),
                     exclusive_lock(python_env_lock_path(env.python_environment_path)),
                 ):
-                    if inputs:
+                    if trusted_lock is not None:
+                        install_result = cast(
+                            "ProcessResult", context.process("environment.sync.install")
+                        )
+                        if install_result.returncode != 0:
+                            raise ConfigError(
+                                f"uv pip sync failed: {_process_stderr(install_result)}".strip()
+                            )
+                    elif inputs:
                         compile_result = cast(
                             "ProcessResult", context.process("environment.sync.compile")
                         )
@@ -1478,7 +1538,12 @@ class EnvironmentResource:
                             )
                     catalog._record_environment_sync_success(
                         str(env.id),
-                        _sync_applied_settings(catalog, env, project, inputs),
+                        _sync_applied_settings(
+                            catalog,
+                            env,
+                            project,
+                            [str(trusted_lock)] if trusted_lock is not None else inputs,
+                        ),
                     )
                     completed = True
                     return self._get_env_row(catalog, env.id)
@@ -3272,7 +3337,9 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 mutating=True,
             )
         )
-    if plan.dependency_inputs:
+    if plan.hash_lock is not None:
+        install_argv = build_trusted_sync_argv(_owned_python_executable(plan.venv), plan.hash_lock)
+    elif plan.dependency_inputs:
         steps.append(
             PreparedStep(
                 step_id="checkout.dependencies.compile",
@@ -3309,6 +3376,9 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 str(plan.dependency_lock),
             )
         )
+    else:
+        install_argv = None
+    if install_argv is not None:
         steps.append(
             PreparedStep(
                 step_id="checkout.dependencies.install",

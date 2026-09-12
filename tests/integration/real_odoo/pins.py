@@ -140,6 +140,8 @@ def _validate_pin_values(pins: E2EPinManifest) -> None:
         raise PrerequisiteError("runtime or runner pin changed without a contract revision")
     if not _SHA256.fullmatch(pins.odoo_python_lock_sha256):
         raise PrerequisiteError("Python resolution lock must be pinned by SHA-256")
+    if not _SHA256.fullmatch(pins.odoo_python_audit_sha256):
+        raise PrerequisiteError("Python resolution audit must be pinned by SHA-256")
 
 
 def validate_pins(pins: E2EPinManifest = E2E_PINS) -> None:

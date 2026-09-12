@@ -46,6 +46,8 @@ def test_pins_are_exact_and_immutable() -> None:
         E2E_PINS.odoo_image = "latest"  # type: ignore[misc]
     with pytest.raises(PrerequisiteError, match="image pin"):
         validate_pins(replace(E2E_PINS, odoo_image="docker.io/library/odoo:latest"))
+    with pytest.raises(PrerequisiteError, match="audit must be pinned"):
+        validate_pins(replace(E2E_PINS, odoo_python_audit_sha256="not-a-sha"))
 
 
 def test_platforms_and_phase_budgets_are_normalized(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -108,19 +108,6 @@ def _clone_pinned_source(repository: Path, destination: Path) -> None:
         raise AssertionError(f"cannot check out pinned Odoo source: {checkout.stderr[-4000:]}")
 
 
-def _trusted_python_sync_argv(python: Path) -> list[str]:
-    """Return the only dependency-install command allowed by the full tier."""
-    return [
-        "uv",
-        "pip",
-        "sync",
-        "--require-hashes",
-        "--python",
-        str(python),
-        str(PYTHON_RESOLUTION_LOCK),
-    ]
-
-
 def _resolved_postgres_digest(image: str) -> str:
     result = subprocess.run(
         ["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", image],
@@ -372,23 +359,9 @@ def test_source_backed_full_critical_path(  # noqa: C901
         "worktree", project.name, lambda: shutil.rmtree(project, ignore_errors=True)
     )
 
-    # The full tier owns dependency installation explicitly below.  Keep the
-    # public checkout focused on worktree/venv creation so it cannot compile
-    # Odoo requirements or perform an unhashed install before the audited lock
-    # is synchronized.  The wrapper makes its preflight side-effect free while
-    # retaining the real pinned odoo-bin for every later invocation.
-    monkeypatch.setattr(
-        "odoo_instance_sdk.resources.environment._find_odoo_requirements",
-        lambda _repo_root: None,
-    )
-    odoo_wrapper = project / "odoo-bootstrap"
-    odoo_wrapper.write_text(
-        "#!/bin/sh\n"
-        'if [ "$1" = "--help" ]; then exit 0; fi\n'
-        f'exec "$PWD/{odoo_bin_relative}" "$@"\n',
-        encoding="utf-8",
-    )
-    odoo_wrapper.chmod(0o700)
+    # The public checkout owns the audited lock contract. It must not discover
+    # Odoo requirements or compile/install an alternate lock.
+    odoo_bin_path = project / odoo_bin_relative
 
     # The shared target fixture owns a disposable PostgreSQL only to establish
     # the target namespace.  The public project lifecycle owns the cluster used
@@ -406,7 +379,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
             str(project),
             "--no-input",
             "--odoo-bin",
-            str(odoo_wrapper),
+            str(odoo_bin_path),
             "--config",
             str(runtime.config_file),
             "--database",
@@ -490,10 +463,14 @@ def test_source_backed_full_critical_path(  # noqa: C901
         "--source-db",
         runtime.topology.target_sentinel_database,
         "--odoo-bin",
-        str(odoo_wrapper),
+        str(odoo_bin_path),
         "--python",
         E2E_PINS.cpython,
         "--create-venv",
+        "--hash-lock",
+        str(PYTHON_RESOLUTION_LOCK),
+        "--hash-lock-sha256",
+        E2E_PINS.odoo_python_lock_sha256,
         "--http-port",
         str(runtime.reservations[3].port),
     )
@@ -540,18 +517,31 @@ def test_source_backed_full_critical_path(  # noqa: C901
     path_result = _invoke(runner, project, cli_environment, "env", "path", environment_id)
     assert path_result["worktree_path"] == environment["worktree_path"]
     _record(record_property, "E2E-CP-03", path_result)
-    sync = _invoke(runner, project, cli_environment, "env", "sync", environment_id)
-    repeated_sync = _invoke(runner, project, cli_environment, "env", "sync", environment_id)
-    assert sync == repeated_sync
-    locked_install = subprocess.run(
-        _trusted_python_sync_argv(python),
-        cwd=project,
-        capture_output=True,
-        shell=False,
-        text=True,
-        check=False,
+    sync = _invoke(
+        runner,
+        project,
+        cli_environment,
+        "env",
+        "sync",
+        environment_id,
+        "--hash-lock",
+        str(PYTHON_RESOLUTION_LOCK),
+        "--hash-lock-sha256",
+        E2E_PINS.odoo_python_lock_sha256,
     )
-    assert locked_install.returncode == 0, locked_install.stdout + locked_install.stderr
+    repeated_sync = _invoke(
+        runner,
+        project,
+        cli_environment,
+        "env",
+        "sync",
+        environment_id,
+        "--hash-lock",
+        str(PYTHON_RESOLUTION_LOCK),
+        "--hash-lock-sha256",
+        E2E_PINS.odoo_python_lock_sha256,
+    )
+    assert sync == repeated_sync
     deps = _invoke(runner, project, cli_environment, "--env", environment_id, "deps", "verify")
     assert deps.get("pip_check_ok") is True
     assert deps.get("missing_imports") == []

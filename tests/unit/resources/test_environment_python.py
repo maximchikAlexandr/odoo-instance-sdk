@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import textwrap
@@ -150,6 +151,60 @@ class TestCreateVenv:
         assert venv_calls[0][2] == str(Path(env.worktree_path).parent / "venv")
         assert "--python" in venv_calls[0]
         assert "3.12" in venv_calls[0]
+
+    def test_hash_locked_checkout_skips_discovery_and_compile(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        lock = tmp_path / "audited.lock"
+        lock.write_text("requests==2.32.5 --hash=sha256:" + "0" * 64 + "\n", encoding="utf-8")
+        digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        calls = _patch_subprocess(monkeypatch)
+        env_client.environments.checkout(
+            project_manifest,
+            "feat/hash-lock",
+            options=EnvironmentCheckoutOptions(
+                python="3.12",
+                create_venv=True,
+                hash_lock=lock,
+                hash_lock_sha256=digest,
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+        dependency_calls = [call for call in calls if call[:2] == ["uv", "pip"]]
+        assert [call[:3] for call in dependency_calls] == [["uv", "pip", "sync"]]
+        assert dependency_calls[0][3:] == [
+            "--python",
+            dependency_calls[0][4],
+            "--require-hashes",
+            str(lock.resolve()),
+        ]
+
+    def test_hash_locked_checkout_requires_owned_environment(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+    ) -> None:
+        lock = tmp_path / "audited.lock"
+        lock.write_text("requests==2.32.5\n", encoding="utf-8")
+        digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        with pytest.raises(ConfigError, match="owned environment"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/hash-lock-reuse",
+                options=EnvironmentCheckoutOptions(
+                    python="python",
+                    hash_lock=lock,
+                    hash_lock_sha256=digest,
+                    db_mode=EnvironmentDatabaseMode.SHARED,
+                    source_database="comerta",
+                ),
+            )
 
 
 class TestSyncUpgradePreserve:

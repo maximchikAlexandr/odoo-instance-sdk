@@ -43,6 +43,7 @@ PYTHON_RESOLUTION_AUDIT: Final[Path] = (
 AUDITED_EXCEPTION_PACKAGES: Final[frozenset[str]] = frozenset(
     {"cryptography", "pypdf2", "requests", "urllib3"}
 )
+PINNED_AUDIT_SCANNER: Final[str] = "2.10.1"
 
 
 def source_cache_key(os_name: str, architecture: str) -> str:
@@ -83,8 +84,64 @@ def _locked_package_versions(content: bytes) -> dict[str, str]:
     return versions
 
 
+def _run_pinned_python_audit(  # noqa: C901
+    lock_path: Path,
+) -> set[tuple[str, str, str]] | None:
+    """Return pip-audit's canonical findings, or ``None`` on any probe error."""
+    try:
+        result = _run(
+            [
+                "uvx",
+                "--from",
+                f"pip-audit=={PINNED_AUDIT_SCANNER}",
+                "pip-audit",
+                "-r",
+                str(lock_path),
+                "--format",
+                "json",
+                "--no-deps",
+            ],
+            timeout=120.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode not in (0, 1):
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, list):
+        return None
+    findings: set[tuple[str, str, str]] = set()
+    for package_result in payload:
+        if not isinstance(package_result, dict):
+            return None
+        package = package_result.get("name")
+        version = package_result.get("version")
+        vulnerabilities = package_result.get("vulns")
+        if not isinstance(package, str) or not isinstance(version, str):
+            return None
+        if not isinstance(vulnerabilities, list):
+            return None
+        for vulnerability in vulnerabilities:
+            if not isinstance(vulnerability, dict) or not isinstance(vulnerability.get("id"), str):
+                return None
+            advisory = str(vulnerability["id"])
+            if not advisory:
+                return None
+            finding = (str(package).replace("_", "-").lower(), str(version), advisory)
+            if finding in findings:
+                return None
+            findings.add(finding)
+    return findings
+
+
 def python_resolution_audit_is_valid(  # noqa: C901
-    path: Path | None = None, *, lock_path: Path | None = None
+    path: Path | None = None,
+    *,
+    lock_path: Path | None = None,
+    scanner_result: set[tuple[str, str, str]] | None = None,
 ) -> bool:
     audit_path = path or PYTHON_RESOLUTION_AUDIT
     resolved_lock = lock_path or PYTHON_RESOLUTION_LOCK
@@ -120,6 +177,7 @@ def python_resolution_audit_is_valid(  # noqa: C901
             return False
         if versions.get(package.replace("_", "-").lower()) != version:
             return False
+    expected_findings: set[tuple[str, str, str]] = set()
     observed: set[str] = set()
     for exception in exceptions:
         if not isinstance(exception, dict):
@@ -149,7 +207,17 @@ def python_resolution_audit_is_valid(  # noqa: C901
         except ValueError:
             return False
         observed.add(package)
-    return observed == AUDITED_EXCEPTION_PACKAGES
+        for advisory in advisories:
+            finding = (package.replace("_", "-").lower(), str(version), str(advisory))
+            if finding in expected_findings:
+                return False
+            expected_findings.add(finding)
+    if observed != AUDITED_EXCEPTION_PACKAGES:
+        return False
+    actual_findings = (
+        scanner_result if scanner_result is not None else _run_pinned_python_audit(resolved_lock)
+    )
+    return actual_findings is not None and actual_findings == expected_findings
 
 
 def _configured_cache_key(name: str, computed: str) -> str:

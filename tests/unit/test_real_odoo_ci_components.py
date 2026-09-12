@@ -168,7 +168,9 @@ def test_full_bootstrap_has_no_synthetic_checkout_prerequisite(
 ) -> None:
     monkeypatch.setattr("scripts.real_odoo_bootstrap.shutil.which", lambda _name: "/usr/bin/docker")
     monkeypatch.setattr(
-        bootstrap, "_run", lambda _command: subprocess.CompletedProcess([], 0, "", "")
+        bootstrap,
+        "_run",
+        lambda _command, **_kwargs: subprocess.CompletedProcess([], 0, "", ""),
     )
     monkeypatch.setattr(bootstrap, "_version_is_exact", lambda _command, _expected: True)
     monkeypatch.setattr(bootstrap, "_image_manifest_is_pinned", lambda _image, _digest: True)
