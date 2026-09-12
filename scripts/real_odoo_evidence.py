@@ -60,7 +60,8 @@ def _include(source: Path, status: Status) -> bool:
         return True
     name = source.name.lower()
     return any(
-        token in name for token in ("junit", "timing", "phase", "pin", "resource", "manifest")
+        token in name
+        for token in ("bootstrap", "junit", "timing", "phase", "pin", "resource", "manifest")
     )
 
 
@@ -72,7 +73,7 @@ def _write_packaging_error(output: Path, message: str) -> None:
             {
                 "schema": "odcli-real-odoo-evidence-v1",
                 "ok": False,
-                "error": message,
+                "error": sanitize_last_error(message) or "evidence packaging failed",
                 "retention_days": RETENTION_DAYS,
             },
             sort_keys=True,
@@ -177,9 +178,14 @@ def _validate_junit(junit: Path, status: Status) -> None:
 
 def _validate_resource_manifest(source: Path, tier: str) -> dict[str, object]:
     manifest = _load_json(source / "resource-manifest.json", "resource manifest")
+    resources = manifest.get("resources")
     audit = manifest.get("audit")
+    if not isinstance(resources, list) or not resources:
+        raise ValueError("resource manifest lacks owned resource records")
     if not isinstance(audit, dict) or audit.get("state") != "clean" or audit.get("leaks") != []:
         raise ValueError("resource manifest lacks a clean final leak audit")
+    if not isinstance(audit.get("runs"), list) or not audit["runs"]:
+        raise ValueError("resource manifest lacks final audit runs")
     if tier == "full" and manifest.get("source_cache_consumed") is not True:
         raise ValueError("full evidence lacks source-cache consumption audit")
     return manifest
@@ -409,30 +415,14 @@ def package_evidence(  # noqa: C901
                 raise ValueError("artifact size changed while packaging")  # noqa: TRY301
     except (OSError, ET.ParseError, TypeError, UnicodeError, ValueError) as error:
         junit = source / "junit.xml"
-        if junit.is_file():
-            try:
-                clean = _bounded_text(junit)
-                if canary_file is not None and canary_file.read_bytes().strip() in clean:
-                    raise ValueError("secret canary detected in JUnit")  # noqa: TRY301
-                junit.write_bytes(clean)
-                junit.chmod(0o600)
-            except (OSError, ValueError):
-                junit.write_text(
-                    '<testsuite tests="0" failures="1"><properties>'
-                    '<property name="packaging_error" value="redacted"/>'
-                    "</properties></testsuite>\n",
-                    encoding="utf-8",
-                )
-                junit.chmod(0o600)
-        else:
-            junit.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            junit.write_text(
-                '<testsuite tests="0" failures="1"><properties>'
-                '<property name="packaging_error" value="redacted"/>'
-                "</properties></testsuite>\n",
-                encoding="utf-8",
-            )
-            junit.chmod(0o600)
+        junit.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        junit.write_text(
+            '<testsuite tests="0" failures="1"><properties>'
+            '<property name="packaging_error" value="redacted"/>'
+            "</properties></testsuite>\n",
+            encoding="utf-8",
+        )
+        junit.chmod(0o600)
         _write_packaging_error(output, str(error))
         raise
     manifest = {

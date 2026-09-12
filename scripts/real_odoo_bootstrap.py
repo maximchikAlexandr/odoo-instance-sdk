@@ -98,6 +98,16 @@ def _source_cache_path() -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _source_checkout_is_available() -> bool:
+    configured = os.environ.get("ODCLI_E2E_SOURCE_CHECKOUT")
+    if not configured:
+        return False
+    path = Path(configured)
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.joinpath("odoo-bin").is_file()
+
+
 def _write_cached_requirements(cache: Path) -> bool:
     requirements = _run(
         [
@@ -204,6 +214,7 @@ def prerequisite_checks(tier: Tier, resolved_platform: str) -> dict[str, bool]:
     }
     if tier == "full":
         checks["odoo_source_revision"] = _source_revision_is_available()
+        checks["odoo_source_checkout"] = _source_checkout_is_available()
     return checks
 
 

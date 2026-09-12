@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts import real_odoo_bootstrap as bootstrap
+from scripts import real_odoo_ci as ci
 from scripts import real_odoo_evidence as evidence
 from scripts import real_odoo_timing as timing
 
@@ -37,7 +38,11 @@ def _evidence_contract(
         json.dumps(
             {
                 "resources": ["owned-run-resource"],
-                "audit": {"state": "clean", "leaks": []},
+                "audit": {
+                    "state": "clean",
+                    "leaks": [],
+                    "runs": [{"run_id": "owned-run", "state": "clean", "leaks": {}}],
+                },
                 "source_cache_consumed": source_cache_consumed,
             }
         )
@@ -146,6 +151,31 @@ def test_evidence_rejects_canary_and_writes_minimal_error(tmp_path: Path) -> Non
         )
     assert (tmp_path / "packaging-error.json").is_file()
     assert "canary-value-1234" not in (tmp_path / "packaging-error.json").read_text()
+    assert 'tests="0" failures="1"' in (source / "junit.xml").read_text()
+
+
+def test_evidence_rejects_manifest_canary_and_replaces_junit(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _evidence_contract(source)
+    bootstrap_value = json.loads((source / "bootstrap.json").read_text())
+    bootstrap_value["canary"] = "canary-value-1234"
+    (source / "bootstrap.json").write_text(json.dumps(bootstrap_value))
+    canary = tmp_path / "canary"
+    canary.write_text("canary-value-1234\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="canary"):
+        evidence.package_evidence(
+            source,
+            tmp_path / "manifest-canary.tar.gz",
+            status="success",
+            canary_file=canary,
+            tier="smoke",
+            cache_class="cold",
+        )
+    assert "canary-value-1234" not in (source / "junit.xml").read_text()
+    assert 'tests="0" failures="1"' in (source / "junit.xml").read_text()
 
 
 def test_evidence_rejects_empty_success_and_oversized_failure_input(tmp_path: Path) -> None:
@@ -319,11 +349,11 @@ def test_timing_plugin_measures_fixture_cleanup_after_test(
     next(hook)
     value = json.loads(path.read_text())
     assert value["phases"]["test"]["duration_seconds"] == 2.0
-    assert "duration_seconds" not in value["phases"]["cleanup"]
+    assert "cleanup" not in value["phases"]
     with pytest.raises(StopIteration):
         next(hook)
     value = json.loads(path.read_text())
-    assert value["phases"]["cleanup"]["duration_seconds"] == 3.0
+    assert "cleanup" not in value["phases"]
 
 
 def test_bootstrap_rejects_injected_cache_key_mismatch(
@@ -339,6 +369,68 @@ def test_bootstrap_rejects_injected_cache_key_mismatch(
     manifest = bootstrap.bootstrap("smoke", output, platform_name="linux/amd64")
     assert manifest["ok"] is False
     assert "does not match computed cache key" in str(manifest["error"])
+
+
+def test_cleanup_instrumentation_wraps_finalize_and_writes_post_audit_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Record:
+        def __init__(self) -> None:
+            self.kind = "container"
+            self.name = "owned-run-container"
+            self.metadata = {"owner": "owned-run"}
+
+    class Ledger:
+        records = (Record(),)
+
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "run_id": "owned-run",
+            "scope": "source",
+            "ledger": Ledger(),
+            "topology": type(
+                "Topology",
+                (),
+                {
+                    "project_name": "owned-run-project",
+                    "source_postgres_port": 1,
+                    "target_postgres_port": 2,
+                    "source_odoo_port": 3,
+                },
+            )(),
+            "reservations": (None, None, None, type("Reservation", (), {"port": 4})()),
+            "compose_file": tmp_path / "compose.yaml",
+            "root": tmp_path / "runtime",
+        },
+    )()
+    timing_path = tmp_path / "timing.json"
+    timing.start(timing_path, "test", now=0.0)
+    monkeypatch.setenv("ODCLI_E2E_TIMING_FILE", str(timing_path))
+    monkeypatch.setattr(ci, "_evidence_root", lambda: tmp_path / "evidence")
+    monkeypatch.setattr(ci, "_capture_service_logs", lambda _runtime: None)
+    monkeypatch.setattr(
+        ci,
+        "_audit",
+        lambda _runtime: {"run_id": "owned-run", "state": "clean", "leaks": {}},
+    )
+    monkeypatch.setattr("scripts.real_odoo_ci.time.monotonic", iter((10.0, 15.0)).__next__)
+    finalized: list[str] = []
+    monkeypatch.setattr(
+        ci,
+        "_ORIGINAL_FINALIZE",
+        lambda _runtime, _failure=None: finalized.append("done"),
+    )
+    ci._RUNTIMES.clear()
+    ci._RESOURCE_SNAPSHOTS.clear()
+    ci._instrumented_finalize(runtime)
+    assert finalized == ["done"]
+    timing_value = json.loads(timing_path.read_text())
+    assert timing_value["phases"]["cleanup"]["duration_seconds"] == 5.0
+    resource = json.loads((tmp_path / "evidence" / "resource-manifest.json").read_text())
+    assert resource["resources"][0]["name"] == "owned-run-container"
+    assert resource["audit"]["state"] == "clean"
 
 
 def test_full_bootstrap_hashes_requirements_after_source_probe(
@@ -404,6 +496,18 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
         assert "ODCLI_E2E_TIMING_FILE" in workflow
         assert "phase setup" in workflow and "phase test" in workflow
         assert "phase cleanup" not in workflow
+        assert "-p scripts.real_odoo_ci" in workflow
+        assert "if: steps.package.outcome == 'success'" in workflow
+        assert "if: steps.package.outcome != 'success'" in workflow
+        assert "packaging-error.json" in workflow
+    for workflow, failure_name in (
+        (smoke_job, "real-odoo-smoke-packaging-failure"),
+        (full, "real-odoo-full-packaging-failure"),
+    ):
+        failure_upload = workflow[workflow.index(failure_name) :]
+        assert ".artifacts/real-odoo-e2e/junit.xml" in failure_upload
+        assert ".artifacts/real-odoo-e2e/packaging-error.json" in failure_upload
+        assert ".artifacts/real-odoo-e2e/bootstrap.json" not in failure_upload
     assert "uv run --no-project python scripts/real_odoo_timing.py start" in smoke_job
     assert "uv run --no-project python scripts/real_odoo_timing.py start" in full
     assert "hashFiles(" not in full
@@ -411,7 +515,8 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert full.count("steps.uv-key.outputs.key") >= 4
     assert "steps.source-prep.outputs.verified_source_cache_hit" in full
     assert "Materialize verified source-backed checkout" in full
-    assert "ODCLI_E2E_SOURCE_CHECKOUT: .artifacts/real-odoo-e2e/odoo-source" in full
+    assert "ODCLI_E2E_SOURCE_CHECKOUT: .cache/odoo-source-checkout" in full
+    assert ".artifacts/real-odoo-e2e/odoo-source" not in full
     assert "from scripts.real_odoo_bootstrap import source_cache_key" in full
     assert "from scripts.real_odoo_bootstrap import uv_cache_key" in full
     assert "--junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing" in makefile

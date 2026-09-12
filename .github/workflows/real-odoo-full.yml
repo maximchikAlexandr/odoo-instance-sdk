@@ -78,10 +78,12 @@ jobs:
         run: uv sync --frozen --group test
       - name: Materialize verified source-backed checkout
         id: source-setup
+        env:
+          ODCLI_E2E_SOURCE_CHECKOUT: .cache/odoo-source-checkout
         run: |
-          mkdir -p .artifacts/real-odoo-e2e/odoo-source
-          git --git-dir=.cache/odoo-source archive --format=tar cd992ceebbaf343c03e1941d39cfe423d35ba6c6 | tar -x -C .artifacts/real-odoo-e2e/odoo-source
-          test -f .artifacts/real-odoo-e2e/odoo-source/odoo-bin
+          mkdir -p "$ODCLI_E2E_SOURCE_CHECKOUT"
+          git --git-dir=.cache/odoo-source archive --format=tar cd992ceebbaf343c03e1941d39cfe423d35ba6c6 | tar -x -C "$ODCLI_E2E_SOURCE_CHECKOUT"
+          test -f "$ODCLI_E2E_SOURCE_CHECKOUT/odoo-bin"
       - name: Bootstrap required full prerequisites
         id: bootstrap
         env:
@@ -89,6 +91,7 @@ jobs:
           ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
           ODCLI_E2E_SOURCE_CACHE_KEY: ${{ steps.source-key.outputs.key }}
           ODCLI_E2E_UV_CACHE_KEY: ${{ steps.uv-key.outputs.key }}
+          ODCLI_E2E_SOURCE_CHECKOUT: .cache/odoo-source-checkout
         run: >-
           uv run python scripts/real_odoo_bootstrap.py
           --tier full
@@ -104,13 +107,14 @@ jobs:
         if: steps.bootstrap.outcome == 'success'
         env:
           ODCLI_E2E_TIMING_FILE: .artifacts/real-odoo-e2e/timing.json
+          ODCLI_E2E_EVIDENCE_ROOT: .artifacts/real-odoo-e2e
           ODCLI_E2E_SOURCE_CACHE: .cache/odoo-source
-          ODCLI_E2E_SOURCE_CHECKOUT: .artifacts/real-odoo-e2e/odoo-source
+          ODCLI_E2E_SOURCE_CHECKOUT: .cache/odoo-source-checkout
           ODCLI_E2E_SOURCE_CACHE_HIT: ${{ steps.source-prep.outputs.verified_source_cache_hit }}
           ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
           ODCLI_E2E_SOURCE_CACHE_KEY: ${{ steps.source-key.outputs.key }}
           ODCLI_E2E_UV_CACHE_KEY: ${{ steps.uv-key.outputs.key }}
-        run: uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -m 'real_odoo and e2e_full' tests/integration/real_odoo
+        run: uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo
       - name: Save content-addressed caches
         if: >-
           always() && steps.source-prep.outcome == 'success' &&
@@ -128,6 +132,7 @@ jobs:
           path: .cache/uv
           key: ${{ steps.uv-key.outputs.key }}
       - name: Package bounded E2E evidence
+        id: package
         if: always()
         run: >-
           uv run python scripts/real_odoo_evidence.py
@@ -138,7 +143,7 @@ jobs:
           --cache-class ${{ steps.bootstrap.outputs.cache_class || 'cold' }}
           --status ${{ steps.pytest.outcome == 'success' && 'success' || 'failure' }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
+        if: steps.package.outcome == 'success'
         with:
           name: real-odoo-full-evidence
           path: |
@@ -148,5 +153,12 @@ jobs:
             .artifacts/real-odoo-e2e/junit.xml
             .artifacts/real-odoo-e2e/timing.json
             .artifacts/real-odoo-e2e/resource-manifest.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.package.outcome != 'success'
+        with:
+          name: real-odoo-full-packaging-failure
+          path: |
+            .artifacts/real-odoo-e2e/junit.xml
             .artifacts/real-odoo-e2e/packaging-error.json
           retention-days: 7

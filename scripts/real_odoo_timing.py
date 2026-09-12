@@ -58,19 +58,47 @@ def finish(path: Path, phase: Phase, *, now: float | None = None) -> float:
     return duration
 
 
+def record(path: Path, phase: Phase, started: float, finished: float) -> float:
+    """Add one measured lifecycle segment to a phase."""
+    if phase not in PHASES:
+        raise ValueError(f"unsupported phase: {phase}")
+    manifest = _read(path)
+    phases = manifest["phases"]
+    if not isinstance(phases, dict):
+        raise TypeError("invalid timing phases")
+    record_value = phases.setdefault(
+        phase,
+        {
+            "started_monotonic": started,
+            "duration_seconds": 0.0,
+            "segments": 0,
+        },
+    )
+    if not isinstance(record_value, dict):
+        raise TypeError(f"invalid phase record: {phase}")
+    duration = round(max(0.0, finished - started), 6)
+    previous = record_value.get("duration_seconds", 0.0)
+    if not isinstance(previous, (int, float)):
+        raise TypeError(f"invalid phase duration: {phase}")
+    segments = record_value.get("segments", 0)
+    if not isinstance(segments, int):
+        raise TypeError(f"invalid phase segments: {phase}")
+    record_value["duration_seconds"] = round(previous + duration, 6)
+    record_value["finished_monotonic"] = finished
+    record_value["segments"] = segments + 1
+    _write(path, manifest)
+    return duration
+
+
 def pytest_sessionfinish(_session: object, _exitstatus: int) -> Iterator[None]:
-    """Measure test completion separately from session-fixture cleanup."""
+    """Measure test completion before session fixture finalizers run."""
     configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
     if not configured:
         yield
         return
     path = Path(configured)
     finish(path, "test")
-    start(path, "cleanup")
-    try:
-        yield
-    finally:
-        finish(path, "cleanup")
+    yield
 
 
 try:

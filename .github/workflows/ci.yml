@@ -46,8 +46,10 @@ jobs:
         if: steps.bootstrap.outcome == 'success'
         env:
           ODCLI_E2E_TIMING_FILE: .artifacts/real-odoo-e2e/timing.json
-        run: uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
+          ODCLI_E2E_EVIDENCE_ROOT: .artifacts/real-odoo-e2e
+        run: uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
       - name: Package bounded E2E evidence
+        id: package
         if: always()
         run: >-
           uv run python scripts/real_odoo_evidence.py
@@ -58,7 +60,7 @@ jobs:
           --cache-class ${{ steps.bootstrap.outputs.cache_class || 'cold' }}
           --status ${{ steps.pytest.outcome == 'success' && 'success' || 'failure' }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
+        if: steps.package.outcome == 'success'
         with:
           name: real-odoo-smoke-evidence
           path: |
@@ -68,6 +70,13 @@ jobs:
             .artifacts/real-odoo-e2e/junit.xml
             .artifacts/real-odoo-e2e/timing.json
             .artifacts/real-odoo-e2e/resource-manifest.json
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.package.outcome != 'success'
+        with:
+          name: real-odoo-smoke-packaging-failure
+          path: |
+            .artifacts/real-odoo-e2e/junit.xml
             .artifacts/real-odoo-e2e/packaging-error.json
           retention-days: 7
 
