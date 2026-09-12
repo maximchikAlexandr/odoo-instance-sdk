@@ -255,12 +255,33 @@ def test_source_backed_full_critical_path(
     source_backup: ArchiveIdentity,
     record_property: Any,
     monkeypatch: pytest.MonkeyPatch,
-    isolated_cli_catalogue: Path,
 ) -> None:
     """Prove one serial public workflow from pinned source checkout to cleanup."""
     source_repository, odoo_bin_relative = _source_repository()
     runner = CliRunner()
     runtime = target_runtime
+    catalogue_path = (runtime.root / "catalog.sqlite3").resolve()
+
+    def run_catalog_path(*, ensure_exists: bool = True) -> Path:
+        if ensure_exists:
+            catalogue_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return catalogue_path
+
+    for provider in (
+        "odoo_instance_sdk.cli.get_catalog_path",
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        "odoo_instance_sdk.commands.context.get_catalog_path",
+        "odoo_instance_sdk.commands.env.get_catalog_path",
+        "odoo_instance_sdk.internal.port_allocation.get_catalog_path",
+        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        "odoo_instance_sdk.resources.monitor.get_catalog_path",
+    ):
+        monkeypatch.setattr(provider, run_catalog_path)
+    from odoo_instance_sdk.commands import backup as backup_commands
+    from odoo_instance_sdk.commands import resource as resource_commands
+
+    monkeypatch.setattr(backup_commands._catalog_path_provider, "provider", run_catalog_path)
+    monkeypatch.setattr(resource_commands._catalog_path_provider, "provider", run_catalog_path)
     master_password = runtime.master_password_file.read_text(encoding="utf-8").strip()
     pg_password = runtime.secret_file.read_text(encoding="utf-8").strip()
     addon_root = Path(__file__).parents[2] / "fixtures" / "addons"
@@ -455,8 +476,13 @@ def test_source_backed_full_critical_path(
         monkeypatch.setenv(key, value)
     client = OdooClient(config=OdooClientConfig(executable="odoo"))
     assert os.environ["ODCLI_E2E_CATALOG"] == runtime.environment["ODCLI_E2E_CATALOG"]
+    assert Path(cli_environment["ODCLI_E2E_CATALOG"]).resolve() == catalogue_path
     sdk_catalogue = client.get_catalog().db_path.resolve()
-    assert sdk_catalogue == isolated_cli_catalogue.resolve()
+    assert sdk_catalogue == catalogue_path
+    backup_catalogue = backup_commands._catalog_path_provider.provider
+    resource_catalogue = resource_commands._catalog_path_provider.provider
+    assert callable(backup_catalogue) and backup_catalogue().resolve() == catalogue_path
+    assert callable(resource_catalogue) and resource_catalogue().resolve() == catalogue_path
     env_obj = client.environments.get(environment_id)
     instance = client.instance.from_environment(env_obj)
     assert (
@@ -660,6 +686,20 @@ def test_source_backed_full_critical_path(
     removed = _invoke(runner, project, cli_environment, "env", "remove", environment_id, "--yes")
     assert removed.get("id") == environment_id
     assert removed.get("state") == "removed"
+    removed_again = _invoke(
+        runner, project, cli_environment, "env", "remove", environment_id, "--yes"
+    )
+    assert removed_again == removed
+    assert (
+        sum(
+            1
+            for row in client.get_catalog().list_environments(include_removed=True)
+            if str(row["id"]) == environment_id
+        )
+        == 1
+    )
+    assert not Path(str(environment["worktree_path"])).exists()
+    assert not Path(str(environment["generated_config_path"])).exists()
     postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
     repeated_postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
     assert postgres_stop == repeated_postgres_stop == {}
@@ -675,15 +715,18 @@ def test_source_backed_full_critical_path(
             runtime.topology.source_odoo_port,
             runtime.reservations[3].port,
         ),
-        catalog_path=runtime.root / "catalog.sqlite3",
+        catalog_path=catalogue_path,
         filestore_paths=(runtime.root / "source-data", runtime.root / "target-data"),
     )
     assert audit.clean, audit.leaks
+    runtime.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    runtime.artifact_root.chmod(0o700)
     _record(
         record_property,
         "E2E-CP-15",
         {
             "removed": removed,
+            "removed_again": removed_again,
             "postgres_stop": postgres_stop,
             "repeated_postgres_stop": repeated_postgres_stop,
             "cleanup_audit": audit.leaks,
@@ -715,4 +758,6 @@ def test_source_backed_full_critical_path(
         encoding="utf-8",
     )
     evidence.chmod(0o600)
+    assert evidence.is_file()
+    assert evidence.stat().st_mode & 0o777 == 0o600
     assert evidence.stat().st_size < 2 * 1024 * 1024
