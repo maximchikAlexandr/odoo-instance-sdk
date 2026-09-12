@@ -15,6 +15,7 @@ from scripts import real_odoo_timing
 
 _RUNTIMES: list[Any] = []
 _RESOURCE_SNAPSHOTS: list[list[dict[str, object]]] = []
+_SOURCE_CACHE_CONSUMED: list[bool] = []
 _ORIGINAL_FINALIZE: Callable[..., Any] | None = None
 
 
@@ -53,14 +54,16 @@ def _capture_service_logs(runtime: Any) -> None:
         "--tail",
         "200",
     ]
-    for name, services in (
+    services = ("source_odoo",) if runtime.scope == "source" else ("target_init",)
+    postgres_services = ("source_postgres",) if runtime.scope == "source" else ("target_postgres",)
+    for name, selected_services in (
         ("compose.log", ()),
-        ("odoo.log", ("source_odoo", "target_odoo", "target_init")),
-        ("postgres.log", ("source_postgres", "target_postgres")),
+        ("odoo.log", services),
+        ("postgres.log", postgres_services),
     ):
         try:
             result = subprocess.run(
-                [*command, *services],
+                [*command, *selected_services],
                 cwd=runtime.compose_file.parent,
                 capture_output=True,
                 check=False,
@@ -121,15 +124,60 @@ def _audit(runtime: Any) -> dict[str, object]:
     }
 
 
-def _source_cache_consumed() -> bool:
-    cache = os.environ.get("ODCLI_E2E_SOURCE_CACHE")
-    checkout = os.environ.get("ODCLI_E2E_SOURCE_CHECKOUT")
-    if not cache or not checkout:
-        return False
+def _source_cache_path() -> Path | None:
+    cache = os.environ.get(
+        "ODCLI_E2E_ODOO_SOURCE_CACHE",
+        os.environ.get("ODCLI_E2E_SOURCE_CACHE"),
+    )
+    if not cache:
+        return None
     cache_path = Path(cache)
-    checkout_path = Path(checkout)
     if not cache_path.is_absolute():
         cache_path = Path.cwd() / cache_path
+    return cache_path
+
+
+def _runtime_consumed_source_cache(runtime: Any) -> bool:
+    cache_path = _source_cache_path()
+    if cache_path is None:
+        return False
+    alternate = (cache_path / "objects").resolve()
+    root = Path(runtime.root)
+    if not root.is_dir():
+        return False
+    for alternate_file in root.rglob("alternates"):
+        if alternate_file.parent.name != "info":
+            continue
+        try:
+            project = alternate_file.parents[3]
+            lines = alternate_file.read_text(encoding="utf-8").splitlines()
+            head = subprocess.run(
+                ["git", "-C", str(project), "rev-parse", "HEAD"],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=30.0,
+            )
+            if (
+                head.returncode == 0
+                and head.stdout.strip() == "cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
+                and any(Path(line).resolve() == alternate for line in lines if line)
+            ):
+                return True
+        except (OSError, subprocess.SubprocessError, IndexError):
+            continue
+    return False
+
+
+def _source_cache_consumed() -> bool:
+    """Report whether the real source-backed OdCLI checkout used the bare cache."""
+    if not _SOURCE_CACHE_CONSUMED or not any(_SOURCE_CACHE_CONSUMED):
+        return False
+    cache_path = _source_cache_path()
+    checkout = os.environ.get("ODCLI_E2E_SOURCE_CHECKOUT")
+    if cache_path is None or not checkout:
+        return False
+    checkout_path = Path(checkout)
     if not checkout_path.is_absolute():
         checkout_path = Path.cwd() / checkout_path
     checkout_bin = checkout_path / "odoo-bin"
@@ -182,6 +230,7 @@ def _write_resource_manifest() -> None:
 def _instrumented_finalize(runtime: Any, primary_failure: BaseException | None = None) -> None:
     _RUNTIMES.append(runtime)
     _RESOURCE_SNAPSHOTS.append(_snapshot_resources(runtime))
+    _SOURCE_CACHE_CONSUMED.append(_runtime_consumed_source_cache(runtime))
     _capture_service_logs(runtime)
     configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
     started = time.monotonic()
@@ -189,10 +238,12 @@ def _instrumented_finalize(runtime: Any, primary_failure: BaseException | None =
         assert _ORIGINAL_FINALIZE is not None
         _ORIGINAL_FINALIZE(runtime, primary_failure)
     finally:
-        if configured:
-            real_odoo_timing.record(Path(configured), "cleanup", started, time.monotonic())
-        if getattr(runtime, "scope", None) == "source":
-            _write_resource_manifest()
+        try:
+            if getattr(runtime, "scope", None) == "source":
+                _write_resource_manifest()
+        finally:
+            if configured:
+                real_odoo_timing.record(Path(configured), "cleanup", started, time.monotonic())
 
 
 def pytest_configure(_config: object) -> None:

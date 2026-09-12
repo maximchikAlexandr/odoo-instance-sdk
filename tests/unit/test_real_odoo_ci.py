@@ -313,6 +313,36 @@ def test_evidence_records_runtime_and_audit_properties(tmp_path: Path) -> None:
         assert f'name="{property_name}"' in junit
 
 
+def test_failure_evidence_keeps_non_clean_completed_audit(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _evidence_contract(source, junit_failures=1)
+    resource = json.loads((source / "resource-manifest.json").read_text())
+    resource["audit"] = {
+        "state": "failed",
+        "leaks": [{"run_id": "owned-run", "state": "leaked"}],
+        "runs": [{"run_id": "owned-run", "state": "leaked", "leaks": {"port": ["1"]}}],
+    }
+    (source / "resource-manifest.json").write_text(json.dumps(resource))
+    for name in ("compose.log", "odoo.log", "postgres.log"):
+        (source / name).write_text("bounded service tail\n")
+    canary = tmp_path / "canary"
+    canary.write_text("canary-value-1234\n", encoding="utf-8")
+    result = evidence.package_evidence(
+        source,
+        tmp_path / "failure.tar.gz",
+        status="failure",
+        canary_file=canary,
+        tier="smoke",
+        cache_class="cold",
+    )
+    assert result["ok"] is True
+    assert (
+        json.loads((source / "resource-manifest.json").read_text())["evidence"]["audit_state"]
+        == "failed"
+    )
+
+
 def test_evidence_exercises_warm_budget_classification(tmp_path: Path) -> None:
     timing_path = tmp_path / "timing.json"
     timing_path.write_text(
@@ -348,12 +378,22 @@ def test_timing_plugin_measures_fixture_cleanup_after_test(
     hook = timing.pytest_sessionfinish(None, 0)
     next(hook)
     value = json.loads(path.read_text())
-    assert value["phases"]["test"]["duration_seconds"] == 2.0
+    assert "duration_seconds" not in value["phases"]["test"]
     assert "cleanup" not in value["phases"]
     with pytest.raises(StopIteration):
         next(hook)
     value = json.loads(path.read_text())
-    assert "cleanup" not in value["phases"]
+    assert value["phases"]["test"]["duration_seconds"] == 2.0
+
+
+def test_test_timing_excludes_recorded_cleanup_segments(tmp_path: Path) -> None:
+    path = tmp_path / "timing.json"
+    timing.start(path, "test", now=0.0)
+    timing.record(path, "cleanup", 10.0, 20.0)
+    assert timing.finish_test_excluding_cleanup(path, now=50.0) == 40.0
+    value = json.loads(path.read_text())
+    assert value["phases"]["test"]["duration_seconds"] == 40.0
+    assert value["phases"]["cleanup"]["duration_seconds"] == 10.0
 
 
 def test_bootstrap_rejects_injected_cache_key_mismatch(
@@ -424,6 +464,7 @@ def test_cleanup_instrumentation_wraps_finalize_and_writes_post_audit_evidence(
     )
     ci._RUNTIMES.clear()
     ci._RESOURCE_SNAPSHOTS.clear()
+    ci._SOURCE_CACHE_CONSUMED.clear()
     ci._instrumented_finalize(runtime)
     assert finalized == ["done"]
     timing_value = json.loads(timing_path.read_text())
@@ -431,6 +472,58 @@ def test_cleanup_instrumentation_wraps_finalize_and_writes_post_audit_evidence(
     resource = json.loads((tmp_path / "evidence" / "resource-manifest.json").read_text())
     assert resource["resources"][0]["name"] == "owned-run-container"
     assert resource["audit"]["state"] == "clean"
+
+
+def test_service_log_capture_selects_generated_compose_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "scope": "target",
+            "topology": type("Topology", (), {"project_name": "owned-project"})(),
+            "compose_file": tmp_path / "compose.yaml",
+        },
+    )()
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "bounded tail", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(ci, "_evidence_root", lambda: tmp_path / "evidence")
+    ci._capture_service_logs(runtime)
+    flattened = [argument for command in calls for argument in command]
+    assert "target_init" in flattened
+    assert "target_postgres" in flattened
+    assert "source_odoo" not in flattened
+    assert "target_odoo" not in flattened
+    assert "source_postgres" not in flattened
+    assert (tmp_path / "evidence" / "odoo.log").is_file()
+    assert (tmp_path / "evidence" / "postgres.log").is_file()
+
+
+def test_source_cache_consumption_requires_actual_shared_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "odoo.git"
+    alternates = tmp_path / "runtime" / "project" / ".git" / "objects" / "info"
+    alternates.mkdir(parents=True)
+    cache_objects = cache / "objects"
+    cache_objects.mkdir(parents=True)
+    (alternates / "alternates").write_text(str(cache_objects) + "\n", encoding="utf-8")
+    runtime = type("Runtime", (), {"root": tmp_path / "runtime"})()
+    monkeypatch.setenv("ODCLI_E2E_ODOO_SOURCE_CACHE", str(cache))
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command, 0, "cd992ceebbaf343c03e1941d39cfe423d35ba6c6\n", ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert ci._runtime_consumed_source_cache(runtime)
 
 
 def test_full_bootstrap_hashes_requirements_after_source_probe(
@@ -472,14 +565,14 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert ".cache/odoo-source" in full
     assert ".cache/uv" in full
     assert "backups" not in full.lower()
-    assert (
-        "uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -m 'real_odoo and e2e_smoke' tests/integration/real_odoo"
-        in docs
-    )
-    assert (
-        "uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -m 'real_odoo and e2e_full' tests/integration/real_odoo"
-        in docs
-    )
+    smoke_command = "uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo"
+    full_command = "uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo"
+    assert smoke_command in smoke_job
+    assert smoke_command in docs
+    assert smoke_command in makefile
+    assert full_command in full
+    assert full_command in docs
+    assert full_command in makefile
     assert (
         "uv run python scripts/real_odoo_bootstrap.py --tier smoke --output .artifacts/real-odoo-e2e/bootstrap.json"
         in docs
@@ -519,7 +612,7 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert ".artifacts/real-odoo-e2e/odoo-source" not in full
     assert "from scripts.real_odoo_bootstrap import source_cache_key" in full
     assert "from scripts.real_odoo_bootstrap import uv_cache_key" in full
-    assert "--junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing" in makefile
-    assert "ODCLI_E2E_SOURCE_CACHE: .cache/odoo-source" in full
+    assert "ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source" in full
+    assert "ODCLI_E2E_SOURCE_CACHE: .cache/odoo-source" not in full
     action_refs = re.findall(r"uses:\s+[^@\s]+@([0-9a-f]{40})", smoke_job + full)
     assert action_refs and all(len(reference) == 40 for reference in action_refs)

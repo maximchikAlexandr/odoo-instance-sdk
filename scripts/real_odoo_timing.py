@@ -90,15 +90,38 @@ def record(path: Path, phase: Phase, started: float, finished: float) -> float:
     return duration
 
 
+def finish_test_excluding_cleanup(path: Path, *, now: float | None = None) -> float:
+    """Finish test timing after teardown, excluding recorded cleanup segments."""
+    manifest = _read(path)
+    phases = manifest["phases"]
+    if not isinstance(phases, dict) or not isinstance(phases.get("test"), dict):
+        raise TypeError("phase was not started: test")
+    test_phase = phases["test"]
+    started = test_phase.get("started_monotonic")
+    if not isinstance(started, (int, float)):
+        raise TypeError("phase has no monotonic start: test")
+    cleanup_phase = phases.get("cleanup")
+    cleanup = cleanup_phase.get("duration_seconds", 0.0) if isinstance(cleanup_phase, dict) else 0.0
+    if not isinstance(cleanup, (int, float)):
+        raise TypeError("invalid cleanup duration")
+    elapsed = (now if now is not None else time.monotonic()) - started
+    duration = round(max(0.0, elapsed - cleanup), 6)
+    test_phase["duration_seconds"] = duration
+    _write(path, manifest)
+    return duration
+
+
 def pytest_sessionfinish(_session: object, _exitstatus: int) -> Iterator[None]:
-    """Measure test completion before session fixture finalizers run."""
+    """Measure test completion after teardown, excluding cleanup segments."""
     configured = os.environ.get("ODCLI_E2E_TIMING_FILE")
     if not configured:
         yield
         return
     path = Path(configured)
-    finish(path, "test")
-    yield
+    try:
+        yield
+    finally:
+        finish_test_excluding_cleanup(path)
 
 
 try:

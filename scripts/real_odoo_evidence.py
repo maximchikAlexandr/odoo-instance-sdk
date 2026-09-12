@@ -176,14 +176,22 @@ def _validate_junit(junit: Path, status: Status) -> None:
         raise ValueError("failure evidence JUnit has no failed tests")
 
 
-def _validate_resource_manifest(source: Path, tier: str) -> dict[str, object]:
+def _validate_resource_manifest(source: Path, *, status: Status, tier: str) -> dict[str, object]:
     manifest = _load_json(source / "resource-manifest.json", "resource manifest")
     resources = manifest.get("resources")
     audit = manifest.get("audit")
     if not isinstance(resources, list) or not resources:
         raise ValueError("resource manifest lacks owned resource records")
-    if not isinstance(audit, dict) or audit.get("state") != "clean" or audit.get("leaks") != []:
-        raise ValueError("resource manifest lacks a clean final leak audit")
+    if not isinstance(audit, dict):
+        raise ValueError("resource manifest lacks final leak audit")  # noqa: TRY004
+    state = audit.get("state")
+    leaks = audit.get("leaks")
+    if status == "success" and (state != "clean" or leaks != []):
+        raise ValueError("successful evidence requires a clean final leak audit")
+    if status == "failure" and state not in {"clean", "failed", "leaked", "error"}:
+        raise ValueError("failure evidence lacks a completed leak audit")
+    if not isinstance(leaks, (list, dict)):
+        raise ValueError("resource manifest lacks leak details")  # noqa: TRY004
     if not isinstance(audit.get("runs"), list) or not audit["runs"]:
         raise ValueError("resource manifest lacks final audit runs")
     if tier == "full" and manifest.get("source_cache_consumed") is not True:
@@ -196,7 +204,7 @@ def _validate_semantic_contract(
 ) -> tuple[dict[str, object], dict[str, object]]:
     bootstrap = _validate_bootstrap(source)
     _validate_junit(source / "junit.xml", status)
-    resource = _validate_resource_manifest(source, tier)
+    resource = _validate_resource_manifest(source, status=status, tier=tier)
     return bootstrap, resource
 
 

@@ -93,7 +93,10 @@ def _image_manifest_is_pinned(image: str, expected_platform_digest: str) -> bool
 
 
 def _source_cache_path() -> Path:
-    configured = os.environ.get("ODCLI_E2E_SOURCE_CACHE", ".cache/odoo-source")
+    configured = os.environ.get(
+        "ODCLI_E2E_ODOO_SOURCE_CACHE",
+        os.environ.get("ODCLI_E2E_SOURCE_CACHE", ".cache/odoo-source"),
+    )
     path = Path(configured)
     return path if path.is_absolute() else ROOT / path
 
