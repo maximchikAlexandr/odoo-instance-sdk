@@ -26,7 +26,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 623),
         ("src/odoo_instance_sdk/commands/output.py", 630),
         ("src/odoo_instance_sdk/commands/output.py", 632),
-        ("src/odoo_instance_sdk/resources/instance.py", 1186),
+        ("src/odoo_instance_sdk/resources/instance.py", 1191),
     }
 )
 
@@ -40,7 +40,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 632): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/cli.py", 1095): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/cli.py", 1096): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/resources/instance.py", 1186): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/resources/instance.py", 1191): "lifecycle cleanup diagnostic transport",
 }
 
 

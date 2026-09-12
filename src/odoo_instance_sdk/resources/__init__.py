@@ -8,6 +8,7 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentState,
 )
 from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
+from odoo_instance_sdk.resources.module import ModuleResource
 
 __all__ = [
     "BackupResource",
@@ -18,5 +19,6 @@ __all__ = [
     "EnvironmentResource",
     "EnvironmentState",
     "InstanceFactory",
+    "ModuleResource",
     "OdooInstance",
 ]

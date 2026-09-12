@@ -19,12 +19,14 @@ from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
+    emit,
     fail,
     field_schema,
     model_to_dict,
     output_options,
     resolve_output_mode,
     run_or_preview,
+    success_document,
 )
 from odoo_instance_sdk.commands.test import (
     project_execution_result,
@@ -35,7 +37,12 @@ from odoo_instance_sdk.internal.automation import (
     module_records_from_result,
 )
 from odoo_instance_sdk.internal.cli_format import rich_cell
-from odoo_instance_sdk.models import CommandResult, OdooTestSpec
+from odoo_instance_sdk.internal.test_selection import _ChangedSelectionError
+from odoo_instance_sdk.models import (
+    CommandResult,
+    ModuleUpdatePlan,
+    OdooTestSpec,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
@@ -127,6 +134,123 @@ def _rich_module_update(document: OutputDocument) -> str:
     return console.export_text().rstrip()
 
 
+def _rich_module_info(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    value = document.result.get("module", {}) if isinstance(document.result, dict) else {}
+    table = Table("Field", "Value", title="Odoo module")
+    if isinstance(value, dict):
+        table.add_row("Name", rich_cell(value.get("name", "")))
+        table.add_row("Path", rich_cell(value.get("path", "")))
+        dependencies = value.get("depends", [])
+        dependencies_text = (
+            ", ".join(str(item) for item in dependencies) if isinstance(dependencies, list) else ""
+        )
+        table.add_row("Dependencies", rich_cell(dependencies_text))
+        shadowed = value.get("shadowed_paths")
+        if isinstance(shadowed, list) and shadowed:
+            table.add_row("Shadowed", rich_cell(", ".join(str(item) for item in shadowed)))
+    console = Console(record=True, color_system=None, width=180)
+    console.print(table)
+    return console.export_text().rstrip()
+
+
+def _rich_module_order(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    modules = document.result.get("modules", []) if isinstance(document.result, dict) else []
+    return "Install order: " + (
+        ", ".join(str(item) for item in modules) if isinstance(modules, list) else ""
+    )
+
+
+def _rich_module_where(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
+    table = Table("Field", "Value", title="Odoo module location")
+    for field in ("name", "path", "manifest_path"):
+        table.add_row(field, rich_cell(result.get(field, "")))
+    console = Console(record=True, color_system=None, width=180)
+    console.print(table)
+    return console.export_text().rstrip()
+
+
+def _rich_module_deps(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    value = document.result.get("module", {}) if isinstance(document.result, dict) else {}
+    module = value.get("module", {}) if isinstance(value, dict) else {}
+    dependencies = value.get("dependencies", []) if isinstance(value, dict) else []
+    module_name = module.get("name", "") if isinstance(module, dict) else ""
+    table = Table("Dependency", "Status", "Path", title=f"Dependencies of {module_name}")
+    if isinstance(dependencies, list) and dependencies:
+        for dependency in dependencies:
+            if isinstance(dependency, dict):
+                table.add_row(
+                    rich_cell(dependency.get("name", "")),
+                    "missing" if dependency.get("missing") else "available",
+                    rich_cell(dependency.get("path") or ""),
+                )
+    else:
+        table.add_row("(none)", "none", "")
+    console = Console(record=True, color_system=None, width=180)
+    console.print(table)
+    return console.export_text().rstrip()
+
+
+def _module_update_payload(
+    plan: ModuleUpdatePlan,
+    value: CommandResult | None,
+    *,
+    dry_run: bool,
+) -> dict[str, JsonValue]:
+    from odoo_instance_sdk.internal.server import parse_payload
+
+    updated: list[str] = []
+    if value is not None:
+        payload = parse_payload(value.stdout)
+        raw = payload.get("result") if isinstance(payload, dict) else None
+        candidates = raw.get("updated") if isinstance(raw, dict) else None
+        if isinstance(candidates, list):
+            updated = [str(item) for item in candidates if isinstance(item, str)]
+    result: dict[str, JsonValue] = {
+        "modules": cast("JsonValue", list(plan.modules)),
+        "updated": cast("JsonValue", updated),
+        "not_installed": cast("JsonValue", list(plan.not_installed)),
+        "changed_files": cast("JsonValue", list(plan.changed_files)),
+        "ignored_paths": cast("JsonValue", list(plan.ignored_paths)),
+        "unmapped_paths": cast("JsonValue", list(plan.unmapped_paths)),
+    }
+    for field in (
+        "base_source",
+        "requested_base",
+        "resolved_base",
+        "merge_base",
+        "head",
+    ):
+        result[field] = cast("JsonValue", getattr(plan, field))
+    if dry_run:
+        result["dry_run"] = True
+    return result
+
+
+def _checked_module_update_payload(
+    plan: ModuleUpdatePlan, value: CommandResult | None
+) -> dict[str, JsonValue]:
+    if value is not None and value.returncode != 0:
+        from odoo_instance_sdk.resources.module import (
+            _module_update_failure,
+            classify_module_update_error,
+        )
+
+        conflict = classify_module_update_error(value)
+        if conflict is not None:
+            raise conflict
+        raise _module_update_failure(value)
+    return _module_update_payload(plan, value, dry_run=False)
+
+
 def module_group() -> None:
     """Discover, test, and upgrade Odoo modules."""
 
@@ -134,6 +258,115 @@ def module_group() -> None:
 @click.group("module", help="Discover, test, and upgrade Odoo modules.")
 def _module_group() -> None:
     module_group()
+
+
+@_module_group.command("info", help="Show one safely discovered Odoo module.")
+@click.argument("module", required=False)
+@output_options
+@pass_cli_context
+def module_info(
+    ctx: CliContext,
+    module: str | None,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    try:
+        instance = cli_context.ready_instance(ctx).instance
+        value = instance.modules.info(module)
+        emit(
+            success_document(command="module.info", result={"module": model_to_dict(value)}),
+            output_mode,
+            rich=_rich_module_info,
+        )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail(output_mode, "module.info", exc, dry_run=False)
+    raise click.exceptions.Exit(0)
+
+
+@_module_group.command("where", help="Show the resolved filesystem path for an Odoo module.")
+@click.argument("module", required=False)
+@output_options
+@pass_cli_context
+def module_where(
+    ctx: CliContext,
+    module: str | None,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    try:
+        instance = cli_context.ready_instance(ctx).instance
+        value = instance.modules.info(module)
+        payload: dict[str, JsonValue] = {
+            "name": value.name,
+            "path": str(value.path),
+            "manifest_path": str(value.manifest_path),
+        }
+        emit(
+            success_document(command="module.where", result=payload),
+            output_mode,
+            rich=_rich_module_where,
+        )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail(output_mode, "module.where", exc, dry_run=False)
+    raise click.exceptions.Exit(0)
+
+
+@_module_group.command("deps", help="Show direct Odoo module dependencies.")
+@click.argument("module", required=False)
+@output_options
+@pass_cli_context
+def module_deps(
+    ctx: CliContext,
+    module: str | None,
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    try:
+        instance = cli_context.ready_instance(ctx).instance
+        value = instance.modules.deps(module)
+        emit(
+            success_document(command="module.deps", result={"module": model_to_dict(value)}),
+            output_mode,
+            rich=_rich_module_deps,
+        )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail(output_mode, "module.deps", exc, dry_run=False)
+    raise click.exceptions.Exit(0)
+
+
+@_module_group.command("install-order", help="Plan a stable dependency install order.")
+@click.argument("modules", nargs=-1, required=True)
+@output_options
+@pass_cli_context
+def module_install_order(
+    ctx: CliContext,
+    modules: tuple[str, ...],
+    output_format: str | None,
+    json_output: bool,
+) -> None:
+    output_mode = resolve_output_mode(output_format, json_output)
+    try:
+        instance = cli_context.ready_instance(ctx).instance
+        value = instance.modules.install_order(modules)
+        emit(
+            success_document(command="module.install-order", result=model_to_dict(value)),
+            output_mode,
+            rich=_rich_module_order,
+        )
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail(output_mode, "module.install-order", exc, dry_run=False)
+    raise click.exceptions.Exit(0)
 
 
 @_module_group.command("list", aliases=["ls"], help="List installed or available Odoo modules.")
@@ -179,41 +412,97 @@ def module_list(
 
 
 @_module_group.command("update", help="Upgrade selected Odoo modules.")
-@click.argument("modules", nargs=-1, required=True)
+@click.argument("modules", nargs=-1, required=False)
+@click.option("--changed", is_flag=True, default=False, help="Select changed addon modules.")
+@click.option("--base", default=None, help="Git baseline used with --changed.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Plan only.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Confirm execution.")
 @output_options
 @pass_cli_context
-def module_update(
+def module_update(  # noqa: C901
     ctx: CliContext,
     modules: tuple[str, ...],
+    changed: bool,
+    base: str | None,
     dry_run: bool,
     yes: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
+    if changed and modules:
+        raise click.UsageError("MODULE cannot be combined with --changed")
+    if base is not None and not changed:
+        raise click.UsageError("--base requires --changed")
+    if not changed and not modules:
+        raise click.UsageError("module update requires MODULE or --changed")
     try:
         runtime_context = cli_context.ready_instance(ctx)
-        runtime_context.runtime
+        runtime = runtime_context.runtime
         instance = runtime_context.instance
-        selected_modules = tuple(modules)
+        if changed:
+            selection = instance.modules.changed_plan(runtime, base=base)
+            if selection.unmapped_paths:
+                fail(
+                    output_mode,
+                    "module.update",
+                    "changed paths are not mapped to safe addon modules: "
+                    + ", ".join(selection.unmapped_paths),
+                    dry_run=dry_run,
+                    error_code="module_changed_path_unmapped",
+                )
+            if selection.not_installed and not dry_run:
+                fail(
+                    output_mode,
+                    "module.update",
+                    "modules not installed: " + ", ".join(selection.not_installed),
+                    dry_run=dry_run,
+                )
+            if not selection.modules:
+                payload = _module_update_payload(selection, None, dry_run=dry_run)
+                payload["reason"] = (
+                    "no_installed_modules" if selection.not_installed else "no_addon_changes"
+                )
+                emit(
+                    success_document(command="module.update", result=payload, dry_run=dry_run),
+                    output_mode,
+                    rich=_rich_module_update,
+                )
+                raise click.exceptions.Exit(0)  # noqa: TRY301
+        else:
+            selected_modules = tuple(modules)
+            selection = ModuleUpdatePlan(modules=selected_modules)
+
+        from odoo_instance_sdk.resources.module import ModuleResource
+
+        resource = getattr(instance, "modules", None)
+        if not changed and isinstance(resource, ModuleResource):
+            selection = resource.plan_update(selection.modules, selection=selection)
+            if selection.not_installed and not dry_run:
+                fail(
+                    output_mode,
+                    "module.update",
+                    "modules not installed: " + ", ".join(selection.not_installed),
+                    dry_run=dry_run,
+                )
 
         def build_command() -> Command[CommandResult]:
+            resource = getattr(instance, "modules", None)
+            if isinstance(resource, ModuleResource):
+                return resource.update_command(selection.modules, selection=selection)
+            # Keep the extracted callback seam usable for lightweight test and
+            # compatibility instances that predate OdooInstance.modules.
             return cast(
                 "Callable[..., Command[CommandResult]]",
                 getattr(sys.modules["odoo_instance_sdk.cli"], "update_modules_command"),
-            )(instance, selected_modules)
+            )(instance, selection.modules)
 
         status, _outcome = run_or_preview(
             build_command,
             command_name="module.update",
             mode=output_mode,
             dry_run=dry_run,
-            result=lambda value: {
-                "modules": list(selected_modules),
-                "updated": _updated_modules(value),
-            },
+            result=lambda value: _checked_module_update_payload(selection, value),
             confirm=(
                 lambda: fail(
                     output_mode, "module.update", "module update requires --yes", dry_run=dry_run
@@ -222,9 +511,8 @@ def module_update(
             if not yes
             else None,
             preview=lambda command: {
-                "modules": list(selected_modules),
+                **_module_update_payload(selection, None, dry_run=True),
                 "plan": model_to_dict(command.plan),
-                "dry_run": True,
             },
             rich=_rich_module_update,
             progress=True,
@@ -232,6 +520,39 @@ def module_update(
     except SystemExit:
         raise
     except Exception as exc:
+        if isinstance(exc, _ChangedSelectionError):
+            selected = exc.plan
+            details = _module_update_payload(
+                ModuleUpdatePlan(
+                    modules=tuple(selected.modules),
+                    base_source=selected.base_source,
+                    requested_base=selected.requested_base,
+                    resolved_base=selected.resolved_base,
+                    merge_base=selected.merge_base,
+                    head=selected.head,
+                    changed_files=selected.changed_files,
+                    ignored_paths=selected.ignored_paths,
+                    unmapped_paths=selected.unmapped_paths,
+                ),
+                None,
+                dry_run=dry_run,
+            )
+            fail(
+                output_mode,
+                "module.update",
+                exc,
+                dry_run=dry_run,
+                error_code="module_changed_selection_failed",
+                details=details,
+            )
+        if getattr(exc, "code", None) == "module_operation_in_progress":
+            fail(
+                output_mode,
+                "module.update",
+                exc,
+                dry_run=dry_run,
+                error_code="module_operation_in_progress",
+            )
         fail(output_mode, "module.update", exc, dry_run=dry_run)
     raise click.exceptions.Exit(status)
 

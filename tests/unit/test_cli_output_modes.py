@@ -65,6 +65,10 @@ from odoo_instance_sdk.models import (
     DevelopmentEnvironment,
     EnvironmentCheckoutPlan,
     EnvironmentPythonMode,
+    Module,
+    ModuleDependencies,
+    ModuleDependency,
+    ModuleInstallOrder,
     OdooTestResult,
     PostgresClusterState,
     ProjectSummary,
@@ -246,6 +250,15 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     ),
     PublicLeafCase(
         ("module", "list"), ("module", "list", "sale"), "process-previewable-read-only", True
+    ),
+    PublicLeafCase(("module", "info"), ("module", "info", "sale"), "bounded-read-only", False),
+    PublicLeafCase(("module", "where"), ("module", "where", "sale"), "bounded-read-only", False),
+    PublicLeafCase(("module", "deps"), ("module", "deps", "sale"), "bounded-read-only", False),
+    PublicLeafCase(
+        ("module", "install-order"),
+        ("module", "install-order", "sale"),
+        "bounded-read-only",
+        False,
     ),
     PublicLeafCase(
         ("module", "update"), ("module", "update", "sale", "--yes"), "mutating-or-spawning", True
@@ -799,6 +812,30 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.cli.cli_context.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), env, instance),
         )
+
+    if path in {
+        ("module", "info"),
+        ("module", "where"),
+        ("module", "deps"),
+        ("module", "install-order"),
+    }:
+        module = Module(
+            name="sale",
+            path=str(tmp_path / "sale"),
+            manifest_path=str(tmp_path / "sale" / "__manifest__.py"),
+        )
+        if failing:
+            instance.modules.info.side_effect = fail_operation
+            instance.modules.deps.side_effect = fail_operation
+            instance.modules.install_order.side_effect = fail_operation
+        else:
+            instance.modules.info.return_value = module
+            instance.modules.deps.return_value = ModuleDependencies(
+                module=module,
+                dependencies=(ModuleDependency(name="base", missing=True),),
+            )
+            instance.modules.install_order.return_value = ModuleInstallOrder(modules=("sale",))
+        return
 
     if path == ("eval",):
         monkeypatch.setattr(

@@ -166,6 +166,7 @@ if TYPE_CHECKING:
         EnvironmentResource,
     )
     from odoo_instance_sdk.resources.instance import InstanceFactory, OdooInstance
+    from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -192,6 +193,7 @@ if TYPE_CHECKING:
             | EnvironmentMonitor
             | InstanceFactory
             | OdooInstance
+            | ModuleResource
             | PostgresCluster
         ]
         | _CanonicalBytes
@@ -230,6 +232,20 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "ClusterResourceSnapshot": ("odoo_instance_sdk.models", "ClusterResourceSnapshot"),
     "ClusterSnapshot": ("odoo_instance_sdk.models", "ClusterSnapshot"),
     "CommandResult": ("odoo_instance_sdk.models", "CommandResult"),
+    "Module": ("odoo_instance_sdk.models", "Module"),
+    "ModuleInfo": ("odoo_instance_sdk.models", "ModuleInfo"),
+    "ModuleDependencies": ("odoo_instance_sdk.models", "ModuleDependencies"),
+    "ModuleDependencyResult": ("odoo_instance_sdk.models", "ModuleDependencyResult"),
+    "ModuleDependency": ("odoo_instance_sdk.models", "ModuleDependency"),
+    "ModuleInstallOrder": ("odoo_instance_sdk.models", "ModuleInstallOrder"),
+    "ModuleInstallOrderResult": ("odoo_instance_sdk.models", "ModuleInstallOrderResult"),
+    "ModuleOperationInProgressError": (
+        "odoo_instance_sdk.exceptions",
+        "ModuleOperationInProgressError",
+    ),
+    "ModuleResource": ("odoo_instance_sdk.resources.module", "ModuleResource"),
+    "ModuleUpdatePlan": ("odoo_instance_sdk.models", "ModuleUpdatePlan"),
+    "ModuleUpdateResult": ("odoo_instance_sdk.models", "ModuleUpdateResult"),
     "BloatCapabilities": ("odoo_instance_sdk.models", "BloatCapabilities"),
     "CommandTimeoutError": ("odoo_instance_sdk.exceptions", "CommandTimeoutError"),
     "ConfigError": ("odoo_instance_sdk.exceptions", "ConfigError"),

@@ -44,6 +44,12 @@ class PlanValidationError(PlanError):
     code = "plan_validation"
 
 
+class ModuleOperationInProgressError(PlanError):
+    """Odoo rejected an update because another module operation is active."""
+
+    code = "module_operation_in_progress"
+
+
 class StalePlanError(PlanError):
     """A captured precondition changed before execution began."""
 

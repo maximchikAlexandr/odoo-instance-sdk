@@ -382,6 +382,10 @@ sentence; use the entry's `--help` for exact options.
 - `odcli exec` — Execute a Python script through the Odoo shell boundary.
 - `odcli test` — Select and run Odoo tests, including changed-add-on selection.
 - `odcli module list` — Discover installable modules visible to the environment.
+- `odcli module info` — Show one safely discovered module and manifest metadata.
+- `odcli module where` — Show the resolved absolute path for one module.
+- `odcli module deps` — Show direct dependencies and missing manifests.
+- `odcli module install-order` — Plan a stable dependency installation order.
 - `odcli module test` — Run tests for explicitly named modules.
 - `odcli module update` — Upgrade explicitly named modules in the selected database.
 - `odcli translations export` — Export translations for a selected module and languages.

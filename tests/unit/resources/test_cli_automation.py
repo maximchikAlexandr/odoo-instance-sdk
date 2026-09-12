@@ -1826,7 +1826,7 @@ class TestNoNewPublicResources:
     def test_no_module_resource(self) -> None:
         from odoo_instance_sdk import resources as r
 
-        assert not hasattr(r, "ModuleResource")
+        assert hasattr(r, "ModuleResource")
 
     def test_no_translation_resource(self) -> None:
         from odoo_instance_sdk import resources as r

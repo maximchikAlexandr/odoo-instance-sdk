@@ -317,7 +317,7 @@ def plan_module_update(instance: OdooInstance, modules: tuple[str, ...]) -> Modu
     installed = list_modules(instance, names=modules, state="installed")
     installed_names = {m.name for m in installed}
     not_installed = [m for m in modules if m not in installed_names]
-    return ModuleUpdatePlan(modules=list(installed_names), not_installed=not_installed)
+    return ModuleUpdatePlan(modules=sorted(installed_names), not_installed=not_installed)
 
 
 def update_modules(
@@ -338,6 +338,9 @@ def update_modules(
 def update_modules_command(
     instance: OdooInstance,
     modules: tuple[str, ...],
+    *,
+    preflight: Callable[[RunContext[CommandResult]], None] | None = None,
+    extra_steps: tuple[PreparedStep, ...] = (),
 ) -> Command[CommandResult]:
     """Capture one exact module-upgrade child after selection is frozen."""
     if not modules:
@@ -347,6 +350,8 @@ def update_modules_command(
         source,
         commit=True,
         exclusive=True,
+        preflight=preflight,
+        extra_steps=extra_steps,
         result_converter=lambda result: _validate_module_update_result(result, modules),
     )
 
