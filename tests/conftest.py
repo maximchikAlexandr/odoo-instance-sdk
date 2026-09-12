@@ -194,15 +194,40 @@ def isolated_cli_catalogue(  # noqa: C901
     """Keep every init path in a per-test, per-worker catalogue root."""
     worker_id = str(getattr(request.config, "workerinput", {}).get("workerid", "master"))
     worker_root = tmp_path / f"catalogue-{worker_id}"
+    user_root = worker_root / ".odcli"
     data_root = worker_root / "data"
     state_root = worker_root / "state"
     cache_root = worker_root / "cache"
     catalog_path = data_root / "catalog.sqlite3"
+    canonical_production_catalogue_path = (
+        Path.home().expanduser().resolve() / ".odcli" / "catalog.sqlite3"
+    )
 
     def data_root_path(*, ensure_exists: bool = True) -> Path:
         if ensure_exists:
             data_root.mkdir(parents=True, exist_ok=True)
         return data_root
+
+    def user_root_path(*, ensure_exists: bool = True) -> Path:
+        if ensure_exists:
+            user_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return user_root
+
+    from odoo_instance_sdk.internal import storage_migration
+
+    def canonical_root_path(home: Path | None = None) -> Path:
+        if home is None:
+            return user_root
+        return (home or Path.home()).expanduser().resolve() / ".odcli"
+
+    original_legacy_storage_roots = storage_migration.legacy_storage_roots
+
+    def legacy_roots(home: Path | None = None) -> dict[str, Path]:
+        if home is not None:
+            return dict(original_legacy_storage_roots(home))
+        return {
+            name: worker_root / "legacy" / name for name in ("config", "data", "cache", "state")
+        }
 
     def state_root_path() -> Path:
         state_root.mkdir(parents=True, exist_ok=True)
@@ -241,11 +266,15 @@ def isolated_cli_catalogue(  # noqa: C901
         def guarded(
             path: Path, *args: object, _original: object = original, **kwargs: object
         ) -> object:
-            if path == production_catalogue_path:
+            if path in {production_catalogue_path, canonical_production_catalogue_path}:
                 raise AssertionError(f"production catalogue accessed: {path}")
             return _original(path, *args, **kwargs)  # type: ignore[operator]
 
         monkeypatch.setattr(Path, method_name, guarded)
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.paths._user_root", user_root_path)
+    monkeypatch.setattr(storage_migration, "_canonical_root", canonical_root_path)
+    monkeypatch.setattr(storage_migration, "legacy_storage_roots", legacy_roots)
 
     if request.node.get_closest_marker("unpatched_xdg") is not None:
         return production_catalogue_path

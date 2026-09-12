@@ -15,6 +15,7 @@ from odoo_instance_sdk.exceptions import (
     OdooInstanceSdkError,
     ProjectManifestNotFoundError,
 )
+from odoo_instance_sdk.internal import paths as _paths
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.applied_settings import (
     AppliedSettingsError,
@@ -32,7 +33,6 @@ from odoo_instance_sdk.internal.git_worktree import (
     worktree_list_porcelain,
 )
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
-from odoo_instance_sdk.internal.paths import get_environments_root
 from odoo_instance_sdk.internal.postgres_compose import docker_available
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.project import ProjectConfig
@@ -264,7 +264,7 @@ def _check_catalog(report: DoctorReport, client: OdooClient) -> None:
 
 
 def _check_orphaned(report: DoctorReport, client: OdooClient) -> None:
-    environments_root = get_environments_root()
+    environments_root = _paths.get_environments_root()
     if not environments_root.is_dir():
         return
     catalog = client.get_catalog()

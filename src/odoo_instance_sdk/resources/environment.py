@@ -39,6 +39,7 @@ from odoo_instance_sdk.exceptions import (
     RestoreFailedError,
     StalePlanError,
 )
+from odoo_instance_sdk.internal import paths as _paths
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.applied_settings import (
     AppliedSettingsError,
@@ -63,7 +64,6 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_db_names,
     parse_odoo_config,
 )
-from odoo_instance_sdk.internal.paths import get_environments_root
 from odoo_instance_sdk.internal.pgadmin import PgAdminPhaseHandle
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.repo_key import repo_key
@@ -392,7 +392,7 @@ class EnvironmentResource:
 
         env_id = uuid.uuid4()
         key = repo_key(repo_root, git_common)
-        env_root = get_environments_root(ensure_exists=not dry_run_paths) / key / str(env_id)
+        env_root = _paths.get_environments_root(ensure_exists=not dry_run_paths) / key / str(env_id)
         worktree = env_root / "worktree"
         venv = env_root / "venv"
         generated_cfg = env_root / "odoo.conf"
@@ -2288,7 +2288,9 @@ class EnvironmentResource:
             )
         repo_root = Path(env.repository_root)
         expected_root = (
-            get_environments_root() / repo_key(repo_root, Path(env.git_common_dir)) / str(env.id)
+            _paths.get_environments_root()
+            / repo_key(repo_root, Path(env.git_common_dir))
+            / str(env.id)
         )
         env_root = Path(env.worktree_path).parent
         if env_root.absolute() != expected_root.absolute() or _has_symlink_component(env_root):

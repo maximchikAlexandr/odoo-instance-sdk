@@ -21,6 +21,7 @@ from odoo_instance_sdk.exceptions import (
     PostgresClusterError,
     ProjectManifestNotFoundError,
 )
+from odoo_instance_sdk.internal import paths as _paths
 from odoo_instance_sdk.internal.address import probe_address
 from odoo_instance_sdk.internal.cluster_resources import (
     BatchClusterRequest,
@@ -33,7 +34,6 @@ from odoo_instance_sdk.internal.git_activity import (
     collect_git_activity_from_identity,
 )
 from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
-from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.postgres_compose import (
     ComposeRunner,
     SubprocessComposeRunner,
@@ -431,7 +431,7 @@ class EnvironmentMonitor:
         """
         from odoo_instance_sdk.internal.proc import PreparedStep
 
-        db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
+        db_path = self.catalog_path if self.catalog_path is not None else _paths.get_catalog_path()
         try:
             catalog = BackupCatalog(db_path=db_path)
             try:
@@ -707,7 +707,7 @@ class EnvironmentMonitor:
     ) -> Snapshot:
         """Perform one coherent collection pass and return an immutable snapshot."""
         generated_at = datetime.now(UTC)
-        db_path = self.catalog_path if self.catalog_path is not None else get_catalog_path()
+        db_path = self.catalog_path if self.catalog_path is not None else _paths.get_catalog_path()
         try:
             catalog = BackupCatalog(db_path=db_path)
         except (BackupCatalogError, sqlite3.Error) as exc:

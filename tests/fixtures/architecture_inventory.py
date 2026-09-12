@@ -47,11 +47,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # Keep only deliberate, line-specific exceptions in this checked inventory so
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
-    # Storage migration journals are deliberately untyped JSON mappings; the
-    # migration boundary validates the version and stage before use.
-    "src/odoo_instance_sdk/internal/storage_migration.py": frozenset({88, 100}),
-}
+EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
 
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(

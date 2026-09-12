@@ -1,50 +1,79 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-import platformdirs
+_USER_ROOT_NAME = ".odcli"
 
-_APP_NAME = "odoo-instance-sdk"
+
+def _user_root(*, ensure_exists: bool = True) -> Path:
+    """Return the one SDK-owned root without consulting platformdirs."""
+    root = Path.home().expanduser().resolve() / _USER_ROOT_NAME
+    if ensure_exists:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+    return root
+
+
+def get_user_root(*, ensure_exists: bool = True) -> Path:
+    """Return the canonical global OdCli root (never repository-local ``.odcli``)."""
+    return _user_root(ensure_exists=ensure_exists)
+
+
+def get_config_root(*, ensure_exists: bool = True) -> Path:
+    root = _user_root(ensure_exists=ensure_exists) / "config"
+    if ensure_exists:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+    return root
 
 
 def get_cache_root(*, ensure_exists: bool = True) -> Path:
-    """Return the cache path, creating its normal mutable root by default."""
-    return Path(platformdirs.user_cache_dir(_APP_NAME, ensure_exists=ensure_exists))
+    """Compatibility name for the canonical global root.
+
+    Backups now have their own child directory; no platform cache root is used.
+    """
+    return _user_root(ensure_exists=ensure_exists)
 
 
 def get_backups_dir(*, ensure_exists: bool = True) -> Path:
-    """Return the backup path with explicit read-only resolution when requested."""
-    root = get_cache_root() if ensure_exists else get_cache_root(ensure_exists=False)
-    return root / "backups"
+    root = _user_root(ensure_exists=ensure_exists) / "backups"
+    if ensure_exists:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+    return root
 
 
 def get_data_root(*, ensure_exists: bool = True) -> Path:
-    return Path(platformdirs.user_data_dir(_APP_NAME, ensure_exists=ensure_exists))
+    return _user_root(ensure_exists=ensure_exists)
 
 
-def get_state_root() -> Path:
-    return Path(platformdirs.user_state_dir(_APP_NAME, ensure_exists=True))
+def get_state_root(*, ensure_exists: bool = True) -> Path:
+    return _user_root(ensure_exists=ensure_exists)
 
 
 def get_catalog_path(*, ensure_exists: bool = True) -> Path:
-    """Return the catalogue path, creating its normal mutable data root by default."""
-    return get_data_root(ensure_exists=ensure_exists) / "catalog.sqlite3"
+    return _user_root(ensure_exists=ensure_exists) / "catalog.sqlite3"
 
 
 def get_environments_root(*, ensure_exists: bool = True) -> Path:
-    return get_data_root(ensure_exists=ensure_exists) / "environments"
+    root = _user_root(ensure_exists=ensure_exists) / "environments"
+    if ensure_exists:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+    return root
 
 
-def get_locks_dir() -> Path:
-    return get_state_root() / "locks"
+def get_locks_dir(*, ensure_exists: bool = True) -> Path:
+    root = _user_root(ensure_exists=ensure_exists) / "locks"
+    if ensure_exists:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(root, 0o700)
+    return root
 
 
 def get_project_postgres_dir(project_id: str) -> Path:
-    """Runtime artifacts directory for a project's SDK-owned PostgreSQL cluster.
-
-    ``project_id`` is expected to be a deterministic identifier (e.g. ``repo_key``).
-    The directory is created lazily by callers — this function only returns the path.
-    """
+    """Return a project runtime directory below the canonical user root."""
     return get_data_root(ensure_exists=False) / "projects" / project_id / "postgres"
 
 
@@ -53,6 +82,7 @@ def get_pgadmin_root(*, ensure_exists: bool = False) -> Path:
     root = get_data_root(ensure_exists=ensure_exists) / "pgadmin"
     if ensure_exists:
         root.mkdir(mode=0o710, parents=True, exist_ok=True)
+        os.chmod(root, 0o710)
     return root
 
 
@@ -61,6 +91,7 @@ def get_pgadmin_private_dir(*, ensure_exists: bool = False) -> Path:
     private = root / "private"
     if ensure_exists:
         private.mkdir(mode=0o710, exist_ok=True)
+        os.chmod(private, 0o710)
     return private
 
 
@@ -69,4 +100,15 @@ def get_pgadmin_data_dir(*, ensure_exists: bool = False) -> Path:
     data = root / "data"
     if ensure_exists:
         data.mkdir(mode=0o770, exist_ok=True)
+        os.chmod(data, 0o770)
     return data
+
+
+def get_storage_migration_lock_path() -> Path:
+    # Keep the coordinator lock beside, rather than inside, the directory it
+    # migrates; a legacy locks directory must be comparable as a whole.
+    return _user_root(ensure_exists=False) / ".storage-migration.lock"
+
+
+def get_storage_migration_journal_path() -> Path:
+    return _user_root(ensure_exists=False) / "storage-migration.json"

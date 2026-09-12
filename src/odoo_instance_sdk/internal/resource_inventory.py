@@ -197,6 +197,7 @@ def open_catalog_read_only(path: Path) -> BackupCatalog | None:
 
     catalog = BackupCatalog.__new__(BackupCatalog)
     catalog.db_path = path
+    catalog._read_only = True
     catalog._conn = sqlite3.connect(
         f"file:{quote(str(path.resolve()), safe='/')}?mode=ro", uri=True
     )

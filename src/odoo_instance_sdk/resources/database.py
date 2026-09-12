@@ -920,6 +920,11 @@ class DatabaseResource:
         part_preexisted = part_path.exists()
         published = False
         catalog = self._instance._client.get_catalog()
+        project_id = (
+            self._instance._runtime_binding.project_id
+            if self._instance._runtime_binding is not None
+            else None
+        )
         catalog.start_download(
             backup_id=backup_id,
             source_base_url=self.base_url,
@@ -928,6 +933,7 @@ class DatabaseResource:
             filestore_requested=filestore,
             path=part_path,
             source_git_branch=source_git_branch,
+            project_id=project_id,
         )
 
         try:

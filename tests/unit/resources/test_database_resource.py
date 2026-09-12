@@ -741,6 +741,52 @@ class TestVerifyPsql:
 
 class TestBackupProvenance:
     @pytest.mark.parametrize(
+        ("base_url", "path_label"),
+        [("http://localhost:8069", "local"), ("https://example.test", "remote")],
+        ids=["local-project", "remote-project"],
+    )
+    def test_project_download_records_canonical_owner_for_local_and_remote_entries(
+        self,
+        client: OdooClient,
+        tmp_path: Path,
+        base_url: str,
+        path_label: str,
+    ) -> None:
+        from odoo_instance_sdk.internal.repo_key import repo_key
+        from odoo_instance_sdk.resources.instance import _RuntimeBinding
+
+        root = tmp_path / path_label
+        common = root / ".git"
+        project_id = f"project_{repo_key(root, common)}"
+        instance = client.instance(base_url, master_password="admin")
+        object.__setattr__(
+            instance,
+            "_runtime_binding",
+            _RuntimeBinding(
+                owner_kind="project",
+                owner_id=project_id,
+                project_id=project_id,
+                repository_root=root,
+                git_common_dir=common,
+            ),
+        )
+        catalog = MagicMock()
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {}
+        response.iter_bytes.return_value = [b"backup"]
+        response.raise_for_status.return_value = None
+        http_cm = _mock_http({})
+        http_cm.__enter__.return_value.post.return_value = response
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+        ):
+            instance.databases.backup("testdb", destination=tmp_path / path_label)
+
+        assert catalog.start_download.call_args.kwargs["project_id"] == project_id
+
+    @pytest.mark.parametrize(
         ("headers", "expected_total"),
         [
             ({"content-length": "6"}, 6),

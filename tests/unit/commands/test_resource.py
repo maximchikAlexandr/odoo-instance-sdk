@@ -29,16 +29,13 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from tests.unit.monitor_support import make_env
 
 
-@pytest.mark.unpatched_xdg
-def test_normal_catalog_and_cache_paths_create_fresh_xdg_roots(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
-
+def test_normal_catalog_and_cache_paths_create_fresh_xdg_roots(tmp_path: Path) -> None:
     catalog_path = get_catalog_path()
     backups_dir = get_backups_dir()
 
+    assert catalog_path.parent.name == ".odcli"
+    assert backups_dir.name == "backups"
+    assert catalog_path.is_relative_to(tmp_path)
     assert catalog_path.parent.is_dir()
     assert backups_dir.parent.is_dir()
 
@@ -115,7 +112,6 @@ def test_resource_command_closes_failed_child_action_before_outer_completion(
     ]
 
 
-@pytest.mark.unpatched_xdg
 def test_resource_leaves_do_not_create_absent_xdg_roots(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
