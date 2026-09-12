@@ -76,15 +76,6 @@ jobs:
       - name: Sync frozen test environment
         id: uv-sync
         run: uv sync --frozen --group test
-      - name: Materialize verified source-backed checkout
-        id: source-setup
-        env:
-          ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source
-          ODCLI_E2E_SOURCE_CHECKOUT: .cache/odoo-source-checkout
-        run: |
-          mkdir -p "$ODCLI_E2E_SOURCE_CHECKOUT"
-          git --git-dir="$ODCLI_E2E_ODOO_SOURCE_CACHE" archive --format=tar cd992ceebbaf343c03e1941d39cfe423d35ba6c6 | tar -x -C "$ODCLI_E2E_SOURCE_CHECKOUT"
-          test -f "$ODCLI_E2E_SOURCE_CHECKOUT/odoo-bin"
       - name: Bootstrap required full prerequisites
         id: bootstrap
         env:
@@ -92,7 +83,6 @@ jobs:
           ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
           ODCLI_E2E_SOURCE_CACHE_KEY: ${{ steps.source-key.outputs.key }}
           ODCLI_E2E_UV_CACHE_KEY: ${{ steps.uv-key.outputs.key }}
-          ODCLI_E2E_SOURCE_CHECKOUT: .cache/odoo-source-checkout
         run: >-
           uv run python scripts/real_odoo_bootstrap.py
           --tier full
@@ -110,7 +100,6 @@ jobs:
           ODCLI_E2E_TIMING_FILE: .artifacts/real-odoo-e2e/timing.json
           ODCLI_E2E_EVIDENCE_ROOT: .artifacts/real-odoo-e2e
           ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source
-          ODCLI_E2E_SOURCE_CHECKOUT: .cache/odoo-source-checkout
           ODCLI_E2E_SOURCE_CACHE_HIT: ${{ steps.source-prep.outputs.verified_source_cache_hit }}
           ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
           ODCLI_E2E_SOURCE_CACHE_KEY: ${{ steps.source-key.outputs.key }}

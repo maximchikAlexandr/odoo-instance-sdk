@@ -73,6 +73,19 @@ def _capture_service_logs(runtime: Any) -> None:
             _append_log(name, result.stdout + result.stderr)
         except (OSError, subprocess.SubprocessError) as error:
             _append_log(name, str(error))
+    if runtime.scope == "target":
+        runtime_root = getattr(runtime, "root", None)
+        if runtime_root is None:
+            return
+        target_logs = sorted(Path(runtime_root).rglob("odoo.log"))
+        for path in target_logs:
+            if path.is_file() and not path.is_symlink():
+                try:
+                    _append_log(
+                        "target-odoo.log", path.read_text(encoding="utf-8", errors="replace")
+                    )
+                except OSError as error:
+                    _append_log("target-odoo.log", str(error))
 
 
 def _snapshot_resources(runtime: Any) -> list[dict[str, object]]:
@@ -171,39 +184,22 @@ def _runtime_consumed_source_cache(runtime: Any) -> bool:
 
 def _source_cache_consumed() -> bool:
     """Report whether the real source-backed OdCLI checkout used the bare cache."""
-    if not _SOURCE_CACHE_CONSUMED or not any(_SOURCE_CACHE_CONSUMED):
-        return False
-    cache_path = _source_cache_path()
-    checkout = os.environ.get("ODCLI_E2E_SOURCE_CHECKOUT")
-    if cache_path is None or not checkout:
-        return False
-    checkout_path = Path(checkout)
-    if not checkout_path.is_absolute():
-        checkout_path = Path.cwd() / checkout_path
-    checkout_bin = checkout_path / "odoo-bin"
-    if not checkout_bin.is_file():
-        return False
-    try:
-        commit = "cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
-        verified = subprocess.run(
-            ["git", "--git-dir", str(cache_path), "cat-file", "-e", f"{commit}^{{commit}}"],
-            capture_output=True,
-            check=False,
-            timeout=30.0,
-        )
-        source_file = subprocess.run(
-            ["git", "--git-dir", str(cache_path), "show", f"{commit}:odoo-bin"],
-            capture_output=True,
-            check=False,
-            timeout=30.0,
-        )
-        return (
-            verified.returncode == 0
-            and source_file.returncode == 0
-            and source_file.stdout == checkout_bin.read_bytes()
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
+    return _source_cache_path() is not None and any(_SOURCE_CACHE_CONSUMED)
+
+
+def _write_command_matrix() -> None:
+    from scripts.check_e2e_contract import MATRIX
+    from tests.integration.real_odoo.contracts import render_matrix_document
+    from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
+
+    content = render_matrix_document(MATRIX.read_text(encoding="utf-8"), PUBLIC_LEAF_CASES)
+    encoded = content.encode("utf-8")
+    if len(encoded) > 2 * 1024 * 1024:
+        raise ValueError("generated command matrix exceeds evidence text limit")
+    path = _evidence_root() / "command-matrix.md"
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_bytes(encoded)
+    path.chmod(0o600)
 
 
 def _write_resource_manifest() -> None:
@@ -254,5 +250,6 @@ def pytest_configure(_config: object) -> None:
         from tests.integration.real_odoo import conftest
     except ImportError:
         return
+    _write_command_matrix()
     _ORIGINAL_FINALIZE = conftest._finalize
     conftest._finalize = _instrumented_finalize

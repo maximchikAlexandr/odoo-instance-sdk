@@ -22,7 +22,13 @@ FAILURE_BUNDLE_LIMIT_BYTES: Final[int] = 50 * 1024 * 1024
 RETENTION_DAYS: Final[int] = 7
 TEXT_SUFFIXES = frozenset({".json", ".log", ".txt", ".xml", ".md", ".yml", ".yaml"})
 REQUIRED_SUCCESS = frozenset(
-    {"bootstrap.json", "junit.xml", "resource-manifest.json", "timing.json"}
+    {
+        "bootstrap.json",
+        "command-matrix.md",
+        "junit.xml",
+        "resource-manifest.json",
+        "timing.json",
+    }
 )
 REQUIRED_FAILURE = REQUIRED_SUCCESS | frozenset({"compose.log", "odoo.log", "postgres.log"})
 
@@ -61,7 +67,19 @@ def _include(source: Path, status: Status) -> bool:
     name = source.name.lower()
     return any(
         token in name
-        for token in ("bootstrap", "junit", "timing", "phase", "pin", "resource", "manifest")
+        for token in (
+            "bootstrap",
+            "command-matrix",
+            "junit",
+            "timing",
+            "phase",
+            "pin",
+            "resource",
+            "manifest",
+            "odoo",
+            "postgres",
+            "compose",
+        )
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,10 @@ def _evidence_contract(
             }
         )
         + "\n"
+    )
+    (source / "command-matrix.md").write_text(
+        "# Public CLI traceability matrix\n\n| Public leaf | Evidence |\n",
+        encoding="utf-8",
     )
     (source / "timing.json").write_text(
         json.dumps(
@@ -250,6 +255,7 @@ def test_evidence_rejects_placeholder_success(tmp_path: Path) -> None:
     source.mkdir()
     (source / "bootstrap.json").write_text('{"ok": false, "pins": {}}\n')
     (source / "junit.xml").write_text("<testsuite tests='0' failures='1'/>\n")
+    (source / "command-matrix.md").write_text("# Public CLI traceability matrix\n")
     (source / "resource-manifest.json").write_text('{"resources": [], "leaks": []}\n')
     (source / "timing.json").write_text(
         json.dumps(
@@ -341,6 +347,8 @@ def test_failure_evidence_keeps_non_clean_completed_audit(tmp_path: Path) -> Non
         json.loads((source / "resource-manifest.json").read_text())["evidence"]["audit_state"]
         == "failed"
     )
+    with tarfile.open(tmp_path / "failure.tar.gz", "r:gz") as archive:
+        assert "command-matrix.md" in archive.getnames()
 
 
 def test_evidence_exercises_warm_budget_classification(tmp_path: Path) -> None:
@@ -484,6 +492,7 @@ def test_service_log_capture_selects_generated_compose_services(
             "scope": "target",
             "topology": type("Topology", (), {"project_name": "owned-project"})(),
             "compose_file": tmp_path / "compose.yaml",
+            "root": tmp_path / "runtime",
         },
     )()
     calls: list[list[str]] = []
@@ -505,6 +514,45 @@ def test_service_log_capture_selects_generated_compose_services(
     assert (tmp_path / "evidence" / "postgres.log").is_file()
 
 
+def test_target_log_capture_reads_host_managed_odoo_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "scope": "target",
+            "topology": type("Topology", (), {"project_name": "owned-project"})(),
+            "compose_file": tmp_path / "compose.yaml",
+            "root": tmp_path / "runtime",
+        },
+    )()
+    (runtime.root / "xdg-data" / "environment").mkdir(parents=True)
+    (runtime.root / "xdg-data" / "environment" / "odoo.log").write_text(
+        "host-managed target process\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "compose tail", ""),
+    )
+    monkeypatch.setattr(ci, "_evidence_root", lambda: tmp_path / "evidence")
+    ci._capture_service_logs(runtime)
+    assert "host-managed target process" in (tmp_path / "evidence" / "target-odoo.log").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_command_matrix_projection_is_staged_in_evidence_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ci, "_evidence_root", lambda: tmp_path / "evidence")
+    ci._write_command_matrix()
+    projection = tmp_path / "evidence" / "command-matrix.md"
+    assert projection.is_file()
+    assert "# Public CLI traceability matrix" in projection.read_text(encoding="utf-8")
+
+
 def test_source_cache_consumption_requires_actual_shared_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -524,6 +572,23 @@ def test_source_cache_consumption_requires_actual_shared_checkout(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert ci._runtime_consumed_source_cache(runtime)
+    ci._SOURCE_CACHE_CONSUMED[:] = [True]
+    assert ci._source_cache_consumed()
+
+
+def test_full_bootstrap_has_no_synthetic_checkout_prerequisite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("scripts.real_odoo_bootstrap.shutil.which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        bootstrap, "_run", lambda _command: subprocess.CompletedProcess([], 0, "", "")
+    )
+    monkeypatch.setattr(bootstrap, "_version_is_exact", lambda _command, _expected: True)
+    monkeypatch.setattr(bootstrap, "_image_manifest_is_pinned", lambda _image, _digest: True)
+    monkeypatch.setattr(bootstrap, "_source_revision_is_available", lambda: True)
+    checks = bootstrap.prerequisite_checks("full", "linux/amd64")
+    assert checks["odoo_source_revision"] is True
+    assert "odoo_source_checkout" not in checks
 
 
 def test_full_bootstrap_hashes_requirements_after_source_probe(
@@ -607,8 +672,8 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert full.count("steps.source-key.outputs.key") >= 4
     assert full.count("steps.uv-key.outputs.key") >= 4
     assert "steps.source-prep.outputs.verified_source_cache_hit" in full
-    assert "Materialize verified source-backed checkout" in full
-    assert "ODCLI_E2E_SOURCE_CHECKOUT: .cache/odoo-source-checkout" in full
+    assert "Materialize verified source-backed checkout" not in full
+    assert "ODCLI_E2E_SOURCE_CHECKOUT" not in full
     assert ".artifacts/real-odoo-e2e/odoo-source" not in full
     assert "from scripts.real_odoo_bootstrap import source_cache_key" in full
     assert "from scripts.real_odoo_bootstrap import uv_cache_key" in full
