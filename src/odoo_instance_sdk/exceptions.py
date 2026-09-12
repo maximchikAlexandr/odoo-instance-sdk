@@ -50,6 +50,41 @@ class ModuleOperationInProgressError(PlanError):
     code = "module_operation_in_progress"
 
 
+class GitWorkflowError(PlanError):
+    """Base class for expected Git workflow planning failures."""
+
+    code = "git_workflow_error"
+
+
+class GitScopeError(GitWorkflowError):
+    """The staged index cannot be reduced to one safe Odoo scope."""
+
+    code = "git_scope_error"
+
+
+class GitAbsorbNotFoundError(GitWorkflowError):
+    """The optional git-absorb executable is not installed."""
+
+    code = "git_absorb_not_found"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "git-absorb was not found; install it with your system package manager and retry"
+        )
+
+
+class GitCheckFailedError(GitWorkflowError):
+    """Git history validation found one or more violations."""
+
+    code = "git_check_failed"
+
+
+class GitSyncError(GitWorkflowError):
+    """Git synchronization cannot safely continue."""
+
+    code = "git_sync_failed"
+
+
 class StalePlanError(PlanError):
     """A captured precondition changed before execution began."""
 

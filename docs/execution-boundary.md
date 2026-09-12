@@ -48,6 +48,10 @@ classification is bounded and whose contract requires `--dry-run`:
 | `module ls` | process-previewable-read-only |
 | `module update` | mutating-or-spawning |
 | `module test` | mutating-or-spawning |
+| `git commit` | mutating-or-spawning |
+| `git check` | bounded-read-only |
+| `git absorb` | mutating-or-spawning |
+| `git sync` | mutating-or-spawning |
 | `translations export` | mutating-or-spawning |
 | `deps verify` | process-previewable-read-only |
 | `vscode generate` | mutating-or-spawning |
@@ -82,6 +86,12 @@ The complete shipped CLI also contains `doctor` and `env ls` as bounded
 read-only leaves, plus `resource ls`, `resource doctor`, `run`, `shell`,
 `logs`, and `monitor` native/stream leaves. They remain in `PUBLIC_LEAF_CASES` with their explicit classifications
 and reasons; no parallel eligibility table is permitted.
+
+The Git workflow leaves use the same captured-plan boundary: `git commit` and
+`git absorb` require explicit confirmation for mutation, while `git check` is
+read-only and `git sync` captures fetch, integration, validation, and optional
+same-name publication before confirmation. Dry-run emits the complete Git
+plan without launching fetch, rebase, absorb, commit, or publication steps.
 
 Resource inventory and doctor are observation-only projections. They report
 logical versus measured bytes, ownership confidence, retained data, and
@@ -144,7 +154,7 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:1216-1217` — documented `logs --follow` JSONL
+- `src/odoo_instance_sdk/cli.py:1256-1257` — documented `logs --follow` JSONL
   stream; remove when that stream gets an explicit bounded transport.
 - `src/odoo_instance_sdk/commands/backup.py:295` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
@@ -158,7 +168,7 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:632` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:1191` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance.py:1195` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 

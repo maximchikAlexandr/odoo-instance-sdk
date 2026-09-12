@@ -94,6 +94,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.internal.project_runtime import DeferredProjectRuntime
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
+    from odoo_instance_sdk.resources.git import GitResource
     from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -834,6 +835,7 @@ class OdooInstance:
     _client: OdooClient
     databases: DatabaseResource = field(init=False)
     modules: ModuleResource = field(init=False)
+    git: GitResource = field(init=False)
     _artifact_lock_path: Path | None = field(default=None, repr=False)
     _postgres_cluster: PostgresCluster | None = field(default=None, repr=False)
     _environment_id: str | None = field(default=None, repr=False)
@@ -845,9 +847,11 @@ class OdooInstance:
             master_password=self.config.master_password,
             _instance=self,
         )
+        from odoo_instance_sdk.resources.git import GitResource
         from odoo_instance_sdk.resources.module import ModuleResource
 
         self.modules = ModuleResource(self)
+        self.git = GitResource(self)
 
     def __repr__(self) -> str:
         return f"OdooInstance(base_url={self.config.base_url!r}, databases=<DatabaseResource>)"

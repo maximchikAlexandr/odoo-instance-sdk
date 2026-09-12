@@ -65,6 +65,10 @@ from odoo_instance_sdk.models import (
     DevelopmentEnvironment,
     EnvironmentCheckoutPlan,
     EnvironmentPythonMode,
+    GitAbsorbResult,
+    GitCheckResult,
+    GitCommitContext,
+    GitSyncResult,
     Module,
     ModuleDependencies,
     ModuleDependency,
@@ -77,6 +81,8 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
+from odoo_instance_sdk.resources.git import GitResource
+from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 T = TypeVar("T")
@@ -265,6 +271,28 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("module", "test", "sale", "--test-tags", "/sale"),
         "mutating-or-spawning",
         True,
+    ),
+    PublicLeafCase(
+        ("git", "commit"),
+        ("git", "commit", "change", "--yes"),
+        "mutating-or-spawning",
+        False,
+        "commit mutates the staged index through Git hooks",
+    ),
+    PublicLeafCase(("git", "check"), ("git", "check"), "bounded-read-only", False),
+    PublicLeafCase(
+        ("git", "absorb"),
+        ("git", "absorb", "--yes"),
+        "mutating-or-spawning",
+        False,
+        "absorb rewrites commits through the optional host tool",
+    ),
+    PublicLeafCase(
+        ("git", "sync"),
+        ("git", "sync", "--yes"),
+        "mutating-or-spawning",
+        False,
+        "sync fetches and rebases through Git",
     ),
     PublicLeafCase(
         ("translations", "export"),
@@ -829,6 +857,74 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr("odoo_instance_sdk.commands.env.OdooClient", lambda **_kwargs: client)
         return
 
+    if path[:1] == ("git",):
+        git_instance = cast("OdooInstance", SimpleNamespace())
+        resource = GitResource(git_instance)
+        git_instance.git = resource
+        environment = _matrix_environment()
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.git.cli_context.ready_instance",
+            lambda _ctx: _resolved_context(MagicMock(), environment, git_instance),
+        )
+        context = GitCommitContext(
+            module="sale",
+            tag="IMP",
+            description="change",
+            ticket="PROJ-123",
+            ticket_link=None,
+            message="[IMP] sale: PROJ-123 change",
+            staged_paths=("addons/sale/models.py",),
+            branch="feature",
+            repository="repo",
+            command=("git", "commit", "-m", "[IMP] sale: PROJ-123 change"),
+        )
+        setattr(resource, "commit_context", lambda *_args, **_kwargs: context)
+        setattr(
+            resource,
+            "commit_command",
+            lambda *_args, **_kwargs: _matrix_command(
+                CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0),
+                error=RuntimeError("isolated external operation failed") if failing else None,
+            ),
+        )
+        setattr(
+            resource,
+            "check_command",
+            lambda **_kwargs: _matrix_command(
+                GitCheckResult(base="main", branch="feature", valid=True),
+                error=RuntimeError("isolated external operation failed") if failing else None,
+            ),
+        )
+        setattr(
+            resource,
+            "absorb_command",
+            lambda **_kwargs: _matrix_command(
+                GitAbsorbResult(
+                    executable="/usr/bin/git-absorb",
+                    base="main",
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                ),
+                error=RuntimeError("isolated external operation failed") if failing else None,
+            ),
+        )
+        setattr(
+            resource,
+            "sync_command",
+            lambda **_kwargs: _matrix_command(
+                GitSyncResult(
+                    branch="feature",
+                    base="main",
+                    fetched_sha="a" * 40,
+                    rebased=True,
+                    pushed=False,
+                ),
+                error=RuntimeError("isolated external operation failed") if failing else None,
+            ),
+        )
+        return
+
     if (
         path in {("eval",), ("exec",)}
         or path[:1] == ("module",)
@@ -1031,10 +1127,10 @@ def _patch_leaf_external(  # noqa: C901
         resource.init_monitoring_command.return_value = command
         if failing and path == ("db", "init-monitoring"):
             resource.init_monitoring_command.side_effect = fail_operation
-        environment = _matrix_public_environment()
+        database_environment = _matrix_public_environment()
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.pg._database_resource",
-            lambda _ctx, _database: (environment, resource, "demo"),
+            lambda _ctx, _database: (database_environment, resource, "demo"),
         )
         return
 

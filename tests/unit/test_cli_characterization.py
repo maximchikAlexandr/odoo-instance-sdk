@@ -53,6 +53,7 @@ ROOT_HELP_DESCRIPTIONS = (
     "Select and run Odoo tests.",
     "Export Odoo module translations.",
     "Generate VS Code launch configuration.",
+    "Generate and safely synchronize Odoo Git workflows.",
 )
 
 
@@ -182,6 +183,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "exec",
         "test",
         "module",
+        "git",
         "translations",
         "deps",
         "vscode",

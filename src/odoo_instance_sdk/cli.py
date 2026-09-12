@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping, MutableMapping
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -397,6 +397,7 @@ def _cluster_rich(document: OutputDocument) -> str:
                     "commands": [
                         "test",
                         "module",
+                        "git",
                         "translations",
                         "deps",
                         "vscode",
@@ -432,6 +433,45 @@ cli.add_command(_postgres_group, name="postgres")
 register_database_commands(db_group)
 cli.add_command(_psql, name="psql")
 cli.add_command(resource_group, name="resource")
+
+
+class _LazyGitGroup(click.RichGroup):  # type: ignore[misc,valid-type]
+    """Expose Git help at the root without importing the Git execution stack."""
+
+    def __init__(self) -> None:
+        self._git_initializing = True
+        self._git_loaded = False
+        self._git_commands: MutableMapping[str, click.Command] = {}
+        super().__init__(name="git", help="Generate and safely synchronize Odoo Git workflows.")
+        self._git_initializing = False
+
+    @property
+    def commands(self) -> MutableMapping[str, click.Command]:
+        if self._git_initializing:
+            return self._git_commands
+        if not self._git_loaded:
+            self._git_commands = self._loaded().commands
+            self._git_loaded = True
+        return self._git_commands
+
+    @commands.setter
+    def commands(self, value: MutableMapping[str, click.Command]) -> None:
+        self._git_commands = value
+
+    @staticmethod
+    def _loaded() -> click.Group:
+        from odoo_instance_sdk.commands.git import git_group
+
+        return git_group
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        return self._loaded().list_commands(ctx)
+
+    def get_command(self, ctx: click.Context, name: str) -> click.Command | None:
+        return self._loaded().get_command(ctx, name)
+
+
+cli.add_command(_LazyGitGroup(), name="git")
 
 
 def _backup_catalog_path() -> Path:

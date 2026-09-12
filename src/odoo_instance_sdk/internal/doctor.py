@@ -4,6 +4,7 @@ import configparser
 import os
 import shutil
 import sqlite3
+import sys
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -634,8 +635,29 @@ def _check_optional_executables(report: DoctorReport) -> None:
     for name in ("msgfmt", "git-absorb"):
         capability = resolve_optional_executable(name)
         detail = capability.path or f"{name} not found (optional)"
+        remediations: tuple[DoctorRemediation, ...] = ()
+        if not capability.available and name == "git-absorb":
+            if sys.platform == "darwin":
+                install_hint = "brew install git-absorb"
+            elif sys.platform.startswith("win"):
+                install_hint = "py -m pip install git-absorb"
+            else:
+                install_hint = "python -m pip install git-absorb"
+            remediations = (
+                DoctorRemediation(
+                    description=f"Install git-absorb ({install_hint})",
+                    argv=("git-absorb", "--help"),
+                    mutating=False,
+                    dry_run_supported=True,
+                ),
+            )
         report.checks.append(
-            CheckResult(name, STATUS_OK if capability.available else STATUS_INFO, detail)
+            CheckResult(
+                name,
+                STATUS_OK if capability.available else STATUS_INFO,
+                detail,
+                remediations=remediations,
+            )
         )
 
 
