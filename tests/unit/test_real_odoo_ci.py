@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -378,7 +379,10 @@ def test_full_failure_evidence_requires_host_target_log(tmp_path: Path) -> None:
         )
 
 
-def test_evidence_exercises_warm_budget_classification(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cache_class", ["cold", "warm"])
+def test_evidence_exercises_smoke_budget_classification(
+    tmp_path: Path, cache_class: Literal["cold", "warm"]
+) -> None:
     timing_path = tmp_path / "timing.json"
     timing_path.write_text(
         json.dumps(
@@ -394,11 +398,11 @@ def test_evidence_exercises_warm_budget_classification(tmp_path: Path) -> None:
     report = evidence._budget_report(
         timing_path,
         status="success",
-        tier="full",
-        cache_class="warm",
+        tier="smoke",
+        cache_class=cache_class,
         artifact_bytes=10,
     )
-    assert report["cache_class"] == "warm"
+    assert report["cache_class"] == cache_class
     assert report["ok"] is True
 
 
@@ -699,6 +703,9 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     full = (root / ".github/workflows/real-odoo-full.yml").read_text(encoding="utf-8")
     docs = (root / "docs/real-odoo-e2e.md").read_text(encoding="utf-8")
     makefile = (root / "Makefile").read_text(encoding="utf-8")
+    smoke_scenario = (root / "tests/integration/real_odoo/test_smoke.py").read_text(
+        encoding="utf-8"
+    )
     smoke_job = smoke[smoke.index("  real-odoo-smoke:") : smoke.index("\n  lint:")]
     for workflow in (smoke_job, full):
         assert "@v" not in workflow
@@ -707,6 +714,9 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "timeout-minutes: 10" in smoke_job
     assert "real_odoo and e2e_smoke" in smoke
     assert "real_odoo and e2e_full" in full
+    assert "pytest.mark.e2e_smoke" in smoke_scenario
+    for scenario in ("E2E-SM-01", "E2E-SM-02", "E2E-SM-03", "E2E-SM-04", "E2E-SM-05"):
+        assert scenario in smoke_scenario
     assert ".cache/odoo-source" in full
     assert ".cache/uv" in full
     assert "backups" not in full.lower()
