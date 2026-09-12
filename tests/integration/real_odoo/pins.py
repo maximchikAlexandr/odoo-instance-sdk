@@ -31,6 +31,7 @@ class E2EPinManifest:
     cpython: str
     uv: str
     odoo_python_lock_sha256: str
+    odoo_python_audit_sha256: str
     actions_checkout: str
     setup_uv: str
     upload_artifact: str
@@ -47,7 +48,8 @@ E2E_PINS = E2EPinManifest(
     postgres_linux_arm64_manifest="sha256:738d1359df5aa0b6d50a9071e989c49fdd39152a2a805c6ff131bf5e2243e0b3",
     cpython="3.12.13",
     uv="0.10.8",
-    odoo_python_lock_sha256="5a907f2d7c3e93c3743288f8497f74c778eb0ef0d868a69aa407b6b8c1943881",
+    odoo_python_lock_sha256="409063537bb93edb085304ac427effd7044a654393b5f9ff719fa105cd8c89d4",
+    odoo_python_audit_sha256="70ce80ce32dd490e1c52b3d43a092fc735209ba538805942cba1de30caea2284",
     actions_checkout="11d5960a326750d5838078e36cf38b85af677262",
     setup_uv="d0cc045d04ccac9d8b7881df0226f9e82c39688e",
     upload_artifact="ea165f8d65b6e75b540449e92b4886f43607fa02",

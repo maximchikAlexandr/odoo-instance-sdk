@@ -8,11 +8,13 @@ import hashlib
 import json
 import os
 import platform as host_platform
+import re
 import secrets
 import shutil
 import subprocess
 import sys
 import time
+from datetime import date
 from pathlib import Path
 from typing import Final, Literal
 
@@ -34,6 +36,12 @@ ODOO_REPOSITORY: Final[str] = "https://github.com/odoo/odoo.git"
 ACTIONS_CACHE: Final[str] = "6849a6489940f00c2f30c0fb92c6274307ccb58a"
 PYTHON_RESOLUTION_LOCK: Final[Path] = (
     ROOT / "tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.lock"
+)
+PYTHON_RESOLUTION_AUDIT: Final[Path] = (
+    ROOT / "tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.audit.json"
+)
+AUDITED_EXCEPTION_PACKAGES: Final[frozenset[str]] = frozenset(
+    {"cryptography", "pypdf2", "requests", "urllib3"}
 )
 
 
@@ -64,6 +72,84 @@ def python_resolution_lock_is_valid(path: Path | None = None) -> bool:
         hashlib.sha256(content).hexdigest() == E2E_PINS.odoo_python_lock_sha256
         and b"--hash=sha256:" in content
     )
+
+
+def _locked_package_versions(content: bytes) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for line in content.decode("utf-8", errors="replace").splitlines():
+        match = re.match(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)", line)
+        if match is not None:
+            versions[match.group(1).replace("_", "-").lower()] = match.group(2)
+    return versions
+
+
+def python_resolution_audit_is_valid(  # noqa: C901
+    path: Path | None = None, *, lock_path: Path | None = None
+) -> bool:
+    audit_path = path or PYTHON_RESOLUTION_AUDIT
+    resolved_lock = lock_path or PYTHON_RESOLUTION_LOCK
+    try:
+        audit_content = audit_path.read_bytes()
+        lock_content = resolved_lock.read_bytes()
+        value = json.loads(audit_content)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if hashlib.sha256(audit_content).hexdigest() != E2E_PINS.odoo_python_audit_sha256:
+        return False
+    if not isinstance(value, dict):
+        return False
+    if value.get("schema") != "odoo19-python-resolution-audit-v1":
+        return False
+    if value.get("source_commit") != E2E_PINS.odoo_source_commit:
+        return False
+    if value.get("python") != E2E_PINS.cpython:
+        return False
+    if value.get("platform") != "x86_64-manylinux_2_17":
+        return False
+    if value.get("lock_sha256") != hashlib.sha256(lock_content).hexdigest():
+        return False
+    versions = _locked_package_versions(lock_content)
+    overrides = value.get("reviewed_overrides")
+    exceptions = value.get("exceptions")
+    if not isinstance(overrides, dict) or not isinstance(exceptions, list):
+        return False
+    if set(overrides) - set(versions):
+        return False
+    for package, version in overrides.items():
+        if not isinstance(package, str) or not isinstance(version, str):
+            return False
+        if versions.get(package.replace("_", "-").lower()) != version:
+            return False
+    observed: set[str] = set()
+    for exception in exceptions:
+        if not isinstance(exception, dict):
+            return False
+        package = exception.get("package")
+        version = exception.get("version")
+        advisories = exception.get("advisories")
+        expires = exception.get("expires")
+        if (
+            not isinstance(package, str)
+            or package not in AUDITED_EXCEPTION_PACKAGES
+            or package in observed
+            or versions.get(package) != version
+            or not isinstance(advisories, list)
+            or not advisories
+            or not all(isinstance(item, str) and item for item in advisories)
+            or not all(
+                isinstance(exception.get(key), str) and exception[key]
+                for key in ("rationale", "scope", "owner", "expires")
+            )
+            or not isinstance(expires, str)
+        ):
+            return False
+        try:
+            if date.fromisoformat(expires) < date.today():
+                return False
+        except ValueError:
+            return False
+        observed.add(package)
+    return observed == AUDITED_EXCEPTION_PACKAGES
 
 
 def _configured_cache_key(name: str, computed: str) -> str:
@@ -224,6 +310,7 @@ def prerequisite_checks(tier: Tier, resolved_platform: str) -> dict[str, bool]:
     if tier == "full":
         checks["odoo_source_revision"] = _source_revision_is_available()
         checks["python_resolution_lock"] = python_resolution_lock_is_valid()
+        checks["python_resolution_audit"] = python_resolution_audit_is_valid()
     return checks
 
 

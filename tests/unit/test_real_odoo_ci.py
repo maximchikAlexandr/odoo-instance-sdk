@@ -16,9 +16,10 @@ from scripts import real_odoo_bootstrap as bootstrap
 from scripts import real_odoo_ci as ci
 from scripts import real_odoo_evidence as evidence
 from scripts import real_odoo_timing as timing
-from scripts.real_odoo_secrets import write_secret_registry
+from scripts.real_odoo_secrets import secret_variants, write_secret_registry
 from tests.integration.real_odoo import test_smoke as smoke
 from tests.integration.real_odoo.conftest import E2ERuntime
+from tests.integration.real_odoo.test_critical_path import _trusted_python_sync_argv
 
 
 def _evidence_contract(
@@ -279,6 +280,31 @@ def test_full_python_resolution_lock_rejects_regeneration_or_hash_drift(
     assert bootstrap.python_resolution_lock_is_valid() is False
 
 
+def test_full_python_resolution_audit_rejects_lock_or_report_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "odoo.lock"
+    audit = tmp_path / "odoo.audit.json"
+    lock.write_bytes(bootstrap.PYTHON_RESOLUTION_LOCK.read_bytes())
+    audit.write_bytes(bootstrap.PYTHON_RESOLUTION_AUDIT.read_bytes())
+    monkeypatch.setattr(bootstrap, "PYTHON_RESOLUTION_LOCK", lock)
+    monkeypatch.setattr(bootstrap, "PYTHON_RESOLUTION_AUDIT", audit)
+    assert bootstrap.python_resolution_audit_is_valid()
+    lock.write_bytes(lock.read_bytes() + b"\n")
+    assert bootstrap.python_resolution_audit_is_valid() is False
+    lock.write_bytes(bootstrap.PYTHON_RESOLUTION_LOCK.read_bytes())
+    audit.write_bytes(audit.read_bytes() + b"\n")
+    assert bootstrap.python_resolution_audit_is_valid() is False
+
+
+def test_full_critical_path_uses_only_hash_required_trusted_sync() -> None:
+    argv = _trusted_python_sync_argv(Path("/venv/bin/python"))
+
+    assert argv[:4] == ["uv", "pip", "sync", "--require-hashes"]
+    assert "compile" not in argv
+    assert "install" not in argv
+
+
 def test_bootstrap_emits_fail_closed_machine_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -368,12 +394,19 @@ def test_evidence_rejects_canary_and_writes_minimal_error(tmp_path: Path) -> Non
     assert 'tests="0" failures="1"' in (source / "junit.xml").read_text()
 
 
-def test_evidence_rejects_bare_runtime_secret_from_registry(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "variant",
+    secret_variants("runtime/db?password=123&token=/safe"),
+    ids=("raw", "sha256", "base64", "urlencoded"),
+)
+def test_evidence_rejects_every_runtime_secret_variant_from_registry(
+    tmp_path: Path, variant: str
+) -> None:
     source = tmp_path / "source"
     source.mkdir()
     _evidence_contract(source, junit_failures=1)
-    secret = "runtime-db-password-123456"
-    (source / "odoo.log").write_text(f"service password={secret}\n", encoding="utf-8")
+    secret = "runtime/db?password=123&token=/safe"
+    (source / "odoo.log").write_text(f"service evidence={variant}\n", encoding="utf-8")
     for name in ("postgres.log", "compose.log"):
         (source / name).write_text("bounded tail\n", encoding="utf-8")
     canary = tmp_path / "canary"

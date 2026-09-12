@@ -108,6 +108,19 @@ def _clone_pinned_source(repository: Path, destination: Path) -> None:
         raise AssertionError(f"cannot check out pinned Odoo source: {checkout.stderr[-4000:]}")
 
 
+def _trusted_python_sync_argv(python: Path) -> list[str]:
+    """Return the only dependency-install command allowed by the full tier."""
+    return [
+        "uv",
+        "pip",
+        "sync",
+        "--require-hashes",
+        "--python",
+        str(python),
+        str(PYTHON_RESOLUTION_LOCK),
+    ]
+
+
 def _resolved_postgres_digest(image: str) -> str:
     result = subprocess.run(
         ["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", image],
@@ -359,6 +372,24 @@ def test_source_backed_full_critical_path(  # noqa: C901
         "worktree", project.name, lambda: shutil.rmtree(project, ignore_errors=True)
     )
 
+    # The full tier owns dependency installation explicitly below.  Keep the
+    # public checkout focused on worktree/venv creation so it cannot compile
+    # Odoo requirements or perform an unhashed install before the audited lock
+    # is synchronized.  The wrapper makes its preflight side-effect free while
+    # retaining the real pinned odoo-bin for every later invocation.
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.environment._find_odoo_requirements",
+        lambda _repo_root: None,
+    )
+    odoo_wrapper = project / "odoo-bootstrap"
+    odoo_wrapper.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--help" ]; then exit 0; fi\n'
+        f'exec "$PWD/{odoo_bin_relative}" "$@"\n',
+        encoding="utf-8",
+    )
+    odoo_wrapper.chmod(0o700)
+
     # The shared target fixture owns a disposable PostgreSQL only to establish
     # the target namespace.  The public project lifecycle owns the cluster used
     # by the critical path from this point onward.
@@ -375,7 +406,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
             str(project),
             "--no-input",
             "--odoo-bin",
-            str(project / odoo_bin_relative),
+            str(odoo_wrapper),
             "--config",
             str(runtime.config_file),
             "--database",
@@ -459,7 +490,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
         "--source-db",
         runtime.topology.target_sentinel_database,
         "--odoo-bin",
-        str(project / odoo_bin_relative),
+        str(odoo_wrapper),
         "--python",
         E2E_PINS.cpython,
         "--create-venv",
@@ -513,15 +544,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     repeated_sync = _invoke(runner, project, cli_environment, "env", "sync", environment_id)
     assert sync == repeated_sync
     locked_install = subprocess.run(
-        [
-            "uv",
-            "pip",
-            "sync",
-            "--require-hashes",
-            "--python",
-            str(python),
-            str(PYTHON_RESOLUTION_LOCK),
-        ],
+        _trusted_python_sync_argv(python),
         cwd=project,
         capture_output=True,
         shell=False,
