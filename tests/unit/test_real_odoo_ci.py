@@ -426,7 +426,7 @@ def test_smoke_bootstrap_and_evidence_emit_cache_class_and_budget(
     source = tmp_path / "evidence"
     source.mkdir()
     _evidence_contract(source)
-    monkeypatch.setenv("ODCLI_E2E_SOURCE_CACHE_HIT", str(cache_class == "warm").lower())
+    monkeypatch.setenv("ODCLI_E2E_SOURCE_CACHE_HIT", "false")
     monkeypatch.setenv("ODCLI_E2E_UV_CACHE_HIT", str(cache_class == "warm").lower())
     bootstrap_manifest = bootstrap.bootstrap(
         "smoke", source / "bootstrap.json", platform_name="linux/amd64", artifact_root=source
@@ -449,6 +449,21 @@ def test_smoke_bootstrap_and_evidence_emit_cache_class_and_budget(
     assert isinstance(packaged_budget, dict)
     assert packaged_budget["cache_class"] == cache_class
     assert packaged_budget["ok"] is True
+
+
+def test_smoke_bootstrap_ignores_label_only_cache_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bootstrap, "prerequisite_checks", lambda _tier, _platform: {})
+    monkeypatch.setenv("ODCLI_E2E_CACHE_CLASS", "warm")
+    monkeypatch.setenv("ODCLI_E2E_SOURCE_CACHE_HIT", "false")
+    monkeypatch.setenv("ODCLI_E2E_UV_CACHE_HIT", "false")
+    manifest = bootstrap.bootstrap(
+        "smoke", tmp_path / "bootstrap.json", platform_name="linux/amd64"
+    )
+    cache = manifest["cache"]
+    assert isinstance(cache, dict)
+    assert cache["class"] == "cold"
 
 
 def test_smoke_target_wiring_keeps_source_and_target_endpoints_distinct(tmp_path: Path) -> None:
@@ -479,6 +494,45 @@ def test_smoke_target_wiring_keeps_source_and_target_endpoints_distinct(tmp_path
     assert "db_host = target_postgres" in container_config
     assert target.root.joinpath("target-data").as_posix() in host_config
     assert "source_postgres" not in host_config
+
+
+def test_smoke_releases_target_port_before_compose_and_waits_for_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+
+    class Reservation:
+        port = 18069
+
+        def release(self) -> None:
+            events.append("release")
+
+    class Lifecycle:
+        def __init__(self, _compose_file: Path, _project_name: str) -> None:
+            pass
+
+        def run(self, *_args: str) -> subprocess.CompletedProcess[str]:
+            events.append("compose")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text(
+        '  target_init:\n    command: ["odoo", '
+        '"--database=odcli_e2e_sentinel_run", "--init=base", "--stop-after-init"]\n',
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(
+        compose_file=compose_file,
+        topology=SimpleNamespace(
+            project_name="odcli-e2e-project-run",
+            target_sentinel_database="odcli_e2e_sentinel_run",
+        ),
+        reservations=(None, None, None, Reservation()),
+    )
+    monkeypatch.setattr(smoke, "ComposeLifecycle", Lifecycle)
+    monkeypatch.setattr(smoke, "wait_for_http", lambda *_args, **_kwargs: events.append("health"))
+    smoke._start_target_odoo(cast("E2ERuntime", runtime))
+    assert events == ["release", "compose", "health", "health"]
 
 
 def test_timing_plugin_measures_fixture_cleanup_after_test(
@@ -798,9 +852,17 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "runtime.topology.target_postgres_port" in smoke_scenario
     assert "target-data" in smoke_scenario
     assert "cache_class: [cold, warm]" in smoke_job
-    assert "enable-cache: true" in smoke_job
+    assert "enable-cache: false" in smoke_job
     assert "ODCLI_E2E_SOURCE_CACHE_HIT" in smoke_job
     assert "ODCLI_E2E_UV_CACHE_HIT" in smoke_job
+    assert "ODCLI_E2E_SOURCE_CACHE_HIT: ${{ matrix.cache_class" not in smoke_job
+    assert "ODCLI_E2E_UV_CACHE_HIT: ${{ matrix.cache_class" not in smoke_job
+    assert "steps.uv-cache.outputs.cache-hit" in smoke_job
+    assert "actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a" in smoke_job
+    assert "Force cold smoke cache miss" in smoke_job
+    assert "Require warm smoke cache hit" in smoke_job
+    assert ".cache.source_hit" in smoke_job
+    assert ".stat().st_size > 0" in smoke_scenario
     assert "Assert smoke cache classification" in smoke_job
     assert "Assert smoke evidence budget" in smoke_job
     assert ".cache/odoo-source" in full

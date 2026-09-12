@@ -17,13 +17,15 @@ jobs:
       fail-fast: false
       matrix:
         cache_class: [cold, warm]
+    env:
+      UV_CACHE_DIR: .cache/uv
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
         with:
           python-version: "3.12.13"
           version: "0.10.8"
-          enable-cache: true
+          enable-cache: false
       - name: Start monotonic setup measurement
         run: uv run --no-project python scripts/real_odoo_timing.py start --phase setup --output .artifacts/real-odoo-e2e/timing.json
       - name: Create upload canary outside evidence root
@@ -32,24 +34,50 @@ jobs:
           umask 077
           python -c 'import secrets; print(secrets.token_urlsafe(24))' > .artifacts/real-odoo-e2e-secret-canary
           printf '%s\n' '<testsuite tests="0" failures="1"/>' > .artifacts/real-odoo-e2e/junit.xml
+      - name: Compute smoke uv cache key
+        id: uv-key
+        run: >-
+          key=$(uv run --no-project python -c
+          'from pathlib import Path; import os; from scripts.real_odoo_bootstrap import uv_cache_key;
+          print(uv_cache_key(os.environ.get("RUNNER_OS", "Linux"), os.environ.get("RUNNER_ARCH", "X64"), b"", Path("uv.lock").read_bytes()))')
+          && printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
+      - name: Force cold smoke cache miss
+        if: matrix.cache_class == 'cold'
+        run: rm -rf .cache/uv
+      - name: Restore warm smoke uv cache
+        id: uv-cache
+        if: matrix.cache_class == 'warm'
+        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: .cache/uv
+          key: ${{ steps.uv-key.outputs.key }}
+      - name: Require warm smoke cache hit
+        if: matrix.cache_class == 'warm'
+        run: test "${{ steps.uv-cache.outputs.cache-hit }}" = true
       - run: uv sync --frozen --group test
+      - name: Save cold smoke uv cache
+        if: matrix.cache_class == 'cold'
+        uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        with:
+          path: .cache/uv
+          key: ${{ steps.uv-key.outputs.key }}
       - name: Bootstrap required smoke prerequisites
         id: bootstrap
         env:
-          ODCLI_E2E_SOURCE_CACHE_HIT: ${{ matrix.cache_class == 'warm' && 'true' || 'false' }}
-          ODCLI_E2E_UV_CACHE_HIT: ${{ matrix.cache_class == 'warm' && 'true' || 'false' }}
+          ODCLI_E2E_SOURCE_CACHE_HIT: false
+          ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
         run: >-
           uv run python scripts/real_odoo_bootstrap.py
           --tier smoke
           --output .artifacts/real-odoo-e2e/bootstrap.json
       - name: Assert smoke cache classification
         env:
-          EXPECTED_CACHE_CLASS: ${{ matrix.cache_class }}
-          EXPECTED_CACHE_HIT: ${{ matrix.cache_class == 'warm' && 'true' || 'false' }}
+          EXPECTED_CACHE_CLASS: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'warm' || 'cold' }}
+          EXPECTED_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
         run: |
           test "$(jq -r '.cache.class' .artifacts/real-odoo-e2e/bootstrap.json)" = "$EXPECTED_CACHE_CLASS"
-          test "$(jq -r '.cache.source_hit' .artifacts/real-odoo-e2e/bootstrap.json)" = "$EXPECTED_CACHE_HIT"
           test "$(jq -r '.cache.uv_hit' .artifacts/real-odoo-e2e/bootstrap.json)" = "$EXPECTED_CACHE_HIT"
+          test "$(jq -r '.cache.source_hit' .artifacts/real-odoo-e2e/bootstrap.json)" = false
       - name: Finish monotonic setup measurement
         if: always()
         run: uv run --no-project python scripts/real_odoo_timing.py finish --phase setup --output .artifacts/real-odoo-e2e/timing.json
@@ -62,8 +90,8 @@ jobs:
         env:
           ODCLI_E2E_TIMING_FILE: .artifacts/real-odoo-e2e/timing.json
           ODCLI_E2E_EVIDENCE_ROOT: .artifacts/real-odoo-e2e
-          ODCLI_E2E_SOURCE_CACHE_HIT: ${{ matrix.cache_class == 'warm' && 'true' || 'false' }}
-          ODCLI_E2E_UV_CACHE_HIT: ${{ matrix.cache_class == 'warm' && 'true' || 'false' }}
+          ODCLI_E2E_SOURCE_CACHE_HIT: false
+          ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
         run: uv run pytest -o addopts='' --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo
       - name: Package bounded E2E evidence
         id: package
@@ -99,7 +127,7 @@ jobs:
       - name: Assert smoke evidence budget
         if: steps.package.outcome == 'success'
         env:
-          EXPECTED_CACHE_CLASS: ${{ matrix.cache_class }}
+          EXPECTED_CACHE_CLASS: ${{ steps.bootstrap.outputs.cache_class || 'cold' }}
         run: >-
           jq -e --arg expected "$EXPECTED_CACHE_CLASS"
           '.budget.cache_class == $expected and .budget.ok == true'

@@ -254,7 +254,11 @@ def bootstrap(
     started = time.monotonic()
     source_hit = os.environ.get("ODCLI_E2E_SOURCE_CACHE_HIT") == "true"
     uv_hit = os.environ.get("ODCLI_E2E_UV_CACHE_HIT") == "true"
-    cache_class = classify_cache(source_hit=source_hit, uv_hit=uv_hit)
+    cache_class = (
+        "warm"
+        if uv_hit and (tier == "smoke" or source_hit)
+        else classify_cache(source_hit=source_hit, uv_hit=uv_hit)
+    )
     manifest: dict[str, object] = {
         "schema": "odcli-real-odoo-bootstrap-v1",
         "ok": False,

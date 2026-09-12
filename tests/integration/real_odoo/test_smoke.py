@@ -74,12 +74,17 @@ def _start_target_odoo(runtime: E2ERuntime) -> None:
             raise AssertionError("target Compose service is not a bootstrap command")
         rendered = rendered.replace(argument, "", 1)
     compose_file.write_text(rendered, encoding="utf-8")
+    runtime.reservations[3].release()
     result = ComposeLifecycle(compose_file, runtime.topology.project_name).run(
         "up",
         "--detach",
         "target_init",
     )
     assert result.returncode == 0, result.stderr
+    wait_for_http(
+        f"http://127.0.0.1:{runtime.reservations[3].port}/web/health",
+        timeout=180.0,
+    )
     wait_for_http(
         f"http://127.0.0.1:{runtime.reservations[3].port}/web/database/selector",
         timeout=180.0,
@@ -191,7 +196,9 @@ def test_container_smoke_public_path(
     backup = refreshed.get("backup")
     assert isinstance(restored_database, str) and restored_database
     assert isinstance(backup, dict) and isinstance(backup.get("id"), str)
-    assert (runtime.root / "target-data" / "filestore" / restored_database).is_dir()
+    restored_filestore = runtime.root / "target-data" / "filestore" / restored_database
+    assert restored_filestore.is_dir()
+    assert any(path.is_file() and path.stat().st_size > 0 for path in restored_filestore.rglob("*"))
     assert runtime.environment["ODCLI_E2E_CATALOG"].startswith(str(runtime.root))
     _record(record_property, "E2E-SM-02", {"database": restored_database, "backup": backup})
 
