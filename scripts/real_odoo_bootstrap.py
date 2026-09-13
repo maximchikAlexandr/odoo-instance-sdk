@@ -43,7 +43,10 @@ PYTHON_RESOLUTION_AUDIT: Final[Path] = (
 AUDITED_EXCEPTION_PACKAGES: Final[frozenset[str]] = frozenset(
     {"cryptography", "pypdf2", "requests", "urllib3"}
 )
-PINNED_AUDIT_SCANNER: Final[str] = "2.10.1"
+PINNED_AUDIT_SCANNER: Final[str] = E2E_PINS.pip_audit
+PACKAGE_NAME = re.compile(r"\A[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*\Z")
+VERSION = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9.!+_-]*\Z")
+ADVISORY = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:-]*\Z")
 
 
 def source_cache_key(os_name: str, architecture: str) -> str:
@@ -80,8 +83,50 @@ def _locked_package_versions(content: bytes) -> dict[str, str]:
     for line in content.decode("utf-8", errors="replace").splitlines():
         match = re.match(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)", line)
         if match is not None:
-            versions[match.group(1).replace("_", "-").lower()] = match.group(2)
+            package = _canonical_package(match.group(1))
+            if package is not None:
+                versions[package] = match.group(2)
     return versions
+
+
+def _canonical_package(value: object) -> str | None:
+    if (
+        not isinstance(value, str)
+        or len(value.encode("utf-8")) > 128
+        or not PACKAGE_NAME.fullmatch(value)
+    ):
+        return None
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _valid_version(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value.encode("utf-8")) <= 128
+        and VERSION.fullmatch(value) is not None
+    )
+
+
+def _valid_advisory(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value.encode("utf-8")) <= 256
+        and ADVISORY.fullmatch(value) is not None
+    )
+
+
+def _valid_exception_text(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and len(value.encode("utf-8")) <= 4096
+        and all(character not in value for character in ("\x00", "\r"))
+    )
+
+
+def _audit_scanner_label() -> str:
+    package, separator, version = PINNED_AUDIT_SCANNER.partition("==")
+    return f"{package} {version}" if separator else PINNED_AUDIT_SCANNER
 
 
 def _run_pinned_python_audit(  # noqa: C901
@@ -93,7 +138,7 @@ def _run_pinned_python_audit(  # noqa: C901
             [
                 "uvx",
                 "--from",
-                f"pip-audit=={PINNED_AUDIT_SCANNER}",
+                PINNED_AUDIT_SCANNER,
                 "pip-audit",
                 "-r",
                 str(lock_path),
@@ -122,15 +167,16 @@ def _run_pinned_python_audit(  # noqa: C901
         vulnerabilities = package_result.get("vulns")
         if not isinstance(package, str) or not isinstance(version, str):
             return None
+        canonical_package = _canonical_package(package)
+        if canonical_package is None or not _valid_version(version):
+            return None
         if not isinstance(vulnerabilities, list):
             return None
         for vulnerability in vulnerabilities:
-            if not isinstance(vulnerability, dict) or not isinstance(vulnerability.get("id"), str):
+            if not isinstance(vulnerability, dict) or not _valid_advisory(vulnerability.get("id")):
                 return None
             advisory = str(vulnerability["id"])
-            if not advisory:
-                return None
-            finding = (str(package).replace("_", "-").lower(), str(version), advisory)
+            finding = (canonical_package, version, advisory)
             if finding in findings:
                 return None
             findings.add(finding)
@@ -157,6 +203,8 @@ def python_resolution_audit_is_valid(  # noqa: C901
         return False
     if value.get("schema") != "odoo19-python-resolution-audit-v1":
         return False
+    if value.get("scanner") != _audit_scanner_label():
+        return False
     if value.get("source_commit") != E2E_PINS.odoo_source_commit:
         return False
     if value.get("python") != E2E_PINS.cpython:
@@ -170,13 +218,14 @@ def python_resolution_audit_is_valid(  # noqa: C901
     exceptions = value.get("exceptions")
     if not isinstance(overrides, dict) or not isinstance(exceptions, list):
         return False
-    if set(overrides) - set(versions):
-        return False
+    normalized_overrides: set[str] = set()
     for package, version in overrides.items():
-        if not isinstance(package, str) or not isinstance(version, str):
+        canonical_package = _canonical_package(package)
+        if canonical_package is None or canonical_package in normalized_overrides:
             return False
-        if versions.get(package.replace("_", "-").lower()) != version:
+        if not _valid_version(version) or versions.get(canonical_package) != version:
             return False
+        normalized_overrides.add(canonical_package)
     expected_findings: set[tuple[str, str, str]] = set()
     observed: set[str] = set()
     for exception in exceptions:
@@ -186,29 +235,34 @@ def python_resolution_audit_is_valid(  # noqa: C901
         version = exception.get("version")
         advisories = exception.get("advisories")
         expires = exception.get("expires")
+        canonical_package = _canonical_package(package)
+        if not isinstance(version, str) or VERSION.fullmatch(version) is None:
+            return False
         if (
-            not isinstance(package, str)
-            or package not in AUDITED_EXCEPTION_PACKAGES
-            or package in observed
-            or versions.get(package) != version
+            canonical_package is None
+            or canonical_package not in AUDITED_EXCEPTION_PACKAGES
+            or canonical_package in observed
+            or versions.get(canonical_package) != version
             or not isinstance(advisories, list)
             or not advisories
-            or not all(isinstance(item, str) and item for item in advisories)
+            or not all(_valid_advisory(item) for item in advisories)
+            or len(set(advisories)) != len(advisories)
             or not all(
-                isinstance(exception.get(key), str) and exception[key]
-                for key in ("rationale", "scope", "owner", "expires")
+                _valid_exception_text(exception.get(key)) for key in ("rationale", "scope", "owner")
             )
-            or not isinstance(expires, str)
+            or not _valid_exception_text(expires)
         ):
+            return False
+        if not isinstance(expires, str):
             return False
         try:
             if date.fromisoformat(expires) < date.today():
                 return False
         except ValueError:
             return False
-        observed.add(package)
+        observed.add(canonical_package)
         for advisory in advisories:
-            finding = (package.replace("_", "-").lower(), str(version), str(advisory))
+            finding = (canonical_package, version, advisory)
             if finding in expected_findings:
                 return False
             expected_findings.add(finding)
@@ -376,9 +430,11 @@ def prerequisite_checks(tier: Tier, resolved_platform: str) -> dict[str, bool]:
         ),
     }
     if tier == "full":
-        checks["odoo_source_revision"] = _source_revision_is_available()
-        checks["python_resolution_lock"] = python_resolution_lock_is_valid()
-        checks["python_resolution_audit"] = python_resolution_audit_is_valid()
+        lock_valid = python_resolution_lock_is_valid()
+        checks["python_resolution_lock"] = lock_valid
+        audit_valid = lock_valid and python_resolution_audit_is_valid()
+        checks["python_resolution_audit"] = audit_valid
+        checks["odoo_source_revision"] = audit_valid and _source_revision_is_available()
     return checks
 
 
