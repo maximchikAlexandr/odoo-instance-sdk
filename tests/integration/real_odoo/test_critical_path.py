@@ -367,7 +367,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
                 encoding="utf-8"
             ).strip(),
             "ODCLI_TEST_INSTANCE_ORIGIN_PINS": (
-                f"http://127.0.0.1:{runtime.topology.source_odoo_port}"
+                f"http://127.0.0.1:{source_server.topology.source_odoo_port}"
             ),
         }
     )
@@ -425,8 +425,8 @@ def test_source_backed_full_critical_path(  # noqa: C901
         initialized,
         source_config=Path(".odcli/odoo.conf"),
         test_instance=TestInstanceProjectConfig(
-            base_url=f"http://127.0.0.1:{runtime.topology.source_odoo_port}",
-            database=runtime.topology.source_database,
+            base_url=f"http://127.0.0.1:{source_server.topology.source_odoo_port}",
+            database=source_server.topology.source_database,
             git_branch=E2E_PINS.odoo_source_commit,
         ),
         default_base_ref=E2E_PINS.odoo_source_commit,
@@ -743,8 +743,10 @@ def test_source_backed_full_critical_path(  # noqa: C901
     assert str(shown.get("id", shown.get("backup", {}).get("id", ""))) == backup_id
     for key in ("size_bytes", "sha256", "source_base_url", "database_name", "source_git_branch"):
         assert shown.get(key) == backup.get(key), key
-    assert backup["source_base_url"] == f"http://127.0.0.1:{runtime.topology.source_odoo_port}"
-    assert backup["database_name"] == runtime.topology.source_database
+    assert (
+        backup["source_base_url"] == f"http://127.0.0.1:{source_server.topology.source_odoo_port}"
+    )
+    assert backup["database_name"] == source_server.topology.source_database
     assert backup["source_git_branch"] == E2E_PINS.odoo_source_commit
     validated = _invoke(runner, project, cli_environment, "backup", "validate", backup_id)
     assert validated

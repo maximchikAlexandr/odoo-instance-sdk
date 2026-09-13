@@ -494,6 +494,17 @@ def test_real_odoo_fixture_preserves_shared_runtime_until_finalizer() -> None:
     assert "ports=(cluster.endpoint_port,)" in critical
 
 
+def test_full_critical_path_uses_source_fixture_for_remote_backup() -> None:
+    root = Path(__file__).resolve().parents[2]
+    critical = (root / "tests/integration/real_odoo/test_critical_path.py").read_text(
+        encoding="utf-8"
+    )
+    assert "source_server.topology.source_odoo_port" in critical
+    assert "source_server.topology.source_database" in critical
+    assert "runtime.topology.source_odoo_port" not in critical
+    assert "runtime.topology.source_database" not in critical
+
+
 def test_full_critical_path_persists_registered_python_manifest() -> None:
     root = Path(__file__).resolve().parents[2]
     critical = (root / "tests/integration/real_odoo/test_critical_path.py").read_text(
