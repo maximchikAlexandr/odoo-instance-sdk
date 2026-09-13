@@ -12,6 +12,15 @@ on:
       - "tests/fixtures/real_odoo/**"
       - "uv.lock"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Manual execution mode; targeted runs the bounded WP-04 node set"
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - targeted
 
 permissions:
   contents: read
@@ -151,7 +160,14 @@ jobs:
           ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
           ODCLI_E2E_SOURCE_CACHE_KEY: ${{ steps.source-key.outputs.key }}
           ODCLI_E2E_UV_CACHE_KEY: ${{ steps.uv-key.outputs.key }}
-        run: uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo
+        env:
+          E2E_MODE: ${{ inputs.mode || 'full' }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$E2E_MODE" == "targeted" ]]; then
+            uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo/test_critical_path.py tests/integration/real_odoo/test_focused_failures.py -k 'source_backed_full_critical_path or remote_auth_and_unreachable_source_fail_closed or archive_and_restore_boundaries_publish_no_unowned_state and truncated'
+          else
+            uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo
+          fi
       - name: Save content-addressed caches
         if: >-
           always() && steps.source-prep.outcome == 'success' &&
