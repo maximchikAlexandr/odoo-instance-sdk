@@ -33,7 +33,7 @@ from tests.integration.real_odoo.pins import (  # noqa: E402
 Tier = Literal["smoke", "full"]
 MAX_PROBE_SECONDS: Final[float] = 30.0
 ODOO_REPOSITORY: Final[str] = "https://github.com/odoo/odoo.git"
-ACTIONS_CACHE: Final[str] = "6849a6489940f00c2f30c0fb92c6274307ccb58a"
+ACTIONS_CACHE: Final[str] = "0400d5f644dc74513175e3cd8d07132dd4860809"
 PYTHON_RESOLUTION_LOCK: Final[Path] = (
     ROOT / "tests/fixtures/real_odoo/odoo19-linux-amd64-py3.12.lock"
 )

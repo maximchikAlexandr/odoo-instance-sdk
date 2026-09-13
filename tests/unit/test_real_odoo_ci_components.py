@@ -263,10 +263,15 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "target-data" in smoke_scenario
     warm_job = smoke[smoke.index("  real-odoo-smoke-warm:") : smoke.index("\n  lint:")]
     cold_job = smoke[smoke.index("  real-odoo-smoke:") : smoke.index("\n  real-odoo-smoke-warm:")]
+    for workflow in (smoke_job, full):
+        assert f"actions/cache/restore@{bootstrap.ACTIONS_CACHE}" in workflow
+        assert f"actions/cache/save@{bootstrap.ACTIONS_CACHE}" in workflow
+        assert "actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a" not in workflow
+        assert "actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a" not in workflow
     assert "needs: real-odoo-smoke" in warm_job
     assert "Save cold smoke uv cache" in cold_job
     assert "actions/cache/restore@" not in cold_job
-    assert "actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a" in warm_job
+    assert "actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809" in warm_job
     assert cold_job.count("uv_cache_key(") == 1
     assert warm_job.count("uv_cache_key(") == 1
     assert 'b"", Path("uv.lock").read_bytes()' in cold_job
@@ -283,7 +288,7 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "ODCLI_E2E_SOURCE_CACHE_HIT: ${{ matrix.cache_class" not in smoke_job
     assert "ODCLI_E2E_UV_CACHE_HIT: ${{ matrix.cache_class" not in smoke_job
     assert "steps.uv-cache.outputs.cache-hit" in smoke_job
-    assert "actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a" in smoke_job
+    assert "actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809" in smoke_job
     assert "Force cold smoke cache miss" in smoke_job
     assert "Require warm smoke cache hit" in smoke_job
     assert ".cache.source_hit" in smoke_job

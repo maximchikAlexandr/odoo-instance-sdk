@@ -42,7 +42,7 @@ jobs:
         run: rm -rf .cache/uv
       - run: uv sync --frozen --group test
       - name: Save cold smoke uv cache
-        uses: actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809
         with:
           path: .cache/uv
           key: ${{ steps.uv-key.outputs.key }}
@@ -150,7 +150,7 @@ jobs:
           && printf 'key=%s\n' "$key" >> "$GITHUB_OUTPUT"
       - name: Restore warm smoke uv cache
         id: uv-cache
-        uses: actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809
         with:
           path: .cache/uv
           key: ${{ steps.uv-key.outputs.key }}
