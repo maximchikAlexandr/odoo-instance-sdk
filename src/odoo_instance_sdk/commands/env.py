@@ -390,6 +390,19 @@ def env_group() -> None:
 @click.option(
     "--create-venv", "create_venv", is_flag=True, default=False, help="Create owned venv."
 )
+@click.option(
+    "--hash-lock",
+    "hash_lock",
+    type=click.Path(),
+    default=None,
+    help="Audited requirements lock for owned hash-locked synchronization.",
+)
+@click.option(
+    "--hash-lock-sha256",
+    "hash_lock_sha256",
+    default=None,
+    help="Expected SHA-256 digest of --hash-lock.",
+)
 @click.option("--http-port", "http_port", type=int, default=None, help="HTTP port.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @output_options
@@ -405,6 +418,8 @@ def env_checkout(
     odoo_bin: str | None,
     python: str | None,
     create_venv: bool,
+    hash_lock: str | None,
+    hash_lock_sha256: str | None,
     http_port: int | None,
     dry_run: bool,
     output_format: str | None,
@@ -429,6 +444,8 @@ def env_checkout(
             odoo_bin=Path(odoo_bin) if odoo_bin else None,
             python=python,
             create_venv=create_venv,
+            hash_lock=Path(hash_lock) if hash_lock else None,
+            hash_lock_sha256=hash_lock_sha256,
             http_port=http_port,
         )
         command, allocation = _build_ticket_checkout_command(
@@ -1315,6 +1332,19 @@ def env_remove(
 @env_group.command("sync", help="Synchronize an environment's Python dependencies.")
 @click.argument("environment", required=False)
 @click.option("--upgrade", "upgrade", is_flag=True, default=False)
+@click.option(
+    "--hash-lock",
+    "hash_lock",
+    type=click.Path(),
+    default=None,
+    help="Audited requirements lock for owned hash-locked synchronization.",
+)
+@click.option(
+    "--hash-lock-sha256",
+    "hash_lock_sha256",
+    default=None,
+    help="Expected SHA-256 digest of --hash-lock.",
+)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @output_options
 @pass_cli_context
@@ -1322,6 +1352,8 @@ def env_sync(
     ctx: CliContext,
     environment: str | None,
     upgrade: bool,
+    hash_lock: str | None,
+    hash_lock_sha256: str | None,
     dry_run: bool,
     output_format: str | None,
     json_output: bool,
@@ -1344,7 +1376,12 @@ def env_sync(
             fail(output_mode, "env.sync", str(e), dry_run=dry_run)
     try:
         resolve_project_path(ctx)
-        command = client.environments.sync_python_command(environment, upgrade=upgrade)
+        command = client.environments.sync_python_command(
+            environment,
+            upgrade=upgrade,
+            hash_lock=hash_lock,
+            hash_lock_sha256=hash_lock_sha256,
+        )
     except Exception as e:
         fail(output_mode, "env.sync", str(e), dry_run=dry_run)
     try:

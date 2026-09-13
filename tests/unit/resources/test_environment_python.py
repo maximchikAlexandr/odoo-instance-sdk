@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import textwrap
@@ -151,8 +152,156 @@ class TestCreateVenv:
         assert "--python" in venv_calls[0]
         assert "3.12" in venv_calls[0]
 
+    def test_hash_locked_checkout_skips_discovery_and_compile(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        lock = tmp_path / "audited.lock"
+        lock.write_text("requests==2.32.5 --hash=sha256:" + "0" * 64 + "\n", encoding="utf-8")
+        digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        calls = _patch_subprocess(monkeypatch)
+        env_client.environments.checkout(
+            project_manifest,
+            "feat/hash-lock",
+            options=EnvironmentCheckoutOptions(
+                python="3.12",
+                create_venv=True,
+                hash_lock=lock,
+                hash_lock_sha256=digest,
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+        dependency_calls = [call for call in calls if call[:2] == ["uv", "pip"]]
+        assert [call[:3] for call in dependency_calls] == [["uv", "pip", "sync"]]
+        assert dependency_calls[0][3:] == [
+            "--python",
+            dependency_calls[0][4],
+            "--require-hashes",
+            str(lock.resolve()),
+        ]
+
+    def test_hash_locked_checkout_requires_owned_environment(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        tmp_path: Path,
+    ) -> None:
+        lock = tmp_path / "audited.lock"
+        lock.write_text("requests==2.32.5\n", encoding="utf-8")
+        digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        with pytest.raises(ConfigError, match="owned environment"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/hash-lock-reuse",
+                options=EnvironmentCheckoutOptions(
+                    python="python",
+                    hash_lock=lock,
+                    hash_lock_sha256=digest,
+                    db_mode=EnvironmentDatabaseMode.SHARED,
+                    source_database="comerta",
+                ),
+            )
+
+    def test_hash_locked_checkout_revalidates_before_install(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        lock = tmp_path / "audited.lock"
+        lock.write_text("requests==2.32.5\n", encoding="utf-8")
+        digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        calls = _patch_subprocess(monkeypatch)
+        from odoo_instance_sdk.internal.proc import executor as executor_module
+
+        original_pump = executor_module._run_pump
+
+        def tamper_after_venv(
+            step: PreparedStep,
+            *,
+            timeout: float | None,
+            environment_snapshot: tuple[tuple[str, str], ...],
+            observer: StepObserver | None,
+            observe_output: bool,
+            max_output_bytes: int | None = None,
+        ) -> tuple[int, bytes, bytes, float]:
+            result = original_pump(
+                step,
+                timeout=timeout,
+                environment_snapshot=environment_snapshot,
+                observer=observer,
+                observe_output=observe_output,
+                max_output_bytes=max_output_bytes,
+            )
+            if step.step_id == "checkout.venv":
+                lock.write_text("requests==2.32.6\n", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(executor_module, "_run_pump", tamper_after_venv)
+        with pytest.raises(ConfigError, match="digest mismatch"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/hash-lock-revalidate",
+                options=EnvironmentCheckoutOptions(
+                    python="3.12",
+                    create_venv=True,
+                    hash_lock=lock,
+                    hash_lock_sha256=digest,
+                    db_mode=EnvironmentDatabaseMode.SHARED,
+                    source_database="comerta",
+                ),
+            )
+        assert not any(call[:2] == ["uv", "pip"] for call in calls)
+
 
 class TestSyncUpgradePreserve:
+    def test_hash_locked_sync_revalidates_captured_lock_before_install(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        lock = tmp_path / "audited.lock"
+        lock.write_text("requests==2.32.5\n", encoding="utf-8")
+        digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        calls = _patch_subprocess(monkeypatch)
+        env = env_client.environments.checkout(
+            project_manifest,
+            "feat/hash-lock-sync-revalidate",
+            options=EnvironmentCheckoutOptions(
+                python="3.12",
+                create_venv=True,
+                hash_lock=lock,
+                hash_lock_sha256=digest,
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+
+        catalog = env_client.get_catalog()
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        before = row["applied_settings_json"]
+        calls.clear()
+        command = env_client.environments.sync_python_command(
+            str(env.id), hash_lock=lock, hash_lock_sha256=digest
+        )
+        lock.write_text("requests==2.32.6\n", encoding="utf-8")
+
+        with pytest.raises(ConfigError, match="digest mismatch"):
+            command.run()
+
+        assert not any(call[:2] == ["uv", "pip"] for call in calls)
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        assert row["applied_settings_json"] == before
+
     def test_dependency_evidence_uses_normalized_meaningful_entries(self, tmp_path: Path) -> None:
         requirements = tmp_path / "requirements.txt"
         requirements.write_text(

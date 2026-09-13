@@ -72,6 +72,7 @@ dev = [
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
+norecursedirs = ["tests/fixtures/addons"]
 pythonpath = ["."]
 timeout = 60
 timeout_method = "signal"
@@ -82,6 +83,8 @@ markers = [
     "packaging: package artifact and isolated-install checks",
     "serial: must run without xdist parallelism",
     "real_odoo: opt-in disposable lifecycle test requiring explicit local Odoo prerequisites",
+    "e2e_smoke: PR smoke real-Odoo verification tier",
+    "e2e_full: source-backed full real-Odoo verification tier",
     "dashboard: requires dashboard extra; mandatory in dashboard CI job",
     "unpatched_xdg: exercise platformdirs against a fresh test-local XDG root",
 ]
@@ -151,6 +154,7 @@ pytest_add_cli_args_test_selection = [
 
 [tool.mypy]
 strict = true
+exclude = ["tests/fixtures/addons"]
 
 [[tool.mypy.overrides]]
 module = ["fastapi", "fastapi.*", "uvicorn", "uvicorn.*"]

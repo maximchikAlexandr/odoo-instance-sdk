@@ -1,0 +1,61 @@
+{
+  "schema": "odoo19-python-resolution-audit-v1",
+  "source_commit": "cd992ceebbaf343c03e1941d39cfe423d35ba6c6",
+  "python": "3.12.13",
+  "platform": "x86_64-manylinux_2_17",
+  "lock_sha256": "409063537bb93edb085304ac427effd7044a654393b5f9ff719fa105cd8c89d4",
+  "scanner": "pip-audit 2.10.1",
+  "reviewed_overrides": {
+    "cbor2": "5.9.0",
+    "cryptography": "46.0.7",
+    "idna": "3.15",
+    "jinja2": "3.1.6",
+    "lxml": "6.1.0",
+    "lxml-html-clean": "0.4.5",
+    "pillow": "12.3.0",
+    "pyopenssl": "26.0.0",
+    "python-ldap": "3.4.5",
+    "requests": "2.32.5",
+    "urllib3": "2.6.3",
+    "werkzeug": "3.1.6",
+    "zeep": "4.3.3"
+  },
+  "exceptions": [
+    {
+      "package": "cryptography",
+      "version": "46.0.7",
+      "advisories": ["GHSA-537c-gmf6-5ccf", "PYSEC-2026-3552", "PYSEC-2026-3553", "PYSEC-2026-3554"],
+      "rationale": "46.0.7 is the latest compatible Python 3.12 resolution for the pinned Odoo 19 runtime; later advisory fix versions require an unreviewed major upgrade.",
+      "scope": "Disposable full-tier Odoo fixture only; no untrusted cryptographic input is processed by the harness.",
+      "owner": "real-odoo-e2e-maintainers",
+      "expires": "2026-12-31"
+    },
+    {
+      "package": "pypdf2",
+      "version": "2.12.1",
+      "advisories": ["PYSEC-2026-1835"],
+      "rationale": "The pinned Odoo 19 requirements select this API-compatible version; the advisory database lists only an unavailable future 3.9.0 fix, so the full-tier runtime remains isolated and the exception is review-expiring.",
+      "scope": "Disposable full-tier Odoo fixture only; no attacker-controlled PDF is supplied by the harness.",
+      "owner": "real-odoo-e2e-maintainers",
+      "expires": "2026-12-31"
+    },
+    {
+      "package": "requests",
+      "version": "2.32.5",
+      "advisories": ["PYSEC-2026-2275"],
+      "rationale": "2.32.5 is the latest compatible Requests 2.x resolution; the advisory database lists 2.33.0 as the next fix and that major-compatible release requires a fresh Odoo review.",
+      "scope": "Pinned source/loopback fixture traffic only; remote source authentication remains fail-closed.",
+      "owner": "real-odoo-e2e-maintainers",
+      "expires": "2026-12-31"
+    },
+    {
+      "package": "urllib3",
+      "version": "2.6.3",
+      "advisories": ["PYSEC-2026-141", "PYSEC-2026-142"],
+      "rationale": "2.6.3 is the latest compatible urllib3 resolution for the reviewed Requests pin; the advisory database lists 2.7.0 as the next fix and requires a new compatibility review.",
+      "scope": "Pinned source/loopback fixture traffic only; evidence and runtime services are isolated and bounded.",
+      "owner": "real-odoo-e2e-maintainers",
+      "expires": "2026-12-31"
+    }
+  ]
+}
