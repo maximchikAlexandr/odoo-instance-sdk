@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -42,6 +43,22 @@ def test_instance_start_stop() -> None:
         assert proc.id not in client._processes
         assert proc.id not in client._handles
         mock_stop.assert_called_once()
+
+
+def test_instance_start_defaults_to_configured_runtime_cwd(tmp_path: Path) -> None:
+    client = _make_client()
+    inst = client.instance(base_url="http://localhost:8069")
+    inst.config = replace(inst.config, default_cwd=tmp_path)
+    process = MagicMock()
+    process.pid = 12345
+    process.poll.return_value = None
+    executor = RecordingExecutor(
+        handles={"instance.start": ProcessHandle(process, (), 12345, 12345, True)}
+    )
+    with patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor):
+        inst.start(StartConfig(http_port=9999))
+
+    assert executor.spawned[0].cwd == str(tmp_path)
 
 
 def test_instance_status() -> None:
