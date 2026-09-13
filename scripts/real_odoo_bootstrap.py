@@ -21,7 +21,7 @@ from typing import Final, Literal
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tests.integration.real_odoo.pins import (  # noqa: E402
+from scripts.real_odoo_pins import (  # noqa: E402
     E2E_PINS,
     PrerequisiteError,
     classify_cache,

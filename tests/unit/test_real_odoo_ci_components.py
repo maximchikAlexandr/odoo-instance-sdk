@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -236,6 +237,18 @@ def test_full_bootstrap_hashes_requirements_after_source_probe(
     )
 
 
+def test_bootstrap_imports_before_project_environment_sync() -> None:
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-S", "-c", "import scripts.real_odoo_bootstrap"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     root = Path(__file__).resolve().parents[2]
     smoke = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -268,6 +281,10 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
         assert f"actions/cache/save@{bootstrap.ACTIONS_CACHE}" in workflow
         assert "actions/cache/restore@6849a6489940f00c2f30c0fb92c6274307ccb58a" not in workflow
         assert "actions/cache/save@6849a6489940f00c2f30c0fb92c6274307ccb58a" not in workflow
+    sync_step = full.index("      - name: Sync frozen test environment")
+    bootstrap_step = full.index("      - name: Bootstrap required full prerequisites")
+    assert sync_step < bootstrap_step
+    assert "from scripts.real_odoo_bootstrap import uv_cache_key" in full
     assert "needs: real-odoo-smoke" in warm_job
     assert "Save cold smoke uv cache" in cold_job
     assert "actions/cache/restore@" not in cold_job
