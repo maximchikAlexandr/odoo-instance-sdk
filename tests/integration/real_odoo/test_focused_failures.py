@@ -260,6 +260,25 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         sparse_path = root / sparse_path
     sparse_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     sparse_path.write_text("odoo-bin\nodoo/\nrequirements.txt\n", encoding="utf-8")
+    # The public planner discovers implicit Odoo requirements from the
+    # registered repository root before ``git worktree add`` runs.  A
+    # no-checkout clone leaves that root empty even though the sparse pattern
+    # would populate the later worktree, so materialize the same pinned sparse
+    # tree in the root first.  This keeps the dependency input visible to the
+    # public checkout without restoring the full source cache.
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "checkout",
+            "--detach",
+            "--no-recurse-submodules",
+            E2E_PINS.odoo_source_commit,
+        ],
+        check=True,
+        capture_output=True,
+    )
     bootstrap_odoo_bin = _materialize_odoo_bootstrap(repository, root)
     relative = bootstrap_odoo_bin.relative_to(root / ".odoo-bootstrap")
     runtime.ledger.record(
