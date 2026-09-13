@@ -216,6 +216,7 @@ def test_target_fixture_provisions_only_target_and_retains_host_http_port(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = e2e_fixtures._make_runtime(tmp_path, "c" * 32)
+    original_cwd = Path.cwd()
     commands: list[tuple[str, ...]] = []
     cleaned: list[str] = []
 
@@ -245,8 +246,10 @@ def test_target_fixture_provisions_only_target_and_retains_host_http_port(
         assert not any("source_odoo" in command for command in commands)
         assert all(reservation.socket.fileno() == -1 for reservation in runtime.reservations[:3])
         assert runtime.reservations[3].socket.fileno() != -1
+        monkeypatch.chdir(runtime.root)
     finally:
         e2e_fixtures._finalize(runtime)
+    assert Path.cwd() == original_cwd
     assert cleaned == ["compose"]
     assert any(
         command[:7] == ("run", "--rm", "--no-deps", "--user", "root", "target_init", "sh")

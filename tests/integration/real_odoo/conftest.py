@@ -54,6 +54,7 @@ class E2ERuntime:
     master_password_file: Path
     secret_registry_file: Path
     scope: str
+    cleanup_cwd: Path
     failed: bool = False
 
 
@@ -215,6 +216,7 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
         master_password_file,
         secret_registry_file,
         scope,
+        Path.cwd().resolve(),
     )
 
 
@@ -397,6 +399,16 @@ def _finalize(runtime: E2ERuntime, primary_failure: BaseException | None = None)
             ComposeLifecycle(runtime.compose_file, runtime.topology.project_name),
         )
     except BaseException as error:
+        errors.append(error)
+    # A public env removal can legitimately delete the registered worktree,
+    # while the fixture project itself remains below the owned runtime root.
+    # Move pytest's process cwd back to the fixture caller's durable directory
+    # before the ledger removes that root; otherwise pytest capture finalizers
+    # try to flush from a deleted cwd and raise FileNotFoundError, masking the
+    # functional result and preventing the remaining module fixtures running.
+    try:
+        os.chdir(runtime.cleanup_cwd)
+    except FileNotFoundError as error:
         errors.append(error)
     try:
         runtime.ledger.unwind(primary_failure=primary_failure)
