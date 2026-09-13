@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import time
 from dataclasses import replace
@@ -435,7 +436,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
                 config_path=root / ".odcli" / "odoo.conf",
                 source_database=runtime.topology.target_sentinel_database,
                 odoo_bin=bootstrap_odoo_bin,
-                python=E2E_PINS.cpython,
+                python=sys.executable,
                 # These leaves exercise source/backup and archive boundaries;
                 # the critical-path node separately proves the owned venv and
                 # pinned dependency install.  Avoid repeating that expensive
