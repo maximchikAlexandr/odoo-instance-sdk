@@ -452,7 +452,8 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     environment_id = str(checkout_environment["id"])
     (root / ".odcli" / "e2e-environment-id").write_text(environment_id, encoding="ascii")
     worktree = Path(str(checkout_environment["worktree_path"]))
-    python = Path(str(checkout_environment["python_environment_path"])) / "bin" / "python"
+    python_root = Path(str(checkout_environment["python_environment_path"]))
+    python = python_root if python_root.name == "python" else python_root / "bin" / "python"
     generated_config = Path(str(checkout_environment["generated_config_path"]))
     config = msgspec.structs.replace(
         initialized,
