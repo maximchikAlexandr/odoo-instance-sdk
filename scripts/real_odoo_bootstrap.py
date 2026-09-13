@@ -204,8 +204,6 @@ def _parse_scanner_payload(payload: object) -> set[tuple[str, str, str]] | None:
                 return None
             advisory, _fix_versions = parsed
             finding = (package, version, advisory)
-            if finding in findings:
-                return None
             findings.add(finding)
     return findings
 
@@ -227,6 +225,10 @@ def _run_pinned_python_audit(
                 "json",
                 "--no-deps",
                 "--strict",
+                "--desc",
+                "off",
+                "--aliases",
+                "off",
             ],
             timeout=120.0,
         )

@@ -384,7 +384,10 @@ def test_pinned_scanner_normalizes_package_names_and_uses_exact_distribution_pin
                         {
                             "name": "Py_Pdf2",
                             "version": "2.12.1",
-                            "vulns": [{"id": "PYSEC-2026-1835", "fix_versions": ["2.12.2"]}],
+                            "vulns": [
+                                {"id": "PYSEC-2026-1835", "fix_versions": ["2.12.2"]},
+                                {"id": "PYSEC-2026-1835", "fix_versions": ["2.12.2"]},
+                            ],
                         }
                     ],
                     "fixes": [],
@@ -399,6 +402,8 @@ def test_pinned_scanner_normalizes_package_names_and_uses_exact_distribution_pin
     assert result == {("py-pdf2", "2.12.1", "PYSEC-2026-1835")}
     assert calls[0][calls[0].index("--from") + 1] == "pip-audit==2.10.1"
     assert "--strict" in calls[0]
+    assert calls[0][calls[0].index("--desc") + 1] == "off"
+    assert calls[0][calls[0].index("--aliases") + 1] == "off"
 
 
 @pytest.mark.parametrize(
@@ -448,6 +453,34 @@ def test_resolution_audit_rejects_skipped_dependency(
 
     assert bootstrap.python_resolution_audit_is_valid() is False
     assert calls and "--strict" in calls[0]
+
+
+def test_resolution_audit_accepts_repeated_live_findings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependencies: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for package, version, advisory in _fixture_audit_findings():
+        dependencies.setdefault((package, version), []).append({"id": advisory, "fix_versions": []})
+    first_package = min(dependencies)
+    dependencies[first_package].append(dict(dependencies[first_package][0]))
+    payload = {
+        "dependencies": [
+            {"name": package, "version": version, "vulns": vulnerabilities}
+            for (package, version), vulnerabilities in sorted(dependencies.items())
+        ],
+        "fixes": [],
+    }
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, json.dumps(payload), "")
+
+    monkeypatch.setattr(bootstrap, "_run", fake_run)
+
+    assert bootstrap.python_resolution_audit_is_valid()
+    assert calls and calls[0][calls[0].index("--desc") + 1] == "off"
+    assert calls[0][calls[0].index("--aliases") + 1] == "off"
 
 
 def test_full_critical_path_uses_only_hash_required_trusted_sync() -> None:
