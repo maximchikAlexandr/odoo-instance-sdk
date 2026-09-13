@@ -75,6 +75,60 @@ def _replace_http_port(config: Path, port: int) -> None:
     config.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_target_proxy(project: Path, target_url: str, auxiliary_port: int) -> Path:
+    """Proxy the owned container Odoo through the project runtime boundary."""
+    proxy = project / "smoke-odoo-proxy.py"
+    proxy.write_text(
+        """from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+TARGET = __TARGET_URL__.rstrip(\"/\")
+
+
+class Proxy(BaseHTTPRequestHandler):
+    def _forward(self):
+        length = int(self.headers.get(\"Content-Length\", \"0\"))
+        body = self.rfile.read(length) if length else None
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in {\"host\", \"connection\", \"content-length\"}
+        }
+        request = Request(TARGET + self.path, data=body, headers=headers, method=self.command)
+        try:
+            response = urlopen(request, timeout=30)
+        except HTTPError as error:
+            response = error
+        with response:
+            payload = response.read()
+            self.send_response(response.status)
+            for key, value in response.headers.items():
+                if key.lower() not in {\"connection\", \"transfer-encoding\", \"content-length\"}:
+                    self.send_header(key, value)
+            self.send_header(\"Content-Length\", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    do_GET = _forward
+    do_POST = _forward
+    do_HEAD = _forward
+
+
+if __name__ == \"__main__\":
+    ThreadingHTTPServer((\"127.0.0.1\", __AUXILIARY_PORT__), Proxy).serve_forever()
+""".replace("__TARGET_URL__", repr(target_url)).replace("__AUXILIARY_PORT__", str(auxiliary_port)),
+        encoding="utf-8",
+    )
+    proxy.chmod(0o700)
+    (project / ".env").write_text(
+        f"ODCLI_SMOKE_TARGET_URL={target_url}\nODCLI_SMOKE_AUXILIARY_PORT={auxiliary_port}\n",
+        encoding="utf-8",
+    )
+    (project / ".env").chmod(0o600)
+    return proxy
+
+
 def _start_target_odoo(runtime: E2ERuntime) -> None:
     compose_file = runtime.compose_file
     rendered = compose_file.read_text(encoding="utf-8")
@@ -199,6 +253,11 @@ def test_container_smoke_public_path(
     config = project / "smoke-odoo.conf"
     shutil.copy2(runtime.config_file, config)
     _replace_http_port(config, auxiliary_http_port)
+    proxy = _write_target_proxy(
+        project,
+        f"http://127.0.0.1:{runtime.reservations[3].port}",
+        auxiliary_http_port,
+    )
     environment = dict(os.environ)
     environment.update(runtime.environment)
     environment.update(
@@ -220,7 +279,7 @@ def test_container_smoke_public_path(
         "init",
         "--no-input",
         "--odoo-bin",
-        "/usr/bin/true",
+        str(proxy),
         "--python",
         sys.executable,
         "--config",

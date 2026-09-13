@@ -46,12 +46,20 @@ from .focused_support import (
 from .focused_support import (
     catalog_state as _catalog_state,
 )
-from .focused_support import copy_catalog_snapshot as _copy_catalog_snapshot
+from .focused_support import (
+    copy_catalog_snapshot as _copy_catalog_snapshot,
+)
+from .focused_support import (
+    invoke_in_registered_worktree as _invoke_in_registered_worktree,
+)
 from .focused_support import (
     observe_failure as _observe_failure,
 )
 from .focused_support import (
     record as _record,
+)
+from .focused_support import (
+    registered_worktree as _registered_worktree,
 )
 from .focused_support import (
     seed_backup as _seed_backup,
@@ -127,16 +135,7 @@ def _ensure_isolated_environment(catalog_path: Path, project: Path) -> str:
     if not selector.is_file():
         raise AssertionError(f"focused project has no environment selector: {selector}")
     environment_id = selector.read_text(encoding="ascii").strip()
-    catalog = BackupCatalog(db_path=catalog_path)
-    try:
-        rows = catalog.list_environments(include_removed=True)
-        row = next((item for item in rows if str(item["id"]) == environment_id), None)
-    finally:
-        catalog.close()
-    if row is None or str(row["state"]) == "removed":
-        raise AssertionError(
-            f"isolated catalog does not contain an active environment: {environment_id}"
-        )
+    _registered_worktree(catalog_path, project)
     return environment_id
 
 
@@ -496,7 +495,7 @@ def _approve_project_postgres(project: Path, environment: dict[str, str]) -> Non
             "--format",
             "json",
         ],
-        cwd=project,
+        cwd=_registered_worktree(Path(environment["ODCLI_E2E_CATALOG"]), project),
         env={**os.environ, **environment},
         capture_output=True,
         text=True,
@@ -530,10 +529,13 @@ def test_remote_auth_and_unreachable_source_fail_closed(
         "ODCLI_TEST_MASTER_PASSWORD": wrong_password,
         "ODCLI_E2E_KEEP_FAILED": "1",
     }
-    auth = runner.invoke(
+    auth = _invoke_in_registered_worktree(
+        runner,
         cli,
+        project,
+        catalog_path,
         ["--project", str(project), "db", "refresh", "--format", "json"],
-        env=environment,
+        environment,
     )
     assert auth.exit_code != 0
     auth_document, auth_files = _observe_failure(
@@ -561,10 +563,13 @@ def test_remote_auth_and_unreachable_source_fail_closed(
         runtime.root / f"unreachable-project-{runtime.run_id}",
         source=unreachable_plan,
     )
-    unreachable = runner.invoke(
+    unreachable = _invoke_in_registered_worktree(
+        runner,
         cli,
+        unreachable_project,
+        catalog_path,
         ["--project", str(unreachable_project), "db", "refresh", "--format", "json"],
-        env=environment,
+        environment,
     )
     assert unreachable.exit_code != 0
     network_document, _ = _observe_failure(
@@ -613,10 +618,13 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
     _ensure_isolated_environment(catalog_path, focused_project)
     _approve_project_postgres(focused_project, environment)
     _bind_catalog_path(monkeypatch, catalog_path)
-    result = CliRunner().invoke(
+    result = _invoke_in_registered_worktree(
+        CliRunner(),
         cli,
+        focused_project,
+        catalog_path,
         ["backup", "validate", _BACKUP_ID, "--format", "json"],
-        env=environment,
+        environment,
     )
     if variant == "incompatible":
         assert result.exit_code == 0, result.output
@@ -630,8 +638,11 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
         assert_secret_free(files, failure_evidence.secret_canary)
         project = focused_project
         target = f"odcli_incompatible_{target_runtime.run_id.replace('-', '')[:20]}"
-        restore = CliRunner().invoke(
+        restore = _invoke_in_registered_worktree(
+            CliRunner(),
             cli,
+            project,
+            catalog_path,
             [
                 "--project",
                 str(project),
@@ -644,7 +655,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
                 "--format",
                 "json",
             ],
-            env=environment,
+            environment,
         )
         assert restore.exit_code != 0
         restore_document, _ = _observe_failure(
@@ -719,7 +730,9 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     }
     _ensure_isolated_environment(catalog_path, project)
     _approve_project_postgres(project, environment)
-    successful = CliRunner().invoke(cli, args, env=environment)
+    successful = _invoke_in_registered_worktree(
+        CliRunner(), cli, project, catalog_path, args, environment
+    )
     assert successful.exit_code == 0, successful.output
     success_document = json.loads(successful.stdout)
     assert success_document["ok"] is True
@@ -730,8 +743,12 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     filestore = _project_filestore(project, target)
     assert filestore.is_dir()
 
-    first = CliRunner().invoke(cli, args, env=environment)
-    second = CliRunner().invoke(cli, args, env=environment)
+    first = _invoke_in_registered_worktree(
+        CliRunner(), cli, project, catalog_path, args, environment
+    )
+    second = _invoke_in_registered_worktree(
+        CliRunner(), cli, project, catalog_path, args, environment
+    )
     assert first.exit_code != 0 and second.exit_code != 0
     first_doc, _ = _observe_failure(
         first, runtime=target_runtime, evidence=failure_evidence, name="restore-occupied"
@@ -774,6 +791,14 @@ def test_remaining_focused_public_leaves_use_canonical_inventory(
 ) -> None:
     catalog_path = _isolated_catalog(focused_catalog, tmp_path)
     _ensure_isolated_environment(catalog_path, focused_project)
+    environment = {
+        **target_runtime.environment,
+        "HOME": str(catalog_path.parent.parent),
+        "ODCLI_E2E_CATALOG": str(catalog_path),
+        "ODCLI_E2E_KEEP_FAILED": "1",
+        "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
+    }
+    _approve_project_postgres(focused_project, environment)
     _bind_catalog_path(monkeypatch, catalog_path)
     _invoke_case(
         case,
@@ -835,7 +860,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
             "--format",
             "json",
         ],
-        cwd=project,
+        cwd=_registered_worktree(catalog_path, project),
         env=environment,
         start_new_session=True,
         stdout=subprocess.PIPE,
@@ -876,7 +901,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
             "--format",
             "json",
         ],
-        cwd=project,
+        cwd=_registered_worktree(catalog_path, project),
         env=environment,
         start_new_session=True,
         stdout=subprocess.PIPE,
@@ -938,7 +963,9 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     filestore = _project_filestore(partial_project, database)
 
     def public_restore_failure() -> None:
-        failed = CliRunner().invoke(cli, partial_args, env=environment)
+        failed = _invoke_in_registered_worktree(
+            CliRunner(), cli, partial_project, catalog_path, partial_args, environment
+        )
         assert failed.exit_code != 0
         observed, _ = _observe_failure(
             failed,
@@ -970,8 +997,11 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     scenario_ledger.record("filestore", f"{run_id}-filestore", lambda: shutil.rmtree(filestore))
 
     def delete_catalog_record() -> None:
-        deleted = CliRunner().invoke(
+        deleted = _invoke_in_registered_worktree(
+            CliRunner(),
             cli,
+            partial_project,
+            catalog_path,
             [
                 "--project",
                 str(partial_project),
@@ -982,7 +1012,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
                 "--format",
                 "json",
             ],
-            env=environment,
+            environment,
         )
         if deleted.exit_code != 0:
             raise RuntimeError(deleted.output)
@@ -1048,10 +1078,13 @@ def test_failed_debug_retention_contains_only_sanitized_files(
     _ensure_isolated_environment(catalog_path, project)
     environment["HOME"] = str(catalog_path.parent.parent)
     environment["ODCLI_E2E_CATALOG"] = str(catalog_path)
-    result = CliRunner().invoke(
+    result = _invoke_in_registered_worktree(
+        CliRunner(),
         cli,
+        project,
+        catalog_path,
         ["--project", str(project), "db", "refresh", "--format", "json"],
-        env=environment,
+        environment,
     )
     assert result.exit_code != 0
     document, files = _observe_failure(

@@ -112,6 +112,26 @@ def test_source_cache_consumption_requires_actual_shared_checkout(
     assert ci._source_cache_consumed()
 
 
+def test_source_cache_consumption_resolves_relative_alternates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "odoo.git"
+    alternates = tmp_path / "runtime" / "project" / ".git" / "objects" / "info"
+    alternates.mkdir(parents=True)
+    (cache / "objects").mkdir(parents=True)
+    (alternates / "alternates").write_text("../../../../../odoo.git/objects\n", encoding="utf-8")
+    runtime = type("Runtime", (), {"root": tmp_path / "runtime"})()
+    monkeypatch.setenv("ODCLI_E2E_ODOO_SOURCE_CACHE", str(cache))
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, "cd992ceebbaf343c03e1941d39cfe423d35ba6c6\n", ""
+        ),
+    )
+    assert ci._runtime_consumed_source_cache(runtime)
+
+
 def test_source_cache_consumption_survives_in_test_unwind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

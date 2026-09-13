@@ -995,6 +995,18 @@ def test_smoke_target_wiring_keeps_source_and_target_endpoints_distinct(tmp_path
     assert "source_postgres" not in host_config
 
 
+def test_smoke_auxiliary_proxy_is_project_bound(tmp_path: Path) -> None:
+    proxy = smoke._write_target_proxy(tmp_path, "http://127.0.0.1:18069", 18070)
+    assert proxy.stat().st_mode & 0o777 == 0o700
+    proxy_source = proxy.read_text(encoding="utf-8")
+    assert "http://127.0.0.1:18069" in proxy_source
+    assert '("127.0.0.1", 18070)' in proxy_source
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == (
+        "ODCLI_SMOKE_TARGET_URL=http://127.0.0.1:18069\nODCLI_SMOKE_AUXILIARY_PORT=18070\n"
+    )
+    assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
+
+
 def test_smoke_releases_target_port_before_compose_and_waits_for_health(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

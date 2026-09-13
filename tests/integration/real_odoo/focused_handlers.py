@@ -12,7 +12,7 @@ import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from click.testing import CliRunner, Result
 
@@ -25,7 +25,14 @@ from .archive import ArchiveIdentity
 from .cleanup import FailureEvidence, terminate_owned_process_group
 from .conftest import E2ERuntime
 from .failures import assert_secret_free
-from .focused_support import BACKUP_ID, catalog_state, observe_failure, record, seed_backup
+from .focused_support import (
+    BACKUP_ID,
+    catalog_state,
+    invoke_in_registered_worktree,
+    observe_failure,
+    record,
+    seed_backup,
+)
 
 
 @dataclass(slots=True)
@@ -45,11 +52,17 @@ Handler = Callable[[_State], tuple[Result, dict[str, Any] | None]]
 def _invoke(state: _State, args: list[str], *, input: str | None = None) -> Result:
     selector = state.project / ".odcli" / "e2e-environment-id"
     context = ["--env", selector.read_text(encoding="ascii").strip()] if selector.is_file() else []
-    return CliRunner().invoke(
-        cli,
-        [*context, "--project", str(state.project), *args],
-        env=state.environment,
-        input=input,
+    return cast(
+        "Result",
+        invoke_in_registered_worktree(
+            CliRunner(),
+            cli,
+            state.project,
+            Path(state.environment["ODCLI_E2E_CATALOG"]),
+            [*context, "--project", str(state.project), *args],
+            state.environment,
+            input=input,
+        ),
     )
 
 

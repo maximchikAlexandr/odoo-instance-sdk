@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import chdir
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,49 @@ def copy_catalog_snapshot(source: Path, destination: Path) -> None:
         source_connection.backup(destination_connection)
     temporary.replace(destination)
     destination.chmod(0o600)
+
+
+def registered_worktree(catalog_path: Path, project: Path) -> Path:
+    """Return the active checkout recorded for a focused project."""
+    selector = project / ".odcli" / "e2e-environment-id"
+    if not selector.is_file():
+        raise AssertionError(f"focused project has no environment selector: {selector}")
+    environment_id = selector.read_text(encoding="ascii").strip()
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        row = next(
+            (
+                item
+                for item in catalog.list_environments(include_removed=True)
+                if str(item["id"]) == environment_id
+            ),
+            None,
+        )
+    finally:
+        catalog.close()
+    if row is None or str(row["state"]) == "removed":
+        raise AssertionError(
+            f"isolated catalog does not contain an active environment: {environment_id}"
+        )
+    worktree = Path(str(row["worktree_path"])).resolve()
+    if not worktree.is_dir():
+        raise AssertionError(f"registered environment worktree is unavailable: {worktree}")
+    return worktree
+
+
+def invoke_in_registered_worktree(
+    runner: Any,
+    cli: Any,
+    project: Path,
+    catalog_path: Path,
+    args: list[str],
+    environment: dict[str, str],
+    *,
+    input: str | None = None,
+) -> Any:
+    """Invoke a public command from the exact worktree it resolves."""
+    with chdir(registered_worktree(catalog_path, project)):
+        return runner.invoke(cli, args, env=environment, input=input)
 
 
 def record(record_property: object, evidence: str, value: object = "passed") -> None:

@@ -518,6 +518,9 @@ def test_source_backed_full_critical_path(  # noqa: C901
         ).stdout.strip()
         == f"Python {E2E_PINS.cpython}"
     )
+    # Every command after checkout must resolve its implicit cwd through the
+    # registered environment, not the pytest repository root.
+    monkeypatch.chdir(Path(str(environment["worktree_path"])))
     _record(
         record_property,
         "E2E-CP-02",
@@ -801,6 +804,11 @@ def test_source_backed_full_critical_path(  # noqa: C901
     postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
     repeated_postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
     assert postgres_stop == repeated_postgres_stop == {}
+    compose_down(
+        cluster.compose_file,
+        cluster.compose_project_name,
+        ports=(cluster.endpoint_port,),
+    )
 
     audit = audit_no_leaks(
         runtime.run_id,

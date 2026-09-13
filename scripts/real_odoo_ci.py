@@ -170,10 +170,17 @@ def _checkout_consumed_source_cache(root: Path, cache_path: Path) -> bool:
                 text=True,
                 timeout=30.0,
             )
+            alternate_sources = {
+                (alternate_file.parent / line).resolve()
+                if not Path(line).is_absolute()
+                else Path(line).resolve()
+                for line in lines
+                if line
+            }
             if (
                 head.returncode == 0
                 and head.stdout.strip() == "cd992ceebbaf343c03e1941d39cfe423d35ba6c6"
-                and any(Path(line).resolve() == alternate for line in lines if line)
+                and alternate in alternate_sources
             ):
                 return True
         except (OSError, subprocess.SubprocessError, IndexError):
