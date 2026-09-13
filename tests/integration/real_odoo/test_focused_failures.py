@@ -74,13 +74,43 @@ def focused_project(target_runtime: E2ERuntime, source_backup_plan: SourceBackup
 @pytest.fixture(scope="module")
 def focused_catalog(target_runtime: E2ERuntime, focused_project: Path) -> Path:
     """Keep a pristine registration/catalog snapshot for each focused leaf."""
-    del focused_project
-    source = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])
-    if not source.is_file():
-        raise AssertionError(f"focused project did not create its catalog: {source}")
+    configured = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])
+    selector = focused_project / ".odcli" / "e2e-environment-id"
+    if not selector.is_file():
+        raise AssertionError(f"focused project has no environment selector: {selector}")
+    environment_id = selector.read_text(encoding="ascii").strip()
+    # Environment checkout may resolve the SDK root through HOME while the
+    # process that bootstrapped the project used ODCLI_E2E_CATALOG.  Select
+    # the actual catalog containing this checkout instead of snapshotting an
+    # empty sibling database; every leaf must start with the active row.
+    candidates: tuple[Path, ...] = (configured, focused_project / ".odcli" / "catalog.sqlite3")
+    candidates += tuple(target_runtime.root.rglob("catalog.sqlite3"))
+    source = next(
+        (
+            candidate
+            for candidate in dict.fromkeys(candidates)
+            if candidate.is_file() and _catalog_has_environment(candidate, environment_id)
+        ),
+        None,
+    )
+    if source is None:
+        raise AssertionError(
+            f"focused project catalog has no active environment {environment_id}: {configured}"
+        )
     snapshot = target_runtime.root / "focused-catalog-baseline.sqlite3"
     _copy_catalog_snapshot(source, snapshot)
     return snapshot
+
+
+def _catalog_has_environment(path: Path, environment_id: str) -> bool:
+    catalog = BackupCatalog(db_path=path)
+    try:
+        return any(
+            str(row["id"]) == environment_id and str(row["state"]) != "removed"
+            for row in catalog.list_environments(include_removed=True)
+        )
+    finally:
+        catalog.close()
 
 
 def _isolated_catalog(source: Path, root: Path) -> Path:
@@ -357,9 +387,9 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             text=True,
             check=False,
         )
-        if removed.returncode != 0 and "Environment not found" not in (
-            removed.stdout + removed.stderr
-        ):
+        output = removed.stdout + removed.stderr
+        normalized = output.casefold().replace("_", " ")
+        if removed.returncode != 0 and "environment not found" not in normalized:
             raise RuntimeError(removed.stdout + removed.stderr)
 
     runtime.ledger.record(

@@ -1029,6 +1029,18 @@ def is_process_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    # A terminated group leader can remain as a zombie until its parent
+    # reaps it.  Treating that kernel entry as alive makes bounded owned-tree
+    # cleanup report a false timeout and prevents the runtime ledger from
+    # reaching its empty postcondition.
+    if sys.platform != "win32":
+        try:
+            with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+                state = stream.read().split()[2]
+        except (FileNotFoundError, OSError, IndexError):
+            return False
+        if state == "Z":
+            return False
     return True
 
 

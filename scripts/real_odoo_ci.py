@@ -282,8 +282,13 @@ def _instrumented_finalize(runtime: Any, primary_failure: BaseException | None =
         _ORIGINAL_FINALIZE(runtime, primary_failure)
     finally:
         try:
-            if getattr(runtime, "scope", None) == "source":
-                _write_resource_manifest()
+            # The target runtime owns the source-backed checkout in the full
+            # tier.  Writing this only for the source fixture left the final
+            # manifest with a stale ``source_cache_consumed`` value even
+            # though the checkout had already been verified before pytest.
+            # Emit one final manifest after every runtime finalization so the
+            # resource and cache audits describe the same completed run.
+            _write_resource_manifest()
         finally:
             if configured:
                 real_odoo_timing.record(Path(configured), "cleanup", started, time.monotonic())

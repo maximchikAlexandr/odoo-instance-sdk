@@ -109,11 +109,14 @@ def _start_target_odoo(runtime: E2ERuntime) -> None:
         # failed its HTTP contract; it must never become a silent pytest kill.
         wait_for_http(
             f"http://127.0.0.1:{runtime.reservations[3].port}/web/health",
-            timeout=120.0,
+            # pytest-timeout includes fixture setup in this test.  Keep a
+            # measured reserve for status/log collection rather than letting
+            # the outer 180s budget kill the diagnostic path.
+            timeout=90.0,
         )
         wait_for_http(
             f"http://127.0.0.1:{runtime.reservations[3].port}/web/database/selector",
-            timeout=20.0,
+            timeout=15.0,
         )
     except TimeoutError as error:
         status = lifecycle.run(
