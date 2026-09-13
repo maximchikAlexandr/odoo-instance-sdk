@@ -46,6 +46,7 @@ from .focused_support import (
 from .focused_support import (
     catalog_state as _catalog_state,
 )
+from .focused_support import copy_catalog_snapshot as _copy_catalog_snapshot
 from .focused_support import (
     observe_failure as _observe_failure,
 )
@@ -78,7 +79,7 @@ def focused_catalog(target_runtime: E2ERuntime, focused_project: Path) -> Path:
     if not source.is_file():
         raise AssertionError(f"focused project did not create its catalog: {source}")
     snapshot = target_runtime.root / "focused-catalog-baseline.sqlite3"
-    shutil.copy2(source, snapshot)
+    _copy_catalog_snapshot(source, snapshot)
     return snapshot
 
 
@@ -86,8 +87,7 @@ def _isolated_catalog(source: Path, root: Path) -> Path:
     """Copy one closed catalog into the HOME-visible SDK root for one leaf."""
     home = root / "home"
     destination = home / ".odcli" / "catalog.sqlite3"
-    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
+    _copy_catalog_snapshot(source, destination)
     return destination
 
 

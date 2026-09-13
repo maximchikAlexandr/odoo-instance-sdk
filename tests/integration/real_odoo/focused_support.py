@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,21 @@ from .conftest import E2ERuntime
 from .failures import assert_secret_free, write_failure_evidence
 
 BACKUP_ID = "00000000-0000-0000-0000-000000000007"
+
+
+def copy_catalog_snapshot(source: Path, destination: Path) -> None:
+    """Take a transactionally consistent snapshot, including SQLite WAL state."""
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.unlink(missing_ok=True)
+    source_uri = f"file:{source}?mode=ro"
+    with (
+        sqlite3.connect(source_uri, uri=True) as source_connection,
+        sqlite3.connect(temporary) as destination_connection,
+    ):
+        source_connection.backup(destination_connection)
+    temporary.replace(destination)
+    destination.chmod(0o600)
 
 
 def record(record_property: object, evidence: str, value: object = "passed") -> None:

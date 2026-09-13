@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from tests.integration.real_odoo.compose import (
     reserve_ports,
     wait_for_compose_pg_isready,
 )
+from tests.integration.real_odoo.focused_support import copy_catalog_snapshot
 
 
 def test_compose_topology_is_namespaced_and_loopback_only() -> None:
@@ -108,6 +110,23 @@ def test_runtime_factory_keeps_two_runs_disjoint_and_uses_loopback_target(
         e2e_fixtures._remove_runtime_files(second)
         for reservation in (*first.reservations, *second.reservations):
             reservation.release()
+
+
+def test_catalog_snapshot_carries_active_environment_state(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE environments (id TEXT PRIMARY KEY, state TEXT)")
+        connection.execute("INSERT INTO environments VALUES ('env-1', 'ready')")
+        connection.commit()
+
+    destination = tmp_path / "isolated" / "catalog.sqlite3"
+    copy_catalog_snapshot(source, destination)
+
+    with sqlite3.connect(destination) as connection:
+        assert connection.execute("SELECT id, state FROM environments").fetchone() == (
+            "env-1",
+            "ready",
+        )
 
 
 def test_runtime_factory_uses_docker_visible_tmp_spelling() -> None:

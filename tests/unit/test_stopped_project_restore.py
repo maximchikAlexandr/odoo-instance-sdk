@@ -180,13 +180,17 @@ def test_auxiliary_readiness_failure_has_exact_recovery_guidance(
         inherited_stdio=False,
     )
     executor = RecordingExecutor(handles={session.start_step.step_id: handle})
-    cast("Any", instance._client.unregister_process).return_value = (None, None)
+    owned = MagicMock()
+    owned.pid = 456
+    cast("Any", instance._client.unregister_process).return_value = (owned, "secret.conf")
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
     )
     monkeypatch.setattr(
         OdooInstance, "wait_ready", MagicMock(side_effect=RuntimeError("health failed"))
     )
+    terminate = MagicMock()
+    monkeypatch.setattr("odoo_instance_sdk.resources.instance.terminate", terminate)
 
     from odoo_instance_sdk.internal.proc import RunContext
 
@@ -206,6 +210,8 @@ def test_auxiliary_readiness_failure_has_exact_recovery_guidance(
     with pytest.raises(DatabaseManagerUnavailableError, match=r"odcli run"):
         command.run()
     cast("Any", instance._client.unregister_process).assert_called_once()
+    terminate.assert_called_once()
+    assert session.process is None
 
 
 def test_auxiliary_spawn_failure_has_exact_recovery_guidance(
