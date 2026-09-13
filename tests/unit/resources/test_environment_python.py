@@ -206,6 +206,58 @@ class TestCreateVenv:
                 ),
             )
 
+    def test_hash_locked_checkout_revalidates_before_install(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        lock = tmp_path / "audited.lock"
+        lock.write_text("requests==2.32.5\n", encoding="utf-8")
+        digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        calls = _patch_subprocess(monkeypatch)
+        from odoo_instance_sdk.internal.proc import executor as executor_module
+
+        original_pump = executor_module._run_pump
+
+        def tamper_after_venv(
+            step: PreparedStep,
+            *,
+            timeout: float | None,
+            environment_snapshot: tuple[tuple[str, str], ...],
+            observer: StepObserver | None,
+            observe_output: bool,
+            max_output_bytes: int | None = None,
+        ) -> tuple[int, bytes, bytes, float]:
+            result = original_pump(
+                step,
+                timeout=timeout,
+                environment_snapshot=environment_snapshot,
+                observer=observer,
+                observe_output=observe_output,
+                max_output_bytes=max_output_bytes,
+            )
+            if step.step_id == "checkout.venv":
+                lock.write_text("requests==2.32.6\n", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(executor_module, "_run_pump", tamper_after_venv)
+        with pytest.raises(ConfigError, match="digest mismatch"):
+            env_client.environments.checkout(
+                project_manifest,
+                "feat/hash-lock-revalidate",
+                options=EnvironmentCheckoutOptions(
+                    python="3.12",
+                    create_venv=True,
+                    hash_lock=lock,
+                    hash_lock_sha256=digest,
+                    db_mode=EnvironmentDatabaseMode.SHARED,
+                    source_database="comerta",
+                ),
+            )
+        assert not any(call[:2] == ["uv", "pip"] for call in calls)
+
 
 class TestSyncUpgradePreserve:
     def test_dependency_evidence_uses_normalized_meaningful_entries(self, tmp_path: Path) -> None:

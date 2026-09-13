@@ -54,6 +54,7 @@ from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filest
 from odoo_instance_sdk.internal.dependency_sync import (
     build_trusted_sync_argv,
     resolve_hash_lock,
+    revalidate_hash_lock,
 )
 from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.locks import (
@@ -1013,6 +1014,8 @@ class EnvironmentResource:
                                 "uv pip compile failed and no prior lock: "
                                 f"{_process_stderr(compile_result)}"
                             )
+                    else:
+                        revalidate_hash_lock(plan.hash_lock, plan.options.hash_lock_sha256)
                     install_result = cast(
                         "ProcessResult", context.process("checkout.dependencies.install")
                     )
@@ -1503,6 +1506,7 @@ class EnvironmentResource:
                     exclusive_lock(python_env_lock_path(env.python_environment_path)),
                 ):
                     if trusted_lock is not None:
+                        revalidate_hash_lock(trusted_lock, hash_lock_sha256)
                         install_result = cast(
                             "ProcessResult", context.process("environment.sync.install")
                         )

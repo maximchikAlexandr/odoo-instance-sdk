@@ -63,3 +63,11 @@ def build_trusted_sync_argv(python: str | Path, hash_lock: str | Path) -> tuple[
         "--require-hashes",
         str(hash_lock),
     )
+
+
+def revalidate_hash_lock(hash_lock: Path, hash_lock_sha256: str | None) -> None:
+    """Reject a lock changed after command capture and before execution."""
+
+    resolved = resolve_hash_lock(hash_lock, hash_lock_sha256)
+    if resolved != hash_lock:
+        raise ConfigError(f"hash lock path changed after capture: {hash_lock}")
