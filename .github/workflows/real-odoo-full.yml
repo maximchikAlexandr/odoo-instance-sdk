@@ -102,8 +102,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libldap2-dev libsasl2-dev
-          dpkg-query --show --showformat='${Package}=${Version}\n' libldap2-dev libsasl2-dev
+          sudo apt-get install --yes --no-install-recommends libldap2-dev libsasl2-dev postgresql-client
+          dpkg-query --show --showformat='${Package}=${Version}\n' libldap2-dev libsasl2-dev postgresql-client
+          psql --version
       - name: Bootstrap required full prerequisites
         id: bootstrap
         env:

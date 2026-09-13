@@ -512,13 +512,15 @@ def test_port_reservation_release_is_idempotent() -> None:
     assert reservation.socket.fileno() == -1
 
 
-def test_full_workflow_installs_only_approved_ldap_build_prerequisites() -> None:
+def test_full_workflow_installs_ldap_and_psql_prerequisites() -> None:
     root = Path(__file__).resolve().parents[2]
     workflow = (root / ".github/workflows/real-odoo-full.yml").read_text(encoding="utf-8")
     assert "Install approved Linux LDAP build prerequisites" in workflow
     assert (
-        "sudo apt-get install --yes --no-install-recommends libldap2-dev libsasl2-dev" in workflow
+        "sudo apt-get install --yes --no-install-recommends "
+        "libldap2-dev libsasl2-dev postgresql-client" in workflow
     )
+    assert "psql --version" in workflow
     deps = workflow.split("Install approved Linux LDAP build prerequisites", 1)[1].split(
         "Bootstrap required full prerequisites", 1
     )[0]
