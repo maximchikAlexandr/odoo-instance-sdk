@@ -279,6 +279,7 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     ):
         assert early_failure_file in full
     assert "pytest.mark.e2e_smoke" in smoke_scenario
+    assert "@pytest.mark.timeout(180)" in smoke_scenario
     for scenario in ("E2E-SM-01", "E2E-SM-02", "E2E-SM-03", "E2E-SM-04", "E2E-SM-05"):
         assert scenario in smoke_scenario
     assert "runtime = target_runtime" in smoke_scenario
@@ -326,6 +327,17 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "Assert smoke evidence budget" in smoke_job
     assert ".cache/odoo-source" in full
     assert ".cache/uv" in full
+    assert "ODCLI_E2E_ODOO_SOURCE_CACHE: ${{ github.workspace }}/.cache/odoo-source" in full
+    assert "ODCLI_E2E_ODOO_SOURCE_REPO: ${{ github.workspace }}/.cache/odoo-source" in full
+    source_cache_verify = full.index("Verify pinned source cache before full pytest")
+    full_pytest = full.index("Run source-backed full E2E")
+    assert source_cache_verify < full_pytest
+    assert 'test "$(git -C "$cache" rev-parse --is-bare-repository)" = true' in full
+    assert 'git -C "$cache" fsck --full --no-progress' in full
+    assert 'cat-file -e "${ODOO_SOURCE_COMMIT}^{commit}"' in full
+    assert 'cat-file -e "${ODOO_SOURCE_COMMIT}:requirements.txt"' in full
+    assert 'find "$cache" -mindepth 1 -print -quit' in full
+    assert "restored source cache is not a bare repository" in full
     assert "backups" not in full.lower()
     smoke_command = "uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_smoke' tests/integration/real_odoo"
     full_command = "uv run pytest -o addopts='' -o junit_family=xunit1 --junitxml=.artifacts/real-odoo-e2e/junit.xml -p scripts.real_odoo_timing -p scripts.real_odoo_ci -m 'real_odoo and e2e_full' tests/integration/real_odoo"
@@ -371,12 +383,21 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert full.count("steps.uv-key.outputs.key") >= 4
     assert "steps.source-prep.outputs.verified_source_cache_hit" in full
     assert "Materialize verified source-backed checkout" not in full
-    assert "git -C .cache/odoo-source update-ref refs/heads/odoo19-pinned FETCH_HEAD" in full
+    assert 'git -C "$cache" update-ref refs/heads/odoo19-pinned FETCH_HEAD' in full
     assert "ODCLI_E2E_SOURCE_CHECKOUT" not in full
     assert ".artifacts/real-odoo-e2e/odoo-source" not in full
     assert "from scripts.real_odoo_bootstrap import source_cache_key" in full
     assert "from scripts.real_odoo_bootstrap import uv_cache_key" in full
-    assert "ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source" in full
+    assert "ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source" not in full
     assert "ODCLI_E2E_SOURCE_CACHE: .cache/odoo-source" not in full
     action_refs = re.findall(r"uses:\s+[^@\s]+@([0-9a-f]{40})", smoke_job + full)
     assert action_refs and all(len(reference) == 40 for reference in action_refs)
+
+
+def test_focused_catalog_binding_uses_existing_public_path_boundary() -> None:
+    root = Path(__file__).resolve().parents[2]
+    focused = (root / "tests/integration/real_odoo/test_focused_failures.py").read_text(
+        encoding="utf-8"
+    )
+    assert "odoo_instance_sdk.internal.port_allocation.get_catalog_path" not in focused
+    assert "odoo_instance_sdk.internal.paths.get_catalog_path" in focused

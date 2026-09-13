@@ -242,7 +242,6 @@ def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> N
         "odoo_instance_sdk.internal.paths.get_catalog_path",
         "odoo_instance_sdk.internal.context.get_catalog_path",
         "odoo_instance_sdk.commands.env.get_catalog_path",
-        "odoo_instance_sdk.internal.port_allocation.get_catalog_path",
         "odoo_instance_sdk.resources.postgres.get_catalog_path",
         "odoo_instance_sdk.resources.monitor.get_catalog_path",
     ):

@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source
+  ODCLI_E2E_ODOO_SOURCE_CACHE: ${{ github.workspace }}/.cache/odoo-source
   UV_CACHE_DIR: .cache/uv
   ODCLI_E2E_SECRET_REGISTRY: .artifacts/real-odoo-e2e-secret-registry.json
 
@@ -57,21 +57,30 @@ jobs:
       - name: Populate and verify pinned bare Odoo source cache
         id: source-prep
         env:
-          ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source
+          ODCLI_E2E_ODOO_SOURCE_CACHE: ${{ github.workspace }}/.cache/odoo-source
         run: |
-          mkdir -p .cache/odoo-source
-          if ! git -C .cache/odoo-source rev-parse --is-bare-repository >/dev/null 2>&1; then
-            git init --bare .cache/odoo-source
+          set -euo pipefail
+          cache="$ODCLI_E2E_ODOO_SOURCE_CACHE"
+          mkdir -p "$(dirname "$cache")"
+          if [ -e "$cache" ]; then
+            if [ -d "$cache" ] && [ -z "$(find "$cache" -mindepth 1 -print -quit)" ]; then
+              git init --bare "$cache"
+            elif [ "$(git -C "$cache" rev-parse --is-bare-repository 2>/dev/null || true)" != true ]; then
+              echo "restored source cache is not a bare repository: $cache" >&2
+              exit 1
+            fi
+          else
+            git init --bare "$cache"
           fi
-          if git -C .cache/odoo-source cat-file -e cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}; then
+          if git -C "$cache" cat-file -e cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}; then
             echo "verified_source_cache_hit=true" >> "$GITHUB_OUTPUT"
           else
-            git -C .cache/odoo-source fetch --depth=1 https://github.com/odoo/odoo.git cd992ceebbaf343c03e1941d39cfe423d35ba6c6
-            git -C .cache/odoo-source update-ref refs/heads/odoo19-pinned FETCH_HEAD
+            git -C "$cache" fetch --depth=1 https://github.com/odoo/odoo.git cd992ceebbaf343c03e1941d39cfe423d35ba6c6
+            git -C "$cache" update-ref refs/heads/odoo19-pinned FETCH_HEAD
             echo "verified_source_cache_hit=false" >> "$GITHUB_OUTPUT"
           fi
-          git -C .cache/odoo-source cat-file -e cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}
-          git -C .cache/odoo-source show cd992ceebbaf343c03e1941d39cfe423d35ba6c6:requirements.txt > .cache/odoo-requirements.txt
+          git -C "$cache" cat-file -e cd992ceebbaf343c03e1941d39cfe423d35ba6c6^{commit}
+          git -C "$cache" show cd992ceebbaf343c03e1941d39cfe423d35ba6c6:requirements.txt > .cache/odoo-requirements.txt
           chmod 600 .cache/odoo-requirements.txt
       - name: Compute immutable uv cache key
         id: uv-key
@@ -105,13 +114,31 @@ jobs:
       - name: Start monotonic test measurement
         if: steps.bootstrap.outcome == 'success'
         run: uv run --no-project python scripts/real_odoo_timing.py start --phase test --output .artifacts/real-odoo-e2e/timing.json
+      - name: Verify pinned source cache before full pytest
+        if: steps.bootstrap.outcome == 'success'
+        env:
+          ODCLI_E2E_ODOO_SOURCE_CACHE: ${{ github.workspace }}/.cache/odoo-source
+          ODCLI_E2E_ODOO_SOURCE_REPO: ${{ github.workspace }}/.cache/odoo-source
+          ODOO_SOURCE_COMMIT: cd992ceebbaf343c03e1941d39cfe423d35ba6c6
+        run: |
+          set -euo pipefail
+          cache="$ODCLI_E2E_ODOO_SOURCE_CACHE"
+          test -d "$cache"
+          test "$(git -C "$cache" rev-parse --is-bare-repository)" = true
+          git -C "$cache" fsck --full --no-progress
+          git -C "$cache" cat-file -e "${ODOO_SOURCE_COMMIT}^{commit}"
+          git -C "$cache" cat-file -e "${ODOO_SOURCE_COMMIT}:requirements.txt"
+          if ! git -C "$cache" cat-file -e "${ODOO_SOURCE_COMMIT}:odoo-bin"; then
+            git -C "$cache" cat-file -e "${ODOO_SOURCE_COMMIT}:odoo/odoo-bin"
+          fi
       - name: Run source-backed full E2E
         id: pytest
         if: steps.bootstrap.outcome == 'success'
         env:
           ODCLI_E2E_TIMING_FILE: .artifacts/real-odoo-e2e/timing.json
           ODCLI_E2E_EVIDENCE_ROOT: .artifacts/real-odoo-e2e
-          ODCLI_E2E_ODOO_SOURCE_CACHE: .cache/odoo-source
+          ODCLI_E2E_ODOO_SOURCE_CACHE: ${{ github.workspace }}/.cache/odoo-source
+          ODCLI_E2E_ODOO_SOURCE_REPO: ${{ github.workspace }}/.cache/odoo-source
           ODCLI_E2E_SOURCE_CACHE_HIT: ${{ steps.source-prep.outputs.verified_source_cache_hit }}
           ODCLI_E2E_UV_CACHE_HIT: ${{ steps.uv-cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
           ODCLI_E2E_SOURCE_CACHE_KEY: ${{ steps.source-key.outputs.key }}

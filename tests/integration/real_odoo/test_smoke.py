@@ -127,6 +127,7 @@ def _align_target_master_password(runtime: E2ERuntime, source: E2ERuntime) -> No
     )
 
 
+@pytest.mark.timeout(180)
 def test_container_smoke_public_path(
     source_server: E2ERuntime,
     target_runtime: E2ERuntime,
