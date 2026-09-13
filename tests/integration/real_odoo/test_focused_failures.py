@@ -436,7 +436,11 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
                 source_database=runtime.topology.target_sentinel_database,
                 odoo_bin=bootstrap_odoo_bin,
                 python=E2E_PINS.cpython,
-                create_venv=True,
+                # These leaves exercise source/backup and archive boundaries;
+                # the critical-path node separately proves the owned venv and
+                # pinned dependency install.  Avoid repeating that expensive
+                # setup under the focused module's 60-second fixture ceiling.
+                create_venv=False,
                 http_port=public_http_port,
             ),
         )
