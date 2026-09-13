@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import importlib
 import json
 import os
 import shutil
@@ -29,6 +30,23 @@ pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_full, pytest.mark.serial]
 _PROBE = "odcli_e2e_probe"
 _PROBE_MARKER = "ODCLI-E2E-RESTORED"
 _ATTACHMENT = b"OdCLI filestore probe\n"
+_CATALOG_PATCH_TARGETS = (
+    "odoo_instance_sdk.cli.get_catalog_path",
+    "odoo_instance_sdk.internal.paths.get_catalog_path",
+    "odoo_instance_sdk.internal.context.get_catalog_path",
+    "odoo_instance_sdk.commands.env.get_catalog_path",
+)
+
+
+def _assert_catalog_patch_targets_importable() -> None:
+    for target in _CATALOG_PATCH_TARGETS:
+        module_name, _, attribute_name = target.rpartition(".")
+        module = importlib.import_module(module_name)
+        assert hasattr(module, attribute_name), target
+
+
+def test_catalog_patch_targets_are_importable() -> None:
+    _assert_catalog_patch_targets_importable()
 
 
 def _source_repository() -> tuple[Path, str]:
@@ -311,16 +329,9 @@ def test_source_backed_full_critical_path(  # noqa: C901
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_cache_root", run_cache_root)
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_locks_dir", run_locks_dir)
 
-    for provider in (
-        "odoo_instance_sdk.cli.get_catalog_path",
-        "odoo_instance_sdk.internal.paths.get_catalog_path",
-        "odoo_instance_sdk.internal.context.get_catalog_path",
-        "odoo_instance_sdk.commands.env.get_catalog_path",
-        "odoo_instance_sdk.internal.port_allocation.get_catalog_path",
-        "odoo_instance_sdk.resources.postgres.get_catalog_path",
-        "odoo_instance_sdk.resources.monitor.get_catalog_path",
-    ):
-        monkeypatch.setattr(provider, run_catalog_path)
+    _assert_catalog_patch_targets_importable()
+    for target in _CATALOG_PATCH_TARGETS:
+        monkeypatch.setattr(target, run_catalog_path)
     from odoo_instance_sdk.commands import backup as backup_commands
     from odoo_instance_sdk.commands import resource as resource_commands
 
