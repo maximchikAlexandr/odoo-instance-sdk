@@ -472,6 +472,8 @@ def test_focused_leaves_snapshot_catalog_and_wait_for_project_ports() -> None:
     assert '"postgres",\n            "approve-image"' in focused
     assert "ports=(project_postgres_port,)" in focused
     assert "_ensure_isolated_environment(" in focused
+    assert "_get_postgres_cluster(cluster._project_id)" in focused
+    assert '"postgres",\n            "up"' in focused
     assert "public_http_port" in focused
 
 
@@ -490,6 +492,15 @@ def test_real_odoo_fixture_preserves_shared_runtime_until_finalizer() -> None:
     )
     assert "runtime.ledger.unwind()" not in critical
     assert "ports=(cluster.endpoint_port,)" in critical
+
+
+def test_full_critical_path_persists_registered_python_manifest() -> None:
+    root = Path(__file__).resolve().parents[2]
+    critical = (root / "tests/integration/real_odoo/test_critical_path.py").read_text(
+        encoding="utf-8"
+    )
+    assert "python=python" in critical
+    assert "ProjectConfig.load(project)" in critical
 
 
 def test_port_reservation_release_is_idempotent() -> None:

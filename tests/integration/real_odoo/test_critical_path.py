@@ -549,6 +549,18 @@ def test_source_backed_full_critical_path(  # noqa: C901
         ).stdout.strip()
         == f"Python {E2E_PINS.cpython}"
     )
+    registered = ProjectConfig.load(project)
+    registered = msgspec.structs.replace(
+        registered,
+        odoo_bin=registered_worktree / odoo_bin_relative,
+        python=python,
+        source_config=generated_config,
+    )
+    manifest.write_text(registered.to_manifest(), encoding="utf-8")
+    manifest.chmod(0o600)
+    persisted = ProjectConfig.load(project)
+    assert persisted.python == python
+    assert persisted.odoo_bin == registered_worktree / odoo_bin_relative
     # Every command after checkout must resolve its implicit cwd through the
     # registered environment, not the pytest repository root.
     monkeypatch.chdir(registered_worktree)

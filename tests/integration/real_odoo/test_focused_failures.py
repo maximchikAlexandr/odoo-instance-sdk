@@ -142,6 +142,18 @@ def _ensure_isolated_environment(catalog_path: Path, project: Path) -> str:
         raise AssertionError(f"focused project has no environment selector: {selector}")
     environment_id = selector.read_text(encoding="ascii").strip()
     _registered_worktree(catalog_path, project)
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    cluster = PostgresCluster.from_project(project)
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        claim = catalog._get_postgres_cluster(cluster._project_id)
+    finally:
+        catalog.close()
+    if claim is None or claim.state != "active":
+        raise AssertionError(
+            f"isolated catalog has no active postgres attachment claim: {cluster._project_id}"
+        )
     return environment_id
 
 
@@ -372,6 +384,29 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         source_config=generated_config,
     )
     manifest.write_text(config.to_manifest(), encoding="utf-8")
+
+    # Materialize the project-owned claim before taking the baseline snapshot.
+    # Every isolated leaf reuses this exact active environment/volume identity;
+    # a catalog row without its attachment claim is not sufficient evidence.
+    up = subprocess.run(
+        [
+            command,
+            "--project",
+            str(root),
+            "postgres",
+            "up",
+            "--format",
+            "json",
+        ],
+        cwd=root,
+        env=process_environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert up.returncode == 0, up.stdout + up.stderr
+    up_document = json.loads(up.stdout)
+    assert up_document["ok"] is True, up_document
 
     def remove_environment() -> None:
         removed = subprocess.run(
