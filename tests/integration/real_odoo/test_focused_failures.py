@@ -260,7 +260,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     if not sparse_path.is_absolute():
         sparse_path = root / sparse_path
     sparse_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    sparse_path.write_text("odoo-bin\nodoo/\nrequirements.txt\n", encoding="utf-8")
+    sparse_path.write_text("odoo-bin\nodoo/\n", encoding="utf-8")
     # The public planner discovers implicit Odoo requirements from the
     # registered repository root before ``git worktree add`` runs.  A
     # no-checkout clone leaves that root empty even though the sparse pattern
