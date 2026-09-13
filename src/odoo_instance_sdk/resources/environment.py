@@ -2203,6 +2203,12 @@ class EnvironmentResource:
         copy_drop: PreparedCommand[None] | None = None,
     ) -> None:
         cat = catalog
+        # A removed catalog row is the durable idempotence boundary.  Do not
+        # re-probe its released endpoint: a later process may legitimately
+        # own that port, while active environments must still pass the
+        # fail-closed port preflight below.
+        if env.state is EnvironmentState.REMOVED:
+            return
         copy_plan = self._preflight_remove(cat, env, context=context)
         _validate_retained_removal_evidence(cat, env)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
