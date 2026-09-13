@@ -286,6 +286,7 @@ def _stop_owned(instance: Any, process: Any) -> None:
 @pytest.mark.timeout(600)
 def test_source_backed_full_critical_path(  # noqa: C901
     target_runtime: E2ERuntime,
+    source_server: E2ERuntime,
     source_backup: ArchiveIdentity,
     record_property: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -359,7 +360,12 @@ def test_source_backed_full_critical_path(  # noqa: C901
     cli_environment.update(runtime.environment)
     cli_environment.update(
         {
-            "ODCLI_TEST_MASTER_PASSWORD": master_password,
+            # The local target config owns ``master_password``; db.refresh
+            # authenticates against the independent source Odoo endpoint and
+            # must use that runtime's admin password instead.
+            "ODCLI_TEST_MASTER_PASSWORD": source_server.master_password_file.read_text(
+                encoding="utf-8"
+            ).strip(),
             "ODCLI_TEST_INSTANCE_ORIGIN_PINS": (
                 f"http://127.0.0.1:{runtime.topology.source_odoo_port}"
             ),

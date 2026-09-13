@@ -7,8 +7,10 @@ import os
 import shutil
 import signal
 import subprocess
+import tarfile
 import time
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -153,6 +155,61 @@ def _replace_http_port(config: Path, port: int) -> None:
     config.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _materialize_odoo_bootstrap(repository: Path, root: Path) -> Path:
+    """Extract only the pinned Odoo launcher/package for checkout preflight.
+
+    The public checkout later creates the full pinned worktree.  Materializing
+    another full source tree here makes the 60-second worktree phase depend on
+    Docker Desktop's bind-mount copy speed, so the bootstrap executable is
+    deliberately limited to the launcher and its import package.
+    """
+    relative = next(
+        relative
+        for relative in (Path("odoo-bin"), Path("odoo") / "odoo-bin")
+        if subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "cat-file",
+                "-e",
+                f"{E2E_PINS.odoo_source_commit}:{relative}",
+            ],
+            capture_output=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+    archive = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "archive",
+            "--format=tar",
+            E2E_PINS.odoo_source_commit,
+            "--",
+            "odoo-bin",
+            "odoo",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert archive.returncode == 0, archive.stderr.decode(errors="replace")
+    bootstrap = root / ".odoo-bootstrap"
+    bootstrap.mkdir(mode=0o700)
+    root_resolved = bootstrap.resolve()
+    with tarfile.open(fileobj=BytesIO(archive.stdout), mode="r:") as stream:
+        for member in stream:
+            destination = (bootstrap / member.name).resolve()
+            assert destination.is_relative_to(root_resolved), member.name
+            assert not member.issym() and not member.islnk(), member.name
+            stream.extract(member, bootstrap)
+    executable = bootstrap / relative
+    assert executable.is_file(), executable
+    return executable
+
+
 def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None = None) -> Path:
     """Create a project using the public pinned source/uv lifecycle."""
     repository_value = os.environ.get("ODCLI_E2E_ODOO_SOURCE_REPO") or os.environ.get(
@@ -187,14 +244,8 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["git", "-C", str(root), "checkout", "--detach", E2E_PINS.odoo_source_commit],
-        check=True,
-        capture_output=True,
-    )
-    relative = next(
-        relative for relative in ("odoo-bin", "odoo/odoo-bin") if (root / relative).is_file()
-    )
+    bootstrap_odoo_bin = _materialize_odoo_bootstrap(repository, root)
+    relative = bootstrap_odoo_bin.relative_to(root / ".odoo-bootstrap")
     runtime.ledger.record(
         "worktree",
         f"{runtime.run_id}-{root.name}",
@@ -227,7 +278,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             str(root),
             "--no-input",
             "--odoo-bin",
-            str(root / relative),
+            str(bootstrap_odoo_bin),
             "--python",
             E2E_PINS.cpython,
             "--config",
@@ -348,7 +399,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
                 base_ref=E2E_PINS.odoo_source_commit,
                 config_path=root / ".odcli" / "odoo.conf",
                 source_database=runtime.topology.target_sentinel_database,
-                odoo_bin=root / relative,
+                odoo_bin=bootstrap_odoo_bin,
                 python=E2E_PINS.cpython,
                 create_venv=True,
                 http_port=public_http_port,
