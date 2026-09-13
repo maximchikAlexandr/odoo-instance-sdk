@@ -44,6 +44,9 @@ from .focused_support import (
     BACKUP_ID as _BACKUP_ID,
 )
 from .focused_support import (
+    assert_project_state_preflight as _assert_project_state_preflight,
+)
+from .focused_support import (
     catalog_state as _catalog_state,
 )
 from .focused_support import (
@@ -137,24 +140,7 @@ def _isolated_catalog(source: Path, root: Path) -> Path:
 
 def _ensure_isolated_environment(catalog_path: Path, project: Path) -> str:
     """Require each leaf to start from the active environment in its catalog."""
-    selector = project / ".odcli" / "e2e-environment-id"
-    if not selector.is_file():
-        raise AssertionError(f"focused project has no environment selector: {selector}")
-    environment_id = selector.read_text(encoding="ascii").strip()
-    _registered_worktree(catalog_path, project)
-    from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-    cluster = PostgresCluster.from_project(project)
-    catalog = BackupCatalog(db_path=catalog_path)
-    try:
-        claim = catalog._get_postgres_cluster(cluster._project_id)
-    finally:
-        catalog.close()
-    if claim is None or claim.state != "active":
-        raise AssertionError(
-            f"isolated catalog has no active postgres attachment claim: {cluster._project_id}"
-        )
-    return environment_id
+    return _assert_project_state_preflight(project, catalog_path)
 
 
 def _replace_http_port(config: Path, port: int) -> None:
@@ -407,6 +393,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     assert up.returncode == 0, up.stdout + up.stderr
     up_document = json.loads(up.stdout)
     assert up_document["ok"] is True, up_document
+    _assert_project_state_preflight(root, Path(process_environment["ODCLI_E2E_CATALOG"]))
 
     def remove_environment() -> None:
         removed = subprocess.run(

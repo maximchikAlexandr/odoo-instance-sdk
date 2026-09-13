@@ -472,7 +472,7 @@ def test_focused_leaves_snapshot_catalog_and_wait_for_project_ports() -> None:
     assert '"postgres",\n            "approve-image"' in focused
     assert "ports=(project_postgres_port,)" in focused
     assert "_ensure_isolated_environment(" in focused
-    assert "_get_postgres_cluster(cluster._project_id)" in focused
+    assert "assert_project_state_preflight" in focused
     assert '"postgres",\n            "up"' in focused
     assert "public_http_port" in focused
 
@@ -555,3 +555,45 @@ def test_focused_catalog_binding_uses_existing_public_path_boundary() -> None:
     assert "odoo_instance_sdk.resources.postgres.get_catalog_path" not in focused
     assert "odoo_instance_sdk.resources.monitor.get_catalog_path" not in focused
     assert "odoo_instance_sdk.internal.paths.get_catalog_path" in focused
+
+
+def test_focused_state_preflight_requires_manifest_environment_and_postgres_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+    from tests.integration.real_odoo import focused_support
+
+    project = tmp_path / "project"
+    manifest = project / ".odcli" / "project.toml"
+    manifest.parent.mkdir(parents=True)
+    python = project / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    manifest.write_text(
+        "[project]\n"
+        f'python = "{python}"\n'
+        "\n[postgres]\n"
+        'mode = "compose"\n'
+        'image = "postgres@sha256:approved"\n'
+        "port = 55432\n"
+        'user = "odoo"\n',
+        encoding="utf-8",
+    )
+    (project / ".odcli" / "e2e-environment-id").write_text("project-id\n", encoding="ascii")
+    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=catalog_path)
+    cluster = SimpleNamespace(_project_id="project-id")
+    claim = catalog._ensure_postgres_cluster_pending("project-id", "owned-compose", "owned-volume")
+    catalog._activate_postgres_cluster(
+        claim.cluster_id, "project-id", "owned-compose", "owned-volume"
+    )
+    catalog.close()
+    monkeypatch.setattr(focused_support, "registered_worktree", lambda *_: project)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+        lambda _project: cluster,
+    )
+
+    assert focused_support.assert_project_state_preflight(project, catalog_path) == "project-id"

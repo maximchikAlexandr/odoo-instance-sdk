@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from odoo_instance_sdk.models import BackupState
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 from .cleanup import FailureEvidence
@@ -60,6 +61,39 @@ def registered_worktree(catalog_path: Path, project: Path) -> Path:
     if not worktree.is_dir():
         raise AssertionError(f"registered environment worktree is unavailable: {worktree}")
     return worktree
+
+
+def assert_project_state_preflight(project: Path, catalog_path: Path) -> str:
+    """Fail fast when a focused leaf lacks the state its public path requires."""
+    config = ProjectConfig.load(project)
+    if config.python is None:
+        raise AssertionError("state preflight: registered project manifest lacks python")
+    python = Path(config.python)
+    if not python.is_absolute():
+        python = project / python
+    if not python.is_file():
+        raise AssertionError(f"state preflight: registered python is unavailable: {python}")
+
+    selector = project / ".odcli" / "e2e-environment-id"
+    if not selector.is_file():
+        raise AssertionError(f"state preflight: project has no environment selector: {selector}")
+    environment_id = selector.read_text(encoding="ascii").strip()
+    registered_worktree(catalog_path, project)
+
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    cluster = PostgresCluster.from_project(project)
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        claim = catalog._get_postgres_cluster(cluster._project_id)
+    finally:
+        catalog.close()
+    if claim is None or claim.state != "active":
+        raise AssertionError(
+            "state preflight: isolated catalog lacks active postgres attachment "
+            f"claim: {cluster._project_id}"
+        )
+    return environment_id
 
 
 def invoke_in_registered_worktree(
