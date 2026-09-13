@@ -289,6 +289,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     source_backup: ArchiveIdentity,
     record_property: Any,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Prove one serial public workflow from pinned source checkout to cleanup."""
     source_repository, odoo_bin_relative = _source_repository()
@@ -431,6 +432,24 @@ def test_source_backed_full_critical_path(  # noqa: C901
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
     cluster = PostgresCluster.from_project(project)
+
+    def release_owned_cluster() -> None:
+        last_error: RuntimeError | None = None
+        for _attempt in range(2):
+            try:
+                compose_down(
+                    cluster.compose_file,
+                    cluster.compose_project_name,
+                    ports=(cluster.endpoint_port,),
+                )
+            except RuntimeError as error:
+                last_error = error
+            else:
+                return
+        if last_error is not None:
+            raise last_error
+
+    request.addfinalizer(release_owned_cluster)
     runtime.ledger.record(
         "postgres",
         f"{runtime.run_id}-sdk-postgres",
@@ -498,6 +517,18 @@ def test_source_backed_full_critical_path(  # noqa: C901
     assert Path(str(environment["generated_config_path"])).is_file()
     assert Path(str(environment["python_environment_path"])).is_dir()
     assert Path(str(environment["worktree_path"])).is_dir()
+    registered_worktree = Path(str(environment["worktree_path"]))
+    probe_root = registered_worktree / "addons"
+    shutil.copytree(addon_root / _PROBE, probe_root / _PROBE, dirs_exist_ok=True)
+    generated_config = Path(str(environment["generated_config_path"]))
+    config_lines = generated_config.read_text(encoding="utf-8").splitlines()
+    addons_lines = [line for line in config_lines if line.lstrip().startswith("addons_path")]
+    config_lines = [line for line in config_lines if not line.lstrip().startswith("addons_path")]
+    configured_addons = addons_lines[0].split("=", 1)[1].strip() if addons_lines else ""
+    configured_addons = ",".join(value for value in (configured_addons, str(probe_root)) if value)
+    config_lines.append(f"addons_path = {configured_addons}")
+    generated_config.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
+    generated_config.chmod(0o600)
     assert (
         subprocess.run(
             ["git", "-C", str(environment["worktree_path"]), "rev-parse", "HEAD"],
@@ -520,7 +551,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     )
     # Every command after checkout must resolve its implicit cwd through the
     # registered environment, not the pytest repository root.
-    monkeypatch.chdir(Path(str(environment["worktree_path"])))
+    monkeypatch.chdir(registered_worktree)
     _record(
         record_property,
         "E2E-CP-02",
