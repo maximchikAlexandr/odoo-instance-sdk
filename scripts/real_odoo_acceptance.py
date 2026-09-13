@@ -540,6 +540,22 @@ def _run_evidence_state(path: Path, tier: str, cache_class: str) -> dict[str, ob
                 "reason": "bootstrap did not satisfy prerequisites",
                 "missing": bootstrap.get("missing", []),
             }
+        if bootstrap.get("pins") != dataclasses.asdict(E2E_PINS):
+            return {"status": "failed", "reason": "bootstrap pin manifest is stale or incomplete"}
+        if tier == "full":
+            prerequisites = bootstrap.get("prerequisites")
+            if not isinstance(prerequisites, dict) or any(
+                prerequisites.get(name) is not True
+                for name in (
+                    "python_resolution_lock",
+                    "python_resolution_audit",
+                    "odoo_source_revision",
+                )
+            ):
+                return {
+                    "status": "failed",
+                    "reason": "full bootstrap lacks a successful audited source prerequisite",
+                }
     required = (
         "bootstrap.json",
         "junit.xml",

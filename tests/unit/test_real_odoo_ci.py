@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tarfile
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -20,6 +22,7 @@ from scripts import real_odoo_timing as timing
 from scripts.real_odoo_secrets import secret_variants, write_secret_registry
 from tests.integration.real_odoo import test_smoke as smoke
 from tests.integration.real_odoo.conftest import E2ERuntime
+from tests.integration.real_odoo.pins import E2E_PINS
 
 
 def _evidence_contract(
@@ -79,15 +82,19 @@ def _evidence_contract(
 def _acceptance_run(root: Path, tier: str, cache_class: str, *, failed: bool = False) -> None:
     run = root / f"{tier}-{cache_class}"
     run.mkdir(parents=True)
-    (run / "bootstrap.json").write_text(
-        json.dumps(
-            {
-                "ok": True,
-                "platform": "linux/amd64",
-                "cache": {"class": cache_class},
-            }
-        )
-    )
+    bootstrap_value: dict[str, object] = {
+        "ok": True,
+        "platform": "linux/amd64",
+        "pins": asdict(E2E_PINS),
+        "cache": {"class": cache_class},
+    }
+    if tier == "full":
+        bootstrap_value["prerequisites"] = {
+            "python_resolution_lock": True,
+            "python_resolution_audit": True,
+            "odoo_source_revision": True,
+        }
+    (run / "bootstrap.json").write_text(json.dumps(bootstrap_value))
     properties = "".join(
         f"<property name='{identifier.lower().replace('-', '_')}' value='passed'/>"
         for identifier in acceptance.REQUIRED_TIER_EVIDENCE[tier]
@@ -171,6 +178,38 @@ def test_acceptance_requires_complete_smoke_and_full_runs(tmp_path: Path) -> Non
     runs = state["runs"]
     assert isinstance(runs, dict)
     assert set(runs) == {f"{tier}-{cache}" for tier, cache in acceptance.REQUIRED_RUNS}
+
+
+def test_acceptance_rejects_stale_reused_pin_manifest(tmp_path: Path) -> None:
+    _complete_acceptance_evidence(tmp_path)
+    path = tmp_path / "full-warm" / "bootstrap.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["pins"]["pip_audit"] = "pip-audit==2.10.0"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    state = acceptance._e2e_bootstrap_state(tmp_path)
+
+    assert state["status"] == "failed"
+    runs = state["runs"]
+    assert isinstance(runs, dict)
+    assert runs["full-warm"]["reason"] == "bootstrap pin manifest is stale or incomplete"
+
+
+def test_acceptance_rejects_full_evidence_without_audited_bootstrap(tmp_path: Path) -> None:
+    _complete_acceptance_evidence(tmp_path)
+    path = tmp_path / "full-cold" / "bootstrap.json"
+    value = json.loads(path.read_text(encoding="utf-8"))
+    del value["prerequisites"]["python_resolution_audit"]
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    state = acceptance._e2e_bootstrap_state(tmp_path)
+
+    assert state["status"] == "failed"
+    runs = state["runs"]
+    assert isinstance(runs, dict)
+    assert runs["full-cold"]["reason"] == (
+        "full bootstrap lacks a successful audited source prerequisite"
+    )
 
 
 def test_acceptance_expands_matrix_evidence_ranges() -> None:
@@ -304,6 +343,71 @@ def test_full_python_resolution_audit_rejects_lock_or_report_drift(
     lock.write_bytes(bootstrap.PYTHON_RESOLUTION_LOCK.read_bytes())
     audit.write_bytes(audit.read_bytes() + b"\n")
     assert bootstrap.python_resolution_audit_is_valid() is False
+
+
+def test_python_resolution_audit_rejects_scanner_metadata_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = tmp_path / "odoo.lock"
+    audit = tmp_path / "odoo.audit.json"
+    lock.write_bytes(bootstrap.PYTHON_RESOLUTION_LOCK.read_bytes())
+    value = json.loads(bootstrap.PYTHON_RESOLUTION_AUDIT.read_text(encoding="utf-8"))
+    value["scanner"] = "pip-audit==2.10.1"
+    audit.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "PYTHON_RESOLUTION_LOCK", lock)
+    monkeypatch.setattr(bootstrap, "PYTHON_RESOLUTION_AUDIT", audit)
+    monkeypatch.setattr(
+        bootstrap,
+        "E2E_PINS",
+        replace(
+            E2E_PINS,
+            odoo_python_audit_sha256=hashlib.sha256(audit.read_bytes()).hexdigest(),
+        ),
+    )
+
+    assert bootstrap.python_resolution_audit_is_valid() is False
+
+
+def test_pinned_scanner_normalizes_package_names_and_uses_exact_distribution_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            json.dumps(
+                [
+                    {
+                        "name": "Py_Pdf2",
+                        "version": "2.12.1",
+                        "vulns": [{"id": "PYSEC-2026-1835"}],
+                    }
+                ]
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(bootstrap, "_run", fake_run)
+    result = bootstrap._run_pinned_python_audit(tmp_path / "odoo.lock")
+
+    assert result == {("py-pdf2", "2.12.1", "PYSEC-2026-1835")}
+    assert calls[0][calls[0].index("--from") + 1] == "pip-audit==2.10.1"
+
+
+def test_pinned_scanner_rejects_malformed_package_without_vulnerabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = [{"name": "bad/name", "version": "1.0", "vulns": []}]
+    monkeypatch.setattr(
+        bootstrap,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, json.dumps(payload), ""),
+    )
+
+    assert bootstrap._run_pinned_python_audit(tmp_path / "odoo.lock") is None
 
 
 def test_full_critical_path_uses_only_hash_required_trusted_sync() -> None:

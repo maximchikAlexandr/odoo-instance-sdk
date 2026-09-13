@@ -174,10 +174,40 @@ def test_full_bootstrap_has_no_synthetic_checkout_prerequisite(
     )
     monkeypatch.setattr(bootstrap, "_version_is_exact", lambda _command, _expected: True)
     monkeypatch.setattr(bootstrap, "_image_manifest_is_pinned", lambda _image, _digest: True)
+    monkeypatch.setattr(bootstrap, "python_resolution_lock_is_valid", lambda: True)
+    monkeypatch.setattr(bootstrap, "python_resolution_audit_is_valid", lambda: True)
     monkeypatch.setattr(bootstrap, "_source_revision_is_available", lambda: True)
     checks = bootstrap.prerequisite_checks("full", "linux/amd64")
     assert checks["odoo_source_revision"] is True
     assert "odoo_source_checkout" not in checks
+
+
+def test_full_bootstrap_rejects_audit_before_source_cache_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("scripts.real_odoo_bootstrap.shutil.which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        bootstrap,
+        "_run",
+        lambda _command, **_kwargs: subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setattr(bootstrap, "_version_is_exact", lambda _command, _expected: True)
+    monkeypatch.setattr(bootstrap, "_image_manifest_is_pinned", lambda _image, _digest: True)
+    monkeypatch.setattr(bootstrap, "python_resolution_lock_is_valid", lambda: True)
+    monkeypatch.setattr(bootstrap, "python_resolution_audit_is_valid", lambda: False)
+    source_probe_calls: list[bool] = []
+
+    def source_revision_probe() -> bool:
+        source_probe_calls.append(True)
+        return True
+
+    monkeypatch.setattr(bootstrap, "_source_revision_is_available", source_revision_probe)
+
+    checks = bootstrap.prerequisite_checks("full", "linux/amd64")
+
+    assert checks["python_resolution_audit"] is False
+    assert checks["odoo_source_revision"] is False
+    assert source_probe_calls == []
 
 
 def test_full_bootstrap_hashes_requirements_after_source_probe(
