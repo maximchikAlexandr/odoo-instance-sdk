@@ -268,6 +268,16 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "real_odoo and e2e_full" in full
     assert "  pull_request:" in full
     assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in full
+    assert "Seed minimal pre-scenario failure evidence" in full
+    for early_failure_file in (
+        "command-matrix.md",
+        "compose.log",
+        "odoo.log",
+        "postgres.log",
+        "resource-manifest.json",
+        "target-odoo.log",
+    ):
+        assert early_failure_file in full
     assert "pytest.mark.e2e_smoke" in smoke_scenario
     for scenario in ("E2E-SM-01", "E2E-SM-02", "E2E-SM-03", "E2E-SM-04", "E2E-SM-05"):
         assert scenario in smoke_scenario

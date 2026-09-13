@@ -224,6 +224,8 @@ def _run_pinned_python_audit(
                 "--format",
                 "json",
                 "--no-deps",
+                "--disable-pip",
+                "--require-hashes",
                 "--strict",
                 "--desc",
                 "off",

@@ -133,6 +133,21 @@ jobs:
         with:
           path: .cache/uv
           key: ${{ steps.uv-key.outputs.key }}
+      - name: Seed minimal pre-scenario failure evidence
+        if: always()
+        run: |
+          root=.artifacts/real-odoo-e2e
+          mkdir -p "$root"
+          test -s "$root/command-matrix.md" || printf '%s\n' '# Pre-scenario failure' > "$root/command-matrix.md"
+          test -s "$root/compose.log" || printf '%s\n' 'Compose scenario was not provisioned.' > "$root/compose.log"
+          test -s "$root/odoo.log" || printf '%s\n' 'Odoo scenario was not provisioned.' > "$root/odoo.log"
+          test -s "$root/postgres.log" || printf '%s\n' 'PostgreSQL scenario was not provisioned.' > "$root/postgres.log"
+          test -s "$root/target-odoo.log" || printf '%s\n' 'Target Odoo scenario was not provisioned.' > "$root/target-odoo.log"
+          if [ ! -s "$root/resource-manifest.json" ]; then
+            cat > "$root/resource-manifest.json" <<'JSON'
+          {"schema":"odcli-real-odoo-resource-v1","resources":[{"kind":"bootstrap","name":"pre-scenario"}],"audit":{"state":"failed","leaks":["scenario-not-provisioned"],"runs":[{"run_id":"pre-scenario","state":"failed","leaks":["bootstrap"]}]},"source_cache_consumed":false}
+          JSON
+          fi
       - name: Package bounded E2E evidence
         id: package
         if: always()

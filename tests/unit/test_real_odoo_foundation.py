@@ -101,6 +101,7 @@ def test_runtime_factory_keeps_two_runs_disjoint_and_uses_loopback_target(
         assert stat.S_IMODE(first.source_config_file.stat().st_mode) == 0o644
         assert stat.S_IMODE(first.container_config_file.stat().st_mode) == 0o644
         assert stat.S_IMODE(first.config_file.stat().st_mode) == 0o600
+        assert stat.S_IMODE((first.root / "source-data").stat().st_mode) == 0o777
     finally:
         e2e_fixtures._remove_runtime_files(first)
         e2e_fixtures._remove_runtime_files(second)

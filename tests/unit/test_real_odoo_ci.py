@@ -402,6 +402,8 @@ def test_pinned_scanner_normalizes_package_names_and_uses_exact_distribution_pin
     assert result == {("py-pdf2", "2.12.1", "PYSEC-2026-1835")}
     assert calls[0][calls[0].index("--from") + 1] == "pip-audit==2.10.1"
     assert "--strict" in calls[0]
+    assert "--disable-pip" in calls[0]
+    assert "--require-hashes" in calls[0]
     assert calls[0][calls[0].index("--desc") + 1] == "off"
     assert calls[0][calls[0].index("--aliases") + 1] == "off"
 
