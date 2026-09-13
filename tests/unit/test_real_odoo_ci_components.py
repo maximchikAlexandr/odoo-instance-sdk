@@ -340,6 +340,9 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "target-data" in smoke_scenario
     warm_job = smoke[smoke.index("  real-odoo-smoke-warm:") : smoke.index("\n  lint:")]
     cold_job = smoke[smoke.index("  real-odoo-smoke:") : smoke.index("\n  real-odoo-smoke-warm:")]
+    for workflow in (cold_job, warm_job):
+        assert "name: Pin workflow uv cache path" in workflow
+        assert 'echo "UV_CACHE_DIR=${{ github.workspace }}/.cache/uv" >> "$GITHUB_ENV"' in workflow
     for workflow in (smoke_job, full):
         assert f"actions/cache/restore@{bootstrap.ACTIONS_CACHE}" in workflow
         assert f"actions/cache/save@{bootstrap.ACTIONS_CACHE}" in workflow
