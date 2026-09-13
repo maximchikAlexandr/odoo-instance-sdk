@@ -129,7 +129,90 @@ def _audit_scanner_label() -> str:
     return f"{package} {version}" if separator else PINNED_AUDIT_SCANNER
 
 
-def _run_pinned_python_audit(  # noqa: C901
+def _validate_scanner_fix(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if set(value) == {"name", "version", "skip_reason"}:
+        return (
+            _canonical_package(value.get("name")) is not None
+            and _valid_version(value.get("version"))
+            and _valid_exception_text(value.get("skip_reason"))
+        )
+    if set(value) == {"name", "old_version", "new_version"}:
+        return (
+            _canonical_package(value.get("name")) is not None
+            and _valid_version(value.get("old_version"))
+            and _valid_version(value.get("new_version"))
+        )
+    return False
+
+
+def _validate_scanner_vulnerability(value: object) -> tuple[str, tuple[str, ...]] | None:
+    if not isinstance(value, dict):
+        return None
+    if not set(value).issubset({"id", "fix_versions", "aliases", "description"}):
+        return None
+    advisory = value.get("id")
+    fix_versions = value.get("fix_versions")
+    if not _valid_advisory(advisory) or not isinstance(fix_versions, list):
+        return None
+    if not all(_valid_version(item) for item in fix_versions):
+        return None
+    aliases = value.get("aliases")
+    if aliases is not None and (
+        not isinstance(aliases, list) or not all(_valid_advisory(item) for item in aliases)
+    ):
+        return None
+    description = value.get("description")
+    if description is not None and not _valid_exception_text(description):
+        return None
+    if not isinstance(advisory, str) or not all(isinstance(item, str) for item in fix_versions):
+        return None
+    return advisory, tuple(fix_versions)
+
+
+def _parse_scanner_payload(payload: object) -> set[tuple[str, str, str]] | None:  # noqa: C901
+    if not isinstance(payload, dict) or set(payload) != {"dependencies", "fixes"}:
+        return None
+    dependencies = payload.get("dependencies")
+    fixes = payload.get("fixes")
+    if not isinstance(dependencies, list) or not isinstance(fixes, list):
+        return None
+    if not all(_validate_scanner_fix(value) for value in fixes):
+        return None
+
+    findings: set[tuple[str, str, str]] = set()
+    for dependency in dependencies:
+        if not isinstance(dependency, dict):
+            return None
+        package = _canonical_package(dependency.get("name"))
+        if package is None:
+            return None
+        if set(dependency) == {"name", "skip_reason"}:
+            if not _valid_exception_text(dependency.get("skip_reason")):
+                return None
+            continue
+        if set(dependency) != {"name", "version", "vulns"}:
+            return None
+        version = dependency.get("version")
+        vulnerabilities = dependency.get("vulns")
+        if not _valid_version(version) or not isinstance(vulnerabilities, list):
+            return None
+        if not isinstance(version, str):
+            return None
+        for vulnerability in vulnerabilities:
+            parsed = _validate_scanner_vulnerability(vulnerability)
+            if parsed is None:
+                return None
+            advisory, _fix_versions = parsed
+            finding = (package, version, advisory)
+            if finding in findings:
+                return None
+            findings.add(finding)
+    return findings
+
+
+def _run_pinned_python_audit(
     lock_path: Path,
 ) -> set[tuple[str, str, str]] | None:
     """Return pip-audit's canonical findings, or ``None`` on any probe error."""
@@ -156,31 +239,7 @@ def _run_pinned_python_audit(  # noqa: C901
         payload = json.loads(result.stdout)
     except (TypeError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, list):
-        return None
-    findings: set[tuple[str, str, str]] = set()
-    for package_result in payload:
-        if not isinstance(package_result, dict):
-            return None
-        package = package_result.get("name")
-        version = package_result.get("version")
-        vulnerabilities = package_result.get("vulns")
-        if not isinstance(package, str) or not isinstance(version, str):
-            return None
-        canonical_package = _canonical_package(package)
-        if canonical_package is None or not _valid_version(version):
-            return None
-        if not isinstance(vulnerabilities, list):
-            return None
-        for vulnerability in vulnerabilities:
-            if not isinstance(vulnerability, dict) or not _valid_advisory(vulnerability.get("id")):
-                return None
-            advisory = str(vulnerability["id"])
-            finding = (canonical_package, version, advisory)
-            if finding in findings:
-                return None
-            findings.add(finding)
-    return findings
+    return _parse_scanner_payload(payload)
 
 
 def python_resolution_audit_is_valid(  # noqa: C901
