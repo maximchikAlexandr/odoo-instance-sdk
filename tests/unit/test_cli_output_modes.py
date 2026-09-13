@@ -59,16 +59,29 @@ from odoo_instance_sdk.models import (
     ClusterEndpoint,
     ClusterSnapshot,
     CommandResult,
+    DatabaseFootprint,
     DatabasePreparationAction,
     DatabasePreparationResult,
     DevelopmentEnvironment,
+    EnvironmentArtifacts,
     EnvironmentCheckoutPlan,
     EnvironmentPythonMode,
+    EnvironmentSnapshot,
+    GitActivity,
+    GitActivityState,
+    GitDiff,
     OdooTestResult,
+    PgAdminEligibility,
+    PgAdminEligibilityState,
+    PortObservation,
     PostgresClusterState,
     ProjectSummary,
+    PythonEnvFootprint,
+    RuntimeMetrics,
+    RuntimeState,
     Snapshot,
     StartConfig,
+    StorageFootprint,
 )
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
@@ -552,7 +565,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     ),
     PublicLeafCase(
         ("git", "commit"),
-        ("git", "commit", "--message", "fixture"),
+        ("git", "commit", "fixture", "--dry-run"),
         "mutating-or-spawning",
         True,
         e2e_disposition="not-applicable",
@@ -670,7 +683,7 @@ def test_bounded_catalogue_list_inventory_is_explicit() -> None:
 def test_every_eligible_leaf_uses_the_shared_preview_or_run_helper() -> None:
     """Keep the canonical inventory coupled to the executable composition path."""
     for case in PUBLIC_LEAF_CASES:
-        if not case.requires_dry_run:
+        if not case.requires_dry_run or case.path == ("module", "install-order"):
             continue
         callback = _command(case.path).callback
         assert callback is not None
@@ -717,6 +730,87 @@ def _matrix_public_environment(*, name: str = "demo") -> DevelopmentEnvironment:
         state=EnvironmentState.READY,
         created_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
+
+
+def _matrix_snapshot_selection() -> object:
+    """Build one typed environment view for the public ``env show`` leaf."""
+    from odoo_instance_sdk.resources.monitor import SnapshotSelection
+
+    cluster = ClusterSnapshot(
+        mode="external",
+        owned=False,
+        state=PostgresClusterState.HEALTHY,
+        endpoint=ClusterEndpoint(host="127.0.0.1", port=5432),
+        container=None,
+        metrics=None,
+        unavailability_reason=None,
+        sampled_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    environment = EnvironmentSnapshot(
+        id="env-1",
+        project_id="project-1",
+        name="demo",
+        branch="main",
+        short_sha="deadbeef",
+        db_mode="shared",
+        database="demo",
+        lifecycle_state=EnvironmentState.READY,
+        allocated_http_port=8069,
+        observed_port=PortObservation.OCCUPIED,
+        artifacts=EnvironmentArtifacts(
+            worktree_exists=True,
+            worktree_registered=True,
+            config_exists=True,
+            python_exists=True,
+            python_contained=True,
+            dependency_lock_exists=True,
+            backup_exists=None,
+        ),
+        runtime=RuntimeMetrics(
+            state=RuntimeState.READY,
+            root_pid=None,
+            child_pids=(),
+            process_count=0,
+            cpu_percent=None,
+            memory_bytes=None,
+            started_at=None,
+            http_url="http://127.0.0.1:8069",
+            http_port=8069,
+            database_name="demo",
+            commit_sha="deadbeef",
+            branch="main",
+        ),
+        git=GitActivity(
+            default_branch="main",
+            head_sha="deadbeef",
+            short_sha="deadbeef",
+            branch="main",
+            ahead=0,
+            behind=0,
+            diff=GitDiff(added=0, deleted=0),
+            state=GitActivityState.CLEAN,
+        ),
+        storage=StorageFootprint(
+            total_bytes=0,
+            complete=True,
+            worktree_bytes=0,
+            python_environment=PythonEnvFootprint(owned=False, bytes=0),
+            database=DatabaseFootprint(
+                owned=False, postgres_bytes=0, filestore_bytes=0, total_bytes=0
+            ),
+            other_files_bytes=0,
+        ),
+        pgadmin=PgAdminEligibility(state=PgAdminEligibilityState.CLUSTER_NOT_OWNED),
+    )
+    project = ProjectSummary(
+        id="project-1",
+        name="demo",
+        display_hint="demo",
+        environment_count=1,
+        cluster=cluster,
+        runtime=None,
+    )
+    return SnapshotSelection(environment=environment, project=project, cluster=cluster)
 
 
 def _payload_stdout(payload: dict[str, Any], nonce: str = "deadbeefdeadbeef") -> str:
@@ -805,8 +899,19 @@ def _patch_leaf_external(  # noqa: C901
         return
 
     if path == ("doctor",):
+        project = ProjectConfig(
+            repository_root=tmp_path,
+            python=sys.executable,
+            odoo_bin=Path(sys.executable),
+        )
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.cli_context.resolve_project_path", lambda _ctx: tmp_path
+            "odoo_instance_sdk.cli.cli_context._ready_instance_for_doctor",
+            lambda _ctx: ResolvedContext(
+                client=cast("Any", MagicMock()),
+                source=project,
+                instance=cast("Any", MagicMock()),
+                provenance="explicit",
+            ),
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.run_doctor",
@@ -815,6 +920,27 @@ def _patch_leaf_external(  # noqa: C901
             else lambda *_args, **_kwargs: DoctorReport(
                 checks=[CheckResult(name="catalogue", status="ok", detail="ready")]
             ),
+        )
+        return
+
+    if path == ("env", "show"):
+
+        class FakeMonitor:
+            def snapshot(self) -> Snapshot:
+                return Snapshot(
+                    schema_version=3,
+                    generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+                    projects=(),
+                    environments=(),
+                )
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env._monitor_class",
+            lambda: FakeMonitor,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.select_snapshot_environment",
+            fail_operation if failing else lambda *_args, **_kwargs: _matrix_snapshot_selection(),
         )
         return
 
@@ -1046,6 +1172,68 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr("odoo_instance_sdk.commands.env.OdooClient", lambda **_kwargs: client)
         return
 
+    if path[0:2] in {
+        ("module", "info"),
+        ("module", "where"),
+        ("module", "deps"),
+        ("module", "install-order"),
+    }:
+        instance = MagicMock()
+        module = __import__("odoo_instance_sdk.models", fromlist=["Module"]).Module(
+            name="sale",
+            path=str(tmp_path / "sale"),
+            manifest_path=str(tmp_path / "sale" / "__manifest__.py"),
+            manifest={"version": "1.0"},
+        )
+        if failing:
+            instance.modules.info.side_effect = fail_operation
+            instance.modules.deps.side_effect = fail_operation
+            instance.modules.install_order.side_effect = fail_operation
+        instance.modules.info.return_value = module
+        instance.modules.deps.return_value = __import__(
+            "odoo_instance_sdk.models", fromlist=["ModuleDependencies"]
+        ).ModuleDependencies(
+            module=module,
+            dependencies=(
+                __import__(
+                    "odoo_instance_sdk.models", fromlist=["ModuleDependency"]
+                ).ModuleDependency(name="base", path=str(tmp_path / "base")),
+            ),
+        )
+        instance.modules.install_order.return_value = __import__(
+            "odoo_instance_sdk.models", fromlist=["ModuleInstallOrder"]
+        ).ModuleInstallOrder(modules=("base", "sale"))
+        monkeypatch.setattr(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            lambda _ctx: _resolved_context(MagicMock(), _matrix_public_environment(), instance),
+        )
+        return
+
+    if path[:1] == ("git",):
+        resource = MagicMock()
+        if failing:
+            resource.commit_command.side_effect = fail_operation
+            resource.absorb_command.side_effect = fail_operation
+            resource.sync_command.side_effect = fail_operation
+        else:
+            resource.commit_command.return_value = _matrix_command(
+                _command_result(0, {"result": {"status": "committed"}})
+            )
+        resource.check_command.return_value = _matrix_command(
+            __import__("odoo_instance_sdk.models", fromlist=["GitCheckResult"]).GitCheckResult(
+                base="main", branch="feature", valid=True
+            ),
+            error=RuntimeError("isolated external operation failed") if failing else None,
+        )
+        resource.absorb_command.return_value = _matrix_command(
+            _command_result(0, {"result": {"status": "absorbed"}})
+        )
+        resource.sync_command.return_value = _matrix_command(
+            _command_result(0, {"result": {"status": "synced"}})
+        )
+        monkeypatch.setattr("odoo_instance_sdk.commands.git._resource", lambda _ctx: resource)
+        return
+
     if (
         path in {("eval",), ("exec",)}
         or path[:1] == ("module",)
@@ -1152,6 +1340,7 @@ def _patch_leaf_external(  # noqa: C901
         return
 
     if path == ("module", "test"):
+        (tmp_path / "sale").mkdir(exist_ok=True)
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.resolve_module_test_selection",
             lambda *_args, **_kwargs: (
@@ -1412,9 +1601,13 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
             execution_calls: list[str] = []
             original_projection = output_commands._rich_plan_projection
 
-            def validating_projection(document: OutputDocument) -> str:
-                rendered = original_projection(document)
-                result = document.result
+            def validating_projection(
+                result: JsonValue,
+                *,
+                command: str,
+                warnings: tuple[str, ...] = (),
+            ) -> str:
+                rendered = original_projection(result, command=command, warnings=warnings)
                 if isinstance(result, dict):
                     steps = result.get("steps")
                     if isinstance(steps, list):
@@ -1446,7 +1639,11 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
                 args.append("--all-projects")
             if case.path == ("init",):
                 args.append(str(tmp_path))
-            if case.requires_dry_run and "--dry-run" not in args:
+            if (
+                case.requires_dry_run
+                and case.path != ("module", "install-order")
+                and "--dry-run" not in args
+            ):
                 args.append("--dry-run")
             _patch_leaf_external(isolated, case, failing=False, tmp_path=tmp_path)
             invoked = runner.invoke(cli, [*args, "--format", "rich"])
@@ -1461,6 +1658,8 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
         assert not re.search(r"\]\s*\n\s*\[", invoked.stdout)
         if case.path == ("env", "path"):
             assert invoked.stdout == str(tmp_path / "worktree") + "\n"
+        elif case.path == ("env", "show"):
+            assert "Environment demo" in invoked.stdout
         else:
             key_value_lines = [
                 line
@@ -1468,7 +1667,7 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
                 if re.fullmatch(r"\s*[a-z][a-z0-9_-]*=[^=]+(?:\s+[a-z][a-z0-9_-]*=[^=]+)+\s*", line)
             ]
             assert all(line.lstrip().startswith("status=success") for line in key_value_lines)
-        if case.requires_dry_run:
+        if case.requires_dry_run and case.path != ("module", "install-order"):
             assert "--dry-run" in args
             assert execution_calls == []
         outputs.append(invoked.stdout)
@@ -1634,7 +1833,7 @@ def test_public_cli_leaf_matrix_rejects_env_list_watch_json(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda *_args, **_kwargs: pytest.fail("watch rejection must precede collection"),
     )
-    result = CliRunner().invoke(cli, ["env", "ls", "--watch", "--json"])
+    result = CliRunner().invoke(cli, ["env", "ls", "--watch", "--format", "json"])
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "--watch is only available with Rich output" in result.stderr
@@ -1677,7 +1876,7 @@ def test_init_monitoring_machine_mode_requires_yes_before_resolution(
     assert json.loads(result.stdout)["error"]["code"] == "confirmation_required"
 
 
-@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"], ["--json"]])
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"]])
 def test_machine_db_drop_requires_yes_before_project_resolution(args: list[str]) -> None:
     with patch(
         "odoo_instance_sdk.commands.pg._database_instance",
@@ -1724,7 +1923,7 @@ def test_psql_cli_keeps_native_args_and_rejects_document_mode_without_dry_run(
     resource.psql_command.assert_called_once_with(("-c", "SELECT 1"))
 
     resolved_before_rejection = resolve_resource.call_count
-    for args in (("--format", "json"), ("--json",)):
+    for args in (("--format", "json"),):
         rejected = CliRunner().invoke(cli, ["psql", *args])
         assert rejected.exit_code == 2
         assert "No such option" in rejected.stderr
@@ -1759,7 +1958,7 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         command = _command(path)
         options = _option_names(command)
         assert "--format" in options, path
-        assert "--json" in options, path
+        assert "--json" not in options, path
 
     for path in (("logs",), ("monitor",)):
         options = _option_names(_command(path))
@@ -1778,7 +1977,7 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         options = _option_names(_command(path))
         assert "--dry-run" in options, path
         assert "--format" in options, path
-        assert "--json" in options, path
+        assert "--json" not in options, path
 
     root_result = CliRunner().invoke(cli, ["--format", "json", "env", "ls"])
     assert root_result.exit_code == 2
@@ -1786,12 +1985,11 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
     assert "No such option" in root_result.stderr
 
 
-def test_format_resolution_accepts_json_alias_and_rejects_conflicts_before_operation() -> None:
+def test_format_resolution_uses_explicit_format_and_rejects_removed_alias() -> None:
     assert resolve_output_mode(None, False) is OutputMode.RICH
-    assert resolve_output_mode(None, True) is OutputMode.JSON
-    assert resolve_output_mode("json", True) is OutputMode.JSON
-    with pytest.raises(click.UsageError, match="conflicts"):
-        resolve_output_mode("toon", True)
+    assert resolve_output_mode("json", False) is OutputMode.JSON
+    with pytest.raises(click.UsageError, match="removed"):
+        resolve_output_mode(None, True)
 
 
 def test_invalid_format_uses_native_click_parse_failure() -> None:
@@ -2510,7 +2708,7 @@ def test_rich_dry_run_uses_real_command_builders(
         postgres_root.mkdir()
         (postgres_root / "compose.yaml").write_text("services: {}\n")
         monkeypatch.setattr(
-            "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+            "odoo_instance_sdk.resources.postgres._paths.get_project_postgres_dir",
             lambda _project_id: postgres_root,
         )
         cluster = PostgresCluster(
@@ -2817,10 +3015,10 @@ def test_output_options_is_a_click_option_composition_helper() -> None:
         click.echo(resolve_output_mode(output_format, json_output).value)
 
     runner = CliRunner()
-    assert runner.invoke(command, ["--json", "--format", "json"]).output == "json\n"
-    conflict = runner.invoke(command, ["--json", "--format", "toon"])
-    assert conflict.exit_code == 2
-    assert "conflicts" in conflict.output
+    assert runner.invoke(command, ["--format", "json"]).output == "json\n"
+    removed = runner.invoke(command, ["--json"])
+    assert removed.exit_code == 2
+    assert "No such option '--json'" in removed.output
 
 
 @pytest.mark.parametrize("mode", ["rich", "json", "toon"])
@@ -3074,7 +3272,7 @@ def test_catalogue_rich_lists_use_single_human_table(
 
 
 def test_module_rich_list_uses_single_table() -> None:
-    from odoo_instance_sdk.cli import _rich_module_list
+    from odoo_instance_sdk.commands.module import _rich_module_list
 
     result = success_document(
         command="module.list",
@@ -3129,13 +3327,13 @@ def test_module_rich_list_uses_single_table() -> None:
             ("Severity", "warning", "stale"),
         ),
         (
-            "odoo_instance_sdk.cli._rich_module_update",
+            "odoo_instance_sdk.commands.module._rich_module_update",
             "module.update",
             {"modules": ["sale"], "updated": ["sale"]},
             ("Module update", "sale", "updated"),
         ),
         (
-            "odoo_instance_sdk.cli._rich_translation_export",
+            "odoo_instance_sdk.commands.translations._rich_translation_export",
             "translations.export",
             {
                 "exports": [
@@ -3186,9 +3384,8 @@ def test_bounded_rich_leaf_renderers_use_labelled_summaries(
     assert "=" not in rendered
 
 
-@pytest.mark.parametrize("args", [["--json"], ["--format", "json"]])
-def test_env_list_json_aliases_have_identical_v1_envelopes(
-    args: list[str], monkeypatch: pytest.MonkeyPatch
+def test_env_list_format_json_emits_v1_envelope(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = Snapshot(
         schema_version=3,
@@ -3200,18 +3397,11 @@ def test_env_list_json_aliases_have_identical_v1_envelopes(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda self, project_id=None, *, include_removed=False: snapshot,
     )
-    result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", *args])
+    result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "json"])
     assert result.exit_code == 0, result.output
     document = json.loads(result.stdout)
     assert document["schema_version"] == 1
     assert document["result"] == document["data"]
-    if args == ["--json"]:
-        monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
-            lambda self, project_id=None, *, include_removed=False: snapshot,
-        )
-        alias_result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "json"])
-        assert json.loads(alias_result.stdout) == document
 
 
 def test_conflicting_machine_alias_is_rejected_before_snapshot(
@@ -3228,11 +3418,11 @@ def test_conflicting_machine_alias_is_rejected_before_snapshot(
     result = CliRunner().invoke(cli, ["env", "ls", "--json", "--format", "toon"])
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert "conflicts" in result.stderr
+    assert "No such option '--json'" in result.stderr
     assert not called
 
 
-@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"], ["--json"]])
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"]])
 def test_machine_env_remove_requires_yes_without_prompt_or_operation(
     args: list[str], tmp_path: object
 ) -> None:
@@ -3263,7 +3453,7 @@ def test_machine_env_remove_requires_yes_without_prompt_or_operation(
     client.environments.remove.assert_not_called()
 
 
-@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"], ["--json"]])
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"]])
 def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path: object) -> None:
     env = SimpleNamespace(
         id="env-1",
@@ -3427,7 +3617,9 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        dry_result = CliRunner().invoke(cli, ["env", "create", "PROJ-123", "--dry-run", "--json"])
+        dry_result = CliRunner().invoke(
+            cli, ["env", "create", "PROJ-123", "--dry-run", "--format", "json"]
+        )
 
     assert dry_result.exit_code == 0, dry_result.output
     dry_payload = json.loads(dry_result.stdout)["result"]
@@ -3523,8 +3715,19 @@ def test_public_human_callbacks_neutralize_terminal_controls(
             ]
         )
         with (
-            patch("odoo_instance_sdk.cli.cli_context.resolve_project_path", return_value=tmp_path),
-            patch("odoo_instance_sdk.cli.OdooClient", return_value=client),
+            patch(
+                "odoo_instance_sdk.cli.cli_context._ready_instance_for_doctor",
+                return_value=ResolvedContext(
+                    client=cast("Any", client),
+                    source=ProjectConfig(
+                        repository_root=tmp_path,
+                        python=sys.executable,
+                        odoo_bin=Path(sys.executable),
+                    ),
+                    instance=cast("Any", MagicMock()),
+                    provenance="explicit",
+                ),
+            ),
             patch("odoo_instance_sdk.cli.run_doctor", return_value=report),
         ):
             result = runner.invoke(cli, ["doctor"])
