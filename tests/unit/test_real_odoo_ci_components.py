@@ -514,6 +514,60 @@ def test_full_critical_path_persists_registered_python_manifest() -> None:
     assert "ProjectConfig.load(project)" in critical
 
 
+def test_full_critical_path_cleans_owned_fixture_before_env_remove() -> None:
+    root = Path(__file__).resolve().parents[2]
+    critical = (root / "tests/integration/real_odoo/test_critical_path.py").read_text(
+        encoding="utf-8"
+    )
+    cleanup = critical.index("_remove_owned_fixture_tree(")
+    env_remove = critical.index('"env", "remove"', cleanup)
+    assert "--porcelain=v1" in critical
+    assert 'not line.startswith("?? ")' in critical[cleanup:env_remove]
+    assert "foreign worktree change" in critical[cleanup:env_remove]
+    assert "shutil.rmtree(destination)" in critical[cleanup:env_remove]
+    assert '"E2E-CP-15"' in critical[cleanup:env_remove]
+
+
+def test_owned_fixture_cleanup_is_fail_closed_and_returns_status_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pytest
+
+    from tests.integration.real_odoo import test_critical_path as critical_path
+
+    worktree = tmp_path / "worktree"
+    destination = worktree / "addons" / "odcli_e2e_probe"
+    destination.mkdir(parents=True)
+    (destination / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+    statuses = iter(
+        (
+            subprocess.CompletedProcess(
+                ["git"], 0, "?? addons/odcli_e2e_probe/__manifest__.py\n", ""
+            ),
+            subprocess.CompletedProcess(["git"], 0, "", ""),
+        )
+    )
+    monkeypatch.setattr(critical_path.subprocess, "run", lambda *_args, **_kwargs: next(statuses))
+
+    before, after = critical_path._remove_owned_fixture_tree(worktree, destination)
+    assert before == ("?? addons/odcli_e2e_probe/__manifest__.py",)
+    assert after == ()
+    assert not destination.exists()
+
+    destination.mkdir(parents=True)
+    (destination / "__manifest__.py").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        critical_path.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["git"], 0, "?? addons/foreign.txt\n", ""
+        ),
+    )
+    with pytest.raises(AssertionError, match="foreign worktree change"):
+        critical_path._remove_owned_fixture_tree(worktree, destination)
+    assert destination.is_dir()
+
+
 def test_port_reservation_release_is_idempotent() -> None:
     from tests.integration.real_odoo.compose import reserve_loopback_port
 

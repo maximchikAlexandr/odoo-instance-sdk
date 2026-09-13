@@ -166,6 +166,66 @@ def _record(record_property: Any, evidence: str, value: object = "passed") -> No
     record_property(evidence.lower().replace("-", "_"), json.dumps(value, default=str))
 
 
+def _worktree_status(worktree: Path) -> tuple[str, ...]:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ],
+        capture_output=True,
+        shell=False,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        raise AssertionError(f"cannot inspect fixture worktree: {result.stderr[-4000:]}")
+    return tuple(line for line in result.stdout.splitlines() if line)
+
+
+def _remove_owned_fixture_tree(
+    worktree: Path, destination: Path
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Remove only the fixture tree that made the registered worktree dirty.
+
+    ``env remove`` must retain its fail-closed dirty-worktree guard.  This
+    helper therefore refuses to remove anything when the status contains a
+    tracked change, a foreign untracked path, or a symlink escaping the
+    registered worktree.  The postcondition is an empty status before the
+    public removal command is allowed to run.
+    """
+    worktree_root = worktree.resolve()
+    if destination.is_symlink():
+        raise AssertionError(f"fixture destination is a symlink: {destination}")
+    try:
+        destination_root = destination.resolve(strict=False)
+        relative_destination = destination_root.relative_to(worktree_root)
+    except ValueError as error:
+        raise AssertionError(f"fixture destination escapes worktree: {destination}") from error
+    if not destination.is_dir():
+        raise AssertionError(f"owned fixture directory is missing: {destination}")
+
+    before = _worktree_status(worktree)
+    if not before:
+        raise AssertionError(f"owned fixture has no dirty-worktree evidence: {destination}")
+    relative = relative_destination.as_posix().rstrip("/")
+    for line in before:
+        if not line.startswith("?? "):
+            raise AssertionError(f"refusing to remove unexpected worktree change: {line}")
+        changed_path = line[3:]
+        if changed_path != relative and not changed_path.startswith(f"{relative}/"):
+            raise AssertionError(f"refusing to remove foreign worktree change: {line}")
+
+    shutil.rmtree(destination)
+    after = _worktree_status(worktree)
+    if after:
+        raise AssertionError(f"fixture cleanup left worktree changes: {after}")
+    return before, after
+
+
 def _environment_state(payload: dict[str, Any], environment_id: str) -> dict[str, Any]:
     environments = payload.get("environments")
     assert isinstance(environments, list)
@@ -525,7 +585,9 @@ def test_source_backed_full_critical_path(  # noqa: C901
     assert Path(str(environment["worktree_path"])).is_dir()
     registered_worktree = Path(str(environment["worktree_path"]))
     probe_root = registered_worktree / "addons"
-    shutil.copytree(addon_root / _PROBE, probe_root / _PROBE, dirs_exist_ok=True)
+    probe_destination = probe_root / _PROBE
+    assert not probe_destination.exists() and not probe_destination.is_symlink()
+    shutil.copytree(addon_root / _PROBE, probe_destination)
     generated_config = Path(str(environment["generated_config_path"]))
     config_lines = generated_config.read_text(encoding="utf-8").splitlines()
     addons_lines = [line for line in config_lines if line.lstrip().startswith("addons_path")]
@@ -835,9 +897,25 @@ def test_source_backed_full_critical_path(  # noqa: C901
         "--force-default",
         "--yes",
     )
+    fixture_status_before, fixture_status_after = _remove_owned_fixture_tree(
+        registered_worktree, probe_destination
+    )
+    _record(
+        record_property,
+        "E2E-CP-15",
+        {
+            "path": str(probe_destination),
+            "before": fixture_status_before,
+            "after": fixture_status_after,
+        },
+    )
     removed = _invoke(runner, project, cli_environment, "env", "remove", environment_id, "--yes")
     assert removed.get("id") == environment_id
     assert removed.get("state") == "removed"
+    # The implicit command-context assertion above intentionally runs from
+    # the registered worktree.  Once the public removal succeeds that cwd is
+    # gone, so idempotent removal must resume from the still-live project root.
+    monkeypatch.chdir(project)
     removed_again = _invoke(
         runner, project, cli_environment, "env", "remove", environment_id, "--yes"
     )
