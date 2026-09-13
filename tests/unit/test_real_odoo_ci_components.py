@@ -411,7 +411,7 @@ def test_full_workflow_installs_only_approved_ldap_build_prerequisites() -> None
 def test_smoke_readiness_keeps_budget_for_diagnostic_service_logs() -> None:
     root = Path(__file__).resolve().parents[2]
     smoke = (root / "tests/integration/real_odoo/test_smoke.py").read_text(encoding="utf-8")
-    assert "timeout=140.0" in smoke
+    assert "timeout=120.0" in smoke
     assert '"logs"' in smoke and '"--no-color"' in smoke and '"target_init"' in smoke
     assert "target Odoo readiness failed" in smoke
 

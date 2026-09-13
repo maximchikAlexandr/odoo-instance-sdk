@@ -426,10 +426,14 @@ def source_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[E2ERunti
         _finalize(runtime)
 
 
-@pytest.fixture()
-def target_runtime(source_server: E2ERuntime, tmp_path: Path) -> Iterator[E2ERuntime]:
-    """Create a fresh function-scoped target root and target resource ledger."""
-    runtime = _make_runtime(tmp_path, new_run_id(), scope="target")
+@pytest.fixture(scope="module")
+def target_runtime(
+    source_server: E2ERuntime, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[E2ERuntime]:
+    """Create one module-scoped target for serial full-tier leaves."""
+    runtime = _make_runtime(
+        tmp_path_factory.mktemp("odcli-target-e2e"), new_run_id(), scope="target"
+    )
     try:
         _provision(runtime)
         yield runtime

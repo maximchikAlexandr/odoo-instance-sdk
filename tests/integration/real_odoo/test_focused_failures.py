@@ -24,8 +24,13 @@ from odoo_instance_sdk.resources.database import DatabaseResource
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES, PublicLeafCase
 
 from .archive import ArchiveIdentity, SourceBackupPlan
-from .cleanup import FailureEvidence, ResourceLedger, terminate_owned_process_group
-from .compose import ComposeLifecycle
+from .cleanup import (
+    FailureEvidence,
+    ResourceLedger,
+    compose_down,
+    terminate_owned_process_group,
+)
+from .compose import ComposeLifecycle, reserve_ports
 from .conftest import E2ERuntime, _finalize
 from .failures import (
     assert_secret_free,
@@ -52,6 +57,16 @@ from .focused_support import (
 from .pins import E2E_PINS
 
 pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_full, pytest.mark.serial]
+
+
+@pytest.fixture(scope="module")
+def focused_project(target_runtime: E2ERuntime, source_backup_plan: SourceBackupPlan) -> Path:
+    """Reuse one checked-out SDK-owned project across focused leaves."""
+    return _project(
+        target_runtime,
+        target_runtime.root / f"focused-project-{target_runtime.run_id}",
+        source=source_backup_plan,
+    )
 
 
 def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None = None) -> Path:
@@ -102,6 +117,8 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         lambda: shutil.rmtree(root, ignore_errors=True),
     )
     environment = dict(runtime.environment)
+    project_postgres = reserve_ports(1)[0]
+    project_postgres.release()
     command = shutil.which("odcli")
     if command is None:
         pytest.fail("odcli executable is required for focused public leaves")
@@ -122,7 +139,13 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             "--database",
             runtime.topology.target_sentinel_database,
             "--postgres",
-            "external",
+            "compose",
+            "--postgres-image",
+            E2E_PINS.postgres_image,
+            "--postgres-port",
+            str(project_postgres.port),
+            "--postgres-user",
+            "odoo",
             "--http-port",
             str(runtime.reservations[3].port),
             "--format",
@@ -149,6 +172,15 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     )
     local_config = root / ".odcli" / "odoo.conf"
     shutil.copy2(runtime.config_file, local_config)
+    # Public module/test leaves resolve modules from the pinned source tree;
+    # the disposable target service config intentionally uses container paths.
+    config_lines = [
+        line
+        for line in local_config.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("addons_path")
+    ]
+    config_lines.append(f"addons_path = {root / 'addons'}")
+    local_config.write_text("\n".join(config_lines) + "\n", encoding="utf-8")
     logfile = root / f"odoo-{runtime.run_id}.log"
     logfile.write_text("INFO focused leaf completed; secret=redacted\n", encoding="utf-8")
     with local_config.open("a", encoding="utf-8") as stream:
@@ -156,6 +188,15 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     local_config.chmod(0o600)
     manifest.write_text(initialized.to_manifest(), encoding="utf-8")
     manifest.chmod(0o600)
+
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    project_cluster = PostgresCluster.from_project(root)
+    runtime.ledger.record(
+        "postgres",
+        f"{runtime.run_id}-postgres-{root.name}",
+        lambda: compose_down(project_cluster.compose_file, project_cluster.compose_project_name),
+    )
 
     ticket = f"MYL-{int(runtime.run_id.replace('-', '')[:8], 16) % 100000000}"
     runtime.reservations[3].release()
@@ -184,6 +225,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         os.environ.update(previous_environment)
     checkout_environment = msgspec.to_builtins(checkout_result.environment)
     environment_id = str(checkout_environment["id"])
+    (root / ".odcli" / "e2e-environment-id").write_text(environment_id, encoding="ascii")
     worktree = Path(str(checkout_environment["worktree_path"]))
     python = Path(str(checkout_environment["python_environment_path"])) / "bin" / "python"
     generated_config = Path(str(checkout_environment["generated_config_path"]))
@@ -214,7 +256,9 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             text=True,
             check=False,
         )
-        if removed.returncode != 0:
+        if removed.returncode != 0 and "Environment not found" not in (
+            removed.stdout + removed.stderr
+        ):
             raise RuntimeError(removed.stdout + removed.stderr)
 
     runtime.ledger.record(
@@ -223,6 +267,43 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         remove_environment,
     )
     return root
+
+
+def _project_filestore(project: Path, database: str) -> Path:
+    """Resolve the filestore from the public project-generated config."""
+    config = ProjectConfig.load(project)
+    source_config = config.source_config
+    if source_config is None:
+        pytest.fail(f"project has no generated source config: {project}")
+    if not source_config.is_absolute():
+        source_config = project / source_config
+    from odoo_instance_sdk.models import StartConfig
+
+    start = StartConfig.from_odoo_config(source_config)
+    if start.data_dir is None:
+        pytest.fail(f"generated config has no data_dir: {source_config}")
+    return Path(start.data_dir) / "filestore" / database
+
+
+def _project_database_probe(project: Path, database: str) -> subprocess.CompletedProcess[str]:
+    """Probe the SDK-owned PostgreSQL cluster bound to a focused project."""
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    cluster = PostgresCluster.from_project(project)
+    return ComposeLifecycle(cluster.compose_file, cluster.compose_project_name).run(
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        "odoo",
+        "-d",
+        "postgres",
+        "-At",
+        "-c",
+        f"SELECT datname FROM pg_database WHERE datname = '{database}';",
+        timeout=30.0,
+    )
 
 
 def _failure_text(result: object) -> str:
@@ -256,12 +337,11 @@ def test_remote_auth_and_unreachable_source_fail_closed(
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
     record_property: object,
+    focused_project: Path,
 ) -> None:
     """The public refresh command must fail before creating a local backup."""
     runtime = target_runtime
-    project = _project(
-        runtime, runtime.root / f"project-{runtime.run_id}", source=source_backup_plan
-    )
+    project = focused_project
     runner = CliRunner()
     wrong_password = failure_evidence.secret_canary
     environment = {
@@ -331,6 +411,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
     variant: str,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
+    focused_project: Path,
 ) -> None:
     path = tmp_path / f"{variant}.zip"
     write_archive_variant(path, variant)  # type: ignore[arg-type]
@@ -362,11 +443,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
             failure_evidence, logs={"archive-incompatible": result.stdout}
         )
         assert_secret_free(files, failure_evidence.secret_canary)
-        project = _project(
-            target_runtime,
-            tmp_path / f"incompatible-restore-{target_runtime.run_id}",
-            source=source_backup_plan,
-        )
+        project = focused_project
         target = f"odcli_incompatible_{target_runtime.run_id.replace('-', '')[:20]}"
         restore = CliRunner().invoke(
             cli,
@@ -395,23 +472,8 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
         assert restore_document["error"]["code"] == "db_restore_failed"
         assert "database" in restore_document["error"]["message"].lower()
         assert _catalog_state(catalog_path) is BackupState.AVAILABLE
-        assert not (target_runtime.root / "target-data" / "filestore" / target).exists()
-        probe = ComposeLifecycle(
-            target_runtime.compose_file, target_runtime.topology.project_name
-        ).run(
-            "exec",
-            "-T",
-            "target_postgres",
-            "psql",
-            "-U",
-            "odoo",
-            "-d",
-            "postgres",
-            "-At",
-            "-c",
-            f"SELECT datname FROM pg_database WHERE datname = '{target}';",
-            timeout=30.0,
-        )
+        assert not _project_filestore(project, target).exists()
+        probe = _project_database_probe(project, target)
         assert probe.returncode == 0
         assert probe.stdout.strip() != target
     else:
@@ -435,6 +497,7 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     failure_evidence: FailureEvidence,
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
+    focused_project: Path,
 ) -> None:
     archive_path = tmp_path / "restore.zip"
     shutil.copy2(source_backup.path, archive_path)
@@ -448,11 +511,7 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
         source_base_url=source_backup_plan.endpoint,
     )
     _bind_catalog_path(monkeypatch, catalog_path)
-    project = _project(
-        target_runtime,
-        tmp_path / f"restore-project-{target_runtime.run_id}",
-        source=source_backup_plan,
-    )
+    project = focused_project
     target = f"odcli_restore_{target_runtime.run_id.replace('-', '')[:24]}"
     args = [
         "--project",
@@ -476,25 +535,11 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     success_document = json.loads(successful.stdout)
     assert success_document["ok"] is True
     assert success_document["result"]["restored_database"] == target
-    database_probe = ComposeLifecycle(
-        target_runtime.compose_file, target_runtime.topology.project_name
-    ).run(
-        "exec",
-        "-T",
-        "target_postgres",
-        "psql",
-        "-U",
-        "odoo",
-        "-d",
-        "postgres",
-        "-At",
-        "-c",
-        f"SELECT datname FROM pg_database WHERE datname = '{target}';",
-        timeout=30.0,
-    )
+    database_probe = _project_database_probe(project, target)
     assert database_probe.returncode == 0
     assert database_probe.stdout.strip() == target
-    assert (target_runtime.root / "target-data" / "filestore" / target).is_dir()
+    filestore = _project_filestore(project, target)
+    assert filestore.is_dir()
 
     first = CliRunner().invoke(cli, args, env=environment)
     second = CliRunner().invoke(cli, args, env=environment)
@@ -510,7 +555,7 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     assert second_doc["error"]["code"] == "db_restore_failed"
     assert _catalog_state(catalog_path, success_id) is BackupState.AVAILABLE
     assert database_probe.stdout.strip() == target
-    assert (target_runtime.root / "target-data" / "filestore" / target).is_dir()
+    assert filestore.is_dir()
     _record(
         record_property,
         "E2E-FC-05",
@@ -533,11 +578,11 @@ def test_remaining_focused_public_leaves_use_canonical_inventory(
     source_backup: ArchiveIdentity,
     failure_evidence: FailureEvidence,
     record_property: object,
+    focused_project: Path,
 ) -> None:
-    project = _project(target_runtime, target_runtime.root / f"leaf-{target_runtime.run_id}")
     _invoke_case(
         case,
-        project=project,
+        project=focused_project,
         runtime=target_runtime,
         evidence=failure_evidence,
         record_property=record_property,
@@ -688,7 +733,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         raise RuntimeError("injected restore failure after database and filestore publication")
 
     monkeypatch.setattr(DatabaseResource, "restore", restore_then_fail)
-    filestore = target_runtime.root / "target-data" / "filestore" / database
+    filestore = _project_filestore(partial_project, database)
 
     def public_restore_failure() -> None:
         failed = CliRunner().invoke(cli, partial_args, env=environment)
@@ -706,9 +751,12 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         raise RuntimeError(observed["error"]["message"])
 
     def drop_database() -> None:
-        result = ComposeLifecycle(
-            target_runtime.compose_file, target_runtime.topology.project_name
-        ).run("exec", "-T", "target_postgres", "dropdb", "-U", "odoo", database, timeout=30.0)
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        cluster = PostgresCluster.from_project(partial_project)
+        result = ComposeLifecycle(cluster.compose_file, cluster.compose_project_name).run(
+            "exec", "-T", "postgres", "dropdb", "-U", "odoo", database, timeout=30.0
+        )
         if result.returncode != 0:
             raise RuntimeError("database cleanup failed")
 
@@ -752,22 +800,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     assert not filestore.exists()
     assert _catalog_state(catalog_path, backup_id) is BackupState.DELETED
     assert not archive_path.exists()
-    database_probe = ComposeLifecycle(
-        target_runtime.compose_file, target_runtime.topology.project_name
-    ).run(
-        "exec",
-        "-T",
-        "target_postgres",
-        "psql",
-        "-U",
-        "odoo",
-        "-d",
-        "postgres",
-        "-At",
-        "-c",
-        f"SELECT datname FROM pg_database WHERE datname = '{database}';",
-        timeout=30.0,
-    )
+    database_probe = _project_database_probe(partial_project, database)
     assert database_probe.returncode == 0
     assert database_probe.stdout.strip() != database
     _record(

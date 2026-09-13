@@ -17,7 +17,8 @@ from typing import Any
 from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.models import BackupState
+from odoo_instance_sdk.models import BackupState, StartConfig
+from odoo_instance_sdk.project import ProjectConfig
 from tests.unit.test_cli_output_modes import PublicLeafCase
 
 from .archive import ArchiveIdentity
@@ -42,12 +43,27 @@ Handler = Callable[[_State], tuple[Result, dict[str, Any] | None]]
 
 
 def _invoke(state: _State, args: list[str], *, input: str | None = None) -> Result:
+    selector = state.project / ".odcli" / "e2e-environment-id"
+    context = ["--env", selector.read_text(encoding="ascii").strip()] if selector.is_file() else []
     return CliRunner().invoke(
         cli,
-        ["--project", str(state.project), *args],
+        [*context, "--project", str(state.project), *args],
         env=state.environment,
         input=input,
     )
+
+
+def _project_filestore(state: _State, database: str) -> Path:
+    config = ProjectConfig.load(state.project)
+    source_config = config.source_config
+    if source_config is None:
+        raise AssertionError(f"project has no generated source config: {state.project}")
+    if not source_config.is_absolute():
+        source_config = state.project / source_config
+    start = StartConfig.from_odoo_config(source_config)
+    if start.data_dir is None:
+        raise AssertionError(f"generated config has no data_dir: {source_config}")
+    return Path(start.data_dir) / "filestore" / database
 
 
 def _backup_delete(state: _State) -> tuple[Result, dict[str, Any]]:
@@ -139,7 +155,17 @@ def _logs(state: _State) -> tuple[Result, None]:
     command = shutil.which("odcli")
     assert command is not None
     followed = subprocess.Popen(
-        [command, "--project", str(state.project), "logs", "--follow", "--tail", "1"],
+        [
+            command,
+            "--env",
+            (state.project / ".odcli" / "e2e-environment-id").read_text(encoding="ascii").strip(),
+            "--project",
+            str(state.project),
+            "logs",
+            "--follow",
+            "--tail",
+            "1",
+        ],
         cwd=state.project,
         env=state.environment,
         start_new_session=True,
@@ -206,7 +232,7 @@ def _db_drop(state: _State) -> tuple[Result, dict[str, Any]]:
         foreign, runtime=state.runtime, evidence=state.evidence, name="leaf-db-drop-foreign"
     )
     assert foreign_document is not None and foreign_document["error"]["code"] == "db_drop_failed"
-    filestore = state.runtime.root / "target-data" / "filestore" / owned_database
+    filestore = _project_filestore(state, owned_database)
     if filestore.exists():
         shutil.rmtree(filestore)
     return first, first_document

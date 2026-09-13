@@ -98,11 +98,11 @@ def _start_target_odoo(runtime: E2ERuntime) -> None:
         # failed its HTTP contract; it must never become a silent pytest kill.
         wait_for_http(
             f"http://127.0.0.1:{runtime.reservations[3].port}/web/health",
-            timeout=140.0,
+            timeout=120.0,
         )
         wait_for_http(
             f"http://127.0.0.1:{runtime.reservations[3].port}/web/database/selector",
-            timeout=25.0,
+            timeout=20.0,
         )
     except TimeoutError as error:
         status = lifecycle.run(
@@ -111,7 +111,7 @@ def _start_target_odoo(runtime: E2ERuntime) -> None:
             "--format",
             "{{.Service}} {{.State}}",
             "target_init",
-            timeout=5.0,
+            timeout=4.0,
         )
         logs = lifecycle.run(
             "logs",
@@ -119,7 +119,7 @@ def _start_target_odoo(runtime: E2ERuntime) -> None:
             "--tail",
             "200",
             "target_init",
-            timeout=10.0,
+            timeout=5.0,
         )
         detail = (logs.stdout + logs.stderr)[-6000:]
         secrets = (
