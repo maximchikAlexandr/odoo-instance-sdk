@@ -189,9 +189,7 @@ def _parse_scanner_payload(payload: object) -> set[tuple[str, str, str]] | None:
         if package is None:
             return None
         if set(dependency) == {"name", "skip_reason"}:
-            if not _valid_exception_text(dependency.get("skip_reason")):
-                return None
-            continue
+            return None
         if set(dependency) != {"name", "version", "vulns"}:
             return None
         version = dependency.get("version")
@@ -228,6 +226,7 @@ def _run_pinned_python_audit(
                 "--format",
                 "json",
                 "--no-deps",
+                "--strict",
             ],
             timeout=120.0,
         )
