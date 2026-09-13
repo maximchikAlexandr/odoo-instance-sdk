@@ -963,6 +963,11 @@ class EnvironmentResource:
         backup_id: uuid.UUID | None = None
         try:
             plan.worktree.parent.mkdir(parents=True, exist_ok=True)
+            # Register the path before invoking Git.  ``git worktree add`` can
+            # be interrupted after creating the administrative entry but
+            # before returning; failure cleanup must then remove that partial
+            # worktree instead of leaving a stale catalog row and lock.
+            created_paths.append(plan.worktree)
             worktree_result = cast("ProcessResult", context.process("checkout.worktree"))
             if worktree_result.returncode != 0:
                 stderr = str(worktree_result.stderr or "").strip()
@@ -971,8 +976,6 @@ class EnvironmentResource:
                         "branch_in_use", f"Branch {plan.branch!r} is already checked out"
                     )
                 raise ConfigError(f"git worktree add failed: {stderr}")  # noqa: TRY301
-            created_paths.append(plan.worktree)
-
             if plan.source_config is not None:
                 context.action("checkout.generated_config")
                 db_name_for_config = (
@@ -1348,6 +1351,10 @@ class EnvironmentResource:
             if p.name == "worktree":
                 from odoo_instance_sdk.internal.git_worktree import worktree_remove
 
+                if not p.exists():
+                    if context is not None and context.planned("checkout.cleanup.worktree"):
+                        context.skip("checkout.cleanup.worktree")
+                    continue
                 try:
                     if context is None:
                         worktree_remove(repo_root, p)

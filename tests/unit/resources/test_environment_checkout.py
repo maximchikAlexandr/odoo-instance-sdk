@@ -1621,6 +1621,53 @@ class TestOwnedRuntimePreflight:
         assert Path(env.worktree_path).is_dir()
         assert "secret" not in (row["last_error"] or "")
 
+    def test_worktree_timeout_cleans_partial_worktree(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+    ) -> None:
+        resource = env_client.environments
+        snapshot = resource._build_checkout_snapshot(
+            project_manifest,
+            "feat/worktree-timeout",
+            options=EnvironmentCheckoutOptions(
+                python="3.12",
+                create_venv=True,
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+
+        def result_for(step: PreparedProcess) -> ProcessResult:
+            step_id = step.step_id
+            if step_id == "checkout.validate.git.toplevel":
+                return self._result(step_id, stdout=str(snapshot.private.repo_root))
+            if step_id == "checkout.validate.git.common-dir":
+                return self._result(step_id, stdout=snapshot.private.git_common_dir)
+            if step_id == "checkout.validate.git.base":
+                return self._result(step_id, stdout=snapshot.private.base_revision)
+            if step_id == "checkout.worktree":
+                snapshot.private.worktree.mkdir(parents=True, exist_ok=True)
+                raise ProcessTimeoutError(
+                    step.argv,
+                    60.0,
+                    duration=60.0,
+                    stderr_tail="git worktree add timed out",
+                )
+            if step_id == "checkout.cleanup.worktree":
+                snapshot.private.worktree.rmdir()
+            return self._result(step_id)
+
+        with pytest.raises(ProcessTimeoutError, match=r"timeout after 60\.0s"):
+            resource._command_from_snapshot(
+                snapshot,
+                executor=RecordingExecutor(result_factory=result_for),
+            ).run()
+
+        env = env_client.environments.list(project=project_manifest)[0]
+        assert env.state is EnvironmentState.FAILED
+        assert not Path(env.worktree_path).exists()
+
     def test_copy_checkout_plans_authoritative_restore_probes(
         self,
         env_client: OdooClient,
