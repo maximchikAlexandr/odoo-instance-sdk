@@ -165,6 +165,36 @@ def test_source_cache_consumption_ignores_another_run(
     assert not ci._source_cache_consumed()
 
 
+def test_finalize_writes_cache_consumption_after_target_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final target teardown must publish the source-cache audit."""
+    runtime_root = tmp_path / "odcli-e2e-run-a"
+    runtime_root.mkdir()
+    evidence = tmp_path / "evidence"
+    monkeypatch.setattr(ci, "_evidence_root", lambda: evidence)
+    monkeypatch.setattr(ci, "_capture_service_logs", lambda _runtime: None)
+    monkeypatch.setattr(ci, "_remember_source_cache_consumption", lambda *_args: None)
+    monkeypatch.setattr(ci, "_write_resource_manifest", lambda: evidence.mkdir(exist_ok=True))
+    original = ci._ORIGINAL_FINALIZE
+    try:
+        ci._ORIGINAL_FINALIZE = lambda _runtime, _failure: None
+        runtime = type(
+            "Runtime",
+            (),
+            {
+                "run_id": "run-a",
+                "root": runtime_root,
+                "scope": "target",
+                "ledger": type("Ledger", (), {"records": ()})(),
+            },
+        )()
+        ci._instrumented_finalize(runtime)
+    finally:
+        ci._ORIGINAL_FINALIZE = original
+    assert evidence.is_dir()
+
+
 def test_full_bootstrap_has_no_synthetic_checkout_prerequisite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -464,7 +494,7 @@ def test_full_workflow_installs_only_approved_ldap_build_prerequisites() -> None
 def test_smoke_readiness_keeps_budget_for_diagnostic_service_logs() -> None:
     root = Path(__file__).resolve().parents[2]
     smoke = (root / "tests/integration/real_odoo/test_smoke.py").read_text(encoding="utf-8")
-    assert "timeout=120.0" in smoke
+    assert "timeout=90.0" in smoke and "timeout=15.0" in smoke
     assert '"logs"' in smoke and '"--no-color"' in smoke and '"target_init"' in smoke
     assert "target Odoo readiness failed" in smoke
 
