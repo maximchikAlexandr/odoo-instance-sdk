@@ -260,7 +260,7 @@ class _CheckoutPlan:
     worktree_argv: tuple[str, ...]
     created_at: str
     options: EnvironmentCheckoutOptions
-    branch_revalidator: Callable[[], None] | None = None
+    branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,7 +729,7 @@ class EnvironmentResource:
         with exclusive_lock(provisioning_lock_path()):
             self._validate_checkout_snapshot(snapshot, context=context)
             if plan.branch_revalidator is not None:
-                plan.branch_revalidator()
+                plan.branch_revalidator(context)
             if plan.db_mode is EnvironmentDatabaseMode.COPY:
                 self._preflight_copy_checkout(plan)
             context.action("checkout.catalog")
@@ -870,7 +870,7 @@ class EnvironmentResource:
         branch: str,
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-        branch_revalidator: Callable[[], None],
+        branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None],
     ) -> Command[DevelopmentEnvironment]:
         """Build the normal checkout command with one private late branch guard."""
         snapshot = self._build_checkout_snapshot(project, branch, options=options)
@@ -3329,6 +3329,42 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
             mutating=True,
         ),
     ]
+    if plan.branch_revalidator is not None:
+        # Ticket allocation revalidation is part of the immutable checkout
+        # boundary.  Capture its Git reads here so the callback cannot open an
+        # unplanned default ``process`` step while the command is running.
+        steps.extend(
+            (
+                PreparedStep(
+                    step_id="checkout.ticket.local-heads",
+                    argv=(
+                        "git",
+                        "-C",
+                        str(plan.repo_root),
+                        "for-each-ref",
+                        "--format=%(refname:strip=2)",
+                        "refs/heads",
+                    ),
+                    cwd=str(plan.repo_root),
+                    read_only=True,
+                ),
+                PreparedStep(
+                    step_id="checkout.ticket.remote-heads",
+                    argv=(
+                        "git",
+                        "-C",
+                        str(plan.repo_root),
+                        "ls-remote",
+                        "--heads",
+                        "origin",
+                        plan.branch,
+                        f"{plan.branch}_*",
+                    ),
+                    cwd=str(plan.repo_root),
+                    read_only=True,
+                ),
+            )
+        )
     if plan.source_config is not None:
         steps.append(PreparedAction("checkout.generated_config"))
     if plan.options.create_venv and plan.python_selector is not None:

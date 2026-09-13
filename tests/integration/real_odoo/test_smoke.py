@@ -91,14 +91,48 @@ def _start_target_odoo(runtime: E2ERuntime) -> None:
         "target_init",
     )
     assert result.returncode == 0, result.stderr
-    wait_for_http(
-        f"http://127.0.0.1:{runtime.reservations[3].port}/web/health",
-        timeout=180.0,
-    )
-    wait_for_http(
-        f"http://127.0.0.1:{runtime.reservations[3].port}/web/database/selector",
-        timeout=180.0,
-    )
+    lifecycle = ComposeLifecycle(compose_file, runtime.topology.project_name)
+    try:
+        # Keep a bounded reserve inside the frozen 180-second test budget for
+        # diagnostics.  A timeout must explain whether Odoo exited or simply
+        # failed its HTTP contract; it must never become a silent pytest kill.
+        wait_for_http(
+            f"http://127.0.0.1:{runtime.reservations[3].port}/web/health",
+            timeout=140.0,
+        )
+        wait_for_http(
+            f"http://127.0.0.1:{runtime.reservations[3].port}/web/database/selector",
+            timeout=25.0,
+        )
+    except TimeoutError as error:
+        status = lifecycle.run(
+            "ps",
+            "--all",
+            "--format",
+            "{{.Service}} {{.State}}",
+            "target_init",
+            timeout=5.0,
+        )
+        logs = lifecycle.run(
+            "logs",
+            "--no-color",
+            "--tail",
+            "200",
+            "target_init",
+            timeout=10.0,
+        )
+        detail = (logs.stdout + logs.stderr)[-6000:]
+        secrets = (
+            runtime.secret_file.read_text(encoding="utf-8").strip(),
+            runtime.master_password_file.read_text(encoding="utf-8").strip(),
+        )
+        for secret in secrets:
+            if secret:
+                detail = detail.replace(secret, "<redacted>")
+        raise RuntimeError(
+            f"target Odoo readiness failed: {error}; service status: "
+            f"{(status.stdout + status.stderr).strip()}; logs:\n{detail}"
+        ) from error
 
 
 def _align_target_master_password(runtime: E2ERuntime, source: E2ERuntime) -> None:

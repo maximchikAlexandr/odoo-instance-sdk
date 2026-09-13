@@ -97,6 +97,13 @@ jobs:
       - name: Sync frozen test environment
         id: uv-sync
         run: uv sync --frozen --group test
+      - name: Install approved Linux LDAP build prerequisites
+        id: ldap-build-deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libldap2-dev libsasl2-dev
+          dpkg-query --show --showformat='${Package}=${Version}\n' libldap2-dev libsasl2-dev
       - name: Bootstrap required full prerequisites
         id: bootstrap
         env:

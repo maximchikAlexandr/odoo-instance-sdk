@@ -120,6 +120,34 @@ def test_ticket_allocation_honors_explicit_base_and_exact_ticket(
     assert allocation.base_ref == "release"
 
 
+def test_ticket_revalidation_consumes_named_git_steps_inside_checkout_context(
+    tmp_path: Path,
+) -> None:
+    allocation = env._TicketAllocation(
+        ticket="PROJ-123",
+        branch="PROJ-123_1",
+        repo_root=tmp_path,
+        git_common_dir=tmp_path / ".git",
+        base_ref="HEAD",
+        local_heads=(),
+        catalogue_heads=(),
+        remote_heads=(),
+    )
+    calls: list[str] = []
+
+    class Context:
+        def process(self, step_id: str) -> SimpleNamespace:
+            calls.append(step_id)
+            return SimpleNamespace(stdout="" if "remote" in step_id else "PROJ-123\n")
+
+    env._revalidate_ticket_absence(
+        cast("OdooClient", _allocation_client([])),
+        allocation,
+        context=Context(),  # type: ignore[arg-type]
+    )
+    assert calls == ["checkout.ticket.local-heads", "checkout.ticket.remote-heads"]
+
+
 @pytest.mark.parametrize("source", ["local", "catalogue", "origin"])
 def test_ticket_allocation_revalidation_is_stale_without_reallocation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str

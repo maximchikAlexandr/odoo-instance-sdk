@@ -24,7 +24,7 @@ from odoo_instance_sdk.resources.database import DatabaseResource
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES, PublicLeafCase
 
 from .archive import ArchiveIdentity, SourceBackupPlan
-from .cleanup import FailureEvidence, ResourceLedger
+from .cleanup import FailureEvidence, ResourceLedger, terminate_owned_process_group
 from .compose import ComposeLifecycle
 from .conftest import E2ERuntime, _finalize
 from .failures import (
@@ -242,8 +242,6 @@ def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> N
         "odoo_instance_sdk.internal.paths.get_catalog_path",
         "odoo_instance_sdk.internal.context.get_catalog_path",
         "odoo_instance_sdk.commands.env.get_catalog_path",
-        "odoo_instance_sdk.resources.postgres.get_catalog_path",
-        "odoo_instance_sdk.resources.monitor.get_catalog_path",
     ):
         monkeypatch.setattr(target, provider)
     from odoo_instance_sdk.commands import backup as backup_commands
@@ -600,7 +598,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     resource_ledger.record(
         "process",
         f"{run_id}-odcli-restore-{process.pid}",
-        lambda: os.killpg(process.pid, signal.SIGKILL) if process.poll() is None else None,
+        lambda: terminate_owned_process_group(process.pid),
     )
     deadline = time.monotonic() + 5
     while process.poll() is None and time.monotonic() < deadline:
@@ -641,11 +639,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     resource_ledger.record(
         "process",
         f"{run_id}-odcli-timeout-{timeout_process.pid}",
-        lambda: (
-            os.killpg(timeout_process.pid, signal.SIGKILL)
-            if timeout_process.poll() is None
-            else None
-        ),
+        lambda: terminate_owned_process_group(timeout_process.pid),
     )
     timeout_stdout, timeout_stderr = timeout_process.communicate(timeout=30)
     assert timeout_process.returncode != 0

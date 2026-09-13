@@ -11,10 +11,16 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from odoo_instance_sdk.internal.proc import terminate_pid
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
 
 MAX_TEXT_BYTES = 2 * 1024 * 1024
 MAX_FAILURE_BUNDLE_BYTES = 50 * 1024 * 1024
+
+
+def terminate_owned_process_group(pid: int) -> None:
+    """Terminate an owned session even after its direct leader has exited."""
+    terminate_pid(pid, process_group_id=pid, timeout=5.0)
 
 
 def write_owner_only_secret(path: Path, value: str) -> None:

@@ -21,7 +21,7 @@ from odoo_instance_sdk.models import BackupState
 from tests.unit.test_cli_output_modes import PublicLeafCase
 
 from .archive import ArchiveIdentity
-from .cleanup import FailureEvidence
+from .cleanup import FailureEvidence, terminate_owned_process_group
 from .conftest import E2ERuntime
 from .failures import assert_secret_free
 from .focused_support import BACKUP_ID, catalog_state, observe_failure, record, seed_backup
@@ -152,8 +152,8 @@ def _logs(state: _State) -> tuple[Result, None]:
         os.killpg(followed.pid, signal.SIGINT)
         followed_stdout, followed_stderr = followed.communicate(timeout=30)
     finally:
+        terminate_owned_process_group(followed.pid)
         if followed.poll() is None:
-            os.killpg(followed.pid, signal.SIGKILL)
             followed.communicate(timeout=30)
     assert followed.returncode == 130
     assert "redacted" in followed_stdout

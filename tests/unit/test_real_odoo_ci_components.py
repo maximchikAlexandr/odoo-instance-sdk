@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from scripts import real_odoo_bootstrap as bootstrap
 from scripts import real_odoo_ci as ci
+from tests.integration.real_odoo import cleanup as real_odoo_cleanup
 from tests.integration.real_odoo.cleanup import ResourceLedger
 
 if TYPE_CHECKING:
@@ -394,10 +395,46 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert action_refs and all(len(reference) == 40 for reference in action_refs)
 
 
+def test_full_workflow_installs_only_approved_ldap_build_prerequisites() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github/workflows/real-odoo-full.yml").read_text(encoding="utf-8")
+    assert "Install approved Linux LDAP build prerequisites" in workflow
+    assert (
+        "sudo apt-get install --yes --no-install-recommends libldap2-dev libsasl2-dev" in workflow
+    )
+    deps = workflow.split("Install approved Linux LDAP build prerequisites", 1)[1].split(
+        "Bootstrap required full prerequisites", 1
+    )[0]
+    assert "python-ldap" not in deps
+
+
+def test_smoke_readiness_keeps_budget_for_diagnostic_service_logs() -> None:
+    root = Path(__file__).resolve().parents[2]
+    smoke = (root / "tests/integration/real_odoo/test_smoke.py").read_text(encoding="utf-8")
+    assert "timeout=140.0" in smoke
+    assert '"logs"' in smoke and '"--no-color"' in smoke and '"target_init"' in smoke
+    assert "target Odoo readiness failed" in smoke
+
+
+def test_owned_process_cleanup_targets_the_whole_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, float]] = []
+    monkeypatch.setattr(
+        real_odoo_cleanup,
+        "terminate_pid",
+        lambda pid, *, process_group_id, timeout: calls.append((pid, process_group_id, timeout)),
+    )
+    real_odoo_cleanup.terminate_owned_process_group(1234)
+    assert calls == [(1234, 1234, 5.0)]
+
+
 def test_focused_catalog_binding_uses_existing_public_path_boundary() -> None:
     root = Path(__file__).resolve().parents[2]
     focused = (root / "tests/integration/real_odoo/test_focused_failures.py").read_text(
         encoding="utf-8"
     )
     assert "odoo_instance_sdk.internal.port_allocation.get_catalog_path" not in focused
+    assert "odoo_instance_sdk.resources.postgres.get_catalog_path" not in focused
+    assert "odoo_instance_sdk.resources.monitor.get_catalog_path" not in focused
     assert "odoo_instance_sdk.internal.paths.get_catalog_path" in focused

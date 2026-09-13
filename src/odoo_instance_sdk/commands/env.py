@@ -13,6 +13,8 @@ import msgspec
 
 if TYPE_CHECKING:
     import click
+
+    from odoo_instance_sdk.internal.proc import RunContext
 else:
     import rich_click as click
 from rich.console import Console, Group
@@ -253,15 +255,49 @@ def _resolve_ticket_allocation(
     )
 
 
-def _revalidate_ticket_absence(client: OdooClient, allocation: _TicketAllocation) -> None:
-    sources = (
-        ("local", local_branch_names(allocation.repo_root)),
-        (
-            "catalogue",
-            _catalogue_branch_names(client, allocation.repo_root, allocation.git_common_dir),
-        ),
-        ("origin", remote_branch_names(allocation.repo_root, allocation.ticket)),
-    )
+def _revalidate_ticket_absence(
+    client: OdooClient,
+    allocation: _TicketAllocation,
+    *,
+    context: RunContext[DevelopmentEnvironment] | None = None,
+) -> None:
+    if context is not None:
+        # The checkout command captures these Git reads as named process steps.
+        # Do not call the generic git helpers while its RunContext is active:
+        # that would create an unplanned default ``process`` step.
+        local_result = context.process("checkout.ticket.local-heads")
+        remote_result = context.process("checkout.ticket.remote-heads")
+        local_output = getattr(local_result, "stdout", "")
+        remote_output = getattr(remote_result, "stdout", "")
+        local_heads = {
+            line.strip() for line in str(local_output or "").splitlines() if line.strip()
+        }
+        remote_heads = {
+            line.split("\t", 1)[1].removeprefix("refs/heads/").strip()
+            for line in str(remote_output or "").splitlines()
+            if "\t" in line and line.split("\t", 1)[1].startswith("refs/heads/")
+        }
+        sources = (
+            ("local", local_heads),
+            (
+                "catalogue",
+                set(
+                    _catalogue_branch_names(client, allocation.repo_root, allocation.git_common_dir)
+                ),
+            ),
+            ("origin", remote_heads),
+        )
+    else:
+        sources = (
+            ("local", set(local_branch_names(allocation.repo_root))),
+            (
+                "catalogue",
+                set(
+                    _catalogue_branch_names(client, allocation.repo_root, allocation.git_common_dir)
+                ),
+            ),
+            ("origin", set(remote_branch_names(allocation.repo_root, allocation.ticket))),
+        )
     for source, branches in sources:
         if allocation.branch in branches:
             raise StalePlanError(
@@ -335,7 +371,9 @@ def _ticket_checkout_command(
             project_path,
             allocation.branch,
             options=selected_options,
-            branch_revalidator=lambda: _revalidate_ticket_absence(client, allocation),
+            branch_revalidator=lambda context: _revalidate_ticket_absence(
+                client, allocation, context=context
+            ),
         )
     return environments.checkout_command(project_path, allocation.branch, options=selected_options)
 
