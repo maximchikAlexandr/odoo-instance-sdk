@@ -32,6 +32,7 @@ class E2EPinManifest:
     uv: str
     odoo_python_lock_sha256: str
     odoo_python_audit_sha256: str
+    pip_audit: str
     actions_checkout: str
     setup_uv: str
     upload_artifact: str
@@ -50,6 +51,7 @@ E2E_PINS = E2EPinManifest(
     uv="0.10.8",
     odoo_python_lock_sha256="409063537bb93edb085304ac427effd7044a654393b5f9ff719fa105cd8c89d4",
     odoo_python_audit_sha256="70ce80ce32dd490e1c52b3d43a092fc735209ba538805942cba1de30caea2284",
+    pip_audit="pip-audit==2.10.1",
     actions_checkout="11d5960a326750d5838078e36cf38b85af677262",
     setup_uv="d0cc045d04ccac9d8b7881df0226f9e82c39688e",
     upload_artifact="ea165f8d65b6e75b540449e92b4886f43607fa02",
@@ -119,7 +121,7 @@ def _validate_digest(value: str, *, label: str) -> None:
         raise PrerequisiteError(f"malformed {label}: {value}")
 
 
-def _validate_pin_values(pins: E2EPinManifest) -> None:
+def _validate_pin_values(pins: E2EPinManifest) -> None:  # noqa: C901
     if not _SHA1.fullmatch(pins.odoo_source_commit):
         raise PrerequisiteError("Odoo source must be pinned to a 40-character commit SHA")
     for value in (
@@ -142,6 +144,8 @@ def _validate_pin_values(pins: E2EPinManifest) -> None:
         raise PrerequisiteError("Python resolution lock must be pinned by SHA-256")
     if not _SHA256.fullmatch(pins.odoo_python_audit_sha256):
         raise PrerequisiteError("Python resolution audit must be pinned by SHA-256")
+    if pins.pip_audit != "pip-audit==2.10.1":
+        raise PrerequisiteError("audit scanner must be pinned to pip-audit==2.10.1")
 
 
 def validate_pins(pins: E2EPinManifest = E2E_PINS) -> None:

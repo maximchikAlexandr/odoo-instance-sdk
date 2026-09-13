@@ -55,6 +55,21 @@ def matrix_row(case: Any) -> str:
 
 
 _MATRIX_PREFIX = "# Public CLI traceability matrix\n\n"
+CANONICAL_INVENTORY_BASE = "af9e1b3e8d127145b9488f11ec79519f9442db46"
+ORIGINAL_AUDIT_BASE = "0ff164636617c03a51277055af45cef009277368"
+CANONICAL_LEAF_COUNT = 50
+_MATRIX_PROVENANCE = (
+    "This is a reviewed projection of "
+    "`tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at "
+    f"canonical-inventory base `{CANONICAL_INVENTORY_BASE}`; the original "
+    f"full-change audit base remains `{ORIGINAL_AUDIT_BASE}`. It is not a source "
+    "registry. Implementation adds the disposition and evidence fields to each "
+    "existing `PublicLeafCase`; the generator SHALL emit this exact provenance, "
+    "rewrite the complete 50-row table, and fail the check on any byte drift. "
+    "`smoke` means covered in PR smoke and full; `critical` means the full "
+    "critical path; `focused` means a full-tier case around the critical path; "
+    "`not-applicable` requires the recorded reason."
+)
 _MATRIX_HEADER = (
     "| Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |\n"
     "| --- | --- | ---: | --- | --- |"
@@ -69,69 +84,21 @@ def render_matrix_table(cases: Sequence[Any]) -> str:
 
 def render_matrix_document(existing: str, cases: Sequence[Any]) -> str:
     """Replace only the generated table, preserving reviewed scenario prose."""
+    if len(cases) != CANONICAL_LEAF_COUNT:
+        raise ContractError(f"expected {CANONICAL_LEAF_COUNT} canonical leaves")
     marker = "\n## Scenario coverage\n"
     if marker not in existing:
         raise ContractError("command matrix is missing its scenario coverage section")
     tail = existing[existing.index(marker) :]
-    return _MATRIX_PREFIX + (
-        "This is a reviewed projection of "
-        "`tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at base "
-        "`0ff164636617c03a51277055af45cef009277368`, not a source registry. "
-        "Implementation adds the disposition and evidence fields to each existing "
-        "`PublicLeafCase`; a generator rewrites this table and a check fails on drift. "
-        "`smoke` means covered in PR smoke and full; `critical` means the full critical "
-        "path; `focused` means a full-tier case around the critical path; "
-        "`not-applicable` requires the recorded reason.\n\n"
-        + render_matrix_table(cases)
-        + "\n"
-        + tail
-    )
+    return _MATRIX_PREFIX + _MATRIX_PROVENANCE + "\n\n" + render_matrix_table(cases) + "\n" + tail
 
 
 def check_matrix_document(path: str, cases: Sequence[Any]) -> None:
-    """Validate the frozen matrix while allowing additive upstream CLI leaves."""
+    """Validate the complete byte-equal generated matrix."""
     from pathlib import Path
 
     matrix_path = Path(path)
     actual = matrix_path.read_text(encoding="utf-8")
     expected = render_matrix_document(actual, cases)
-    if actual == expected:
-        return
-
-    # The reviewed OpenSpec matrix is intentionally frozen.  The rebased
-    # branch may expose additive upstream leaves and Click's canonical alias
-    # names without changing that artifact.  Keep checking every frozen row's
-    # metadata and reject unknown rows, while allowing those upstream additions.
-    aliases = {
-        "resource list": "resource ls",
-        "env checkout": "env create",
-        "env list": "env ls",
-        "env remove": "env rm",
-        "backup list": "backup ls",
-        "backup show": "backup inspect",
-        "backup delete": "backup rm",
-        "db list": "db ls",
-        "db drop": "db rm",
-        "module list": "module ls",
-        "postgres status": "postgres ps",
-    }
-    current_rows = {matrix_row(case): case for case in cases}
-    table_lines = [line for line in actual.splitlines() if line.startswith("| `")]
-    if len(table_lines) < 2:
+    if actual != expected:
         raise ContractError(f"stale generated command matrix: {matrix_path}")
-    for line in table_lines:
-        match = re.match(r"\| `([^`]+)` \| (.*)", line)
-        if match is None:
-            raise ContractError(f"malformed command matrix row: {line}")
-        path_text = aliases.get(match.group(1), match.group(1))
-        candidate = next(
-            (
-                rendered
-                for rendered in current_rows
-                if rendered.startswith(f"| `{path_text}` |")
-                and rendered.split("` | ", 1)[1] == match.group(2)
-            ),
-            None,
-        )
-        if candidate is None:
-            raise ContractError(f"stale generated command matrix: {matrix_path}")
