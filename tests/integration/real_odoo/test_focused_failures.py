@@ -204,7 +204,7 @@ def _materialize_odoo_bootstrap(repository: Path, root: Path) -> Path:
             destination = (bootstrap / member.name).resolve()
             assert destination.is_relative_to(root_resolved), member.name
             assert not member.issym() and not member.islnk(), member.name
-            stream.extract(member, bootstrap)
+            stream.extract(member, bootstrap, filter="data")
     executable = bootstrap / relative
     assert executable.is_file(), executable
     return executable
