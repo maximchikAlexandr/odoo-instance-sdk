@@ -82,8 +82,15 @@ def focused_project(target_runtime: E2ERuntime, source_backup_plan: SourceBackup
 @pytest.fixture(scope="module")
 def focused_catalog(target_runtime: E2ERuntime, focused_project: Path) -> Path:
     """Keep a pristine registration/catalog snapshot for each focused leaf."""
-    configured = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])
-    selector = focused_project / ".odcli" / "e2e-environment-id"
+    source = _catalog_for_project(target_runtime, focused_project)
+    snapshot = target_runtime.root / "focused-catalog-baseline.sqlite3"
+    _copy_catalog_snapshot(source, snapshot)
+    return snapshot
+
+
+def _catalog_for_project(runtime: E2ERuntime, project: Path) -> Path:
+    """Find the catalog that actually owns a project's registered environment."""
+    selector = project / ".odcli" / "e2e-environment-id"
     if not selector.is_file():
         raise AssertionError(f"focused project has no environment selector: {selector}")
     environment_id = selector.read_text(encoding="ascii").strip()
@@ -91,8 +98,9 @@ def focused_catalog(target_runtime: E2ERuntime, focused_project: Path) -> Path:
     # process that bootstrapped the project used ODCLI_E2E_CATALOG.  Select
     # the actual catalog containing this checkout instead of snapshotting an
     # empty sibling database; every leaf must start with the active row.
-    candidates: tuple[Path, ...] = (configured, focused_project / ".odcli" / "catalog.sqlite3")
-    candidates += tuple(target_runtime.root.rglob("catalog.sqlite3"))
+    configured = Path(runtime.environment["ODCLI_E2E_CATALOG"])
+    candidates: tuple[Path, ...] = (configured, project / ".odcli" / "catalog.sqlite3")
+    candidates += tuple(runtime.root.rglob("catalog.sqlite3"))
     source = next(
         (
             candidate
@@ -103,11 +111,9 @@ def focused_catalog(target_runtime: E2ERuntime, focused_project: Path) -> Path:
     )
     if source is None:
         raise AssertionError(
-            f"focused project catalog has no active environment {environment_id}: {configured}"
+            f"project catalog has no active environment {environment_id}: {configured}"
         )
-    snapshot = target_runtime.root / "focused-catalog-baseline.sqlite3"
-    _copy_catalog_snapshot(source, snapshot)
-    return snapshot
+    return source
 
 
 def _catalog_has_environment(path: Path, environment_id: str) -> bool:
@@ -464,9 +470,6 @@ def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> N
 
 def _approve_project_postgres(project: Path, environment: dict[str, str]) -> None:
     """Reassert the exact pinned image through the public trust command."""
-    command = shutil.which("odcli")
-    if command is None:
-        pytest.fail("odcli executable is required for focused public leaves")
     resolved = subprocess.run(
         [
             "docker",
@@ -483,9 +486,12 @@ def _approve_project_postgres(project: Path, environment: dict[str, str]) -> Non
     assert resolved.returncode == 0, resolved.stderr
     digest = resolved.stdout.strip()
     assert digest.rsplit("@", 1)[-1] == E2E_PINS.postgres_image.rsplit("@", 1)[-1]
-    approved = subprocess.run(
+    approved = _invoke_in_registered_worktree(
+        CliRunner(),
+        cli,
+        project,
+        Path(environment["ODCLI_E2E_CATALOG"]),
         [
-            command,
             "--project",
             str(project),
             "postgres",
@@ -495,13 +501,9 @@ def _approve_project_postgres(project: Path, environment: dict[str, str]) -> Non
             "--format",
             "json",
         ],
-        cwd=_registered_worktree(Path(environment["ODCLI_E2E_CATALOG"]), project),
-        env={**os.environ, **environment},
-        capture_output=True,
-        text=True,
-        check=False,
+        environment,
     )
-    assert approved.returncode == 0, approved.stdout + approved.stderr
+    assert approved.exit_code == 0, approved.output
 
 
 def test_remote_auth_and_unreachable_source_fail_closed(
@@ -832,7 +834,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         database=target_runtime.topology.source_database,
     )
     project = _project(target_runtime, target_runtime.root / f"recovery-{run_id}")
-    isolated_catalog = _isolated_catalog(catalog_path, tmp_path)
+    isolated_catalog = _isolated_catalog(_catalog_for_project(target_runtime, project), tmp_path)
     catalog_path = isolated_catalog
     _ensure_isolated_environment(catalog_path, project)
     target = f"odcli_interrupt_{run_id.replace('-', '')[:20]}"
@@ -1072,9 +1074,7 @@ def test_failed_debug_retention_contains_only_sanitized_files(
         target_runtime.root / f"retention-{target_runtime.run_id}",
         source=source_backup_plan,
     )
-    catalog_path = _isolated_catalog(
-        Path(target_runtime.environment["ODCLI_E2E_CATALOG"]), tmp_path
-    )
+    catalog_path = _isolated_catalog(_catalog_for_project(target_runtime, project), tmp_path)
     _ensure_isolated_environment(catalog_path, project)
     environment["HOME"] = str(catalog_path.parent.parent)
     environment["ODCLI_E2E_CATALOG"] = str(catalog_path)
