@@ -1207,6 +1207,11 @@ def _restore_preflight(  # noqa: C901
             base_url=local_url,
             master_password=local_password,
         )
+        # ``from_config`` is intentionally transport-only and therefore does
+        # not infer the project Compose claim. Restore provenance must carry
+        # the exact active cluster and data root into the local instance so a
+        # later public ``db.drop`` can validate the same ownership evidence.
+        local._postgres_cluster = cluster
         if not local.databases.names():
             raise DatabaseManagerUnavailableError("local database manager returned no databases")
         if target_database is None:

@@ -1430,6 +1430,7 @@ def test_restore_preflight_orders_lock_cluster_manager_and_target_check(
     assert events == ["preparation-lock", "cluster", "names", "exists"]
     client.instance.assert_not_called()
     client.instance.from_config.assert_called_once()
+    assert local._postgres_cluster is cluster
 
 
 @pytest.mark.parametrize("entrypoint", ["preflight_restore", "prepare_restore"])
