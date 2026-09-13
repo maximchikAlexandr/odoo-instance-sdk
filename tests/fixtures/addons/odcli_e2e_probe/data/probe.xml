@@ -7,7 +7,7 @@
   <record id="probe_attachment" model="ir.attachment">
     <field name="name">odcli-e2e-attachment.txt</field>
     <field name="type">binary</field>
-    <field name="datas">T2RDTGkgZmlsZXN0b3JlIHByb2JlCg==</field>
+    <field name="datas">T2RDTEkgZmlsZXN0b3JlIHByb2JlCg==</field>
     <field name="res_model">odcli.e2e.probe</field>
     <field name="res_id" ref="probe_record"/>
     <field name="mimetype">text/plain</field>
