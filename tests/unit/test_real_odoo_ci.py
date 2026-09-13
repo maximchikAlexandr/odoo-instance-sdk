@@ -379,13 +379,16 @@ def test_pinned_scanner_normalizes_package_names_and_uses_exact_distribution_pin
             command,
             1,
             json.dumps(
-                [
-                    {
-                        "name": "Py_Pdf2",
-                        "version": "2.12.1",
-                        "vulns": [{"id": "PYSEC-2026-1835"}],
-                    }
-                ]
+                {
+                    "dependencies": [
+                        {
+                            "name": "Py_Pdf2",
+                            "version": "2.12.1",
+                            "vulns": [{"id": "PYSEC-2026-1835", "fix_versions": ["2.12.2"]}],
+                        }
+                    ],
+                    "fixes": [],
+                }
             ),
             "",
         )
@@ -397,10 +400,20 @@ def test_pinned_scanner_normalizes_package_names_and_uses_exact_distribution_pin
     assert calls[0][calls[0].index("--from") + 1] == "pip-audit==2.10.1"
 
 
-def test_pinned_scanner_rejects_malformed_package_without_vulnerabilities(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"name": "pypdf2", "version": "2.12.1", "vulns": []}],
+        {"dependencies": [], "fixes": {"name": "pypdf2"}},
+        {"dependencies": [{"name": "pypdf2", "version": "2.12.1", "vulns": [{}]}], "fixes": []},
+    ],
+    ids=("legacy-list", "fixes-not-list", "malformed-vulnerability"),
+)
+def test_pinned_scanner_rejects_legacy_or_malformed_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object,
 ) -> None:
-    payload = [{"name": "bad/name", "version": "1.0", "vulns": []}]
     monkeypatch.setattr(
         bootstrap,
         "_run",
