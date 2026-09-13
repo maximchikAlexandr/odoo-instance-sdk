@@ -244,6 +244,22 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         check=True,
         capture_output=True,
     )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "core.sparseCheckout", "true"],
+        check=True,
+        capture_output=True,
+    )
+    sparse_checkout = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--git-path", "info/sparse-checkout"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sparse_path = Path(sparse_checkout.stdout.strip())
+    if not sparse_path.is_absolute():
+        sparse_path = root / sparse_path
+    sparse_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    sparse_path.write_text("odoo-bin\nodoo/\n", encoding="utf-8")
     bootstrap_odoo_bin = _materialize_odoo_bootstrap(repository, root)
     relative = bootstrap_odoo_bin.relative_to(root / ".odoo-bootstrap")
     runtime.ledger.record(
