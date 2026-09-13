@@ -434,7 +434,11 @@ def test_source_backed_full_critical_path(  # noqa: C901
     runtime.ledger.record(
         "postgres",
         f"{runtime.run_id}-sdk-postgres",
-        lambda: compose_down(cluster.compose_file, cluster.compose_project_name),
+        lambda: compose_down(
+            cluster.compose_file,
+            cluster.compose_project_name,
+            ports=(cluster.endpoint_port,),
+        ),
     )
     _invoke(
         runner,
@@ -798,19 +802,12 @@ def test_source_backed_full_critical_path(  # noqa: C901
     repeated_postgres_stop = _invoke(runner, project, cli_environment, "postgres", "stop")
     assert postgres_stop == repeated_postgres_stop == {}
 
-    runtime.ledger.unwind()
     audit = audit_no_leaks(
         runtime.run_id,
-        compose_project=runtime.topology.project_name,
-        runtime_root=runtime.root,
-        ports=(
-            runtime.topology.source_postgres_port,
-            runtime.topology.target_postgres_port,
-            runtime.topology.source_odoo_port,
-            runtime.reservations[3].port,
-        ),
-        catalog_path=catalogue_path,
-        filestore_paths=(runtime.root / "source-data", runtime.root / "target-data"),
+        # The module-scoped fixture is still needed by focused leaves.  Audit
+        # only the just-removed SDK project here; the fixture-wide audit runs
+        # in conftest finalization after every leaf has completed.
+        ports=(cluster.endpoint_port,),
     )
     assert audit.clean, audit.leaks
     runtime.artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)

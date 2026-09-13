@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.project import ProjectConfig
 
 from .cleanup import write_odoo_config, write_owner_only_secret
-from .compose import ComposeLifecycle, wait_for_http
+from .compose import ComposeLifecycle, reserve_ports, wait_for_http
 from .conftest import E2ERuntime
 from .pins import E2E_PINS
 
@@ -62,6 +63,16 @@ def _git_project(path: Path) -> None:
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def _replace_http_port(config: Path, port: int) -> None:
+    lines = [
+        line
+        for line in config.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("http_port")
+    ]
+    lines.append(f"http_port = {port}")
+    config.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _start_target_odoo(runtime: E2ERuntime) -> None:
@@ -174,7 +185,17 @@ def test_container_smoke_public_path(
     _start_target_odoo(runtime)
     project = runtime.root / f"smoke-project-{runtime.run_id}"
     _git_project(project)
-    config = runtime.config_file
+    auxiliary_http = reserve_ports(1)[0]
+    auxiliary_http_port = auxiliary_http.port
+    runtime.ledger.record(
+        "port",
+        f"{runtime.run_id}-smoke-http-{auxiliary_http_port}",
+        auxiliary_http.release,
+    )
+    auxiliary_http.release()
+    config = project / "smoke-odoo.conf"
+    shutil.copy2(runtime.config_file, config)
+    _replace_http_port(config, auxiliary_http_port)
     environment = dict(os.environ)
     environment.update(runtime.environment)
     environment.update(

@@ -21,6 +21,7 @@ from odoo_instance_sdk.models import BackupState
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.project import TestInstanceProjectConfig as _TestInstanceConfig
 from odoo_instance_sdk.resources.database import DatabaseResource
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES, PublicLeafCase
 
 from .archive import ArchiveIdentity, SourceBackupPlan
@@ -90,6 +91,35 @@ def _isolated_catalog(source: Path, root: Path) -> Path:
     return destination
 
 
+def _ensure_isolated_environment(catalog_path: Path, project: Path) -> str:
+    """Require each leaf to start from the active environment in its catalog."""
+    selector = project / ".odcli" / "e2e-environment-id"
+    if not selector.is_file():
+        raise AssertionError(f"focused project has no environment selector: {selector}")
+    environment_id = selector.read_text(encoding="ascii").strip()
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        rows = catalog.list_environments(include_removed=True)
+        row = next((item for item in rows if str(item["id"]) == environment_id), None)
+    finally:
+        catalog.close()
+    if row is None or str(row["state"]) == "removed":
+        raise AssertionError(
+            f"isolated catalog does not contain an active environment: {environment_id}"
+        )
+    return environment_id
+
+
+def _replace_http_port(config: Path, port: int) -> None:
+    lines = [
+        line
+        for line in config.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("http_port")
+    ]
+    lines.append(f"http_port = {port}")
+    config.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None = None) -> Path:
     """Create a project using the public pinned source/uv lifecycle."""
     repository_value = os.environ.get("ODCLI_E2E_ODOO_SOURCE_REPO") or os.environ.get(
@@ -140,6 +170,17 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     environment = dict(runtime.environment)
     project_postgres = reserve_ports(1)[0]
     project_postgres.release()
+    public_http = reserve_ports(1)[0]
+    public_http_port = public_http.port
+    runtime.ledger.record(
+        "port",
+        f"{runtime.run_id}-focused-http-{root.name}-{public_http_port}",
+        public_http.release,
+    )
+    public_http.release()
+    bootstrap_config = root / "focused-odoo.conf"
+    shutil.copy2(runtime.config_file, bootstrap_config)
+    _replace_http_port(bootstrap_config, public_http_port)
     command = shutil.which("odcli")
     if command is None:
         pytest.fail("odcli executable is required for focused public leaves")
@@ -157,7 +198,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             "--python",
             E2E_PINS.cpython,
             "--config",
-            str(runtime.config_file),
+            str(bootstrap_config),
             "--database",
             runtime.topology.target_sentinel_database,
             "--postgres",
@@ -169,7 +210,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
             "--postgres-user",
             "odoo",
             "--http-port",
-            str(runtime.reservations[3].port),
+            str(public_http_port),
             "--format",
             "json",
         ],
@@ -193,7 +234,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
         default_base_ref=E2E_PINS.odoo_source_commit,
     )
     local_config = root / ".odcli" / "odoo.conf"
-    shutil.copy2(runtime.config_file, local_config)
+    shutil.copy2(bootstrap_config, local_config)
     # Public module/test leaves resolve modules from the pinned source tree;
     # the disposable target service config intentionally uses container paths.
     config_lines = [
@@ -260,7 +301,6 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     )
 
     ticket = f"MYL-{int(runtime.run_id.replace('-', '')[:8], 16) % 100000000}"
-    runtime.reservations[3].release()
     from odoo_instance_sdk import EnvironmentCheckoutOptions, OdooClient, OdooClientConfig
 
     previous_environment = os.environ.copy()
@@ -278,7 +318,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
                 odoo_bin=root / relative,
                 python=E2E_PINS.cpython,
                 create_venv=True,
-                http_port=runtime.reservations[3].port,
+                http_port=public_http_port,
             ),
         )
     finally:
@@ -393,20 +433,70 @@ def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> N
     monkeypatch.setattr(resource_commands._catalog_path_provider, "provider", provider)
 
 
+def _approve_project_postgres(project: Path, environment: dict[str, str]) -> None:
+    """Reassert the exact pinned image through the public trust command."""
+    command = shutil.which("odcli")
+    if command is None:
+        pytest.fail("odcli executable is required for focused public leaves")
+    resolved = subprocess.run(
+        [
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{index .RepoDigests 0}}",
+            E2E_PINS.postgres_image,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert resolved.returncode == 0, resolved.stderr
+    digest = resolved.stdout.strip()
+    assert digest.rsplit("@", 1)[-1] == E2E_PINS.postgres_image.rsplit("@", 1)[-1]
+    approved = subprocess.run(
+        [
+            command,
+            "--project",
+            str(project),
+            "postgres",
+            "approve-image",
+            "--image-digest",
+            digest,
+            "--format",
+            "json",
+        ],
+        cwd=project,
+        env={**os.environ, **environment},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert approved.returncode == 0, approved.stdout + approved.stderr
+
+
 def test_remote_auth_and_unreachable_source_fail_closed(
+    tmp_path: Path,
     source_backup_plan: SourceBackupPlan,
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
     record_property: object,
     focused_project: Path,
+    focused_catalog: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The public refresh command must fail before creating a local backup."""
     runtime = target_runtime
     project = focused_project
+    catalog_path = _isolated_catalog(focused_catalog, tmp_path)
+    _ensure_isolated_environment(catalog_path, project)
+    _bind_catalog_path(monkeypatch, catalog_path)
     runner = CliRunner()
     wrong_password = failure_evidence.secret_canary
     environment = {
         **runtime.environment,
+        "HOME": str(catalog_path.parent.parent),
+        "ODCLI_E2E_CATALOG": str(catalog_path),
         "ODCLI_TEST_MASTER_PASSWORD": wrong_password,
         "ODCLI_E2E_KEEP_FAILED": "1",
     }
@@ -490,6 +580,8 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
         "ODCLI_E2E_CATALOG": str(catalog_path),
         "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
     }
+    _ensure_isolated_environment(catalog_path, focused_project)
+    _approve_project_postgres(focused_project, environment)
     _bind_catalog_path(monkeypatch, catalog_path)
     result = CliRunner().invoke(
         cli,
@@ -561,12 +653,11 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
     focused_project: Path,
+    focused_catalog: Path,
 ) -> None:
     archive_path = tmp_path / "restore.zip"
     shutil.copy2(source_backup.path, archive_path)
-    catalog_path = _isolated_catalog(
-        Path(target_runtime.environment["ODCLI_E2E_CATALOG"]), tmp_path
-    )
+    catalog_path = _isolated_catalog(focused_catalog, tmp_path)
     success_id = "00000000-0000-0000-0000-000000000008"
     _seed_backup(
         catalog_path,
@@ -596,6 +687,8 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
         "ODCLI_E2E_CATALOG": str(catalog_path),
         "ODCLI_E2E_KEEP_FAILED": "1",
     }
+    _ensure_isolated_environment(catalog_path, project)
+    _approve_project_postgres(project, environment)
     successful = CliRunner().invoke(cli, args, env=environment)
     assert successful.exit_code == 0, successful.output
     success_document = json.loads(successful.stdout)
@@ -650,6 +743,7 @@ def test_remaining_focused_public_leaves_use_canonical_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = _isolated_catalog(focused_catalog, tmp_path)
+    _ensure_isolated_environment(catalog_path, focused_project)
     _bind_catalog_path(monkeypatch, catalog_path)
     _invoke_case(
         case,
@@ -663,6 +757,7 @@ def test_remaining_focused_public_leaves_use_canonical_inventory(
 
 
 def test_sigint_timeout_and_partial_publication_recover_without_leaks(
+    tmp_path: Path,
     target_runtime: E2ERuntime,
     source_backup: ArchiveIdentity,
     failure_evidence: FailureEvidence,
@@ -682,6 +777,9 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         database=target_runtime.topology.source_database,
     )
     project = _project(target_runtime, target_runtime.root / f"recovery-{run_id}")
+    isolated_catalog = _isolated_catalog(catalog_path, tmp_path)
+    catalog_path = isolated_catalog
+    _ensure_isolated_environment(catalog_path, project)
     target = f"odcli_interrupt_{run_id.replace('-', '')[:20]}"
     command = shutil.which("odcli")
     if command is None:
@@ -690,6 +788,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
         **os.environ,
         **target_runtime.environment,
         "HOME": str(catalog_path.parent.parent),
+        "ODCLI_E2E_CATALOG": str(catalog_path),
         "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
     }
     process = subprocess.Popen(
@@ -763,7 +862,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     assert timeout_process.returncode != 0
     timeout_document = json.loads(timeout_stdout)
     assert timeout_document["ok"] is False
-    assert timeout_document["error"]["code"] == "db_init_monitoring_failed"
+    assert timeout_document["error"]["code"] == "db_init-monitoring_failed"
     assert "timeout" in timeout_document["error"]["message"].lower()
     assert_secret_free(
         {"argv": command, "machine_output": timeout_stdout, "pytest_output": timeout_stderr},
@@ -896,6 +995,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
 
 
 def test_failed_debug_retention_contains_only_sanitized_files(
+    tmp_path: Path,
     source_backup_plan: SourceBackupPlan,
     target_runtime: E2ERuntime,
     failure_evidence: FailureEvidence,
@@ -912,6 +1012,12 @@ def test_failed_debug_retention_contains_only_sanitized_files(
         target_runtime.root / f"retention-{target_runtime.run_id}",
         source=source_backup_plan,
     )
+    catalog_path = _isolated_catalog(
+        Path(target_runtime.environment["ODCLI_E2E_CATALOG"]), tmp_path
+    )
+    _ensure_isolated_environment(catalog_path, project)
+    environment["HOME"] = str(catalog_path.parent.parent)
+    environment["ODCLI_E2E_CATALOG"] = str(catalog_path)
     result = CliRunner().invoke(
         cli,
         ["--project", str(project), "db", "refresh", "--format", "json"],

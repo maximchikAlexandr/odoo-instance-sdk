@@ -418,12 +418,34 @@ def test_focused_leaves_snapshot_catalog_and_wait_for_project_ports() -> None:
     assert '"HOME": str(catalog_path.parent.parent)' in focused
     assert '"postgres",\n            "approve-image"' in focused
     assert "ports=(project_postgres_port,)" in focused
+    assert "_ensure_isolated_environment(" in focused
+    assert "public_http_port" in focused
 
 
 def test_smoke_rewrites_container_config_for_uid_100() -> None:
     root = Path(__file__).resolve().parents[2]
     smoke = (root / "tests/integration/real_odoo/test_smoke.py").read_text(encoding="utf-8")
     assert "mode=0o644" in smoke
+    assert "auxiliary_http_port" in smoke
+    assert "target_runtime.reservations[3].port" in smoke
+
+
+def test_real_odoo_fixture_preserves_shared_runtime_until_finalizer() -> None:
+    root = Path(__file__).resolve().parents[2]
+    critical = (root / "tests/integration/real_odoo/test_critical_path.py").read_text(
+        encoding="utf-8"
+    )
+    assert "runtime.ledger.unwind()" not in critical
+    assert "ports=(cluster.endpoint_port,)" in critical
+
+
+def test_port_reservation_release_is_idempotent() -> None:
+    from tests.integration.real_odoo.compose import reserve_loopback_port
+
+    reservation = reserve_loopback_port()
+    reservation.release()
+    reservation.release()
+    assert reservation.socket.fileno() == -1
 
 
 def test_full_workflow_installs_only_approved_ldap_build_prerequisites() -> None:

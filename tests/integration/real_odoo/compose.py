@@ -34,15 +34,20 @@ def _name(prefix: str, run_id: str) -> str:
     return f"odcli-e2e-{prefix}-{run_id}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class PortReservation:
     """A loopback socket held until the caller is ready to launch a service."""
 
     socket: socket.socket
     port: int
+    _released: bool = False
 
     def release(self) -> None:
+        """Release the reservation once; ledger and fixture cleanup may overlap."""
+        if self._released:
+            return
         self.socket.close()
+        self._released = True
 
 
 def reserve_loopback_port() -> PortReservation:
