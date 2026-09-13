@@ -110,6 +110,8 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
     artifact_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     for name in ("xdg-config", "xdg-data", "xdg-cache", "xdg-state", "source-data", "target-data"):
         (root / name).mkdir(mode=0o700)
+    home = root / "home"
+    (home / ".odcli").mkdir(mode=0o700, parents=True)
     # The pinned Odoo image runs as uid 100 and needs to create its database
     # filestore below both bind mounts. The runtime root is still private
     # (0700), so container writeability does not widen host visibility.
@@ -189,12 +191,13 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
     )
     compose_file.chmod(0o600)
     environment = {
+        "HOME": str(home),
         "XDG_CONFIG_HOME": str(root / "xdg-config"),
         "XDG_DATA_HOME": str(root / "xdg-data"),
         "XDG_CACHE_HOME": str(root / "xdg-cache"),
         "XDG_STATE_HOME": str(root / "xdg-state"),
         "ODCLI_E2E_RUN_ID": run_id,
-        "ODCLI_E2E_CATALOG": str(root / "catalog.sqlite3"),
+        "ODCLI_E2E_CATALOG": str(home / ".odcli" / "catalog.sqlite3"),
     }
     return E2ERuntime(
         run_id,
@@ -318,6 +321,9 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
             "--stop-after-init",
             timeout=300.0,
         )
+        _make_container_data_host_removable(
+            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
+        )
 
 
 def _remove_runtime_files(runtime: E2ERuntime) -> None:
@@ -407,7 +413,7 @@ def _finalize(runtime: E2ERuntime, primary_failure: BaseException | None = None)
                 runtime.topology.source_odoo_port,
                 runtime.reservations[3].port,
             ),
-            catalog_path=runtime.root / "catalog.sqlite3",
+            catalog_path=Path(runtime.environment["ODCLI_E2E_CATALOG"]),
             filestore_paths=(runtime.root / "source-data", runtime.root / "target-data"),
         )
     except BaseException as error:

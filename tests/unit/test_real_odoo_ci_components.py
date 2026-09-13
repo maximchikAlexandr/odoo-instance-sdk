@@ -404,6 +404,8 @@ def test_runtime_fixture_normalizes_nested_container_data_permissions() -> None:
     conftest = (root / "tests/integration/real_odoo/conftest.py").read_text(encoding="utf-8")
     assert "chmod -R a+rwX -- {data_dir}" in conftest
     assert "_make_container_data_host_removable(" in conftest
+    assert '"HOME": str(home)' in conftest
+    assert '"ODCLI_E2E_CATALOG": str(home / ".odcli" / "catalog.sqlite3")' in conftest
 
 
 def test_focused_leaves_snapshot_catalog_and_wait_for_project_ports() -> None:
@@ -412,8 +414,16 @@ def test_focused_leaves_snapshot_catalog_and_wait_for_project_ports() -> None:
         encoding="utf-8"
     )
     assert "focused-catalog-baseline.sqlite3" in focused
-    assert "shutil.copy2(focused_catalog, catalog_path)" in focused
+    assert "_isolated_catalog(focused_catalog, tmp_path)" in focused
+    assert '"HOME": str(catalog_path.parent.parent)' in focused
+    assert '"postgres",\n            "approve-image"' in focused
     assert "ports=(project_postgres_port,)" in focused
+
+
+def test_smoke_rewrites_container_config_for_uid_100() -> None:
+    root = Path(__file__).resolve().parents[2]
+    smoke = (root / "tests/integration/real_odoo/test_smoke.py").read_text(encoding="utf-8")
+    assert "mode=0o644" in smoke
 
 
 def test_full_workflow_installs_only_approved_ldap_build_prerequisites() -> None:

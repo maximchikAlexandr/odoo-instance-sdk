@@ -148,6 +148,7 @@ def _align_target_master_password(runtime: E2ERuntime, source: E2ERuntime) -> No
         admin_password=master_password,
         data_dir=Path("/var/lib/odoo-target"),
         addons_path=(Path("/usr/lib/python3/dist-packages/odoo/addons"),),
+        mode=0o644,
     )
     write_odoo_config(
         runtime.config_file,

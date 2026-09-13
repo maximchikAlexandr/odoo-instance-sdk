@@ -296,7 +296,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     runtime = target_runtime
     for key, value in runtime.environment.items():
         monkeypatch.setenv(key, value)
-    catalogue_path = (runtime.root / "catalog.sqlite3").resolve()
+    catalogue_path = Path(runtime.environment["ODCLI_E2E_CATALOG"]).resolve()
 
     def run_catalog_path(*, ensure_exists: bool = True) -> Path:
         if ensure_exists:

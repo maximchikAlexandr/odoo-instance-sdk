@@ -76,7 +76,9 @@ def _backup_delete(state: _State) -> tuple[Result, dict[str, Any]]:
     assert first_document["result"]["already_deleted"] is False
     assert second_document["result"]["already_deleted"] is True
     assert catalog_state(Path(state.environment["ODCLI_E2E_CATALOG"])) is BackupState.DELETED
-    assert not (state.runtime.artifact_root / f"leaf-{state.runtime.run_id}.zip").exists()
+    assert not (
+        state.runtime.artifact_root / f"leaf-{state.runtime.run_id}-{state.case.path[-1]}.zip"
+    ).exists()
     return first, first_document
 
 
@@ -313,6 +315,7 @@ def invoke_case(
         evidence,
         {
             **runtime.environment,
+            **({"HOME": str(catalog_path.parent.parent)} if catalog_path is not None else {}),
             **({"ODCLI_E2E_CATALOG": str(catalog_path)} if catalog_path else {}),
             "ODCLI_E2E_KEEP_FAILED": "1",
             "ODCLI_TEST_MASTER_PASSWORD": evidence.secret_canary,

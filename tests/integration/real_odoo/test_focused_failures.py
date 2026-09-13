@@ -74,9 +74,20 @@ def focused_catalog(target_runtime: E2ERuntime, focused_project: Path) -> Path:
     """Keep a pristine registration/catalog snapshot for each focused leaf."""
     del focused_project
     source = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])
+    if not source.is_file():
+        raise AssertionError(f"focused project did not create its catalog: {source}")
     snapshot = target_runtime.root / "focused-catalog-baseline.sqlite3"
     shutil.copy2(source, snapshot)
     return snapshot
+
+
+def _isolated_catalog(source: Path, root: Path) -> Path:
+    """Copy one closed catalog into the HOME-visible SDK root for one leaf."""
+    home = root / "home"
+    destination = home / ".odcli" / "catalog.sqlite3"
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return destination
 
 
 def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None = None) -> Path:
@@ -203,6 +214,41 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
     project_cluster = PostgresCluster.from_project(root)
+    resolved_image = subprocess.run(
+        [
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{index .RepoDigests 0}}",
+            E2E_PINS.postgres_image,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert resolved_image.returncode == 0, resolved_image.stderr
+    image_digest = resolved_image.stdout.strip()
+    assert image_digest.rsplit("@", 1)[-1] == E2E_PINS.postgres_image.rsplit("@", 1)[-1]
+    approved = subprocess.run(
+        [
+            command,
+            "--project",
+            str(root),
+            "postgres",
+            "approve-image",
+            "--image-digest",
+            image_digest,
+            "--format",
+            "json",
+        ],
+        cwd=root,
+        env=process_environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert approved.returncode == 0, approved.stdout + approved.stderr
     runtime.ledger.record(
         "postgres",
         f"{runtime.run_id}-postgres-{root.name}",
@@ -431,8 +477,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
 ) -> None:
     path = tmp_path / f"{variant}.zip"
     write_archive_variant(path, variant)  # type: ignore[arg-type]
-    catalog_path = tmp_path / "catalog.sqlite3"
-    shutil.copy2(focused_catalog, catalog_path)
+    catalog_path = _isolated_catalog(focused_catalog, tmp_path)
     _seed_backup(
         catalog_path,
         path,
@@ -441,6 +486,7 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
     )
     environment = {
         **target_runtime.environment,
+        "HOME": str(catalog_path.parent.parent),
         "ODCLI_E2E_CATALOG": str(catalog_path),
         "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
     }
@@ -518,7 +564,9 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
 ) -> None:
     archive_path = tmp_path / "restore.zip"
     shutil.copy2(source_backup.path, archive_path)
-    catalog_path = tmp_path / "catalog.sqlite3"
+    catalog_path = _isolated_catalog(
+        Path(target_runtime.environment["ODCLI_E2E_CATALOG"]), tmp_path
+    )
     success_id = "00000000-0000-0000-0000-000000000008"
     _seed_backup(
         catalog_path,
@@ -544,6 +592,7 @@ def test_catalog_restore_is_exact_and_occupied_or_repeated_targets_fail(
     ]
     environment = {
         **target_runtime.environment,
+        "HOME": str(catalog_path.parent.parent),
         "ODCLI_E2E_CATALOG": str(catalog_path),
         "ODCLI_E2E_KEEP_FAILED": "1",
     }
@@ -598,9 +647,10 @@ def test_remaining_focused_public_leaves_use_canonical_inventory(
     focused_project: Path,
     focused_catalog: Path,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    catalog_path = tmp_path / "catalog.sqlite3"
-    shutil.copy2(focused_catalog, catalog_path)
+    catalog_path = _isolated_catalog(focused_catalog, tmp_path)
+    _bind_catalog_path(monkeypatch, catalog_path)
     _invoke_case(
         case,
         project=focused_project,
@@ -639,6 +689,7 @@ def test_sigint_timeout_and_partial_publication_recover_without_leaks(
     environment = {
         **os.environ,
         **target_runtime.environment,
+        "HOME": str(catalog_path.parent.parent),
         "ODCLI_TEST_MASTER_PASSWORD": failure_evidence.secret_canary,
     }
     process = subprocess.Popen(
