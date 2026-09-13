@@ -69,6 +69,16 @@ def focused_project(target_runtime: E2ERuntime, source_backup_plan: SourceBackup
     )
 
 
+@pytest.fixture(scope="module")
+def focused_catalog(target_runtime: E2ERuntime, focused_project: Path) -> Path:
+    """Keep a pristine registration/catalog snapshot for each focused leaf."""
+    del focused_project
+    source = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])
+    snapshot = target_runtime.root / "focused-catalog-baseline.sqlite3"
+    shutil.copy2(source, snapshot)
+    return snapshot
+
+
 def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None = None) -> Path:
     """Create a project using the public pinned source/uv lifecycle."""
     repository_value = os.environ.get("ODCLI_E2E_ODOO_SOURCE_REPO") or os.environ.get(
@@ -123,6 +133,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     if command is None:
         pytest.fail("odcli executable is required for focused public leaves")
     process_environment = {**os.environ, **environment}
+    project_postgres_port = project_postgres.port
     init = subprocess.run(
         [
             command,
@@ -195,7 +206,11 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
     runtime.ledger.record(
         "postgres",
         f"{runtime.run_id}-postgres-{root.name}",
-        lambda: compose_down(project_cluster.compose_file, project_cluster.compose_project_name),
+        lambda: compose_down(
+            project_cluster.compose_file,
+            project_cluster.compose_project_name,
+            ports=(project_postgres_port,),
+        ),
     )
 
     ticket = f"MYL-{int(runtime.run_id.replace('-', '')[:8], 16) % 100000000}"
@@ -412,10 +427,12 @@ def test_archive_and_restore_boundaries_publish_no_unowned_state(
     record_property: object,
     monkeypatch: pytest.MonkeyPatch,
     focused_project: Path,
+    focused_catalog: Path,
 ) -> None:
     path = tmp_path / f"{variant}.zip"
     write_archive_variant(path, variant)  # type: ignore[arg-type]
-    catalog_path = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])
+    catalog_path = tmp_path / "catalog.sqlite3"
+    shutil.copy2(focused_catalog, catalog_path)
     _seed_backup(
         catalog_path,
         path,
@@ -579,7 +596,11 @@ def test_remaining_focused_public_leaves_use_canonical_inventory(
     failure_evidence: FailureEvidence,
     record_property: object,
     focused_project: Path,
+    focused_catalog: Path,
+    tmp_path: Path,
 ) -> None:
+    catalog_path = tmp_path / "catalog.sqlite3"
+    shutil.copy2(focused_catalog, catalog_path)
     _invoke_case(
         case,
         project=focused_project,
@@ -587,6 +608,7 @@ def test_remaining_focused_public_leaves_use_canonical_inventory(
         evidence=failure_evidence,
         record_property=record_property,
         source_backup=source_backup,
+        catalog_path=catalog_path,
     )
 
 

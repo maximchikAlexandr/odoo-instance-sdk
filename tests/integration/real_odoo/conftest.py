@@ -288,6 +288,13 @@ def _provision(runtime: E2ERuntime, *, scope: str | None = None) -> None:
             "--stop-after-init",
             timeout=300.0,
         )
+        # The bootstrap container runs as uid 100. Its shard directories are
+        # consequently not writable by the host-side SDK Odoo process that
+        # owns the subsequent project runtime. Normalize only this fixture's
+        # private bind mount before handing it to that process.
+        _make_container_data_host_removable(
+            runtime, ComposeLifecycle(runtime.compose_file, runtime.topology.project_name)
+        )
         wait_for_http(
             f"http://127.0.0.1:{runtime.topology.source_odoo_port}/web/health",
             timeout=180.0,
@@ -347,7 +354,7 @@ def _publish_failure_logs(runtime: E2ERuntime, lifecycle: ComposeLifecycle) -> N
 
 
 def _make_container_data_host_removable(runtime: E2ERuntime, lifecycle: ComposeLifecycle) -> None:
-    """Restore host cleanup access to files created by the image's uid 100."""
+    """Restore host access to files created by the image's uid 100."""
     service, data_dir = (
         ("source_odoo", "/var/lib/odoo")
         if runtime.scope == "source"

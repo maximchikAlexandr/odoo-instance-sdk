@@ -280,7 +280,7 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     ):
         assert early_failure_file in full
     assert "pytest.mark.e2e_smoke" in smoke_scenario
-    assert "@pytest.mark.timeout(180)" in smoke_scenario
+    assert "@pytest.mark.timeout(180, func_only=True)" in smoke_scenario
     for scenario in ("E2E-SM-01", "E2E-SM-02", "E2E-SM-03", "E2E-SM-04", "E2E-SM-05"):
         assert scenario in smoke_scenario
     assert "runtime = target_runtime" in smoke_scenario
@@ -328,6 +328,10 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "Assert smoke evidence budget" in smoke_job
     assert ".cache/odoo-source" in full
     assert ".cache/uv" in full
+    assert "if: always() && steps.package.outcome == 'success'" in full
+    assert "if: always() && steps.package.outcome == 'success'" in cold_job
+    assert "if: always() && steps.package.outcome == 'success'" in warm_job
+
     assert "ODCLI_E2E_ODOO_SOURCE_CACHE: ${{ github.workspace }}/.cache/odoo-source" in full
     assert "ODCLI_E2E_ODOO_SOURCE_REPO: ${{ github.workspace }}/.cache/odoo-source" in full
     source_cache_verify = full.index("Verify pinned source cache before full pytest")
@@ -365,7 +369,7 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
         assert "phase setup" in workflow and "phase test" in workflow
         assert "phase cleanup" not in workflow
         assert "-p scripts.real_odoo_ci" in workflow
-        assert "if: steps.package.outcome == 'success'" in workflow
+        assert "if: always() && steps.package.outcome == 'success'" in workflow
         assert "if: always() && steps.package.outcome != 'success'" in workflow
         assert "packaging-error.json" in workflow
     for workflow, failure_name in (
@@ -393,6 +397,23 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "ODCLI_E2E_SOURCE_CACHE: .cache/odoo-source" not in full
     action_refs = re.findall(r"uses:\s+[^@\s]+@([0-9a-f]{40})", smoke_job + full)
     assert action_refs and all(len(reference) == 40 for reference in action_refs)
+
+
+def test_runtime_fixture_normalizes_nested_container_data_permissions() -> None:
+    root = Path(__file__).resolve().parents[2]
+    conftest = (root / "tests/integration/real_odoo/conftest.py").read_text(encoding="utf-8")
+    assert "chmod -R a+rwX -- {data_dir}" in conftest
+    assert "_make_container_data_host_removable(" in conftest
+
+
+def test_focused_leaves_snapshot_catalog_and_wait_for_project_ports() -> None:
+    root = Path(__file__).resolve().parents[2]
+    focused = (root / "tests/integration/real_odoo/test_focused_failures.py").read_text(
+        encoding="utf-8"
+    )
+    assert "focused-catalog-baseline.sqlite3" in focused
+    assert "shutil.copy2(focused_catalog, catalog_path)" in focused
+    assert "ports=(project_postgres_port,)" in focused
 
 
 def test_full_workflow_installs_only_approved_ldap_build_prerequisites() -> None:

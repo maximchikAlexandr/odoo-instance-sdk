@@ -283,6 +283,7 @@ def invoke_case(
     evidence: FailureEvidence,
     record_property: object,
     source_backup: ArchiveIdentity,
+    catalog_path: Path | None = None,
 ) -> None:
     """Execute one canonical leaf through an explicit family handler."""
     args = list(case.args)
@@ -295,12 +296,12 @@ def invoke_case(
     if case.path == ("db", "drop"):
         args = ["db", "drop", runtime.topology.target_sentinel_database, "--yes"]
     if case.path == ("backup", "delete"):
-        backup_path = runtime.artifact_root / f"leaf-{runtime.run_id}.zip"
+        backup_path = runtime.artifact_root / f"leaf-{runtime.run_id}-{case.path[-1]}.zip"
         with zipfile.ZipFile(backup_path, "w") as archive:
             archive.writestr("manifest.json", '{"db_name": "demo"}')
             archive.writestr("dump.sql", "-- database: demo\n")
             archive.writestr("filestore/demo/blob", b"fixture")
-        seed_backup(Path(runtime.environment["ODCLI_E2E_CATALOG"]), backup_path)
+        seed_backup(catalog_path or Path(runtime.environment["ODCLI_E2E_CATALOG"]), backup_path)
         args = ["backup", "delete", BACKUP_ID, "--yes"]
     if case.classification not in {"native-passthrough", "jsonl-stream"}:
         args.extend(("--format", "json"))
@@ -312,6 +313,7 @@ def invoke_case(
         evidence,
         {
             **runtime.environment,
+            **({"ODCLI_E2E_CATALOG": str(catalog_path)} if catalog_path else {}),
             "ODCLI_E2E_KEEP_FAILED": "1",
             "ODCLI_TEST_MASTER_PASSWORD": evidence.secret_canary,
         },

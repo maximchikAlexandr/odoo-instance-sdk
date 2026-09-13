@@ -195,7 +195,7 @@ jobs:
           --cache-class ${{ steps.bootstrap.outputs.cache_class || 'cold' }}
           --status ${{ steps.pytest.outcome == 'success' && 'success' || 'failure' }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: steps.package.outcome == 'success'
+        if: always() && steps.package.outcome == 'success'
         with:
           name: real-odoo-full-evidence
           path: |
