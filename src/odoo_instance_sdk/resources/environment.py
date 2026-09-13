@@ -136,6 +136,7 @@ type _EnvironmentList = list[DevelopmentEnvironment]
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _PGADMIN_LIFECYCLE_TIMEOUT = 60.0
+_CHECKOUT_WORKTREE_TIMEOUT = 300.0
 _REQUIREMENT_OPERATOR = re.compile(r"\s*(===|==|~=|!=|<=|>=|<|>|;|@)\s*")
 _APPLIED_CONFIG_BINDINGS = frozenset(
     {
@@ -3332,6 +3333,7 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
             step_id="checkout.worktree",
             argv=plan.worktree_argv,
             cwd=str(plan.repo_root),
+            timeout=_CHECKOUT_WORKTREE_TIMEOUT,
             mode="captured",
             mutating=True,
         ),

@@ -89,6 +89,8 @@ Selector SHALL be a UUID or exact name (`str | DevelopmentEnvironment`); ambigui
 
 `sync_python()` SHALL delegate to `sync_python_command(...).run()` with the same arguments. Checkout convenience methods SHALL consume the command captured from their `EnvironmentCheckoutOptions`; no public convenience method or CLI adapter SHALL rebuild hash-lock argv, cwd, environment, digest evidence, or action order.
 
+The captured `checkout.worktree` process SHALL use a 300-second timeout. This ceiling applies only to Git worktree creation; existing timeouts for validation, Python preflight, dependency operations, database preparation, and cleanup SHALL remain unchanged.
+
 #### Scenario: Checkout returns DevelopmentEnvironment
 
 - **WHEN** `client.environments.checkout(project, "feat/x")` succeeds

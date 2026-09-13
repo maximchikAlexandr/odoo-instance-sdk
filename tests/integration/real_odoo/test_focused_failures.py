@@ -72,7 +72,14 @@ from .focused_support import (
 )
 from .pins import E2E_PINS
 
-pytestmark = [pytest.mark.real_odoo, pytest.mark.e2e_full, pytest.mark.serial]
+pytestmark = [
+    pytest.mark.real_odoo,
+    pytest.mark.e2e_full,
+    pytest.mark.serial,
+    # The public checkout.worktree step is allowed 300s; keep the module's
+    # fixture/setup timeout aligned without changing other process ceilings.
+    pytest.mark.timeout(300),
+]
 
 
 @pytest.fixture(scope="module")
@@ -160,7 +167,7 @@ def _materialize_odoo_bootstrap(repository: Path, root: Path) -> Path:
     """Extract only the pinned Odoo launcher/package for checkout preflight.
 
     The public checkout later creates the full pinned worktree.  Materializing
-    another full source tree here makes the 60-second worktree phase depend on
+    another full source tree here makes the 300-second worktree phase depend on
     Docker Desktop's bind-mount copy speed, so the bootstrap executable is
     deliberately limited to the launcher and its import package.
     """
@@ -438,7 +445,7 @@ def _project(runtime: E2ERuntime, root: Path, *, source: SourceBackupPlan | None
                 # These leaves exercise source/backup and archive boundaries;
                 # the critical-path node separately proves the owned venv and
                 # pinned dependency install.  Avoid repeating that expensive
-                # setup under the focused module's 60-second fixture ceiling.
+                # setup under the focused module's 300-second fixture ceiling.
                 create_venv=False,
                 http_port=public_http_port,
             ),
