@@ -597,3 +597,38 @@ def test_focused_state_preflight_requires_manifest_environment_and_postgres_clai
     )
 
     assert focused_support.assert_project_state_preflight(project, catalog_path) == "project-id"
+
+
+def test_project_restore_accepts_matching_environment_runtime_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from odoo_instance_sdk.resources import instance as instance_module
+
+    runtime = {
+        "owner_kind": "environment",
+        "owner_id": "environment-id",
+        "http_port": 12345,
+        "root_pid": 4242,
+        "create_time": 10.0,
+    }
+    snapshot = SimpleNamespace(environments=(({}, runtime),), project_runtimes=())
+    catalog = SimpleNamespace(_monitor_snapshot_rows=lambda **_: snapshot)
+    instance = SimpleNamespace(
+        _runtime_binding=SimpleNamespace(
+            owner_kind="project", owner_id="project-id", project_id="project-id"
+        ),
+        _client=SimpleNamespace(get_catalog=lambda: catalog),
+    )
+    process = SimpleNamespace(
+        is_running=lambda: True,
+        status=lambda: "running",
+        create_time=lambda: 10.0,
+    )
+    monkeypatch.setattr("odoo_instance_sdk.resources.instance.psutil.Process", lambda _pid: process)
+
+    assert instance_module._project_runtime_owns_port(
+        cast("Any", instance), cast("Any", SimpleNamespace(http_port=12345))
+    )

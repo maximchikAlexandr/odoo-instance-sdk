@@ -2107,9 +2107,21 @@ def _project_runtime_owns_port(instance: OdooInstance, config: StartConfig) -> b
         runtimes = getattr(snapshot, "project_runtimes", ())
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return False
-    for runtime in runtimes:
+    # A public ``db refresh`` invoked for a project may temporarily reuse an
+    # Odoo process owned by an environment checked out from that project.
+    # The project filter already proves repository/common-dir ownership; include
+    # those environment runtime rows in the same strict PID/create-time check.
+    environment_runtimes = tuple(
+        runtime
+        for _environment, runtime in getattr(snapshot, "environments", ())
+        if runtime is not None
+    )
+    for runtime in (*runtimes, *environment_runtimes):
         try:
-            if str(runtime["owner_id"]) != binding.owner_id:
+            if (
+                str(runtime["owner_kind"]) == "project"
+                and str(runtime["owner_id"]) != binding.owner_id
+            ):
                 continue
             if int(str(runtime["http_port"])) != config.http_port:
                 continue
