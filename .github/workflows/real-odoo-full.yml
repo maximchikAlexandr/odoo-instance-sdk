@@ -3,6 +3,14 @@ name: Real Odoo full E2E
 on:
   schedule:
     - cron: "17 3 * * *"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/real-odoo-full.yml"
+      - "scripts/real_odoo_*.py"
+      - "tests/integration/real_odoo/**"
+      - "tests/fixtures/real_odoo/**"
+      - "uv.lock"
   workflow_dispatch:
 
 permissions:
@@ -19,6 +27,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
         with:
           python-version: "3.12.13"
@@ -148,7 +158,7 @@ jobs:
             .artifacts/real-odoo-e2e/resource-manifest.json
           retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: steps.package.outcome != 'success'
+        if: always() && steps.package.outcome != 'success'
         with:
           name: real-odoo-full-packaging-failure
           path: |

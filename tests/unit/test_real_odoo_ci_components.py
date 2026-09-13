@@ -266,6 +266,8 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
     assert "timeout-minutes: 10" in smoke_job
     assert "real_odoo and e2e_smoke" in smoke
     assert "real_odoo and e2e_full" in full
+    assert "  pull_request:" in full
+    assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in full
     assert "pytest.mark.e2e_smoke" in smoke_scenario
     for scenario in ("E2E-SM-01", "E2E-SM-02", "E2E-SM-03", "E2E-SM-04", "E2E-SM-05"):
         assert scenario in smoke_scenario
@@ -341,7 +343,7 @@ def test_real_odoo_workflows_are_immutable_and_select_their_tier() -> None:
         assert "phase cleanup" not in workflow
         assert "-p scripts.real_odoo_ci" in workflow
         assert "if: steps.package.outcome == 'success'" in workflow
-        assert "if: steps.package.outcome != 'success'" in workflow
+        assert "if: always() && steps.package.outcome != 'success'" in workflow
         assert "packaging-error.json" in workflow
     for workflow, failure_name in (
         (cold_job, "real-odoo-smoke-packaging-failure-cold"),

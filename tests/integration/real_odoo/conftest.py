@@ -141,6 +141,7 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
         admin_password=master_password,
         data_dir=Path("/var/lib/odoo"),
         addons_path=(Path("/usr/lib/python3/dist-packages/odoo/addons"), Path("/mnt/extra-addons")),
+        mode=0o644,
     )
     container_config_file = root / "target-etc" / "odoo-container.conf"
     write_odoo_config(
@@ -151,6 +152,7 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
         admin_password=master_password,
         data_dir=Path("/var/lib/odoo-target"),
         addons_path=(Path("/usr/lib/python3/dist-packages/odoo/addons"),),
+        mode=0o644,
     )
     config_file = root / "target-etc" / "odoo-host.conf"
     write_odoo_config(

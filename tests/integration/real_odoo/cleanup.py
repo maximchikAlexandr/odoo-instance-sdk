@@ -40,8 +40,15 @@ def write_odoo_config(
     http_interface: str = "0.0.0.0",
     http_port: int = 8069,
     addons_path: Iterable[Path] = (),
+    mode: int = 0o600,
 ) -> None:
-    """Write a minimal owner-only Odoo config with the password off argv."""
+    """Write a minimal Odoo config with the password off argv.
+
+    Container-bound configs use ``0644`` because the pinned image runs as its
+    non-root ``odoo`` user. The containing runtime root remains ``0700`` so
+    that this readability is limited to the disposable fixture owner and the
+    Docker daemon; host-managed configs retain the owner-only default.
+    """
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     rendered_addons = ",".join(str(item) for item in addons_path)
     path.write_text(
@@ -57,7 +64,7 @@ def write_odoo_config(
         "list_db = True\n" + (f"addons_path = {rendered_addons}\n" if rendered_addons else ""),
         encoding="utf-8",
     )
-    path.chmod(0o600)
+    path.chmod(mode)
 
 
 @dataclass(frozen=True, slots=True)
