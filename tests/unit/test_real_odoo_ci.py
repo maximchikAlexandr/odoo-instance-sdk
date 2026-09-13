@@ -858,6 +858,29 @@ def test_full_failure_evidence_requires_host_target_log(tmp_path: Path) -> None:
         )
 
 
+def test_full_failure_evidence_accepts_audited_unconsumed_cache_before_scenario(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _evidence_contract(source, junit_failures=1, source_cache_consumed=False)
+    for name in ("compose.log", "odoo.log", "postgres.log", "target-odoo.log"):
+        (source / name).write_text("bounded pre-scenario tail\n")
+    canary = tmp_path / "canary"
+    canary.write_text("canary-value-1234\n", encoding="utf-8")
+    result = evidence.package_evidence(
+        source,
+        tmp_path / "full-failure.tar.gz",
+        status="failure",
+        canary_file=canary,
+        tier="full",
+        cache_class="cold",
+    )
+    assert result["ok"] is True
+    resource = json.loads((source / "resource-manifest.json").read_text(encoding="utf-8"))
+    assert resource["source_cache_consumed"] is False
+
+
 @pytest.mark.parametrize("cache_class", ["cold", "warm"])
 def test_evidence_exercises_smoke_budget_classification(
     tmp_path: Path, cache_class: Literal["cold", "warm"]

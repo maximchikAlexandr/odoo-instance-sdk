@@ -102,6 +102,7 @@ def test_runtime_factory_keeps_two_runs_disjoint_and_uses_loopback_target(
         assert stat.S_IMODE(first.container_config_file.stat().st_mode) == 0o644
         assert stat.S_IMODE(first.config_file.stat().st_mode) == 0o600
         assert stat.S_IMODE((first.root / "source-data").stat().st_mode) == 0o777
+        assert stat.S_IMODE((first.root / "target-data").stat().st_mode) == 0o777
     finally:
         e2e_fixtures._remove_runtime_files(first)
         e2e_fixtures._remove_runtime_files(second)
@@ -228,6 +229,10 @@ def test_target_fixture_provisions_only_target_and_retains_host_http_port(
     finally:
         e2e_fixtures._finalize(runtime)
     assert cleaned == ["compose"]
+    assert any(
+        command[:7] == ("run", "--rm", "--no-deps", "--user", "root", "target_init", "sh")
+        for command in commands
+    )
     assert not runtime.root.exists()
     assert not runtime.artifact_root.exists()
 
@@ -265,6 +270,10 @@ def test_source_fixture_does_not_provision_target_resources(
         assert runtime.topology.target_postgres_name not in recorded
     finally:
         e2e_fixtures._finalize(runtime)
+    assert any(
+        command[:7] == ("run", "--rm", "--no-deps", "--user", "root", "source_odoo", "sh")
+        for command in commands
+    )
 
 
 def test_failed_runtime_keeps_only_sanitized_artifacts_when_requested(
@@ -404,6 +413,17 @@ def test_fixture_failure_publishes_bounded_sanitized_compose_logs(
         assert commands == [
             ("logs", "--no-color", "--tail", "200", "target_postgres"),
             ("logs", "--no-color", "--tail", "200", "target_init"),
+            (
+                "run",
+                "--rm",
+                "--no-deps",
+                "--user",
+                "root",
+                "target_init",
+                "sh",
+                "-c",
+                "chmod -R a+rwX -- /var/lib/odoo-target",
+            ),
         ]
         logs = sorted(runtime.artifact_root.glob("*.log"))
         assert {path.name for path in logs} == {"odoo.log", "postgres.log"}

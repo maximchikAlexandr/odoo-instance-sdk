@@ -111,9 +111,10 @@ def _make_runtime(base: Path, run_id: str, *, scope: str = "target") -> E2ERunti
     for name in ("xdg-config", "xdg-data", "xdg-cache", "xdg-state", "source-data", "target-data"):
         (root / name).mkdir(mode=0o700)
     # The pinned Odoo image runs as uid 100 and needs to create its database
-    # filestore below the source bind mount. The runtime root is still private
+    # filestore below both bind mounts. The runtime root is still private
     # (0700), so container writeability does not widen host visibility.
     (root / "source-data").chmod(0o777)
+    (root / "target-data").chmod(0o777)
     secret_file = root / "secrets" / "pg-password"
     master_password_file = root / "secrets" / "master-password"
     database_password = secrets.token_urlsafe(32)
@@ -345,6 +346,27 @@ def _publish_failure_logs(runtime: E2ERuntime, lifecycle: ComposeLifecycle) -> N
     evidence.write()
 
 
+def _make_container_data_host_removable(runtime: E2ERuntime, lifecycle: ComposeLifecycle) -> None:
+    """Restore host cleanup access to files created by the image's uid 100."""
+    service, data_dir = (
+        ("source_odoo", "/var/lib/odoo")
+        if runtime.scope == "source"
+        else ("target_init", "/var/lib/odoo-target")
+    )
+    lifecycle.run(
+        "run",
+        "--rm",
+        "--no-deps",
+        "--user",
+        "root",
+        service,
+        "sh",
+        "-c",
+        f"chmod -R a+rwX -- {data_dir}",
+        timeout=60.0,
+    )
+
+
 def _finalize(runtime: E2ERuntime, primary_failure: BaseException | None = None) -> None:
     runtime.failed = primary_failure is not None
     errors: list[BaseException] = []
@@ -356,6 +378,13 @@ def _finalize(runtime: E2ERuntime, primary_failure: BaseException | None = None)
             )
         except BaseException as error:
             errors.append(error)
+    try:
+        _make_container_data_host_removable(
+            runtime,
+            ComposeLifecycle(runtime.compose_file, runtime.topology.project_name),
+        )
+    except BaseException as error:
+        errors.append(error)
     try:
         runtime.ledger.unwind(primary_failure=primary_failure)
     except BaseException as error:

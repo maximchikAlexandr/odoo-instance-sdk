@@ -207,8 +207,11 @@ def _validate_resource_manifest(source: Path, *, status: Status, tier: str) -> d
         raise ValueError("resource manifest lacks leak details")  # noqa: TRY004
     if not isinstance(audit.get("runs"), list) or not audit["runs"]:
         raise ValueError("resource manifest lacks final audit runs")
-    if tier == "full" and manifest.get("source_cache_consumed") is not True:
-        raise ValueError("full evidence lacks source-cache consumption audit")
+    source_cache_consumed = manifest.get("source_cache_consumed")
+    if not isinstance(source_cache_consumed, bool):
+        raise ValueError("evidence lacks source-cache consumption audit")  # noqa: TRY004
+    if tier == "full" and status == "success" and source_cache_consumed is not True:
+        raise ValueError("successful full evidence lacks source-cache consumption audit")
     return manifest
 
 
