@@ -260,6 +260,48 @@ class TestCreateVenv:
 
 
 class TestSyncUpgradePreserve:
+    def test_hash_locked_sync_revalidates_captured_lock_before_install(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        lock = tmp_path / "audited.lock"
+        lock.write_text("requests==2.32.5\n", encoding="utf-8")
+        digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+        calls = _patch_subprocess(monkeypatch)
+        env = env_client.environments.checkout(
+            project_manifest,
+            "feat/hash-lock-sync-revalidate",
+            options=EnvironmentCheckoutOptions(
+                python="3.12",
+                create_venv=True,
+                hash_lock=lock,
+                hash_lock_sha256=digest,
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+
+        catalog = env_client.get_catalog()
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        before = row["applied_settings_json"]
+        calls.clear()
+        command = env_client.environments.sync_python_command(
+            str(env.id), hash_lock=lock, hash_lock_sha256=digest
+        )
+        lock.write_text("requests==2.32.6\n", encoding="utf-8")
+
+        with pytest.raises(ConfigError, match="digest mismatch"):
+            command.run()
+
+        assert not any(call[:2] == ["uv", "pip"] for call in calls)
+        row = catalog.get_environment(str(env.id))
+        assert row is not None
+        assert row["applied_settings_json"] == before
+
     def test_dependency_evidence_uses_normalized_meaningful_entries(self, tmp_path: Path) -> None:
         requirements = tmp_path / "requirements.txt"
         requirements.write_text(
