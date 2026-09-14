@@ -10,6 +10,31 @@ permissions:
   contents: read
 
 jobs:
+  real-odoo-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      UV_CACHE_DIR: .cache/uv
+      ODCLI_E2E_SECRET_REGISTRY: .artifacts/real-odoo-e2e-secret-registry.json
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ./.github/actions/real-odoo-smoke
+        with:
+          cache_class: cold
+
+  real-odoo-smoke-warm:
+    needs: real-odoo-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      UV_CACHE_DIR: .cache/uv
+      ODCLI_E2E_SECRET_REGISTRY: .artifacts/real-odoo-e2e-secret-registry.json
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ./.github/actions/real-odoo-smoke
+        with:
+          cache_class: warm
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
