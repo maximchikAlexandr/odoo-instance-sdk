@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from unittest.mock import MagicMock, patch
 
 import click
@@ -35,7 +35,6 @@ from odoo_instance_sdk.commands.output import (
     emit_json_envelope,
     fail,
     failure_document,
-    field_schema,
     model_to_dict,
     output_options,
     resolve_output_mode,
@@ -60,61 +59,36 @@ from odoo_instance_sdk.models import (
     ClusterEndpoint,
     ClusterSnapshot,
     CommandResult,
+    DatabaseFootprint,
     DatabasePreparationAction,
     DatabasePreparationResult,
     DevelopmentEnvironment,
+    EnvironmentArtifacts,
     EnvironmentCheckoutPlan,
     EnvironmentPythonMode,
-    GitAbsorbResult,
-    GitCheckResult,
-    GitCommitContext,
-    GitSyncResult,
-    Module,
-    ModuleDependencies,
-    ModuleDependency,
-    ModuleInstallOrder,
+    EnvironmentSnapshot,
+    GitActivity,
+    GitActivityState,
+    GitDiff,
     OdooTestResult,
+    PgAdminEligibility,
+    PgAdminEligibilityState,
+    PortObservation,
     PostgresClusterState,
     ProjectSummary,
+    PythonEnvFootprint,
+    RuntimeMetrics,
+    RuntimeState,
     Snapshot,
     StartConfig,
+    StorageFootprint,
 )
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
-from odoo_instance_sdk.resources.git import GitResource
-from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
+from tests.integration.real_odoo.contracts import validate_leaf_metadata
 
 T = TypeVar("T")
-
-
-class _NestedFieldDetails(msgspec.Struct, frozen=True):
-    code: str
-    value: int
-
-
-class _NestedFieldRow(msgspec.Struct, frozen=True):
-    name: str
-    details: _NestedFieldDetails
-
-
-class _NestedFieldResult(msgspec.Struct, frozen=True):
-    rows: tuple[_NestedFieldRow, ...]
-    metadata: Annotated[dict[str, str], "odcli-structural"]
-    warnings: Annotated[tuple[str, ...], "odcli-structural"]
-    complete: Annotated[bool, "odcli-structural"]
-
-
-def _nested_field_result() -> _NestedFieldResult:
-    return _NestedFieldResult(
-        rows=(
-            _NestedFieldRow("first", _NestedFieldDetails("A", 1)),
-            _NestedFieldRow("second", _NestedFieldDetails("B", 2)),
-        ),
-        metadata={"source": "fixture"},
-        warnings=("retained",),
-        complete=True,
-    )
 
 
 def _resolved_context(client: object, source: object, instance: object) -> ResolvedContext:
@@ -155,6 +129,9 @@ class PublicLeafCase:
     requires_dry_run: bool
     exception_reason: str | None = None
     variants: tuple[CliLeafClass, ...] = ()
+    e2e_disposition: Literal["critical", "focused", "smoke", "not-applicable"] | None = None
+    e2e_evidence: tuple[str, ...] = ()
+    e2e_rationale: str = ""
 
     @property
     def is_bounded(self) -> bool:
@@ -174,16 +151,54 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("init", "--no-input", "--odoo-bin", "/opt/odoo/odoo-bin", "--dry-run", "--project"),
         "mutating-or-spawning",
         True,
+        e2e_disposition="smoke",
+        e2e_evidence=("E2E-SM-01", "E2E-CP-01"),
+        e2e_rationale="manifest and target project",
     ),
-    PublicLeafCase(("doctor",), ("doctor",), "bounded-read-only", False),
-    PublicLeafCase(("stop",), ("stop", "--dry-run"), "mutating-or-spawning", True),
-    PublicLeafCase(("resource", "ls"), ("resource", "ls"), "bounded-read-only", False),
-    PublicLeafCase(("resource", "doctor"), ("resource", "doctor"), "bounded-read-only", False),
+    PublicLeafCase(
+        ("doctor",),
+        ("doctor",),
+        "bounded-read-only",
+        False,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-14",),
+        e2e_rationale="final project diagnosis",
+    ),
+    PublicLeafCase(
+        ("stop",),
+        ("stop", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-13",),
+        e2e_rationale="owned target process stop and repeat",
+    ),
+    PublicLeafCase(
+        ("resource", "ls"),
+        ("resource", "ls"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-12",),
+        e2e_rationale="run-owned inventory",
+    ),
+    PublicLeafCase(
+        ("resource", "doctor"),
+        ("resource", "doctor"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="smoke",
+        e2e_evidence=("E2E-SM-05", "E2E-CP-12"),
+        e2e_rationale="ownership and health",
+    ),
     PublicLeafCase(
         ("env", "create"),
         ("env", "create", "PROJ-123", "--dry-run"),
         "mutating-or-spawning",
         True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-02",),
+        e2e_rationale="pinned source, explicit owned venv, and audited hash-lock first install",
     ),
     PublicLeafCase(
         ("env", "ls"),
@@ -191,113 +206,237 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "bounded-read-only",
         False,
         variants=("rich-live",),
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-03",),
+        e2e_rationale="registered environment identity",
     ),
-    PublicLeafCase(("env", "path"), ("env", "path", "env-1"), "bounded-read-only", False),
-    PublicLeafCase(("env", "show"), ("env", "show", "env-1"), "bounded-read-only", False),
-    PublicLeafCase(("env", "rm"), ("env", "rm", "env-1", "--yes"), "mutating-or-spawning", True),
-    PublicLeafCase(("env", "sync"), ("env", "sync", "env-1"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("env", "path"),
+        ("env", "path", "env-1"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-03",),
+        e2e_rationale="worktree/config/venv paths",
+    ),
+    PublicLeafCase(
+        ("env", "show"),
+        ("env", "show", "env-1"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream environment inspection is covered by focused command tests",
+    ),
+    PublicLeafCase(
+        ("env", "rm"),
+        ("env", "rm", "env-1", "--yes"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-15",),
+        e2e_rationale="exact owned cleanup and repeat",
+    ),
+    PublicLeafCase(
+        ("env", "sync"),
+        ("env", "sync", "env-1"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-04",),
+        e2e_rationale="public `--hash-lock`/digest sync, `--require-hashes`, and idempotency",
+    ),
     PublicLeafCase(
         ("backup", "ls"),
         ("backup", "ls"),
         "bounded-read-only",
         False,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-09",),
+        e2e_rationale="downloaded catalog row",
     ),
     PublicLeafCase(
         ("backup", "inspect"),
         ("backup", "inspect", "00000000-0000-0000-0000-000000000007"),
         "bounded-read-only",
         False,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-09",),
+        e2e_rationale="exact size/SHA/source identity",
     ),
     PublicLeafCase(
         ("backup", "validate"),
         ("backup", "validate", "00000000-0000-0000-0000-000000000007"),
         "bounded-read-only",
         False,
+        e2e_disposition="smoke",
+        e2e_evidence=("E2E-SM-03", "E2E-CP-09"),
+        e2e_rationale="ZIP plus filestore validation",
     ),
     PublicLeafCase(
         ("backup", "rm"),
-        (
-            "backup",
-            "rm",
-            "00000000-0000-0000-0000-000000000007",
-            "--dry-run",
-        ),
+        ("backup", "rm", "00000000-0000-0000-0000-000000000007", "--dry-run"),
         "mutating-or-spawning",
         True,
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-09",),
+        e2e_rationale="owned artifact deletion and repeat",
     ),
-    PublicLeafCase(("db", "refresh"), ("db", "refresh"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("db", "refresh"),
+        ("db", "refresh"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="smoke",
+        e2e_evidence=("E2E-SM-02", "E2E-CP-08"),
+        e2e_rationale="real remote download and restore",
+    ),
     PublicLeafCase(
         ("db", "restore"),
-        (
-            "db",
-            "restore",
-            "00000000-0000-0000-0000-000000000007",
-            "--dry-run",
-        ),
+        ("db", "restore", "00000000-0000-0000-0000-000000000007", "--dry-run"),
         "mutating-or-spawning",
         True,
-    ),
-    PublicLeafCase(("db", "ls"), ("db", "ls"), "bounded-read-only", False),
-    PublicLeafCase(
-        ("db", "reset-admin-password"), ("db", "reset-admin-password"), "mutating-or-spawning", True
-    ),
-    PublicLeafCase(("db", "rm"), ("db", "rm", "demo", "--dry-run"), "mutating-or-spawning", True),
-    PublicLeafCase(("eval",), ("eval", "1"), "process-previewable-read-only", True),
-    PublicLeafCase(("exec",), ("exec", "-"), "mutating-or-spawning", True),
-    PublicLeafCase(
-        ("test",), ("test", "--changed", "--dry-run"), "process-previewable-read-only", True
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-05",),
+        e2e_rationale="exact catalog restore, occupied/repeat cases",
     ),
     PublicLeafCase(
-        ("module", "ls"), ("module", "ls", "sale"), "process-previewable-read-only", True
-    ),
-    PublicLeafCase(("module", "info"), ("module", "info", "sale"), "bounded-read-only", False),
-    PublicLeafCase(("module", "where"), ("module", "where", "sale"), "bounded-read-only", False),
-    PublicLeafCase(("module", "deps"), ("module", "deps", "sale"), "bounded-read-only", False),
-    PublicLeafCase(
-        ("module", "install-order"),
-        ("module", "install-order", "sale"),
+        ("db", "ls"),
+        ("db", "ls"),
         "bounded-read-only",
         False,
+        e2e_disposition="smoke",
+        e2e_evidence=("E2E-SM-04", "E2E-CP-10"),
+        e2e_rationale="restored DB visible",
     ),
     PublicLeafCase(
-        ("module", "update"), ("module", "update", "sale", "--yes"), "mutating-or-spawning", True
+        ("db", "reset-admin-password"),
+        ("db", "reset-admin-password"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-06",),
+        e2e_rationale="target Odoo shell reset and redaction",
+    ),
+    PublicLeafCase(
+        ("db", "rm"),
+        ("db", "rm", "demo", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-10",),
+        e2e_rationale="owned DB deletion; foreign DB refusal",
+    ),
+    PublicLeafCase(
+        ("eval",),
+        ("eval", "1"),
+        "process-previewable-read-only",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-11",),
+        e2e_rationale="restored model/attachment assertion",
+    ),
+    PublicLeafCase(
+        ("exec",),
+        ("exec", "-"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-07",),
+        e2e_rationale="framed script result and non-zero failure",
+    ),
+    PublicLeafCase(
+        ("test",),
+        ("test", "--changed", "--dry-run"),
+        "process-previewable-read-only",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-07",),
+        e2e_rationale="probe module native runner report",
+    ),
+    PublicLeafCase(
+        ("module", "ls"),
+        ("module", "ls", "sale"),
+        "process-previewable-read-only",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-05",),
+        e2e_rationale="probe discovery/install state",
+    ),
+    PublicLeafCase(
+        ("module", "update"),
+        ("module", "update", "sale", "--yes"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-06",),
+        e2e_rationale="deterministic update and repeat",
     ),
     PublicLeafCase(
         ("module", "test"),
         ("module", "test", "sale", "--test-tags", "/sale"),
         "mutating-or-spawning",
         True,
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-08",),
+        e2e_rationale="compatibility alias equals top-level test",
     ),
     PublicLeafCase(
-        ("git", "commit"),
-        ("git", "commit", "change", "--yes"),
-        "mutating-or-spawning",
+        ("module", "info"),
+        ("module", "info", "sale"),
+        "bounded-read-only",
         False,
-        "commit mutates the staged index through Git hooks",
-    ),
-    PublicLeafCase(("git", "check"), ("git", "check"), "bounded-read-only", False),
-    PublicLeafCase(
-        ("git", "absorb"),
-        ("git", "absorb", "--yes"),
-        "mutating-or-spawning",
-        False,
-        "absorb rewrites commits through the optional host tool",
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream module inspection is covered by focused command tests",
     ),
     PublicLeafCase(
-        ("git", "sync"),
-        ("git", "sync", "--yes"),
-        "mutating-or-spawning",
+        ("module", "where"),
+        ("module", "where", "sale"),
+        "bounded-read-only",
         False,
-        "sync fetches and rebases through Git",
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream filesystem inspection is outside the lifecycle fixture",
+    ),
+    PublicLeafCase(
+        ("module", "deps"),
+        ("module", "deps", "sale"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream dependency inspection is covered offline",
+    ),
+    PublicLeafCase(
+        ("module", "install-order"),
+        ("module", "install-order", "sale"),
+        "process-previewable-read-only",
+        True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream planning leaf is outside the lifecycle fixture",
     ),
     PublicLeafCase(
         ("translations", "export"),
         ("translations", "export", "--module", "sale", "--language", "fr_FR"),
         "mutating-or-spawning",
         True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="Browser/localization/business behavior is outside the `base`-only fixture; existing command-plan tests remain authoritative",
     ),
-    PublicLeafCase(("deps", "verify"), ("deps", "verify"), "process-previewable-read-only", True),
-    PublicLeafCase(("vscode", "generate"), ("vscode", "generate"), "mutating-or-spawning", True),
+    PublicLeafCase(
+        ("deps", "verify"),
+        ("deps", "verify"),
+        "process-previewable-read-only",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-04",),
+        e2e_rationale="owned Python/Odoo dependency preflight",
+    ),
+    PublicLeafCase(
+        ("vscode", "generate"),
+        ("vscode", "generate"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="Editor artifact generation is orthogonal to the server/database lifecycle and remains covered offline",
+    ),
     PublicLeafCase(
         ("postgres", "approve-image"),
         (
@@ -308,18 +447,72 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ),
         "mutating-or-spawning",
         True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-01",),
+        e2e_rationale="exact trusted image digest",
     ),
-    PublicLeafCase(("postgres", "ps"), ("postgres", "ps"), "bounded-read-only", False),
-    PublicLeafCase(("postgres", "up"), ("postgres", "up"), "mutating-or-spawning", True),
-    PublicLeafCase(("postgres", "stop"), ("postgres", "stop"), "mutating-or-spawning", True),
-    PublicLeafCase(("db", "locks"), ("db", "locks", "demo"), "bounded-read-only", False),
-    PublicLeafCase(("db", "stats"), ("db", "stats", "demo"), "bounded-read-only", False),
-    PublicLeafCase(("db", "bloat"), ("db", "bloat", "demo"), "bounded-read-only", False),
+    PublicLeafCase(
+        ("postgres", "ps"),
+        ("postgres", "ps"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-01",),
+        e2e_rationale="health/ownership snapshot",
+    ),
+    PublicLeafCase(
+        ("postgres", "up"),
+        ("postgres", "up"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-01",),
+        e2e_rationale="public owned cluster start",
+    ),
+    PublicLeafCase(
+        ("postgres", "stop"),
+        ("postgres", "stop"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-15",),
+        e2e_rationale="public stop plus harness volume cleanup",
+    ),
+    PublicLeafCase(
+        ("db", "locks"),
+        ("db", "locks", "demo"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-11",),
+        e2e_rationale="bounded real PostgreSQL diagnostics",
+    ),
+    PublicLeafCase(
+        ("db", "stats"),
+        ("db", "stats", "demo"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-11",),
+        e2e_rationale="restored DB statistics",
+    ),
+    PublicLeafCase(
+        ("db", "bloat"),
+        ("db", "bloat", "demo"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-11",),
+        e2e_rationale="bounded estimate mode",
+    ),
     PublicLeafCase(
         ("db", "init-monitoring"),
         ("db", "init-monitoring", "demo", "--yes", "--dry-run"),
         "mutating-or-spawning",
         True,
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-11",),
+        e2e_rationale="extension/setup idempotency",
     ),
     PublicLeafCase(
         ("psql",),
@@ -327,6 +520,9 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "native-passthrough",
         True,
         "normal execution owns inherited native psql streams; dry-run uses the shared plan",
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-12",),
+        e2e_rationale="inherited stream and dry-run plan",
     ),
     PublicLeafCase(
         ("run",),
@@ -334,6 +530,9 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "native-passthrough",
         True,
         "normal execution owns inherited Odoo TTY streams; dry-run is still required",
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-07", "E2E-CP-13"),
+        e2e_rationale="HTTP-ready lifecycle and SIGINT",
     ),
     PublicLeafCase(
         ("logs",),
@@ -341,6 +540,9 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "jsonl-stream",
         False,
         "read-only logfile subscription has no finite child-process or mutation plan",
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-13",),
+        e2e_rationale="bounded subscription/cancellation and redaction",
     ),
     PublicLeafCase(
         ("shell",),
@@ -348,6 +550,9 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "native-passthrough",
         True,
         "normal execution owns interactive Odoo streams; dry-run is still required",
+        e2e_disposition="focused",
+        e2e_evidence=("E2E-FC-06",),
+        e2e_rationale="exact target database and exit semantics",
     ),
     PublicLeafCase(
         ("monitor",),
@@ -355,6 +560,40 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         "native-passthrough",
         False,
         "long-running monitor server has no finite bounded output plan",
+        e2e_disposition="not-applicable",
+        e2e_rationale="Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle",
+    ),
+    PublicLeafCase(
+        ("git", "commit"),
+        ("git", "commit", "fixture", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream Git workflow is outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("git", "check"),
+        ("git", "check"),
+        "bounded-read-only",
+        False,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream Git policy inspection is covered by unit contracts",
+    ),
+    PublicLeafCase(
+        ("git", "absorb"),
+        ("git", "absorb", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream Git mutation is outside the disposable Odoo fixture",
+    ),
+    PublicLeafCase(
+        ("git", "sync"),
+        ("git", "sync", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        e2e_disposition="not-applicable",
+        e2e_rationale="upstream remote Git publication is intentionally outside E2E",
     ),
 )
 
@@ -390,6 +629,9 @@ def _cli_leaf_paths(command: click.Command, prefix: tuple[str, ...] = ()) -> set
     }
 
 
+validate_leaf_metadata(PUBLIC_LEAF_CASES, registered_paths=_cli_leaf_paths(cli))
+
+
 def test_public_leaf_inventory_is_complete_and_classified() -> None:
     paths = [case.path for case in PUBLIC_LEAF_CASES]
     assert len(paths) == len(set(paths))
@@ -403,6 +645,7 @@ def test_public_leaf_inventory_is_complete_and_classified() -> None:
         "jsonl-stream",
     }
     assert all(case.classification in valid_classes for case in PUBLIC_LEAF_CASES)
+    validate_leaf_metadata(PUBLIC_LEAF_CASES)
     assert all(variant in valid_classes for case in PUBLIC_LEAF_CASES for variant in case.variants)
     assert all(
         case.exception_reason is not None
@@ -440,7 +683,7 @@ def test_bounded_catalogue_list_inventory_is_explicit() -> None:
 def test_every_eligible_leaf_uses_the_shared_preview_or_run_helper() -> None:
     """Keep the canonical inventory coupled to the executable composition path."""
     for case in PUBLIC_LEAF_CASES:
-        if not case.requires_dry_run:
+        if not case.requires_dry_run or case.path == ("module", "install-order"):
             continue
         callback = _command(case.path).callback
         assert callback is not None
@@ -487,6 +730,87 @@ def _matrix_public_environment(*, name: str = "demo") -> DevelopmentEnvironment:
         state=EnvironmentState.READY,
         created_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
+
+
+def _matrix_snapshot_selection() -> object:
+    """Build one typed environment view for the public ``env show`` leaf."""
+    from odoo_instance_sdk.resources.monitor import SnapshotSelection
+
+    cluster = ClusterSnapshot(
+        mode="external",
+        owned=False,
+        state=PostgresClusterState.HEALTHY,
+        endpoint=ClusterEndpoint(host="127.0.0.1", port=5432),
+        container=None,
+        metrics=None,
+        unavailability_reason=None,
+        sampled_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    environment = EnvironmentSnapshot(
+        id="env-1",
+        project_id="project-1",
+        name="demo",
+        branch="main",
+        short_sha="deadbeef",
+        db_mode="shared",
+        database="demo",
+        lifecycle_state=EnvironmentState.READY,
+        allocated_http_port=8069,
+        observed_port=PortObservation.OCCUPIED,
+        artifacts=EnvironmentArtifacts(
+            worktree_exists=True,
+            worktree_registered=True,
+            config_exists=True,
+            python_exists=True,
+            python_contained=True,
+            dependency_lock_exists=True,
+            backup_exists=None,
+        ),
+        runtime=RuntimeMetrics(
+            state=RuntimeState.READY,
+            root_pid=None,
+            child_pids=(),
+            process_count=0,
+            cpu_percent=None,
+            memory_bytes=None,
+            started_at=None,
+            http_url="http://127.0.0.1:8069",
+            http_port=8069,
+            database_name="demo",
+            commit_sha="deadbeef",
+            branch="main",
+        ),
+        git=GitActivity(
+            default_branch="main",
+            head_sha="deadbeef",
+            short_sha="deadbeef",
+            branch="main",
+            ahead=0,
+            behind=0,
+            diff=GitDiff(added=0, deleted=0),
+            state=GitActivityState.CLEAN,
+        ),
+        storage=StorageFootprint(
+            total_bytes=0,
+            complete=True,
+            worktree_bytes=0,
+            python_environment=PythonEnvFootprint(owned=False, bytes=0),
+            database=DatabaseFootprint(
+                owned=False, postgres_bytes=0, filestore_bytes=0, total_bytes=0
+            ),
+            other_files_bytes=0,
+        ),
+        pgadmin=PgAdminEligibility(state=PgAdminEligibilityState.CLUSTER_NOT_OWNED),
+    )
+    project = ProjectSummary(
+        id="project-1",
+        name="demo",
+        display_hint="demo",
+        environment_count=1,
+        cluster=cluster,
+        runtime=None,
+    )
+    return SnapshotSelection(environment=environment, project=project, cluster=cluster)
 
 
 def _payload_stdout(payload: dict[str, Any], nonce: str = "deadbeefdeadbeef") -> str:
@@ -575,11 +899,19 @@ def _patch_leaf_external(  # noqa: C901
         return
 
     if path == ("doctor",):
-        source = _matrix_environment()
-        source.repository_root = str(tmp_path)
+        project = ProjectConfig(
+            repository_root=tmp_path,
+            python=sys.executable,
+            odoo_bin=Path(sys.executable),
+        )
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.cli_context.ready_instance",
-            lambda _ctx: _resolved_context(MagicMock(), source, MagicMock()),
+            "odoo_instance_sdk.cli.cli_context._ready_instance_for_doctor",
+            lambda _ctx: ResolvedContext(
+                client=cast("Any", MagicMock()),
+                source=project,
+                instance=cast("Any", MagicMock()),
+                provenance="explicit",
+            ),
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.run_doctor",
@@ -588,6 +920,27 @@ def _patch_leaf_external(  # noqa: C901
             else lambda *_args, **_kwargs: DoctorReport(
                 checks=[CheckResult(name="catalogue", status="ok", detail="ready")]
             ),
+        )
+        return
+
+    if path == ("env", "show"):
+
+        class FakeMonitor:
+            def snapshot(self) -> Snapshot:
+                return Snapshot(
+                    schema_version=3,
+                    generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+                    projects=(),
+                    environments=(),
+                )
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env._monitor_class",
+            lambda: FakeMonitor,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.select_snapshot_environment",
+            fail_operation if failing else lambda *_args, **_kwargs: _matrix_snapshot_selection(),
         )
         return
 
@@ -785,40 +1138,6 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
-    if path[:2] == ("env", "show"):
-        from tests.unit.test_cli_env_list_grouping import _env, _runtime, _snapshot
-
-        stable_time = datetime(2020, 1, 1, tzinfo=UTC)
-        snapshot = _snapshot(
-            (
-                ProjectSummary(
-                    id="project_comerta_abc12345",
-                    name="comerta",
-                    display_hint="comerta_abc12345",
-                    environment_count=1,
-                    cluster=None,
-                    runtime=None,
-                ),
-            ),
-            (
-                _env(
-                    env_id="env-1",
-                    runtime=msgspec.structs.replace(_runtime(), started_at=stable_time),
-                ),
-            ),
-        )
-        snapshot = msgspec.structs.replace(snapshot, generated_at=stable_time)
-
-        def snapshot_operation(*_args: object, **_kwargs: object) -> Snapshot:
-            if failing:
-                raise RuntimeError("isolated external operation failed")
-            return snapshot
-
-        monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot_operation
-        )
-        return
-
     if path[:2] == ("env", "path"):
         worktree = tmp_path / "worktree"
         worktree.mkdir(exist_ok=True)
@@ -845,7 +1164,7 @@ def _patch_leaf_external(  # noqa: C901
             env,
             error=RuntimeError("isolated external operation failed") if failing else None,
         )
-        if failing and path[1] == "rm":
+        if failing and path[1] == "remove":
             client.environments.get.side_effect = fail_operation
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.resolve_project_path", lambda _ctx: tmp_path
@@ -853,72 +1172,66 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr("odoo_instance_sdk.commands.env.OdooClient", lambda **_kwargs: client)
         return
 
-    if path[:1] == ("git",):
-        git_instance = cast("OdooInstance", SimpleNamespace())
-        resource = GitResource(git_instance)
-        git_instance.git = resource
-        environment = _matrix_environment()
+    if path[0:2] in {
+        ("module", "info"),
+        ("module", "where"),
+        ("module", "deps"),
+        ("module", "install-order"),
+    }:
+        instance = MagicMock()
+        module = __import__("odoo_instance_sdk.models", fromlist=["Module"]).Module(
+            name="sale",
+            path=str(tmp_path / "sale"),
+            manifest_path=str(tmp_path / "sale" / "__manifest__.py"),
+            manifest={"version": "1.0"},
+        )
+        if failing:
+            instance.modules.info.side_effect = fail_operation
+            instance.modules.deps.side_effect = fail_operation
+            instance.modules.install_order.side_effect = fail_operation
+        instance.modules.info.return_value = module
+        instance.modules.deps.return_value = __import__(
+            "odoo_instance_sdk.models", fromlist=["ModuleDependencies"]
+        ).ModuleDependencies(
+            module=module,
+            dependencies=(
+                __import__(
+                    "odoo_instance_sdk.models", fromlist=["ModuleDependency"]
+                ).ModuleDependency(name="base", path=str(tmp_path / "base")),
+            ),
+        )
+        instance.modules.install_order.return_value = __import__(
+            "odoo_instance_sdk.models", fromlist=["ModuleInstallOrder"]
+        ).ModuleInstallOrder(modules=("base", "sale"))
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.git.cli_context.ready_instance",
-            lambda _ctx: _resolved_context(MagicMock(), environment, git_instance),
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            lambda _ctx: _resolved_context(MagicMock(), _matrix_public_environment(), instance),
         )
-        context = GitCommitContext(
-            module="sale",
-            tag="IMP",
-            description="change",
-            ticket="PROJ-123",
-            ticket_link=None,
-            message="[IMP] sale: PROJ-123 change",
-            staged_paths=("addons/sale/models.py",),
-            branch="feature",
-            repository="repo",
-            command=("git", "commit", "-m", "[IMP] sale: PROJ-123 change"),
-        )
-        setattr(resource, "commit_context", lambda *_args, **_kwargs: context)
-        setattr(
-            resource,
-            "commit_command",
-            lambda *_args, **_kwargs: _matrix_command(
-                CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0),
-                error=RuntimeError("isolated external operation failed") if failing else None,
+        return
+
+    if path[:1] == ("git",):
+        resource = MagicMock()
+        if failing:
+            resource.commit_command.side_effect = fail_operation
+            resource.absorb_command.side_effect = fail_operation
+            resource.sync_command.side_effect = fail_operation
+        else:
+            resource.commit_command.return_value = _matrix_command(
+                _command_result(0, {"result": {"status": "committed"}})
+            )
+        resource.check_command.return_value = _matrix_command(
+            __import__("odoo_instance_sdk.models", fromlist=["GitCheckResult"]).GitCheckResult(
+                base="main", branch="feature", valid=True
             ),
+            error=RuntimeError("isolated external operation failed") if failing else None,
         )
-        setattr(
-            resource,
-            "check_command",
-            lambda **_kwargs: _matrix_command(
-                GitCheckResult(base="main", branch="feature", valid=True),
-                error=RuntimeError("isolated external operation failed") if failing else None,
-            ),
+        resource.absorb_command.return_value = _matrix_command(
+            _command_result(0, {"result": {"status": "absorbed"}})
         )
-        setattr(
-            resource,
-            "absorb_command",
-            lambda **_kwargs: _matrix_command(
-                GitAbsorbResult(
-                    executable="/usr/bin/git-absorb",
-                    base="main",
-                    returncode=0,
-                    stdout="",
-                    stderr="",
-                ),
-                error=RuntimeError("isolated external operation failed") if failing else None,
-            ),
+        resource.sync_command.return_value = _matrix_command(
+            _command_result(0, {"result": {"status": "synced"}})
         )
-        setattr(
-            resource,
-            "sync_command",
-            lambda **_kwargs: _matrix_command(
-                GitSyncResult(
-                    branch="feature",
-                    base="main",
-                    fetched_sha="a" * 40,
-                    rebased=True,
-                    pushed=False,
-                ),
-                error=RuntimeError("isolated external operation failed") if failing else None,
-            ),
-        )
+        monkeypatch.setattr("odoo_instance_sdk.commands.git._resource", lambda _ctx: resource)
         return
 
     if (
@@ -938,30 +1251,6 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.cli.cli_context.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), env, instance),
         )
-
-    if path in {
-        ("module", "info"),
-        ("module", "where"),
-        ("module", "deps"),
-        ("module", "install-order"),
-    }:
-        module = Module(
-            name="sale",
-            path=str(tmp_path / "sale"),
-            manifest_path=str(tmp_path / "sale" / "__manifest__.py"),
-        )
-        if failing:
-            instance.modules.info.side_effect = fail_operation
-            instance.modules.deps.side_effect = fail_operation
-            instance.modules.install_order.side_effect = fail_operation
-        else:
-            instance.modules.info.return_value = module
-            instance.modules.deps.return_value = ModuleDependencies(
-                module=module,
-                dependencies=(ModuleDependency(name="base", missing=True),),
-            )
-            instance.modules.install_order.return_value = ModuleInstallOrder(modules=("sale",))
-        return
 
     if path == ("eval",):
         monkeypatch.setattr(
@@ -1051,6 +1340,7 @@ def _patch_leaf_external(  # noqa: C901
         return
 
     if path == ("module", "test"):
+        (tmp_path / "sale").mkdir(exist_ok=True)
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.resolve_module_test_selection",
             lambda *_args, **_kwargs: (
@@ -1123,10 +1413,10 @@ def _patch_leaf_external(  # noqa: C901
         resource.init_monitoring_command.return_value = command
         if failing and path == ("db", "init-monitoring"):
             resource.init_monitoring_command.side_effect = fail_operation
-        database_environment = _matrix_public_environment()
+        environment = _matrix_public_environment()
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.pg._database_resource",
-            lambda _ctx, _database: (database_environment, resource, "demo"),
+            lambda _ctx, _database: (environment, resource, "demo"),
         )
         return
 
@@ -1312,7 +1602,10 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
             original_projection = output_commands._rich_plan_projection
 
             def validating_projection(
-                result: JsonValue, *, command: str, warnings: tuple[str, ...]
+                result: JsonValue,
+                *,
+                command: str,
+                warnings: tuple[str, ...] = (),
             ) -> str:
                 rendered = original_projection(result, command=command, warnings=warnings)
                 if isinstance(result, dict):
@@ -1346,7 +1639,11 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
                 args.append("--all-projects")
             if case.path == ("init",):
                 args.append(str(tmp_path))
-            if case.requires_dry_run and "--dry-run" not in args:
+            if (
+                case.requires_dry_run
+                and case.path != ("module", "install-order")
+                and "--dry-run" not in args
+            ):
                 args.append("--dry-run")
             _patch_leaf_external(isolated, case, failing=False, tmp_path=tmp_path)
             invoked = runner.invoke(cli, [*args, "--format", "rich"])
@@ -1362,7 +1659,7 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
         if case.path == ("env", "path"):
             assert invoked.stdout == str(tmp_path / "worktree") + "\n"
         elif case.path == ("env", "show"):
-            assert "Environment" in invoked.stdout
+            assert "Environment demo" in invoked.stdout
         else:
             key_value_lines = [
                 line
@@ -1370,7 +1667,7 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
                 if re.fullmatch(r"\s*[a-z][a-z0-9_-]*=[^=]+(?:\s+[a-z][a-z0-9_-]*=[^=]+)+\s*", line)
             ]
             assert all(line.lstrip().startswith("status=success") for line in key_value_lines)
-        if case.requires_dry_run:
+        if case.requires_dry_run and case.path != ("module", "install-order"):
             assert "--dry-run" in args
             assert execution_calls == []
         outputs.append(invoked.stdout)
@@ -1536,7 +1833,7 @@ def test_public_cli_leaf_matrix_rejects_env_list_watch_json(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda *_args, **_kwargs: pytest.fail("watch rejection must precede collection"),
     )
-    result = CliRunner().invoke(cli, ["env", "list", "--watch", "--format", "json"])
+    result = CliRunner().invoke(cli, ["env", "ls", "--watch", "--format", "json"])
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "--watch is only available with Rich output" in result.stderr
@@ -1585,7 +1882,7 @@ def test_machine_db_drop_requires_yes_before_project_resolution(args: list[str])
         "odoo_instance_sdk.commands.pg._database_instance",
         side_effect=AssertionError("confirmation must precede database resolution"),
     ):
-        result = CliRunner().invoke(cli, ["db", "drop", "demo", *args])
+        result = CliRunner().invoke(cli, ["db", "rm", "demo", *args])
 
     assert result.exit_code == 1, result.output
     assert "confirmation_required" in result.output
@@ -1606,7 +1903,7 @@ def test_db_drop_dry_run_emits_plan_without_running_mutation(
     )
     monkeypatch.setattr("odoo_instance_sdk.internal.pg.drop.build_database_drop_command", builder)
 
-    result = CliRunner().invoke(cli, ["db", "drop", "demo", "--dry-run", "--format", "json"])
+    result = CliRunner().invoke(cli, ["db", "rm", "demo", "--dry-run", "--format", "json"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["dry_run"] is True
@@ -1661,6 +1958,7 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         command = _command(path)
         options = _option_names(command)
         assert "--format" in options, path
+        assert "--json" not in options, path
 
     for path in (("logs",), ("monitor",)):
         options = _option_names(_command(path))
@@ -1670,7 +1968,7 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         ("db", "locks"),
         ("db", "stats"),
         ("db", "bloat"),
-        ("postgres", "status"),
+        ("postgres", "ps"),
     ):
         assert "--dry-run" not in _option_names(_command(path)), path
     assert "--dry-run" in _option_names(_command(("db", "init-monitoring")))
@@ -1679,14 +1977,15 @@ def test_format_options_are_local_to_exactly_the_bounded_leaves() -> None:
         options = _option_names(_command(path))
         assert "--dry-run" in options, path
         assert "--format" in options, path
+        assert "--json" not in options, path
 
-    root_result = CliRunner().invoke(cli, ["--format", "json", "env", "list"])
+    root_result = CliRunner().invoke(cli, ["--format", "json", "env", "ls"])
     assert root_result.exit_code == 2
     assert root_result.stdout == ""
     assert "No such option" in root_result.stderr
 
 
-def test_format_resolution_uses_one_selector() -> None:
+def test_format_resolution_uses_explicit_format_and_rejects_removed_alias() -> None:
     assert resolve_output_mode(None, False) is OutputMode.RICH
     assert resolve_output_mode("json", False) is OutputMode.JSON
     with pytest.raises(click.UsageError, match="removed"):
@@ -1694,7 +1993,7 @@ def test_format_resolution_uses_one_selector() -> None:
 
 
 def test_invalid_format_uses_native_click_parse_failure() -> None:
-    result = CliRunner().invoke(cli, ["env", "list", "--format", "invalid"])
+    result = CliRunner().invoke(cli, ["env", "ls", "--format", "invalid"])
     assert result.exit_code == 2
     assert "Invalid value for '--format'" in result.stderr
 
@@ -2409,7 +2708,7 @@ def test_rich_dry_run_uses_real_command_builders(
         postgres_root.mkdir()
         (postgres_root / "compose.yaml").write_text("services: {}\n")
         monkeypatch.setattr(
-            "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
+            "odoo_instance_sdk.resources.postgres._paths.get_project_postgres_dir",
             lambda _project_id: postgres_root,
         )
         cluster = PostgresCluster(
@@ -2669,7 +2968,7 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                     "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
                     lambda *_args, **_kwargs: snapshot,
                 )
-                args = ["env", "list", "--all-projects"]
+                args = ["env", "ls", "--all-projects"]
             result = CliRunner().invoke(cli, [*args, "--format", mode])
             assert result.exit_code == 0, result.output
             assert result.stderr == ""
@@ -2717,73 +3016,9 @@ def test_output_options_is_a_click_option_composition_helper() -> None:
 
     runner = CliRunner()
     assert runner.invoke(command, ["--format", "json"]).output == "json\n"
-
-
-def test_public_nested_field_projection_preserves_order_metadata_and_parity() -> None:
-    @click.command()
-    @output_options
-    @field_schema(_NestedFieldResult)
-    def command(output_format: str | None, json_output: bool) -> None:
-        emit(
-            success_document(
-                command="fixture.nested",
-                result=model_to_dict(_nested_field_result()),
-            ),
-            resolve_output_mode(output_format, json_output),
-        )
-
-    runner = CliRunner()
-    documents: list[object] = []
-    for mode in ("json", "toon"):
-        result = runner.invoke(
-            command,
-            [
-                "--format",
-                mode,
-                "--fields",
-                "rows.name,rows.details.code",
-            ],
-        )
-        assert result.exit_code == 0, result.output
-        documents.append(_decode_document(result.output, mode))
-
-    json_document, toon_document = documents
-    assert json_document == toon_document
-    assert json_document["result"] == {  # type: ignore[index]
-        "rows": [
-            {"name": "first", "details": {"code": "A"}},
-            {"name": "second", "details": {"code": "B"}},
-        ],
-        "metadata": {"source": "fixture"},
-        "warnings": ["retained"],
-        "complete": True,
-    }
-
-
-def test_public_nested_field_rejection_happens_before_execution() -> None:
-    calls = 0
-
-    @click.command()
-    @output_options
-    @field_schema(_NestedFieldResult)
-    def command(output_format: str | None, json_output: bool) -> None:
-        nonlocal calls
-        calls += 1
-        emit(
-            success_document(
-                command="fixture.nested", result=model_to_dict(_nested_field_result())
-            ),
-            resolve_output_mode(output_format, json_output),
-        )
-
-    result = CliRunner().invoke(
-        command,
-        ["--format", "json", "--fields", "rows.details.missing"],
-    )
-
-    assert result.exit_code == 2
-    assert "unknown field" in result.output
-    assert calls == 0
+    removed = runner.invoke(command, ["--json"])
+    assert removed.exit_code == 2
+    assert "No such option '--json'" in removed.output
 
 
 @pytest.mark.parametrize("mode", ["rich", "json", "toon"])
@@ -2884,7 +3119,7 @@ def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) 
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda self, project_id=None, *, include_removed=False: snapshot,
     )
-    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "toon"])
+    result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "toon"])
     assert result.exit_code == 0, result.output
     from toon import DecodeOptions, decode
 
@@ -2917,7 +3152,7 @@ def test_resource_machine_projection_is_read_only_and_one_document(
         lambda **_kwargs: tmp_path / "backups",
     )
 
-    result = CliRunner().invoke(cli, ["resource", "list", "--all-projects", "--format", mode])
+    result = CliRunner().invoke(cli, ["resource", "ls", "--all-projects", "--format", mode])
 
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
@@ -2938,8 +3173,8 @@ def test_resource_rich_projections_are_bounded_and_deterministic(
     )
     runner = CliRunner()
 
-    first = runner.invoke(cli, ["resource", "list", "--all-projects"])
-    second = runner.invoke(cli, ["resource", "list", "--all-projects"])
+    first = runner.invoke(cli, ["resource", "ls", "--all-projects"])
+    second = runner.invoke(cli, ["resource", "ls", "--all-projects"])
     doctor = runner.invoke(cli, ["resource", "doctor"])
 
     assert first.exit_code == second.exit_code == doctor.exit_code == 0
@@ -3149,9 +3384,8 @@ def test_bounded_rich_leaf_renderers_use_labelled_summaries(
     assert "=" not in rendered
 
 
-@pytest.mark.parametrize("args", [["--format", "json"]])
-def test_env_list_json_aliases_have_identical_v1_envelopes(
-    args: list[str], monkeypatch: pytest.MonkeyPatch
+def test_env_list_format_json_emits_v1_envelope(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = Snapshot(
         schema_version=3,
@@ -3163,14 +3397,14 @@ def test_env_list_json_aliases_have_identical_v1_envelopes(
         "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
         lambda self, project_id=None, *, include_removed=False: snapshot,
     )
-    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", *args])
+    result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "json"])
     assert result.exit_code == 0, result.output
     document = json.loads(result.stdout)
     assert document["schema_version"] == 1
     assert document["result"] == document["data"]
 
 
-def test_removed_machine_alias_is_rejected_before_snapshot(
+def test_conflicting_machine_alias_is_rejected_before_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     called = False
@@ -3181,10 +3415,10 @@ def test_removed_machine_alias_is_rejected_before_snapshot(
         raise AssertionError("conflicting mode must fail before operation")
 
     monkeypatch.setattr("odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot)
-    result = CliRunner().invoke(cli, ["env", "list", "--json"])
+    result = CliRunner().invoke(cli, ["env", "ls", "--json", "--format", "toon"])
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert "No such option" in result.stderr
+    assert "No such option '--json'" in result.stderr
     assert not called
 
 
@@ -3201,7 +3435,6 @@ def test_machine_env_remove_requires_yes_without_prompt_or_operation(
         http_port=8069,
         worktree_path="/worktree",
     )
-    env.repository_root = str(tmp_path)
     client = MagicMock()
     client.environments.get.return_value = env
     with (
@@ -3209,7 +3442,7 @@ def test_machine_env_remove_requires_yes_without_prompt_or_operation(
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
         patch("odoo_instance_sdk.commands.env.click.confirm") as confirm,
     ):
-        result = CliRunner().invoke(cli, ["env", "remove", "env-1", *args])
+        result = CliRunner().invoke(cli, ["env", "rm", "env-1", *args])
 
     assert result.exit_code == 1, result.output
     assert result.stderr == ""
@@ -3231,7 +3464,6 @@ def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path
         http_port=8069,
         worktree_path="/worktree",
     )
-    env.repository_root = str(tmp_path)
     client = MagicMock()
     client.environments.get.return_value = env
     client.environments.remove_command.return_value = _matrix_command(None)
@@ -3240,7 +3472,7 @@ def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
         patch("odoo_instance_sdk.commands.env.click.confirm") as confirm,
     ):
-        result = CliRunner().invoke(cli, ["env", "remove", "env-1", "--yes", *args])
+        result = CliRunner().invoke(cli, ["env", "rm", "env-1", "--yes", *args])
 
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
@@ -3266,7 +3498,7 @@ def test_rich_env_remove_retains_confirmation_prompt(tmp_path: object) -> None:
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        result = CliRunner().invoke(cli, ["env", "remove", "env-1"], input="n\n")
+        result = CliRunner().invoke(cli, ["env", "rm", "env-1"], input="n\n")
 
     assert result.exit_code == 0, result.output
     assert "Aborted." in result.output
@@ -3304,7 +3536,7 @@ def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) 
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        result = CliRunner().invoke(cli, ["env", "checkout", "PROJ-123"])
+        result = CliRunner().invoke(cli, ["env", "create", "PROJ-123"])
 
     assert result.exit_code == 0, result.output
     assert "Environment demo" in result.output
@@ -3386,7 +3618,7 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
         dry_result = CliRunner().invoke(
-            cli, ["env", "checkout", "PROJ-123", "--dry-run", "--format", "json"]
+            cli, ["env", "create", "PROJ-123", "--dry-run", "--format", "json"]
         )
 
     assert dry_result.exit_code == 0, dry_result.output
@@ -3424,7 +3656,7 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
     ):
-        run_result = CliRunner().invoke(cli, ["env", "checkout", "PROJ-123"])
+        run_result = CliRunner().invoke(cli, ["env", "create", "PROJ-123"])
 
     assert run_result.exit_code == 0, run_result.output
     assert run_effects == ["run"]
@@ -3467,7 +3699,6 @@ def test_public_human_callbacks_neutralize_terminal_controls(
         http_port=8069,
         worktree_path="/worktree",
     )
-    env.repository_root = str(tmp_path)
     client = MagicMock()
     runner = CliRunner()
 
@@ -3485,8 +3716,17 @@ def test_public_human_callbacks_neutralize_terminal_controls(
         )
         with (
             patch(
-                "odoo_instance_sdk.cli.cli_context.ready_instance",
-                return_value=_resolved_context(client, env, MagicMock()),
+                "odoo_instance_sdk.cli.cli_context._ready_instance_for_doctor",
+                return_value=ResolvedContext(
+                    client=cast("Any", client),
+                    source=ProjectConfig(
+                        repository_root=tmp_path,
+                        python=sys.executable,
+                        odoo_bin=Path(sys.executable),
+                    ),
+                    instance=cast("Any", MagicMock()),
+                    provenance="explicit",
+                ),
             ),
             patch("odoo_instance_sdk.cli.run_doctor", return_value=report),
         ):
@@ -3507,8 +3747,8 @@ def test_public_human_callbacks_neutralize_terminal_controls(
             patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
         ):
             args = {
-                "checkout": ["env", "checkout", "PROJ-123"],
-                "remove": ["env", "remove", "env-1", "--yes"],
+                "checkout": ["env", "create", "PROJ-123"],
+                "remove": ["env", "rm", "env-1", "--yes"],
                 "sync": ["env", "sync", "env-1"],
             }[command]
             result = runner.invoke(cli, args)

@@ -22,6 +22,7 @@ dist/
 .ruff_cache/
 
 # pytest / coverage / mutation
+.cache/
 .pytest_cache/
 .coverage
 .coverage.*
