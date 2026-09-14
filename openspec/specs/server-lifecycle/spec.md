@@ -51,7 +51,7 @@ Process registry (зарегистрированные `OdooProcess` и subproce
 
 For every token beginning `--`, the validator SHALL compare the option-name portion before the first `=` with the protected long names. It SHALL reject an exact match and every non-empty proper prefix of a protected name, regardless of whether that prefix is ambiguous or unknown in the installed Odoo version, so Odoo `optparse` abbreviation cannot bypass the boundary. It SHALL not reject a longer near-prefix that no protected name starts with. It SHALL reject an exact short protected name or its attached value. It SHALL not implement or duplicate the complete Odoo option parser. `shell_command()` SHALL retain its subcommand placement (`... generated-config-args shell <args>`) while using this expanded shared protected-name boundary.
 
-After spawn, only an instance bound through `from_environment()` SHALL persist current runtime identity in `environment_runtime` (`root_pid`, `create_time`, `started_at`, branch/commit, `http_url`/`http_port`, `database_name`). `run_foreground()` SHALL clear that identity best-effort in `finally`. Manual instances SHALL not persist it; `shell()`/`run_shell_script()`/`start()`/`stop()` SHALL not persist it.
+After spawn, only an instance bound through `from_environment()` SHALL persist current runtime identity in `environment_runtime` (`root_pid`, exact `psutil.Process(root_pid).create_time()`, `started_at`, branch/commit, `http_url`/`http_port`, `database_name`). `run_foreground()` SHALL clear that identity best-effort in `finally`. If foreground wait raises unexpectedly, it SHALL terminate and reap the owned process group before clearing identity and re-raising, even when the leader exited but descendants remain; cleanup errors SHALL NOT mask the original exception. Manual instances SHALL not persist it; `shell()`/`run_shell_script()`/`start()`/`stop()` SHALL not persist it.
 
 #### Scenario: Foreground run with explicit config
 
@@ -100,6 +100,16 @@ After spawn, only an instance bound through `from_environment()` SHALL persist c
 
 - **WHEN** `instance.run_foreground(args=("--dev=reload",))` receives Ctrl+C
 - **THEN** the owned process group is stopped, runtime identity is cleared in `finally`, and the CLI exits `130`
+
+#### Scenario: Foreground identity is exact
+
+- **WHEN** an environment-bound foreground process is spawned
+- **THEN** its catalog `create_time` equals that process's exact `psutil.Process(pid).create_time()` value
+
+#### Scenario: Unexpected wait failure reaps owned process
+
+- **WHEN** the foreground wait raises after the leader exits but an owned descendant remains live
+- **THEN** the group is terminated and reaped, runtime identity is cleared best-effort, and the original exception is re-raised
 
 #### Scenario: Manual instance does not persist runtime identity
 
@@ -305,4 +315,3 @@ Every existing consumer of the shared scripted Odoo shell wrapper SHALL use one 
 
 - **WHEN** eval, exec, module update/test, translations export, administrator reset, or database preparation executes scripted Odoo code
 - **THEN** each operation uses this same wrapper and transaction outcome classification
-
