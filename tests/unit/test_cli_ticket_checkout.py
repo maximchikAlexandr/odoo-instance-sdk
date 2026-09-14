@@ -120,6 +120,34 @@ def test_ticket_allocation_honors_explicit_base_and_exact_ticket(
     assert allocation.base_ref == "release"
 
 
+def test_ticket_revalidation_consumes_named_git_steps_inside_checkout_context(
+    tmp_path: Path,
+) -> None:
+    allocation = env._TicketAllocation(
+        ticket="PROJ-123",
+        branch="PROJ-123_1",
+        repo_root=tmp_path,
+        git_common_dir=tmp_path / ".git",
+        base_ref="HEAD",
+        local_heads=(),
+        catalogue_heads=(),
+        remote_heads=(),
+    )
+    calls: list[str] = []
+
+    class Context:
+        def process(self, step_id: str) -> SimpleNamespace:
+            calls.append(step_id)
+            return SimpleNamespace(stdout="" if "remote" in step_id else "PROJ-123\n")
+
+    env._revalidate_ticket_absence(
+        cast("OdooClient", _allocation_client([])),
+        allocation,
+        context=Context(),  # type: ignore[arg-type]
+    )
+    assert calls == ["checkout.ticket.local-heads", "checkout.ticket.remote-heads"]
+
+
 @pytest.mark.parametrize("source", ["local", "catalogue", "origin"])
 def test_ticket_allocation_revalidation_is_stale_without_reallocation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str
@@ -137,21 +165,20 @@ def test_ticket_allocation_revalidation_is_stale_without_reallocation(
         remote_heads=(),
     )
     monkeypatch.setattr(
-        env, "local_branch_names", lambda _: ("PROJ-123_1",) if source == "local" else ()
-    )
-    monkeypatch.setattr(
         env,
         "_catalogue_branch_names",
         lambda *_: ("PROJ-123_1",) if source == "catalogue" else (),
     )
-    monkeypatch.setattr(
-        env,
-        "remote_branch_names",
-        lambda _, __: ("PROJ-123_1",) if source == "origin" else (),
-    )
+    context = MagicMock()
+    context.process.side_effect = [
+        SimpleNamespace(stdout="PROJ-123_1\n" if source == "local" else ""),
+        SimpleNamespace(stdout="abc\trefs/heads/PROJ-123_1\n" if source == "origin" else ""),
+    ]
 
     with pytest.raises(StalePlanError) as error:
-        env._revalidate_ticket_absence(cast("OdooClient", _allocation_client([])), allocation)
+        env._revalidate_ticket_absence(
+            cast("OdooClient", _allocation_client([])), allocation, context=context
+        )
 
     assert error.value.actual == {"source": source, "branch": "PROJ-123_1"}
 
