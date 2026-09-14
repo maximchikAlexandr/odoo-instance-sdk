@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 from zipfile import ZipFile
 
+import pytest
 from click.testing import CliRunner
 
 if TYPE_CHECKING:
-    import pytest
     from click.testing import Result
 
 from odoo_instance_sdk.cli import cli
@@ -58,6 +59,39 @@ def _invoke(
 ) -> Result:
     monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda **_kwargs: db_path)
     return CliRunner().invoke(cli, args, input=input)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("", id="empty-cursor"),
+        pytest.param("[]", id="wrong-shape"),
+        pytest.param(json.dumps({"catalogue_time": "", "id": BACKUP_ID}), id="empty-time"),
+        pytest.param('{"catalogue_time":"2026-09-14","id":"bad"}', id="invalid-uuid"),
+        pytest.param('{"catalogue_time":"2026-09-14","id":null}', id="non-string-uuid"),
+        pytest.param(
+            json.dumps({"catalogue_time": "2026-09-14", "id": BACKUP_ID.replace("-", "")}),
+            id="noncanonical-uuid",
+        ),
+    ],
+)
+def test_backup_list_rejects_invalid_cursor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: str
+) -> None:
+    db_path, _ = _seed_backup(tmp_path)
+    cursor = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    args = ["backup", "list", "--all-projects", "--format", "json"]
+
+    result = _invoke(monkeypatch, db_path, [*args, "--cursor", cursor])
+
+    assert result.exit_code == 1
+    error = json.loads(result.stdout)["error"]
+    assert error["code"] == "backup_list_failed"
+    assert "cursor is invalid" in error["message"]
+
+    valid = _invoke(monkeypatch, db_path, args)
+    assert valid.exit_code == 0
+    assert [item["id"] for item in json.loads(valid.stdout)["result"]["backups"]] == [BACKUP_ID]
 
 
 def test_backup_list_and_show_are_context_independent_and_format_parity(

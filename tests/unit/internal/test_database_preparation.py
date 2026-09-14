@@ -331,6 +331,31 @@ def test_selected_odoo_zip_executes_real_psql_plain_sql_transport(tmp_path: Path
     assert result.returncode != 0
 
 
+def test_selected_odoo_zip_rejects_manifest_database_mismatch(tmp_path: Path) -> None:
+    from odoo_instance_sdk.internal.database_preparation import capture_selected_backup_restore
+
+    archive_path = tmp_path / "incompatible.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name": "not-the-catalogue-database"}')
+        archive.writestr("dump.sql", "\\connect not-the-catalogue-database\n")
+        archive.writestr("filestore/not-the-catalogue-database/marker", "fixture")
+    backup = Backup(
+        id=uuid.uuid4(),
+        source_base_url="https://example.test",
+        database_name="remote_test",
+        format=BackupFormat.ZIP,
+        filestore_requested=True,
+        path=str(archive_path),
+        filename=archive_path.name,
+        size_bytes=archive_path.stat().st_size,
+        sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        downloaded_at=datetime.now(UTC),
+    )
+
+    with pytest.raises(ConfigError, match="database name does not match"):
+        capture_selected_backup_restore(backup)
+
+
 def test_validate_zip_rejects_duplicate_members_and_policy_limits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1430,6 +1455,7 @@ def test_restore_preflight_orders_lock_cluster_manager_and_target_check(
     assert events == ["preparation-lock", "cluster", "names", "exists"]
     client.instance.assert_not_called()
     client.instance.from_config.assert_called_once()
+    assert local._postgres_cluster is cluster
 
 
 @pytest.mark.parametrize("entrypoint", ["preflight_restore", "prepare_restore"])
@@ -1744,8 +1770,10 @@ def test_restore_admin_reset_failure_retains_target_and_removes_config(
     local.databases.restore.assert_called_once()
 
 
+@pytest.mark.parametrize("variant", ["valid", "truncated", "incompatible"])
 def test_catalogue_source_preflight_validates_exact_published_artifact(
     tmp_path: Path,
+    variant: str,
 ) -> None:
     from odoo_instance_sdk.internal.database_preparation import (
         _catalogue_backup_preflight,
@@ -1754,7 +1782,13 @@ def test_catalogue_source_preflight_validates_exact_published_artifact(
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
     archive = tmp_path / "registered.zip"
-    archive.write_bytes(b"registered backup")
+    if variant == "truncated":
+        archive.write_bytes(b"PK\x03\x04truncated")
+    else:
+        name = "remote_test" if variant == "valid" else "foreign_database"
+        with zipfile.ZipFile(archive, "w") as payload:
+            payload.writestr("manifest.json", f'{{"db_name": "{name}"}}')
+            payload.writestr("dump.sql", "SELECT 1;\n")
     backup_id = str(uuid.uuid4())
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     catalog.start_download(
@@ -1768,9 +1802,15 @@ def test_catalogue_source_preflight_validates_exact_published_artifact(
     catalog.success_download(backup_id, archive.name, archive.stat().st_size, "")
     project = _project(tmp_path)
 
-    assert _catalogue_backup_preflight(
-        catalog, _CatalogueRestoreSource(uuid.UUID(backup_id)), project
-    ).id == uuid.UUID(backup_id)
+    if variant == "valid":
+        assert _catalogue_backup_preflight(
+            catalog, _CatalogueRestoreSource(uuid.UUID(backup_id)), project
+        ).id == uuid.UUID(backup_id)
+    else:
+        with pytest.raises(ConfigError, match=r"archive|database name"):
+            _catalogue_backup_preflight(
+                catalog, _CatalogueRestoreSource(uuid.UUID(backup_id)), project
+            )
     catalog.close()
 
 

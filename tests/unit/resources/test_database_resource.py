@@ -904,6 +904,26 @@ class TestBackupProvenance:
         assert list(tmp_path.glob("*.zip")) == []
         catalog.fail_download.assert_called_once()
 
+    def test_backup_rejects_non_archive_remote_error_without_publishing(
+        self, instance: OdooInstance, tmp_path: Path
+    ) -> None:
+        response = MagicMock(spec=httpx.Response)
+        response.headers = {"content-type": "text/html; charset=utf-8"}
+        response.raise_for_status.return_value = None
+        http_cm, _http = _stream_http(response)
+        catalog = MagicMock()
+
+        with (
+            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
+            patch("httpx.Client", return_value=http_cm),
+            pytest.raises(BackupDownloadError, match="not an archive"),
+        ):
+            instance.databases.backup("testdb", destination=tmp_path)
+
+        assert list(tmp_path.glob("*.part")) == []
+        assert list(tmp_path.glob("*.zip")) == []
+        catalog.fail_download.assert_called_once()
+
     def test_backup_limit_stops_iteration_before_requesting_another_chunk(
         self, tmp_path: Path
     ) -> None:

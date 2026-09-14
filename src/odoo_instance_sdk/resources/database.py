@@ -1047,6 +1047,15 @@ class DatabaseResource:
                     ) as resp,
                 ):
                     resp.raise_for_status()
+                    content_type = (
+                        resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                    )
+                    if content_type and content_type not in {
+                        "application/octet-stream",
+                        "application/zip",
+                        "application/x-zip-compressed",
+                    }:
+                        raise BackupDownloadError("Backup response was not an archive")
                     server_filename = extract_server_filename(
                         resp.headers.get("content-disposition")
                     )

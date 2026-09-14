@@ -988,6 +988,7 @@ class OdooInstance:
                 )
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         argv = (*self._executable_prefix(), *cli_args)
+        resolved_cwd = cwd if cwd is not None else self.config.default_cwd
         environment_snapshot, environment_overrides = captured_child_environment(
             env, project_environment=self.config.project_environment
         )
@@ -995,7 +996,11 @@ class OdooInstance:
         step = PreparedStep(
             step_id="instance.start",
             argv=argv,
-            cwd=None if cwd is None else str(cwd),
+            # Environment-owned starts must use the captured runtime cwd when
+            # the caller does not override it.  Otherwise the child starts in
+            # the caller's directory while the persisted identity records the
+            # environment cwd, making a later public stop fail closed.
+            cwd=None if resolved_cwd is None else str(resolved_cwd),
             environment=environment_overrides,
             environment_snapshot=environment_snapshot,
             environment_overrides=environment_overrides,
@@ -1927,6 +1932,37 @@ class AuxiliaryRestoreSession:
     process: OdooProcess | None = None
     using_existing_runtime: bool = False
 
+    def _cleanup_failed_start(self, handle: ProcessHandle | None, error: BaseException) -> None:
+        if self.process is not None:
+            # Readiness failure happens after registration.  Unregister and
+            # terminate the owned process here so a timeout cannot leave a
+            # listener/process behind for the next leaf.
+            owned, registered_secret_path = self.instance._client.unregister_process(
+                self.process.id
+            )
+            self.process = None
+            if owned is not None:
+                try:
+                    terminate(
+                        ProcessHandle(
+                            process=owned,
+                            argv=(),
+                            process_group_id=owned.pid,
+                            session_id=owned.pid,
+                            inherited_stdio=False,
+                        ),
+                        process_group_id=owned.pid,
+                        timeout=10.0,
+                    )
+                except BaseException as cleanup_error:
+                    error.add_note(f"auxiliary process cleanup failed: {cleanup_error}")
+            cleanup_secret_config(registered_secret_path or self.secret_path)
+            return
+        if handle is not None:
+            with contextlib.suppress(BaseException):
+                terminate(handle, process_group_id=handle.process_group_id, timeout=10.0)
+        cleanup_secret_config(self.secret_path)
+
     def ensure_started(self, context: RunContext[PrivateJsonValue]) -> None:
         if self.process is not None or self.using_existing_runtime:
             return
@@ -1965,12 +2001,8 @@ class AuxiliaryRestoreSession:
                     "resolve the project runtime and retry, or run `odcli run`"
                 ) from None
             context.complete_action(self.ready_action.step_id)
-        except BaseException:
-            if self.process is None:
-                if handle is not None:
-                    with contextlib.suppress(BaseException):
-                        terminate(handle, process_group_id=handle.process_group_id, timeout=10.0)
-                cleanup_secret_config(self.secret_path)
+        except BaseException as error:
+            self._cleanup_failed_start(handle, error)
             if handle is None:
                 from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
 
@@ -2075,9 +2107,21 @@ def _project_runtime_owns_port(instance: OdooInstance, config: StartConfig) -> b
         runtimes = getattr(snapshot, "project_runtimes", ())
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return False
-    for runtime in runtimes:
+    # A public ``db refresh`` invoked for a project may temporarily reuse an
+    # Odoo process owned by an environment checked out from that project.
+    # The project filter already proves repository/common-dir ownership; include
+    # those environment runtime rows in the same strict PID/create-time check.
+    environment_runtimes = tuple(
+        runtime
+        for _environment, runtime in getattr(snapshot, "environments", ())
+        if runtime is not None
+    )
+    for runtime in (*runtimes, *environment_runtimes):
         try:
-            if str(runtime["owner_id"]) != binding.owner_id:
+            if (
+                str(runtime["owner_kind"]) == "project"
+                and str(runtime["owner_id"]) != binding.owner_id
+            ):
                 continue
             if int(str(runtime["http_port"])) != config.http_port:
                 continue

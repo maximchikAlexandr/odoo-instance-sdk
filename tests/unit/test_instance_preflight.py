@@ -175,7 +175,7 @@ def test_start_readiness_failure_precedes_secret_write_and_spawn() -> None:
         patch("odoo_instance_sdk.resources.instance._write_secret_config") as write_secret,
         pytest.raises(PostgresClusterUnreachableError, match="not ready"),
     ):
-        instance.start(StartConfig(db_password="private"))
+        instance.start(StartConfig(http_port=_free_loopback_port(), db_password="private"))
 
     assert executor.spawned == []
     assert write_secret.call_count == 0
