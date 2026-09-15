@@ -672,23 +672,24 @@ def _check_catalog(report: DoctorReport, client: OdooClient) -> None:
         return
     conn = sqlite3.connect(f"file:{catalog_path}?mode=ro", uri=True)
     try:
-        row = conn.execute("PRAGMA user_version").fetchone()
-        user_version = int(row[0]) if row is not None else 0
+        from odoo_instance_sdk.storage.catalog_migrate import CATALOG_REVISION, catalog_revision
+
+        revision = catalog_revision(conn)
     except sqlite3.Error as e:
         report.checks.append(CheckResult("catalog", STATUS_ERROR, f"catalog unreadable: {e}"))
         return
     finally:
         conn.close()
-    if user_version >= 5:
+    if revision == CATALOG_REVISION:
         report.checks.append(
-            CheckResult("catalog", STATUS_OK, f"{catalog_path} (user_version={user_version})")
+            CheckResult("catalog", STATUS_OK, f"{catalog_path} (revision={revision})")
         )
     else:
         report.checks.append(
             CheckResult(
                 "catalog",
                 STATUS_ERROR,
-                f"catalog user_version={user_version}, expected at least 5",
+                f"catalog revision={revision!r}, expected {CATALOG_REVISION!r}",
             )
         )
 

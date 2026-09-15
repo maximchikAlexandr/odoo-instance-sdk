@@ -12,130 +12,227 @@ from odoo_instance_sdk.internal.applied_settings import (
     LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON,
     encode_applied_settings,
 )
-from odoo_instance_sdk.storage.backup_catalog import (
-    CURRENT_SCHEMA_VERSION,
-    BackupCatalog,
-)
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.catalog_migrate import CATALOG_REVISION, catalog_revision
+from odoo_instance_sdk.storage.catalog_schema import CATALOG_INDEXES, CATALOG_TABLES
 from tests.unit.monitor_support import make_env
-
-CATALOG_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
-NEXT_CATALOG_SCHEMA_VERSION = CATALOG_SCHEMA_VERSION + 1
-# These are the pre-change upgrade states represented by the migration tests;
-# keeping the list explicit makes a missing intermediate fixture fail loudly.
-MIGRATION_FIXTURE_VERSIONS = (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+from tests.unit.storage.catalog_alpha_fixture import write_alpha_catalog
 
 
-def test_next_catalog_migration_version_and_fixtures_are_sequential() -> None:
-    assert CATALOG_SCHEMA_VERSION == 16
-    assert NEXT_CATALOG_SCHEMA_VERSION == 17
-    contiguous_versions = tuple(range(MIGRATION_FIXTURE_VERSIONS[0], CATALOG_SCHEMA_VERSION))
-    assert contiguous_versions == MIGRATION_FIXTURE_VERSIONS
+def _assert_current_revision(conn: sqlite3.Connection) -> None:
+    assert catalog_revision(conn) == CATALOG_REVISION
 
 
-def test_fresh_install_creates_v16_directly(tmp_path: Path) -> None:
+def test_fresh_install_creates_current_schema_directly(tmp_path: Path) -> None:
     durable = tmp_path / "catalog.sqlite3"
     catalog = BackupCatalog(db_path=durable)
-    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == CATALOG_SCHEMA_VERSION
-    backup_columns = {r[1] for r in catalog._conn.execute("PRAGMA table_info(backups)").fetchall()}
+    _assert_current_revision(catalog._conn)
+    backup_columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(backups)")}
     assert "source_git_branch" in backup_columns
+    assert "project_id" in backup_columns
     environment_columns = {
-        r[1] for r in catalog._conn.execute("PRAGMA table_info(environments)").fetchall()
+        row[1] for row in catalog._conn.execute("PRAGMA table_info(environments)")
     }
     assert "applied_settings_json" in environment_columns
     tables = {
-        r[0]
-        for r in catalog._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+        row[0] for row in catalog._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
-    assert "environments" in tables
-    assert "environment_events" in tables
+    assert set(CATALOG_TABLES) <= tables
     assert "runtime" in tables
-    assert "projects" in tables
     for child_table in ("environment_events", "environment_copy_journal"):
         environment_foreign_keys = {
             (foreign_key[3], foreign_key[2], foreign_key[4])
             for foreign_key in catalog._conn.execute(f"PRAGMA foreign_key_list({child_table})")
         }
         assert ("environment_id", "environments", "id") in environment_foreign_keys
-    indexes = {r[1] for r in catalog._conn.execute("PRAGMA index_list(backups)").fetchall()}
+    indexes = {row[1] for row in catalog._conn.execute("PRAGMA index_list(backups)")}
     assert "backups_point_order_idx" in indexes
     catalog.close()
 
 
-def test_v15_applied_settings_migration_is_additive_and_unknown(tmp_path: Path) -> None:
+def test_alpha_catalogue_is_backed_up_stamped_and_preserves_rows(tmp_path: Path) -> None:
     db = tmp_path / "catalog.sqlite3"
-    env_id = str(uuid.uuid4())
+    backup_id, environment_id, project_id = write_alpha_catalog(db)
+    backup_copy = db.with_suffix(f"{db.suffix}.pre-alembic.backup")
+    assert not backup_copy.exists()
+
+    catalog = BackupCatalog(db_path=db)
+    _assert_current_revision(catalog._conn)
+    assert backup_copy.exists()
+    row = catalog.get_by_id(backup_id)
+    assert row is not None
+    assert row["project_id"] == project_id
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM backup_events WHERE backup_id = ?", (backup_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    assert catalog.get_environment(environment_id) is not None
+    catalog.close()
+
+
+def test_reopen_stamped_catalog_is_idempotent(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=db)
+    catalog.close()
+    reopened = BackupCatalog(db_path=db)
+    _assert_current_revision(reopened._conn)
+    reopened.close()
+
+
+def test_schema_verification_failure_does_not_stamp(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
     conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA user_version = 14")
     conn.executescript(
         """
-        CREATE TABLE environments (
+        CREATE TABLE backups (
             id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            repository_root TEXT NOT NULL,
-            git_common_dir TEXT NOT NULL,
-            branch TEXT NOT NULL,
-            base_ref TEXT NOT NULL,
-            worktree_path TEXT NOT NULL,
-            generated_config_path TEXT NOT NULL,
-            python_environment_path TEXT NOT NULL,
-            python_environment_owned INTEGER NOT NULL,
-            dependency_lock_path TEXT NOT NULL,
-            db_mode TEXT NOT NULL,
-            source_db_name TEXT,
-            target_db_name TEXT,
-            backup_id TEXT,
-            runtime_json TEXT NOT NULL,
-            state TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            last_used_at TEXT,
-            removed_at TEXT,
-            last_error TEXT
+            source_base_url TEXT NOT NULL,
+            database_name TEXT NOT NULL,
+            state TEXT NOT NULL
         );
-        CREATE INDEX environments_active_idx ON environments(git_common_dir, branch, state);
-        CREATE TABLE environment_events (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            environment_id TEXT NOT NULL REFERENCES environments(id),
-            operation TEXT NOT NULL,
-            outcome TEXT NOT NULL,
-            occurred_at TEXT NOT NULL,
-            message TEXT
-        );
-        INSERT INTO environments VALUES (
-            '"""
-        + env_id
-        + """', 'legacy', '/repo', '/repo/.git', 'main', 'HEAD',
-            '/wt', '/wt/odoo.conf', '/venv', 0, '/lock', 'shared', NULL, NULL, NULL,
-            '{}', 'ready', '2026-01-01T00:00:00', NULL, NULL, NULL
-        );
-        INSERT INTO environment_events(environment_id, operation, outcome, occurred_at)
-        VALUES ('"""
-        + env_id
-        + """', 'checkout', 'succeeded', '2026-01-01T00:00:00');
         """
     )
     conn.commit()
     conn.close()
 
+    with pytest.raises(BackupCatalogError, match="schema is not equivalent"):
+        BackupCatalog(db_path=db)
+
+    conn = sqlite3.connect(str(db))
+    assert catalog_revision(conn) is None
+    conn.close()
+
+
+def test_foreign_keys_and_indexes_exist_after_fresh_install(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    indexes = {
+        row[0]
+        for row in catalog._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    assert set(CATALOG_INDEXES) <= indexes
+    foreign_keys = {
+        (item[3], item[2], item[4])
+        for item in catalog._conn.execute("PRAGMA foreign_key_list(backups)")
+    }
+    assert ("project_id", "projects", "project_id") in foreign_keys
+    view = catalog._conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='environment_runtime'"
+    ).fetchone()
+    assert view is not None
+    catalog.close()
+
+
+def test_data_writes_after_alpha_upgrade(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    backup_id, environment_id, _project_id = write_alpha_catalog(db)
     catalog = BackupCatalog(db_path=db)
-    columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(environments)")}
-    row = catalog.get_environment(env_id)
-    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
-    assert "applied_settings_json" in columns
-    assert row is not None
-    assert row["applied_settings_json"] == LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON
-    assert catalog._conn.execute("SELECT COUNT(*) FROM environment_events").fetchone()[0] == 1
+    catalog.start_download(
+        str(uuid.uuid4()),
+        "https://example.test",
+        "fresh",
+        "zip",
+        True,
+        tmp_path / "fresh.zip",
+        project_id="project_alpha-fixture",
+    )
+    catalog.add_environment_event(environment_id, "use", "succeeded", message="after upgrade")
     assert (
         catalog._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
-            ("environments_active_idx",),
-        ).fetchone()
-        is not None
+            "SELECT COUNT(*) FROM backup_events WHERE backup_id = ?", (backup_id,)
+        ).fetchone()[0]
+        == 1
     )
-    foreign_keys = catalog._conn.execute("PRAGMA foreign_key_list(environment_events)").fetchall()
-    assert any(item[3] == "environment_id" and item[2] == "environments" for item in foreign_keys)
+    assert (
+        catalog._conn.execute(
+            "SELECT COUNT(*) FROM environment_events WHERE environment_id = ?",
+            (environment_id,),
+        ).fetchone()[0]
+        == 2
+    )
+    catalog.close()
+
+
+def test_environment_methods_exist(tmp_path: Path) -> None:
+    durable = tmp_path / "catalog.sqlite3"
+    catalog = BackupCatalog(db_path=durable)
+    env_id = str(uuid.uuid4())
+    catalog.create_environment(
+        {
+            "id": env_id,
+            "name": "test",
+            "repository_root": "/repo",
+            "git_common_dir": "/repo/.git",
+            "branch": "main",
+            "base_ref": "HEAD",
+            "worktree_path": "/wt",
+            "generated_config_path": "/wt/odoo.conf",
+            "python_environment_path": "/venv",
+            "python_environment_owned": False,
+            "dependency_lock_path": "/lock",
+            "db_mode": "shared",
+            "source_db_name": "mydb",
+            "target_db_name": None,
+            "backup_id": None,
+            "runtime_json": "{}",
+            "state": "creating",
+            "created_at": "2026-01-01T00:00:00",
+            "last_used_at": None,
+            "removed_at": None,
+            "last_error": None,
+        }
+    )
+    row = catalog.get_environment(env_id)
+    assert row is not None
+    assert row["name"] == "test"
+    catalog.add_environment_event(env_id, "checkout", "started", message="begin")
+    catalog.update_environment_state(env_id, "ready")
+    assert catalog.active_environment_for("/repo/.git", "main") is not None
+    envs = catalog.list_environments()
+    assert len(envs) == 1
+    catalog.close()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "{}",
+        '{"version": 99, "components": {}}',
+        '{"version": 1, "components": {"python": {"status": "unknown"}, "dependencies": {"status": "unknown"}, "odoo": {"status": "known", "values": {"admin_passwd": "raw-secret"}}, "addons": {"status": "unknown"}, "git": {"status": "unknown"}}}',
+    ],
+)
+def test_create_environment_rejects_unsafe_applied_settings(tmp_path: Path, document: str) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    environment: dict[str, JsonValue] = {
+        "id": str(uuid.uuid4()),
+        "name": "unsafe",
+        "repository_root": "/repo",
+        "git_common_dir": "/repo/.git",
+        "branch": "main",
+        "base_ref": "HEAD",
+        "worktree_path": "/wt",
+        "generated_config_path": "/wt/odoo.conf",
+        "python_environment_path": "/venv",
+        "python_environment_owned": False,
+        "dependency_lock_path": "/lock",
+        "db_mode": "shared",
+        "source_db_name": None,
+        "target_db_name": None,
+        "backup_id": None,
+        "runtime_json": "{}",
+        "applied_settings_json": document,
+        "state": "creating",
+        "created_at": "2026-01-01T00:00:00",
+        "last_used_at": None,
+        "removed_at": None,
+        "last_error": None,
+    }
+    with pytest.raises(BackupCatalogError, match="invalid applied_settings_json"):
+        catalog.create_environment(environment)
+    assert catalog._conn.execute("SELECT COUNT(*) FROM environments").fetchone()[0] == 0
     catalog.close()
 
 
@@ -290,726 +387,18 @@ def test_copy_replacement_publishes_backup_and_restore_atomically(tmp_path: Path
     catalog.close()
 
 
-def test_v13_migration_rolls_back_on_claim_index_conflict(tmp_path: Path) -> None:
-    db = tmp_path / "catalog.sqlite3"
-    catalog = BackupCatalog(db_path=db)
-    catalog._conn.execute("DROP INDEX postgres_clusters_project_idx")
-    catalog._conn.execute("PRAGMA user_version = 12")
-    catalog._conn.execute("CREATE TABLE postgres_clusters_project_idx (marker INTEGER)")
-    catalog._conn.commit()
-    catalog.close()
-
-    with pytest.raises(BackupCatalogError):
-        BackupCatalog(db_path=db)
-
-    conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
-    assert (
-        conn.execute(
-            "SELECT type FROM sqlite_master WHERE name='postgres_clusters_project_idx'"
-        ).fetchone()[0]
-        == "table"
-    )
-    conn.execute("DROP TABLE postgres_clusters_project_idx")
-    conn.commit()
-    conn.close()
-    reopened = BackupCatalog(db_path=db)
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
-    reopened.close()
-
-
-def test_v13_migration_rejects_unsupported_cluster_table_shape(tmp_path: Path) -> None:
-    db = tmp_path / "catalog.sqlite3"
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA user_version = 12")
-    conn.execute("CREATE TABLE postgres_clusters (marker INTEGER)")
-    conn.commit()
-    conn.close()
-
-    with pytest.raises(BackupCatalogError, match="unsupported shape"):
-        BackupCatalog(db_path=db)
-
-    conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
-    assert [row[1] for row in conn.execute("PRAGMA table_info(postgres_clusters)")] == ["marker"]
-    conn.close()
-
-
-def test_v12_backup_order_index_migration_rolls_back_on_conflict(tmp_path: Path) -> None:
-    db = tmp_path / "catalog.sqlite3"
-    catalog = BackupCatalog(db_path=db)
-    catalog._conn.execute("DROP INDEX backups_point_order_idx")
-    catalog._conn.execute("PRAGMA user_version = 11")
-    catalog._conn.execute("CREATE TABLE backups_point_order_idx (marker INTEGER)")
-    catalog._conn.commit()
-    catalog.close()
-
-    with pytest.raises(BackupCatalogError):
-        BackupCatalog(db_path=db)
-
-    conn = sqlite3.connect(str(db))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
-    assert (
-        conn.execute(
-            "SELECT type FROM sqlite_master WHERE name='backups_point_order_idx'"
-        ).fetchone()[0]
-        == "table"
-    )
-    conn.execute("DROP TABLE backups_point_order_idx")
-    conn.commit()
-    conn.close()
-
-    reopened = BackupCatalog(db_path=db)
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
-    assert (
-        reopened._conn.execute(
-            "SELECT type FROM sqlite_master WHERE name='backups_point_order_idx'"
-        ).fetchone()[0]
-        == "index"
-    )
-    reopened.close()
-
-
-def test_v9_catalog_migrates_branch_column_and_preserves_mapping_and_events(tmp_path: Path) -> None:
-    db = tmp_path / "catalog.sqlite3"
-    backup_id = str(uuid.uuid4())
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA user_version = 9")
-    conn.executescript("""
-        CREATE TABLE backups (
-            id TEXT PRIMARY KEY,
-            source_base_url TEXT NOT NULL,
-            database_name TEXT NOT NULL,
-            format TEXT NOT NULL,
-            filestore_requested INTEGER NOT NULL,
-            path TEXT,
-            filename TEXT,
-            size_bytes INTEGER,
-            sha256 TEXT,
-            state TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            downloaded_at TEXT,
-            failed_at TEXT,
-            deleted_at TEXT,
-            error_type TEXT,
-            error_message TEXT
-        );
-        CREATE TABLE backup_events (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            backup_id TEXT NOT NULL REFERENCES backups(id),
-            event_type TEXT NOT NULL,
-            occurred_at TEXT NOT NULL,
-            path TEXT,
-            validator TEXT,
-            exit_code INTEGER,
-            message TEXT
-        );
-        CREATE TABLE restores (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            db_host TEXT NOT NULL,
-            db_port INTEGER NOT NULL,
-            database_name TEXT NOT NULL,
-            backup_id TEXT NOT NULL REFERENCES backups(id),
-            restored_at TEXT NOT NULL
-        );
-        CREATE TABLE database_events (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            db_host TEXT NOT NULL,
-            db_port INTEGER NOT NULL,
-            database_name TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            occurred_at TEXT NOT NULL,
-            backup_id TEXT REFERENCES backups(id)
-        );
-    """)
-    conn.execute(
-        "INSERT INTO backups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            backup_id,
-            "https://example.test",
-            "source",
-            "zip",
-            1,
-            str(tmp_path / "gone.zip"),
-            "gone.zip",
-            7,
-            "a" * 64,
-            "deleted",
-            "2026-01-01T00:00:00+00:00",
-            "2026-01-01T00:00:01+00:00",
-            None,
-            "2026-01-02T00:00:00+00:00",
-            None,
-            None,
-        ),
-    )
-    conn.execute(
-        "INSERT INTO backup_events (backup_id, event_type, occurred_at) VALUES (?, ?, ?)",
-        (backup_id, "download_succeeded", "2026-01-01T00:00:01+00:00"),
-    )
-    conn.execute(
-        "INSERT INTO restores (db_host, db_port, database_name, backup_id, restored_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("localhost", 5432, "restored", backup_id, "2026-01-02T00:00:00+00:00"),
-    )
-    conn.execute(
-        "INSERT INTO database_events (db_host, db_port, database_name, event_type, occurred_at, backup_id) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("localhost", 5432, "restored", "restored", "2026-01-02T00:00:00+00:00", backup_id),
-    )
-    conn.commit()
-    conn.close()
-
-    catalog = BackupCatalog(db_path=db)
-    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
-    assert (
-        catalog._conn.execute(
-            "SELECT COUNT(*) FROM backup_events WHERE backup_id=?", (backup_id,)
-        ).fetchone()[0]
-        == 1
-    )
-    assert (
-        catalog._conn.execute(
-            "SELECT COUNT(*) FROM restores WHERE backup_id=?", (backup_id,)
-        ).fetchone()[0]
-        == 1
-    )
-    assert (
-        catalog._conn.execute(
-            "SELECT COUNT(*) FROM database_events WHERE backup_id=?", (backup_id,)
-        ).fetchone()[0]
-        == 1
-    )
-    catalog.close()
-
-    reopened = BackupCatalog(db_path=db)
-    columns = [row[1] for row in reopened._conn.execute("PRAGMA table_info(backups)")]
-    assert columns.count("source_git_branch") == 1
-    provenance = reopened.latest_restore_provenance("localhost", 5432, "restored")
-    assert provenance is not None
-    assert provenance.source_git_branch is None
-    assert reopened._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
-    reopened.close()
-
-
-def test_v15_catalog_migration_preserves_populated_backup_relations(tmp_path: Path) -> None:
-    """The v16 ownership column must not disturb populated v15 catalogue rows."""
-    db = tmp_path / "catalog.sqlite3"
-    backup_id = str(uuid.uuid4())
-    environment_id = str(uuid.uuid4())
-    project_id = "project_legacy-owner"
-    backup_path = tmp_path / "legacy.zip"
-    backup_path.write_bytes(b"legacy backup")
-
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA user_version = 15")
-    conn.executescript(
-        """
-        CREATE TABLE projects (
-            project_id TEXT PRIMARY KEY,
-            repository_root TEXT NOT NULL,
-            git_common_dir TEXT NOT NULL,
-            registered_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE backups (
-            id TEXT PRIMARY KEY,
-            source_base_url TEXT NOT NULL,
-            database_name TEXT NOT NULL,
-            format TEXT NOT NULL,
-            filestore_requested INTEGER NOT NULL,
-            path TEXT,
-            filename TEXT,
-            size_bytes INTEGER,
-            sha256 TEXT,
-            state TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            downloaded_at TEXT,
-            failed_at TEXT,
-            deleted_at TEXT,
-            error_type TEXT,
-            error_message TEXT,
-            source_git_branch TEXT
-        );
-        CREATE TABLE backup_events (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            backup_id TEXT NOT NULL REFERENCES backups(id),
-            event_type TEXT NOT NULL,
-            occurred_at TEXT NOT NULL,
-            path TEXT,
-            validator TEXT,
-            exit_code INTEGER,
-            message TEXT
-        );
-        CREATE TABLE restores (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            db_host TEXT NOT NULL,
-            db_port INTEGER NOT NULL,
-            database_name TEXT NOT NULL,
-            backup_id TEXT NOT NULL REFERENCES backups(id),
-            restored_at TEXT NOT NULL,
-            cluster_id TEXT,
-            data_directory TEXT
-        );
-        CREATE TABLE database_events (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            db_host TEXT NOT NULL,
-            db_port INTEGER NOT NULL,
-            database_name TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            occurred_at TEXT NOT NULL,
-            backup_id TEXT REFERENCES backups(id),
-            cluster_id TEXT,
-            data_directory TEXT
-        );
-        CREATE TABLE environments (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            repository_root TEXT NOT NULL,
-            git_common_dir TEXT NOT NULL,
-            branch TEXT NOT NULL,
-            backup_id TEXT REFERENCES backups(id)
-        );
-        """
-    )
-    conn.execute(
-        "INSERT INTO projects VALUES (?, ?, ?, ?, ?)",
-        (project_id, "/repo", "/repo/.git", "2026-01-01", "2026-01-01"),
-    )
-    conn.execute(
-        """INSERT INTO backups
-           (id, source_base_url, database_name, format, filestore_requested, path,
-            filename, size_bytes, sha256, state, started_at, downloaded_at,
-            source_git_branch)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            backup_id,
-            "https://example.test",
-            "legacy",
-            "zip",
-            1,
-            str(backup_path),
-            backup_path.name,
-            backup_path.stat().st_size,
-            "a" * 64,
-            "available",
-            "2026-01-01T00:00:00+00:00",
-            "2026-01-01T00:00:01+00:00",
-            "main",
-        ),
-    )
-    conn.execute(
-        "INSERT INTO backup_events (backup_id, event_type, occurred_at, path) VALUES (?, ?, ?, ?)",
-        (backup_id, "download_succeeded", "2026-01-01T00:00:01+00:00", str(backup_path)),
-    )
-    conn.execute(
-        "INSERT INTO restores (db_host, db_port, database_name, backup_id, restored_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("localhost", 5432, "legacy", backup_id, "2026-01-02T00:00:00+00:00"),
-    )
-    conn.execute(
-        "INSERT INTO database_events "
-        "(db_host, db_port, database_name, event_type, occurred_at, backup_id) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("localhost", 5432, "legacy", "restored", "2026-01-02T00:00:00+00:00", backup_id),
-    )
-    conn.execute(
-        "INSERT INTO environments (id, name, repository_root, git_common_dir, branch, backup_id) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (environment_id, "legacy", "/repo", "/repo/.git", "main", backup_id),
-    )
-    conn.commit()
-    conn.close()
-
-    catalog = BackupCatalog(db_path=db)
-    row = catalog.get_by_id(backup_id)
-    assert row is not None
-    assert row["id"] == backup_id
-    assert row["project_id"] == project_id
-    assert catalog._conn.execute("PRAGMA user_version").fetchone()[0] == CATALOG_SCHEMA_VERSION
-    assert (
-        catalog._conn.execute(
-            "SELECT COUNT(*) FROM backup_events WHERE backup_id = ?", (backup_id,)
-        ).fetchone()[0]
-        == 1
-    )
-    assert (
-        catalog._conn.execute(
-            "SELECT COUNT(*) FROM restores WHERE backup_id = ?", (backup_id,)
-        ).fetchone()[0]
-        == 1
-    )
-    assert (
-        catalog._conn.execute(
-            "SELECT COUNT(*) FROM database_events WHERE backup_id = ?", (backup_id,)
-        ).fetchone()[0]
-        == 1
-    )
-    assert (
-        catalog._conn.execute(
-            "SELECT backup_id FROM environments WHERE id = ?", (environment_id,)
-        ).fetchone()[0]
-        == backup_id
-    )
-    foreign_keys = {
-        (item[3], item[2], item[4])
-        for item in catalog._conn.execute("PRAGMA foreign_key_list(backups)")
-    }
-    assert ("project_id", "projects", "project_id") in foreign_keys
-    indexes = {item[1] for item in catalog._conn.execute("PRAGMA index_list(backups)")}
-    assert "backups_project_idx" in indexes
-    catalog.close()
-
-
-def test_environment_methods_exist(tmp_path: Path) -> None:
-    durable = tmp_path / "catalog.sqlite3"
-    catalog = BackupCatalog(db_path=durable)
-    env_id = str(uuid.uuid4())
-    catalog.create_environment(
-        {
-            "id": env_id,
-            "name": "test",
-            "repository_root": "/repo",
-            "git_common_dir": "/repo/.git",
-            "branch": "main",
-            "base_ref": "HEAD",
-            "worktree_path": "/wt",
-            "generated_config_path": "/wt/odoo.conf",
-            "python_environment_path": "/venv",
-            "python_environment_owned": False,
-            "dependency_lock_path": "/lock",
-            "db_mode": "shared",
-            "source_db_name": "mydb",
-            "target_db_name": None,
-            "backup_id": None,
-            "runtime_json": "{}",
-            "state": "creating",
-            "created_at": "2026-01-01T00:00:00",
-            "last_used_at": None,
-            "removed_at": None,
-            "last_error": None,
-        }
-    )
-    row = catalog.get_environment(env_id)
-    assert row is not None
-    assert row["name"] == "test"
-    catalog.add_environment_event(env_id, "checkout", "started", message="begin")
-    catalog.update_environment_state(env_id, "ready")
-    assert catalog.active_environment_for("/repo/.git", "main") is not None
-    envs = catalog.list_environments()
-    assert len(envs) == 1
-    catalog.close()
-
-
-@pytest.mark.parametrize(
-    "document",
-    [
-        "{}",
-        '{"version": 99, "components": {}}',
-        '{"version": 1, "components": {"python": {"status": "unknown"}, "dependencies": {"status": "unknown"}, "odoo": {"status": "known", "values": {"admin_passwd": "raw-secret"}}, "addons": {"status": "unknown"}, "git": {"status": "unknown"}}}',
-    ],
-)
-def test_create_environment_rejects_unsafe_applied_settings(tmp_path: Path, document: str) -> None:
+def test_fresh_catalog_keeps_one_active_environment_per_branch(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
-    environment: dict[str, JsonValue] = {
-        "id": str(uuid.uuid4()),
-        "name": "unsafe",
-        "repository_root": "/repo",
-        "git_common_dir": "/repo/.git",
-        "branch": "main",
-        "base_ref": "HEAD",
-        "worktree_path": "/wt",
-        "generated_config_path": "/wt/odoo.conf",
-        "python_environment_path": "/venv",
-        "python_environment_owned": False,
-        "dependency_lock_path": "/lock",
-        "db_mode": "shared",
-        "source_db_name": None,
-        "target_db_name": None,
-        "backup_id": None,
-        "runtime_json": "{}",
-        "applied_settings_json": document,
-        "state": "creating",
-        "created_at": "2026-01-01T00:00:00",
-        "last_used_at": None,
-        "removed_at": None,
-        "last_error": None,
-    }
-    with pytest.raises(BackupCatalogError, match="invalid applied_settings_json"):
-        catalog.create_environment(environment)
-    assert catalog._conn.execute("SELECT COUNT(*) FROM environments").fetchone()[0] == 0
-    catalog.close()
-
-
-def test_v5_copy_journal_migrates_to_typed_pending_stage(tmp_path: Path) -> None:
-    db = tmp_path / "catalog.sqlite3"
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA user_version = 5")
-    conn.executescript("""
-        CREATE TABLE backups (
-            id TEXT PRIMARY KEY,
-            source_base_url TEXT NOT NULL,
-            database_name TEXT NOT NULL,
-            state TEXT NOT NULL,
-            downloaded_at TEXT
-        );
-        CREATE TABLE environments (id TEXT PRIMARY KEY);
-        CREATE TABLE environment_copy_journal (
-            environment_id TEXT PRIMARY KEY REFERENCES environments(id),
-            target_database TEXT NOT NULL,
-            db_host TEXT NOT NULL,
-            db_port INTEGER NOT NULL,
-            db_user TEXT,
-            backup_id TEXT REFERENCES backups(id),
-            stage TEXT NOT NULL CHECK (stage IN ('prepared', 'backed_up', 'restored', 'dropped', 'backup_deleted')),
-            updated_at TEXT NOT NULL
-        );
-    """)
-    conn.close()
-
-    catalog = BackupCatalog(db_path=db)
-    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    schema = catalog._conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='environment_copy_journal'"
-    ).fetchone()[0]
-    assert version == CATALOG_SCHEMA_VERSION
-    assert "restore_pending" in schema
-    catalog.close()
-
-
-def test_v8_catalog_upgrades_to_v16_environment_runtime_and_branch_column(tmp_path: Path) -> None:
-    db = tmp_path / "catalog.sqlite3"
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA user_version = 8")
-    conn.executescript("""
-        CREATE TABLE backups (
-            id TEXT PRIMARY KEY,
-            source_base_url TEXT NOT NULL,
-            database_name TEXT NOT NULL,
-            state TEXT NOT NULL,
-            downloaded_at TEXT
-        );
-        CREATE TABLE environments (id TEXT PRIMARY KEY);
-    """)
-    conn.close()
-
-    catalog = BackupCatalog(db_path=db)
-    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    tables = {
-        r[0]
-        for r in catalog._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
-    assert version == CATALOG_SCHEMA_VERSION
-    assert "runtime" in tables
-    columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(backups)")}
-    assert "source_git_branch" in columns
-    assert len([column for column in columns if column == "source_git_branch"]) == 1
-    catalog.close()
-
-
-def _write_v7_catalog_with_environment(db: Path, env_id: str) -> None:
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA user_version = 7")
-    conn.executescript("""
-        CREATE TABLE backups (
-            id TEXT PRIMARY KEY,
-            source_base_url TEXT NOT NULL,
-            database_name TEXT NOT NULL,
-            format TEXT NOT NULL,
-            filestore_requested INTEGER NOT NULL,
-            path TEXT,
-            filename TEXT,
-            size_bytes INTEGER,
-            sha256 TEXT,
-            state TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            downloaded_at TEXT,
-            failed_at TEXT,
-            deleted_at TEXT,
-            error_type TEXT,
-            error_message TEXT
-        );
-        CREATE TABLE environments (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            repository_root TEXT NOT NULL,
-            git_common_dir TEXT NOT NULL,
-            branch TEXT NOT NULL,
-            base_ref TEXT NOT NULL,
-            worktree_path TEXT NOT NULL,
-            generated_config_path TEXT NOT NULL,
-            python_environment_path TEXT NOT NULL,
-            python_environment_owned INTEGER NOT NULL,
-            dependency_lock_path TEXT NOT NULL,
-            http_interface TEXT NOT NULL,
-            http_port INTEGER NOT NULL,
-            db_mode TEXT NOT NULL,
-            source_db_name TEXT,
-            target_db_name TEXT,
-            backup_id TEXT,
-            runtime_json TEXT NOT NULL,
-            state TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            last_used_at TEXT,
-            removed_at TEXT,
-            last_error TEXT,
-            FOREIGN KEY (backup_id) REFERENCES backups(id)
-        );
-        CREATE TABLE environment_events (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            environment_id TEXT NOT NULL,
-            operation TEXT NOT NULL,
-            outcome TEXT NOT NULL,
-            occurred_at TEXT NOT NULL,
-            message TEXT,
-            FOREIGN KEY (environment_id) REFERENCES environments(id)
-        );
-        CREATE TABLE environment_copy_journal (
-            environment_id TEXT PRIMARY KEY REFERENCES environments(id),
-            target_database TEXT NOT NULL,
-            db_host TEXT NOT NULL,
-            db_port INTEGER NOT NULL,
-            db_user TEXT,
-            backup_id TEXT REFERENCES backups(id),
-            stage TEXT NOT NULL CHECK (stage IN ('prepared', 'backed_up', 'restore_pending', 'restored', 'dropped', 'backup_deleted')),
-            updated_at TEXT NOT NULL
-        );
-        CREATE UNIQUE INDEX environments_one_active_branch
-            ON environments(git_common_dir, branch) WHERE state <> 'removed';
-    """)
-    conn.execute(
-        """INSERT INTO environments (
-            id, name, repository_root, git_common_dir, branch, base_ref,
-            worktree_path, generated_config_path, python_environment_path,
-            python_environment_owned, dependency_lock_path, http_interface,
-            http_port, db_mode, source_db_name, target_db_name, backup_id,
-            runtime_json, state, created_at, last_used_at, removed_at, last_error
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            env_id,
-            "test",
-            "/repo",
-            "/repo/.git",
-            "main",
-            "HEAD",
-            "/wt",
-            "/wt/odoo.conf",
-            "/venv",
-            0,
-            "/lock",
-            "127.0.0.1",
-            8077,
-            "shared",
-            "mydb",
-            None,
-            None,
-            "{}",
-            "ready",
-            "2026-01-01T00:00:00",
-            None,
-            None,
-            None,
-        ),
-    )
-    conn.execute(
-        """INSERT INTO environment_events
-           (environment_id, operation, outcome, occurred_at, message)
-           VALUES (?, 'checkout', 'succeeded', '2026-01-01T00:00:00', NULL)""",
-        (env_id,),
-    )
-    conn.execute(
-        """INSERT INTO environment_copy_journal
-           (environment_id, target_database, db_host, db_port, db_user, backup_id, stage, updated_at)
-           VALUES (?, 'target', 'localhost', 5432, 'odoo', NULL, 'prepared', '2026-01-01T00:00:00')""",
-        (env_id,),
-    )
-    conn.commit()
-    conn.close()
-
-
-def test_v7_catalog_drops_http_port_columns(tmp_path: Path) -> None:
-    db = tmp_path / "catalog.sqlite3"
     env_id = str(uuid.uuid4())
-    _write_v7_catalog_with_environment(db, env_id)
-
-    catalog = BackupCatalog(db_path=db)
-    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    columns = {row[1] for row in catalog._conn.execute("PRAGMA table_info(environments)")}
-    indexes = {row[1] for row in catalog._conn.execute("PRAGMA index_list(environments)")}
-    row = catalog.get_environment(env_id)
-    event = catalog._conn.execute(
-        "SELECT environment_id FROM environment_events WHERE environment_id=?",
-        (env_id,),
-    ).fetchone()
-    journal = catalog._conn.execute(
-        "SELECT environment_id, target_database FROM environment_copy_journal WHERE environment_id=?",
-        (env_id,),
-    ).fetchone()
-
-    assert version == CATALOG_SCHEMA_VERSION
-    assert "http_port" not in columns
-    assert "http_interface" not in columns
-    assert "environments_one_active_branch" in indexes
-    assert row is not None
-    assert row["name"] == "test"
-    assert row["branch"] == "main"
-    assert event is not None
-    assert event["environment_id"] == env_id
-    assert journal is not None
-    assert journal["environment_id"] == env_id
-    assert journal["target_database"] == "target"
-    for child_table in ("environment_events", "environment_copy_journal"):
-        environment_foreign_tables = {
-            foreign_key[2]
-            for foreign_key in catalog._conn.execute(f"PRAGMA foreign_key_list({child_table})")
-            if foreign_key[3] == "environment_id"
-        }
-        assert environment_foreign_tables == {"environments"}
-    catalog._conn.execute("PRAGMA foreign_keys=ON")
-    catalog.add_environment_event(env_id, "use", "succeeded", message="after migration")
-    event_ids = [
-        event_row[0]
-        for event_row in catalog._conn.execute(
-            "SELECT environment_id FROM environment_events ORDER BY sequence"
-        )
-    ]
-    assert event_ids == [env_id, env_id]
-    catalog.close()
-
-
-def test_v8_catalog_keeps_one_active_environment_per_branch(tmp_path: Path) -> None:
-    db = tmp_path / "catalog.sqlite3"
-    env_id = str(uuid.uuid4())
-    _write_v7_catalog_with_environment(db, env_id)
-    catalog = BackupCatalog(db_path=db)
+    catalog.create_environment(make_env(env_id, state="ready"))
     with pytest.raises(BackupCatalogError):
         catalog.create_environment(
-            {
-                "id": str(uuid.uuid4()),
-                "name": "other",
-                "repository_root": "/repo",
-                "git_common_dir": "/repo/.git",
-                "branch": "main",
-                "base_ref": "HEAD",
-                "worktree_path": "/wt2",
-                "generated_config_path": "/wt2/odoo.conf",
-                "python_environment_path": "/venv",
-                "python_environment_owned": False,
-                "dependency_lock_path": "/lock",
-                "db_mode": "shared",
-                "source_db_name": "mydb",
-                "target_db_name": None,
-                "backup_id": None,
-                "runtime_json": "{}",
-                "state": "ready",
-                "created_at": "2026-01-02T00:00:00",
-                "last_used_at": None,
-                "removed_at": None,
-                "last_error": None,
-            }
+            make_env(
+                str(uuid.uuid4()),
+                branch="main",
+                worktree_path="/wt2",
+                generated_config_path="/wt2/odoo.conf",
+                state="creating",
+            )
         )
     catalog.close()
