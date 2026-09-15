@@ -15,11 +15,11 @@ The `pyproject.toml` SHALL declare core runtime dependencies as exactly:
 - `python-toon==0.1.3`
 - `expression>=5,<6`
 - `alembic>=1.13,<2`
-- `sqlalchemy-core>=2,<3`
+- `sqlalchemy>=2,<3`
 
 Rich SHALL remain the command-result terminal renderer, while `rich-click>=1.9,<2` SHALL render only Click help and Click-generated usage/validation errors; Textual, curses wrappers, and alternative CLI frameworks SHALL NOT be added. `python-toon` SHALL be used in-process through `from toon import encode, decode, DecodeOptions`; strict verification SHALL invoke `decode(encoded, DecodeOptions(indent=2, strict=True))`. The project SHALL NOT contain a custom TOON encoder/decoder or invoke a Node subprocess. The dependency SHALL remain exactly pinned. The checked fixture source SHALL be the project's committed envelope fixtures derived from CLI envelope v1 and snapshot schema v2, with TOON syntax expectations traced to the published TOON specification v4.1 (2026-07-26). The supported contract is semantic round-trip of those project envelopes, not a claim that the dependency implements every v4.1 production. A dependency or fixture-source upgrade SHALL require deliberately updating the pin and fixtures together.
 
-SQLAlchemy Core SHALL be used for schema metadata and Alembic integration only; ORM models SHALL NOT be added and repository queries SHALL NOT be translated away from `sqlite3` by this change. Alembic SHALL be the catalogue migration ledger; the `PRAGMA user_version` chain SHALL NOT remain as a migration ledger after the transition.
+SQLAlchemy SHALL be used for Core schema metadata and Alembic integration only (no ORM); repository queries SHALL NOT be translated away from `sqlite3` by this change. Alembic SHALL be the catalogue migration ledger; the `PRAGMA user_version` chain SHALL NOT remain as a migration ledger after the transition.
 
 Optional extras SHALL remain:
 

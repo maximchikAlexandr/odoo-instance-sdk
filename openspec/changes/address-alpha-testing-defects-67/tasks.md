@@ -27,7 +27,7 @@
 
 ## 4. Alembic + SQLAlchemy Core catalogue migration (item 4)
 
-- [ ] 4.1 Add `alembic` and `sqlalchemy-core` to runtime dependencies; refresh the uv lock.
+- [ ] 4.1 Add `alembic` and `sqlalchemy` (Core, no ORM) to runtime dependencies; refresh the uv lock.
 - [ ] 4.2 Create the first Alembic revision that creates the full current schema, constraints, and indexes in one step.
 - [ ] 4.3 Implement clean-install application of only the first revision without running v2–v16.
 - [ ] 4.4 Back up known alpha catalogues, verify schema equivalence, and stamp the first revision.

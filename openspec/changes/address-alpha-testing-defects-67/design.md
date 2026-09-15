@@ -68,6 +68,26 @@ Alternative considered: keep the PRAGMA chain and add Alembic alongside. Rejecte
 
 The thirteen oversized files are split behaviour-preservingly along the boundaries listed in #67. A Python package is created only when confirmed multiple responsibilities exist. The split is ordered by dependency safety: `models.py` first (domain split with public re-exports), then leaf modules, then `cli.py`/`commands/env.py` (thin registration). A simple CI check rejects manually maintained production Python files over 1000 physical lines with generated/vendor exclusion and no existing-file allowlist.
 
+Target module tree (preliminary, to be confirmed by call-graph analysis during implementation):
+
+| Source file | Confirmed boundaries | Target modules |
+|---|---|---|
+| `resources/environment.py` (3838) | checkout planning/execution, applied settings, cleanup/recovery, pgAdmin integration | `resources/environment/checkout.py`, `resources/environment/settings.py`, `resources/environment/cleanup.py`, `resources/environment/pgadmin.py` |
+| `storage/backup_catalog.py` (2307) | backup operations, environment ops, runtime ops, cluster ops (after Alembic) | `storage/catalog/backup.py`, `storage/catalog/environment.py`, `storage/catalog/runtime.py`, `storage/catalog/cluster.py` |
+| `resources/instance.py` (2103) | runtime identity, command planning, foreground lifecycle, logs, auxiliary restore session | `resources/instance/identity.py`, `resources/instance/planning.py`, `resources/instance/foreground.py`, `resources/instance/logs.py`, `resources/instance/restore_session.py` |
+| `internal/database_preparation.py` (1923) | source resolution, verified backup materialization, preflight, orchestration | `internal/dbprep/source.py`, `internal/dbprep/materialize.py`, `internal/dbprep/preflight.py`, `internal/dbprep/orchestrate.py` |
+| `cli.py` (1691) | thin registration only; move callbacks to existing command modules | `cli.py` (registration only), `commands/` modules absorb callbacks |
+| `resources/monitor.py` (1667) | snapshot planning, collection, typed projection | `resources/monitor/planning.py`, `resources/monitor/collection.py`, `resources/monitor/projection.py` |
+| `resources/database.py` (1521) | lifecycle, backup/restore, diagnostics, monitoring SQL | `resources/database/lifecycle.py`, `resources/database/backup_restore.py`, `resources/database/diagnostics.py` |
+| `resources/postgres.py` (1500) | lifecycle, backup/restore, diagnostics, monitoring | `resources/postgres/lifecycle.py`, `resources/postgres/backup_restore.py`, `resources/postgres/diagnostics.py` |
+| `commands/env.py` (1393) | checkout/list/show/path/remove/sync and Rich projections | `commands/env/checkout.py`, `commands/env/list.py`, `commands/env/show.py`, `commands/env/remove.py`, `commands/env/sync.py` |
+| `internal/doctor.py` (1386) | manifest/runtime/catalog/PostgreSQL/environment checks | `internal/doctor/manifest.py`, `internal/doctor/runtime.py`, `internal/doctor/catalog.py`, `internal/doctor/postgres.py`, `internal/doctor/environment.py` |
+| `models.py` (1215) | models by existing domains with public re-exports | `models/` package with domain submodules, `models.py` re-exports public names |
+| `internal/database_replacement.py` (1189) | planning/validation/execution (if call graph confirms) | `internal/dbreplace/planning.py`, `internal/dbreplace/validation.py`, `internal/dbreplace/execution.py` |
+| `internal/proc/executor.py` (1153) | run/spawn/termination (if call graph confirms) | `internal/proc/run.py`, `internal/proc/spawn.py`, `internal/proc/terminate.py` |
+
+Dependency direction: `commands/` → `resources/` → `internal/` → `internal/proc/`. `models.py` (or `models/` package) is imported by all layers but imports none. No circular dependencies. Public SDK imports are preserved via re-export shims where needed.
+
 Alternative considered: mechanical line-count split. Rejected because it creates artificial modules and breaks cohesion.
 
 ### D6: SDK-first via `PUBLIC_LEAF_CASES` extension
