@@ -57,7 +57,6 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.automation import (
     export_translations_command,  # noqa: F401 - extracted translation callback seam
     list_modules_command,  # noqa: F401 - extracted module callback seam
-    module_tests_command,  # noqa: F401 - extracted module callback seam
     update_modules_command,  # noqa: F401 - extracted module callback seam
 )
 from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
@@ -78,6 +77,7 @@ from odoo_instance_sdk.models import (
     StartConfig,
 )
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
+from odoo_instance_sdk.resources.testing import module_tests_command  # noqa: F401
 
 if TYPE_CHECKING:
     from collections.abc import Callable as TypeCallback

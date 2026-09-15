@@ -46,11 +46,11 @@
 
 ## 6. CLI through public typed SDK primitives (item 6)
 
-- [ ] 6.1 Extend `PublicLeafCase` with `sdk_primitive` and `cli_only_reason` fields; update every existing entry and add `ps` so the inventory stays the single source of truth.
-- [ ] 6.2 Add public frozen input/result types and `*_command()` siblings for `backup inspect`, `db ls`, the shared test runner, `deps verify`, persisted `stop`, and COPY database replacement.
-- [ ] 6.3 Align `test` and `module test` on one SDK test primitive.
-- [ ] 6.4 Add a contract test rejecting a leaf without `sdk_primitive` or `cli_only_reason` and an architecture gate rejecting parallel domain execution in Click callbacks.
-- [ ] 6.5 Update `docs/python-sdk.md`, README, and execution-boundary from the actual public API.
+- [x] 6.1 Extend `PublicLeafCase` with `sdk_primitive` and `cli_only_reason` fields; update every existing entry and add `ps` so the inventory stays the single source of truth.
+- [x] 6.2 Add public frozen input/result types and `*_command()` siblings for `backup inspect`, `db ls`, the shared test runner, `deps verify`, persisted `stop`, and COPY database replacement.
+- [x] 6.3 Align `test` and `module test` on one SDK test primitive.
+- [x] 6.4 Add a contract test rejecting a leaf without `sdk_primitive` or `cli_only_reason` and an architecture gate rejecting parallel domain execution in Click callbacks.
+- [x] 6.5 Update `docs/python-sdk.md`, README, and execution-boundary from the actual public API.
 
 ## 7. SDK-first rule and documentation drift (item 7)
 

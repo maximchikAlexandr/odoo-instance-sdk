@@ -106,6 +106,10 @@ class OdooInstance(_IdentityMixin, _PlanningMixin):
     _runtime_binding: _RuntimeBinding | None = field(default=None, repr=False)
 
 
+import odoo_instance_sdk.resources.instance.helpers_1 as _helpers_1_module
+
+_helpers_1_module.OdooInstance = OdooInstance
+
 from odoo_instance_sdk.resources.instance.helpers_1 import InstanceFactory
 from odoo_instance_sdk.resources.instance.helpers_2 import (
     AuxiliaryRestoreSession,

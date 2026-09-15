@@ -33,10 +33,6 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.exceptions import ConfigError
-from odoo_instance_sdk.internal.automation import (
-    TestCommandSnapshot,
-    run_odoo_tests_command,
-)
 from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.test_selection import (
     _ChangedSelection,
@@ -46,7 +42,8 @@ from odoo_instance_sdk.internal.test_selection import (
     resolve_changed_selection,
     resolve_test_selection,
 )
-from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec, StartConfig
+from odoo_instance_sdk.models import OdooTestResult, OdooTestSpec, StartConfig, TestCommandSnapshot
+from odoo_instance_sdk.resources.testing import run_odoo_tests_command
 
 
 def _looks_like_file_target(target: str) -> bool:

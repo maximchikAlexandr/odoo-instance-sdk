@@ -38,10 +38,6 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.resources.instance import OdooInstance
-if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 _ROOT = "database.replace"
@@ -78,15 +74,6 @@ class CopyReplacementFailureContext(
     target_present: bool | None = None
     rollback_present: bool | None = None
     rollback_filestore_present: bool | None = None
-
-
-class CopyReplacementResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    backup_id: uuid.UUID
-    environment_id: uuid.UUID
-    database: str
-    filestore: str
-    admin_password_reset: bool = False
-    rollback_artifacts_removed: bool = True
 
 
 @dataclass(frozen=True, slots=True)

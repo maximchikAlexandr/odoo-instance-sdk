@@ -20,6 +20,7 @@ from odoo_instance_sdk.models import (
     OdooProcess,
     ProcessStatus,
     ReadinessResult,
+    StopEnvironmentResult,
 )
 
 if TYPE_CHECKING:
@@ -73,10 +74,14 @@ class _PlanningMixin:
         if any(getattr(planned, field) != getattr(current, field) for field in live_fields):
             raise RuntimeError("runtime identity changed after planning")
 
-    def _stop_environment(self, *, timeout: float = 10.0) -> dict[str, str]:
-        return self._stop_environment_command(timeout=timeout).run()
+    def stop_environment(self, *, timeout: float = 10.0) -> StopEnvironmentResult:
+        payload = self.stop_environment_command(timeout=timeout).run()
+        return StopEnvironmentResult(
+            status=str(payload["status"]),
+            environment_id=str(payload["environment_id"]),
+        )
 
-    def _stop_environment_command(self, *, timeout: float = 10.0) -> Command[dict[str, str]]:
+    def stop_environment_command(self, *, timeout: float = 10.0) -> Command[dict[str, str]]:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
 
         with self._artifact_operation(exclusive=False):

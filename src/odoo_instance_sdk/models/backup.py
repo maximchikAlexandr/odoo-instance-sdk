@@ -259,3 +259,56 @@ class BackupDeletionResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tr
     file_existed: bool
     already_deleted: bool
     deleted_at: datetime
+
+
+class BackupRestoreLink(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """One recorded restore binding for a retained backup."""
+
+    db_host: str
+    db_port: int
+    database_name: str
+    restored_at: datetime
+
+
+class BackupEnvironmentLink(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """One environment checkout linked to a retained backup."""
+
+    environment_id: str
+    name: str
+    state: str
+    target_database: str | None
+
+
+class BackupInspectResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """State-aware catalogue projection for one complete backup UUID."""
+
+    id: uuid.UUID
+    source_base_url: str
+    database_name: str
+    format: BackupFormat
+    filestore_requested: bool
+    path: str
+    filename: str
+    size_bytes: int
+    sha256: str
+    downloaded_at: datetime
+    source_git_branch: str | None
+    state: BackupState
+    catalogue_time: datetime
+    file_present: bool
+    recorded_bytes: int | None
+    occupied_bytes: int | None
+    history: tuple[BackupEvent, ...]
+    restore_links: tuple[BackupRestoreLink, ...]
+    environment_links: tuple[BackupEnvironmentLink, ...]
+
+
+class CopyReplacementResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Outcome of replacing a stopped COPY environment database and filestore."""
+
+    backup_id: uuid.UUID
+    environment_id: uuid.UUID
+    database: str
+    filestore: str
+    admin_password_reset: bool = False
+    rollback_artifacts_removed: bool = True
