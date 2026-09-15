@@ -43,8 +43,14 @@ from odoo_instance_sdk.models import (
     OdooProcess,
     StartConfig,
 )
+from odoo_instance_sdk.resources.instance.helpers_1 import (
+    _PROTECTED_RUNTIME_OPTIONS,
+    _build_cli_args,
+    _RuntimeBinding,
+)
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import (
         ExecutionPlan,
         PlanObservation,
@@ -181,30 +187,54 @@ def _command_plan(
     return plan.with_fingerprint(secrets=secrets)
 
 
-def _http_port_observation(config: StartConfig) -> SemanticPlanObservation:
+def _http_port_observation(
+    config: StartConfig,
+    *,
+    environment_id: str | None = None,
+    client: OdooClient | None = None,
+) -> SemanticPlanObservation:
     """Capture the bounded, read-only HTTP binding check for a plan."""
     from odoo_instance_sdk.execution import PlanPrecondition, SemanticPlanObservation
     from odoo_instance_sdk.internal.address import AddressState, probe_address
 
+    endpoint = f"{config.http_interface}:{config.http_port}"
     try:
         state = probe_address(config.http_interface, config.http_port)
     except OSError as error:
         precondition = PlanPrecondition(
             name="http-port-free",
             status="unknown",
-            detail=f"unable to inspect {config.http_interface}:{config.http_port}: {error}",
+            detail=f"unable to inspect {endpoint}: {error}",
         )
     else:
-        free = state is AddressState.FREE
-        precondition = PlanPrecondition(
-            name="http-port-free",
-            status="passed" if free else "failed",
-            detail=(
-                f"{config.http_interface}:{config.http_port} is available"
-                if free
-                else f"{config.http_interface}:{config.http_port} is occupied (ownership unknown)"
-            ),
-        )
+        if state is AddressState.FREE:
+            precondition = PlanPrecondition(
+                name="http-port-free",
+                status="passed",
+                detail=f"{endpoint} is available",
+            )
+        elif environment_id is not None and client is not None:
+            from odoo_instance_sdk.internal.context import _persisted_environment_runtime_owner
+
+            owner = _persisted_environment_runtime_owner(client, environment_id, config.http_port)
+            if owner is not None:
+                precondition = PlanPrecondition(
+                    name="http-port-free",
+                    status="passed",
+                    detail=f"{endpoint} is occupied by persisted environment runtime (pid={owner})",
+                )
+            else:
+                precondition = PlanPrecondition(
+                    name="http-port-free",
+                    status="failed",
+                    detail=f"{endpoint} is occupied (ownership unknown)",
+                )
+        else:
+            precondition = PlanPrecondition(
+                name="http-port-free",
+                status="failed",
+                detail=f"{endpoint} is occupied (ownership unknown)",
+            )
     return SemanticPlanObservation(
         kind="semantic",
         goal="Start Odoo in the foreground",

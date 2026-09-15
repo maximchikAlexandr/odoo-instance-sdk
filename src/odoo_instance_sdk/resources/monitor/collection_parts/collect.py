@@ -196,9 +196,14 @@ class _CollectMixin:
                 resolved_project = f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
                 if resolved_project != project_id:
                     continue
-            worktree_value = row["worktree_path"]
-            if isinstance(worktree_value, str) and worktree_value.strip():
-                paths[env_id] = worktree_value
+            artifacts = _paths.resolve_environment_artifact_paths(
+                environment_id=env_id,
+                repository_root=str(row["repository_root"]),
+                git_common_dir=str(row["git_common_dir"]),
+                python_environment_owned=bool(int(row["python_environment_owned"])),
+                python_environment_path=str(row["python_environment_path"]),
+            )
+            paths[env_id] = str(artifacts.worktree_path)
         return paths
 
     def processes_command(self, project_id: str | None = None) -> Command[ProcessInventory]:

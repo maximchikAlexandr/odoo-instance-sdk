@@ -4,6 +4,8 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import psutil
+
 from odoo_instance_sdk.exceptions import (
     EnvironmentNotFoundError,
     EnvironmentResolutionError,
@@ -12,7 +14,10 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal import git_worktree
 from odoo_instance_sdk.internal.address import AddressState, probe_address
-from odoo_instance_sdk.internal.paths import get_catalog_path
+from odoo_instance_sdk.internal.paths import (
+    get_catalog_path,
+    resolve_environment_artifact_paths,
+)
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
 
@@ -107,7 +112,7 @@ def resolve_environment(
     cwd: Path | None = None,
 ) -> DevelopmentEnvironment:
     base = (cwd or Path.cwd()).resolve()
-    environments = _list_environments(client)
+    environments = [_canonical_environment(env) for env in _list_environments(client)]
     if explicit is not None:
         return _resolve_explicit(explicit, environments)
     env = _infer_from_worktree(base, environments)
@@ -180,7 +185,82 @@ def _check_port_free(env_obj: DevelopmentEnvironment) -> bool:
     return probe_address(env_obj.http_interface, env_obj.http_port) is AddressState.FREE
 
 
+def _persisted_environment_runtime_owner(
+    client: OdooClient,
+    environment_id: str,
+    http_port: int,
+) -> int | None:
+    """Return the persisted root PID when it still owns the reserved HTTP port."""
+    runtime_row = client.get_catalog().get_environment_runtime(environment_id)
+    if runtime_row is None:
+        return None
+    try:
+        root_pid = int(str(runtime_row["root_pid"]))
+        create_time = float(str(runtime_row["create_time"]))
+        recorded_port = int(str(runtime_row["http_port"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if recorded_port != http_port:
+        return None
+    try:
+        process = psutil.Process(root_pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return None
+    try:
+        if float(process.create_time()) != create_time:
+            return None
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return None
+    return root_pid
+
+
+def _environment_http_port_preflight(
+    env_obj: DevelopmentEnvironment,
+    client: OdooClient,
+) -> tuple[bool, str]:
+    """Return spawn availability and a sanitized detail for the reserved HTTP port."""
+    endpoint = f"{env_obj.http_interface}:{env_obj.http_port}"
+    try:
+        state = probe_address(env_obj.http_interface, env_obj.http_port)
+    except OSError as error:
+        return False, f"unable to inspect {endpoint}: {error}"
+    if state is AddressState.FREE:
+        return True, f"{endpoint} is available"
+    owner = _persisted_environment_runtime_owner(client, str(env_obj.id), env_obj.http_port)
+    if owner is not None:
+        return True, f"{endpoint} is occupied by persisted environment runtime (pid={owner})"
+    return False, f"{endpoint} is occupied (ownership unknown)"
+
+
+def _canonical_environment(env_obj: DevelopmentEnvironment) -> DevelopmentEnvironment:
+    """Project catalogue-backed paths onto the canonical ``~/.odcli`` layout."""
+    artifacts = resolve_environment_artifact_paths(
+        environment_id=str(env_obj.id),
+        repository_root=env_obj.repository_root,
+        git_common_dir=env_obj.git_common_dir,
+        python_environment_owned=env_obj.python_environment_owned,
+        python_environment_path=env_obj.python_environment_path,
+    )
+    if (
+        env_obj.worktree_path == str(artifacts.worktree_path)
+        and env_obj.generated_config_path == str(artifacts.generated_config_path)
+        and env_obj.dependency_lock_path == str(artifacts.dependency_lock_path)
+        and env_obj.python_environment_path == str(artifacts.python_environment_path)
+    ):
+        return env_obj
+    from msgspec.structs import replace
+
+    return replace(
+        env_obj,
+        worktree_path=str(artifacts.worktree_path),
+        generated_config_path=str(artifacts.generated_config_path),
+        dependency_lock_path=str(artifacts.dependency_lock_path),
+        python_environment_path=str(artifacts.python_environment_path),
+    )
+
+
 def _verify_env_runtime(env_obj: DevelopmentEnvironment) -> None:
+    env_obj = _canonical_environment(env_obj)
     worktree = Path(env_obj.worktree_path)
     if not worktree.is_dir():
         raise RuntimeError(f"worktree missing: {worktree}")

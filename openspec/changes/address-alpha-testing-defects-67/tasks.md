@@ -63,10 +63,10 @@
 
 ## 8. `run` uses canonical `~/.odcli` worktree path (item 8)
 
-- [ ] 8.1 Add a regression test that builds `run --dry-run` against a catalogue existing only under `~/.odcli` with no legacy path or symlink.
-- [ ] 8.2 Fix `run` to resolve worktree paths, `cwd`, `--addons-path`, and Git provenance from the canonical root.
-- [ ] 8.3 Verify runtime/session ownership, port preflight, and active-session lookup agree across `env list` and `run`.
-- [ ] 8.4 Search the repository for legacy path usage outside migration/compatibility code and remove it.
+- [x] 8.1 Add a regression test that builds `run --dry-run` against a catalogue existing only under `~/.odcli` with no legacy path or symlink.
+- [x] 8.2 Fix `run` to resolve worktree paths, `cwd`, `--addons-path`, and Git provenance from the canonical root.
+- [x] 8.3 Verify runtime/session ownership, port preflight, and active-session lookup agree across `env list` and `run`.
+- [x] 8.4 Search the repository for legacy path usage outside migration/compatibility code and remove it.
 
 ## 9. Project remote-backup ownership (item 9)
 

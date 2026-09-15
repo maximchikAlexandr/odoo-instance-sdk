@@ -22,6 +22,7 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_db_names,
     parse_odoo_config,
 )
+from odoo_instance_sdk.internal.paths import resolve_environment_artifact_paths
 from odoo_instance_sdk.internal.proc import (
     is_process_alive,
 )
@@ -183,7 +184,14 @@ class InstanceFactory:
                 f"from_environment requires a ready environment; "
                 f"state={environment.state} for {environment.id}"
             )
-        config_path = Path(environment.generated_config_path)
+        artifacts = resolve_environment_artifact_paths(
+            environment_id=str(environment.id),
+            repository_root=environment.repository_root,
+            git_common_dir=environment.git_common_dir,
+            python_environment_owned=environment.python_environment_owned,
+            python_environment_path=environment.python_environment_path,
+        )
+        config_path = artifacts.generated_config_path
         if not config_path.is_file():
             raise InstanceConfigurationError(f"Generated config not found: {config_path}")
         cfg = parse_odoo_config(config_path)
@@ -205,8 +213,7 @@ class InstanceFactory:
         python_bin = _resolve_python_binary(environment)
         command_prefix: tuple[str, ...] = (python_bin, odoo_bin)
 
-        runtime_cwd = runtime.get("runtime_cwd") or environment.worktree_path
-        default_cwd = Path(runtime_cwd)
+        default_cwd = artifacts.worktree_path
 
         start_cfg = StartConfig.from_odoo_config(config_path)
         db_port = start_cfg.db_port
@@ -371,13 +378,19 @@ def _runtime_expectations(
     try:
         runtime_json = _decode_runtime_json(cast("str | None", env_row["runtime_json"]))
         odoo_bin = runtime_json["odoo_bin"]
-        runtime_cwd = runtime_json["runtime_cwd"]
-        config_path = _canonical_runtime_path(str(env_row["generated_config_path"]))
-        python_path = Path(str(env_row["python_environment_path"]))
+        artifacts = resolve_environment_artifact_paths(
+            environment_id=str(env_row["id"]),
+            repository_root=str(env_row["repository_root"]),
+            git_common_dir=str(env_row["git_common_dir"]),
+            python_environment_owned=bool(int(env_row["python_environment_owned"])),
+            python_environment_path=str(env_row["python_environment_path"]),
+        )
+        config_path = _canonical_runtime_path(str(artifacts.generated_config_path))
+        python_path = artifacts.python_environment_path
         if python_path.is_dir():
             python_path /= "bin/python"
         expected_executable = _canonical_runtime_path(str(python_path))
-        expected_cwd = _canonical_runtime_path(runtime_cwd)
+        expected_cwd = _canonical_runtime_path(str(artifacts.worktree_path))
         expected_odoo_bin = _canonical_runtime_path(odoo_bin)
         start_config = StartConfig.from_odoo_config(config_path)
         expected_argv = _canonical_runtime_argv(
