@@ -69,3 +69,17 @@ current direct launches, output writes, imprecise annotations, module-local
 subprocess patches, and public methods that transitively spawn. Shrink those
 line-specific entries as each migration lands; do not silence a new finding by
 moving it to an undocumented allowlist.
+
+## SDK-first CLI boundary
+
+Every entry in `PUBLIC_LEAF_CASES` records either a public `sdk_primitive` or
+a concrete `cli_only_reason` for transport-only leaves such as `run`, `shell`,
+`logs --follow`, and `monitor`. CLI callbacks must not build self-contained
+domain read/mutation/spawn operations through `internal.*` when a public typed
+SDK primitive applies. Convenience methods delegate to the corresponding
+`*_command()` sibling and do not rebuild argv, cwd, environment, or actions.
+
+## Test matrices
+
+Use `pytest.mark.parametrize` for repeated input/output/error matrices instead
+of copying near-identical test functions.

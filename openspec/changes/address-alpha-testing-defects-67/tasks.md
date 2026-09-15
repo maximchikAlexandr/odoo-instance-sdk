@@ -54,12 +54,12 @@
 
 ## 7. SDK-first rule and documentation drift (item 7)
 
-- [ ] 7.1 Add the SDK-first rule to `AGENTS.md` and the OpenSpec contract.
-- [ ] 7.2 Unify context-resolution order across README, docs, and code: explicit `--env` → exact registered worktree → explicit `--project`/nearest manifest → error.
-- [ ] 7.3 Remove the removed `--json` alias wording from `docs/execution-boundary.md`, README, and characterization contracts; `--format json` is the only JSON selector and `--json` is a Click usage error.
-- [ ] 7.4 Add CI, MIT, and Python 3.12+ badges to README.
-- [ ] 7.5 Add the `pytest.mark.parametrize` rule for repeated input/output/error matrices to `AGENTS.md`/`CONTRIBUTING.md`.
-- [ ] 7.6 Sync delta specs and archive completed OpenSpec changes of this slice; leave unrelated/incomplete changes intact.
+- [x] 7.1 Add the SDK-first rule to `AGENTS.md` and the OpenSpec contract.
+- [x] 7.2 Unify context-resolution order across README, docs, and code: explicit `--env` → exact registered worktree → explicit `--project`/nearest manifest → error.
+- [x] 7.3 Remove the removed `--json` alias wording from `docs/execution-boundary.md`, README, and characterization contracts; `--format json` is the only JSON selector and `--json` is a Click usage error.
+- [x] 7.4 Add CI, MIT, and Python 3.12+ badges to README.
+- [x] 7.5 Add the `pytest.mark.parametrize` rule for repeated input/output/error matrices to `AGENTS.md`/`CONTRIBUTING.md`.
+- [x] 7.6 Sync delta specs and archive completed OpenSpec changes of this slice; leave unrelated/incomplete changes intact.
 
 ## 8. `run` uses canonical `~/.odcli` worktree path (item 8)
 

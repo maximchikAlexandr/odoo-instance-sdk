@@ -107,14 +107,37 @@ The first two cases produce an environment context; the third produces a project
 - **WHEN** a project has exactly one ready environment, current directory is not in its worktree, and no `--env` is supplied
 - **THEN** that environment is never selected implicitly and project fallback is used only when the project itself is initialized
 
+### Requirement: SDK-first CLI leaf contract
+
+Every entry in the canonical `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an `sdk_primitive` referencing the public typed SDK call the CLI delegates to, or a `cli_only_reason` with a concrete transport/presentation reason why the operation stays CLI-only. A generic formulation such as "convenient for CLI" SHALL NOT be accepted. A new CLI leaf SHALL NOT pass contract tests without one of these two values.
+
+CLI callbacks SHALL NOT build a self-contained domain read/mutation/spawn operation through `internal.*` when a public typed SDK primitive applies. The SDK SHALL own typed inputs/results, `Command`, immutable plans, revalidation, process/actions, cleanup, and failure semantics. Convenience methods SHALL delegate to the corresponding `*_command()` sibling and SHALL NOT rebuild the snapshot. The public SDK SHALL NOT export Click context, Rich renderables, CLI envelopes, or private executor callbacks.
+
+#### Scenario: Every leaf has a primitive or reason
+
+- **WHEN** the `PUBLIC_LEAF_CASES` contract test runs
+- **THEN** every entry has either a non-empty `sdk_primitive` or a concrete `cli_only_reason`
+
+#### Scenario: New leaf without primitive or reason is rejected
+
+- **WHEN** a new CLI leaf is added without `sdk_primitive` or `cli_only_reason`
+- **THEN** the contract test fails
+
+#### Scenario: CLI-only reason is concrete
+
+- **WHEN** a `cli_only_reason` is inspected
+- **THEN** it names a specific transport or presentation boundary, not a general convenience statement
+
 ### Requirement: Project resolution order
 
 Project resolution MUST follow this order.
 
 1. Explicit global `--project PATH` (любой путь внутри project).
-2. Ближайший `.odcli/project.toml` от current directory вверх до Git/filesystem boundary.
-3. Exact registered worktree containing current directory, resolved через canonical Git common dir.
+2. Exact registered worktree containing current directory, resolved через canonical Git common dir.
+3. Ближайший `.odcli/project.toml` от current directory вверх до Git/filesystem boundary.
 4. Иначе — ошибка с подсказкой `odcli init` или `--project`.
+
+This is the project-identity projection of the instance-command order: explicit `--env` → exact registered worktree → explicit `--project`/nearest manifest → error.
 
 #### Scenario: Explicit --project
 
@@ -123,8 +146,13 @@ Project resolution MUST follow this order.
 
 #### Scenario: Nearest project.toml
 
-- **WHEN** `odcli env list` in subdir of repo with `.odcli/project.toml`
+- **WHEN** `odcli env list` in subdir of repo with `.odcli/project.toml` and no exact registered worktree
 - **THEN** project resolved from nearest manifest upward
+
+#### Scenario: Exact worktree wins over nearest manifest
+
+- **WHEN** cwd is inside an exact registered worktree that also has a nearest `.odcli/project.toml`
+- **THEN** project identity comes from that worktree record rather than walking to a different manifest
 
 ### Requirement: Environment resolution for instance commands
 
@@ -183,25 +211,26 @@ Command-specific context handling MUST follow these rules.
 
 ### Requirement: Stable machine output
 
-The exact bounded structured leaf inventory is: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `backup list`, `backup show`, `backup validate`, `backup delete`, `db refresh`, `db reset-admin-password`, `db list`, `db restore`, `db drop`, `resource list`, `resource doctor`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `db locks`, `db stats`, `db bloat`, `db init-monitoring`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Each SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Existing `--json` SHALL remain a backward-compatible alias for `--format json`. Supplying `--json` with `--format toon` or `--format rich` SHALL be a Click usage error with exit code `2`; supplying `--json --format json` SHALL be accepted. During normal execution, `run`, interactive `shell`, `psql`, and `logs --follow` SHALL remain raw-streaming and SHALL not emit document output or use a Rich live wrapper. Eligible spawning `run` and `shell` SHALL accept document-format options only together with `--dry-run`; those dry-run paths SHALL suppress native execution and emit one bounded plan document in Rich, JSON, or TOON, with `--json` equivalent to `--format json`. `psql --dry-run` SHALL remain an explicit plan-only exception that emits the shared sanitized native command plan without spawning; normal `psql` remains raw passthrough and SHALL continue to reject `--format` and `--json`.
+The exact bounded structured leaf inventory is: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `backup list`, `backup show`, `backup validate`, `backup delete`, `db refresh`, `db reset-admin-password`, `db list`, `db restore`, `db drop`, `resource list`, `resource doctor`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `ps`, `db locks`, `db stats`, `db bloat`, `db init-monitoring`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Each SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Removed `--json` SHALL be an ordinary Click usage error with exit code `2`. `--format json` SHALL be the only JSON selector. Supplying `--json` with `--format` SHALL also be a Click usage error with exit code `2`. During normal execution, `run`, interactive `shell`, `psql`, and `logs --follow` SHALL remain raw-streaming and SHALL not emit document output or use a Rich live wrapper. Eligible spawning `run` and `shell` SHALL accept document-format options only together with `--dry-run`; those dry-run paths SHALL suppress native execution and emit one bounded plan document in Rich, JSON, or TOON. `psql --dry-run` SHALL remain an explicit plan-only exception that emits the shared sanitized native command plan without spawning; normal `psql` remains raw passthrough and SHALL continue to reject `--format` and `--json`.
 
 The CLI SHALL define one CLI-only `OutputMode` with values `rich`, `json`, and `toon`. The mode and envelope types SHALL NOT become public SDK models or FastAPI response models. Each successful or failed bounded operation SHALL first build one JSON-safe CLI envelope v1 containing `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, and `warnings`; success SHALL contain equal `result` and `data`, while failure SHALL omit top-level `result` and `data` and SHALL contain stable `error.code` and sanitized `error.message`. `error` MAY additionally contain an operation-specific JSON-safe `details` field; failures without structured details SHALL omit it and retain their existing v1 shape.
 
 JSON and TOON SHALL serialize that exact envelope without building format-specific result graphs. Decoding a TOON document with the selected strict decoder SHALL yield the same JSON value as decoding JSON output for the same operation. Machine modes SHALL emit exactly one UTF-8 document to stdout with no ANSI, prompt, status, progress, or external log text; diagnostics SHALL go to stderr. Renderer selection SHALL NOT change operation execution, exception mapping, or exit code. Native Click parse failures that occur before output-mode resolution SHALL retain Click's stderr usage output and exit code `2`.
 
-For `env remove`, `backup delete`, `db restore`, and `db drop`, JSON and TOON document modes (including the `--json` alias) SHALL never call `click.confirm`. Without `--yes`, they SHALL NOT execute mutation and SHALL emit exactly one sanitized failure envelope with `error.code="confirmation_required"` and exit code `1`. With `--yes`, JSON and TOON SHALL execute the same operation and normal success/failure mapping. Interactive Rich mode SHALL retain command-specific confirmation behavior. Dry-run SHALL never prompt and SHALL remain non-mutating.
+For `env remove`, `backup delete`, `db restore`, and `db drop`, JSON and TOON document modes SHALL never call `click.confirm`. Without `--yes`, they SHALL NOT execute mutation and SHALL emit exactly one sanitized failure envelope with `error.code="confirmation_required"` and exit code `1`. With `--yes`, JSON and TOON SHALL execute the same operation and normal success/failure mapping. Interactive Rich mode SHALL retain command-specific confirmation behavior. Dry-run SHALL never prompt and SHALL remain non-mutating.
 
 Rich renderers SHALL remain adjacent to the concrete commands whose typed results they render. They MAY use `Table`, `Status`, `Progress`, and `Live` only when appropriate to the operation; they SHALL NOT introduce a generic renderer interface, registry, or DSL. `db stats` and `db bloat` SHALL render separate tables and indexes tables rather than one sparse combined table.
 
 #### Scenario: JSON envelope
 
-- **WHEN** `odcli env list --json` executes
+- **WHEN** `odcli env list --format json` executes
 - **THEN** stdout contains exactly one versioned envelope and no progress or log text
 
 #### Scenario: JSON alias preserves envelope v1
 
-- **WHEN** `odcli env list --json` and `odcli env list --format json` run against the same frozen result
-- **THEN** each stdout document decodes to the same envelope v1 and contains no ANSI or diagnostic text
+- **WHEN** `odcli env list --json` is invoked
+- **THEN** Click exits `2` before the operation runs
+- **AND** `odcli env list --format json` against the same frozen result emits envelope v1 with no ANSI or diagnostic text
 
 #### Scenario: TOON is semantically equal to JSON
 
@@ -236,12 +265,12 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 
 #### Scenario: Machine remove requires explicit confirmation
 
-- **WHEN** `odcli env remove ENV --format json`, `--format toon`, or `--json` is invoked without `--yes`
+- **WHEN** `odcli env remove ENV --format json` or `--format toon` is invoked without `--yes`
 - **THEN** no prompt is rendered, removal is not called, stdout contains one failure envelope with `error.code="confirmation_required"`, and the command exits `1`
 
 #### Scenario: Explicit machine remove executes
 
-- **WHEN** `odcli env remove ENV --yes --format json`, `--format toon`, or `--json` is invoked
+- **WHEN** `odcli env remove ENV --yes --format json` or `--format toon` is invoked
 - **THEN** the same removal operation runs once and its result is emitted as one document under the normal renderer-independent exit mapping
 
 #### Scenario: Secrets redacted
@@ -256,9 +285,9 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 
 #### Scenario: Native command dry-run supports every bounded format
 
-- **WHEN** `odcli run --dry-run` or spawning `odcli shell --dry-run` is requested with `--format rich|json|toon` or `--json`
+- **WHEN** `odcli run --dry-run` or spawning `odcli shell --dry-run` is requested with `--format rich|json|toon`
 - **THEN** output contains exactly one bounded plan with `dry_run=true` in the selected format
-- **AND** `--json` and `--format json` produce equivalent JSON documents
+- **AND** `--json` is a Click usage error with exit code `2`
 - **AND** no native child stream starts
 
 #### Scenario: Normal native command stays raw
@@ -672,7 +701,7 @@ Entry point MUST остаться `odoo_instance_sdk.cli:cli`. Имена ком
 
 #### Scenario: List JSON does not open catalog
 
-- **WHEN** `odcli env list --json` prints the envelope
+- **WHEN** `odcli env list --format json` prints the envelope
 - **THEN** the command does not call `get_catalog()` and does not write environment events
 
 #### Scenario: Port conflict skips use
@@ -991,7 +1020,7 @@ The Click command tree SHALL add this bounded structured command:
 
 ```text
 odcli test [TARGET] [--tags TAGS] [--reload-tests] [--allow-empty]
-           [--changed [--base REF] [--dry-run]] [--format rich|json|toon] [--json]
+           [--changed [--base REF] [--dry-run]] [--format rich|json|toon]
 ```
 
 `odcli test` SHALL resolve the typed MYL-55 CLI project/environment context, delegate selection and execution to the `local-odoo-testing` capability, and render through the shared MYL-55 output adapter. `TARGET` SHALL be optional and singular. `--changed` with `TARGET`, `--base` without `--changed`, `--dry-run` without `--changed`, and a test-file target with `--tags` SHALL be Click usage errors with exit code `2` before selection or execution.
@@ -1010,7 +1039,7 @@ The command SHALL be added beside the existing command groups through the stable
 
 ### Requirement: Test output uses the shared CLI contract
 
-Both `odcli test` and `odcli module test` SHALL be bounded structured leaves under the MYL-55 `OutputMode` and CLI envelope v1 contract. They SHALL accept command-local `--format rich|json|toon`, keep `--json` as the alias for `--format json`, reject conflicting format flags through the shared option resolver, and use the shared sanitized error/exit mapping. The command name in new-path envelopes SHALL be `test`; the compatibility path SHALL retain `module.test` while `result` and execution semantics remain equal for equivalent inputs.
+Both `odcli test` and `odcli module test` SHALL be bounded structured leaves under the MYL-55 `OutputMode` and CLI envelope v1 contract. They SHALL accept command-local `--format rich|json|toon`, reject removed `--json` as an ordinary Click usage error, reject conflicting format flags through the shared option resolver, and use the shared sanitized error/exit mapping. The command name in new-path envelopes SHALL be `test`; the compatibility path SHALL retain `module.test` while `result` and execution semantics remain equal for equivalent inputs.
 
 Every success machine result SHALL contain `owner_kind: "environment" | "project"`, canonical `project_id`, nullable `environment_id` and `environment_name`, `worktree_root`, `database`, `http_url`, `command_prefix: list[str]`, selector kind/value and provenance, modules, and exit code. For an environment owner both environment fields SHALL identify the resolved environment; for a project owner both SHALL be null. All common worktree/runtime fields SHALL describe the same resolved owner and SHALL NOT fabricate an environment. An executed result SHALL additionally contain effective native test tags, `reload_tests`, `allow_empty`, counts, and failure/zero-tests flags from `OdooTestResult`. A successful `--changed --dry-run` result SHALL instead contain `dry_run=true` plus complete base/Git provenance and SHALL omit `test_tags`, `reload_tests`, `allow_empty`, counts, and failure/zero-tests flags. A successful changed selection with no addons SHALL contain `reason="no_addon_changes"`, complete base/Git provenance, empty modules, and `exit_code=0`, and SHALL omit those same execution-only fields; if it is also a dry-run it MAY additionally contain `dry_run=true`. Neither non-executed state SHALL construct or imply an `OdooTestResult`, fabricate zero counts/false flags, or emit execution progress. JSON and strict-decoded TOON SHALL be semantically equal in all three states. Raw sanitized Odoo diagnostics SHALL be written only to stderr; machine stdout SHALL contain exactly one document without ANSI, prompts, progress, or embedded raw logs.
 
@@ -1043,7 +1072,7 @@ Rich output SHALL show the same owner identity, project, nullable environment id
 
 ### Requirement: `module test` is a compatibility alias
 
-`odcli module test MODULE...` SHALL remain available with its existing plural positional module form and existing `--test-tags`, `--reload-tests`, `--allow-empty`, `--json`, and MYL-55 `--format` options. It SHALL validate each module through the same eligible-addon boundary, build the same `OdooTestSpec`, use the same installed-state preflight and single runner, and return the same `OdooTestResult` as `odcli test MODULE --tags ...` for an equivalent one-module request.
+`odcli module test MODULE...` SHALL remain available with its existing plural positional module form and existing `--test-tags`, `--reload-tests`, `--allow-empty`, and MYL-55 `--format` options. It SHALL validate each module through the same eligible-addon boundary, build the same `OdooTestSpec`, use the same installed-state preflight and single runner, and return the same `OdooTestResult` as `odcli test MODULE --tags ...` for an equivalent one-module request.
 
 The alias SHALL continue to require at least one module and `--test-tags`. It SHALL not accept cwd/file inference, `--changed`, `--base`, or `--dry-run`, and SHALL not retain a second `run_module_tests` behavior branch after migration.
 
@@ -1272,7 +1301,7 @@ Default Rich dry-run output SHALL use one shared projection showing the command 
 
 ### Requirement: Restore progress and command streams
 
-Rich `odcli db refresh --restore` SHALL show logical step progress. On an interactive TTY it SHALL use live current/completed-step rendering; on non-TTY Rich output it SHALL emit deterministic step-prefixed sanitized lines without `Live` or cursor control. An explicit `--show-command-output` SHALL stream sanitized, step-prefixed stdout/stderr only in Rich mode. Combining `--show-command-output` with `--format json`, `--format toon`, or `--json` SHALL be a Click usage error with exit code `2` before SDK work. JSON and TOON without the flag SHALL emit one deterministic final document without Rich rendering or raw stream injection. Existing execution exit codes, captured subprocess results, and redaction SHALL remain unchanged.
+Rich `odcli db refresh --restore` SHALL show logical step progress. On an interactive TTY it SHALL use live current/completed-step rendering; on non-TTY Rich output it SHALL emit deterministic step-prefixed sanitized lines without `Live` or cursor control. An explicit `--show-command-output` SHALL stream sanitized, step-prefixed stdout/stderr only in Rich mode. Combining `--show-command-output` with `--format json` or `--format toon` SHALL be a Click usage error with exit code `2` before SDK work. JSON and TOON without the flag SHALL emit one deterministic final document without Rich rendering or raw stream injection. Existing execution exit codes, captured subprocess results, and redaction SHALL remain unchanged.
 
 #### Scenario: Interactive restore shows plan progress
 - **WHEN** restore runs in an interactive Rich terminal without the stream flag
@@ -1283,7 +1312,7 @@ Rich `odcli db refresh --restore` SHALL show logical step progress. On an intera
 - **THEN** stdout contains exactly one parseable document and no live progress or raw command stream
 
 #### Scenario: Stream flag is Rich-only
-- **WHEN** `--show-command-output` is combined with JSON, TOON, or the JSON alias
+- **WHEN** `--show-command-output` is combined with JSON or TOON
 - **THEN** Click exits `2` before restore planning/execution and emits no partial machine document
 
 #### Scenario: Redirected Rich output is line-oriented
@@ -1292,7 +1321,7 @@ Rich `odcli db refresh --restore` SHALL show logical step progress. On an intera
 
 ### Requirement: Safe database-drop command
 
-The CLI SHALL expose `odcli db drop DATABASE [--force-default] [--force-connections] [--yes] [--dry-run]`. It SHALL require an exact database name, resolve only the current project PostgreSQL cluster, reject system/template databases, display the cluster and database before mutation, require interactive Rich confirmation by default, and require `--yes` for machine execution. JSON, TOON, and the `--json` alias SHALL always be noninteractive and SHALL never call `click.confirm`. A normal machine-mode drop without `--yes` SHALL perform zero SDK/transport/catalogue work, emit exactly one sanitized CLI envelope v1 with `error.code="confirmation_required"`, and exit `1`; with `--yes` it SHALL execute through the normal renderer-independent path. Dry-run in every format SHALL require neither confirmation nor `--yes` and SHALL remain side-effect-free. Dropping the configured project default SHALL additionally require `--force-default`; terminating active sessions SHALL additionally require `--force-connections`. Rich, JSON, and TOON SHALL otherwise use the shared output and confirmation contracts.
+The CLI SHALL expose `odcli db drop DATABASE [--force-default] [--force-connections] [--yes] [--dry-run]`. It SHALL require an exact database name, resolve only the current project PostgreSQL cluster, reject system/template databases, display the cluster and database before mutation, require interactive Rich confirmation by default, and require `--yes` for machine execution. JSON and TOON document modes SHALL always be noninteractive and SHALL never call `click.confirm`. A normal machine-mode drop without `--yes` SHALL perform zero SDK/transport/catalogue work, emit exactly one sanitized CLI envelope v1 with `error.code="confirmation_required"`, and exit `1`; with `--yes` it SHALL execute through the normal renderer-independent path. Dry-run in every format SHALL require neither confirmation nor `--yes` and SHALL remain side-effect-free. Dropping the configured project default SHALL additionally require `--force-default`; terminating active sessions SHALL additionally require `--force-connections`. Rich, JSON, and TOON SHALL otherwise use the shared output and confirmation contracts.
 
 #### Scenario: Protected default database is refused
 - **WHEN** the exact target is the configured project default and `--force-default` is absent
@@ -1303,7 +1332,7 @@ The CLI SHALL expose `odcli db drop DATABASE [--force-default] [--force-connecti
 - **THEN** the command emits the resolved guarded plan without prompt, connection termination, database mutation, or catalogue write
 
 #### Scenario: Machine drop requires explicit confirmation
-- **WHEN** normal `db drop` is invoked with JSON, TOON, or `--json` without `--yes`
+- **WHEN** normal `db drop` is invoked with JSON or TOON without `--yes`
 - **THEN** no prompt or SDK work occurs, stdout contains exactly one sanitized `confirmation_required` envelope, and the command exits `1`
 
 #### Scenario: Explicit machine confirmation executes
@@ -1705,7 +1734,7 @@ Diagnosis SHALL NOT update applied evidence, repair artifacts, call sync, change
 - **THEN** all formats represent the same statuses and reasons and no applied snapshot or runtime resource changes
 
 ### Requirement: Single format selector and typed field projection
-Format-aware commands SHALL expose only `--format rich|json|toon`, default to Rich, and reject removed `--json` as an ordinary Click usage error. Eligible bounded reads (`env list/show`, `backup list/show`, `resource list/doctor`, `db list/locks/stats/bloat`, and `module list`) SHALL accept comma-separated documented dotted `--fields` only with explicit JSON or TOON, recursively derive every allowed root and nested path from that leaf's concrete typed result schema without a command/field registry, project only successful `result`/`data`, preserve repeated-row order and all envelope/structural metadata, and fail before execution for unknown or ineligible fields. [Source: GH#62]
+Format-aware commands SHALL expose only `--format rich|json|toon`, default to Rich, and reject removed `--json` as an ordinary Click usage error. Eligible bounded reads (`env list/show`, `backup list/show`, `resource list/doctor`, `db list/locks/stats/bloat`, `module list`, and `ps`) SHALL accept comma-separated documented dotted `--fields` only with explicit JSON or TOON, recursively derive every allowed root and nested path from that leaf's concrete typed result schema without a command/field registry, project only successful `result`/`data`, preserve repeated-row order and all envelope/structural metadata, and fail before execution for unknown or ineligible fields. [Source: GH#62]
 
 #### Scenario: Project repeated fields
 - **WHEN** an eligible bounded read uses valid dotted fields in JSON and TOON
