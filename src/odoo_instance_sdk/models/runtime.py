@@ -79,3 +79,10 @@ class HttpError(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only
 
     def __repr__(self) -> str:
         return f"HttpError(code={self.code!r}, message=<redacted>)"
+
+
+class StopEnvironmentResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Outcome of stopping a persisted environment runtime."""
+
+    status: str
+    environment_id: str

@@ -134,6 +134,15 @@ These are transport exceptions, not process-boundary exceptions: Odoo child
 launches still go through `internal/proc`, and output-option validation for
 `run`/`shell` still happens before SDK resolution.
 
+## SDK-first leaf inventory
+
+`tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` is the only CLI leaf
+inventory. Every entry records either a public `sdk_primitive` or a concrete
+`cli_only_reason` for transport-only leaves such as `run`, `shell`, `logs
+--follow`, and `monitor`. The contract test rejects a leaf without one of
+those two values, and an architecture gate rejects Click callbacks that call
+parallel internal domain builders where a public SDK primitive already exists.
+
 ## Checked architectural inventories and allowlists
 
 The exact checked fixture is `tests/fixtures/architecture_inventory.py` and

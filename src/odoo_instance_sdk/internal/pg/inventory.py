@@ -5,12 +5,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, cast
-
-import msgspec
+from typing import TYPE_CHECKING, Literal, cast
 
 from odoo_instance_sdk.exceptions import ConfigError
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
+from odoo_instance_sdk.models import DatabaseInventoryItem, DatabaseInventoryResult
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
@@ -42,31 +41,6 @@ FROM (
   WHERE NOT d.datistemplate AND d.datallowconn
 ) inventory;
 """
-
-
-class DatabaseInventoryItem(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    """One exact database identity and its read-only local relationships."""
-
-    cluster: str
-    cluster_id: str | None
-    name: str
-    logical_size_bytes: int | None
-    active_sessions: int
-    is_default: bool
-    environment_ids: tuple[str, ...] = ()
-    runtime_bindings: tuple[str, ...] = ()
-    restore_backup_ids: tuple[str, ...] = ()
-    origin: Literal["restore", "unknown"] = "unknown"
-
-
-class DatabaseInventoryResult(
-    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
-):
-    """Deterministic project-cluster database inventory."""
-
-    cluster: str
-    databases: tuple[DatabaseInventoryItem, ...]
-    tracked: Annotated[bool, "odcli-structural"] = False
 
 
 def _credentials(instance: OdooInstance) -> tuple[str, int, str | None, str | None]:

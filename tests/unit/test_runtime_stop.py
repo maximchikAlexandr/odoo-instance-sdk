@@ -152,7 +152,7 @@ def test_stop_owned_runtime_revalidates_then_terminates_and_clears(
             side_effect=AssertionError("stop must not inspect port state"),
         ),
     ):
-        result = instance._stop_environment_command(timeout=3.0).run()
+        result = instance.stop_environment_command(timeout=3.0).run()
 
     assert result == {"status": "stopped", "environment_id": environment_id}
     assert calls == [(4242, 4242, 3.0)]
@@ -175,7 +175,7 @@ def test_stop_mismatch_fails_closed_and_retains_runtime(tmp_path: Path, mismatch
         patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
         pytest.raises(RuntimeError, match="runtime identity mismatch"),
     ):
-        instance._stop_environment_command().run()
+        instance.stop_environment_command().run()
     terminate.assert_not_called()
     assert catalog.runtime_row is not None
     assert catalog.clear_calls == []
@@ -192,7 +192,7 @@ def test_stop_inaccessible_identity_fails_closed_and_retains_runtime(tmp_path: P
         patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
         pytest.raises(RuntimeError, match="identity is inaccessible"),
     ):
-        instance._stop_environment_command().run()
+        instance.stop_environment_command().run()
     terminate.assert_not_called()
     assert catalog.runtime_row is not None
     assert catalog.clear_calls == []
@@ -214,7 +214,7 @@ def test_stop_win32_identity_mismatch_fails_closed_without_taskkill(tmp_path: Pa
         patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
         pytest.raises(RuntimeError, match="runtime identity mismatch"),
     ):
-        instance._stop_environment_command().run()
+        instance.stop_environment_command().run()
     terminate.assert_not_called()
     assert catalog.runtime_row is not None
     assert catalog.clear_calls == []
@@ -236,7 +236,7 @@ def test_stop_win32_inaccessible_identity_fails_closed_without_taskkill(tmp_path
         patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
         pytest.raises(RuntimeError, match="identity is inaccessible"),
     ):
-        instance._stop_environment_command().run()
+        instance.stop_environment_command().run()
     terminate.assert_not_called()
     assert catalog.runtime_row is not None
     assert catalog.clear_calls == []
@@ -253,7 +253,7 @@ def test_stop_rejects_runtime_record_changed_after_planning(tmp_path: Path) -> N
         patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
         patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
     ):
-        command = instance._stop_environment_command()
+        command = instance.stop_environment_command()
         assert catalog.runtime_row is not None
         catalog.runtime_row["create_time"] = 99.0
         with pytest.raises(RuntimeError, match="changed after planning"):
@@ -274,7 +274,7 @@ def test_stop_rejects_environment_evidence_changed_after_planning(tmp_path: Path
         patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
         patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
     ):
-        command = instance._stop_environment_command()
+        command = instance.stop_environment_command()
         catalog.env_row["runtime_json"] = json.dumps(
             {
                 "odoo_bin": str(
@@ -304,7 +304,7 @@ def test_stop_rejects_live_evidence_changed_after_planning(tmp_path: Path) -> No
         patch("odoo_instance_sdk.resources.instance.os.getpgid", side_effect=[4242, 4242]),
         patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
     ):
-        command = instance._stop_environment_command()
+        command = instance.stop_environment_command()
         with pytest.raises(RuntimeError, match="changed after planning"):
             command.run()
     terminate.assert_not_called()
@@ -327,7 +327,7 @@ def test_stop_allows_safe_default_launch_args(tmp_path: Path) -> None:
             return_value=False,
         ),
     ):
-        result = instance._stop_environment_command().run()
+        result = instance.stop_environment_command().run()
     assert result == {"status": "stopped", "environment_id": environment_id}
     terminate.assert_called_once_with(4242, process_group_id=4242, timeout=10.0)
     assert catalog.clear_calls == [(environment_id, 4242, 12.5)]
@@ -337,7 +337,7 @@ def test_stop_allows_safe_default_launch_args(tmp_path: Path) -> None:
 def test_stop_no_row_is_idempotent(tmp_path: Path) -> None:
     instance, catalog, environment_id = _instance(tmp_path, runtime=False)
     with patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate:
-        result = instance._stop_environment_command().run()
+        result = instance.stop_environment_command().run()
     assert result == {"status": "already_stopped", "environment_id": environment_id}
     terminate.assert_not_called()
     assert catalog.clear_calls == []
@@ -401,7 +401,7 @@ def test_stop_vanished_process_clears_matching_row(tmp_path: Path) -> None:
         patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
         patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
     ):
-        result = instance._stop_environment_command().run()
+        result = instance.stop_environment_command().run()
     assert result == {"status": "already_stopped", "environment_id": environment_id}
     terminate.assert_not_called()
     assert catalog.clear_calls == [(environment_id, 4242, 12.5)]

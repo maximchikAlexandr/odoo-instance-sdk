@@ -59,14 +59,11 @@ from odoo_instance_sdk.exceptions import (
     LogfileAccessError,
 )
 from odoo_instance_sdk.internal.automation import (
-    DepsVerifyResult,
     eval_expression_command,
     exec_script_command,
     export_translations_command,  # noqa: F401 - extracted translation callback seam
     list_modules_command,  # noqa: F401 - extracted module callback seam
-    module_tests_command,  # noqa: F401 - extracted module callback seam
     update_modules_command,  # noqa: F401 - extracted module callback seam
-    verify_deps_command,
 )
 from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.generated_config import (
@@ -78,9 +75,12 @@ from odoo_instance_sdk.internal.vscode_generate import (
     write_launch_json,
 )
 from odoo_instance_sdk.models import (
+    DepsVerifyResult,
     PostgresClusterState,
 )
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.deps import verify_deps_command
+from odoo_instance_sdk.resources.testing import module_tests_command  # noqa: F401
 
 if TYPE_CHECKING:
     from collections.abc import Callable as TypeCallback
@@ -333,7 +333,7 @@ def stop(
     try:
         runtime_context = cli_context.ready_instance(ctx)
         environment = runtime_context.require_environment()
-        command = runtime_context.instance._stop_environment_command()
+        command = runtime_context.instance.stop_environment_command()
     except SystemExit:
         raise
     except Exception as error:
@@ -633,15 +633,12 @@ def deps_verify(
 def _deps_verify_payload(result: DepsVerifyResult) -> JsonObject:
     return {
         "distributions": [
-            {
-                "detail": sanitize_diagnostic(str(item.get("detail", ""))),
-            }
-            for item in result.distributions
+            {"detail": sanitize_diagnostic(item.detail)} for item in result.distributions
         ],
         "missing_imports": [
             {
-                "module": sanitize_diagnostic(str(item.get("module", ""))),
-                "import": sanitize_diagnostic(str(item.get("import", ""))),
+                "module": sanitize_diagnostic(item.module),
+                "import": sanitize_diagnostic(item.import_name),
             }
             for item in result.missing_imports
         ],

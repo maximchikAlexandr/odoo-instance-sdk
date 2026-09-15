@@ -42,6 +42,7 @@ from odoo_instance_sdk.models import (
     BackupFreshness,
     BackupProvenanceComparison,
     BackupProvenanceStatus,
+    CopyReplacementResult,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
     EnvironmentCheckoutPlan,
@@ -267,6 +268,37 @@ class _CheckoutMixin:
             options=options,
             restore_source=restore_source,
             target_database=target_database,
+            executor=executor,
+        )
+
+    def replace_copy_database(
+        self,
+        environment: DevelopmentEnvironment,
+        backup_id: uuid.UUID,
+        *,
+        reset_admin_password: bool = False,
+    ) -> CopyReplacementResult:
+        return self.replace_copy_database_command(
+            environment,
+            backup_id,
+            reset_admin_password=reset_admin_password,
+        ).run()
+
+    def replace_copy_database_command(
+        self,
+        environment: DevelopmentEnvironment,
+        backup_id: uuid.UUID,
+        *,
+        reset_admin_password: bool = False,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[CopyReplacementResult]:
+        from odoo_instance_sdk.internal.database_replacement import build_copy_replacement_command
+
+        return build_copy_replacement_command(
+            self._client,
+            environment,
+            backup_id,
+            reset_admin_password=reset_admin_password,
             executor=executor,
         )
 

@@ -22,7 +22,6 @@ from odoo_instance_sdk.internal.database_preparation import (
 from odoo_instance_sdk.internal.dbreplace.planning import (
     CopyReplacementFailureContext,
     CopyReplacementPlan,
-    CopyReplacementResult,
 )
 from odoo_instance_sdk.internal.locks import (
     backup_lock_path,
@@ -41,6 +40,7 @@ from odoo_instance_sdk.internal.proc import (
 )
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
+    CopyReplacementResult,
     DatabaseRefreshOptions,
     DevelopmentEnvironment,
     EnvironmentState,

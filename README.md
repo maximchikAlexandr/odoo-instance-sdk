@@ -530,9 +530,12 @@ and order. The CLI equivalent requires the literal `--` delimiter; its
 `--dry-run` preview does not record use or execute the command.
 
 See [Python SDK examples](docs/python-sdk.md) for runnable examples covering
-database backup/restore, processes, environments, PostgreSQL, monitoring, and
-inspect-then-run command siblings. The complete boundary inventory and
-allowlist rationale are in [docs/execution-boundary.md](docs/execution-boundary.md).
+database backup/restore, catalogue inspect, database inventory, dependency
+verification, shared test execution, persisted environment stop, COPY database
+replacement, environments, PostgreSQL, monitoring, and inspect-then-run
+command siblings. `PUBLIC_LEAF_CASES` records the SDK primitive or CLI-only
+reason for every leaf; the complete boundary inventory and allowlist rationale
+are in [docs/execution-boundary.md](docs/execution-boundary.md).
 
 ## Monitor and local API
 
