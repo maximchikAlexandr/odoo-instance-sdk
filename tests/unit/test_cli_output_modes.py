@@ -75,6 +75,7 @@ from odoo_instance_sdk.models import (
     PgAdminEligibilityState,
     PortObservation,
     PostgresClusterState,
+    ProcessInventory,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -594,6 +595,16 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         True,
         e2e_disposition="not-applicable",
         e2e_rationale="upstream remote Git publication is intentionally outside E2E",
+    ),
+    PublicLeafCase(
+        ("ps",),
+        ("ps",),
+        "bounded-read-only",
+        False,
+        variants=("rich-live",),
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-12",),
+        e2e_rationale="single-snapshot process/resource inventory",
     ),
 )
 
@@ -1136,6 +1147,23 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot_operation
         )
+        return
+
+    if path == ("ps",):
+        ps_inventory = ProcessInventory(
+            schema_version=1,
+            generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+            sample_time=datetime(2020, 1, 1, tzinfo=UTC),
+            project_id=None,
+        )
+
+        class FakePsMonitor:
+            def processes(self, project_id: str | None = None) -> ProcessInventory:
+                if failing:
+                    raise RuntimeError("isolated external operation failed")
+                return ps_inventory
+
+        monkeypatch.setattr("odoo_instance_sdk.commands.ps._monitor_class", lambda: FakePsMonitor)
         return
 
     if path[:2] == ("env", "path"):

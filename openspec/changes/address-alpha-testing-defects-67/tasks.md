@@ -7,13 +7,13 @@
 
 ## 2. `odcli ps` process/resource inventory (item 2)
 
-- [ ] 2.1 Add the frozen `ProcessInventory` typed model and its subtypes (process groups, backend groups, external contributions) in `models.py`.
-- [ ] 2.2 Implement `EnvironmentMonitor.processes_command()` and `processes()` projecting one canonical snapshot per sample.
-- [ ] 2.3 Implement PostgreSQL backend attribution bounded to `pg_stat_activity` with Linux/macOS PID-scope modelling and `shared_database` handling.
-- [ ] 2.4 Implement the bounded process-contribution contract for external sources without a plugin framework.
-- [ ] 2.5 Register `odcli ps` as a bounded structured leaf with `--all-projects`, `--watch`, `--interval`, `--format`, and `--fields`; delegate to the SDK primitive.
-- [ ] 2.6 Implement Rich rendering with shared resources, main checkout, and environment blocks; reuse the live loop pattern.
-- [ ] 2.7 Add tests covering stopped/running main checkout, multiple Odoo workers, unique/shared database, multiple PostgreSQL connections, Linux/macOS PID scope, privilege failure, stale PID, shared external process, and no double counting.
+- [x] 2.1 Add the frozen `ProcessInventory` typed model and its subtypes (process groups, backend groups, external contributions) in `models.py`.
+- [x] 2.2 Implement `EnvironmentMonitor.processes_command()` and `processes()` projecting one canonical snapshot per sample.
+- [x] 2.3 Implement PostgreSQL backend attribution bounded to `pg_stat_activity` with Linux/macOS PID-scope modelling and `shared_database` handling.
+- [x] 2.4 Implement the bounded process-contribution contract for external sources without a plugin framework.
+- [x] 2.5 Register `odcli ps` as a bounded structured leaf with `--all-projects`, `--watch`, `--interval`, `--format`, and `--fields`; delegate to the SDK primitive.
+- [x] 2.6 Implement Rich rendering with shared resources, main checkout, and environment blocks; reuse the live loop pattern.
+- [x] 2.7 Add tests covering stopped/running main checkout, multiple Odoo workers, unique/shared database, multiple PostgreSQL connections, Linux/macOS PID scope, privilege failure, stale PID, shared external process, and no double counting.
 
 ## 3. `env list` checkout inventory (item 3)
 
