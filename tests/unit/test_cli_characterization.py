@@ -25,7 +25,7 @@ from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
 from odoo_instance_sdk.internal.context import resolve_environment, resolve_project
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
 from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor, RunContext
-from odoo_instance_sdk.models import Snapshot
+from odoo_instance_sdk.models import CheckoutInventory
 from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.environment import EnvironmentResource
@@ -191,6 +191,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "psql",
         "monitor",
         "resource",
+        "ps",
     }
     assert "--project" in result.output
     assert "--env" in result.output
@@ -499,7 +500,13 @@ def test_discovered_public_methods() -> None:
             "sync_python",
             "sync_python_command",
         ),
-        EnvironmentMonitor: ("snapshot", "snapshot_command", "watch"),
+        EnvironmentMonitor: (
+            "processes",
+            "processes_command",
+            "snapshot",
+            "snapshot_command",
+            "watch",
+        ),
         PostgresCluster: (
             "approve_image",
             "approve_image_command",
@@ -935,13 +942,22 @@ def test_outside_project_all_projects_listing_does_not_require_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    empty = Snapshot(schema_version=3, generated_at=datetime.now(UTC), projects=(), environments=())
+    now = datetime.now(UTC)
+    empty_inventory = CheckoutInventory(
+        schema_version=1,
+        generated_at=now,
+        sample_time=now,
+        project_id=None,
+        rows=(),
+        clusters=(),
+    )
     client = MagicMock()
     with (
         patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
         patch(
-            "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", return_value=empty
-        ) as snapshot,
+            "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",
+            return_value=empty_inventory,
+        ) as checkout_inventory,
     ):
         result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
@@ -951,4 +967,4 @@ def test_outside_project_all_projects_listing_does_not_require_context(
         "project_source": "null",
         "environment_source": "null",
     }
-    snapshot.assert_called_once_with(project_id=None, include_removed=False)
+    checkout_inventory.assert_called_once_with(project_id=None, include_removed=False)

@@ -63,6 +63,7 @@ class RuntimeView:
     http_port: int
     base_ref: str | None
     base_provenance: BaseProvenance
+    default_run_args: tuple[str, ...] = ()
 
     @property
     def http_url(self) -> str:
@@ -170,6 +171,7 @@ class ResolvedContext:
                 http_port=start_config.http_port,
                 base_ref=self.source.default_base_ref,
                 base_provenance="project",
+                default_run_args=tuple(getattr(config, "default_run_args", ()) or ()),
             )
 
         environment = self.source
@@ -197,6 +199,7 @@ class ResolvedContext:
             http_port=start_config.http_port,
             base_ref=getattr(environment, "base_ref", None),
             base_provenance="environment",
+            default_run_args=tuple(getattr(config, "default_run_args", ()) or ()),
         )
 
     def require_environment(self) -> DevelopmentEnvironment:
@@ -238,7 +241,11 @@ class ResolvedContext:
         from odoo_instance_sdk.internal import context as _resolution
 
         if self.is_environment:
-            return _resolution._check_port_free(cast("DevelopmentEnvironment", self.source))
+            available, _detail = _resolution._environment_http_port_preflight(
+                cast("DevelopmentEnvironment", self.source),
+                self.client,
+            )
+            return available
         start_config = self.instance.config.start_config
         if start_config is None:
             raise RuntimeError("resolved project instance has no Odoo start configuration")

@@ -20,7 +20,7 @@ class PostgresProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     """Non-secret project-level PostgreSQL cluster intent stored under ``[postgres]``.
 
     Secrets (password) never live here — they live in a ``0600`` file under
-    platformdirs user data directory, created lazily on first ``up``.
+    the canonical ``~/.odcli`` root, created lazily on first ``up``.
     """
 
     mode: Literal["external", "compose"] = "external"

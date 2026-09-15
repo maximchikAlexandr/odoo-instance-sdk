@@ -72,8 +72,14 @@ def _isolate_vscode_port_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestVscodeGenerateProfile:
-    def test_project_view_builds_profile_without_environment(self, tmp_path: Path) -> None:
-        view = RuntimeView(
+    def _project_view(
+        self,
+        tmp_path: Path,
+        *,
+        default_run_args: tuple[str, ...] = (),
+        db_name: str = "project_db",
+    ) -> RuntimeView:
+        return RuntimeView(
             owner_kind="project",
             project_id="demo-project",
             environment_id=None,
@@ -84,16 +90,20 @@ class TestVscodeGenerateProfile:
                 http_port=18069,
                 http_interface="127.0.0.1",
                 config_path=str(tmp_path / "odoo.conf"),
-                db_name="project_db",
+                db_name=db_name,
             ),
             command_prefix=(sys.executable, str(tmp_path / "odoo-bin")),
             python_path=Path(sys.executable),
-            database="project_db",
+            database=db_name,
             http_interface="127.0.0.1",
             http_port=18069,
             base_ref="main",
             base_provenance="project",
+            default_run_args=default_run_args,
         )
+
+    def test_project_view_builds_profile_without_environment(self, tmp_path: Path) -> None:
+        view = self._project_view(tmp_path)
 
         profile = build_launch_profile(view)
 
@@ -104,6 +114,34 @@ class TestVscodeGenerateProfile:
         args = cast("list[object]", profile["args"])
         assert "--database" in args
         assert "project_db" in args
+
+    def test_default_run_args_appear_in_profile_exactly_once(self, tmp_path: Path) -> None:
+        view = self._project_view(tmp_path, default_run_args=("--dev=qweb,xml",))
+
+        profile = build_launch_profile(view)
+
+        args = cast("list[object]", profile["args"])
+        assert args.count("--dev=qweb,xml") == 1
+
+    def test_empty_default_run_args_adds_no_extra_arguments(self, tmp_path: Path) -> None:
+        view = self._project_view(tmp_path, default_run_args=())
+
+        profile = build_launch_profile(view)
+
+        args = cast("list[object]", profile["args"])
+        baseline_view = self._project_view(tmp_path, default_run_args=())
+        baseline_profile = build_launch_profile(baseline_view)
+        baseline_args = cast("list[object]", baseline_profile["args"])
+        assert args == baseline_args
+        assert "--dev" not in args
+
+    def test_disallowed_managed_override_in_default_run_args_raises(self, tmp_path: Path) -> None:
+        from odoo_instance_sdk.exceptions import InstanceConfigurationError
+
+        view = self._project_view(tmp_path, default_run_args=("--database=forced",))
+
+        with pytest.raises(InstanceConfigurationError):
+            build_launch_profile(view)
 
     @pytest.mark.parametrize("mode", ["rich", "json", "toon"])
     def test_project_cli_uses_runtime_view_for_each_output_mode(

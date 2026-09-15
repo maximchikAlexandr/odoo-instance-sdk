@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import re
@@ -44,12 +45,8 @@ from odoo_instance_sdk.commands.output import (
     success_document,
 )
 from odoo_instance_sdk.execution import Command, ExecutionPlan, SemanticPlanObservation
-from odoo_instance_sdk.internal.automation import (
-    DepsVerifyResult,
-)
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
 from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
-from odoo_instance_sdk.internal.pg.inventory import DatabaseInventoryItem, DatabaseInventoryResult
 from odoo_instance_sdk.internal.resource_inventory import ResourceInventory
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
@@ -60,8 +57,13 @@ from odoo_instance_sdk.models import (
     ClusterSnapshot,
     CommandResult,
     DatabaseFootprint,
+    DatabaseInventoryItem,
+    DatabaseInventoryResult,
     DatabasePreparationAction,
     DatabasePreparationResult,
+    DepsDistributionDetail,
+    DepsMissingImport,
+    DepsVerifyResult,
     DevelopmentEnvironment,
     EnvironmentArtifacts,
     EnvironmentCheckoutPlan,
@@ -75,6 +77,7 @@ from odoo_instance_sdk.models import (
     PgAdminEligibilityState,
     PortObservation,
     PostgresClusterState,
+    ProcessInventory,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -127,6 +130,8 @@ class PublicLeafCase:
     args: tuple[str, ...]
     classification: CliLeafClass
     requires_dry_run: bool
+    sdk_primitive: str | None = None
+    cli_only_reason: str | None = None
     exception_reason: str | None = None
     variants: tuple[CliLeafClass, ...] = ()
     e2e_disposition: Literal["critical", "focused", "smoke", "not-applicable"] | None = None
@@ -151,8 +156,12 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("init", "--no-input", "--odoo-bin", "/opt/odoo/odoo-bin", "--dry-run", "--project"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="cli.init_project_command",
         e2e_disposition="smoke",
-        e2e_evidence=("E2E-SM-01", "E2E-CP-01"),
+        e2e_evidence=(
+            "E2E-SM-01",
+            "E2E-CP-01",
+        ),
         e2e_rationale="manifest and target project",
     ),
     PublicLeafCase(
@@ -160,6 +169,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("doctor",),
         "bounded-read-only",
         False,
+        sdk_primitive="DoctorReport.from_project",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-14",),
         e2e_rationale="final project diagnosis",
@@ -169,6 +179,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("stop", "--dry-run"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="OdooInstance.stop_environment_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-13",),
         e2e_rationale="owned target process stop and repeat",
@@ -178,6 +189,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("resource", "ls"),
         "bounded-read-only",
         False,
+        cli_only_reason="CLI-only resource inventory projection without a public SDK type",
+        exception_reason="CLI-only resource inventory projection without a public SDK type",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-12",),
         e2e_rationale="run-owned inventory",
@@ -187,8 +200,13 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("resource", "doctor"),
         "bounded-read-only",
         False,
+        cli_only_reason="CLI-only resource doctor projection without a public SDK type",
+        exception_reason="CLI-only resource doctor projection without a public SDK type",
         e2e_disposition="smoke",
-        e2e_evidence=("E2E-SM-05", "E2E-CP-12"),
+        e2e_evidence=(
+            "E2E-SM-05",
+            "E2E-CP-12",
+        ),
         e2e_rationale="ownership and health",
     ),
     PublicLeafCase(
@@ -196,6 +214,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("env", "create", "PROJ-123", "--dry-run"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="EnvironmentResource.checkout_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-02",),
         e2e_rationale="pinned source, explicit owned venv, and audited hash-lock first install",
@@ -205,6 +224,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("env", "ls", "--all-projects"),
         "bounded-read-only",
         False,
+        sdk_primitive="EnvironmentMonitor.checkout_inventory_command",
         variants=("rich-live",),
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-03",),
@@ -215,6 +235,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("env", "path", "env-1"),
         "bounded-read-only",
         False,
+        cli_only_reason="CLI-only worktree path resolution for shell substitution",
+        exception_reason="CLI-only worktree path resolution for shell substitution",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-03",),
         e2e_rationale="worktree/config/venv paths",
@@ -224,6 +246,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("env", "show", "env-1"),
         "bounded-read-only",
         False,
+        cli_only_reason="CLI-only Rich environment detail rendering",
+        exception_reason="CLI-only Rich environment detail rendering",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream environment inspection is covered by focused command tests",
     ),
@@ -232,6 +256,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("env", "rm", "env-1", "--yes"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="EnvironmentResource.remove_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-15",),
         e2e_rationale="exact owned cleanup and repeat",
@@ -241,6 +266,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("env", "sync", "env-1"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="EnvironmentResource.sync_python_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-04",),
         e2e_rationale="public `--hash-lock`/digest sync, `--require-hashes`, and idempotency",
@@ -250,6 +276,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("backup", "ls"),
         "bounded-read-only",
         False,
+        cli_only_reason="CLI-only catalogue pagination and project-scope selection",
+        exception_reason="CLI-only catalogue pagination and project-scope selection",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-09",),
         e2e_rationale="downloaded catalog row",
@@ -259,6 +287,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("backup", "inspect", "00000000-0000-0000-0000-000000000007"),
         "bounded-read-only",
         False,
+        sdk_primitive="BackupResource.inspect_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-09",),
         e2e_rationale="exact size/SHA/source identity",
@@ -268,8 +297,12 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("backup", "validate", "00000000-0000-0000-0000-000000000007"),
         "bounded-read-only",
         False,
+        sdk_primitive="BackupResource.validate_command",
         e2e_disposition="smoke",
-        e2e_evidence=("E2E-SM-03", "E2E-CP-09"),
+        e2e_evidence=(
+            "E2E-SM-03",
+            "E2E-CP-09",
+        ),
         e2e_rationale="ZIP plus filestore validation",
     ),
     PublicLeafCase(
@@ -277,6 +310,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("backup", "rm", "00000000-0000-0000-0000-000000000007", "--dry-run"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="BackupResource.delete_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-09",),
         e2e_rationale="owned artifact deletion and repeat",
@@ -286,8 +320,12 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("db", "refresh"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="EnvironmentResource.refresh_database_command",
         e2e_disposition="smoke",
-        e2e_evidence=("E2E-SM-02", "E2E-CP-08"),
+        e2e_evidence=(
+            "E2E-SM-02",
+            "E2E-CP-08",
+        ),
         e2e_rationale="real remote download and restore",
     ),
     PublicLeafCase(
@@ -295,6 +333,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("db", "restore", "00000000-0000-0000-0000-000000000007", "--dry-run"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="EnvironmentResource.refresh_database_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-05",),
         e2e_rationale="exact catalog restore, occupied/repeat cases",
@@ -304,8 +343,12 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("db", "ls"),
         "bounded-read-only",
         False,
+        sdk_primitive="DatabaseResource.list_inventory_command",
         e2e_disposition="smoke",
-        e2e_evidence=("E2E-SM-04", "E2E-CP-10"),
+        e2e_evidence=(
+            "E2E-SM-04",
+            "E2E-CP-10",
+        ),
         e2e_rationale="restored DB visible",
     ),
     PublicLeafCase(
@@ -313,6 +356,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("db", "reset-admin-password"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="DatabaseResource.reset_admin_password_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-06",),
         e2e_rationale="target Odoo shell reset and redaction",
@@ -322,6 +366,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("db", "rm", "demo", "--dry-run"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="DatabaseResource.drop_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-10",),
         e2e_rationale="owned DB deletion; foreign DB refusal",
@@ -331,6 +376,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("eval", "1"),
         "process-previewable-read-only",
         True,
+        sdk_primitive="eval_expression_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-11",),
         e2e_rationale="restored model/attachment assertion",
@@ -340,6 +386,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("exec", "-"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="exec_script_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-07",),
         e2e_rationale="framed script result and non-zero failure",
@@ -349,6 +396,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("test", "--changed", "--dry-run"),
         "process-previewable-read-only",
         True,
+        sdk_primitive="run_odoo_tests_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-07",),
         e2e_rationale="probe module native runner report",
@@ -358,6 +406,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("module", "ls", "sale"),
         "process-previewable-read-only",
         True,
+        sdk_primitive="list_modules_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-05",),
         e2e_rationale="probe discovery/install state",
@@ -367,6 +416,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("module", "update", "sale", "--yes"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="update_modules_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-06",),
         e2e_rationale="deterministic update and repeat",
@@ -376,6 +426,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("module", "test", "sale", "--test-tags", "/sale"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="run_odoo_tests_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-08",),
         e2e_rationale="compatibility alias equals top-level test",
@@ -385,6 +436,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("module", "info", "sale"),
         "bounded-read-only",
         False,
+        sdk_primitive="ModuleResource.info",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream module inspection is covered by focused command tests",
     ),
@@ -393,6 +445,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("module", "where", "sale"),
         "bounded-read-only",
         False,
+        sdk_primitive="ModuleResource.locate",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream filesystem inspection is outside the lifecycle fixture",
     ),
@@ -401,6 +454,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("module", "deps", "sale"),
         "bounded-read-only",
         False,
+        sdk_primitive="ModuleResource.dependencies",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream dependency inspection is covered offline",
     ),
@@ -409,6 +463,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("module", "install-order", "sale"),
         "process-previewable-read-only",
         True,
+        sdk_primitive="ModuleResource.install_order_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream planning leaf is outside the lifecycle fixture",
     ),
@@ -417,6 +472,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("translations", "export", "--module", "sale", "--language", "fr_FR"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="export_translations_command",
         e2e_disposition="not-applicable",
         e2e_rationale="Browser/localization/business behavior is outside the `base`-only fixture; existing command-plan tests remain authoritative",
     ),
@@ -425,6 +481,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("deps", "verify"),
         "process-previewable-read-only",
         True,
+        sdk_primitive="verify_deps_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-04",),
         e2e_rationale="owned Python/Odoo dependency preflight",
@@ -434,6 +491,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("vscode", "generate"),
         "mutating-or-spawning",
         True,
+        cli_only_reason="CLI-only VS Code launch.json artifact writer",
+        exception_reason="CLI-only VS Code launch.json artifact writer",
         e2e_disposition="not-applicable",
         e2e_rationale="Editor artifact generation is orthogonal to the server/database lifecycle and remains covered offline",
     ),
@@ -443,10 +502,11 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
             "postgres",
             "approve-image",
             "--image-digest",
-            "docker.io/library/postgres@sha256:" + "a" * 64,
+            "docker.io/library/postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ),
         "mutating-or-spawning",
         True,
+        sdk_primitive="PostgresCluster.approve_image_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-01",),
         e2e_rationale="exact trusted image digest",
@@ -456,6 +516,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("postgres", "ps"),
         "bounded-read-only",
         False,
+        sdk_primitive="PostgresCluster.status_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-01",),
         e2e_rationale="health/ownership snapshot",
@@ -465,6 +526,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("postgres", "up"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="PostgresCluster.ensure_running_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-01",),
         e2e_rationale="public owned cluster start",
@@ -474,6 +536,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("postgres", "stop"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="PostgresCluster.stop_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-15",),
         e2e_rationale="public stop plus harness volume cleanup",
@@ -483,6 +546,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("db", "locks", "demo"),
         "bounded-read-only",
         False,
+        sdk_primitive="DatabaseResource.locks_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-11",),
         e2e_rationale="bounded real PostgreSQL diagnostics",
@@ -492,6 +556,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("db", "stats", "demo"),
         "bounded-read-only",
         False,
+        sdk_primitive="DatabaseResource.stats_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-11",),
         e2e_rationale="restored DB statistics",
@@ -501,6 +566,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("db", "bloat", "demo"),
         "bounded-read-only",
         False,
+        sdk_primitive="DatabaseResource.bloat_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-11",),
         e2e_rationale="bounded estimate mode",
@@ -510,6 +576,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("db", "init-monitoring", "demo", "--yes", "--dry-run"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="DatabaseResource.init_monitoring_command",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-11",),
         e2e_rationale="extension/setup idempotency",
@@ -519,7 +586,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("psql", "--dry-run", "-c", "SELECT 1"),
         "native-passthrough",
         True,
-        "normal execution owns inherited native psql streams; dry-run uses the shared plan",
+        cli_only_reason="normal execution owns inherited native psql streams; dry-run uses the shared plan",
+        exception_reason="normal execution owns inherited native psql streams; dry-run uses the shared plan",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-12",),
         e2e_rationale="inherited stream and dry-run plan",
@@ -529,9 +597,13 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("run",),
         "native-passthrough",
         True,
-        "normal execution owns inherited Odoo TTY streams; dry-run is still required",
+        cli_only_reason="normal execution owns inherited Odoo TTY streams; dry-run is still required",
+        exception_reason="normal execution owns inherited Odoo TTY streams; dry-run is still required",
         e2e_disposition="critical",
-        e2e_evidence=("E2E-CP-07", "E2E-CP-13"),
+        e2e_evidence=(
+            "E2E-CP-07",
+            "E2E-CP-13",
+        ),
         e2e_rationale="HTTP-ready lifecycle and SIGINT",
     ),
     PublicLeafCase(
@@ -539,7 +611,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("logs", "--follow"),
         "jsonl-stream",
         False,
-        "read-only logfile subscription has no finite child-process or mutation plan",
+        cli_only_reason="read-only logfile subscription has no finite child-process or mutation plan",
+        exception_reason="read-only logfile subscription has no finite child-process or mutation plan",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-13",),
         e2e_rationale="bounded subscription/cancellation and redaction",
@@ -549,7 +622,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("shell",),
         "native-passthrough",
         True,
-        "normal execution owns interactive Odoo streams; dry-run is still required",
+        cli_only_reason="normal execution owns interactive Odoo streams; dry-run is still required",
+        exception_reason="normal execution owns interactive Odoo streams; dry-run is still required",
         e2e_disposition="focused",
         e2e_evidence=("E2E-FC-06",),
         e2e_rationale="exact target database and exit semantics",
@@ -559,7 +633,8 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("monitor",),
         "native-passthrough",
         False,
-        "long-running monitor server has no finite bounded output plan",
+        cli_only_reason="long-running monitor server has no finite bounded output plan",
+        exception_reason="long-running monitor server has no finite bounded output plan",
         e2e_disposition="not-applicable",
         e2e_rationale="Long-running dashboard service is a separate CI/dashboard concern and does not validate Odoo 19 lifecycle",
     ),
@@ -568,6 +643,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("git", "commit", "fixture", "--dry-run"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="GitResource.commit_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream Git workflow is outside the disposable Odoo fixture",
     ),
@@ -576,6 +652,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("git", "check"),
         "bounded-read-only",
         False,
+        sdk_primitive="GitResource.check_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream Git policy inspection is covered by unit contracts",
     ),
@@ -584,6 +661,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("git", "absorb", "--dry-run"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="GitResource.absorb_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream Git mutation is outside the disposable Odoo fixture",
     ),
@@ -592,8 +670,20 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("git", "sync", "--dry-run"),
         "mutating-or-spawning",
         True,
+        sdk_primitive="GitResource.sync_command",
         e2e_disposition="not-applicable",
         e2e_rationale="upstream remote Git publication is intentionally outside E2E",
+    ),
+    PublicLeafCase(
+        ("ps",),
+        ("ps",),
+        "bounded-read-only",
+        False,
+        sdk_primitive="EnvironmentMonitor.processes_command",
+        variants=("rich-live",),
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-12",),
+        e2e_rationale="single-snapshot process/resource inventory",
     ),
 )
 
@@ -657,6 +747,39 @@ def test_public_leaf_inventory_is_complete_and_classified() -> None:
         for case in PUBLIC_LEAF_CASES
         if case.classification in {"mutating-or-spawning", "process-previewable-read-only"}
     )
+
+
+_FORBIDDEN_PARALLEL_DOMAIN_CALLS = frozenset(
+    {
+        "build_database_inventory_command",
+        "build_copy_replacement_command",
+        "_stop_environment_command",
+    }
+)
+
+
+def test_sdk_first_leaves_do_not_call_parallel_internal_domain_builders() -> None:
+    """Reject Click callbacks that bypass public SDK primitives."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).parents[2]
+    commands_root = repo_root / "src" / "odoo_instance_sdk" / "commands"
+    sdk_paths = {case.path for case in PUBLIC_LEAF_CASES if case.sdk_primitive}
+    violations: list[str] = []
+    for path in sorted(commands_root.rglob("*.py")):
+        module = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(module):
+            if not isinstance(node, ast.Call):
+                continue
+            name = None
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            if name in _FORBIDDEN_PARALLEL_DOMAIN_CALLS:
+                violations.append(f"{path.relative_to(repo_root)}:{node.lineno}:{name}")
+    assert not violations, "parallel internal domain execution at " + ", ".join(violations)
+    assert sdk_paths  # inventory documents SDK-backed leaves
 
 
 def test_bounded_catalogue_list_inventory_is_explicit() -> None:
@@ -914,7 +1037,7 @@ def _patch_leaf_external(  # noqa: C901
             ),
         )
         monkeypatch.setattr(
-            "odoo_instance_sdk.cli.run_doctor",
+            "odoo_instance_sdk.cli._run_doctor",
             fail_operation
             if failing
             else lambda *_args, **_kwargs: DoctorReport(
@@ -948,9 +1071,9 @@ def _patch_leaf_external(  # noqa: C901
         instance = MagicMock()
         env = _matrix_environment()
         if failing:
-            instance._stop_environment_command.side_effect = fail_operation
+            instance.stop_environment_command.side_effect = fail_operation
         else:
-            instance._stop_environment_command.return_value = _matrix_command(
+            instance.stop_environment_command.return_value = _matrix_command(
                 {"status": "stopped", "environment_id": str(env.id)}
             )
         monkeypatch.setattr(
@@ -1075,12 +1198,8 @@ def _patch_leaf_external(  # noqa: C901
                 ),
             ),
         )
-        from odoo_instance_sdk.internal.pg import inventory as inventory_module
-
-        monkeypatch.setattr(
-            inventory_module,
-            "build_database_inventory_command",
-            fail_operation if failing else lambda *_args, **_kwargs: _matrix_command(inventory),
+        instance.databases.list_inventory_command = (
+            fail_operation if failing else lambda *_args, **_kwargs: _matrix_command(inventory)
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.pg._database_instance",
@@ -1136,6 +1255,29 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot_operation
         )
+        return
+
+    if path == ("ps",):
+        ps_inventory = ProcessInventory(
+            schema_version=1,
+            generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+            sample_time=datetime(2020, 1, 1, tzinfo=UTC),
+            project_id=None,
+        )
+
+        class FakePsMonitor:
+            def processes_command(self, project_id: str | None = None) -> Command[ProcessInventory]:
+                if failing:
+                    return _matrix_command(
+                        ps_inventory,
+                        error=RuntimeError("isolated external operation failed"),
+                    )
+                return _matrix_command(ps_inventory)
+
+            def processes(self, project_id: str | None = None) -> ProcessInventory:
+                return self.processes_command(project_id=project_id).run()
+
+        monkeypatch.setattr("odoo_instance_sdk.commands.ps._monitor_class", lambda: FakePsMonitor)
         return
 
     if path[:2] == ("env", "path"):
@@ -1704,14 +1846,16 @@ def _rich_contract_process_plan() -> ExecutionPlan:
         (
             DepsVerifyResult(
                 pip_check_ok=False,
-                distributions=[{"detail": "package requires password='pip-secret'"}],
+                distributions=(
+                    DepsDistributionDetail(detail="package requires password='pip-secret'"),
+                ),
             ),
             False,
             1,
         ),
         (
             DepsVerifyResult(
-                missing_imports=[{"module": "sale", "import": "missing_pkg"}],
+                missing_imports=(DepsMissingImport(module="sale", import_name="missing_pkg"),),
             ),
             False,
             1,
@@ -1719,8 +1863,8 @@ def _rich_contract_process_plan() -> ExecutionPlan:
         (
             DepsVerifyResult(
                 pip_check_ok=False,
-                distributions=[{"detail": "conflict"}],
-                missing_imports=[{"module": "sale", "import": "missing_pkg"}],
+                distributions=(DepsDistributionDetail(detail="conflict"),),
+                missing_imports=(DepsMissingImport(module="sale", import_name="missing_pkg"),),
             ),
             False,
             1,
@@ -3109,15 +3253,30 @@ def test_project_module_update_incomplete_result_is_a_failure_document(tmp_path:
 
 
 def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+
     snapshot = Snapshot(
         schema_version=3,
         generated_at=datetime.now(UTC),
         projects=(),
         environments=(),
     )
+    inventory = build_checkout_inventory(
+        snapshot,
+        git_collector=lambda _p, _r: GitActivity(
+            default_branch="main",
+            head_sha="abc",
+            short_sha="abc",
+            branch="main",
+            ahead=0,
+            behind=0,
+            diff=None,
+            state=GitActivityState.CLEAN,
+        ),
+    )
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
-        lambda self, project_id=None, *, include_removed=False: snapshot,
+        "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",
+        lambda self, project_id=None, *, include_removed=False: inventory,
     )
     result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "toon"])
     assert result.exit_code == 0, result.output
@@ -3387,15 +3546,30 @@ def test_bounded_rich_leaf_renderers_use_labelled_summaries(
 def test_env_list_format_json_emits_v1_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+
     snapshot = Snapshot(
         schema_version=3,
         generated_at=datetime.now(UTC),
         projects=(),
         environments=(),
     )
+    inventory = build_checkout_inventory(
+        snapshot,
+        git_collector=lambda _p, _r: GitActivity(
+            default_branch="main",
+            head_sha="abc",
+            short_sha="abc",
+            branch="main",
+            ahead=0,
+            behind=0,
+            diff=None,
+            state=GitActivityState.CLEAN,
+        ),
+    )
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
-        lambda self, project_id=None, *, include_removed=False: snapshot,
+        "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",
+        lambda self, project_id=None, *, include_removed=False: inventory,
     )
     result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "json"])
     assert result.exit_code == 0, result.output
@@ -3414,7 +3588,9 @@ def test_conflicting_machine_alias_is_rejected_before_snapshot(
         called = True
         raise AssertionError("conflicting mode must fail before operation")
 
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory", snapshot
+    )
     result = CliRunner().invoke(cli, ["env", "ls", "--json", "--format", "toon"])
     assert result.exit_code == 2
     assert result.stdout == ""
@@ -3728,7 +3904,7 @@ def test_public_human_callbacks_neutralize_terminal_controls(
                     provenance="explicit",
                 ),
             ),
-            patch("odoo_instance_sdk.cli.run_doctor", return_value=report),
+            patch("odoo_instance_sdk.cli._run_doctor", return_value=report),
         ):
             result = runner.invoke(cli, ["doctor"])
     else:

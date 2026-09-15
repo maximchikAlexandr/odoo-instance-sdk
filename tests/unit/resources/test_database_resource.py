@@ -99,7 +99,7 @@ def _patch_captured_process(monkeypatch: pytest.MonkeyPatch, fake_run: Any) -> N
             0.0,
         )
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
 
 
 def _make_backup(**kw: Any) -> Backup:

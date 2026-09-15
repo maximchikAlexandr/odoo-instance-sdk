@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -23,10 +23,12 @@ from odoo_instance_sdk.models import (
     BackupDeletionResult,
     BackupEvent,
     BackupFormat,
+    BackupInspectResult,
     BackupState,
     BackupValidationResult,
     BackupValidationStatus,
 )
+from odoo_instance_sdk.resources.catalog import backup_projection_to_inspect_result
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -87,10 +89,13 @@ class BackupResource:
         format: BackupFormat | None = None,
     ) -> Backup | None:
         catalog = self._client.get_catalog()
-        return catalog.latest_backup(
-            source_base_url=normalize_base_url(source_base_url),
-            database_name=database_name,
-            format=format.value if format else None,
+        return cast(
+            "Backup | None",
+            catalog.latest_backup(
+                source_base_url=normalize_base_url(source_base_url),
+                database_name=database_name,
+                format=format.value if format else None,
+            ),
         )
 
     def history(
@@ -109,6 +114,22 @@ class BackupResource:
             backup_id=backup_id,
         )
         return tuple(events)
+
+    def inspect(self, backup_id: str) -> BackupInspectResult:
+        return self.inspect_command(backup_id).run()
+
+    def inspect_command(
+        self, backup_id: str, *, executor: ProcessExecutor | None = None
+    ) -> Command[BackupInspectResult]:
+        return self._command(
+            "backup.inspect",
+            "Resolve one complete backup UUID from the catalogue",
+            lambda: backup_projection_to_inspect_result(
+                self._client.get_catalog()._resolve_backup_projection(backup_id)
+            ),
+            executor=executor,
+            read_only=True,
+        )
 
     def delete(self, backup: Backup) -> BackupDeletionResult:
         return self.delete_command(backup).run()

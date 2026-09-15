@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import uuid
 from pathlib import Path
 from typing import TypedDict
@@ -9,11 +8,8 @@ import pytest
 
 from odoo_instance_sdk.exceptions import BackupCatalogError
 from odoo_instance_sdk.internal.repo_key import repo_key
-from odoo_instance_sdk.storage.backup_catalog import (
-    CURRENT_SCHEMA_VERSION,
-    BackupCatalog,
-    CatalogValue,
-)
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
+from odoo_instance_sdk.storage.catalog_migrate import CATALOG_REVISION, catalog_revision
 
 
 def _make_env(env_id: str) -> dict[str, CatalogValue]:
@@ -68,8 +64,7 @@ def _runtime_kwargs() -> RuntimeKwargs:
 
 def test_fresh_catalog_has_latest_schema_and_runtime_table(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
-    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == CURRENT_SCHEMA_VERSION
+    assert catalog_revision(catalog._conn) == CATALOG_REVISION
     tables = {
         r[0]
         for r in catalog._conn.execute(
@@ -86,38 +81,8 @@ def test_reopen_catalog_is_idempotent(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=db)
     catalog.close()
     reopened = BackupCatalog(db_path=db)
-    version = reopened._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == CURRENT_SCHEMA_VERSION
+    assert catalog_revision(reopened._conn) == CATALOG_REVISION
     reopened.close()
-
-
-def test_v8_catalog_upgrades_to_latest_on_open(tmp_path: Path) -> None:
-    db = tmp_path / "catalog.sqlite3"
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA user_version = 8")
-    conn.executescript("""
-        CREATE TABLE backups (
-            id TEXT PRIMARY KEY,
-            source_base_url TEXT NOT NULL,
-            database_name TEXT NOT NULL,
-            state TEXT NOT NULL,
-            downloaded_at TEXT
-        );
-        CREATE TABLE environments (id TEXT PRIMARY KEY);
-    """)
-    conn.close()
-
-    catalog = BackupCatalog(db_path=db)
-    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    tables = {
-        r[0]
-        for r in catalog._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
-    }
-    assert version == CURRENT_SCHEMA_VERSION
-    assert "runtime" in tables
-    catalog.close()
 
 
 def test_upsert_inserts_then_updates_single_row(tmp_path: Path) -> None:
@@ -232,52 +197,6 @@ def test_project_runtime_uses_exclusive_owner_and_registration(tmp_path: Path) -
         == 0
     )
     catalog.close()
-
-
-@pytest.mark.parametrize(
-    ("runtime_schema", "runtime_row", "message"),
-    [
-        ("CREATE TABLE runtime (unexpected TEXT)", None, "unsupported shape"),
-        (
-            """CREATE TABLE runtime (
-                environment_id TEXT, project_id TEXT, root_pid INTEGER,
-                create_time REAL, started_at TEXT, checkout_branch TEXT,
-                commit_sha TEXT, http_url TEXT, http_port INTEGER,
-                database_name TEXT, updated_at TEXT
-            )""",
-            "INSERT INTO runtime VALUES (NULL, NULL, 1, 1.0, '', '', '', '', 1, '', '')",
-            "exactly one owner",
-        ),
-        (
-            """CREATE TABLE runtime (
-                owner_kind TEXT, owner_id TEXT, root_pid INTEGER,
-                create_time REAL, started_at TEXT, checkout_branch TEXT,
-                commit_sha TEXT, http_url TEXT, http_port INTEGER,
-                database_name TEXT, updated_at TEXT
-            )""",
-            "INSERT INTO runtime VALUES ('invalid', '', 1, 1.0, '', '', '', '', 1, '', '')",
-            "exactly one valid owner",
-        ),
-    ],
-)
-def test_v11_migration_rejects_invalid_runtime_ownership(
-    tmp_path: Path, runtime_schema: str, runtime_row: str | None, message: str
-) -> None:
-    db = tmp_path / "catalog.sqlite3"
-    catalog = BackupCatalog(db_path=db)
-    catalog.close()
-    conn = sqlite3.connect(db)
-    conn.execute("DROP VIEW environment_runtime")
-    conn.execute("DROP TABLE runtime")
-    conn.execute(runtime_schema)
-    if runtime_row is not None:
-        conn.execute(runtime_row)
-    conn.execute("PRAGMA user_version = 10")
-    conn.commit()
-    conn.close()
-
-    with pytest.raises(BackupCatalogError, match=message):
-        BackupCatalog(db_path=db)
 
 
 def test_runtime_owner_validation_rejects_invalid_and_missing_owners(tmp_path: Path) -> None:
