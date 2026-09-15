@@ -283,6 +283,7 @@ def test_editor_and_browser_builders_do_not_embed_project_dotenv(
             project_id="project_demo",
             python_path=tmp_path / "venv" / "bin" / "python",
             root=tmp_path,
+            default_run_args=(),
         ),
     )
     profile = build_launch_profile(cast("RuntimeView", runtime))
