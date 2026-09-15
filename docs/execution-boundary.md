@@ -13,8 +13,9 @@ Every eligible bounded leaf resolves inputs once and captures one immutable
 `Command` before confirmation or mutation. `--dry-run` emits its redacted
 `ExecutionPlan` and does not call `.run()`, prompt, or launch a process.
 The normal path confirms only after planning and runs that same command object.
-`--json` and `--format json` are aliases over the same frozen document;
-Rich, JSON, and TOON are projections, not independent planners.
+`--format json` is the only JSON selector; removed `--json` is a Click usage
+error with exit code `2`. Rich, JSON, and TOON are projections, not independent
+planners.
 
 Plans preserve ordered process/action steps, argv boundaries, sanitized
 environment policy, multiline stdin/source previews, observations, warnings,
@@ -163,8 +164,9 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:1256-1257` — documented `logs --follow` JSONL
-  stream; remove when that stream gets an explicit bounded transport.
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py:424-425` — documented
+  `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
+  transport.
 - `src/odoo_instance_sdk/commands/backup.py:295` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/output.py:236` — shared Rich output
@@ -177,7 +179,7 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:392` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:1200` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:413` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
