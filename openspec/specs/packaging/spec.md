@@ -65,25 +65,20 @@ React SPA assets SHALL ship in sdist + wheel; Node.js SHALL NOT be required for 
 - **WHEN** installed metadata and CLI imports are inspected
 - **THEN** Rich provides Table/Live/Status/Progress for command results, `rich-click>=1.9,<2` is confined to Click help/errors, and no Textual or alternate parser/rendering framework is present
 
-#### Scenario: Dashboard extra remains bounded
+#### Scenario: dashboard extra pulls web dependencies
 
 - **WHEN** `pip install odoo-instance-sdk[dashboard]` is run
-- **THEN** installed extra dependencies are exactly FastAPI, Starlette, and Uvicorn within their existing bounds in addition to core dependencies
+- **THEN** installed dependencies include core `psutil`, `fastapi`, `starlette`, and `uvicorn`
 
-#### Scenario: Monitor command hint when extra missing
+#### Scenario: Monitor command hint when dashboard extra missing
 
 - **WHEN** `odcli monitor` runs and `fastapi`/`uvicorn` are not installed
 - **THEN** exits `1` with message containing `pip install odoo-instance-sdk[dashboard]`
 
-#### Scenario: metrics extra contains psutil only
+#### Scenario: Obsolete metrics extra is absent
 
-- **WHEN** `pip install odoo-instance-sdk[metrics]` is run
-- **THEN** installed extra dependencies are exactly `psutil>=5.9,<7` (plus existing core deps); no FastAPI/Uvicorn
-
-#### Scenario: dashboard extra pulls metrics + fastapi + uvicorn
-
-- **WHEN** `pip install odoo-instance-sdk[dashboard]` is run
-- **THEN** installed extra dependencies include `psutil`, `fastapi`, `uvicorn` (via `metrics` + dashboard-specific)
+- **WHEN** the published metadata is inspected
+- **THEN** it exposes no `metrics` optional extra and does not require an extra install for process collection
 
 ### Requirement: Strict mypy and ruff
 
@@ -196,3 +191,16 @@ Neither `msgfmt` nor `git-absorb`, any wrapper/downloader/installer, or an `odcl
 - **WHEN** wheel, sdist, and dependency inventories are checked
 - **THEN** no gettext or git-absorb package boundary has been introduced
 
+### Requirement: Installed metadata is the CLI version source
+
+The root Click version option SHALL obtain the `odoo-instance-sdk` version from installed distribution metadata using Click and standard-library packaging facilities. The CLI SHALL NOT duplicate the project version as a command-local literal or add a runtime dependency for version discovery.
+
+#### Scenario: Installed wheel reports its metadata version
+
+- **WHEN** an isolated environment installs a built wheel and runs `odcli --version` outside a project
+- **THEN** the command exits `0` and its output contains the version declared by that wheel's distribution metadata
+
+#### Scenario: Version support adds no dependency
+
+- **WHEN** the built wheel metadata is inspected after the change
+- **THEN** its runtime dependency set is unchanged by version discovery

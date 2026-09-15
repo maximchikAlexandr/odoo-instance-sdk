@@ -51,6 +51,11 @@ from odoo_instance_sdk.internal.database_preparation import (
     compare_provenance,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
+from odoo_instance_sdk.internal.dependency_sync import (
+    build_trusted_sync_argv,
+    resolve_hash_lock,
+    revalidate_hash_lock,
+)
 from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.locks import (
     environment_lock_path,
@@ -131,6 +136,7 @@ type _EnvironmentList = list[DevelopmentEnvironment]
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _PGADMIN_LIFECYCLE_TIMEOUT = 60.0
+_CHECKOUT_WORKTREE_TIMEOUT = 300.0
 _REQUIREMENT_OPERATOR = re.compile(r"\s*(===|==|~=|!=|<=|>=|<|>|;|@)\s*")
 _APPLIED_CONFIG_BINDINGS = frozenset(
     {
@@ -161,6 +167,8 @@ class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
     python: str | Path | None = None
     create_venv: bool = False
     http_port: int | None = None
+    hash_lock: str | Path | None = None
+    hash_lock_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,10 +257,11 @@ class _CheckoutPlan:
     odoo_bin: str
     runtime_cwd: str
     dependency_inputs: tuple[str, ...]
+    hash_lock: Path | None
     worktree_argv: tuple[str, ...]
     created_at: str
     options: EnvironmentCheckoutOptions
-    branch_revalidator: Callable[[], None] | None = None
+    branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +330,34 @@ class _ExpressionApi(Protocol):
 _StrList = list[str]
 
 
+def _resolve_checkout_hash_lock(
+    options: EnvironmentCheckoutOptions, repo_root: Path
+) -> Path | None:
+    hash_lock = resolve_hash_lock(
+        options.hash_lock,
+        options.hash_lock_sha256,
+        base_dir=repo_root,
+    )
+    if hash_lock is not None and not options.create_venv:
+        raise ConfigError("hash-locked dependency sync requires an owned environment")
+    return hash_lock
+
+
+def _resolve_checkout_dependency_inputs(
+    project_cfg: ProjectConfig,
+    repo_root: Path,
+    worktree: Path,
+    hash_lock: Path | None,
+) -> tuple[str, ...]:
+    if hash_lock is not None:
+        return ()
+    dependency_paths = list(project_cfg.requirements)
+    odoo_requirements = _find_odoo_requirements(repo_root)
+    if odoo_requirements is not None and str(odoo_requirements) not in dependency_paths:
+        dependency_paths.append(str(odoo_requirements))
+    return tuple(_rebase_requirement_paths(dependency_paths, repo_root, worktree))
+
+
 @dataclass(slots=True, kw_only=True)
 class EnvironmentResource:
     _client: OdooClient
@@ -357,6 +394,8 @@ class EnvironmentResource:
         repo_root = rev_parse_toplevel(project_path)
         git_common = rev_parse_git_common_dir(repo_root)
         git_common_str = str(git_common)
+
+        hash_lock = _resolve_checkout_hash_lock(options, repo_root)
 
         self._verify_tools()
 
@@ -445,11 +484,9 @@ class EnvironmentResource:
         now = datetime.now(UTC).isoformat()
         odoo_bin = self._resolve_odoo_bin(options, project_cfg, repo_root)
         runtime_cwd = self._resolve_runtime_cwd(project_cfg, repo_root, worktree)
-        dependency_paths = list(project_cfg.requirements)
-        odoo_requirements = _find_odoo_requirements(repo_root)
-        if odoo_requirements is not None and str(odoo_requirements) not in dependency_paths:
-            dependency_paths.append(str(odoo_requirements))
-        dependency_inputs = tuple(_rebase_requirement_paths(dependency_paths, repo_root, worktree))
+        dependency_inputs = _resolve_checkout_dependency_inputs(
+            project_cfg, repo_root, worktree, hash_lock
+        )
 
         return _CheckoutPlan(
             project=project_cfg,
@@ -477,6 +514,7 @@ class EnvironmentResource:
             odoo_bin=odoo_bin,
             runtime_cwd=runtime_cwd,
             dependency_inputs=dependency_inputs,
+            hash_lock=hash_lock,
             base_revision=base_revision,
             worktree_argv=worktree_argv,
             created_at=now,
@@ -707,7 +745,7 @@ class EnvironmentResource:
         with exclusive_lock(provisioning_lock_path()):
             self._validate_checkout_snapshot(snapshot, context=context)
             if plan.branch_revalidator is not None:
-                plan.branch_revalidator()
+                plan.branch_revalidator(context)
             if plan.db_mode is EnvironmentDatabaseMode.COPY:
                 self._preflight_copy_checkout(plan)
             context.action("checkout.catalog")
@@ -848,7 +886,7 @@ class EnvironmentResource:
         branch: str,
         *,
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
-        branch_revalidator: Callable[[], None],
+        branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None],
     ) -> Command[DevelopmentEnvironment]:
         """Build the normal checkout command with one private late branch guard."""
         snapshot = self._build_checkout_snapshot(project, branch, options=options)
@@ -941,6 +979,11 @@ class EnvironmentResource:
         backup_id: uuid.UUID | None = None
         try:
             plan.worktree.parent.mkdir(parents=True, exist_ok=True)
+            # Register the path before invoking Git.  ``git worktree add`` can
+            # be interrupted after creating the administrative entry but
+            # before returning; failure cleanup must then remove that partial
+            # worktree instead of leaving a stale catalog row and lock.
+            created_paths.append(plan.worktree)
             worktree_result = cast("ProcessResult", context.process("checkout.worktree"))
             if worktree_result.returncode != 0:
                 stderr = str(worktree_result.stderr or "").strip()
@@ -949,8 +992,6 @@ class EnvironmentResource:
                         "branch_in_use", f"Branch {plan.branch!r} is already checked out"
                     )
                 raise ConfigError(f"git worktree add failed: {stderr}")  # noqa: TRY301
-            created_paths.append(plan.worktree)
-
             if plan.source_config is not None:
                 context.action("checkout.generated_config")
                 db_name_for_config = (
@@ -982,15 +1023,18 @@ class EnvironmentResource:
 
             env_obj = self._get_env_row(cat, plan.env_id)
             with exclusive_lock(python_env_lock_path(env_obj.python_environment_path)):
-                if plan.dependency_inputs:
-                    compile_result = cast(
-                        "ProcessResult", context.process("checkout.dependencies.compile")
-                    )
-                    if compile_result.returncode != 0 and not plan.dependency_lock.is_file():
-                        raise ConfigError(  # noqa: TRY301
-                            "uv pip compile failed and no prior lock: "
-                            f"{_process_stderr(compile_result)}"
+                if plan.hash_lock is not None or plan.dependency_inputs:
+                    if plan.hash_lock is None:
+                        compile_result = cast(
+                            "ProcessResult", context.process("checkout.dependencies.compile")
                         )
+                        if compile_result.returncode != 0 and not plan.dependency_lock.is_file():
+                            raise ConfigError(  # noqa: TRY301
+                                "uv pip compile failed and no prior lock: "
+                                f"{_process_stderr(compile_result)}"
+                            )
+                    else:
+                        revalidate_hash_lock(plan.hash_lock, plan.options.hash_lock_sha256)
                     install_result = cast(
                         "ProcessResult", context.process("checkout.dependencies.install")
                     )
@@ -998,7 +1042,8 @@ class EnvironmentResource:
                         raise ConfigError(  # noqa: TRY301
                             f"uv pip install failed: {_process_stderr(install_result)}".strip()
                         )
-                    created_paths.append(plan.dependency_lock)
+                    if plan.hash_lock is None:
+                        created_paths.append(plan.dependency_lock)
 
             if plan.python_owned:
                 preflight = cast("ProcessResult", context.process("checkout.runtime.preflight"))
@@ -1322,6 +1367,10 @@ class EnvironmentResource:
             if p.name == "worktree":
                 from odoo_instance_sdk.internal.git_worktree import worktree_remove
 
+                if not p.exists():
+                    if context is not None and context.planned("checkout.cleanup.worktree"):
+                        context.skip("checkout.cleanup.worktree")
+                    continue
                 try:
                     if context is None:
                         worktree_remove(repo_root, p)
@@ -1359,14 +1408,23 @@ class EnvironmentResource:
         selector: EnvironmentSelector,
         *,
         upgrade: bool = False,
+        hash_lock: str | Path | None = None,
+        hash_lock_sha256: str | None = None,
     ) -> DevelopmentEnvironment:
-        return self.sync_python_command(selector, upgrade=upgrade).run()
+        return self.sync_python_command(
+            selector,
+            upgrade=upgrade,
+            hash_lock=hash_lock,
+            hash_lock_sha256=hash_lock_sha256,
+        ).run()
 
     def sync_python_command(  # noqa: C901
         self,
         selector: EnvironmentSelector,
         *,
         upgrade: bool = False,
+        hash_lock: str | Path | None = None,
+        hash_lock_sha256: str | None = None,
     ) -> Command[DevelopmentEnvironment]:
         """Capture one immutable uv synchronization operation."""
         from odoo_instance_sdk.execution import Command
@@ -1385,12 +1443,32 @@ class EnvironmentResource:
         project = _load_project(env)
         worktree = Path(env.worktree_path)
         repo_root = Path(env.repository_root)
-        inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
-        odoo_req = _find_odoo_requirements(worktree)
-        if odoo_req is not None and str(odoo_req) not in inputs:
-            inputs.append(str(odoo_req))
+        trusted_lock = resolve_hash_lock(hash_lock, hash_lock_sha256, base_dir=repo_root)
+        if trusted_lock is not None:
+            if not env.python_environment_owned:
+                raise ConfigError("hash-locked dependency sync requires an owned environment")
+            if upgrade:
+                raise ConfigError("upgrade cannot be combined with a hash-locked sync")
+            inputs: list[str] = []
+        else:
+            inputs = _rebase_requirement_paths(list(project.requirements), repo_root, worktree)
+            odoo_req = _find_odoo_requirements(worktree)
+            if odoo_req is not None and str(odoo_req) not in inputs:
+                inputs.append(str(odoo_req))
         steps: list[Step] = []
-        if inputs:
+        if trusted_lock is not None:
+            install_argv = build_trusted_sync_argv(
+                _owned_python_executable(Path(env.python_environment_path)), trusted_lock
+            )
+            steps.append(
+                PreparedStep(
+                    step_id="environment.sync.install",
+                    argv=install_argv,
+                    cwd=str(worktree),
+                    mutating=True,
+                )
+            )
+        elif inputs:
             compile_argv = ["uv", "pip", "compile", *inputs]
             if upgrade:
                 compile_argv.append("--upgrade")
@@ -1404,7 +1482,7 @@ class EnvironmentResource:
                 )
             )
             if env.python_environment_owned:
-                install_argv: tuple[str, ...] = (
+                install_argv = (
                     "uv",
                     "pip",
                     "sync",
@@ -1435,7 +1513,7 @@ class EnvironmentResource:
                 step_id="environment.sync",
                 action="sync_python",
                 description="Record Python dependency synchronization",
-                mutating=bool(inputs),
+                mutating=trusted_lock is not None or bool(inputs),
             )
         )
         prepared_steps = tuple(steps)
@@ -1450,7 +1528,16 @@ class EnvironmentResource:
                     exclusive_lock(environment_lock_path(str(env.id))),
                     exclusive_lock(python_env_lock_path(env.python_environment_path)),
                 ):
-                    if inputs:
+                    if trusted_lock is not None:
+                        revalidate_hash_lock(trusted_lock, hash_lock_sha256)
+                        install_result = cast(
+                            "ProcessResult", context.process("environment.sync.install")
+                        )
+                        if install_result.returncode != 0:
+                            raise ConfigError(
+                                f"uv pip sync failed: {_process_stderr(install_result)}".strip()
+                            )
+                    elif inputs:
                         compile_result = cast(
                             "ProcessResult", context.process("environment.sync.compile")
                         )
@@ -1478,7 +1565,12 @@ class EnvironmentResource:
                             )
                     catalog._record_environment_sync_success(
                         str(env.id),
-                        _sync_applied_settings(catalog, env, project, inputs),
+                        _sync_applied_settings(
+                            catalog,
+                            env,
+                            project,
+                            [str(trusted_lock)] if trusted_lock is not None else inputs,
+                        ),
                     )
                     completed = True
                     return self._get_env_row(catalog, env.id)
@@ -2126,6 +2218,12 @@ class EnvironmentResource:
         copy_drop: PreparedCommand[None] | None = None,
     ) -> None:
         cat = catalog
+        # A removed catalog row is the durable idempotence boundary.  Do not
+        # re-probe its released endpoint: a later process may legitimately
+        # own that port, while active environments must still pass the
+        # fail-closed port preflight below.
+        if env.state is EnvironmentState.REMOVED:
+            return
         copy_plan = self._preflight_remove(cat, env, context=context)
         _validate_retained_removal_evidence(cat, env)
         cat.update_environment_state(str(env.id), EnvironmentState.REMOVING)
@@ -3256,10 +3354,47 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
             step_id="checkout.worktree",
             argv=plan.worktree_argv,
             cwd=str(plan.repo_root),
+            timeout=_CHECKOUT_WORKTREE_TIMEOUT,
             mode="captured",
             mutating=True,
         ),
     ]
+    if plan.branch_revalidator is not None:
+        # Ticket allocation revalidation is part of the immutable checkout
+        # boundary.  Capture its Git reads here so the callback cannot open an
+        # unplanned default ``process`` step while the command is running.
+        steps.extend(
+            (
+                PreparedStep(
+                    step_id="checkout.ticket.local-heads",
+                    argv=(
+                        "git",
+                        "-C",
+                        str(plan.repo_root),
+                        "for-each-ref",
+                        "--format=%(refname:strip=2)",
+                        "refs/heads",
+                    ),
+                    cwd=str(plan.repo_root),
+                    read_only=True,
+                ),
+                PreparedStep(
+                    step_id="checkout.ticket.remote-heads",
+                    argv=(
+                        "git",
+                        "-C",
+                        str(plan.repo_root),
+                        "ls-remote",
+                        "--heads",
+                        "origin",
+                        plan.branch,
+                        f"{plan.branch}_*",
+                    ),
+                    cwd=str(plan.repo_root),
+                    read_only=True,
+                ),
+            )
+        )
     if plan.source_config is not None:
         steps.append(PreparedAction("checkout.generated_config"))
     if plan.options.create_venv and plan.python_selector is not None:
@@ -3272,7 +3407,9 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 mutating=True,
             )
         )
-    if plan.dependency_inputs:
+    if plan.hash_lock is not None:
+        install_argv = build_trusted_sync_argv(_owned_python_executable(plan.venv), plan.hash_lock)
+    elif plan.dependency_inputs:
         steps.append(
             PreparedStep(
                 step_id="checkout.dependencies.compile",
@@ -3309,6 +3446,9 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 str(plan.dependency_lock),
             )
         )
+    else:
+        install_argv = None
+    if install_argv is not None:
         steps.append(
             PreparedStep(
                 step_id="checkout.dependencies.install",

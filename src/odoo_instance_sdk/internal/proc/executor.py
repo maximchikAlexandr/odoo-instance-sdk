@@ -303,6 +303,8 @@ def _run_pump(  # noqa: C901
 
     def drain_after_termination() -> None:
         for stream in output_streams:
+            if stream.closed:
+                continue
             with contextlib.suppress(OSError, ValueError):
                 os.set_blocking(stream.fileno(), False)
             while True:
@@ -377,7 +379,7 @@ def _run_pump(  # noqa: C901
                             selector.unregister(stream)
                         close_stream(stream)
                         stdin = None
-                        if process.poll() is not None and isinstance(error, BrokenPipeError):
+                        if isinstance(error, BrokenPipeError):
                             continue
                         terminate_and_reap()
                         drain_after_termination()
@@ -1029,6 +1031,18 @@ def is_process_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    # A terminated group leader can remain as a zombie until its parent
+    # reaps it.  Treating that kernel entry as alive makes bounded owned-tree
+    # cleanup report a false timeout and prevents the runtime ledger from
+    # reaching its empty postcondition.
+    if sys.platform != "win32":
+        try:
+            with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+                state = stream.read().split()[2]
+        except (FileNotFoundError, OSError, IndexError):
+            return False
+        if state == "Z":
+            return False
     return True
 
 

@@ -57,6 +57,11 @@ implementations.
   `frozen=True, forbid_unknown_fields=True`; all nested models are frozen
   `msgspec.Struct`
 
+#### Scenario: Removed inclusion is query-owned
+
+- **WHEN** `monitor.snapshot(include_removed=True)` runs
+- **THEN** the same typed snapshot graph includes active and removed catalog environments without a second CLI catalog read or a CLI-specific snapshot type
+
 #### Scenario: Watch is cancellable without leaks
 
 - **WHEN** consumer cancels the task iterating `monitor.watch()` mid-iteration
@@ -70,39 +75,18 @@ implementations.
 
 ### Requirement: `EnvironmentSnapshot` runtime states
 
-Каждый non-removed environment MUST становиться одним `EnvironmentSnapshot`.
-`runtime.state` MUST быть enum `RuntimeState` со значениями:
+Every environment selected by `include_removed` SHALL become one `EnvironmentSnapshot`. For active rows, `runtime.state` SHALL remain `stopped`, `ready`, or `not_ready` under the existing PID/create-time and bounded health-probe rules. For a removed row, the collector SHALL NOT probe a port or Odoo health endpoint and SHALL emit stopped/null live-runtime values while retaining catalog lifecycle identity and any safely obtainable Git, storage, and artifact data.
 
-- `stopped` — verified process отсутствует (нет runtime-записи, либо
-  PID+`create_time` не совпадают, т.е. stale/reused PID);
-- `ready` — process жив и bounded Odoo readiness probe успешен;
-- `not_ready` — process жив, probe неуспешен.
-
-`stopped` environment остаётся карточкой: Git/storage metadata доступны, Odoo
-PID/CPU/RAM `None`, UI "Open Odoo" disabled.
-
-Reconciliation: collector читает catalog `environment_runtime` (если есть),
-берёт `root_pid` и `create_time`, проверяет exact
-`psutil.Process(pid).create_time() == recorded_create_time` и
-`psutil.pid_exists(pid)`. Mismatch → `stopped`; collector does not delete the
-catalog row. Approximate wall-clock identity fallback is forbidden.
-
-Readiness after a live PID+create_time match: one
-`httpx.get(f"{http_url}/web/health?db_server_status=true", timeout=2.0)`.
-`ready` iff HTTP 200 and JSON `status == "pass"`. Any timeout, connect error,
-non-200, or missing/non-pass status → `not_ready` with process metrics still
-populated. Do not call `wait_ready` / `poll_health` (those poll up to 60s).
+Runtime reconciliation for non-removed rows SHALL read catalog `environment_runtime`, verify both `psutil.pid_exists(pid)` and exact `psutil.Process(pid).create_time() == recorded_create_time`, and SHALL treat a missing/stale/reused PID as stopped without deleting catalog data. After a live match, readiness SHALL use one bounded `httpx.get(f"{http_url}/web/health?db_server_status=true", timeout=2.0)`; only HTTP 200 with JSON `status == "pass"` is ready, while other outcomes are not-ready with process metrics retained.
 
 #### Scenario: Stopped environment has null runtime metrics
 
 - **WHEN** an environment has no current-runtime record in catalog
-- **THEN** `runtime.state == "stopped"`, `runtime.root_pid is None`,
-  `runtime.cpu_percent is None`
+- **THEN** `runtime.state == "stopped"`, `runtime.root_pid is None`, `runtime.cpu_percent is None`
 
 #### Scenario: PID reuse reconciles as stopped
 
-- **WHEN** an environment has a runtime record with PID 43120 and
-  `create_time=T1`, but `psutil.Process(43120).create_time() == T2 != T1`
+- **WHEN** an environment has a runtime record with PID 43120 and `create_time=T1`, but `psutil.Process(43120).create_time() == T2 != T1`
 - **THEN** `runtime.state == "stopped"`, runtime metrics are null; catalog
   record is not deleted by collector
 
@@ -115,18 +99,28 @@ populated. Do not call `wait_ready` / `poll_health` (those poll up to 60s).
 
 #### Scenario: Ready environment shows live metrics
 
-- **WHEN** an environment has a live Odoo process matching PID+`create_time`
-  and readiness probe succeeds
-- **THEN** `runtime.state == "ready"`, `runtime.root_pid` is the verified PID,
-  `runtime.cpu_percent` and `runtime.rss_bytes` are aggregated over the
-  process tree
+- **WHEN** an environment has a live Odoo process matching PID+`create_time` and readiness probe succeeds
+- **THEN** `runtime.state == "ready"`, `runtime.root_pid` is the verified PID, `runtime.cpu_percent` and `runtime.rss_bytes` are aggregated over the process tree
 
 #### Scenario: Live process but probe fails
 
-- **WHEN** an environment has a live matching process but
-  `GET {http_url}/web/health?db_server_status=true` does not return HTTP 200
-  with JSON `status=="pass"` within 2.0s
+- **WHEN** an environment has a live matching process but `GET {http_url}/web/health?db_server_status=true` does not return HTTP 200 with JSON `status=="pass"` within 2.0s
 - **THEN** `runtime.state == "not_ready"`, process metrics still populated
+
+#### Scenario: Active stopped environment has null runtime metrics
+
+- **WHEN** a selected non-removed environment has no current runtime record
+- **THEN** `runtime.state == "stopped"`, `runtime.root_pid is None`, and `runtime.cpu_percent is None`
+
+#### Scenario: Active live environment uses existing runtime semantics
+
+- **WHEN** a selected non-removed environment has a matching live PID/create-time and its health probe succeeds
+- **THEN** `runtime.state == "ready"` and verified process-tree metrics are populated; if that probe fails, state is `not_ready` and those metrics remain populated
+
+#### Scenario: Removed environment is retained without live probes
+
+- **WHEN** `monitor.snapshot(include_removed=True)` selects a row with `lifecycle_state="removed"`
+- **THEN** exactly one snapshot row is returned with stopped/null live-runtime values, no address or health probe is made for it, and safely available Git/storage/artifact fields follow normal partial-data isolation
 
 ### Requirement: Component failure isolation
 

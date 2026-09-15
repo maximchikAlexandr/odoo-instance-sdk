@@ -420,6 +420,11 @@ Runtime reconciliation for non-removed rows SHALL read catalog `environment_runt
 - **WHEN** an environment has a runtime record with PID 43120 and `create_time=T1`, but `psutil.Process(43120).create_time() == T2 != T1`
 - **THEN** `runtime.state == "stopped"`, runtime metrics are null; catalog record is not deleted by collector
 
+#### Scenario: Exact persisted foreground runtime is live
+
+- **WHEN** a catalog row was persisted from a running environment foreground process
+- **THEN** the monitor accepts that row as live when the exact PID and `create_time` match
+
 #### Scenario: Ready environment shows live metrics
 
 - **WHEN** an environment has a live Odoo process matching PID+`create_time` and readiness probe succeeds
@@ -666,10 +671,9 @@ Collector MUST разделять кеширование:
 - Ошибка одного cluster (Docker inspect/stats) → affected cluster получает `unavailability_reason`, остальные продолжаются.
 - Ошибка project manifest load → `cluster=None` для этого project, environments продолжаются.
 - Catalog SQLite error → snapshot fails целиком с typed `MonitorError` (это единственная unrecoverable ошибка — без catalog нет project discovery); collector не сваливается в generic `Exception`.
-- `psutil` import error (missing extra) on first `snapshot()` (default process provider) → `MonitorExtrasMissingError` with `pip install odoo-instance-sdk[metrics]`. Construction of `EnvironmentMonitor()` succeeds without importing psutil.
 - Docker CLI missing → только affected compose clusters; не global crash (covered above).
 
-Типизированные ошибки в `exceptions.py` (наследники `OdooInstanceSdkError`): `MonitorError` (base), `MonitorExtrasMissingError`. Сообщения redacted (без secrets/absolute paths). Component failures изолируются в snapshot (`complete=False`/`unavailability_reason`), не отдельным exception; catalog SQLite error → `MonitorError`.
+Типизированные ошибки в `exceptions.py` (наследники `OdooInstanceSdkError`): `MonitorError` (base). Component failures изолируются в snapshot (`complete=False`/`unavailability_reason`), не отдельным exception; catalog SQLite error → `MonitorError`. `MonitorExtrasMissingError` and any missing `psutil` extra install hint are not part of the public contract because `psutil` is core.
 
 #### Scenario: One environment failure isolated
 
@@ -683,8 +687,8 @@ Collector MUST разделять кеширование:
 
 #### Scenario: Missing psutil extra actionable hint
 
-- **WHEN** `psutil` is not installed and `EnvironmentMonitor().snapshot()` is called
-- **THEN** `MonitorExtrasMissingError` with message containing `pip install odoo-instance-sdk[metrics]`
+- **WHEN** an installation is manually corrupted by removing required core `psutil`
+- **THEN** that unsupported installation has no `metrics` extra or `MonitorExtrasMissingError` compatibility contract
 
 ### Requirement: Snapshot redaction and no secrets
 
@@ -915,4 +919,3 @@ The monitor boundary SHALL provide a pure selector for one environment and its m
 #### Scenario: Select explicit environment
 - **WHEN** a known UUID or unambiguous name is selected from a captured snapshot
 - **THEN** the selector returns its environment, project, and cluster records without another metrics collection
-

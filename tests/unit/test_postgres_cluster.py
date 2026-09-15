@@ -178,6 +178,20 @@ def test_from_project_compose_mode(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("image", "port", "message"),
+    [(None, 5468, "requires image"), ("pgvector/pgvector:pg16", None, "requires port")],
+    ids=["missing-image", "missing-port"],
+)
+def test_from_project_rejects_incomplete_compose_configuration(
+    tmp_path: Path, image: str | None, port: int | None, message: str
+) -> None:
+    root = _write_compose_project(tmp_path, image=image, port=port)
+    with pytest.raises(PostgresClusterError, match=message):
+        PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
+
+
+@pytest.mark.unit
 def test_from_project_git_identity_does_not_depend_on_cwd(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

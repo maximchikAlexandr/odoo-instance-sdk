@@ -26,7 +26,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 383),
         ("src/odoo_instance_sdk/commands/output.py", 390),
         ("src/odoo_instance_sdk/commands/output.py", 392),
-        ("src/odoo_instance_sdk/resources/instance.py", 1195),
+        ("src/odoo_instance_sdk/resources/instance.py", 1200),
     }
 )
 
@@ -40,7 +40,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/cli.py", 1256): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/cli.py", 1257): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/commands/backup.py", 293): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/resources/instance.py", 1195): "lifecycle cleanup diagnostic transport",
+    ("src/odoo_instance_sdk/resources/instance.py", 1200): "lifecycle cleanup diagnostic transport",
 }
 
 
@@ -55,6 +55,12 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/resources/test_database_resource.py", 637),
         ("tests/unit/test_monitor_cache_and_docker.py", 129),
         ("tests/unit/test_cluster_resources.py", 190),
+        ("tests/unit/test_real_odoo_ci_components.py", 38),
+        ("tests/unit/test_real_odoo_ci_components.py", 107),
+        ("tests/unit/test_real_odoo_ci_components.py", 149),
+        ("tests/unit/test_real_odoo_foundation.py", 325),
+        ("tests/unit/test_real_odoo_foundation.py", 348),
+        ("tests/unit/test_real_odoo_foundation.py", 367),
     }
 )
 

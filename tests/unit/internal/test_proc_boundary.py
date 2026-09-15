@@ -1179,6 +1179,28 @@ def test_captured_stdin_closes_cleanly_when_child_exits_before_consuming_it() ->
     assert result.stderr == ""
 
 
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_child_can_close_stdin_before_exiting(returncode: int) -> None:
+    result = run_captured(
+        _python(
+            "import os, time; os.close(0); time.sleep(0.1); "
+            f"os.write(1, b'done'); os.write(2, b'notice'); raise SystemExit({returncode})"
+        ),
+        stdin=b"x" * (1024 * 1024),
+        timeout=2.0,
+    )
+    assert (result.returncode, result.stdout, result.stderr) == (returncode, "done", "notice")
+
+
+def test_timeout_after_child_closes_stdout_preserves_stderr() -> None:
+    with pytest.raises(ProcessTimeoutError) as raised:
+        run_captured(
+            _python("import os, time; os.close(1); os.write(2, b'waiting'); time.sleep(10)"),
+            timeout=0.5,
+        )
+    assert raised.value.stderr_tail == "waiting"
+
+
 def test_timeout_closes_unconsumed_stdin_on_windows_process_cleanup_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

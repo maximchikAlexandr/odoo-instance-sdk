@@ -202,6 +202,10 @@ def isolated_cli_catalogue(  # noqa: C901
     production_catalogue_path: Path,
 ) -> Path:
     """Keep every init path in a per-test, per-worker catalogue root."""
+    if request.node.get_closest_marker("real_odoo") is not None:
+        # Real runtimes own HOME; SDK paths must follow it just as child CLIs do.
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        return tmp_path / "home" / ".odcli" / "catalog.sqlite3"
     worker_id = str(getattr(request.config, "workerinput", {}).get("workerid", "master"))
     worker_root = tmp_path / f"catalogue-{worker_id}"
     home_root = worker_root / "home"

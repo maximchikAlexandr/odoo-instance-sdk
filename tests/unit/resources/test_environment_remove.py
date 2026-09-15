@@ -188,6 +188,30 @@ class TestEnvRemove:
         assert Path(env.worktree_path).is_dir()
         assert Path(env.generated_config_path).is_file()
 
+    def test_removed_environment_is_idempotent_when_port_is_reused(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        free_port = int(probe.getsockname()[1])
+        probe.close()
+        env = env_client.environments.checkout(
+            project_manifest,
+            "feat/rm-port-reused",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python), source_database="comerta", http_port=free_port
+            ),
+        )
+        env_client.environments.remove(env)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind((env.http_interface, env.http_port))
+        listener.listen()
+        try:
+            env_client.environments.remove(env_client.environments.get(str(env.id)))
+        finally:
+            listener.close()
+        assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED
+
     def test_audit_rows_kept(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
     ) -> None:

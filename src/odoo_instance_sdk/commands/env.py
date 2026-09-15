@@ -13,6 +13,8 @@ import msgspec
 
 if TYPE_CHECKING:
     import click
+
+    from odoo_instance_sdk.internal.proc import RunContext
 else:
     import rich_click as click
 from rich.console import Console, Group
@@ -253,14 +255,32 @@ def _resolve_ticket_allocation(
     )
 
 
-def _revalidate_ticket_absence(client: OdooClient, allocation: _TicketAllocation) -> None:
+def _revalidate_ticket_absence(
+    client: OdooClient,
+    allocation: _TicketAllocation,
+    *,
+    context: RunContext[DevelopmentEnvironment],
+) -> None:
+    # The checkout command captures these Git reads as named process steps.
+    # Do not call the generic git helpers while its RunContext is active:
+    # that would create an unplanned default ``process`` step.
+    local_result = context.process("checkout.ticket.local-heads")
+    remote_result = context.process("checkout.ticket.remote-heads")
+    local_output = getattr(local_result, "stdout", "")
+    remote_output = getattr(remote_result, "stdout", "")
+    local_heads = {line.strip() for line in str(local_output or "").splitlines() if line.strip()}
+    remote_heads = {
+        line.split("\t", 1)[1].removeprefix("refs/heads/").strip()
+        for line in str(remote_output or "").splitlines()
+        if "\t" in line and line.split("\t", 1)[1].startswith("refs/heads/")
+    }
     sources = (
-        ("local", local_branch_names(allocation.repo_root)),
+        ("local", local_heads),
         (
             "catalogue",
-            _catalogue_branch_names(client, allocation.repo_root, allocation.git_common_dir),
+            set(_catalogue_branch_names(client, allocation.repo_root, allocation.git_common_dir)),
         ),
-        ("origin", remote_branch_names(allocation.repo_root, allocation.ticket)),
+        ("origin", remote_heads),
     )
     for source, branches in sources:
         if allocation.branch in branches:
@@ -335,7 +355,9 @@ def _ticket_checkout_command(
             project_path,
             allocation.branch,
             options=selected_options,
-            branch_revalidator=lambda: _revalidate_ticket_absence(client, allocation),
+            branch_revalidator=lambda context: _revalidate_ticket_absence(
+                client, allocation, context=context
+            ),
         )
     return environments.checkout_command(project_path, allocation.branch, options=selected_options)
 
@@ -390,6 +412,19 @@ def env_group() -> None:
 @click.option(
     "--create-venv", "create_venv", is_flag=True, default=False, help="Create owned venv."
 )
+@click.option(
+    "--hash-lock",
+    "hash_lock",
+    type=click.Path(),
+    default=None,
+    help="Audited requirements lock for owned hash-locked synchronization.",
+)
+@click.option(
+    "--hash-lock-sha256",
+    "hash_lock_sha256",
+    default=None,
+    help="Expected SHA-256 digest of --hash-lock.",
+)
 @click.option("--http-port", "http_port", type=int, default=None, help="HTTP port.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @output_options
@@ -405,6 +440,8 @@ def env_checkout(
     odoo_bin: str | None,
     python: str | None,
     create_venv: bool,
+    hash_lock: str | None,
+    hash_lock_sha256: str | None,
     http_port: int | None,
     dry_run: bool,
     output_format: str | None,
@@ -429,6 +466,8 @@ def env_checkout(
             odoo_bin=Path(odoo_bin) if odoo_bin else None,
             python=python,
             create_venv=create_venv,
+            hash_lock=Path(hash_lock) if hash_lock else None,
+            hash_lock_sha256=hash_lock_sha256,
             http_port=http_port,
         )
         command, allocation = _build_ticket_checkout_command(
@@ -1315,6 +1354,19 @@ def env_remove(
 @env_group.command("sync", help="Synchronize an environment's Python dependencies.")
 @click.argument("environment", required=False)
 @click.option("--upgrade", "upgrade", is_flag=True, default=False)
+@click.option(
+    "--hash-lock",
+    "hash_lock",
+    type=click.Path(),
+    default=None,
+    help="Audited requirements lock for owned hash-locked synchronization.",
+)
+@click.option(
+    "--hash-lock-sha256",
+    "hash_lock_sha256",
+    default=None,
+    help="Expected SHA-256 digest of --hash-lock.",
+)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @output_options
 @pass_cli_context
@@ -1322,6 +1374,8 @@ def env_sync(
     ctx: CliContext,
     environment: str | None,
     upgrade: bool,
+    hash_lock: str | None,
+    hash_lock_sha256: str | None,
     dry_run: bool,
     output_format: str | None,
     json_output: bool,
@@ -1344,7 +1398,12 @@ def env_sync(
             fail(output_mode, "env.sync", str(e), dry_run=dry_run)
     try:
         resolve_project_path(ctx)
-        command = client.environments.sync_python_command(environment, upgrade=upgrade)
+        command = client.environments.sync_python_command(
+            environment,
+            upgrade=upgrade,
+            hash_lock=hash_lock,
+            hash_lock_sha256=hash_lock_sha256,
+        )
     except Exception as e:
         fail(output_mode, "env.sync", str(e), dry_run=dry_run)
     try:

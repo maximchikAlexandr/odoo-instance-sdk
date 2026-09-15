@@ -1,0 +1,37 @@
+name: Real Odoo full E2E
+
+on:
+  push:
+    branches:
+      - agent/planner/a451a6ea752f
+    paths:
+      - ".github/workflows/real-odoo-full.yml"
+      - ".github/workflows/real-odoo-tier.yml"
+      - "scripts/real_odoo_*.py"
+      - "src/odoo_instance_sdk/**"
+      - "tests/integration/real_odoo/**"
+      - "tests/fixtures/**"
+      - "tests/fixtures/real_odoo/**"
+      - "uv.lock"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-odoo-targeted:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/real-odoo-tier.yml
+    with:
+      mode: targeted
+
+  real-odoo-full:
+    needs: real-odoo-targeted
+    if: >-
+      always() &&
+      (github.event_name != 'push' || needs.real-odoo-targeted.result == 'success')
+    uses: ./.github/workflows/real-odoo-tier.yml
+    with:
+      mode: full

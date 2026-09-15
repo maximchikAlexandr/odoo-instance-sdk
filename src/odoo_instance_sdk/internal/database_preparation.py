@@ -354,6 +354,8 @@ def capture_selected_backup_restore(  # noqa: C901
     zip_validation = validate_zip(path)
     if not zip_validation.valid:
         raise ConfigError("selected backup archive is unavailable or invalid")
+    if zip_validation.db_name != backup.database_name:
+        raise ConfigError("selected backup database name does not match catalog metadata")
     try:
         with _open_verified_zip(path) as archive:
             archive.getinfo("dump.sql")
@@ -1090,6 +1092,15 @@ def _catalogue_backup_preflight(
         raise ConfigError("catalogue backup size does not match its recorded identity")
     catalog.verify_identity(backup, verify_content=True)
 
+    if backup.format == BackupFormat.ZIP:
+        from odoo_instance_sdk.internal.backup_validation import validate_zip
+
+        validation = validate_zip(path)
+        if not validation.valid:
+            raise ConfigError("selected backup archive is unavailable or invalid")
+        if validation.db_name != backup.database_name:
+            raise ConfigError("selected backup database name does not match catalog metadata")
+
     # A configured remote source is a project binding hint, never an authority
     # for ownership.  Projects without it can still restore a registered point.
     if project.test_instance is not None:
@@ -1207,6 +1218,11 @@ def _restore_preflight(  # noqa: C901
             base_url=local_url,
             master_password=local_password,
         )
+        # ``from_config`` is intentionally transport-only and therefore does
+        # not infer the project Compose claim. Restore provenance must carry
+        # the exact active cluster and data root into the local instance so a
+        # later public ``db.drop`` can validate the same ownership evidence.
+        local._postgres_cluster = cluster
         if not local.databases.names():
             raise DatabaseManagerUnavailableError("local database manager returned no databases")
         if target_database is None:
