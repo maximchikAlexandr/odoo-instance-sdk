@@ -139,6 +139,11 @@ JSON and TOON SHALL keep the full timezone-aware ISO timestamp and original prec
 - **WHEN** `odcli backup ls` renders `Catalogue time`
 - **THEN** the value is in local timezone formatted as `YYYY-MM-DD HH:MM`
 
+#### Scenario: Backup inspect formats all time fields
+
+- **WHEN** `odcli backup inspect` renders Rich
+- **THEN** `catalogue_time`, `history.occurred_at`, and `restore_links.restored_at` are in local timezone formatted as `YYYY-MM-DD HH:MM`
+
 #### Scenario: UTC with non-zero offset crosses day boundary
 
 - **WHEN** a UTC timestamp near midnight is rendered with a non-zero local offset
@@ -337,7 +342,7 @@ The main checkout of each selected project SHALL appear as the first typed row o
 
 Rich SHALL NOT show `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, or detailed process/artifact columns; those values live in `odcli ps`. Rich SHALL remain a readable `Table` with headers and checkout rows on both normal and compact terminal widths and SHALL NOT replace the table with `branch=... state=...` blocks. The same table contract SHALL hold under `--watch`. Rich color/ANSI SHALL be enabled only when supported by the output terminal.
 
-`--all-projects` and project-context behavior SHALL remain unchanged. `--all` SHALL request `include_removed=True` only for Rich output so the existing observable contract remains: Rich includes removed rows, while JSON/TOON wrap the default non-removed `Snapshot`. JSON and TOON SHALL use `command="env.list"` and the same monitor snapshot contract as `GET /api/v1/snapshot`; TOON differs only in serialization. The raw `EnvironmentMonitor.snapshot()` SHALL remain the canonical source for `odcli ps`, the Python SDK, FastAPI, and the dashboard. A separate monitor or collector SHALL NOT be added.
+`--all-projects` and project-context behavior SHALL remain unchanged. `--all` SHALL request `include_removed=True` only for Rich output so the existing observable contract remains: Rich includes removed rows, while JSON/TOON wrap the default non-removed `CheckoutInventory`. JSON and TOON SHALL use `command="env.list"` and project the same frozen `CheckoutInventory` as Rich; TOON differs only in serialization. The raw `EnvironmentMonitor.snapshot()` SHALL remain the canonical source for `odcli ps`, the Python SDK, FastAPI, and the dashboard. A separate monitor or collector SHALL NOT be added.
 
 #### Scenario: Main checkout is the first row
 
@@ -356,8 +361,8 @@ Rich SHALL NOT show `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, or detailed pr
 
 #### Scenario: --all human includes removed, JSON does not
 
-- **WHEN** `odcli env list --all` prints human table and `odcli env list --json --all` emits JSON
-- **THEN** human table includes `STATE=removed` rows; JSON `result.environments` contains only non-removed snapshot rows
+- **WHEN** `odcli env list --all` prints human table and `odcli env list --format json --all` emits JSON
+- **THEN** human table includes `STATE=removed` rows; JSON `CheckoutInventory` rows contain only non-removed checkouts
 
 #### Scenario: Stopped checkout stays visible
 
@@ -376,23 +381,23 @@ Rich SHALL NOT show `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, or detailed pr
 
 #### Scenario: JSON parity with monitor snapshot
 
-- **WHEN** `odcli env list --json --all-projects` runs
-- **THEN** `result`/`data` payload uses the same `projects[].cluster` and `environments[].runtime` contract as `EnvironmentMonitor.snapshot()` and `GET /api/v1/snapshot`
+- **WHEN** `odcli env list --format json --all-projects` runs
+- **THEN** `result`/`data` payload is the frozen `CheckoutInventory` built from the same `EnvironmentMonitor.snapshot()` and `GET /api/v1/snapshot` remains the raw snapshot for `odcli ps`
 
 #### Scenario: Grouped Rich table uses one result
 
 - **WHEN** Rich `env list` runs with two projects
-- **THEN** output has two project sections and all displayed fields originate from one `EnvironmentMonitor.snapshot()` result
+- **THEN** output has two project sections and all displayed fields originate from one `CheckoutInventory` built from one `EnvironmentMonitor.snapshot()` result
 
 #### Scenario: JSON and TOON parity with monitor snapshot
 
 - **WHEN** `odcli env list --format json --all-projects` and `--format toon --all-projects` render the same sample
-- **THEN** decoded `result`/`data` equal the JSON-safe `EnvironmentMonitor.snapshot()` object including cluster, runtime, observation, and artifacts
+- **THEN** decoded `result`/`data` equal the JSON-safe `CheckoutInventory` object with main checkout and environment rows, cluster summaries, and Git facts
 
 #### Scenario: --all compatibility
 
 - **WHEN** `odcli env list --all` renders Rich and `odcli env list --all --format json` or `--format toon` renders a machine document
-- **THEN** Rich includes `lifecycle_state="removed"` rows while both machine documents contain only non-removed rows
+- **THEN** Rich includes `lifecycle_state="removed"` rows while both machine documents contain only non-removed `CheckoutInventory` rows
 
 #### Scenario: CLI does not recollect inventory
 
