@@ -391,7 +391,13 @@ class _IdentityMixin:
             _command_plan(
                 prepared_steps,
                 secrets=secrets,
-                observations=(_http_port_observation(config),),
+                observations=(
+                    _http_port_observation(
+                        config,
+                        environment_id=self._environment_id,
+                        client=self._client,
+                    ),
+                ),
             ),
             execute,
             prepared_steps,

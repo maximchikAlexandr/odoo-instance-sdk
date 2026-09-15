@@ -241,7 +241,11 @@ class ResolvedContext:
         from odoo_instance_sdk.internal import context as _resolution
 
         if self.is_environment:
-            return _resolution._check_port_free(cast("DevelopmentEnvironment", self.source))
+            available, _detail = _resolution._environment_http_port_preflight(
+                cast("DevelopmentEnvironment", self.source),
+                self.client,
+            )
+            return available
         start_config = self.instance.config.start_config
         if start_config is None:
             raise RuntimeError("resolved project instance has no Odoo start configuration")

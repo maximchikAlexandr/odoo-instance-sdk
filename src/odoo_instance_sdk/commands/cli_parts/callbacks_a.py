@@ -381,14 +381,24 @@ def run(
         # Preview must retain the captured plan even when this read-only
         # precondition fails; normal execution keeps the early diagnostic
         # compatibility path in addition to the command-boundary recheck.
-        if not dry_run and not runtime_context.check_port_free():
-            http_interface, http_port = runtime_context.instance_address()
-            fail(
-                output_mode,
-                "run",
-                f"port-conflict: {http_interface}:{http_port} is occupied (ownership unknown)",
-                dry_run=dry_run,
-            )
+        if not dry_run:
+            from odoo_instance_sdk.internal import context as _resolution
+
+            if runtime_context.is_environment:
+                available, detail = _resolution._environment_http_port_preflight(
+                    runtime_context.require_environment(),
+                    runtime_context.client,
+                )
+            else:
+                available = runtime_context.check_port_free()
+                http_interface, http_port = runtime_context.instance_address()
+                detail = (
+                    f"{http_interface}:{http_port} is available"
+                    if available
+                    else f"{http_interface}:{http_port} is occupied (ownership unknown)"
+                )
+            if not available:
+                fail(output_mode, "run", f"port-conflict: {detail}", dry_run=dry_run)
         command = runtime_context.instance.run_foreground_command(args=odoo_args)
     except SystemExit:
         raise
