@@ -1,9 +1,9 @@
 ## 1. VS Code `default_run_args` propagation (item 1)
 
-- [ ] 1.1 Add a regression test that generates a profile from a project with `default_run_args = ["--dev=qweb,xml"]` and asserts `--dev=qweb,xml` appears in `args` exactly once.
-- [ ] 1.2 Add a regression test for an empty `default_run_args` list asserting no extra arguments.
-- [ ] 1.3 Refactor `vscode generate` to reuse the same resolved runtime/argv source as `run` in project context; preserve disallowed-override validation.
-- [ ] 1.4 Verify managed-environment context behavior is unchanged; run focused tests, Ruff, and mypy.
+- [x] 1.1 Add a regression test that generates a profile from a project with `default_run_args = ["--dev=qweb,xml"]` and asserts `--dev=qweb,xml` appears in `args` exactly once.
+- [x] 1.2 Add a regression test for an empty `default_run_args` list asserting no extra arguments.
+- [x] 1.3 Refactor `vscode generate` to reuse the same resolved runtime/argv source as `run` in project context; preserve disallowed-override validation.
+- [x] 1.4 Verify managed-environment context behavior is unchanged; run focused tests, Ruff, and mypy.
 
 ## 2. `odcli ps` process/resource inventory (item 2)
 

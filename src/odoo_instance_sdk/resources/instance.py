@@ -645,6 +645,39 @@ def _validate_runtime_args(args: Sequence[str]) -> tuple[str, ...]:
     return captured
 
 
+def resolve_runtime_argv(
+    start_config: StartConfig,
+    default_run_args: Sequence[str],
+    extra_args: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Return the resolved non-executable runtime argv shared by ``run`` and projections.
+
+    Produces the same managed CLI arguments plus validated extra arguments that
+    ``OdooInstance.run_foreground_command`` spawns.  ``default_run_args`` from the
+    owning project are validated against the disallowed managed-override families
+    and appended after the managed arguments; an empty ``default_run_args`` adds
+    nothing.  Callers that need secret-config handling for an actual spawn keep
+    using ``_snapshot_start_inputs``; this function is the argv source for
+    non-spawning projections such as the VS Code launch profile.
+    """
+    managed_args = tuple(_build_cli_args(start_config))
+    validated_extra = resolve_runtime_argv_extra(default_run_args, extra_args)
+    return (*managed_args, *validated_extra)
+
+
+def resolve_runtime_argv_extra(
+    default_run_args: Sequence[str],
+    extra_args: Sequence[str] = (),
+) -> tuple[str, ...]:
+    """Validate and return the extra runtime arguments appended after managed args.
+
+    This is the shared validation seam used by both the foreground launch path
+    and non-spawning projections so ``default_run_args`` flow through one
+    disallowed-override check instead of being duplicated.
+    """
+    return _validate_runtime_args((*default_run_args, *extra_args))
+
+
 def _command_plan(
     steps: tuple[PreparedStep | PreparedAction, ...],
     *,
@@ -1076,7 +1109,7 @@ class OdooInstance:
                 raise InstanceConfigurationError(
                     "No StartConfig — pass one explicitly or create instance via from_config()"
                 )
-        validated_args = _validate_runtime_args((*self.config.default_run_args, *args))
+        validated_args = resolve_runtime_argv_extra(self.config.default_run_args, args)
         resolved_cwd = cwd if cwd is not None else self.config.default_cwd
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         environment_snapshot, environment_overrides = captured_child_environment(
