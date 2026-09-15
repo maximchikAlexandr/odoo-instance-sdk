@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 
@@ -56,26 +56,22 @@ from odoo_instance_sdk.internal.locks import exclusive_lock, provisioning_lock_p
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import (
+    CheckoutClusterSummary,
+    CheckoutGitFacts,
+    CheckoutInventory,
+    CheckoutRow,
     ClusterMetrics,
     ClusterSnapshot,
     DevelopmentEnvironment,
-    EnvironmentArtifacts,
     EnvironmentCheckoutPlan,
     EnvironmentCheckoutResult,
     EnvironmentDatabaseMode,
     EnvironmentSnapshot,
     EnvironmentState,
-    GitActivity,
-    GitActivityState,
-    PgAdminEligibility,
     PidScope,
-    PortObservation,
     PostgresClusterState,
     ProjectSummary,
-    RuntimeMetrics,
-    RuntimeState,
     Snapshot,
-    StorageFootprint,
 )
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
@@ -101,38 +97,6 @@ def select_snapshot_environment(
     return select(snapshot, selector, cwd=cwd, worktree_paths=worktree_paths)
 
 
-class _CliEnvironmentSnapshot(
-    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
-):
-    """The environment row actually emitted by the machine ``env list`` leaf."""
-
-    id: str
-    project_id: str
-    name: str
-    branch: str
-    short_sha: str | None
-    db_mode: Literal["shared", "copy"]
-    database: str | None
-    lifecycle_state: EnvironmentState
-    allocated_http_port: int | None
-    observed_port: PortObservation | None
-    artifacts: EnvironmentArtifacts
-    runtime: RuntimeMetrics
-    git: GitActivity
-    storage: StorageFootprint
-    pgadmin: PgAdminEligibility
-    worktree_path: str
-
-
-class _CliSnapshot(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
-    """The concrete machine result, including its CLI-only enrichment."""
-
-    schema_version: int
-    generated_at: Annotated[datetime, "odcli-structural"]
-    projects: tuple[ProjectSummary, ...]
-    environments: tuple[_CliEnvironmentSnapshot, ...]
-
-
 class _EnvShowResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     """Typed payload for the focused environment inspection leaf."""
 
@@ -143,30 +107,20 @@ class _EnvShowResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw
 
 
 _ENV_LIST_COLUMNS = (
+    "KIND",
     "NAME",
     "BRANCH",
-    "STATE",
-    "RUNTIME",
-    "OBSERVED",
-    "ODOO_PID",
-    "CPU",
-    "RAM",
-    "GIT_AHEAD",
-    "GIT_DIFF",
-    "SIZE",
+    "STATUS",
+    "GIT",
     "DB_MODE",
     "DATABASE",
-    "PORT",
-    "ARTIFACTS",
     "WORKTREE",
 )
 _ENV_LIST_COMPACT_COLUMNS = (
     "NAME",
-    "BRANCH / STATE",
-    "RUNTIME / PORT",
+    "BRANCH / STATUS",
     "DATABASE",
     "GIT A/D",
-    "ARTIFACTS",
 )
 _ENV_LIST_MEDIUM_COLUMNS = (*_ENV_LIST_COMPACT_COLUMNS, "WORKTREE")
 
@@ -574,7 +528,7 @@ def env_checkout(
     help="Seconds between Rich inventory refreshes.",
 )
 @output_options
-@field_schema(_CliSnapshot)
+@field_schema(CheckoutInventory)
 @pass_cli_context
 def env_list(
     ctx: CliContext,
@@ -610,30 +564,18 @@ def env_list(
             raise click.exceptions.Exit(130) from exc
         return
     try:
-        snapshot = monitor.snapshot(project_id=project_id, include_removed=include_removed)
-    except Exception as e:
-        fail(output_mode, "env.list", str(e), dry_run=False)
-    try:
-        worktree_paths = (
-            _catalog_worktree_paths(monitor, include_removed=include_removed)
-            if snapshot.environments
-            else {}
+        inventory = monitor.checkout_inventory(
+            project_id=project_id,
+            include_removed=include_removed if not machine_output else False,
         )
     except Exception as e:
-        fail(output_mode, "env.list", e, dry_run=False)
+        fail(output_mode, "env.list", str(e), dry_run=False)
 
     if machine_output:
-        # Machine output always wraps the non-removed Snapshot; --all does NOT
-        # change the machine payload. msgspec round-trips enums/datetimes to
-        # plain JSON-safe builtins.
-        try:
-            result = model_to_dict(_cli_snapshot(snapshot, worktree_paths))
-        except Exception as e:
-            fail(output_mode, "env.list", e, dry_run=False)
         emit_json_envelope(
             ok=True,
             command="env.list",
-            result=result,
+            result=model_to_dict(inventory),
             provenance={
                 "project_source": "null" if all_projects else _project_provenance(ctx),
                 "environment_source": "null",
@@ -642,8 +584,7 @@ def env_list(
         )
         return
 
-    # Human output: grouped by project, with cluster summary + environment rows.
-    _print_env_list_human(snapshot, worktree_paths)
+    _print_env_list_human(inventory)
 
 
 @env_group.command("show", help="Show one environment, its project, and PostgreSQL runtime facts.")
@@ -761,26 +702,17 @@ def _run_env_list_live(
     with Live(None, transient=True) as live:
         while True:
             try:
-                snapshot = monitor.snapshot(
+                inventory = monitor.checkout_inventory(
                     project_id=project_id,
                     include_removed=include_removed,
                 )
-                worktree_paths = (
-                    _catalog_worktree_paths(monitor, include_removed=include_removed)
-                    if snapshot.environments
-                    else {}
-                )
-                last_renderable = _render_env_list_rich(
-                    snapshot, worktree_paths, width=Console().width
-                )
+                last_renderable = _render_env_list_rich(inventory, width=Console().width)
                 live.update(last_renderable, refresh=True)
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
                 if last_renderable is None:
                     fail(OutputMode.RICH, "env.list", str(exc), dry_run=False)
-                # Keep the last successful table in the live region and add a
-                # bounded, sanitized retry diagnostic below it.
                 live.update(
                     Group(
                         last_renderable,
@@ -841,40 +773,9 @@ def _catalog_worktree_paths(
     }
 
 
-def _cli_snapshot(snapshot: Snapshot, worktree_paths: dict[str, str]) -> _CliSnapshot:
-    """Join catalogue paths into the typed machine result before serialization."""
-    environments = tuple(
-        _CliEnvironmentSnapshot(
-            id=environment.id,
-            project_id=environment.project_id,
-            name=environment.name,
-            branch=environment.branch,
-            short_sha=environment.short_sha,
-            db_mode=environment.db_mode,
-            database=environment.database,
-            lifecycle_state=environment.lifecycle_state,
-            allocated_http_port=environment.allocated_http_port,
-            observed_port=environment.observed_port,
-            artifacts=environment.artifacts,
-            runtime=environment.runtime,
-            git=environment.git,
-            storage=environment.storage,
-            pgadmin=environment.pgadmin,
-            worktree_path=worktree_paths[environment.id],
-        )
-        for environment in snapshot.environments
-    )
-    return _CliSnapshot(
-        schema_version=snapshot.schema_version,
-        generated_at=snapshot.generated_at,
-        projects=snapshot.projects,
-        environments=environments,
-    )
-
-
-def _print_env_list_human(snapshot: Snapshot, worktree_paths: dict[str, str] | None = None) -> None:
+def _print_env_list_human(inventory: CheckoutInventory) -> None:
     console = Console()
-    console.print(_render_env_list_rich(snapshot, worktree_paths, width=console.width))
+    console.print(_render_env_list_rich(inventory, width=console.width))
 
 
 def _project_provenance(cli_context: CliContext) -> str:
@@ -952,49 +853,57 @@ def env_path(
     )
 
 
-def _render_env_list_rich(
-    snapshot: Snapshot,
-    worktree_paths: dict[str, str] | None = None,
-    *,
-    width: int = 300,
-) -> Group:
-    """Build the Rich inventory projection without collecting any data."""
-    if worktree_paths is not None:
-        for env in snapshot.environments:
-            if env.id not in worktree_paths:
-                raise RuntimeError(
-                    "environment catalogue is missing a worktree path for an environment result"
-                )
-    paths = worktree_paths or {}
-    envs_by_project: dict[str, list[EnvironmentSnapshot]] = {}
-    for env in snapshot.environments:
-        envs_by_project.setdefault(env.project_id, []).append(env)
+def _render_env_list_rich(inventory: CheckoutInventory, *, width: int = 300) -> Group:
+    """Build the Rich checkout inventory projection without collecting any data."""
+    provider_columns = _provider_columns(inventory)
+    rows_by_project: dict[str, list[CheckoutRow]] = {}
+    project_names: dict[str, str] = {}
+    for row in inventory.rows:
+        rows_by_project.setdefault(row.project_id, []).append(row)
+        if row.kind == "main":
+            project_names[row.project_id] = row.name
+    clusters = {cluster.project_id: cluster for cluster in inventory.clusters}
 
     sections: list[Text | Table] = []
-    for project in sorted(snapshot.projects, key=lambda item: item.id):
-        sections.append(Text(sanitize_terminal_text(f"Project {project.name}"), style="bold cyan"))
-        cluster = project.cluster
+    for project_id in sorted(rows_by_project):
+        project_name = project_names.get(project_id, project_id)
+        sections.append(Text(sanitize_terminal_text(f"Project {project_name}"), style="bold cyan"))
+        cluster = clusters.get(project_id)
         sections.append(
             Text(
                 sanitize_terminal_text(
-                    "  PostgreSQL  —" if cluster is None else _cluster_summary_line(cluster)
+                    "  PostgreSQL  —"
+                    if cluster is None
+                    else _checkout_cluster_summary_line(cluster)
                 ),
                 style="dim",
             )
         )
-        table = Table(show_header=True, box=None, pad_edge=False)
-        columns = _env_columns_for_width(width)
-        project_envs = sorted(envs_by_project.get(project.id, ()), key=lambda item: item.id)
-        if columns in {_ENV_LIST_COMPACT_COLUMNS, _ENV_LIST_MEDIUM_COLUMNS}:
+        project_rows = rows_by_project[project_id]
+        base_columns = _env_columns_for_width(width)
+        columns = (*base_columns, *provider_columns)
+        if base_columns in {_ENV_LIST_COMPACT_COLUMNS, _ENV_LIST_MEDIUM_COLUMNS}:
             sections.extend(
-                _rich_env_compact_rows(project_envs, paths, include_worktree=width >= 120)
+                _rich_checkout_compact_rows(
+                    project_rows,
+                    provider_columns=provider_columns,
+                    include_worktree=width >= 120,
+                )
             )
             continue
+        table = Table(show_header=True, box=None, pad_edge=False)
         for column in columns:
             table.add_column(column, overflow="fold", no_wrap=column == "WORKTREE")
-        for env in project_envs:
-            row = _rich_env_row(env, paths.get(env.id))
-            table.add_row(*(row[_ENV_LIST_COLUMNS.index(column)] for column in columns))
+        for row in project_rows:
+            values = _checkout_row_values(row, provider_columns)
+            table.add_row(
+                *(
+                    Text(sanitize_terminal_text(values[column]), style=_checkout_status_style(row))
+                    if column == "STATUS"
+                    else Text(sanitize_terminal_text(values[column]))
+                    for column in columns
+                )
+            )
         sections.append(table)
     return Group(*sections)
 
@@ -1008,105 +917,104 @@ def _env_columns_for_width(width: int) -> tuple[str, ...]:
     return _ENV_LIST_COLUMNS
 
 
-def _rich_env_compact_rows(
-    environments: list[EnvironmentSnapshot],
-    paths: dict[str, str],
+def _provider_columns(inventory: CheckoutInventory) -> tuple[str, ...]:
+    providers: set[str] = set()
+    for row in inventory.rows:
+        for fact in row.facts:
+            providers.add(fact.provider)
+    return tuple(sorted(providers))
+
+
+def _checkout_status_style(row: CheckoutRow) -> str:
+    status = _checkout_status_str(row)
+    if status == "removed":
+        return "red"
+    if status == "running":
+        return "green"
+    return "dim"
+
+
+def _checkout_status_str(row: CheckoutRow) -> str:
+    if row.lifecycle_state is EnvironmentState.REMOVED:
+        return "removed"
+    return row.odoo_status
+
+
+def _git_branch(row: CheckoutRow) -> str:
+    return row.git.branch if row.git is not None else "—"
+
+
+def _git_ahead_from_facts(git: CheckoutGitFacts | None) -> str:
+    if git is None or git.ahead is None or git.behind is None:
+        return "—"
+    return f"↑{git.ahead} ↓{git.behind}"
+
+
+def _git_diff_from_facts(git: CheckoutGitFacts | None) -> str:
+    if git is None or git.added_lines is None or git.deleted_lines is None:
+        return "—"
+    return f"+{git.added_lines} -{git.deleted_lines}"
+
+
+def _fact_text(row: CheckoutRow, provider_id: str) -> str:
+    for fact in row.facts:
+        if fact.provider == provider_id:
+            return fact.text
+    return "—"
+
+
+def _checkout_row_values(row: CheckoutRow, provider_columns: tuple[str, ...]) -> dict[str, str]:
+    database = row.database or "—"
+    db_mode = row.db_mode or "—"
+    worktree = _display_path(row.worktree_path) if row.worktree_path else "—"
+    git_value = f"{_git_ahead_from_facts(row.git)} {_git_diff_from_facts(row.git)}".strip()
+    values = {
+        "KIND": row.kind,
+        "NAME": row.name,
+        "BRANCH": _git_branch(row),
+        "STATUS": _checkout_status_str(row),
+        "GIT": git_value,
+        "DB_MODE": db_mode,
+        "DATABASE": database,
+        "WORKTREE": worktree,
+        "BRANCH / STATUS": f"{_git_branch(row)} / {_checkout_status_str(row)}",
+        "GIT A/D": git_value,
+        "DATABASE_COMPACT": f"{db_mode} {database}".strip(),
+    }
+    for provider_id in provider_columns:
+        values[provider_id] = _fact_text(row, provider_id)
+    return values
+
+
+def _rich_checkout_compact_rows(
+    rows: list[CheckoutRow],
     *,
+    provider_columns: tuple[str, ...],
     include_worktree: bool,
 ) -> list[Text]:
-    """Keep required fields readable without forcing narrow tables to split words."""
-    rows: list[Text] = []
-    for env in environments:
-        values = _env_row_values(env, paths.get(env.id))
+    rendered: list[Text] = []
+    for row in rows:
+        values = _checkout_row_values(row, provider_columns)
+        label = "Main checkout" if row.kind == "main" else f"Environment {row.name}"
         lines = [
-            f"Environment {values[0]}",
-            f"  branch={_compact_value(values[1], 42)} state={values[2]} "
-            f"runtime={values[3]} port={values[13]}",
-            f"  database={values[11]} {values[12] or '—'} git=ahead {values[8]} diff {values[9]}",
-            f"  artifacts={_compact_value(values[14], 52)}",
+            label,
+            f"  branch={_compact_value(values['BRANCH'], 42)} status={values['STATUS']}",
+            f"  database={_compact_value(values['DATABASE_COMPACT'], 52)} git={values['GIT A/D']}",
         ]
+        for provider_id in provider_columns:
+            lines.append(f"  {provider_id}={_compact_value(values[provider_id], 52)}")
         if include_worktree:
-            lines.append(f"  worktree={_compact_value(values[15], 64)}")
-        rows.append(
+            lines.append(f"  worktree={_compact_value(values['WORKTREE'], 64)}")
+        rendered.append(
             Text(sanitize_terminal_text("\n".join(lines), preserve_newlines=True), style="")
         )
-    return rows
+    return rendered
 
 
 def _compact_value(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: max(1, limit - 1)] + "…"
-
-
-def _rich_env_row(env: EnvironmentSnapshot, worktree_path: str | None = None) -> tuple[Text, ...]:
-    """Return all sixteen environment values with terminal-aware styles."""
-    values = _env_row_values(env, worktree_path)
-    state_style = {
-        "ready": "green",
-        "not_ready": "yellow",
-        "stopped": "dim",
-        "removed": "red",
-    }.get(values[2])
-    runtime_style = "green" if values[3] == "ready" else None
-    observed_style = "green" if values[4] == "port-free" else "yellow"
-    styled_values = (
-        (values[0], None),
-        (values[1], None),
-        (values[2], state_style),
-        (values[3], runtime_style),
-        (values[4], observed_style if values[4] != "—" else "dim"),
-        *[(value, None) for value in values[5:]],
-    )
-    return tuple(
-        Text(sanitize_terminal_text(value), style=style or "") for value, style in styled_values
-    )
-
-
-def _env_row_values(env: EnvironmentSnapshot, worktree_path: str | None = None) -> tuple[str, ...]:
-    if env.lifecycle_state is EnvironmentState.REMOVED:
-        return _removed_env_row_values(env, worktree_path)
-    return (
-        env.name,
-        env.branch,
-        env.lifecycle_state.value,
-        _runtime_str(env.runtime.state),
-        _observed_str(env),
-        _odoo_pid_str(env.runtime),
-        f"{env.runtime.cpu_percent:.1f}%" if env.runtime.cpu_percent is not None else "—",
-        _human_bytes(env.runtime.memory_bytes) if env.runtime.memory_bytes is not None else "—",
-        _git_ahead_str(env.git),
-        _git_diff_str(env.git),
-        _size_str(env.storage),
-        env.db_mode,
-        env.database or "",
-        _port_str(env),
-        _artifacts_str(env.artifacts),
-        _display_path(worktree_path) if worktree_path else "—",
-    )
-
-
-def _removed_env_row_values(
-    env: EnvironmentSnapshot, worktree_path: str | None = None
-) -> tuple[str, ...]:
-    return (
-        env.name,
-        env.branch,
-        "removed",
-        "—",
-        "—",
-        "—",
-        "—",
-        "—",
-        "—",
-        "—",
-        "—",
-        env.db_mode,
-        env.database or "",
-        str(env.allocated_http_port) if env.allocated_http_port is not None else "—",
-        _artifacts_str(env.artifacts),
-        _display_path(worktree_path) if worktree_path else "—",
-    )
 
 
 def _display_path(path: str) -> str:
@@ -1117,6 +1025,20 @@ def _display_path(path: str) -> str:
     except (OSError, ValueError):
         return path
     return "~" if not relative.parts else f"~/{relative.as_posix()}"
+
+
+def _checkout_cluster_summary_line(cluster: CheckoutClusterSummary) -> str:
+    parts = ["  PostgreSQL", cluster.state.value]
+    if cluster.unavailability_reason and cluster.unavailability_reason not in {
+        "external_not_owned"
+    }:
+        parts.append(cluster.unavailability_reason)
+        return "  ".join(parts)
+    if cluster.mode == "external":
+        parts.append("external")
+    elif cluster.state is PostgresClusterState.STOPPED:
+        parts.append("stopped")
+    return "  ".join(parts)
 
 
 def _cluster_summary_line(cluster: ClusterSnapshot) -> str:
@@ -1159,65 +1081,6 @@ def _cluster_metrics_parts(metrics: ClusterMetrics | None) -> list[str]:
     if metrics.volume_usage_bytes is not None:
         out.append(f"disk={_human_bytes(metrics.volume_usage_bytes)}")
     return out
-
-
-def _runtime_str(state: RuntimeState) -> str:
-    return state.value
-
-
-def _observed_str(env: EnvironmentSnapshot) -> str:
-    if env.observed_port is None:
-        return "—"
-    return f"port-{env.observed_port.value}"
-
-
-def _odoo_pid_str(runtime: RuntimeMetrics) -> str:
-    if runtime.state == RuntimeState.STOPPED or runtime.root_pid is None:
-        return "—"
-    child = len(runtime.child_pids)
-    return f"{runtime.root_pid} (+{child})" if child else str(runtime.root_pid)
-
-
-def _git_ahead_str(git: GitActivity) -> str:
-    if git.state == GitActivityState.ORPHAN or git.ahead is None or git.behind is None:
-        return "—"
-    return f"↑{git.ahead} ↓{git.behind}"
-
-
-def _git_diff_str(git: GitActivity) -> str:
-    if git.diff is None:
-        return "—"
-    return f"+{git.diff.added} -{git.diff.deleted}"
-
-
-def _size_str(storage: StorageFootprint) -> str:
-    prefix = ">=" if not storage.complete else ""
-    return f"{prefix}{_human_bytes(storage.total_bytes)}"
-
-
-def _port_str(env: EnvironmentSnapshot) -> str:
-    if env.runtime.state in (RuntimeState.READY, RuntimeState.NOT_READY):
-        return str(env.runtime.http_port) if env.runtime.http_port is not None else "—"
-    return str(env.allocated_http_port) if env.allocated_http_port is not None else "—"
-
-
-def _artifacts_str(artifacts: EnvironmentArtifacts) -> str:
-    return (
-        ",".join(
-            name
-            for name, value in (
-                ("worktree", artifacts.worktree_exists),
-                ("registered", artifacts.worktree_registered),
-                ("config", artifacts.config_exists),
-                ("python", artifacts.python_exists),
-                ("python-contained", artifacts.python_contained),
-                ("lock", artifacts.dependency_lock_exists),
-                ("backup", artifacts.backup_exists),
-            )
-            if value is False
-        )
-        or "ok"
-    )
 
 
 def _client_class() -> type[OdooClient]:
