@@ -8,6 +8,8 @@
 odcli env list
 odcli env list --all
 odcli env list --format rich|json|toon
+odcli env list --all-projects
+odcli env list --watch [--interval SECONDS]
 ```
 
 The command SHALL project one frozen `CheckoutInventory` model for Rich, JSON, and TOON. The main checkout of each selected project SHALL appear as the first typed row of its group with `kind = main | environment`, a stable `project_id`, and a nullable `environment_id`. The main checkout SHALL NOT be modelled as a synthetic environment.
@@ -165,6 +167,34 @@ Bulk prune, автоматическое удаление по возрасту 
 
 - **WHEN** one target in a multi-target call is unknown
 - **THEN** the command aborts with no changes and a sanitized error
+
+### Requirement: Catalog current-runtime record (schema v8 → v9)
+
+Catalog MUST хранить одну current runtime-запись на environment в таблице `environment_runtime`. The first Alembic revision SHALL create this table as part of the complete current schema. Sequential `PRAGMA user_version` v8→v9 and `CURRENT_SCHEMA_VERSION = 9` SHALL NOT remain as a production migration ledger.
+
+`BackupCatalog` MUST предоставлять read-only `list_environments_with_runtimes()` returning each environment and its current runtime from one SQLite read snapshot using two SELECTs in that transaction, plus `get_environment_runtime()` and `list_environment_runtimes()` for their explicit read-only callers, and write `upsert_environment_runtime(...)` / `clear_environment_runtime(environment_id)` (только из `run_foreground` and the detached launch command that persists runtime identity).
+
+Collector (`EnvironmentMonitor`) reads runtime rows read-only. PID safety: collector считает process живым только при `psutil.Process(pid).create_time() == recorded_create_time` и `psutil.pid_exists(pid)`; mismatch → `runtime.state="stopped"`.
+
+#### Scenario: Migration adds runtime table
+
+- **WHEN** a fresh catalogue is created or a known alpha catalogue is stamped
+- **THEN** `environment_runtime` table exists, environments without a live process have no runtime row, and no `PRAGMA user_version` step runs
+
+#### Scenario: Upsert is one-row-per-environment
+
+- **WHEN** `upsert_environment_runtime(env_id, ...)` is called twice for the same environment
+- **THEN** one row exists with the latest values (no duplicates)
+
+#### Scenario: Collector reads runtime read-only
+
+- **WHEN** `EnvironmentMonitor.snapshot()` runs
+- **THEN** its aggregate catalog read is read-only; collector never calls `upsert`/`clear`
+
+#### Scenario: Collector reads one aggregate snapshot
+
+- **WHEN** `EnvironmentMonitor.snapshot()` runs
+- **THEN** it calls `list_environments_with_runtimes()` once and never calls `upsert`/`clear`
 
 ## ADDED Requirements
 
