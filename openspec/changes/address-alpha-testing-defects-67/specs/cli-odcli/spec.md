@@ -225,6 +225,207 @@ CLI callbacks SHALL NOT build a self-contained domain read/mutation/spawn operat
 
 ## MODIFIED Requirements
 
+### Requirement: Click entry point
+
+SDK MUST добавлять один Click entry point:
+
+```toml
+[project.scripts]
+odcli = "odoo_instance_sdk.cli:cli"
+```
+
+CLI — тонкий adapter над SDK, не оркестратор процессов.
+
+Help и synopsis MUST показывать полный command surface:
+
+```text
+odcli [--project PATH] COMMAND
+odcli [--project PATH] [--env SELECTOR] <instance-command>
+
+odcli init [OPTIONS]
+odcli env checkout BRANCH [OPTIONS]
+odcli env sync [ENVIRONMENT] [OPTIONS]
+odcli env list [OPTIONS]
+odcli env remove [ENVIRONMENT] [OPTIONS]
+odcli run [OPTIONS]
+odcli logs [-n|--tail N] [-f|--follow]
+odcli shell [-- ODOO_ARGS...]
+odcli doctor [OPTIONS]
+odcli monitor [--headless] [--host HOST] [--port PORT] [--no-open]
+odcli eval EXPRESSION [OPTIONS]
+odcli exec SCRIPT [-- SCRIPT_ARGS...]
+odcli test [TARGET] [OPTIONS]
+odcli module list [MODULE...] [OPTIONS]
+odcli module update MODULE... [OPTIONS]
+odcli module test MODULE... [OPTIONS]
+odcli translations export --module MODULE... [OPTIONS]
+odcli deps verify [OPTIONS]
+odcli vscode generate [OPTIONS]
+odcli ps [OPTIONS]
+```
+
+#### Scenario: Help shows full command surface
+
+- **WHEN** `odcli --help` runs
+- **THEN** shows init, env, run, logs, shell, doctor, monitor, eval, exec, test, module, translations, deps, vscode, ps
+
+### Requirement: CLI does not open the catalog
+
+CLI command bodies, printers и env-list rendering MUST NOT вызывать `get_catalog()` и MUST NOT писать `last_used_at` или environment events напрямую.
+
+`odcli run` MUST вызвать `EnvironmentResource.record_use()` после free-port preflight и MUST NOT вызывать его при `port-conflict`. Other instance commands MUST NOT record `use`.
+
+JSON envelope v1 MUST остаться: `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, `warnings`; success — одинаковые `result` и `data`; error — `error.code` + sanitized `error.message`. Один shared emit path.
+
+Entry point MUST остаться `odoo_instance_sdk.cli:cli`. Имена команд и `from odoo_instance_sdk.cli import cli` MUST сохраниться.
+
+#### Scenario: List JSON does not open catalog
+
+- **WHEN** `odcli env list --json` prints the envelope
+- **THEN** the command does not call `get_catalog()` and does not write environment events
+
+#### Scenario: Port conflict skips use
+
+- **WHEN** `odcli run` hits an occupied port
+- **THEN** output is `port-conflict` / ownership-unknown and `record_use` is not called
+
+#### Scenario: Successful run records use on the environment resource
+
+- **WHEN** `odcli run` finds a free port
+- **THEN** `EnvironmentResource.record_use()` writes `last_used_at` and `use/succeeded` before `run_foreground()`
+
+#### Scenario: Help still lists full command surface
+
+- **WHEN** `odcli --help` runs
+- **THEN** shows init, env, run, logs, shell, doctor, monitor, eval, exec, module, translations, deps, vscode, ps
+
+### Requirement: Stable machine output
+
+The exact bounded structured leaf inventory is: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `backup list`, `backup show`, `backup validate`, `backup delete`, `db refresh`, `db reset-admin-password`, `db list`, `db restore`, `db drop`, `resource list`, `resource doctor`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `ps`, `db locks`, `db stats`, `db bloat`, `db init-monitoring`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Each SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Existing `--json` SHALL remain a backward-compatible alias for `--format json`. Supplying `--json` with `--format toon` or `--format rich` SHALL be a Click usage error with exit code `2`; supplying `--json --format json` SHALL be accepted. During normal execution, `run`, interactive `shell`, `psql`, and `logs --follow` SHALL remain raw-streaming and SHALL not emit document output or use a Rich live wrapper. Eligible spawning `run` and `shell` SHALL accept document-format options only together with `--dry-run`; those dry-run paths SHALL suppress native execution and emit one bounded plan document in Rich, JSON, or TOON, with `--json` equivalent to `--format json`. `psql --dry-run` SHALL remain an explicit plan-only exception that emits the shared sanitized native command plan without spawning; normal `psql` remains raw passthrough and SHALL continue to reject `--format` and `--json`.
+
+The CLI SHALL define one CLI-only `OutputMode` with values `rich`, `json`, and `toon`. The mode and envelope types SHALL NOT become public SDK models or FastAPI response models. Each successful or failed bounded operation SHALL first build one JSON-safe CLI envelope v1 containing `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, and `warnings`; success SHALL contain equal `result` and `data`, while failure SHALL omit top-level `result` and `data` and SHALL contain stable `error.code` and sanitized `error.message`. `error` MAY additionally contain an operation-specific JSON-safe `details` field; failures without structured details SHALL omit it and retain their existing v1 shape.
+
+JSON and TOON SHALL serialize that exact envelope without building format-specific result graphs. Decoding a TOON document with the selected strict decoder SHALL yield the same JSON value as decoding JSON output for the same operation. Machine modes SHALL emit exactly one UTF-8 document to stdout with no ANSI, prompt, status, progress, or external log text; diagnostics SHALL go to stderr. Renderer selection SHALL NOT change operation execution, exception mapping, or exit code. Native Click parse failures that occur before output-mode resolution SHALL retain Click's stderr usage output and exit code `2`.
+
+For `env remove`, `backup delete`, `db restore`, and `db drop`, JSON and TOON document modes (including the `--json` alias) SHALL never call `click.confirm`. Without `--yes`, they SHALL NOT execute mutation and SHALL emit exactly one sanitized failure envelope with `error.code="confirmation_required"` and exit code `1`. With `--yes`, JSON and TOON SHALL execute the same operation and normal success/failure mapping. Interactive Rich mode SHALL retain command-specific confirmation behavior. Dry-run SHALL never prompt and SHALL remain non-mutating.
+
+Rich renderers SHALL remain adjacent to the concrete commands whose typed results they render. They MAY use `Table`, `Status`, `Progress`, and `Live` only when appropriate to the operation; they SHALL NOT introduce a generic renderer interface, registry, or DSL. `db stats` and `db bloat` SHALL render separate tables and indexes tables rather than one sparse combined table.
+
+#### Scenario: JSON envelope
+
+- **WHEN** `odcli env list --json` executes
+- **THEN** stdout contains exactly one versioned envelope and no progress or log text
+
+#### Scenario: JSON alias preserves envelope v1
+
+- **WHEN** `odcli env list --json` and `odcli env list --format json` run against the same frozen result
+- **THEN** each stdout document decodes to the same envelope v1 and contains no ANSI or diagnostic text
+
+#### Scenario: TOON is semantically equal to JSON
+
+- **WHEN** a bounded command succeeds or fails once and its envelope is emitted as JSON and TOON
+- **THEN** strict TOON decoding and JSON decoding produce equal Python builtins including `result`/`data`, context, provenance, warnings, and error fields
+
+#### Scenario: Conflicting alias is usage error
+
+- **WHEN** a caller supplies `--json --format toon`
+- **THEN** Click exits `2`, does not execute the operation, and does not emit a partial machine document
+
+#### Scenario: Machine diagnostics stay on stderr
+
+- **WHEN** a bounded machine-mode operation reports a sanitized diagnostic in addition to its result
+- **THEN** stdout contains one JSON or TOON envelope and the diagnostic is written only to stderr
+
+#### Scenario: Structured failure details preserve the failure variant
+
+- **WHEN** a bounded operation has structured diagnostics required by its capability contract
+- **THEN** the machine document has `ok=false`, omits top-level `result` and `data`, retains `error.code` and sanitized `error.message`, and stores those diagnostics only in JSON-safe `error.details`
+- **AND** a failure without such diagnostics omits `error.details`
+
+#### Scenario: Machine mutation requires explicit confirmation
+
+- **WHEN** `env remove`, `backup delete`, `db restore`, or `db drop` runs in JSON/TOON mode without `--yes` and without `--dry-run`
+- **THEN** no prompt or mutation occurs, stdout contains one `confirmation_required` failure envelope, and the command exits `1`
+
+#### Scenario: Explicit machine mutation executes
+
+- **WHEN** a supported mutating lifecycle leaf is invoked with `--yes` in JSON/TOON mode
+- **THEN** the same operation runs once and its result is emitted under the normal renderer-independent exit mapping
+
+#### Scenario: Machine remove requires explicit confirmation
+
+- **WHEN** `odcli env remove ENV --format json`, `--format toon`, or `--json` is invoked without `--yes`
+- **THEN** no prompt is rendered, removal is not called, stdout contains one failure envelope with `error.code="confirmation_required"`, and the command exits `1`
+
+#### Scenario: Explicit machine remove executes
+
+- **WHEN** `odcli env remove ENV --yes --format json`, `--format toon`, or `--json` is invoked
+- **THEN** the same removal operation runs once and its result is emitted as one document under the normal renderer-independent exit mapping
+
+#### Scenario: Secrets redacted
+
+- **WHEN** an error occurs during checkout or resource lifecycle execution
+- **THEN** every machine or Rich error message redacts passwords, config bodies, sensitive environment values, and captured secrets before emission
+
+#### Scenario: Diagnostic machine formats share one result graph
+
+- **WHEN** one frozen diagnostic or resource result is projected as JSON and TOON
+- **THEN** both decoded envelopes contain equal typed fields, numeric byte fields, warnings, and completeness state
+
+#### Scenario: Native command dry-run supports every bounded format
+
+- **WHEN** `odcli run --dry-run` or spawning `odcli shell --dry-run` is requested with `--format rich|json|toon` or `--json`
+- **THEN** output contains exactly one bounded plan with `dry_run=true` in the selected format
+- **AND** `--json` and `--format json` produce equivalent JSON documents
+- **AND** no native child stream starts
+
+#### Scenario: Normal native command stays raw
+
+- **WHEN** `odcli run` or interactive `odcli shell` executes without `--dry-run`
+- **THEN** its inherited stream is not wrapped in a bounded document or Rich live view
+
+#### Scenario: Normal native command rejects machine options
+
+- **WHEN** `odcli run` or spawning `odcli shell` is invoked with `--format` or `--json` but without `--dry-run`
+- **THEN** Click exits `2` before invoking SDK code or starting a process
+
+#### Scenario: Canonical bounded inventory remains single-source
+
+- **WHEN** the stable machine-output characterization gate compares the documented normal-execution leaves
+- **THEN** they equal canonical `PUBLIC_LEAF_CASES`, including every backup, database, resource, and `ps` leaf added by this change
+- **AND** no second bounded-leaf table is introduced
+
+#### Scenario: Mutating lifecycle dry-runs are canonical leaves
+
+- **WHEN** the characterization gate exercises `backup delete`, `db restore`, or `db drop` with `--dry-run` in every shared format
+- **THEN** each appears exactly once in canonical `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
+- **AND** no file, database, configuration, process, or catalogue mutation occurs
+
+#### Scenario: Database drop is a canonical bounded leaf
+
+- **WHEN** the stable machine-output characterization gate exercises `db drop DATABASE --dry-run` in every shared format
+- **THEN** `db drop` appears exactly once in canonical `PUBLIC_LEAF_CASES` as `mutating-or-spawning` with required dry-run support
+- **AND** no database, session, or catalogue mutation occurs
+
+### Requirement: Single format selector and typed field projection
+
+Format-aware commands SHALL expose only `--format rich|json|toon`, default to Rich, and reject removed `--json` as an ordinary Click usage error. Eligible bounded reads (`env list/show`, `backup list/show`, `resource list/doctor`, `db list/locks/stats/bloat`, `module list`, and `ps`) SHALL accept comma-separated documented dotted `--fields` only with explicit JSON or TOON, recursively derive every allowed root and nested path from that leaf's concrete typed result schema without a command/field registry, project only successful `result`/`data`, preserve repeated-row order and all envelope/structural metadata, and fail before execution for unknown or ineligible fields. [Source: GH#62]
+
+#### Scenario: Project repeated fields
+
+- **WHEN** an eligible bounded read uses valid dotted fields in JSON and TOON
+- **THEN** decoded documents are equal, every repeated row retains order with only selected data, and envelope, pagination, completeness, capabilities, timestamps, warnings, context, provenance, dry-run, and errors remain unfiltered
+
+#### Scenario: Reject invalid projection
+
+- **WHEN** `--fields` is used with Rich, unsupported output, an unknown path, mutation, error, dry-run plan, native passthrough, interactive, or streaming command
+- **THEN** Click exits `2` before the operation runs
+
+#### Scenario: Typed schema is the field authority
+
+- **WHEN** an eligible leaf's concrete typed result adds or removes a nested field
+- **THEN** accepted dotted paths change from that schema alone, including paths through repeated structures, without updating any projection allowlist or command-name field table
+
 ### Requirement: `odcli run`
 
 `odcli run` SHALL launch the resolved Odoo runtime from either a ready environment or an initialized project. For project context, it SHALL derive the Python executable, Odoo entry point, source Odoo config, runtime working directory, preferred HTTP port, default database, default run arguments, and project PostgreSQL binding from `.odcli/project.toml` and the referenced config. Missing required runtime fields or files SHALL fail before process construction with a sanitized actionable error.
