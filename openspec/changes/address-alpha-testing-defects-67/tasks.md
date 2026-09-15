@@ -17,13 +17,13 @@
 
 ## 3. `env list` checkout inventory (item 3)
 
-- [ ] 3.1 Add the frozen `CheckoutInventory` typed model with `kind = main | environment` rows.
-- [ ] 3.2 Implement `CheckoutInventory` projection from one snapshot per sample plus Git facts of the main checkout.
-- [ ] 3.3 Refactor `odcli env list` Rich to drop `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, and detailed process/artifact columns; keep a readable `Table` on normal and compact widths.
-- [ ] 3.4 Add the main checkout as the first typed row of each project group without creating a synthetic environment.
-- [ ] 3.5 Implement the narrow environment-facts entry point (typed callable/protocol, Python entry points, deterministic order, bounded timeout, isolated errors, at most one Rich column per provider).
-- [ ] 3.6 Update `env list --watch` to use one snapshot per sample and the same table contract.
-- [ ] 3.7 Add tests covering main + environments, all-projects, stopped runtime, Git ahead/diff, no extensions, three installed providers, one failed/slow provider, stable order, and watch interruption.
+- [x] 3.1 Add the frozen `CheckoutInventory` typed model with `kind = main | environment` rows.
+- [x] 3.2 Implement `CheckoutInventory` projection from one snapshot per sample plus Git facts of the main checkout.
+- [x] 3.3 Refactor `odcli env list` Rich to drop `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, and detailed process/artifact columns; keep a readable `Table` on normal and compact widths.
+- [x] 3.4 Add the main checkout as the first typed row of each project group without creating a synthetic environment.
+- [x] 3.5 Implement the narrow environment-facts entry point (typed callable/protocol, Python entry points, deterministic order, bounded timeout, isolated errors, at most one Rich column per provider).
+- [x] 3.6 Update `env list --watch` to use one snapshot per sample and the same table contract.
+- [x] 3.7 Add tests covering main + environments, all-projects, stopped runtime, Git ahead/diff, no extensions, three installed providers, one failed/slow provider, stable order, and watch interruption.
 
 ## 4. Alembic + SQLAlchemy Core catalogue migration (item 4)
 

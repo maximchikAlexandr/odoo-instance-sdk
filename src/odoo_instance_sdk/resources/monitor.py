@@ -46,6 +46,7 @@ from odoo_instance_sdk.internal.storage_footprint import (
     collect_storage_footprint,
 )
 from odoo_instance_sdk.models import (
+    CheckoutInventory,
     ClusterEndpoint,
     ClusterResourceSnapshot,
     ClusterSnapshot,
@@ -400,6 +401,153 @@ class EnvironmentMonitor:
         Delegates to ``processes_command`` and does not perform a second sample.
         """
         return self.processes_command(project_id=project_id).run()
+
+    def checkout_inventory(
+        self, project_id: str | None = None, *, include_removed: bool = False
+    ) -> CheckoutInventory:
+        """Project one ``CheckoutInventory`` from a single canonical snapshot.
+
+        Delegates to ``checkout_inventory_command`` and does not perform a
+        second sample. The main checkout of each project is the first row of
+        its group with ``kind = main``; environment rows follow with
+        ``kind = environment``.
+        """
+        return self.checkout_inventory_command(
+            project_id=project_id, include_removed=include_removed
+        ).run()
+
+    def checkout_inventory_command(
+        self, project_id: str | None = None, *, include_removed: bool = False
+    ) -> Command[CheckoutInventory]:
+        """Capture one ``CheckoutInventory`` projection from a single snapshot.
+
+        The captured command runs ``snapshot_command`` exactly once and projects
+        the result plus Git facts of the main checkout into the frozen
+        ``CheckoutInventory`` model. The action is read-only and never spawns a
+        process outside the bounded Git facts collector.
+        """
+        from odoo_instance_sdk.execution import Command as _Command
+        from odoo_instance_sdk.execution import ExecutionPlan
+        from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+        from odoo_instance_sdk.internal.proc import (
+            PreparedAction,
+            prepared_command,
+        )
+
+        action = PreparedAction(
+            step_id="monitor.checkout_inventory",
+            action="project_checkout_inventory",
+            description="Project one CheckoutInventory from a single monitor snapshot",
+            details={"project_id": project_id, "include_removed": include_removed},
+            read_only=True,
+        )
+
+        def execute(context: RunContext[CheckoutInventory]) -> CheckoutInventory:
+            context.action(action.step_id)
+            try:
+                snapshot = self.snapshot_command(
+                    project_id=project_id, include_removed=include_removed
+                ).run()
+                base_ref_resolver = self._checkout_inventory_base_ref_resolver()
+                worktree_paths = self._checkout_inventory_worktree_paths(
+                    project_id=project_id,
+                    snapshot=snapshot,
+                    include_removed=include_removed,
+                )
+                inventory = build_checkout_inventory(
+                    snapshot,
+                    project_id=project_id,
+                    include_removed=include_removed,
+                    worktree_paths=worktree_paths,
+                    base_ref_resolver=base_ref_resolver,
+                )
+                context.complete_action(action.step_id)
+                return inventory
+            finally:
+                context.skip_remaining()
+
+        plan = ExecutionPlan(steps=(action.public_projection(),)).with_fingerprint()
+        return _Command.from_prepared(
+            plan,
+            prepared_command(execute, (action,), executor=self._executor),
+        )
+
+    def _checkout_inventory_base_ref_resolver(self) -> Callable[[str], str | None] | None:
+        """Build a base-ref resolver from catalogue project manifests.
+
+        ponytail: reads each project manifest once; the project count is small.
+        Returns ``None`` when the catalogue is unavailable so the projection
+        degrades to the ``main`` default.
+        """
+        import sqlite3
+
+        from odoo_instance_sdk.project import ProjectConfig
+
+        db_path = self.catalog_path if self.catalog_path is not None else _paths.get_catalog_path()
+        try:
+            catalog = BackupCatalog(db_path=db_path)
+        except (BackupCatalogError, sqlite3.Error, OSError):
+            return None
+        base_refs: dict[str, str | None] = {}
+        try:
+            rows = catalog._monitor_snapshot_rows(include_removed=False)
+            for project in rows.projects:
+                project_id = str(project["project_id"])
+                if project_id in base_refs:
+                    continue
+                repo_root = Path(str(project["repository_root"]))
+                try:
+                    config = ProjectConfig.load(repo_root)
+                    base_refs[project_id] = config.default_base_ref
+                except Exception:
+                    base_refs[project_id] = None
+        finally:
+            catalog.close()
+        if not base_refs:
+            return None
+
+        def resolve(project_id: str) -> str | None:
+            return base_refs.get(project_id)
+
+        return resolve
+
+    def _checkout_inventory_worktree_paths(
+        self, *, project_id: str | None, snapshot: Snapshot, include_removed: bool = False
+    ) -> dict[str, str]:
+        """Read stored worktree paths after the monitor's single snapshot pass.
+
+        ponytail: one catalogue read per sample; the environment count is small.
+        Returns an empty mapping when the catalogue is unavailable so the
+        projection degrades to empty worktree paths.
+        """
+        import sqlite3
+
+        db_path = self.catalog_path if self.catalog_path is not None else _paths.get_catalog_path()
+        try:
+            catalog = BackupCatalog(db_path=db_path)
+        except (BackupCatalogError, sqlite3.Error, OSError):
+            return {}
+        paths: dict[str, str] = {}
+        try:
+            rows = catalog.list_environments(include_removed=include_removed)
+        except (BackupCatalogError, OSError):
+            catalog.close()
+            return {}
+        finally:
+            catalog.close()
+        environment_ids = {env.id for env in snapshot.environments}
+        for row in rows:
+            env_id = str(row["id"])
+            if env_id not in environment_ids:
+                continue
+            if project_id is not None:
+                resolved_project = f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
+                if resolved_project != project_id:
+                    continue
+            worktree_value = row["worktree_path"]
+            if isinstance(worktree_value, str) and worktree_value.strip():
+                paths[env_id] = worktree_value
+        return paths
 
     def processes_command(self, project_id: str | None = None) -> Command[ProcessInventory]:
         """Capture one ``ProcessInventory`` projection from a single snapshot.
@@ -1069,6 +1217,7 @@ class EnvironmentMonitor:
                     id=plan.project_id,
                     name=plan.repo_root.name,
                     display_hint=plan.project_id.removeprefix("project_"),
+                    repository_root=str(plan.repo_root),
                     environment_count=len(plan.environments),
                     cluster=self._cluster_snapshot(plan, resources.get(plan.project_id)),
                     runtime=project_runtime,
