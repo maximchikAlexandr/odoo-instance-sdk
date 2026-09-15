@@ -14,7 +14,7 @@ Relevant prior changes: `refactor-cli-output-boundary` established the CLI trans
 - Replace the `PRAGMA user_version` migration chain with Alembic + SQLAlchemy Core (no ORM).
 - Plan the split of thirteen oversized production files along confirmed responsibility boundaries.
 - Make every `PUBLIC_LEAF_CASES` entry carry `sdk_primitive` or a concrete `cli_only_reason`, and add public SDK primitives for the confirmed candidates.
-- Fix documentation drift, add README badges, and require `pytest.mark.parametrize` for repeated matrices.
+- Fix documentation drift (context-resolution order and removed `--json`), add README badges, and require `pytest.mark.parametrize` for repeated matrices.
 - Make `run` resolve worktree paths from `~/.odcli` only.
 - Record `project_id` on project-owned remote downloads.
 - Add safe variadic multi-target deletion to `backup rm`, `db rm`, and `env rm`.
@@ -62,6 +62,8 @@ Alternative considered: keep `env list` as the process+checkout table and add a 
 
 One first Alembic revision creates the full current schema in a single step. Clean installs apply only that revision. Known alpha catalogues are backed up via SQLite `.backup`, verified, and stamped. After the transition, the old `PRAGMA user_version` ledger, `_run_migrations()`, `_migrate_v*`, and stale compatibility branches are removed. SQLAlchemy Core is used for schema metadata and Alembic integration only; ORM is not added and `sqlite3` queries remain.
 
+The first revision materializes the current schema, including restore/event tables, `environment_runtime`, `source_git_branch`, repaired environment child foreign keys, and unified-root path columns. Historical sequential PRAGMA requirements in other capabilities are not production steps after this change; they describe schema that the first revision already contains.
+
 Alternative considered: keep the PRAGMA chain and add Alembic alongside. Rejected because it keeps the historical chain in production code and the issue explicitly asks to remove it.
 
 ### D5: File split along confirmed responsibility boundaries
@@ -92,7 +94,7 @@ Alternative considered: mechanical line-count split. Rejected because it creates
 
 ### D6: SDK-first via `PUBLIC_LEAF_CASES` extension
 
-Each of the 50 leaves gets either `sdk_primitive` or `cli_only_reason`. New public SDK primitives are added for `backup inspect`, `db ls`, the shared test runner, `deps verify`, persisted `stop`, and COPY database replacement, each with frozen input/result types and `*_command()` siblings. The contract test rejects a leaf without one of the two values. An architecture gate rejects a Click callback that builds a self-contained domain operation through `internal.*` where a public SDK primitive applies.
+Each current `PUBLIC_LEAF_CASES` entry, including the new `ps` leaf, gets either `sdk_primitive` or `cli_only_reason`. New public SDK primitives are added for `backup inspect`, `db ls`, the shared test runner, `deps verify`, persisted `stop`, and COPY database replacement, each with frozen input/result types and `*_command()` siblings. The contract test rejects a leaf without one of the two values. An architecture gate rejects a Click callback that builds a self-contained domain operation through `internal.*` where a public SDK primitive applies.
 
 Alternative considered: a second registry. Rejected because `PUBLIC_LEAF_CASES` is already the single inventory and #67 explicitly forbids a second one.
 
@@ -122,15 +124,23 @@ Alternative considered: a formatting layer with locale support. Rejected as over
 
 ### D11: Detached `run -d`
 
-`-d, --detach` spawns Odoo through the existing process executor, confirms the process is alive, persists runtime identity, and returns PID/identity/endpoint/log path without waiting. No daemon manager or second command-construction path. Logs go to the bound `odoo.conf` logfile; no logfile means fail-fast before spawn. `odcli stop` stops the persisted runtime. Foreground behavior is unchanged. `-d` after the literal `--` is a native Odoo argument.
+`-d, --detach` is a separate public SDK launch command with a `*_command()` sibling. It spawns Odoo through the existing `internal/proc` executor, confirms the process is alive, persists runtime identity, and returns PID/identity/endpoint/log path without waiting. The convenience method delegates to that captured command and does not rebuild argv, cwd, environment, or actions. Detached launch SHALL NOT overload `run_foreground()`, which continues to inherit stdio and block until Odoo exits. No daemon manager or second command-construction path. Logs go to the bound `odoo.conf` logfile; no logfile means fail-fast before spawn. `odcli stop` stops the persisted runtime. Foreground behavior is unchanged. `-d` after the literal `--` is a native Odoo argument.
 
 Alternative considered: a new background manager. Rejected because the existing runtime identity and stop mechanism already support persisted runtimes.
 
+Alternative considered: add a `detach=` flag to `run_foreground()`. Rejected because that method's contract is blocking inherited stdio, and mixing it with immediate return would hide two process lifetimes behind one name.
+
 ### D12: COPY-restore cluster identity and primary reason
 
-`EnvironmentManager._do_copy_restore()` binds the active managed cluster identity so `record_restore()` stores `cluster_id`. The `None`-swallowing failure in `_remove_copy_database_command()` is replaced with a sanitized primary reason while retaining fail-closed behavior.
+`EnvironmentManager._do_copy_restore()` binds the active managed cluster identity so `record_restore()` stores `cluster_id`. The failure path that currently swallows the drop-plan error as `None` is replaced with a sanitized primary reason while retaining fail-closed behavior.
 
 Alternative considered: relax the guarded drop check. Rejected because it weakens safety.
+
+### D13: Context resolution and JSON selector match the shipped CLI
+
+Issue #67 item 7 records two documentation/spec drifts, not new product behavior. `Project resolution order` on main lists nearest manifest before exact registered worktree, contradicting `Context-aware command resolution` and the code. This change rewrites that requirement to: explicit `--project` → exact registered worktree → nearest manifest → error, which is the project-identity projection of `--env` → exact worktree → `--project`/nearest manifest.
+
+On main, `Stable machine output` still requires a `--json` alias, which contradicts both `Single format selector` and the issue. This change removes that alias from the machine-output contract so archive does not restore it. `--format json` is the only JSON selector; removed `--json` is a Click usage error.
 
 ## Risks / Trade-offs
 

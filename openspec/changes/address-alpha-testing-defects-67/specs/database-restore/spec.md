@@ -2,7 +2,7 @@
 
 ### Requirement: COPY-restore preserves managed PostgreSQL cluster identity
 
-When a COPY environment restore is performed, the active managed PostgreSQL cluster identity SHALL be bound on the `OdooInstance` used for the copy restore (through the same `_postgres_cluster` binding used by `from_environment()`) so that `record_restore()` receives and stores a `cluster_id` matching the active owned cluster claim. The existing `record_restore()` call SHALL receive the cluster identity from the bound instance; no new parameter is added to the public `record_restore()` signature. Absence of a claim SHALL NOT be substituted with a guess. The guarded direct PostgreSQL drop SHALL then work for fresh COPY environments because `restores.cluster_id` matches the active managed cluster.
+When a COPY environment restore is performed, the instance used for the copy restore SHALL carry the same active managed PostgreSQL cluster identity as an environment-bound instance, so `record_restore()` stores a `cluster_id` matching the active owned cluster claim. No new parameter is added to the public `record_restore()` signature. Absence of a claim SHALL NOT be substituted with a guess. The guarded direct PostgreSQL drop SHALL then work for fresh COPY environments because `restores.cluster_id` matches the active managed cluster.
 
 When guarded drop-plan construction fails, the command SHALL report a sanitized primary reason and SHALL NOT swallow the failure into an uninformative `None` while retaining fail-closed behavior. Checks for dirty worktree, active runtime, cluster/volume identity, restore binding, and related resources SHALL NOT be weakened.
 

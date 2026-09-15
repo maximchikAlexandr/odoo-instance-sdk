@@ -46,7 +46,7 @@
 
 ## 6. CLI through public typed SDK primitives (item 6)
 
-- [ ] 6.1 Extend `PublicLeafCase` with `sdk_primitive` and `cli_only_reason` fields; update all 50 entries.
+- [ ] 6.1 Extend `PublicLeafCase` with `sdk_primitive` and `cli_only_reason` fields; update every existing entry and add `ps` so the inventory stays the single source of truth.
 - [ ] 6.2 Add public frozen input/result types and `*_command()` siblings for `backup inspect`, `db ls`, the shared test runner, `deps verify`, persisted `stop`, and COPY database replacement.
 - [ ] 6.3 Align `test` and `module test` on one SDK test primitive.
 - [ ] 6.4 Add a contract test rejecting a leaf without `sdk_primitive` or `cli_only_reason` and an architecture gate rejecting parallel domain execution in Click callbacks.
@@ -56,7 +56,7 @@
 
 - [ ] 7.1 Add the SDK-first rule to `AGENTS.md` and the OpenSpec contract.
 - [ ] 7.2 Unify context-resolution order across README, docs, and code: explicit `--env` → exact registered worktree → explicit `--project`/nearest manifest → error.
-- [ ] 7.3 Remove the removed `--json` alias wording from `docs/execution-boundary.md`.
+- [ ] 7.3 Remove the removed `--json` alias wording from `docs/execution-boundary.md`, README, and characterization contracts; `--format json` is the only JSON selector and `--json` is a Click usage error.
 - [ ] 7.4 Add CI, MIT, and Python 3.12+ badges to README.
 - [ ] 7.5 Add the `pytest.mark.parametrize` rule for repeated input/output/error matrices to `AGENTS.md`/`CONTRIBUTING.md`.
 - [ ] 7.6 Sync delta specs and archive completed OpenSpec changes of this slice; leave unrelated/incomplete changes intact.
@@ -93,7 +93,7 @@
 
 ## 12. Detached Odoo launch (item 12)
 
-- [ ] 12.1 Add `-d, --detach` to `odcli run` and the compatible public SDK command; preserve foreground behavior.
+- [ ] 12.1 Add `-d, --detach` to `odcli run` and a public SDK detached launch `*_command()` sibling that does not overload `run_foreground()`; preserve foreground behavior.
 - [ ] 12.2 Implement spawn, alive confirmation, runtime identity persistence, and return of PID/identity/endpoint/log path without waiting.
 - [ ] 12.3 Ensure no logfile fails fast before spawn; `iter_logs` works after detached launch.
 - [ ] 12.4 Implement `--dry-run -d` showing the sanitized process command and detached lifecycle plan without spawning.

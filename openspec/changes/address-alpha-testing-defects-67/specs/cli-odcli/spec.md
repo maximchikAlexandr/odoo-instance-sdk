@@ -14,55 +14,6 @@ The CLI SHALL register `odcli ps` as a bounded structured leaf accepting `--all-
 - **WHEN** `odcli ps --format json` runs
 - **THEN** the envelope wraps the result of `EnvironmentMonitor.processes_command()` and the CLI performs no second collection
 
-### Requirement: VS Code profile carries project default_run_args
-
-`odcli vscode generate` SHALL reuse the same resolved runtime/argv source as `odcli run`. Safe `default_run_args` from the resolved project manifest SHALL appear in the generated launch profile `args` exactly once. An empty `default_run_args` list SHALL add no arguments. Validation of disallowed managed-override families (config, database/credential, addons/upgrade/data-path, HTTP/gevent/longpolling bind or port, and logfile) SHALL be preserved for both project and environment contexts. The profile SHALL NOT include automatic module update/install arguments or secrets.
-
-#### Scenario: Project default_run_args appear in profile
-
-- **WHEN** `odcli vscode generate` runs from a project with `default_run_args = ["--dev=qweb,xml"]`
-- **THEN** the generated profile `args` contain `--dev=qweb,xml` exactly once
-
-#### Scenario: Empty default_run_args add nothing
-
-- **WHEN** `odcli vscode generate` runs from a project with an empty `default_run_args` list
-- **THEN** the generated profile `args` contain no extra arguments beyond the required runtime arguments
-
-#### Scenario: Disallowed overrides are rejected
-
-- **WHEN** `default_run_args` contains a managed-override family such as `--config`
-- **THEN** the command fails before profile generation with a sanitized actionable error
-
-### Requirement: Checkout inventory for env list
-
-`odcli env list` SHALL project one frozen `CheckoutInventory` model for Rich, JSON, and TOON. The main checkout of each selected project SHALL appear as the first typed row of its group with `kind = main | environment`, a stable `project_id`, and a nullable `environment_id`. The main checkout SHALL NOT be modelled as a synthetic environment.
-
-The base inventory row SHALL contain only working identity and state: kind/name and project; branch, short SHA, and canonical worktree path; commits ahead of the base branch plus added and deleted lines; a compact Odoo status `running | stopped | unavailable` without PID or metrics; and the bound database/DB mode when applicable.
-
-Rich SHALL NOT show `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, or detailed process/artifact columns; those values live in `odcli ps`. Rich SHALL remain a readable `Table` with headers and checkout rows on both normal and compact terminal widths and SHALL NOT replace the table with `branch=... state=...` blocks. The same table contract SHALL hold under `--watch`.
-
-`CheckoutInventory` SHALL be built from one canonical `EnvironmentMonitor.snapshot()` per sample plus Git facts of the main checkout. A separate monitor or collector SHALL NOT be added. The raw `EnvironmentMonitor.snapshot()` SHALL remain the canonical source for `odcli ps`, the Python SDK, FastAPI, and the dashboard.
-
-#### Scenario: Main checkout is the first row
-
-- **WHEN** `odcli env list` runs inside a project with one environment
-- **THEN** the first row of that project's group is the main checkout with `kind=main` and no synthetic environment is created
-
-#### Scenario: Rich drops process columns
-
-- **WHEN** `odcli env list` renders a Rich table
-- **THEN** the columns `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, and `SIZE` are absent
-
-#### Scenario: Stopped checkout stays visible
-
-- **WHEN** `odcli env list` runs and the main checkout's Odoo is stopped
-- **THEN** the main checkout row remains visible with `running | stopped | unavailable` status and no PID
-
-#### Scenario: One frozen model across formats
-
-- **WHEN** `odcli env list --format json` and `odcli env list --format toon` run
-- **THEN** both wrap the same `CheckoutInventory` model, not three different field sets
-
 ### Requirement: Environment facts entry point
 
 One narrow environment-facts entry point SHALL allow `odcli-codex` (#68), `odcli-openspec` (#69), and `odcli-multica` (#70) to attach read-only facts to `CheckoutInventory` rows. The entry point SHALL be a single explicitly typed callable/protocol discovered via Python entry points. A provider SHALL receive immutable core checkout rows and return frozen summaries; it SHALL NOT patch Click or Rich, run its own live loop, or mutate the core snapshot.
@@ -246,7 +197,7 @@ odcli init [OPTIONS]
 odcli env checkout BRANCH [OPTIONS]
 odcli env sync [ENVIRONMENT] [OPTIONS]
 odcli env list [OPTIONS]
-odcli env remove [ENVIRONMENT] [OPTIONS]
+odcli env remove [ENVIRONMENT]... [OPTIONS]
 odcli run [OPTIONS]
 odcli logs [-n|--tail N] [-f|--follow]
 odcli shell [-- ODOO_ARGS...]
@@ -281,7 +232,7 @@ Entry point MUST остаться `odoo_instance_sdk.cli:cli`. Имена ком
 
 #### Scenario: List JSON does not open catalog
 
-- **WHEN** `odcli env list --json` prints the envelope
+- **WHEN** `odcli env list --format json` prints the envelope
 - **THEN** the command does not call `get_catalog()` and does not write environment events
 
 #### Scenario: Port conflict skips use
@@ -297,29 +248,30 @@ Entry point MUST остаться `odoo_instance_sdk.cli:cli`. Имена ком
 #### Scenario: Help still lists full command surface
 
 - **WHEN** `odcli --help` runs
-- **THEN** shows init, env, run, logs, shell, doctor, monitor, eval, exec, module, translations, deps, vscode, ps
+- **THEN** shows init, env, run, logs, shell, doctor, monitor, eval, exec, test, module, translations, deps, vscode, ps
 
 ### Requirement: Stable machine output
 
-The exact bounded structured leaf inventory is: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `backup list`, `backup show`, `backup validate`, `backup delete`, `db refresh`, `db reset-admin-password`, `db list`, `db restore`, `db drop`, `resource list`, `resource doctor`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `ps`, `db locks`, `db stats`, `db bloat`, `db init-monitoring`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Each SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Existing `--json` SHALL remain a backward-compatible alias for `--format json`. Supplying `--json` with `--format toon` or `--format rich` SHALL be a Click usage error with exit code `2`; supplying `--json --format json` SHALL be accepted. During normal execution, `run`, interactive `shell`, `psql`, and `logs --follow` SHALL remain raw-streaming and SHALL not emit document output or use a Rich live wrapper. Eligible spawning `run` and `shell` SHALL accept document-format options only together with `--dry-run`; those dry-run paths SHALL suppress native execution and emit one bounded plan document in Rich, JSON, or TOON, with `--json` equivalent to `--format json`. `psql --dry-run` SHALL remain an explicit plan-only exception that emits the shared sanitized native command plan without spawning; normal `psql` remains raw passthrough and SHALL continue to reject `--format` and `--json`.
+The exact bounded structured leaf inventory is: `init`, `doctor`, `env checkout`, `env list`, `env remove`, `env sync`, `backup list`, `backup show`, `backup validate`, `backup delete`, `db refresh`, `db reset-admin-password`, `db list`, `db restore`, `db drop`, `resource list`, `resource doctor`, `eval`, `exec`, `test`, `module list`, `module update`, `module test`, `translations export`, `deps verify`, `vscode generate`, `ps`, `db locks`, `db stats`, `db bloat`, `db init-monitoring`, `postgres approve-image`, `postgres status`, `postgres up`, and `postgres stop`. Each SHALL accept command-local `--format rich|json|toon`; `rich` SHALL be the default. Removed `--json` SHALL be an ordinary Click usage error with exit code `2`. `--format json` SHALL be the only JSON selector. Supplying `--json` with `--format` SHALL also be a Click usage error with exit code `2`. During normal execution, `run`, interactive `shell`, `psql`, and `logs --follow` SHALL remain raw-streaming and SHALL not emit document output or use a Rich live wrapper. Eligible spawning `run` and `shell` SHALL accept document-format options only together with `--dry-run`; those dry-run paths SHALL suppress native execution and emit one bounded plan document in Rich, JSON, or TOON. `psql --dry-run` SHALL remain an explicit plan-only exception that emits the shared sanitized native command plan without spawning; normal `psql` remains raw passthrough and SHALL continue to reject `--format` and `--json`.
 
 The CLI SHALL define one CLI-only `OutputMode` with values `rich`, `json`, and `toon`. The mode and envelope types SHALL NOT become public SDK models or FastAPI response models. Each successful or failed bounded operation SHALL first build one JSON-safe CLI envelope v1 containing `schema_version`, `ok`, `command`, `context`, `provenance`, `dry_run`, and `warnings`; success SHALL contain equal `result` and `data`, while failure SHALL omit top-level `result` and `data` and SHALL contain stable `error.code` and sanitized `error.message`. `error` MAY additionally contain an operation-specific JSON-safe `details` field; failures without structured details SHALL omit it and retain their existing v1 shape.
 
 JSON and TOON SHALL serialize that exact envelope without building format-specific result graphs. Decoding a TOON document with the selected strict decoder SHALL yield the same JSON value as decoding JSON output for the same operation. Machine modes SHALL emit exactly one UTF-8 document to stdout with no ANSI, prompt, status, progress, or external log text; diagnostics SHALL go to stderr. Renderer selection SHALL NOT change operation execution, exception mapping, or exit code. Native Click parse failures that occur before output-mode resolution SHALL retain Click's stderr usage output and exit code `2`.
 
-For `env remove`, `backup delete`, `db restore`, and `db drop`, JSON and TOON document modes (including the `--json` alias) SHALL never call `click.confirm`. Without `--yes`, they SHALL NOT execute mutation and SHALL emit exactly one sanitized failure envelope with `error.code="confirmation_required"` and exit code `1`. With `--yes`, JSON and TOON SHALL execute the same operation and normal success/failure mapping. Interactive Rich mode SHALL retain command-specific confirmation behavior. Dry-run SHALL never prompt and SHALL remain non-mutating.
+For `env remove`, `backup delete`, `db restore`, and `db drop`, JSON and TOON document modes SHALL never call `click.confirm`. Without `--yes`, they SHALL NOT execute mutation and SHALL emit exactly one sanitized failure envelope with `error.code="confirmation_required"` and exit code `1`. With `--yes`, JSON and TOON SHALL execute the same operation and normal success/failure mapping. Interactive Rich mode SHALL retain command-specific confirmation behavior. Dry-run SHALL never prompt and SHALL remain non-mutating.
 
 Rich renderers SHALL remain adjacent to the concrete commands whose typed results they render. They MAY use `Table`, `Status`, `Progress`, and `Live` only when appropriate to the operation; they SHALL NOT introduce a generic renderer interface, registry, or DSL. `db stats` and `db bloat` SHALL render separate tables and indexes tables rather than one sparse combined table.
 
 #### Scenario: JSON envelope
 
-- **WHEN** `odcli env list --json` executes
+- **WHEN** `odcli env list --format json` executes
 - **THEN** stdout contains exactly one versioned envelope and no progress or log text
 
 #### Scenario: JSON alias preserves envelope v1
 
-- **WHEN** `odcli env list --json` and `odcli env list --format json` run against the same frozen result
-- **THEN** each stdout document decodes to the same envelope v1 and contains no ANSI or diagnostic text
+- **WHEN** `odcli env list --json` is invoked
+- **THEN** Click exits `2` before the operation runs
+- **AND** `odcli env list --format json` against the same frozen result emits envelope v1 with no ANSI or diagnostic text
 
 #### Scenario: TOON is semantically equal to JSON
 
@@ -354,12 +306,12 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 
 #### Scenario: Machine remove requires explicit confirmation
 
-- **WHEN** `odcli env remove ENV --format json`, `--format toon`, or `--json` is invoked without `--yes`
+- **WHEN** `odcli env remove ENV --format json` or `--format toon` is invoked without `--yes`
 - **THEN** no prompt is rendered, removal is not called, stdout contains one failure envelope with `error.code="confirmation_required"`, and the command exits `1`
 
 #### Scenario: Explicit machine remove executes
 
-- **WHEN** `odcli env remove ENV --yes --format json`, `--format toon`, or `--json` is invoked
+- **WHEN** `odcli env remove ENV --yes --format json` or `--format toon` is invoked
 - **THEN** the same removal operation runs once and its result is emitted as one document under the normal renderer-independent exit mapping
 
 #### Scenario: Secrets redacted
@@ -374,9 +326,9 @@ Rich renderers SHALL remain adjacent to the concrete commands whose typed result
 
 #### Scenario: Native command dry-run supports every bounded format
 
-- **WHEN** `odcli run --dry-run` or spawning `odcli shell --dry-run` is requested with `--format rich|json|toon` or `--json`
+- **WHEN** `odcli run --dry-run` or spawning `odcli shell --dry-run` is requested with `--format rich|json|toon`
 - **THEN** output contains exactly one bounded plan with `dry_run=true` in the selected format
-- **AND** `--json` and `--format json` produce equivalent JSON documents
+- **AND** `--json` is a Click usage error with exit code `2`
 - **AND** no native child stream starts
 
 #### Scenario: Normal native command stays raw
@@ -528,6 +480,11 @@ The command SHALL accept the shared `environment | project` context. In project 
 - **WHEN** `odcli vscode generate` runs from a project with an empty `default_run_args` list
 - **THEN** the generated profile `args` contain no extra arguments beyond the required runtime arguments
 
+#### Scenario: Disallowed overrides are rejected
+
+- **WHEN** `default_run_args` contains a managed-override family such as `--config`
+- **THEN** the command fails before profile generation with a sanitized actionable error
+
 ### Requirement: `odcli env list`
 
 ```bash
@@ -604,3 +561,117 @@ Rich SHALL NOT show `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, or detailed pr
 
 - **WHEN** the `env list` command and renderers are exercised with a supplied typed snapshot
 - **THEN** no CLI code opens the catalog, lists backups/environments, calls Git or Docker, probes a port, or performs filesystem reconciliation
+
+### Requirement: Project resolution order
+
+Project resolution MUST follow this order.
+
+1. Explicit global `--project PATH` (любой путь внутри project).
+2. Exact registered worktree containing current directory, resolved через canonical Git common dir.
+3. Ближайший `.odcli/project.toml` от current directory вверх до Git/filesystem boundary.
+4. Иначе — ошибка с подсказкой `odcli init` или `--project`.
+
+This is the project-identity projection of the instance-command order: explicit `--env` → exact registered worktree → explicit `--project`/nearest manifest → error.
+
+#### Scenario: Explicit --project
+
+- **WHEN** `odcli --project /path/to/repo env list`
+- **THEN** project resolved from explicit flag
+
+#### Scenario: Nearest project.toml
+
+- **WHEN** `odcli env list` in subdir of repo with `.odcli/project.toml` and no exact registered worktree
+- **THEN** project resolved from nearest manifest upward
+
+#### Scenario: Exact worktree wins over nearest manifest
+
+- **WHEN** cwd is inside an exact registered worktree that also has a nearest `.odcli/project.toml`
+- **THEN** project identity comes from that worktree record rather than walking to a different manifest
+
+### Requirement: Live Rich environment inventory
+
+`odcli env list` SHALL accept `--watch` and `--interval SECONDS`. `--watch` SHALL be valid only for `rich` mode when stdout is an interactive TTY. `--interval` SHALL default to `2.0` and SHALL reject values below `0.1` as a Click usage error with exit code `2`.
+
+The live loop SHALL use `rich.live.Live` and repeatedly invoke the same `EnvironmentMonitor.snapshot(project_id=..., include_removed=...)` query used by the one-shot command, then project that snapshot plus Git facts into `CheckoutInventory`. Every refresh SHALL retain the original project selection, `--all`, `--all-projects`, and deterministic project/checkout ordering; this change SHALL NOT add a separate live query or a new sort option. The live table SHALL use the same checkout-inventory columns as one-shot Rich `env list`.
+
+After at least one successful sample, a collection failure SHALL keep the last successful table visible, display a sanitized diagnostic in the live region or stderr, and retry at the selected interval. Failure of the initial sample SHALL exit `1`. The loop SHALL use `Live(..., transient=True)` or explicit equivalent cleanup. `Ctrl-C` SHALL stop polling, close the Live context, restore the terminal, remove the live region and last table, leave no task/thread/process behind, and exit `130`.
+
+The live renderer SHALL use `Table` and `Live`; it SHALL use `Status` or `Progress` only for an operation with real measurable progress and SHALL NOT show a fabricated progress bar during snapshot polling.
+
+#### Scenario: Watch refreshes the canonical query
+
+- **WHEN** `odcli env list --watch --interval 2` runs in an interactive terminal
+- **THEN** one Rich live checkout-inventory table is refreshed from successive canonical snapshots with the original filters and deterministic ordering
+
+#### Scenario: Watch rejects machine output
+
+- **WHEN** `odcli env list --watch --format json` or `--format toon` is invoked
+- **THEN** Click exits `2` without starting a live loop or emitting a partial machine document
+
+#### Scenario: Watch rejects non-interactive output
+
+- **WHEN** `odcli env list --watch` is invoked with stdout redirected or captured
+- **THEN** the command exits `1` with a sanitized diagnostic and leaves stdout free of a partial live display
+
+#### Scenario: Later sample failure retains data
+
+- **WHEN** a successful live sample is followed by a monitor failure
+- **THEN** the last successful inventory remains displayed and the loop retries without replacing it with an empty graph
+
+#### Scenario: Watch interrupt cleans up
+
+- **WHEN** the user presses Ctrl-C during live refresh or interval waiting
+- **THEN** Rich restores the terminal, removes the live region so the last table is not left in scrollback, the polling loop exits, no background work remains, and the command exits `130`
+
+### Requirement: Backup lifecycle CLI
+
+`odcli backup list [--source URL] [--database NAME] [--all] [--limit N] [--cursor CURSOR]`, `backup show <BACKUP_UUID>`, and `backup validate <BACKUP_UUID>` SHALL be read-only bounded leaves usable without running Odoo or requiring a worktree. List SHALL show full UUID, source database/base URL, catalogue time, format, recorded size, state, and actual file presence; show SHALL add sanitized path, checksum, branch, history, and restore/environment relationships. Validate SHALL distinguish an unavailable validator from an invalid archive. `backup delete` / `backup rm` SHALL accept one or more full UUIDs, reuse the existing single-target deletion command for each UUID, and follow the multi-target deletion contract for preflight, confirmation, sequential execution, partial failure, and dry-run.
+
+#### Scenario: Default backup list
+
+- **WHEN** `backup list` runs without `--all`
+- **THEN** it deterministically returns only available catalogue records and separately reports actual file presence
+
+#### Scenario: Backup details
+
+- **WHEN** `backup show` receives a known UUID
+- **THEN** every format represents the same record, audit history, and known relationships without starting Odoo
+
+#### Scenario: Validator is unavailable
+
+- **WHEN** dump validation requires `pg_restore` and it is not available
+- **THEN** the command reports validation unavailable rather than labelling the archive corrupt
+
+#### Scenario: Backup deletion preview
+
+- **WHEN** `backup delete UUID --dry-run` executes
+- **THEN** the plan identifies the exact file, recorded size, state, and relationships without prompting or mutation
+
+#### Scenario: Backup deletion preview of several UUIDs
+
+- **WHEN** `backup rm UUID1 UUID2 --dry-run` executes
+- **THEN** one ordered aggregate plan covers both UUIDs and no file or catalogue mutation occurs
+
+### Requirement: Safe database-drop command
+
+The CLI SHALL expose `odcli db drop DATABASE [DATABASE...] [--force-default] [--force-connections] [--yes] [--dry-run]`. It SHALL require exact database names, resolve only the current project PostgreSQL cluster, reject system/template databases, display the cluster and databases before mutation, require interactive Rich confirmation by default, and require `--yes` for machine execution. Multiple names SHALL follow the multi-target deletion contract: one planning preflight, one confirmation, sequential per-database revalidation, per-target results, and a non-zero exit on partial failure. JSON and TOON document modes SHALL always be noninteractive and SHALL never call `click.confirm`. A normal machine-mode drop without `--yes` SHALL perform zero SDK/transport/catalogue work, emit exactly one sanitized CLI envelope v1 with `error.code="confirmation_required"`, and exit `1`; with `--yes` it SHALL execute through the normal renderer-independent path. Dry-run in every format SHALL require neither confirmation nor `--yes` and SHALL remain side-effect-free. Dropping the configured project default SHALL additionally require `--force-default`; terminating active sessions SHALL additionally require `--force-connections`. `--force-default` and `--force-connections` SHALL apply to the whole set but SHALL be checked per database. Rich, JSON, and TOON SHALL otherwise use the shared output and confirmation contracts.
+
+#### Scenario: Protected default database is refused
+
+- **WHEN** the exact target is the configured project default and `--force-default` is absent
+- **THEN** the command fails before termination or drop and identifies the protection
+
+#### Scenario: Dry-run needs no confirmation
+
+- **WHEN** a valid drop target is invoked with `--dry-run` without force or yes flags unrelated to observed conditions
+- **THEN** the command emits the resolved guarded plan without prompt, connection termination, database mutation, or catalogue write
+
+#### Scenario: Machine drop requires explicit confirmation
+
+- **WHEN** normal `db drop` is invoked with JSON or TOON without `--yes`
+- **THEN** no prompt or SDK work occurs, stdout contains exactly one sanitized `confirmation_required` envelope, and the command exits `1`
+
+#### Scenario: Explicit machine confirmation executes
+
+- **WHEN** normal `db drop` is invoked in a machine format with `--yes` and all safety preconditions pass
+- **THEN** the guarded operation executes once and emits exactly one success or failure envelope under the normal exit mapping
