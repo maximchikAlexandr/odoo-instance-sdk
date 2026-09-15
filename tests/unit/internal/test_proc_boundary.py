@@ -978,7 +978,7 @@ def test_large_stdin_is_written_exactly_while_output_is_drained() -> None:
 
 def test_stdin_write_failure_terminates_the_owned_child(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.proc.executor.os.write",
+        "odoo_instance_sdk.internal.proc.run.os.write",
         lambda *_args: (_ for _ in ()).throw(OSError("synthetic stdin failure")),
     )
 
@@ -1007,7 +1007,7 @@ def test_ctrl_c_closes_the_pump_and_reports_failed_step(
             return
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.proc.executor.selectors.DefaultSelector",
+        "odoo_instance_sdk.internal.proc.run.selectors.DefaultSelector",
         InterruptingSelector,
     )
     step = PreparedStep(
@@ -1204,7 +1204,7 @@ def test_timeout_after_child_closes_stdout_preserves_stderr() -> None:
 def test_timeout_closes_unconsumed_stdin_on_windows_process_cleanup_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor.sys.platform", "win32")
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run.sys.platform", "win32")
     with pytest.raises(ProcessTimeoutError) as raised:
         run_captured(
             _python("import time; time.sleep(10)"),
@@ -1230,7 +1230,7 @@ def test_limited_capture_delegates_to_the_common_pump(monkeypatch: pytest.Monkey
         calls.append((step, max_output_bytes))
         return 9, b"out", b"err", 0.5
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
     result = run_captured_limited(("tool",), max_output_bytes=3)
 
     assert result.returncode == 9
@@ -1579,7 +1579,7 @@ def test_subprocess_deadline_receives_remainder_and_floored_statement_timeout(
         )
         return 0, b"", b"", 0.0
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
     step = PreparedStep(
         step_id="subprocess-deadline-step",
         argv=("psql",),

@@ -133,17 +133,20 @@ def test_stop_owned_runtime_revalidates_then_terminates_and_clears(
     calls: list[tuple[int, int | None, float]] = []
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
         patch(
-            "odoo_instance_sdk.resources.instance.terminate_pid",
+            "odoo_instance_sdk.resources.instance.planning.terminate_pid",
             side_effect=lambda pid, *, process_group_id, timeout: calls.append(
                 (pid, process_group_id, timeout)
             ),
         ),
-        patch("odoo_instance_sdk.resources.instance.is_process_alive", return_value=False),
+        patch(
+            "odoo_instance_sdk.resources.instance.helpers_1.is_process_alive",
+            return_value=False,
+        ),
         patch(
             "odoo_instance_sdk.internal.address.probe_address",
             side_effect=AssertionError("stop must not inspect port state"),
@@ -314,12 +317,15 @@ def test_stop_allows_safe_default_launch_args(tmp_path: Path) -> None:
     instance, catalog, environment_id = _instance(tmp_path, default_run_args=("--dev",))
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
-        patch("odoo_instance_sdk.resources.instance.is_process_alive", return_value=False),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+        patch(
+            "odoo_instance_sdk.resources.instance.helpers_1.is_process_alive",
+            return_value=False,
+        ),
     ):
         result = instance._stop_environment_command().run()
     assert result == {"status": "stopped", "environment_id": environment_id}
@@ -341,16 +347,16 @@ def test_stop_no_row_is_idempotent(tmp_path: Path) -> None:
 def test_terminate_pid_uses_bounded_term_then_kill_escalation() -> None:
     alive = iter((True, True, True, False, False))
     with (
-        patch("odoo_instance_sdk.internal.proc.executor.os.killpg") as killpg,
+        patch("odoo_instance_sdk.internal.proc.terminate.os.killpg") as killpg,
         patch(
-            "odoo_instance_sdk.internal.proc.executor.is_process_alive",
+            "odoo_instance_sdk.internal.proc.terminate.is_process_alive",
             side_effect=lambda _pid: next(alive),
         ),
         patch(
-            "odoo_instance_sdk.internal.proc.executor.time.monotonic",
+            "odoo_instance_sdk.internal.proc.terminate.time.monotonic",
             side_effect=(0, 100, 100, 100, 100),
         ),
-        patch("odoo_instance_sdk.internal.proc.executor.time.sleep"),
+        patch("odoo_instance_sdk.internal.proc.terminate.time.sleep"),
     ):
         terminate_pid(4242, process_group_id=4242, timeout=5.0)
     assert [call.args[1] for call in killpg.call_args_list] == [
@@ -363,17 +369,17 @@ def test_terminate_pid_uses_bounded_term_then_kill_escalation() -> None:
 def test_terminate_pid_win32_escalates_taskkill_and_verifies_exit() -> None:
     alive = iter((True, True, False))
     with (
-        patch("odoo_instance_sdk.internal.proc.executor.sys.platform", "win32"),
-        patch("odoo_instance_sdk.internal.proc.executor.SubprocessExecutor.execute") as execute,
+        patch("odoo_instance_sdk.internal.proc.run.sys.platform", "win32"),
+        patch("odoo_instance_sdk.internal.proc.terminate.SubprocessExecutor.execute") as execute,
         patch(
-            "odoo_instance_sdk.internal.proc.executor.is_process_alive",
+            "odoo_instance_sdk.internal.proc.terminate.is_process_alive",
             side_effect=lambda _pid: next(alive),
         ),
         patch(
-            "odoo_instance_sdk.internal.proc.executor.time.monotonic",
+            "odoo_instance_sdk.internal.proc.terminate.time.monotonic",
             side_effect=(0.0, 100.0),
         ),
-        patch("odoo_instance_sdk.internal.proc.executor.time.sleep"),
+        patch("odoo_instance_sdk.internal.proc.terminate.time.sleep"),
     ):
         terminate_pid(4242, timeout=5.0)
 
@@ -426,13 +432,16 @@ def test_stop_cli_output_parity_and_root_selector_without_signal_for_dry_run(
     with (
         patch("odoo_instance_sdk.commands.context.ready_instance", return_value=context),
         patch("odoo_instance_sdk.cli.cli_context.ready_instance", return_value=context),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
-        patch("odoo_instance_sdk.resources.instance.is_process_alive", return_value=False),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch(
+            "odoo_instance_sdk.resources.instance.helpers_1.is_process_alive",
+            return_value=False,
+        ),
     ):
         result = CliRunner().invoke(cli, argv)
     assert result.exit_code == 0, result.output

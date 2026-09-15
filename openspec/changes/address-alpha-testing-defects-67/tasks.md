@@ -37,12 +37,12 @@
 
 ## 5. Split oversized production Python files (item 5)
 
-- [ ] 5.1 Confirm responsibilities, callers, and public imports for each of the thirteen listed files.
-- [ ] 5.2 Prepare the target module tree in this `design.md` (already done) and proceed with behaviour-preserving slices.
-- [ ] 5.3 Split `models.py` by domain with public re-exports preserved.
-- [ ] 5.4 Split `resources/environment.py`, `storage/backup_catalog.py` (after Alembic), `resources/instance.py`, `internal/database_preparation.py`, `cli.py`, `commands/env.py`, `resources/monitor.py`, `resources/database.py`, `resources/postgres.py`, `internal/doctor.py`, `internal/database_replacement.py`, and `internal/proc/executor.py` along confirmed boundaries.
-- [ ] 5.5 Add a CI line-limit check rejecting manually maintained production Python files over 1000 physical lines with generated/vendor exclusion and no existing-file allowlist.
-- [ ] 5.6 Run focused tests, architecture contract tests, Ruff, and mypy after each slice.
+- [x] 5.1 Confirm responsibilities, callers, and public imports for each of the thirteen listed files.
+- [x] 5.2 Prepare the target module tree in this `design.md` (already done) and proceed with behaviour-preserving slices.
+- [x] 5.3 Split `models.py` by domain with public re-exports preserved.
+- [x] 5.4 Split `resources/environment.py`, `storage/backup_catalog.py` (after Alembic), `resources/instance.py`, `internal/database_preparation.py`, `cli.py`, `commands/env.py`, `resources/monitor.py`, `resources/database.py`, `resources/postgres.py`, `internal/doctor.py`, `internal/database_replacement.py`, and `internal/proc/executor.py` along confirmed boundaries.
+- [x] 5.5 Add a CI line-limit check rejecting manually maintained production Python files over 1000 physical lines with generated/vendor exclusion and no existing-file allowlist.
+- [x] 5.6 Run focused tests, architecture contract tests, Ruff, and mypy after each slice.
 
 ## 6. CLI through public typed SDK primitives (item 6)
 

@@ -16,7 +16,7 @@ from . import (
     bounded_process_inputs,
     event_for_step,
 )
-from .executor import ProcessHandle, ProcessResult, _notify, _notify_output, _safe_error
+from .run import ProcessHandle, ProcessResult, _notify, _notify_output, _safe_error
 
 
 @dataclass(slots=True)
