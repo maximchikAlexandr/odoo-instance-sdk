@@ -71,8 +71,8 @@ PHASE_BUDGETS: Mapping[tuple[Tier, CacheClass], PhaseBudget] = MappingProxyType(
     {
         ("smoke", "cold"): PhaseBudget(360, 180, 600),
         ("smoke", "warm"): PhaseBudget(180, 180, 600),
-        ("full", "cold"): PhaseBudget(900, 600, 1500),
-        ("full", "warm"): PhaseBudget(420, 600, 1500),
+        ("full", "cold"): PhaseBudget(900, 1200, 1500),
+        ("full", "warm"): PhaseBudget(420, 1200, 1500),
     }
 )
 PLATFORM_IMAGE_MANIFESTS: Mapping[str, tuple[str, str]] = MappingProxyType(

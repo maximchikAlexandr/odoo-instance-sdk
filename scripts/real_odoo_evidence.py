@@ -251,6 +251,16 @@ def _budget_report(
     budget: PhaseBudget = budget_for(tier, cache_class)
     total = sum(durations.values())
     artifact_budget = SUCCESS_LIMIT_BYTES if status == "success" else FAILURE_BUNDLE_LIMIT_BYTES
+    violations = "; ".join(
+        f"{metric}={actual:g} exceeds limit={limit}"
+        for metric, actual, limit in (
+            ("setup_seconds", durations["setup"], budget.setup_seconds),
+            ("test_seconds", durations["test"], budget.test_seconds),
+            ("job_seconds", total, budget.job_seconds),
+            ("artifact_bytes", artifact_bytes, artifact_budget),
+        )
+        if not actual <= limit
+    )
     return {
         "status": status,
         "tier": tier,
@@ -264,12 +274,8 @@ def _budget_report(
         "test_budget_seconds": budget.test_seconds,
         "job_budget_seconds": budget.job_seconds,
         "artifact_budget_bytes": artifact_budget,
-        "ok": (
-            durations["setup"] <= budget.setup_seconds
-            and durations["test"] <= budget.test_seconds
-            and total <= budget.job_seconds
-            and artifact_bytes <= artifact_budget
-        ),
+        "violations": violations,
+        "ok": not violations,
     }
 
 
@@ -437,7 +443,10 @@ def package_evidence(  # noqa: C901
                     artifact_bytes=output.stat().st_size,
                 )
             if not bool(report["ok"]):
-                raise ValueError("E2E phase or artifact budget exceeded")  # noqa: TRY301
+                raise ValueError(  # noqa: TRY301
+                    f"E2E phase or artifact budget exceeded ({tier}/{cache_class}): "
+                    f"{report['violations']}"
+                )
             if report["artifact_bytes"] != output.stat().st_size:
                 raise ValueError("artifact size changed while packaging")  # noqa: TRY301
     except (OSError, ET.ParseError, TypeError, UnicodeError, ValueError) as error:

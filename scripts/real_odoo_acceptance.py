@@ -21,8 +21,8 @@ sys.path.insert(0, str(ROOT))
 from scripts import real_odoo_evidence as evidence  # noqa: E402
 from scripts.real_odoo_pins import E2E_PINS  # noqa: E402
 
-CHANGE: Final[Path] = ROOT / "openspec/changes/add-reproducible-odoo19-e2e-harness"
-MATRIX: Final[Path] = CHANGE / "command-matrix.md"
+SPEC: Final[Path] = ROOT / "openspec/specs/real-odoo-e2e-verification/spec.md"
+MATRIX: Final[Path] = ROOT / "tests/integration/real_odoo/command-matrix.md"
 EVIDENCE_ID = re.compile(r"E2E-(?:SM|CP|FC|REC|SEC)-\d{2}")
 EVIDENCE_RANGE = re.compile(r"\b(E2E-(?:SM|CP|FC|REC|SEC)-)(\d{2})\.\.(\d{2})\b")
 SCENARIO = re.compile(r"^#### Scenario: (.+)$", re.MULTILINE)
@@ -373,9 +373,7 @@ def _static_contract() -> dict[str, object]:
     check_matrix_document(str(MATRIX), PUBLIC_LEAF_CASES)
     matrix_text = MATRIX.read_text(encoding="utf-8")
     evidence_ids = _matrix_evidence_ids(matrix_text)
-    scenario_names = SCENARIO.findall(
-        (CHANGE / "specs/real-odoo-e2e-verification/spec.md").read_text(encoding="utf-8")
-    )
+    scenario_names = SCENARIO.findall(SPEC.read_text(encoding="utf-8"))
     scenario_mapping_errors = _scenario_mapping_errors(scenario_names, SCENARIO_EVIDENCE)
     collected_nodes = _collect_pytest_nodes(
         sorted(

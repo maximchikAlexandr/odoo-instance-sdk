@@ -20,6 +20,9 @@ ODOO_IMAGE = (
 )
 POSTGRES_IMAGE = "docker.io/library/postgres@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685"
 DB_NAME = "odcli_poc"
+ROOT = next(
+    parent for parent in Path(__file__).resolve().parents if (parent / "pyproject.toml").is_file()
+)
 
 
 def run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -123,7 +126,7 @@ def write_config(
 
 
 def main() -> None:
-    addon_root = Path(__file__).parent / "addons"
+    addon_root = ROOT / "tests" / "fixtures" / "addons"
     user_spec = f"{os.getuid()}:{os.getgid()}"
     run_id = secrets.token_hex(6)
     names = {

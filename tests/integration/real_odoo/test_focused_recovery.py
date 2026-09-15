@@ -81,7 +81,7 @@ def _prepare_recovery_case(
     name: str,
 ) -> tuple[str, Path, str, Path, dict[str, str]]:
     run_id = target_runtime.run_id
-    archive_path = target_runtime.artifact_root / f"{name}-{run_id}.zip"
+    archive_path = target_runtime.root / f"{name}-{run_id}.zip"
     shutil.copy2(source_backup.path, archive_path)
     backup_id = _RECOVERY_BACKUP_IDS[name]
     catalog_path = Path(target_runtime.environment["ODCLI_E2E_CATALOG"])

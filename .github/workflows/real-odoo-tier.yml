@@ -30,6 +30,8 @@ jobs:
           python-version: "3.12.13"
           version: "0.10.8"
           enable-cache: false
+      - name: Pin workflow uv cache path
+        run: echo "UV_CACHE_DIR=${{ github.workspace }}/.cache/uv" >> "$GITHUB_ENV"
       - name: Start monotonic setup measurement
         run: uv run --no-project python scripts/real_odoo_timing.py start --phase setup --output .artifacts/real-odoo-e2e/timing.json
       - name: Create upload canary outside evidence root

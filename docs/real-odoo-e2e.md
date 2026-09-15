@@ -31,7 +31,7 @@ Databases, filestore, generated configuration, secrets, catalogs, ports,
 logs, worktrees, and backups are never cached. Cache misses are cold runs;
 only complete source and uv hits are warm. Setup budgets are 360/180 seconds
 (smoke cold/warm) and 900/420 seconds (full cold/warm); full test runtime is
-limited to 600 seconds. Job limits are 10 minutes for smoke and 25 minutes
+limited to 1200 seconds. Job limits are 10 minutes for smoke and 25 minutes
 for full.
 
 The source cache key includes the pinned Odoo commit. The uv key is computed

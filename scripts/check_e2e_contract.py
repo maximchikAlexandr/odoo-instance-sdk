@@ -16,7 +16,7 @@ from tests.integration.real_odoo.contracts import (  # noqa: E402
 )
 from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES  # noqa: E402
 
-MATRIX = ROOT / "openspec/changes/add-reproducible-odoo19-e2e-harness/command-matrix.md"
+MATRIX = ROOT / "tests/integration/real_odoo/command-matrix.md"
 
 
 def main() -> int:

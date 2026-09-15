@@ -21,7 +21,7 @@ Secrets were generated in process, written only to owner-readable runtime files,
 Command:
 
 ```text
-uv run python openspec/changes/add-reproducible-odoo19-e2e-harness/poc/run_probe.py
+uv run python openspec/changes/archive/2026-09-15-add-reproducible-odoo19-e2e-harness/poc/run_probe.py
 ```
 
 | Run | Exit | Elapsed | ZIP SHA-256 | Filestore members | Restored marker |
@@ -39,7 +39,7 @@ After POC-1, each command returned exit 0 and empty output:
 docker ps -a --filter name=odcli-poc --format '{{.Names}}'
 docker volume ls --filter name=odcli-poc --format '{{.Name}}'
 docker network ls --filter name=odcli-poc --format '{{.Name}}'
-find openspec/changes/add-reproducible-odoo19-e2e-harness/poc -maxdepth 1 -type d -name '.runtime-*' -print
+find openspec/changes/archive/2026-09-15-add-reproducible-odoo19-e2e-harness/poc -maxdepth 1 -type d -name '.runtime-*' -print
 ```
 
 POC-2 used a new run id and completed successfully, proving rerun isolation. The runner's `finally` removes exact container names, exact network, named PostgreSQL volumes, Docker-visible runtime roots, XDG state, catalogs, backup, target database, and filestore.

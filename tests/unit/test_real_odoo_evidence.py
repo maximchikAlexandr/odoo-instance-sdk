@@ -3,6 +3,7 @@
 import json
 import tarfile
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -330,3 +331,56 @@ def test_full_failure_evidence_accepts_audited_unconsumed_cache_before_scenario(
     assert result["ok"] is True
     resource = json.loads((source / "resource-manifest.json").read_text(encoding="utf-8"))
     assert resource["source_cache_consumed"] is False
+
+
+@pytest.mark.parametrize("cache_class", ["cold", "warm"])
+def test_full_evidence_accepts_twenty_minute_test_phase(
+    tmp_path: Path, cache_class: Literal["cold", "warm"]
+) -> None:
+    _evidence_contract(tmp_path)
+    canary = tmp_path / "canary"
+    canary.write_text("canary-value-1234\n")
+    ledger = json.loads((tmp_path / "timing.json").read_text())
+    ledger["phases"]["test"]["duration_seconds"] = 1200
+    (tmp_path / "timing.json").write_text(json.dumps(ledger))
+    result = evidence.package_evidence(
+        tmp_path,
+        tmp_path / "evidence.tar.gz",
+        status="success",
+        canary_file=canary,
+        tier="full",
+        cache_class=cache_class,
+    )
+    budget = result["budget"]
+    assert isinstance(budget, dict)
+    assert budget["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("phase", "seconds", "detail"),
+    [
+        ("test", 1201, "test_seconds=1201 exceeds limit=1200"),
+        ("setup", 901, "setup_seconds=901 exceeds limit=900"),
+        ("cleanup", 1500, "job_seconds=1503 exceeds limit=1500"),
+    ],
+)
+def test_full_evidence_persists_exceeded_budget_details(
+    tmp_path: Path, phase: str, seconds: int, detail: str
+) -> None:
+    _evidence_contract(tmp_path)
+    canary = tmp_path / "canary"
+    canary.write_text("canary-value-1234\n")
+    ledger = json.loads((tmp_path / "timing.json").read_text())
+    ledger["phases"][phase]["duration_seconds"] = seconds
+    (tmp_path / "timing.json").write_text(json.dumps(ledger))
+    with pytest.raises(ValueError, match=detail):
+        evidence.package_evidence(
+            tmp_path,
+            tmp_path / "evidence.tar.gz",
+            status="success",
+            canary_file=canary,
+            tier="full",
+            cache_class="cold",
+        )
+    error = json.loads((tmp_path / "packaging-error.json").read_text())
+    assert detail in error["error"]

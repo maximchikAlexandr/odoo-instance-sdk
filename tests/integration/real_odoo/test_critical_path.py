@@ -895,6 +895,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
         "drop",
         restored_database,
         "--force-default",
+        "--force-connections",
         "--yes",
     )
     fixture_status_before, fixture_status_after = _remove_owned_fixture_tree(

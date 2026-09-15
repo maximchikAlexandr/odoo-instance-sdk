@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -90,3 +91,51 @@ def test_secret_scan_rejects_each_variant_inside_a_binary_zip(tmp_path: Path, va
         archive.writestr("payload.bin", b"\x00\xff" + variant.encode() + b"\x00")
     with pytest.raises(AssertionError, match="secret material leaked"):
         assert_secret_free((path,), "focused-secret-canary")
+
+
+@pytest.mark.parametrize("name", ["recovery", "recovery-timeout", "partial"])
+def test_recovery_input_is_removed_while_diagnostics_are_retained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    from tests.integration.real_odoo import conftest as fixtures
+    from tests.integration.real_odoo import test_focused_recovery as recovery
+    from tests.integration.real_odoo.archive import SourceBackupPlan, archive_identity
+
+    run_id = "a" * 32
+    runtime = Mock(
+        spec=fixtures.E2ERuntime,
+        run_id=run_id,
+        root=tmp_path / f"runtime-{run_id}",
+        artifact_root=tmp_path / f"artifacts-{run_id}",
+        environment={"ODCLI_E2E_CATALOG": str(tmp_path / "catalog.sqlite3")},
+        secret_registry_file=tmp_path / "secrets.json",
+        failed=True,
+    )
+    runtime.root.mkdir()
+    evidence = FailureEvidence(run_id, "canary", runtime.artifact_root)
+    evidence.add_log("failure", "expected failure")
+    diagnostics = evidence.write()
+    source = tmp_path / "source.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("dump.sql", "SELECT 1;")
+        archive.writestr("filestore/blob", "fixture")
+    seed = Mock()
+    monkeypatch.setattr(recovery, "_seed_backup", seed)
+    monkeypatch.setattr(
+        recovery, "_project", Mock(side_effect=RuntimeError("stop before provisioning"))
+    )
+    with pytest.raises(RuntimeError, match="stop before provisioning"):
+        recovery._prepare_recovery_case(
+            tmp_path,
+            runtime,
+            archive_identity(source),
+            SourceBackupPlan("http://127.0.0.1", "source", source),
+            evidence,
+            name,
+        )
+    copied_archive = seed.call_args.args[1]
+    assert copied_archive.read_bytes() == source.read_bytes()
+    monkeypatch.setenv("ODCLI_E2E_KEEP_FAILED", "1")
+    fixtures._remove_runtime_files(runtime)
+    assert not copied_archive.exists()
+    assert set(runtime.artifact_root.iterdir()) == set(diagnostics)

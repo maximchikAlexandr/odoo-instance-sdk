@@ -28,7 +28,7 @@ from tests.unit.test_cli_output_modes import PUBLIC_LEAF_CASES
 
 
 def test_generated_matrix_matches_canonical_inventory() -> None:
-    path = Path("openspec/changes/add-reproducible-odoo19-e2e-harness/command-matrix.md")
+    path = Path("tests/integration/real_odoo/command-matrix.md")
     actual = path.read_bytes()
     check_matrix_document(str(path), PUBLIC_LEAF_CASES)
     assert actual == path.read_bytes()
@@ -61,9 +61,7 @@ def test_pins_are_exact_and_immutable() -> None:
 
 
 def test_matrix_provenance_uses_both_reviewed_bases() -> None:
-    matrix = Path(
-        "openspec/changes/add-reproducible-odoo19-e2e-harness/command-matrix.md"
-    ).read_text(encoding="utf-8")
+    matrix = Path("tests/integration/real_odoo/command-matrix.md").read_text(encoding="utf-8")
     assert f"canonical-inventory base `{CANONICAL_INVENTORY_BASE}`" in matrix
     assert f"full-change audit base remains `{ORIGINAL_AUDIT_BASE}`" in matrix
 

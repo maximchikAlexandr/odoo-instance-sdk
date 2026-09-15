@@ -514,6 +514,10 @@ def test_e2e_workflows_pin_actions_and_gate_evidence_uploads() -> None:
         assert f"actions/cache/restore@{bootstrap.ACTIONS_CACHE}" in actions
         assert f"actions/cache/save@{bootstrap.ACTIONS_CACHE}" in actions
         assert "enable-cache: false" in workflow
+        cache_export = 'echo "UV_CACHE_DIR=${{ github.workspace }}/.cache/uv" >> "$GITHUB_ENV"'
+        assert cache_export in workflow
+        assert workflow.index("uses: astral-sh/setup-uv@") < workflow.index(cache_export)
+        assert workflow.index(cache_export) < workflow.index("uv run")
         assert f"real_odoo and e2e_{tier}" in workflow
         assert "-p scripts.real_odoo_timing -p scripts.real_odoo_ci" in workflow
         assert "--junitxml=.artifacts/real-odoo-e2e/junit.xml" in workflow
