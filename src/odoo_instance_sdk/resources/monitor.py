@@ -6,7 +6,7 @@ import json
 import shutil
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,6 +59,7 @@ from odoo_instance_sdk.models import (
     PgAdminEligibilityState,
     PortObservation,
     PostgresClusterState,
+    ProcessInventory,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -91,6 +92,7 @@ if TYPE_CHECKING:
         ProcessResult,
         RunContext,
     )
+    from odoo_instance_sdk.internal.process_inventory import DatabaseCredentials
 
 
 class _ProcessProvider(Protocol):
@@ -391,6 +393,117 @@ class EnvironmentMonitor:
     def snapshot(self, project_id: str | None = None, *, include_removed: bool = False) -> Snapshot:
         """Build one immutable snapshot command and execute it."""
         return self.snapshot_command(project_id, include_removed=include_removed).run()
+
+    def processes(self, project_id: str | None = None) -> ProcessInventory:
+        """Project one ``ProcessInventory`` from a single canonical snapshot.
+
+        Delegates to ``processes_command`` and does not perform a second sample.
+        """
+        return self.processes_command(project_id=project_id).run()
+
+    def processes_command(self, project_id: str | None = None) -> Command[ProcessInventory]:
+        """Capture one ``ProcessInventory`` projection from a single snapshot.
+
+        The captured command runs ``snapshot_command`` exactly once and projects
+        the result into the frozen ``ProcessInventory`` model. The action is
+        read-only and never spawns a process outside the shared PostgreSQL
+        backend attribution boundary.
+        """
+        from odoo_instance_sdk.execution import Command as _Command
+        from odoo_instance_sdk.execution import ExecutionPlan
+        from odoo_instance_sdk.internal.proc import (
+            PreparedAction,
+            prepared_command,
+        )
+        from odoo_instance_sdk.internal.process_inventory import build_process_inventory
+
+        action = PreparedAction(
+            step_id="monitor.processes",
+            action="project_process_inventory",
+            description="Project one ProcessInventory from a single monitor snapshot",
+            details={"project_id": project_id},
+            read_only=True,
+        )
+
+        def execute(context: RunContext[ProcessInventory]) -> ProcessInventory:
+            context.action(action.step_id)
+            try:
+                snapshot = self.snapshot_command(project_id=project_id, include_removed=False).run()
+                credential_resolver = self._process_inventory_credential_resolver(
+                    project_id=project_id
+                )
+                inventory = build_process_inventory(
+                    snapshot,
+                    project_id=project_id,
+                    credential_resolver=credential_resolver,
+                )
+                context.complete_action(action.step_id)
+                return inventory
+            finally:
+                context.skip_remaining()
+
+        plan = ExecutionPlan(steps=(action.public_projection(),)).with_fingerprint()
+        return _Command.from_prepared(
+            plan,
+            prepared_command(execute, (action,), executor=self._executor),
+        )
+
+    def _process_inventory_credential_resolver(
+        self, *, project_id: str | None
+    ) -> Callable[[str], DatabaseCredentials | None] | None:
+        """Build a credential resolver from catalogue environment config paths.
+
+        ponytail: reads the generated config once per database; the per-project
+        environment count is small. Returns ``None`` when the catalogue is
+        unavailable so backend attribution degrades gracefully.
+        """
+        import sqlite3
+
+        from odoo_instance_sdk.internal.process_inventory import DatabaseCredentials
+        from odoo_instance_sdk.models import StartConfig
+
+        db_path = self.catalog_path if self.catalog_path is not None else _paths.get_catalog_path()
+        try:
+            catalog = BackupCatalog(db_path=db_path)
+        except (BackupCatalogError, sqlite3.Error, OSError):
+            return None
+        credentials_by_database: dict[str, DatabaseCredentials] = {}
+        try:
+            rows = catalog._monitor_snapshot_rows(include_removed=False)
+            for row, _runtime in rows.environments:
+                resolved_project_id = f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
+                if project_id is not None and resolved_project_id != project_id:
+                    continue
+                database_value = (
+                    row["target_db_name"]
+                    if str(row["db_mode"]) == "copy"
+                    else row["source_db_name"]
+                )
+                if database_value is None:
+                    continue
+                database_name = str(database_value)
+                if database_name in credentials_by_database:
+                    continue
+                try:
+                    config = StartConfig.from_odoo_config(str(row["generated_config_path"]))
+                except Exception:
+                    continue
+                credentials_by_database[database_name] = DatabaseCredentials(
+                    database=database_name,
+                    host=config.db_host,
+                    port=config.db_port,
+                    user=config.db_user,
+                    password=config.db_password,
+                )
+        finally:
+            catalog.close()
+        if not credentials_by_database:
+            return None
+
+        def resolve(database: str) -> DatabaseCredentials | None:
+            return credentials_by_database.get(database)
+
+        return resolve
 
     def snapshot_command(
         self, project_id: str | None = None, *, include_removed: bool = False
