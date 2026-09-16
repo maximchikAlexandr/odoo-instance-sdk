@@ -18,6 +18,7 @@ else:
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context, resolve_catalogue_scope
 from odoo_instance_sdk.commands.multi_target import run_multi_target_deletion
@@ -38,7 +39,7 @@ from odoo_instance_sdk.commands.output import (
 )
 from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
-from odoo_instance_sdk.internal.cli_format import rich_cell
+from odoo_instance_sdk.internal.cli_format import rich_cell, rich_local_time
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import (
@@ -110,6 +111,12 @@ class _BackupPayloadResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tr
 class _BackupListResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     backups: tuple[_BackupPayloadResult, ...]
     next_cursor: Annotated[str | None, "odcli-structural"]
+
+
+def _rich_local_time_cell(value: JsonValue) -> Text:
+    if not isinstance(value, str) or not value:
+        return rich_cell("—")
+    return Text(rich_local_time(value))
 
 
 def configure_catalog_path_provider(provider: Callable[[], Path]) -> None:
@@ -198,7 +205,7 @@ def _rich_table(document: OutputDocument) -> str:
                 if isinstance(recorded_bytes, int) and not isinstance(recorded_bytes, bool)
                 else "—"
             ),
-            rich_cell(item.get("catalogue_time", "")),
+            _rich_local_time_cell(item.get("catalogue_time")),
         )
     output = StringIO()
     console = Console(file=output, color_system=None, width=180)
@@ -209,10 +216,7 @@ def _rich_table(document: OutputDocument) -> str:
     return output.getvalue().rstrip()
 
 
-def _rich_detail(document: OutputDocument) -> str:
-    if not document.ok:
-        return document.error.message if document.error is not None else "operation failed"
-    result = document.result if isinstance(document.result, dict) else {}
+def _rich_summary_table(result: JsonObject) -> Table:
     summary = Table("Field", "Value", title="Backup")
     for field in (
         "id",
@@ -231,27 +235,68 @@ def _rich_detail(document: OutputDocument) -> str:
                 if isinstance(value, int) and not isinstance(value, bool)
                 else "—"
             )
+        if field == "catalogue_time" and isinstance(value, str):
+            value = rich_local_time(value)
         summary.add_row(
             field.replace("_", " ").title(),
             rich_cell(value if value is not None else "—"),
         )
+    return summary
 
+
+def _rich_history_table(items: list[JsonValue]) -> Table:
+    history = Table("Seq", "Event", "Occurred", "Message", title="History")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        history.add_row(
+            rich_cell(item.get("sequence", "")),
+            rich_cell(item.get("event_type", "")),
+            _rich_local_time_cell(item.get("occurred_at")),
+            rich_cell(item.get("message") or ""),
+        )
+    return history
+
+
+def _rich_restore_table(items: list[JsonValue]) -> Table:
+    restore = Table("Host", "Port", "Database", "Restored", title="Restore links")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        restore.add_row(
+            rich_cell(item.get("db_host", "")),
+            rich_cell(item.get("db_port", "")),
+            rich_cell(item.get("database_name", "")),
+            _rich_local_time_cell(item.get("restored_at")),
+        )
+    return restore
+
+
+def _rich_environment_table(items: list[JsonValue]) -> Table:
+    details = Table("Details", title="Environment links")
+    for item in items:
+        details.add_row(rich_cell(item))
+    return details
+
+
+def _rich_detail(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
     output = StringIO()
     console = Console(file=output, color_system=None, width=180)
-    console.print(summary)
-    for title, field in (
-        ("History", "history"),
-        ("Restore links", "restore_links"),
-        ("Environment links", "environment_links"),
-    ):
+    console.print(_rich_summary_table(result))
+    sections: tuple[tuple[str, str, Callable[[list[JsonValue]], Table]], ...] = (
+        ("history", "History", _rich_history_table),
+        ("restore_links", "Restore links", _rich_restore_table),
+        ("environment_links", "Environment links", _rich_environment_table),
+    )
+    for field, _title, builder in sections:
         items = result.get(field)
         if not isinstance(items, list) or not items:
             continue
-        details = Table("Details", title=title)
-        for item in items:
-            details.add_row(rich_cell(item))
         console.print()
-        console.print(details)
+        console.print(builder(items))
     return output.getvalue().rstrip()
 
 

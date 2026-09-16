@@ -87,9 +87,9 @@
 
 ## 11. Rich absolute-time formatting (item 11)
 
-- [ ] 11.1 Add one small helper in the existing internal formatting module converting aware UTC and naive SQLite UTC timestamps to local timezone `YYYY-MM-DD HH:MM`.
-- [ ] 11.2 Apply the helper to `backup ls` and `backup inspect` time fields; audit other Rich renderers for absolute timestamps.
-- [ ] 11.3 Add a parametrized test covering aware UTC, SQLite naive UTC, and local timezone with non-zero offset including day-boundary crossing; verify JSON/TOON keep ISO precision and durations are untouched.
+- [x] 11.1 Add one small helper in the existing internal formatting module converting aware UTC and naive SQLite UTC timestamps to local timezone `YYYY-MM-DD HH:MM`.
+- [x] 11.2 Apply the helper to `backup ls` and `backup inspect` time fields; audit other Rich renderers for absolute timestamps.
+- [x] 11.3 Add a parametrized test covering aware UTC, SQLite naive UTC, and local timezone with non-zero offset including day-boundary crossing; verify JSON/TOON keep ISO precision and durations are untouched.
 
 ## 12. Detached Odoo launch (item 12)
 
