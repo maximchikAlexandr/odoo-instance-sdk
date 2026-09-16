@@ -1041,8 +1041,10 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.cli._run_doctor",
             fail_operation
             if failing
-            else lambda *_args, **_kwargs: DoctorReport(
-                checks=[CheckResult(name="catalogue", status="ok", detail="ready")]
+            else lambda: (
+                lambda *_args, **_kwargs: DoctorReport(
+                    checks=[CheckResult(name="catalogue", status="ok", detail="ready")]
+                )
             ),
         )
         return

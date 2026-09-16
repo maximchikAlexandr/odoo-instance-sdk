@@ -22,7 +22,6 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.resources.instance import helpers as _helpers
 
-SubprocessExecutor = _instance_shim.SubprocessExecutor
 terminate = _instance_shim.terminate
 terminate_pid = _instance_shim.terminate_pid
 
@@ -241,7 +240,7 @@ class _PlanningMixin:
             _command_plan(frozen_steps),
             execute,
             frozen_steps,
-            executor=SubprocessExecutor(),
+            executor=_instance_shim.SubprocessExecutor(),
         )
 
     def status(self, proc: OdooProcess) -> ProcessStatus:

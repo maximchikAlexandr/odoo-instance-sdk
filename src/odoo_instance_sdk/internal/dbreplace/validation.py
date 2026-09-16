@@ -1,4 +1,3 @@
-# ruff: noqa: F821
 """Private, compensating COPY-environment replacement command."""
 
 from __future__ import annotations
@@ -38,12 +37,16 @@ from odoo_instance_sdk.internal.dbreplace.planning import (
     _ROOT,
     CopyReplacementFailureContext,
     CopyReplacementPlan,
+    _drop_sql,
+    _durable_failure_message,
+    _exists_sql,
     _inspect,
     _inspect_sql,
     _rename,
     _rename_sql,
     _revalidate,
     _skip_remaining,
+    _stdout,
     _step,
     _validate_plan,
     _validate_retained_evidence,

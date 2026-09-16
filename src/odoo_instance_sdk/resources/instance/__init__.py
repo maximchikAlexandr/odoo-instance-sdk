@@ -107,7 +107,13 @@ from odoo_instance_sdk.resources.instance.helpers_2 import (
     _build_shell_script_step as _build_shell_script_step,
 )
 from odoo_instance_sdk.resources.instance.helpers_2 import (
+    _project_runtime_owns_port as _project_runtime_owns_port,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
     activate_auxiliary_restore_session as activate_auxiliary_restore_session,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    active_auxiliary_restore_session as active_auxiliary_restore_session,
 )
 from odoo_instance_sdk.resources.instance.helpers_2 import (
     auxiliary_restore_session as auxiliary_restore_session,

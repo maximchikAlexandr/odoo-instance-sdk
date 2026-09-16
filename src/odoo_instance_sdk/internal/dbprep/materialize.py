@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: F821
+import contextlib
+import types
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -18,6 +20,9 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.dbprep.source_1 import (
     DatabasePreparationFailureContext as DatabasePreparationFailureContext,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _CatalogueRestoreSource as _CatalogueRestoreSource,
 )
 from odoo_instance_sdk.internal.dbprep.source_1 import (
     _CoalescedRestore as _CoalescedRestore,
@@ -70,9 +75,11 @@ from odoo_instance_sdk.internal.dbprep.source_2 import (
 from odoo_instance_sdk.internal.dbprep.source_2 import (
     _coerce_restore_source as _coerce_restore_source,
 )
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    build_target_instance as build_target_instance,
+)
 from odoo_instance_sdk.internal.locks import (
     backup_lock_path,
-    exclusive_lock,
 )
 from odoo_instance_sdk.internal.odoo_config import infer_base_url, parse_odoo_config
 from odoo_instance_sdk.internal.project_env import (
@@ -95,6 +102,13 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.project import ProjectConfig
 
+
+def _dbprep_shim() -> types.ModuleType:
+    import odoo_instance_sdk.internal.database_preparation as preparation
+
+    return preparation
+
+
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
@@ -108,6 +122,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
+@contextlib.contextmanager
 def _restore_preflight(  # noqa: C901
     client: OdooClient,
     project: ProjectConfig | str | Path,
@@ -131,7 +146,7 @@ def _restore_preflight(  # noqa: C901
     )
     if initial_source is not None:
         require_test_instance_origin_approval(initial_source.config.base_url)
-    _, _, project_id = canonical_project_identity(root)
+    _, _, project_id = _dbprep_shim().canonical_project_identity(root)
     lock_context = (
         _wait_for_preparation_lock(project_id) if wait_for_lock else preparation_lock(project_id)
     )
@@ -148,7 +163,7 @@ def _restore_preflight(  # noqa: C901
         catalogue_backup = None
         if isinstance(selected_source, _CatalogueRestoreSource):
             _consume_action_if_planned("database.prepare.catalogue-backup")
-            with exclusive_lock(backup_lock_path(str(selected_source.backup_id))):
+            with _dbprep_shim().exclusive_lock(backup_lock_path(str(selected_source.backup_id))):
                 catalogue_backup = _catalogue_backup_preflight(
                     client.get_catalog(), selected_source, current
                 )
@@ -282,7 +297,7 @@ def prepare_restore(  # noqa: C901
         else None
     )
     try:
-        preflight_context = _restore_preflight(
+        preflight_context = _dbprep_shim()._restore_preflight(
             client,
             project,
             options=options,
@@ -290,7 +305,7 @@ def prepare_restore(  # noqa: C901
             target_database=restore_inputs[0] if restore_inputs is not None else None,
         )
         if not isinstance(selected_source, _RemoteRestoreSource):
-            preflight_context = _restore_preflight(
+            preflight_context = _dbprep_shim()._restore_preflight(
                 client,
                 project,
                 options=options,
@@ -431,7 +446,7 @@ def prepare_download(
     password = _remote_password()
     source = resolve_test_source(initial, options)
     require_test_instance_origin_approval(source.config.base_url)
-    _, _, project_id = canonical_project_identity(root)
+    _, _, project_id = _dbprep_shim().canonical_project_identity(root)
     lock_context = (
         _wait_for_preparation_lock(project_id) if wait_for_lock else preparation_lock(project_id)
     )
@@ -463,7 +478,7 @@ def preflight_restore(
     options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
     restore_source: _RestoreSource | uuid.UUID | str | None = None,
 ) -> RestorePreflight:
-    with _restore_preflight(
+    with _dbprep_shim()._restore_preflight(
         client, project, options=options, wait_for_lock=False, restore_source=restore_source
     ) as preflight:
         return preflight

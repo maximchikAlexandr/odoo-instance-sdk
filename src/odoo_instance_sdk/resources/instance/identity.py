@@ -2,7 +2,6 @@ from __future__ import annotations
 
 # ruff: noqa: F821
 import contextlib
-import os
 import sys
 import time
 import uuid
@@ -10,8 +9,6 @@ from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-
-import psutil
 
 import odoo_instance_sdk.resources.instance as _instance_shim
 from odoo_instance_sdk.exceptions import (
@@ -51,7 +48,6 @@ globals().update(
     {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
 )
 
-SubprocessExecutor = _instance_shim.SubprocessExecutor
 terminate = _instance_shim.terminate
 
 
@@ -176,7 +172,7 @@ class _IdentityMixin:
             _command_plan((step,)),
             execute,
             (step,),
-            executor=SubprocessExecutor(),
+            executor=_instance_shim.SubprocessExecutor(),
         )
 
     def start(
@@ -264,7 +260,7 @@ class _IdentityMixin:
             _command_plan(prepared_steps, secrets=secrets),
             execute,
             prepared_steps,
-            executor=SubprocessExecutor(),
+            executor=_instance_shim.SubprocessExecutor(),
         )
 
     def run_foreground(
@@ -336,12 +332,12 @@ class _IdentityMixin:
                 ),
             )
 
-        process_executor = SubprocessExecutor()
+        process_executor = _instance_shim.SubprocessExecutor()
 
         def execute(context: RunContext[int]) -> int:
             # The planning probe is intentionally repeated at this mutation
             # boundary.  A stale preview must never turn into a spawn.
-            if type(process_executor) is SubprocessExecutor:
+            if type(process_executor) is _instance_shim.SubprocessExecutor:
                 _assert_http_port_free(config)
             self._ensure_dependencies_ready(
                 context,
@@ -550,7 +546,7 @@ class _IdentityMixin:
             _command_plan(prepared_steps, secrets=secrets),
             execute,
             prepared_steps,
-            executor=SubprocessExecutor(),
+            executor=_instance_shim.SubprocessExecutor(),
         )
 
     def run_shell_script(
@@ -673,7 +669,7 @@ class _IdentityMixin:
             _command_plan(captured_steps, secrets=secrets),
             execute,
             captured_steps,
-            executor=executor or SubprocessExecutor(),
+            executor=executor or _instance_shim.SubprocessExecutor(),
         )
 
     def _run_shell_script_in_context(
@@ -807,10 +803,14 @@ class _IdentityMixin:
             )
 
         try:
-            process = psutil.Process(root_pid)
-        except psutil.NoSuchProcess:
+            process = _instance_shim.psutil.Process(root_pid)
+        except _instance_shim.psutil.NoSuchProcess:
             return vanished_identity()
-        except (psutil.AccessDenied, psutil.ZombieProcess, OSError) as exc:
+        except (
+            _instance_shim.psutil.AccessDenied,
+            _instance_shim.psutil.ZombieProcess,
+            OSError,
+        ) as exc:
             raise RuntimeError("runtime identity is inaccessible") from exc
 
         try:
@@ -818,10 +818,17 @@ class _IdentityMixin:
             live_executable = _canonical_runtime_path(process.exe())
             live_argv = tuple(process.cmdline())
             live_cwd = _canonical_runtime_path(process.cwd())
-            process_group_id = os.getpgid(root_pid) if sys.platform != "win32" else None
-        except psutil.NoSuchProcess:
+            process_group_id = (
+                _instance_shim.os.getpgid(root_pid) if sys.platform != "win32" else None
+            )
+        except _instance_shim.psutil.NoSuchProcess:
             return vanished_identity()
-        except (psutil.AccessDenied, psutil.ZombieProcess, OSError, TypeError) as exc:
+        except (
+            _instance_shim.psutil.AccessDenied,
+            _instance_shim.psutil.ZombieProcess,
+            OSError,
+            TypeError,
+        ) as exc:
             raise RuntimeError("runtime identity is inaccessible") from exc
         return _RuntimeIdentity(
             environment_id=environment_id,
