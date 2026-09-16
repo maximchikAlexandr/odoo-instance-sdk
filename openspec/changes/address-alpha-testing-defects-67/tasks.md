@@ -102,10 +102,10 @@
 
 ## 13. COPY-restore cluster identity (item 13)
 
-- [ ] 13.1 Bind the active managed cluster identity in `EnvironmentManager._do_copy_restore()` so `record_restore()` stores `cluster_id`.
-- [ ] 13.2 Replace the `None`-swallowing failure in `_remove_copy_database_command()` with a sanitized primary reason; retain fail-closed behavior.
-- [ ] 13.3 Add a test covering fresh backup → restore → COPY checkout → stop → `env rm --dry-run` showing guarded drop step → `env rm --yes` confirming COPY-DB and owned-artifact cleanup.
-- [ ] 13.4 Verify dirty worktree, active runtime, cluster/volume identity, restore binding, and related-resource checks are not weakened.
+- [x] 13.1 Bind the active managed cluster identity in `EnvironmentManager._do_copy_restore()` so `record_restore()` stores `cluster_id`.
+- [x] 13.2 Replace the `None`-swallowing failure in `_remove_copy_database_command()` with a sanitized primary reason; retain fail-closed behavior.
+- [x] 13.3 Add a test covering fresh backup → restore → COPY checkout → stop → `env rm --dry-run` showing guarded drop step → `env rm --yes` confirming COPY-DB and owned-artifact cleanup.
+- [x] 13.4 Verify dirty worktree, active runtime, cluster/volume identity, restore binding, and related-resource checks are not weakened.
 
 ## 14. Compatibility, documentation, and delivery gates
 

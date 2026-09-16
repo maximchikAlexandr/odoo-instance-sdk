@@ -806,6 +806,7 @@ class _CheckoutMixin:
                     cfg_dict=plan.config_values,
                     source_db=plan.source_database,
                     target_db=plan.target_database,
+                    repo_root=plan.repo_root,
                 )
 
             cat._finalize_environment_checkout(str(plan.env_id), _checkout_applied_settings(plan))

@@ -82,6 +82,7 @@ class _SettingsMixin:
         cfg_dict: Mapping[str, str],
         source_db: str,
         target_db: str,
+        repo_root: Path,
     ) -> uuid.UUID:
 
         catalog = cat
@@ -94,6 +95,9 @@ class _SettingsMixin:
             raise MasterPasswordRequiredError("copy mode requires admin_passwd in source config")
 
         instance = self._client.instance.from_config(source_config, master_password=master_pwd)
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        instance._postgres_cluster = PostgresCluster.from_project(repo_root)
         db_port = instance.config.db_port or 5432
         catalog.upsert_copy_journal(
             str(env_id),
