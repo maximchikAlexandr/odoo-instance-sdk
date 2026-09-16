@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         ProcessResult,
         RunContext,
     )
+    from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
 from odoo_instance_sdk.resources.environment import helpers as _helpers
 

@@ -16,6 +16,7 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.config import InstanceConfig
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.proc.executor import terminate_pid
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
@@ -102,10 +103,10 @@ def _live_process(
     extra_args: tuple[str, ...] = (),
 ) -> SimpleNamespace:
     catalog = instance._client.get_catalog()
-    env_row = cast("Mapping[str, object]", catalog.get_environment(str(instance._environment_id)))
-    expected_executable, expected_argv, expected_cwd, _config_path = _runtime_expectations(
-        cast("Mapping[str, object]", env_row)
+    env_row = cast(
+        "Mapping[str, JsonValue]", catalog.get_environment(str(instance._environment_id))
     )
+    expected_executable, expected_argv, expected_cwd, _config_path = _runtime_expectations(env_row)
     argv = (*expected_argv, *instance.config.default_run_args, *extra_args)
     live = SimpleNamespace(
         create_time=lambda: 12.5,

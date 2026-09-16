@@ -54,6 +54,7 @@ from odoo_instance_sdk.models import (
     BackupFreshness,
     BackupProvenanceComparison,
     BackupProvenanceStatus,
+    CheckoutInventory,
     ClusterEndpoint,
     ClusterSnapshot,
     CommandResult,
@@ -1253,7 +1254,7 @@ def _patch_leaf_external(  # noqa: C901
             ),
             environments=(),
         )
-        inventory = build_checkout_inventory(
+        checkout_inventory = build_checkout_inventory(
             snapshot,
             git_collector=lambda _p, _r: GitActivity(
                 default_branch="main",
@@ -1267,10 +1268,10 @@ def _patch_leaf_external(  # noqa: C901
             ),
         )
 
-        def inventory_operation(*_args: object, **_kwargs: object):
+        def inventory_operation(*_args: object, **_kwargs: object) -> CheckoutInventory:
             if failing:
                 raise RuntimeError("isolated external operation failed")
-            return inventory
+            return checkout_inventory
 
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",

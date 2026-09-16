@@ -95,6 +95,9 @@ for _module_name in ("helpers_1", "helpers_2"):
             continue
         globals()[_key] = _value
 from odoo_instance_sdk.resources.instance.helpers_1 import (
+    _LOGFILE_SENTINEL_BYTES as _LOGFILE_SENTINEL_BYTES,
+)
+from odoo_instance_sdk.resources.instance.helpers_1 import (
     InstanceFactory as InstanceFactory,
 )
 from odoo_instance_sdk.resources.instance.helpers_1 import (
@@ -107,7 +110,13 @@ from odoo_instance_sdk.resources.instance.helpers_2 import (
     _build_shell_script_step as _build_shell_script_step,
 )
 from odoo_instance_sdk.resources.instance.helpers_2 import (
+    _command_result as _command_result,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
     _project_runtime_owns_port as _project_runtime_owns_port,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    _validate_runtime_args as _validate_runtime_args,
 )
 from odoo_instance_sdk.resources.instance.helpers_2 import (
     activate_auxiliary_restore_session as activate_auxiliary_restore_session,

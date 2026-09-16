@@ -59,13 +59,12 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
     "src/odoo_instance_sdk/cli.py": frozenset({58}),
     "src/odoo_instance_sdk/commands/cli_parts/__init__.py": frozenset({9}),
-    "src/odoo_instance_sdk/commands/env/__init__.py": frozenset({86}),
-    "src/odoo_instance_sdk/commands/test.py": frozenset({50, 59}),
-    "src/odoo_instance_sdk/internal/doctor/__init__.py": frozenset({36}),
+    "src/odoo_instance_sdk/commands/env/__init__.py": frozenset({88}),
+    "src/odoo_instance_sdk/commands/test.py": frozenset({78}),
+    "src/odoo_instance_sdk/internal/doctor/__init__.py": frozenset({37}),
     "src/odoo_instance_sdk/internal/pg/__init__.py": frozenset({12}),
-    "src/odoo_instance_sdk/internal/proc/executor.py": frozenset({41}),
-    "src/odoo_instance_sdk/resources/monitor/__init__.py": frozenset({45}),
-    "src/odoo_instance_sdk/resources/postgres/__init__.py": frozenset({24}),
+    "src/odoo_instance_sdk/resources/monitor/__init__.py": frozenset({61}),
+    "src/odoo_instance_sdk/resources/postgres/__init__.py": frozenset({27}),
 }
 
 

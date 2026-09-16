@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import os
 import time
 from collections import deque
@@ -43,6 +42,7 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
+    from odoo_instance_sdk.resources.instance import OdooInstance  # noqa: TC004
 T = TypeVar("T")
 
 

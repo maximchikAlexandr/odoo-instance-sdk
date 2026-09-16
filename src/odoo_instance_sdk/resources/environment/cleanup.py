@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         ProcessResult,
         RunContext,
     )
+    from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from odoo_instance_sdk.resources.environment import helpers as _helpers

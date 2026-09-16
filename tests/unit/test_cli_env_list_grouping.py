@@ -337,10 +337,8 @@ def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> N
     flat = "".join(out.split())
     assert "stopped" in flat
     assert "env" in flat
-    stopped_row = next(
-        line for line in out.splitlines() if "stopped-" in line or "stopped-env" in flat
-    )
-    assert "— —" in stopped_row or "— —" in flat
+    stopped_row = next(line for line in out.splitlines() if "stopped-env" in line)
+    assert "— —" in stopped_row
 
 
 @pytest.mark.unit

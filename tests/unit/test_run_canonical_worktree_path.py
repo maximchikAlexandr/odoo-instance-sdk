@@ -17,7 +17,10 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.internal.paths import resolve_environment_artifact_paths
+from odoo_instance_sdk.internal.paths import (
+    EnvironmentArtifactPaths,
+    resolve_environment_artifact_paths,
+)
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
 
@@ -37,7 +40,7 @@ def _seed_environment(
     branch: str,
     http_port: int,
     legacy_paths: bool,
-) -> tuple[str, object]:
+) -> tuple[str, EnvironmentArtifactPaths]:
     repo_root = project_manifest.parent.parent
     git_common = repo_root / ".git"
     env_id = uuid.uuid4()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from rich.live import Live
 
 from odoo_instance_sdk.commands.context import resolve_environment, resolve_project_path
@@ -83,7 +85,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
 }
 
 
-def __getattr__(name: str) -> object:
+def __getattr__(name: str) -> Any:
     spec = _LAZY_EXPORTS.get(name)
     if spec is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
