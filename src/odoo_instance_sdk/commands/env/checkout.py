@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 from rich.console import Console, Group
-from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
@@ -59,21 +58,22 @@ from odoo_instance_sdk.exceptions import BackupCatalogError, ProjectContextError
 from odoo_instance_sdk.internal.locks import exclusive_lock, provisioning_lock_path
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.repo_key import repo_key
-from odoo_instance_sdk.models import (
-    CheckoutInventory,
-    CheckoutRow,
-    ClusterSnapshot,
+from odoo_instance_sdk.models.backup import (
     DevelopmentEnvironment,
     EnvironmentCheckoutPlan,
     EnvironmentCheckoutResult,
     EnvironmentDatabaseMode,
-    EnvironmentSnapshot,
     EnvironmentState,
+)
+from odoo_instance_sdk.models.monitor import (
+    CheckoutInventory,
+    CheckoutRow,
+    ClusterSnapshot,
+    EnvironmentSnapshot,
     ProjectSummary,
     Snapshot,
 )
 from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -696,14 +696,18 @@ def _run_env_list_live(
 ) -> None:
     """Run the foreground Rich refresh loop without creating background work."""
     last_renderable: Group | None = None
-    with Live(None, transient=True) as live:
+    import odoo_instance_sdk.commands.env as _env_commands
+
+    with _env_commands.Live(None, transient=True) as live:
         while True:
             try:
                 inventory = monitor.checkout_inventory(
                     project_id=project_id,
                     include_removed=include_removed,
                 )
-                last_renderable = _render_env_list_rich(inventory, width=Console().width)
+                last_renderable = _env_commands._render_env_list_rich(
+                    inventory, width=Console().width
+                )
                 live.update(last_renderable, refresh=True)
             except KeyboardInterrupt:
                 raise
@@ -741,6 +745,8 @@ def _catalog_worktree_paths(
     monitor: EnvironmentMonitor, *, include_removed: bool
 ) -> dict[str, str]:
     """Read stored CLI-only paths after the monitor's single snapshot pass."""
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
     catalog_path = getattr(monitor, "catalog_path", None)
     if catalog_path is None:
         catalog_path = get_catalog_path(ensure_exists=False)
@@ -780,8 +786,10 @@ def _catalog_worktree_paths(
 
 
 def _print_env_list_human(inventory: CheckoutInventory) -> None:
+    import odoo_instance_sdk.commands.env as _env_commands
+
     console = Console()
-    console.print(_render_env_list_rich(inventory, width=console.width))
+    console.print(_env_commands._render_env_list_rich(inventory, width=console.width))
 
 
 def _project_provenance(cli_context: CliContext) -> str:

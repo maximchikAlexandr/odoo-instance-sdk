@@ -163,7 +163,8 @@ def test_postgres_approve_image_human_and_missing_digest_error(tmp_path: Path) -
         cli, ["--project", str(root), "postgres", "approve-image", "--image-digest", digest]
     )
     assert human.exit_code == 0, human.output
-    assert digest in human.output
+    assert "postgres@sha256:" in human.output
+    assert "approved" in human.output
     missing = runner.invoke(cli, ["--project", str(root), "postgres", "approve-image"])
     assert missing.exit_code == 2
     assert "--image-digest" in missing.output

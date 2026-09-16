@@ -5,12 +5,14 @@ import os
 import shutil
 import sqlite3
 import sys
+import types
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+import odoo_instance_sdk.internal.doctor as _doctor_shim
 from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeView
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.exceptions import (
@@ -27,7 +29,6 @@ from odoo_instance_sdk.internal.applied_settings import (
 from odoo_instance_sdk.internal.executables import resolve_optional_executable
 from odoo_instance_sdk.internal.generated_config import _rebase_path
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
-from odoo_instance_sdk.internal.postgres_compose import docker_available
 from odoo_instance_sdk.models import DevelopmentEnvironment, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import (
@@ -44,6 +45,14 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.applied_settings import SettingsValue
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
+
+
+def _doctor_seam() -> types.ModuleType:
+    import odoo_instance_sdk.internal.doctor as doctor_shim
+
+    return doctor_shim
+
+
 STATUS_OK = "ok"
 STATUS_WARN = "warn"
 STATUS_ERROR = "error"
@@ -171,17 +180,18 @@ def run_doctor(
             )
         else:
             report.context["project_source"] = "explicit" if project_path is not None else "cwd"
-        _check_manifest(report, project_root)
+        seam = _doctor_seam()
+        seam._check_manifest(report, project_root)
         if resolved_context is not None and not isinstance(resolved_context.source, ProjectConfig):
             selected_environment = resolved_context.source
-            _check_environment_runtime(
+            seam._check_environment_runtime(
                 report,
                 client,
                 selected_environment,
                 resolved_context=resolved_context,
             )
         else:
-            _check_project_runtime(
+            seam._check_project_runtime(
                 report,
                 client,
                 project_root,
@@ -196,18 +206,19 @@ def run_doctor(
             )
         envs = client.environments.list(project=project_root, include_removed=True)
 
-    _check_uv(report)
-    _check_optional_executables(report)
-    _check_catalog(report, client)
-    _check_orphaned(report, client)
-    _check_postgres(report, project_root)
+    seam = _doctor_seam()
+    seam._check_uv(report)
+    seam._check_optional_executables(report)
+    seam._check_catalog(report, client)
+    seam._check_orphaned(report, client)
+    seam._check_postgres(report, project_root)
 
     from odoo_instance_sdk.internal.doctor.runtime import _project_environment_drift
 
     for env in envs:
         if resolved_context is None:
-            _check_environment_runtime(report, client, env)
-        _check_environment(report, client, env)
+            seam._check_environment_runtime(report, client, env)
+        seam._check_environment(report, client, env)
         row = client.get_catalog().get_environment(str(env.id))
         raw_applied = row["applied_settings_json"] if row is not None else None
         report.drift.append(_project_environment_drift(env, raw_applied))
@@ -242,7 +253,7 @@ def _check_project_runtime(
             StartConfig.from_odoo_config(config_path) if config_path is not None else StartConfig()
         )
         database = project.default_source_database or start.db_name
-        database_available = _database_available(project_root, database)
+        database_available = _doctor_seam()._database_available(project_root, database)
         view = (
             resolved_context.runtime
             if resolved_context is not None
@@ -296,7 +307,7 @@ def _check_project_runtime(
             )
             return
         database = project.default_source_database or start.db_name
-        database_available = _database_available(project_root, database)
+        database_available = _doctor_seam()._database_available(project_root, database)
         facts = _unresolved_runtime_facts(
             project,
             config_path=config_path,
@@ -361,7 +372,7 @@ def _check_environment_runtime(
             configured_odoo_bin=str(odoo_bin) if odoo_bin is not None else None,
             config_path=env.generated_config_path,
             database=env.target_db_name or env.source_db_name or start.db_name,
-            database_available=_database_available(
+            database_available=_doctor_seam()._database_available(
                 Path(env.repository_root), env.target_db_name or env.source_db_name or start.db_name
             ),
             database_status=_database_status(
@@ -444,7 +455,7 @@ def _runtime_facts(
         "odoo_bin": _path_available(resolved_odoo_bin),
         "config": _path_available(config_path),
         "database": database_available,
-        "http": _http_available(view.http_interface, view.http_port),
+        "http": _doctor_seam()._http_available(view.http_interface, view.http_port),
     }
     return {
         "owner_kind": view.owner_kind,
@@ -491,7 +502,7 @@ def _unresolved_runtime_facts(
                 "odoo_bin": _path_available(configured_odoo_bin),
                 "config": _path_available(str(config_path) if config_path is not None else None),
                 "database": database_available,
-                "http": _http_available(start.http_interface, start.http_port),
+                "http": _doctor_seam()._http_available(start.http_interface, start.http_port),
             },
         ),
         "resolution_error": resolution_error,
@@ -723,7 +734,7 @@ def _check_postgres(report: DoctorReport, project_root: Path | None) -> None:
     except OdooInstanceSdkError as exc:
         report.checks.append(CheckResult("postgres.cluster", STATUS_WARN, str(exc)))
         return
-    if cluster.owned and not docker_available():
+    if cluster.owned and not _doctor_shim.docker_available():
         report.checks.append(
             CheckResult("postgres.compose", STATUS_WARN, "docker not found in PATH")
         )

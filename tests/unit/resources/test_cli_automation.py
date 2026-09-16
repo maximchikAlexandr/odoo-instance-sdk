@@ -1849,8 +1849,8 @@ class TestNoNewPublicResources:
     "relative_path",
     [
         "src/odoo_instance_sdk/internal/automation.py",
-        "src/odoo_instance_sdk/internal/database_preparation.py",
-        "src/odoo_instance_sdk/resources/database.py",
+        "src/odoo_instance_sdk/internal/dbprep/materialize.py",
+        "src/odoo_instance_sdk/resources/database/backup_restore_parts/backup.py",
     ],
 )
 def test_scripted_consumers_share_instance_shell_wrapper_seam(relative_path: str) -> None:

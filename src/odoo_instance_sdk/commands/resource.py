@@ -489,8 +489,17 @@ def _rich_list(document: OutputDocument) -> str:
     if not isinstance(resources, list):
         return "No resources"
     table = Table(
-        "Identity", "Type", "Name", "Ownership", "Measured bytes", "Complete", "Reclaimable"
+        "Identity",
+        "Type",
+        "Name",
+        "Ownership",
+        "Measured bytes",
+        "Complete",
+        "Reclaimable",
     )
+    name_column = table.columns[2]
+    name_column.overflow = "ignore"
+    name_column.no_wrap = True
     for resource in resources:
         if not isinstance(resource, dict):
             continue
@@ -509,7 +518,7 @@ def _rich_list(document: OutputDocument) -> str:
             rich_cell(str(resource.get("reclaimable", False)).lower()),
         )
     output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
+    console = Console(file=output, color_system=None, width=9999)
     console.print(table)
     return output.getvalue().rstrip()
 

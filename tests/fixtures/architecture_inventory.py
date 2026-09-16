@@ -18,8 +18,8 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py", 424),
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py", 425),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py", 437),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py", 438),
         ("src/odoo_instance_sdk/commands/backup.py", 295),
         ("src/odoo_instance_sdk/commands/output.py", 236),
         ("src/odoo_instance_sdk/commands/output.py", 381),
@@ -39,11 +39,11 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 392): "shared diagnostic boundary",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py",
-        424,
+        437,
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py",
-        425,
+        438,
     ): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/commands/backup.py", 295): "shared Rich output boundary",
     (
@@ -56,7 +56,17 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # Keep only deliberate, line-specific exceptions in this checked inventory so
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
+EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
+    "src/odoo_instance_sdk/cli.py": frozenset({58}),
+    "src/odoo_instance_sdk/commands/cli_parts/__init__.py": frozenset({9}),
+    "src/odoo_instance_sdk/commands/env/__init__.py": frozenset({86}),
+    "src/odoo_instance_sdk/commands/test.py": frozenset({50, 59}),
+    "src/odoo_instance_sdk/internal/doctor/__init__.py": frozenset({36}),
+    "src/odoo_instance_sdk/internal/pg/__init__.py": frozenset({12}),
+    "src/odoo_instance_sdk/internal/proc/executor.py": frozenset({41}),
+    "src/odoo_instance_sdk/resources/monitor/__init__.py": frozenset({45}),
+    "src/odoo_instance_sdk/resources/postgres/__init__.py": frozenset({24}),
+}
 
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(

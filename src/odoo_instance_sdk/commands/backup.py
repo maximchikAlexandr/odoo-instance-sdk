@@ -321,11 +321,12 @@ def _rich_delete(document: OutputDocument) -> str:
     plan = result.get("plan")
     if isinstance(plan, dict):
         table = Table("Field", "Value", title="Delete plan")
+        table.columns[1].overflow = "fold"
         for field in ("backup_id", "path", "state", "file_present"):
             if field in plan:
                 table.add_row(field.replace("_", " ").title(), rich_cell(plan[field]))
         output = StringIO()
-        console = Console(file=output, color_system=None, width=180)
+        console = Console(file=output, color_system=None, width=9999)
         console.print("Delete plan:")
         console.print(table)
         return output.getvalue().rstrip()

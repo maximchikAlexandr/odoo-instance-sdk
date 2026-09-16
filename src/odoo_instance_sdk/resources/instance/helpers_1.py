@@ -392,7 +392,10 @@ def _runtime_expectations(
         if python_path.is_dir():
             python_path /= "bin/python"
         expected_executable = _canonical_runtime_path(str(python_path))
-        expected_cwd = _canonical_runtime_path(str(artifacts.worktree_path))
+        runtime_cwd = runtime_json.get("runtime_cwd")
+        expected_cwd = _canonical_runtime_path(
+            str(runtime_cwd if runtime_cwd else artifacts.worktree_path)
+        )
         expected_odoo_bin = _canonical_runtime_path(odoo_bin)
         start_config = StartConfig.from_odoo_config(config_path)
         expected_argv = _canonical_runtime_argv(

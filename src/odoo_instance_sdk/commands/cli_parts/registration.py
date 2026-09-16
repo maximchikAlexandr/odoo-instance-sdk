@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     import click
 else:
     import rich_click as click
+import odoo_instance_sdk.commands.env.list as _env_list_commands  # noqa: F401
 from odoo_instance_sdk.commands.backup import (
     backup_group,
     configure_catalog_path_provider,
@@ -54,18 +55,12 @@ from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     VscodeImportError,
 )
-from odoo_instance_sdk.internal.automation import (
-    export_translations_command,  # noqa: F401 - extracted translation callback seam
-    list_modules_command,  # noqa: F401 - extracted module callback seam
-    update_modules_command,  # noqa: F401 - extracted module callback seam
-)
 from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
 from odoo_instance_sdk.internal.generated_config import (
     generate_config,
     project_generated_config_path,
     render_config,
 )
-from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
 from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
@@ -77,7 +72,6 @@ from odoo_instance_sdk.models import (
     StartConfig,
 )
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
-from odoo_instance_sdk.resources.testing import module_tests_command  # noqa: F401
 
 if TYPE_CHECKING:
     from collections.abc import Callable as TypeCallback
@@ -138,6 +132,21 @@ def __getattr__(name: str) -> CliLazyExport:
 
         globals()[name] = PostgresCluster
         return PostgresCluster
+    if name in {
+        "export_translations_command",
+        "list_modules_command",
+        "update_modules_command",
+    }:
+        from odoo_instance_sdk.internal import automation
+
+        value = getattr(automation, name)
+        globals()[name] = value
+        return cast("CliLazyExport", value)
+    if name == "module_tests_command":
+        from odoo_instance_sdk.resources.testing import module_tests_command
+
+        globals()[name] = module_tests_command
+        return cast("CliLazyExport", module_tests_command)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -408,6 +417,27 @@ cli.add_command(_psql, name="psql")
 cli.add_command(resource_group, name="resource")
 cli.add_command(ps_command, name="ps")
 
+_callbacks_loaded = False
+_original_get_command = cli.get_command
+
+
+def _ensure_callbacks_loaded() -> None:
+    if _callbacks_loaded:
+        return
+    import odoo_instance_sdk.commands.cli_parts.callbacks_a as _callbacks_a
+
+    del _callbacks_a
+    globals()["_callbacks_loaded"] = True
+
+
+def _lazy_get_command(ctx: click.Context, name: str) -> click.Command | None:
+    if not ctx.resilient_parsing:
+        _ensure_callbacks_loaded()
+    return cast("click.Command | None", _original_get_command(ctx, name))
+
+
+cli.get_command = _lazy_get_command
+
 
 class _LazyGitGroup(click.RichGroup):  # type: ignore[misc,valid-type]
     """Expose Git help at the root without importing the Git execution stack."""
@@ -448,12 +478,23 @@ class _LazyGitGroup(click.RichGroup):  # type: ignore[misc,valid-type]
 cli.add_command(_LazyGitGroup(), name="git")
 
 
+def _cli_catalog_path(*, ensure_exists: bool = True) -> Path:
+    import odoo_instance_sdk.cli as _cli_shim
+
+    get_catalog_path = cast("Callable[..., Path]", _cli_shim.get_catalog_path)
+    return get_catalog_path(ensure_exists=ensure_exists)
+
+
 def _backup_catalog_path() -> Path:
-    return get_catalog_path()
+    return _cli_catalog_path()
+
+
+def _resource_catalog_path(*, ensure_exists: bool) -> Path:
+    return _cli_catalog_path(ensure_exists=ensure_exists)
 
 
 configure_catalog_path_provider(_backup_catalog_path)
-configure_resource_catalog_path_provider(lambda: get_catalog_path(ensure_exists=False))
+configure_resource_catalog_path_provider(lambda: _resource_catalog_path(ensure_exists=False))
 
 
 class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]
@@ -783,7 +824,7 @@ def _register_initialized_project(project_path: Path) -> None:
     project_id = f"project_{identity}"
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
-    catalog = BackupCatalog(db_path=get_catalog_path())
+    catalog = BackupCatalog(db_path=_cli_catalog_path())
     try:
         catalog._register_project(project_id, root, common)
     finally:
@@ -837,10 +878,9 @@ def _resolve_postgres_state(
 
 def _open_catalog_optional() -> BackupCatalog | None:
     """Open the catalog read-only; return None if missing/unreadable."""
-    from odoo_instance_sdk.internal.paths import get_catalog_path
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
-    catalog_path = get_catalog_path()
+    catalog_path = _cli_catalog_path()
     if not catalog_path.is_file():
         return None
     try:

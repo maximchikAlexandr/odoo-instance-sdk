@@ -17,9 +17,9 @@ from click.testing import CliRunner
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.internal.proc.executor import terminate_pid
-from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.resources.instance.helpers_1 import _runtime_expectations
 
 
 class _Catalog:
@@ -103,20 +103,15 @@ def _live_process(
 ) -> SimpleNamespace:
     catalog = instance._client.get_catalog()
     env_row = cast("Mapping[str, object]", catalog.get_environment(str(instance._environment_id)))
-    config = StartConfig.from_odoo_config(str(env_row["generated_config_path"]))
-    runtime = json.loads(str(env_row["runtime_json"]))
-    argv = (
-        str(env_row["python_environment_path"]),
-        str(runtime["odoo_bin"]),
-        *_build_cli_args(config),
-        *instance.config.default_run_args,
-        *extra_args,
+    expected_executable, expected_argv, expected_cwd, _config_path = _runtime_expectations(
+        cast("Mapping[str, object]", env_row)
     )
+    argv = (*expected_argv, *instance.config.default_run_args, *extra_args)
     live = SimpleNamespace(
         create_time=lambda: 12.5,
-        exe=lambda: argv[0],
+        exe=lambda: expected_executable,
         cmdline=lambda: list(argv),
-        cwd=lambda: runtime["runtime_cwd"],
+        cwd=lambda: expected_cwd,
     )
     if mismatch == "argv":
         live.cmdline = lambda: [*argv, "--config", "/wrong"]
@@ -135,12 +130,12 @@ def test_stop_owned_runtime_revalidates_then_terminates_and_clears(
     calls: list[tuple[int, int | None, float]] = []
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
+            "odoo_instance_sdk.resources.instance.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
         patch(
-            "odoo_instance_sdk.resources.instance.planning.terminate_pid",
+            "odoo_instance_sdk.resources.instance.terminate_pid",
             side_effect=lambda pid, *, process_group_id, timeout: calls.append(
                 (pid, process_group_id, timeout)
             ),
@@ -319,11 +314,11 @@ def test_stop_allows_safe_default_launch_args(tmp_path: Path) -> None:
     instance, catalog, environment_id = _instance(tmp_path, default_run_args=("--dev",))
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
+            "odoo_instance_sdk.resources.instance.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
-        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
         patch(
             "odoo_instance_sdk.resources.instance.helpers_1.is_process_alive",
             return_value=False,
@@ -434,12 +429,12 @@ def test_stop_cli_output_parity_and_root_selector_without_signal_for_dry_run(
     with (
         patch("odoo_instance_sdk.commands.context.ready_instance", return_value=context),
         patch("odoo_instance_sdk.cli.cli_context.ready_instance", return_value=context),
-        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
         patch(
-            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
+            "odoo_instance_sdk.resources.instance.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
         patch(
             "odoo_instance_sdk.resources.instance.helpers_1.is_process_alive",
             return_value=False,

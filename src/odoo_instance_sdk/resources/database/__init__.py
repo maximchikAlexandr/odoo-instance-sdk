@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import httpx as httpx
+
+from odoo_instance_sdk.models import Backup as Backup
 from odoo_instance_sdk.resources.database.backup_restore import *  # noqa: F403
 from odoo_instance_sdk.resources.database.backup_restore_parts import (
     DatabaseResource as DatabaseResource,

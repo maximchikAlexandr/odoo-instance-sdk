@@ -42,7 +42,6 @@ from odoo_instance_sdk.internal.dbreplace.planning import (
     _exists_sql,
     _inspect,
     _inspect_sql,
-    _rename,
     _rename_sql,
     _revalidate,
     _skip_remaining,
@@ -77,6 +76,12 @@ from odoo_instance_sdk.models import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+
+
+def _apply_rename(context: RunContext[None], step_id: str, *, message: str) -> None:
+    import odoo_instance_sdk.internal.database_replacement as _replacement_shim
+
+    _replacement_shim._rename(context, step_id, message=message)
 
 
 def build_copy_replacement_command(  # noqa: C901
@@ -281,7 +286,7 @@ def build_copy_replacement_command(  # noqa: C901
                     context.action(_CLEANUP_ROLLBACK)
                     rollback_cleanup_started = True
                     if plan.planning_database[1]:
-                        _rename(
+                        _apply_rename(
                             cast("RunContext[None]", context),
                             _DROP_ROLLBACK,
                             message="rollback database cleanup failed",
@@ -313,7 +318,7 @@ def build_copy_replacement_command(  # noqa: C901
                     context.skip(_MOVE_DATABASE_VERIFY)
                     moved_database = True
                 else:
-                    _rename(
+                    _apply_rename(
                         cast("RunContext[None]", context),
                         _MOVE_DATABASE,
                         message="prior database move failed",
@@ -420,7 +425,7 @@ def build_copy_replacement_command(  # noqa: C901
                 context.action(_CLEANUP_ROLLBACK)
                 if moved_database:
                     rollback_cleanup_started = True
-                    _rename(
+                    _apply_rename(
                         cast("RunContext[None]", context),
                         _DROP_ROLLBACK,
                         message="rollback database cleanup failed",
@@ -461,7 +466,7 @@ def build_copy_replacement_command(  # noqa: C901
             if compensated and restored_database and not drop_attempted:
                 drop_attempted = True
                 try:
-                    _rename(
+                    _apply_rename(
                         cast("RunContext[None]", context),
                         _DROP_PARTIAL,
                         message="partial database cleanup failed",
@@ -478,7 +483,7 @@ def build_copy_replacement_command(  # noqa: C901
                     compensated = False
             if compensated and moved_database and (not drop_attempted or database_removed):
                 try:
-                    _rename(
+                    _apply_rename(
                         cast("RunContext[None]", context),
                         _RESTORE_DATABASE,
                         message="prior database compensation failed",

@@ -33,7 +33,7 @@ from odoo_instance_sdk.commands.output import (
     sanitize_terminal_text,
     success_document,
 )
-from odoo_instance_sdk.models import DevelopmentEnvironment
+from odoo_instance_sdk.models.backup import DevelopmentEnvironment
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient

@@ -2,28 +2,7 @@
 
 from __future__ import annotations
 
-import importlib
-from pathlib import Path
-from typing import TYPE_CHECKING, cast
-
-if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.config import OdooClientConfig
-    from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
-    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
-
-_discovered = {
-    path.stem for path in Path(__file__).parent.glob("*.py") if path.name != "__init__.py"
-}
-_ORDER = ["checkout", "list", "show", "remove", "sync"]
-_SUBMODULES = [name for name in _ORDER if name in _discovered] + sorted(_discovered - set(_ORDER))
-
-for _module_name in _SUBMODULES:
-    _module = importlib.import_module(f"odoo_instance_sdk.commands.env.{_module_name}")
-    for _key, _value in _module.__dict__.items():
-        if _key.startswith("__"):
-            continue
-        globals()[_key] = _value
+from rich.live import Live
 
 from odoo_instance_sdk.commands.context import resolve_environment, resolve_project_path
 from odoo_instance_sdk.commands.env.checkout import (
@@ -34,6 +13,12 @@ from odoo_instance_sdk.commands.env.checkout import (
 )
 from odoo_instance_sdk.commands.env.checkout import (
     _catalogue_branch_names as _catalogue_branch_names,
+)
+from odoo_instance_sdk.commands.env.checkout import (
+    _render_env_list_rich as _render_env_list_rich,
+)
+from odoo_instance_sdk.commands.env.checkout import (
+    _resolve_monitor_project_id as _resolve_monitor_project_id,
 )
 from odoo_instance_sdk.commands.env.checkout import (
     _resolve_ticket_allocation as _resolve_ticket_allocation,
@@ -48,8 +33,12 @@ from odoo_instance_sdk.commands.env.checkout import (
     _ticket_provenance as _ticket_provenance,
 )
 from odoo_instance_sdk.commands.env.checkout import (
+    _ticket_rich_lines as _ticket_rich_lines,
+)
+from odoo_instance_sdk.commands.env.checkout import (
     _TicketAllocation as _TicketAllocation,
 )
+from odoo_instance_sdk.commands.env.checkout import env_group as env_group
 from odoo_instance_sdk.commands.env.checkout import (
     select_snapshot_environment as select_snapshot_environment,
 )
@@ -67,17 +56,66 @@ from odoo_instance_sdk.internal.git_worktree import (
     rev_parse_toplevel as rev_parse_toplevel,
 )
 
+_LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
+    "EnvironmentMonitor": (
+        "odoo_instance_sdk.resources.monitor",
+        "EnvironmentMonitor",
+    ),
+    "OdooClient": ("odoo_instance_sdk.client", "OdooClient"),
+    "OdooClientConfig": ("odoo_instance_sdk.config", "OdooClientConfig"),
+    "EnvironmentCheckoutOptions": (
+        "odoo_instance_sdk.resources.environment",
+        "EnvironmentCheckoutOptions",
+    ),
+    "click": ("rich_click", None),
+    "_ENV_LIST_COLUMNS": ("odoo_instance_sdk.commands.env.display", "_ENV_LIST_COLUMNS"),
+    "_ENV_LIST_COMPACT_COLUMNS": (
+        "odoo_instance_sdk.commands.env.display",
+        "_ENV_LIST_COMPACT_COLUMNS",
+    ),
+    "_ENV_LIST_MEDIUM_COLUMNS": (
+        "odoo_instance_sdk.commands.env.display",
+        "_ENV_LIST_MEDIUM_COLUMNS",
+    ),
+    "env_list": ("odoo_instance_sdk.commands.env.checkout", "env_list"),
+    "get_catalog_path": ("odoo_instance_sdk.internal.paths", "get_catalog_path"),
+    "time": ("time", None),
+}
+
+
+def __getattr__(name: str) -> object:
+    spec = _LAZY_EXPORTS.get(name)
+    if spec is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = spec
+    from importlib import import_module
+
+    module = import_module(module_name)
+    value = module if attr_name is None else getattr(module, attr_name)
+    globals()[name] = value
+    return value
+
+
 __all__ = [
+    "EnvironmentCheckoutOptions",
+    "EnvironmentMonitor",
+    "Live",
+    "OdooClient",
+    "OdooClientConfig",
     "_TicketAllocation",
     "_build_ticket_checkout_command",
     "_catalog_worktree_paths",
     "_catalogue_branch_names",
     "_monitor_class",
+    "_render_env_list_rich",
+    "_resolve_monitor_project_id",
     "_resolve_ticket_allocation",
     "_revalidate_ticket_absence",
     "_ticket_checkout_command",
     "_ticket_provenance",
+    "_ticket_rich_lines",
     "env_group",
+    "env_list",
     "local_branch_names",
     "remote_branch_names",
     "resolve_environment",
@@ -86,15 +124,3 @@ __all__ = [
     "rev_parse_toplevel",
     "select_snapshot_environment",
 ]
-
-
-def __getattr__(
-    name: str,
-) -> type[OdooClient | OdooClientConfig | EnvironmentMonitor | EnvironmentCheckoutOptions]:
-    """Preserve lazy exports for tests and callers."""
-    import odoo_instance_sdk.commands.env.deps as env_deps
-
-    return cast(
-        "type[OdooClient | OdooClientConfig | EnvironmentMonitor | EnvironmentCheckoutOptions]",
-        getattr(env_deps, name),
-    )

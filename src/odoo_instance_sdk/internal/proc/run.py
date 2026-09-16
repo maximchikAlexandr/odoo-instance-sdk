@@ -496,7 +496,9 @@ class SubprocessExecutor:
         _notify(observer, event_for_step(prepared, "started", elapsed=0.0))
         if prepared.mode == "captured":
             try:
-                returncode, stdout, stderr, duration = _run_pump(
+                from odoo_instance_sdk.internal.proc import executor as _proc_shim
+
+                returncode, stdout, stderr, duration = _proc_shim._run_pump(
                     prepared,
                     timeout=timeout,
                     environment_snapshot=environment_snapshot,
@@ -898,7 +900,9 @@ def run_captured_limited(
         return cast("ProcessResult", context.process_prepared(step))
     started = time.perf_counter()
     try:
-        returncode, stdout, stderr, duration = _run_pump(
+        from odoo_instance_sdk.internal.proc import executor as _proc_shim
+
+        returncode, stdout, stderr, duration = _proc_shim._run_pump(
             step,
             timeout=timeout,
             environment_snapshot=step.environment_snapshot,

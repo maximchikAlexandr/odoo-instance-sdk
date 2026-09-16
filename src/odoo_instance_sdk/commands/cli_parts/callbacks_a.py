@@ -14,7 +14,6 @@ from click.shell_completion import CompletionItem
 from rich.console import Console
 from rich.table import Table
 
-from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.cli_parts.registration import (
     _generated_config_needs_repair,
     _OptionState,
@@ -26,7 +25,7 @@ from odoo_instance_sdk.commands.cli_parts.registration import (
     _write_project_generated_config,
     cli,
 )
-from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
+from odoo_instance_sdk.commands.context import CliContext, ResolvedContext, pass_cli_context
 from odoo_instance_sdk.commands.module import register_module_commands
 from odoo_instance_sdk.commands.output import (
     JsonObject,
@@ -58,8 +57,6 @@ from odoo_instance_sdk.exceptions import (
     LogfileAccessError,
 )
 from odoo_instance_sdk.internal.automation import (
-    eval_expression_command,
-    exec_script_command,
     export_translations_command,  # noqa: F401 - extracted translation callback seam
     list_modules_command,  # noqa: F401 - extracted module callback seam
     update_modules_command,  # noqa: F401 - extracted module callback seam
@@ -69,7 +66,6 @@ from odoo_instance_sdk.internal.generated_config import (
     project_generated_config_path,
 )
 from odoo_instance_sdk.internal.vscode_generate import (
-    build_launch_profile,
     launch_json,
     write_launch_json,
 )
@@ -79,6 +75,13 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.testing import module_tests_command  # noqa: F401
+
+
+def _ready_instance(ctx: CliContext) -> ResolvedContext:
+    import odoo_instance_sdk.cli as _cli_shim
+
+    return cast("ResolvedContext", _cli_shim.cli_context.ready_instance(ctx))
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable as TypeCallback
@@ -242,7 +245,7 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
     try:
         import odoo_instance_sdk.cli as _cli_shim
 
-        resolved = cli_context._ready_instance_for_doctor(ctx)
+        resolved = _cli_shim.cli_context._ready_instance_for_doctor(ctx)
         report = _cli_shim._run_doctor()(
             resolved.client,
             resolved.project_root,
@@ -331,7 +334,7 @@ def stop(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        runtime_context = cli_context.ready_instance(ctx)
+        runtime_context = _ready_instance(ctx)
         environment = runtime_context.require_environment()
         command = runtime_context.instance.stop_environment_command()
     except SystemExit:
@@ -377,20 +380,20 @@ def run(
 ) -> None:
     output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
     try:
-        runtime_context = cli_context.ready_instance(ctx)
+        runtime_context = _ready_instance(ctx)
         # Preview must retain the captured plan even when this read-only
         # precondition fails; normal execution keeps the early diagnostic
         # compatibility path in addition to the command-boundary recheck.
         if not dry_run:
-            from odoo_instance_sdk.internal import context as _resolution
-
+            available = runtime_context.check_port_free()
             if runtime_context.is_environment:
-                available, detail = _resolution._environment_http_port_preflight(
-                    runtime_context.require_environment(),
-                    runtime_context.client,
+                env = runtime_context.require_environment()
+                detail = (
+                    f"{env.http_interface}:{env.http_port} is available"
+                    if available
+                    else f"{env.http_interface}:{env.http_port} is occupied"
                 )
             else:
-                available = runtime_context.check_port_free()
                 http_interface, http_port = runtime_context.instance_address()
                 detail = (
                     f"{http_interface}:{http_port} is available"
@@ -429,7 +432,7 @@ def run(
 @pass_cli_context
 def logs(ctx: CliContext, tail: int, follow: bool) -> None:
     try:
-        runtime_context = cli_context.ready_instance(ctx)
+        runtime_context = _ready_instance(ctx)
         for line in runtime_context.instance.iter_logs(tail=tail, follow=follow):
             sys.stdout.write(line)
             sys.stdout.flush()
@@ -456,7 +459,7 @@ def shell(
 ) -> None:
     output_mode = resolve_command_options(output_format, json_output, dry_run, command="shell")
     try:
-        runtime_context = cli_context.ready_instance(ctx)
+        runtime_context = _ready_instance(ctx)
         command = runtime_context.instance.shell_command(args=list(odoo_args))
     except SystemExit:
         raise
@@ -497,11 +500,15 @@ def eval_cmd(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        runtime_context = cli_context.ready_instance(ctx)
+        import odoo_instance_sdk.cli as _cli_shim
+
+        runtime_context = _ready_instance(ctx)
         instance = runtime_context.instance
         status = _run_shell_command(
             command_name="eval",
-            build_command=lambda: eval_expression_command(instance, expression, commit=commit),
+            build_command=lambda: _cli_shim.eval_expression_command(
+                instance, expression, commit=commit
+            ),
             mode=output_mode,
             dry_run=dry_run,
             project_result=lambda _value, payload: {**payload, "returncode": 0},
@@ -546,11 +553,13 @@ def exec_cmd(
         except OSError as e:
             fail(output_mode, "exec", f"cannot read script: {e}", dry_run=dry_run)
     try:
-        runtime_context = cli_context.ready_instance(ctx)
+        import odoo_instance_sdk.cli as _cli_shim
+
+        runtime_context = _ready_instance(ctx)
         instance = runtime_context.instance
         status = _run_shell_command(
             command_name="exec",
-            build_command=lambda: exec_script_command(
+            build_command=lambda: _cli_shim.exec_script_command(
                 instance, source, argv=tuple(script_args), commit=commit
             ),
             mode=output_mode,
@@ -588,7 +597,7 @@ def deps_verify(
 
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        runtime_context = cli_context.ready_instance(ctx)
+        runtime_context = _ready_instance(ctx)
         project_python = (
             runtime_context.source.python
             if isinstance(runtime_context.source, ProjectConfig)
@@ -685,6 +694,7 @@ def _rich_vscode_generate(document: OutputDocument) -> str:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
     table = Table("Field", "Value", title="VS Code launch")
+    table.columns[1].overflow = "fold"
     if "written" in result:
         table.add_row("Output", rich_cell(result["written"]))
     profile = result.get("profile")
@@ -694,7 +704,7 @@ def _rich_vscode_generate(document: OutputDocument) -> str:
     if not table.rows:
         table.add_row("Status", "ready")
     output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
+    console = Console(file=output, color_system=None, width=9999)
     console.print(table)
     return output.getvalue().rstrip()
 
@@ -715,11 +725,13 @@ def vscode_generate(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        runtime_context = cli_context.ready_instance(ctx)
+        import odoo_instance_sdk.cli as _cli_shim
+
+        runtime_context = _ready_instance(ctx)
         runtime = runtime_context.runtime
 
         def operation() -> dict[str, JsonValue]:
-            profile = build_launch_profile(runtime)
+            profile = _cli_shim.build_launch_profile(runtime)
             if write_file:
                 project_path = runtime.repository_root
                 written = write_launch_json(project_path, launch_json(profile))

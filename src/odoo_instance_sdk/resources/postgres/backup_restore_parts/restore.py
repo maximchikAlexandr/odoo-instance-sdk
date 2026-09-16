@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 import msgspec
 
+import odoo_instance_sdk.resources.postgres as _postgres_shim
 from odoo_instance_sdk.exceptions import (
     LockConflictError,
     PostgresClusterError,
@@ -23,7 +24,6 @@ from odoo_instance_sdk.internal.postgres_compose import (
     compose_stop,
     compose_up,
     compose_volume_name,
-    docker_available,
     ensure_docker_or_raise,
     inspect_container_identity,
     inspect_volume_identity,
@@ -441,7 +441,7 @@ class _RestoreMixin:
                     value["diagnostic"] = diagnostic
                 return value
 
-            if not self._compose_runner.requires_docker or docker_available():
+            if not self._compose_runner.requires_docker or _postgres_shim.docker_available():
                 try:
                     planning_result = process_executor.execute(planning_step)
                 except ProcessExecutionError as error:

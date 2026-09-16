@@ -896,7 +896,7 @@ def _production_restore_command(
     executor = RecordingExecutor(result_factory=result_for)
     monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
     monkeypatch.setattr(ProjectConfig, "load", MagicMock(return_value=project))
-    monkeypatch.setattr("odoo_instance_sdk.internal.project_manifest.write_manifest", write)
+    monkeypatch.setattr(preparation, "write_manifest", write, raising=False)
     monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
     command = preparation.DatabasePreparationCoordinator(client).prepare_command(
         project, options=options, executor=executor

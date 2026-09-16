@@ -10,10 +10,7 @@ from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     ProcessHandle,
 )
-from odoo_instance_sdk.internal.server import (
-    cleanup_secret_config,
-    get_process_status,
-)
+from odoo_instance_sdk.internal.server import cleanup_secret_config
 from odoo_instance_sdk.models import (
     OdooProcess,
     ProcessStatus,
@@ -23,7 +20,6 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.resources.instance import helpers as _helpers
 
 terminate = _instance_shim.terminate
-terminate_pid = _instance_shim.terminate_pid
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
@@ -134,7 +130,7 @@ class _PlanningMixin:
                         }
                     self._validate_runtime_identity(identity)
                     context.action(action_ids[2])
-                    terminate_pid(
+                    _instance_shim.terminate_pid(
                         identity.root_pid,
                         process_group_id=identity.process_group_id,
                         timeout=timeout,
@@ -216,7 +212,7 @@ class _PlanningMixin:
             else:
                 context.action("instance.stop.signal")
                 try:
-                    terminate(
+                    _instance_shim.terminate(
                         ProcessHandle(
                             process=owned,
                             argv=(),
@@ -245,7 +241,7 @@ class _PlanningMixin:
 
     def status(self, proc: OdooProcess) -> ProcessStatus:
         self._client.get_process(proc.id)
-        return get_process_status(self._client.get_handle(proc.id))
+        return _instance_shim.get_process_status(self._client.get_handle(proc.id))
 
     def wait_ready(
         self,

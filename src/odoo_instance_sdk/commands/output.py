@@ -541,7 +541,11 @@ def run_rich_bounded(  # noqa: C901
                 live.update(value, refresh=True)
 
             update = update_live
-            return run(observer)
+            result = run(observer)
+        if lines:
+            for line in lines:
+                rich_print(line)
+        return result
     return run(observer)
 
 

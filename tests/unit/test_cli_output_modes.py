@@ -22,6 +22,7 @@ from click.testing import CliRunner
 if TYPE_CHECKING:
     from rich.console import Console
 
+import odoo_instance_sdk.commands.cli_parts.callbacks_a as _cli_callbacks  # noqa: F401
 from odoo_instance_sdk.cli import _rich_shell_projection, cli
 from odoo_instance_sdk.commands import output as output_commands
 from odoo_instance_sdk.commands.context import ResolvedContext
@@ -1234,6 +1235,8 @@ def _patch_leaf_external(  # noqa: C901
         return
 
     if path[:2] == ("env", "ls"):
+        from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+
         snapshot = Snapshot(
             schema_version=3,
             generated_at=datetime(2020, 1, 1, tzinfo=UTC),
@@ -1250,15 +1253,28 @@ def _patch_leaf_external(  # noqa: C901
             ),
             environments=(),
         )
+        inventory = build_checkout_inventory(
+            snapshot,
+            git_collector=lambda _p, _r: GitActivity(
+                default_branch="main",
+                head_sha="abc",
+                short_sha="abc",
+                branch="main",
+                ahead=0,
+                behind=0,
+                diff=None,
+                state=GitActivityState.CLEAN,
+            ),
+        )
 
-        def snapshot_operation(*_args: object, **_kwargs: object) -> Snapshot:
+        def inventory_operation(*_args: object, **_kwargs: object):
             if failing:
                 raise RuntimeError("isolated external operation failed")
-            return snapshot
+            return inventory
 
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",
-            snapshot_operation,
+            inventory_operation,
         )
         return
 
@@ -1807,6 +1823,9 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
             assert invoked.stdout == str(tmp_path / "worktree") + "\n"
         elif case.path == ("env", "show"):
             assert "Environment demo" in invoked.stdout
+        elif case.path == ("env", "ls"):
+            assert "Project demo" in invoked.stdout
+            assert "status=" in invoked.stdout
         else:
             key_value_lines = [
                 line
@@ -2376,7 +2395,10 @@ def test_rich_bounded_runner_is_sparse_and_reports_reliable_units(
         observer(StepEvent(step_id="download", kind="completed", elapsed=0.5))
         return "ok"
 
-    assert run_rich_bounded(run) == "ok"
+    class NonTerminalConsole:
+        is_terminal = False
+
+    assert run_rich_bounded(run, console=cast("Console", NonTerminalConsole())) == "ok"
     output = capsys.readouterr().out
     assert "[download] started elapsed=" in output
     assert "[download] progress units=5/10 (50%) elapsed=0.250s" in output
@@ -2579,7 +2601,10 @@ def test_progress_inventory_is_identified_and_machine_silent(
 
         return command.run(observer=observe)
 
-    result = run_rich_bounded(run)
+    class NonTerminalConsole:
+        is_terminal = False
+
+    result = run_rich_bounded(run, console=cast("Console", NonTerminalConsole()))
     captured = capsys.readouterr().out
 
     assert result == "done"
@@ -3098,6 +3123,8 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                     str(tmp_path),
                 ]
             else:
+                from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+
                 snapshot = Snapshot(
                     schema_version=3,
                     generated_at=datetime(2020, 1, 1, tzinfo=UTC),
@@ -3114,9 +3141,22 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                     ),
                     environments=(),
                 )
+                inventory = build_checkout_inventory(
+                    snapshot,
+                    git_collector=lambda _p, _r: GitActivity(
+                        default_branch="main",
+                        head_sha="abc",
+                        short_sha="abc",
+                        branch="main",
+                        ahead=0,
+                        behind=0,
+                        diff=None,
+                        state=GitActivityState.CLEAN,
+                    ),
+                )
                 isolated.setattr(
-                    "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
-                    lambda *_args, **_kwargs: snapshot,
+                    "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",
+                    lambda *_args, **_kwargs: inventory,
                 )
                 args = ["env", "ls", "--all-projects"]
             result = CliRunner().invoke(cli, [*args, "--format", mode])
@@ -3407,7 +3447,7 @@ def test_resource_rich_projections_are_bounded_and_deterministic(
                     }
                 ]
             },
-            ("Identity", "Type", "Name", "Measured bytes"),
+            ("Identity", "Type", "Name", "Measured"),
             id="resource-list",
         ),
     ],

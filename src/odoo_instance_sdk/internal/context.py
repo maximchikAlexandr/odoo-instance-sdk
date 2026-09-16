@@ -112,13 +112,16 @@ def resolve_environment(
     cwd: Path | None = None,
 ) -> DevelopmentEnvironment:
     base = (cwd or Path.cwd()).resolve()
-    environments = [_canonical_environment(env) for env in _list_environments(client)]
+    raw_environments = _list_environments(client)
     if explicit is not None:
-        return _resolve_explicit(explicit, environments)
-    env = _infer_from_worktree(base, environments)
+        return _resolve_explicit(
+            explicit,
+            [_canonical_environment(env) for env in raw_environments],
+        )
+    env = _infer_from_worktree(base, raw_environments)
     if env is not None:
-        return env
-    candidates = [f"{e.name} ({e.id})" for e in environments]
+        return _canonical_environment(env)
+    candidates = [f"{e.name} ({e.id})" for e in raw_environments]
     raise EnvironmentResolutionError(
         "No environment resolved; pass --env or cd into a registered worktree",
         candidates=candidates,
@@ -241,6 +244,13 @@ def _canonical_environment(env_obj: DevelopmentEnvironment) -> DevelopmentEnviro
         python_environment_owned=env_obj.python_environment_owned,
         python_environment_path=env_obj.python_environment_path,
     )
+    original_worktree = Path(env_obj.worktree_path)
+    try:
+        original_worktree_exists = original_worktree.is_dir()
+    except OSError:
+        original_worktree_exists = False
+    if original_worktree_exists and not artifacts.worktree_path.is_dir():
+        return env_obj
     if (
         env_obj.worktree_path == str(artifacts.worktree_path)
         and env_obj.generated_config_path == str(artifacts.generated_config_path)

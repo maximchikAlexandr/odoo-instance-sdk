@@ -22,6 +22,9 @@ from odoo_instance_sdk.internal.dbprep.source_1 import (
     DatabasePreparationFailureContext as DatabasePreparationFailureContext,
 )
 from odoo_instance_sdk.internal.dbprep.source_1 import (
+    RestorePreflight as RestorePreflight,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
     _CatalogueRestoreSource as _CatalogueRestoreSource,
 )
 from odoo_instance_sdk.internal.dbprep.source_1 import (
@@ -49,6 +52,9 @@ from odoo_instance_sdk.internal.dbprep.source_1 import (
     _resolve_source_config as _resolve_source_config,
 )
 from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _skip_preparation_branch as _skip_preparation_branch,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
     _target_config_path as _target_config_path,
 )
 from odoo_instance_sdk.internal.dbprep.source_1 import (
@@ -61,7 +67,16 @@ from odoo_instance_sdk.internal.dbprep.source_1 import (
     canonical_project_identity as canonical_project_identity,
 )
 from odoo_instance_sdk.internal.dbprep.source_1 import (
+    classify_freshness as classify_freshness,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
     generate_target_database as generate_target_database,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    preparation_lock as preparation_lock,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    reserve_target_database as reserve_target_database,
 )
 from odoo_instance_sdk.internal.dbprep.source_1 import (
     resolve_runtime_binding as resolve_runtime_binding,
@@ -73,7 +88,16 @@ from odoo_instance_sdk.internal.dbprep.source_2 import (
     _annotate_retained_failure as _annotate_retained_failure,
 )
 from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _catalogue_backup_preflight as _catalogue_backup_preflight,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
     _coerce_restore_source as _coerce_restore_source,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _latest_default_backup as _latest_default_backup,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _manifest_after_preparation as _manifest_after_preparation,
 )
 from odoo_instance_sdk.internal.dbprep.source_2 import (
     build_target_instance as build_target_instance,
@@ -359,14 +383,12 @@ def prepare_restore(  # noqa: C901
                         target_instance.databases.reset_admin_password()
                     reset_completed = True
 
-                final_config = _manifest_after_preparation(root, current)
+                final_config = _dbprep_shim()._manifest_after_preparation(root, current)
                 switched = msgspec.structs.replace(
                     final_config, default_source_database=preflight.target_database
                 )
-                from odoo_instance_sdk.internal.project_manifest import write_manifest
-
                 _consume_action_if_planned("database.prepare.default-switch")
-                write_manifest(root, switched)
+                _dbprep_shim().write_manifest(root, switched)
                 default_switch_confirmed = True
                 return DatabasePreparationResult(
                     mode=DatabasePreparationAction.RESTORE,

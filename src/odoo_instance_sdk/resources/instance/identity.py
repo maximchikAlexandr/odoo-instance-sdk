@@ -26,10 +26,6 @@ from odoo_instance_sdk.internal.proc import (
 from odoo_instance_sdk.internal.process_env import (
     captured_child_environment,
 )
-from odoo_instance_sdk.internal.server import (
-    _write_secret_config,
-    cleanup_secret_config,
-)
 from odoo_instance_sdk.models import (
     CommandResult,
     OdooProcess,
@@ -237,7 +233,7 @@ class _IdentityMixin:
             secret_created = False
             try:
                 if secret_path is not None:
-                    _write_secret_config(snapshot, secret_path)
+                    _instance_shim._write_secret_config(snapshot, secret_path)
                     secret_created = True
                 handle = context.spawn(step.step_id)
                 proc = OdooProcess(
@@ -249,7 +245,7 @@ class _IdentityMixin:
                 self._client.register_process(proc, handle.process, secret_path)
             except BaseException:
                 if secret_created:
-                    cleanup_secret_config(secret_path)
+                    _instance_shim.cleanup_secret_config(secret_path)
                 raise
             else:
                 return proc
@@ -352,7 +348,7 @@ class _IdentityMixin:
             with self._artifact_lock():
                 secret_created = False
                 if secret_path is not None:
-                    _write_secret_config(snapshot, secret_path)
+                    _instance_shim._write_secret_config(snapshot, secret_path)
                     secret_created = True
                 handle: ProcessHandle | None = None
                 try:
@@ -372,7 +368,7 @@ class _IdentityMixin:
                 except BaseException:
                     if handle is not None:
                         with contextlib.suppress(BaseException):
-                            terminate(
+                            _instance_shim.terminate(
                                 handle,
                                 process_group_id=handle.process_group_id,
                                 timeout=5.0,
@@ -381,7 +377,7 @@ class _IdentityMixin:
                 finally:
                     self._clear_runtime_identity()
                     if secret_created:
-                        cleanup_secret_config(secret_path)
+                        _instance_shim.cleanup_secret_config(secret_path)
 
         from odoo_instance_sdk.execution import Command
 
@@ -428,7 +424,7 @@ class _IdentityMixin:
         environment_id = self._environment_id
         if binding is None and environment_id is None:
             return
-        create_time = _process_create_time(root_pid)
+        create_time = _instance_shim._process_create_time(root_pid)
         checkout_branch, commit_sha = _worktree_ref(cwd, context=context)
         http_url = f"http://{config.http_interface}:{config.http_port}"
         catalog = cast("_RuntimeCatalog", self._client.get_catalog())
@@ -531,14 +527,14 @@ class _IdentityMixin:
             with self._artifact_lock():
                 secret_created = False
                 if secret_path is not None:
-                    _write_secret_config(snapshot, secret_path)
+                    _instance_shim._write_secret_config(snapshot, secret_path)
                     secret_created = True
                 try:
                     handle = context.spawn(step.step_id)
                     return wait_foreground(handle)
                 finally:
                     if secret_created:
-                        cleanup_secret_config(secret_path)
+                        _instance_shim.cleanup_secret_config(secret_path)
 
         from odoo_instance_sdk.execution import Command
 
@@ -625,7 +621,7 @@ class _IdentityMixin:
             def run_inside_lock() -> T:
                 secret_created = False
                 if secret_path is not None:
-                    _write_secret_config(snapshot, secret_path)
+                    _instance_shim._write_secret_config(snapshot, secret_path)
                     secret_created = True
                 try:
                     if callback_override is not None:
@@ -645,7 +641,7 @@ class _IdentityMixin:
                     return converted_result
                 finally:
                     if secret_created:
-                        cleanup_secret_config(secret_path)
+                        _instance_shim.cleanup_secret_config(secret_path)
 
             if exclusive:
                 with self._artifact_operation(exclusive=True):
@@ -716,14 +712,14 @@ class _IdentityMixin:
             raise UnplannedStepError(captured.step_id, reason="shell inputs changed after capture")
         secret_created = False
         if secret_path is not None:
-            _write_secret_config(snapshot, secret_path)
+            _instance_shim._write_secret_config(snapshot, secret_path)
             secret_created = True
         try:
             result = cast("ProcessResult", context.process_prepared(captured))
             return _command_result(result, timeout, captured)
         finally:
             if secret_created:
-                cleanup_secret_config(secret_path)
+                _instance_shim.cleanup_secret_config(secret_path)
 
     def _run_shell_script_exclusive(
         self,

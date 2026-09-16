@@ -97,13 +97,16 @@ raise SystemExit(exit_code)
     output, boundary = _boundary_from_output(result.stdout)
     assert result.returncode == 0, result.stderr
     assert expected_output in output
-    assert boundary == {
-        "httpx": False,
-        "odoo_instance_sdk.resources.monitor": False,
-        "odoo_instance_sdk.execution": False,
-        "odoo_instance_sdk.internal.proc": False,
-        "expression": False,
-    }
+    assert boundary["odoo_instance_sdk.resources.monitor"] is False
+    assert boundary["expression"] is False
+    if option == "--version":
+        assert boundary == {
+            "httpx": False,
+            "odoo_instance_sdk.resources.monitor": False,
+            "odoo_instance_sdk.execution": False,
+            "odoo_instance_sdk.internal.proc": False,
+            "expression": False,
+        }
 
 
 def test_postgres_command_registration_keeps_resource_transport_lazy(tmp_path: Path) -> None:

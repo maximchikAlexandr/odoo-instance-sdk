@@ -28,6 +28,7 @@ globals().update(
 
 
 class _EnvironmentMixin:
+    @_translate_sqlite_error
     def create_environment(self, env: Mapping[str, CatalogValue]) -> None:
         applied_settings = env.get("applied_settings_json", LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON)
         if not isinstance(applied_settings, str):

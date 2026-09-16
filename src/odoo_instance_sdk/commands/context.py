@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
+import odoo_instance_sdk.internal.project_runtime as _project_runtime
 from odoo_instance_sdk.exceptions import EnvironmentResolutionError
-from odoo_instance_sdk.internal.project_runtime import resolve_project_runtime
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
@@ -216,7 +216,7 @@ class ResolvedContext:
 
     def python_path(self) -> Path:
         if isinstance(self.source, ProjectConfig):
-            return resolve_project_runtime(
+            return _project_runtime.resolve_project_runtime(
                 self.source.repository_root, self.source.python, field="python"
             )
         path_value = getattr(self.source, "python_environment_path", None)

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 
 import psutil
 
+import odoo_instance_sdk.resources.instance as _instance_shim
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
 )
@@ -24,7 +25,6 @@ from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     ProcessHandle,
     ProcessResult,
-    terminate,
 )
 from odoo_instance_sdk.internal.process_env import (
     captured_child_environment,
@@ -36,7 +36,6 @@ from odoo_instance_sdk.internal.project_env import (
 )
 from odoo_instance_sdk.internal.server import (
     _write_secret_config,
-    cleanup_secret_config,
 )
 from odoo_instance_sdk.models import (
     CommandResult,
@@ -45,7 +44,6 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.resources.instance.helpers_1 import (
     _PROTECTED_RUNTIME_OPTIONS,
-    _build_cli_args,
     _RuntimeBinding,
 )
 
@@ -154,7 +152,7 @@ def resolve_runtime_argv(
     using ``_snapshot_start_inputs``; this function is the argv source for
     non-spawning projections such as the VS Code launch profile.
     """
-    managed_args = tuple(_build_cli_args(start_config))
+    managed_args = tuple(_instance_shim._build_cli_args(start_config))
     validated_extra = resolve_runtime_argv_extra(default_run_args, extra_args)
     return (*managed_args, *validated_extra)
 
@@ -319,9 +317,9 @@ def _snapshot_start_inputs(
     elif snapshot.config_path is not None:
         secret_path = None
     args = tuple(
-        _build_cli_args(snapshot)
+        _instance_shim._build_cli_args(snapshot)
         if secret_path is None
-        else _build_cli_args(snapshot, secret_config_path=secret_path)
+        else _instance_shim._build_cli_args(snapshot, secret_config_path=secret_path)
     )
     secrets = tuple(value for value in (snapshot.db_password, secret_path) if value is not None)
     return snapshot, args, secret_path, secrets
@@ -460,7 +458,7 @@ class AuxiliaryRestoreSession:
             self.process = None
             if owned is not None:
                 try:
-                    terminate(
+                    _instance_shim.terminate(
                         ProcessHandle(
                             process=owned,
                             argv=(),
@@ -473,12 +471,14 @@ class AuxiliaryRestoreSession:
                     )
                 except BaseException as cleanup_error:
                     error.add_note(f"auxiliary process cleanup failed: {cleanup_error}")
-            cleanup_secret_config(registered_secret_path or self.secret_path)
+            _instance_shim.cleanup_secret_config(registered_secret_path or self.secret_path)
             return
         if handle is not None:
             with contextlib.suppress(BaseException):
-                terminate(handle, process_group_id=handle.process_group_id, timeout=10.0)
-        cleanup_secret_config(self.secret_path)
+                _instance_shim.terminate(
+                    handle, process_group_id=handle.process_group_id, timeout=10.0
+                )
+        _instance_shim.cleanup_secret_config(self.secret_path)
 
     def ensure_started(self, context: RunContext[PrivateJsonValue]) -> None:
         if self.process is not None or self.using_existing_runtime:
@@ -492,7 +492,7 @@ class AuxiliaryRestoreSession:
         if _project_runtime_owns_port(self.instance, config):
             self.using_existing_runtime = True
             return
-        _assert_http_port_free(config)
+        _instance_shim._assert_http_port_free(config)
         if self.secret_config is not None and self.secret_path is not None:
             _write_secret_config(self.secret_config, self.secret_path)
         handle: ProcessHandle | None = None
@@ -544,7 +544,7 @@ class AuxiliaryRestoreSession:
             return
         if self.process is None:
             self._skip_unconsumed_steps(context)
-            cleanup_secret_config(self.secret_path)
+            _instance_shim.cleanup_secret_config(self.secret_path)
             return
         if context.planned(self.cleanup_action.step_id) and not context.consumed(
             self.cleanup_action.step_id
@@ -557,7 +557,7 @@ class AuxiliaryRestoreSession:
             )
             secret_path = registered_secret_path or secret_path
             if owned is not None:
-                terminate(
+                _instance_shim.terminate(
                     ProcessHandle(
                         process=owned,
                         argv=(),
@@ -570,7 +570,7 @@ class AuxiliaryRestoreSession:
                 )
         finally:
             try:
-                cleanup_secret_config(secret_path)
+                _instance_shim.cleanup_secret_config(secret_path)
             except BaseException:
                 if sys.exc_info()[1] is None:
                     raise
