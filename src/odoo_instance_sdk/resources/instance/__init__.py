@@ -97,9 +97,14 @@ for _module_name in ("helpers_1", "helpers_2"):
 from odoo_instance_sdk.resources.instance.helpers_1 import (
     InstanceFactory as InstanceFactory,
 )
-from odoo_instance_sdk.resources.instance.helpers_1 import _RuntimeBinding
+from odoo_instance_sdk.resources.instance.helpers_1 import (
+    _RuntimeBinding as _RuntimeBinding,
+)
 from odoo_instance_sdk.resources.instance.helpers_2 import (
     AuxiliaryRestoreSession as AuxiliaryRestoreSession,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    _build_shell_script_step as _build_shell_script_step,
 )
 from odoo_instance_sdk.resources.instance.helpers_2 import (
     activate_auxiliary_restore_session as activate_auxiliary_restore_session,

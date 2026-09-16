@@ -758,6 +758,9 @@
           "name": {
             "type": "string"
           },
+          "repository_root": {
+            "type": "string"
+          },
           "runtime": {
             "anyOf": [
               {
@@ -773,6 +776,7 @@
           "id",
           "name",
           "display_hint",
+          "repository_root",
           "environment_count",
           "cluster",
           "runtime"

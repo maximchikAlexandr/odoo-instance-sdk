@@ -7,6 +7,7 @@ import importlib
 from odoo_instance_sdk.internal.dbreplace.planning import (
     CopyReplacementFailureContext as CopyReplacementFailureContext,
 )
+from odoo_instance_sdk.internal.dbreplace.planning import _rename as _rename
 from odoo_instance_sdk.internal.dbreplace.validation import (
     build_copy_replacement_command as build_copy_replacement_command,
 )
