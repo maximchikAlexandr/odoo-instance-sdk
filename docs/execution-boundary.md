@@ -164,10 +164,10 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py:437-438` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py:484-485` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/backup.py:297` — shared Rich validation
+- `src/odoo_instance_sdk/commands/backup.py:342` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/output.py:236` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.

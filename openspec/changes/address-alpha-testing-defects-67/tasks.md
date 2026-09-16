@@ -93,12 +93,12 @@
 
 ## 12. Detached Odoo launch (item 12)
 
-- [ ] 12.1 Add `-d, --detach` to `odcli run` and a public SDK detached launch `*_command()` sibling that does not overload `run_foreground()`; preserve foreground behavior.
-- [ ] 12.2 Implement spawn, alive confirmation, runtime identity persistence, and return of PID/identity/endpoint/log path without waiting.
-- [ ] 12.3 Ensure no logfile fails fast before spawn; `iter_logs` works after detached launch.
-- [ ] 12.4 Implement `--dry-run -d` showing the sanitized process command and detached lifecycle plan without spawning.
-- [ ] 12.5 Reject incompatible combinations with native Odoo args and output formats through Click validation; treat `-d` after `--` as native.
-- [ ] 12.6 Add lifecycle/contract tests covering detached launch, immediate exit, stop, logs, dry-run, and foreground unchanged.
+- [x] 12.1 Add `-d, --detach` to `odcli run` and a public SDK detached launch `*_command()` sibling that does not overload `run_foreground()`; preserve foreground behavior.
+- [x] 12.2 Implement spawn, alive confirmation, runtime identity persistence, and return of PID/identity/endpoint/log path without waiting.
+- [x] 12.3 Ensure no logfile fails fast before spawn; `iter_logs` works after detached launch.
+- [x] 12.4 Implement `--dry-run -d` showing the sanitized process command and detached lifecycle plan without spawning.
+- [x] 12.5 Reject incompatible combinations with native Odoo args and output formats through Click validation; treat `-d` after `--` as native.
+- [x] 12.6 Add lifecycle/contract tests covering detached launch, immediate exit, stop, logs, dry-run, and foreground unchanged.
 
 ## 13. COPY-restore cluster identity (item 13)
 

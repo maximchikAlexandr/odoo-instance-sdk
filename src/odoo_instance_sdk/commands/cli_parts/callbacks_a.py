@@ -37,6 +37,7 @@ from odoo_instance_sdk.commands.output import (
     emit_json_envelope,
     fail,
     failure_document,
+    model_to_dict,
     output_options,
     resolve_command_options,
     resolve_output_mode,
@@ -366,64 +367,110 @@ def stop(
 @cli.command(
     cls=_RunCommand,
     help="Native Odoo arguments must follow a literal `--` delimiter.",
-    short_help="Start resolved Odoo in the foreground.",
+    short_help="Start resolved Odoo in the foreground or detached.",
+)
+@click.option(
+    "-d",
+    "--detach",
+    "detach",
+    is_flag=True,
+    default=False,
+    help="Launch Odoo detached and return once it is alive.",
 )
 @click.argument("odoo_args", nargs=-1, type=click.UNPROCESSED)
 @command_options
 @pass_cli_context
-def run(
+def run(  # noqa: C901
     ctx: CliContext,
+    detach: bool,
     odoo_args: tuple[str, ...],
     dry_run: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
-    output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
+    if detach:
+        output_mode = resolve_output_mode(output_format, json_output)
+    else:
+        output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
     try:
         runtime_context = _ready_instance(ctx)
-        # Preview must retain the captured plan even when this read-only
-        # precondition fails; normal execution keeps the early diagnostic
-        # compatibility path in addition to the command-boundary recheck.
-        if not dry_run:
-            available = runtime_context.check_port_free()
-            if runtime_context.is_environment:
-                env = runtime_context.require_environment()
-                detail = (
-                    f"{env.http_interface}:{env.http_port} is available"
-                    if available
-                    else f"{env.http_interface}:{env.http_port} is occupied"
-                )
-            else:
-                http_interface, http_port = runtime_context.instance_address()
-                detail = (
-                    f"{http_interface}:{http_port} is available"
-                    if available
-                    else f"{http_interface}:{http_port} is occupied (ownership unknown)"
-                )
-            if not available:
-                fail(output_mode, "run", f"port-conflict: {detail}", dry_run=dry_run)
-        command = runtime_context.instance.run_foreground_command(args=odoo_args)
+        if detach:
+            detached_command = runtime_context.instance.run_detached_command(args=odoo_args)
+        else:
+            if not dry_run:
+                available = runtime_context.check_port_free()
+                if runtime_context.is_environment:
+                    env = runtime_context.require_environment()
+                    detail = (
+                        f"{env.http_interface}:{env.http_port} is available"
+                        if available
+                        else f"{env.http_interface}:{env.http_port} is occupied"
+                    )
+                else:
+                    http_interface, http_port = runtime_context.instance_address()
+                    detail = (
+                        f"{http_interface}:{http_port} is available"
+                        if available
+                        else f"{http_interface}:{http_port} is occupied (ownership unknown)"
+                    )
+                if not available:
+                    fail(output_mode, "run", f"port-conflict: {detail}", dry_run=dry_run)
+            foreground_command = runtime_context.instance.run_foreground_command(args=odoo_args)
     except SystemExit:
         raise
     except Exception as e:
         fail(output_mode, "run", e, dry_run=dry_run)
     if not dry_run and runtime_context.is_environment:
         runtime_context.client.environments.record_use(runtime_context.require_environment())
+    if detach:
+        try:
+            status, _value = run_or_preview(
+                lambda: detached_command,
+                command_name="run",
+                mode=output_mode,
+                dry_run=dry_run,
+                result=lambda result: (
+                    model_to_dict(result) if result is not None else cast("JsonObject", {})
+                ),
+                provenance=cast("JsonObject", runtime_context.output_provenance),
+                rich=_rich_detached_status,
+            )
+        except SystemExit:
+            raise
+        except Exception as e:
+            fail(output_mode, "run", e, dry_run=dry_run)
+        if not dry_run:
+            sys.exit(status)
+        return
     try:
-        _status, value = run_or_preview(
-            lambda: command,
+        _status, exit_code = run_or_preview(
+            lambda: foreground_command,
             command_name="run",
             mode=output_mode,
             dry_run=dry_run,
             emit_normal=False,
         )
     except KeyboardInterrupt:
-        value = 130
+        exit_code = 130
     except Exception as e:
         fail(output_mode, "run", e, dry_run=dry_run)
     if not dry_run:
-        sys.exit(int(value or 0))
+        sys.exit(int(exit_code or 0))
     return
+
+
+def _rich_detached_status(document: OutputDocument) -> str:
+    result = document.result
+    if not isinstance(result, dict):
+        return "Detached launch planned."
+    pid = result.get("pid")
+    endpoint = result.get("http_endpoint")
+    log_path = result.get("log_path")
+    return (
+        f"Odoo detached: pid={pid} endpoint={endpoint} log={log_path}"
+        if pid is not None
+        else "Detached launch planned."
+    )
 
 
 @cli.command(help="Read or follow retained Odoo logs.")
