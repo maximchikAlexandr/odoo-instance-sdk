@@ -78,12 +78,12 @@
 
 ## 10. Safe multi-target deletion (item 10)
 
-- [ ] 10.1 Make `backup rm` accept variadic UUIDs, reusing single-target resolvers and binding checks.
-- [ ] 10.2 Make `db rm` accept variadic database names within one resolved project cluster; preserve `--force-default` and `--force-connections` per-database checks.
-- [ ] 10.3 Make `env rm` accept variadic UUIDs/selectors with per-target repository/cluster resolution; preserve no-argument cwd semantics.
-- [ ] 10.4 Implement one planning preflight, one confirmation, sequential execution with per-target revalidation, per-target results, and non-zero exit on partial failure.
-- [ ] 10.5 Implement `--dry-run` returning one ordered aggregate plan.
-- [ ] 10.6 Add tests covering multi-target success, unknown/duplicate target abort, partial failure, single-target backward compatibility, cross-project UUIDs, cluster-scoped db names, shared vs copy environment cleanup, and machine-mode `--yes` behavior.
+- [x] 10.1 Make `backup rm` accept variadic UUIDs, reusing single-target resolvers and binding checks.
+- [x] 10.2 Make `db rm` accept variadic database names within one resolved project cluster; preserve `--force-default` and `--force-connections` per-database checks.
+- [x] 10.3 Make `env rm` accept variadic UUIDs/selectors with per-target repository/cluster resolution; preserve no-argument cwd semantics.
+- [x] 10.4 Implement one planning preflight, one confirmation, sequential execution with per-target revalidation, per-target results, and non-zero exit on partial failure.
+- [x] 10.5 Implement `--dry-run` returning one ordered aggregate plan.
+- [x] 10.6 Add tests covering multi-target success, unknown/duplicate target abort, partial failure, single-target backward compatibility, cross-project UUIDs, cluster-scoped db names, shared vs copy environment cleanup, and machine-mode `--yes` behavior.
 
 ## 11. Rich absolute-time formatting (item 11)
 
