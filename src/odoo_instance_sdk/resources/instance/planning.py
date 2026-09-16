@@ -4,13 +4,11 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, cast
 
+import odoo_instance_sdk.resources.instance as _instance_shim
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
     ProcessHandle,
-    SubprocessExecutor,
-    terminate,
-    terminate_pid,
 )
 from odoo_instance_sdk.internal.server import (
     cleanup_secret_config,
@@ -22,13 +20,17 @@ from odoo_instance_sdk.models import (
     ReadinessResult,
     StopEnvironmentResult,
 )
+from odoo_instance_sdk.resources.instance import helpers as _helpers
+
+SubprocessExecutor = _instance_shim.SubprocessExecutor
+terminate = _instance_shim.terminate
+terminate_pid = _instance_shim.terminate_pid
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
         Command,
     )
     from odoo_instance_sdk.internal.proc import RunContext
-from odoo_instance_sdk.resources.instance import helpers as _helpers
 
 globals().update(
     {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}

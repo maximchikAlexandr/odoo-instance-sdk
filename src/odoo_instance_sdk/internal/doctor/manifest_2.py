@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,6 +22,16 @@ from odoo_instance_sdk.resources.environment import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
+
+from odoo_instance_sdk.internal.doctor.manifest_1 import _DriftComponent
+
+_REMEDIATION = {
+    "python": "run odcli env sync",
+    "dependencies": "run odcli env sync",
+    "odoo_config": "recreate the environment",
+    "addons": "recreate the environment",
+    "git_provenance": "recreate the environment",
+}
 
 
 def _live_git_component(worktree: Path, base_ref: str) -> JsonValue | None:

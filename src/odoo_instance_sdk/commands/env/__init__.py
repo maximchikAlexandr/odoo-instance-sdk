@@ -25,6 +25,16 @@ for _module_name in _SUBMODULES:
             continue
         globals()[_key] = _value
 
+from odoo_instance_sdk.commands.context import resolve_environment, resolve_project_path
+from odoo_instance_sdk.commands.env.checkout import _catalog_worktree_paths
+
+__all__ = [
+    "_catalog_worktree_paths",
+    "env_group",
+    "resolve_environment",
+    "resolve_project_path",
+]
+
 
 def __getattr__(
     name: str,

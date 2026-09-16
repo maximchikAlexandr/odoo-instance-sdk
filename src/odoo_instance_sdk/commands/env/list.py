@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -13,7 +14,6 @@ from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
     resolve_environment,
-    resolve_project_path,
 )
 from odoo_instance_sdk.commands.context import (
     project_provenance as _project_provenance,
@@ -38,6 +38,12 @@ from odoo_instance_sdk.models import DevelopmentEnvironment
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
+
+
+def _resolve_project_path(ctx: CliContext) -> Path:
+    import odoo_instance_sdk.commands.env as _env_module
+
+    return _env_module.resolve_project_path(ctx)
 
 
 def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
@@ -85,7 +91,7 @@ def env_remove(
             fail(output_mode, "env.remove", str(e), dry_run=dry_run)
     else:
         try:
-            resolve_project_path(ctx)
+            _resolve_project_path(ctx)
             env_obj = client.environments.get(environment)
         except Exception as e:
             fail(output_mode, "env.remove", str(e), dry_run=dry_run)
@@ -178,7 +184,7 @@ def env_sync(
         except Exception as e:
             fail(output_mode, "env.sync", str(e), dry_run=dry_run)
     try:
-        resolve_project_path(ctx)
+        _resolve_project_path(ctx)
         command = client.environments.sync_python_command(
             environment,
             upgrade=upgrade,

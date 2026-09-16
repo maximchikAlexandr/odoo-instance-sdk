@@ -30,6 +30,9 @@ from odoo_instance_sdk.internal.postgres_compose import (
 )
 from odoo_instance_sdk.models import ClusterResourceSnapshot, PostgresClusterState
 from odoo_instance_sdk.resources.postgres.lifecycle import _DEFAULT_STOP_TIMEOUT
+from odoo_instance_sdk.resources.postgres.lifecycle import (
+    _RESOURCE_SNAPSHOT_TIMEOUT as _RESOURCE_SNAPSHOT_TIMEOUT,
+)
 from odoo_instance_sdk.storage.backup_catalog import PostgresClusterClaim
 
 if TYPE_CHECKING:

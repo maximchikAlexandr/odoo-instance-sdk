@@ -268,6 +268,7 @@ def test_snapshot_has_exact_json_content_type_and_body() -> None:
                         id="project_x",
                         name="x",
                         display_hint="x",
+                        repository_root="/tmp/x",
                         environment_count=1,
                         cluster=ClusterSnapshot(
                             mode="compose",

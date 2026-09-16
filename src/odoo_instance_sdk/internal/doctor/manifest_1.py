@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import configparser
 import os
 import shutil
@@ -202,6 +201,8 @@ def run_doctor(
     _check_catalog(report, client)
     _check_orphaned(report, client)
     _check_postgres(report, project_root)
+
+    from odoo_instance_sdk.internal.doctor.runtime import _project_environment_drift
 
     for env in envs:
         if resolved_context is None:
@@ -750,25 +751,18 @@ def _postgres_state_to_status(state: PostgresClusterState) -> str:
 def _check_environment(
     report: DoctorReport, client: OdooClient, env: DevelopmentEnvironment
 ) -> None:
+    from odoo_instance_sdk.internal.doctor import runtime as _runtime
+
     eid = str(env.id)
     ename = env.name
 
-    _check_worktree(report, env, eid, ename)
-    _check_python(report, env, eid, ename)
-    _check_dependencies(report, env, eid, ename)
-    _check_generated_config(report, env, eid, ename)
-    _check_port(report, env, eid, ename)
+    _runtime._check_worktree(report, env, eid, ename)
+    _runtime._check_python(report, env, eid, ename)
+    _runtime._check_dependencies(report, env, eid, ename)
+    _runtime._check_generated_config(report, env, eid, ename)
+    _runtime._check_port(report, env, eid, ename)
     if env.db_mode == "copy" and env.backup_id is not None:
-        _check_backup(report, client, env, eid, ename)
-
-
-_REMEDIATION = {
-    "python": "run odcli env sync",
-    "dependencies": "run odcli env sync",
-    "odoo_config": "recreate the environment",
-    "addons": "recreate the environment",
-    "git_provenance": "recreate the environment",
-}
+        _runtime._check_backup(report, client, env, eid, ename)
 
 
 def _current_drift_components(
@@ -834,6 +828,7 @@ def _current_drift_components(
         managed_config=artifact_config,
         addons=artifact_addons,
     )
+    from odoo_instance_sdk.internal.doctor.manifest_2 import _live_git_component
 
     components: dict[str, JsonValue] = {
         "python": python_component,

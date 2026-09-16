@@ -281,6 +281,8 @@ class InstanceFactory:
         else:
             config_path = _project_path(root, project.source_config, field="source_config")
         odoo_bin = _project_path(root, project.odoo_bin, field="odoo_bin")
+        from odoo_instance_sdk.resources.instance.helpers_2 import _project_runtime_binding
+
         python_bin, deferred_runtime = _project_runtime_binding(root, project, odoo_bin)
         default_cwd = (
             _project_path(root, project.runtime_cwd, field="runtime_cwd", directory=True)

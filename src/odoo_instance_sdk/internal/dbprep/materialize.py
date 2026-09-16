@@ -16,6 +16,60 @@ from odoo_instance_sdk.exceptions import (
     MasterPasswordRequiredError,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    DatabasePreparationFailureContext as DatabasePreparationFailureContext,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _CoalescedRestore as _CoalescedRestore,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _consume_action_if_planned as _consume_action_if_planned,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _load_project as _load_project,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _planned_project_identity as _planned_project_identity,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _reload_project as _reload_project,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _remote_password as _remote_password,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _RemoteRestoreSource as _RemoteRestoreSource,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _resolve_source_config as _resolve_source_config,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _target_config_path as _target_config_path,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _wait_for_preparation_lock as _wait_for_preparation_lock,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    build_selected_backup_restore_steps as build_selected_backup_restore_steps,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    canonical_project_identity as canonical_project_identity,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    generate_target_database as generate_target_database,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    resolve_runtime_binding as resolve_runtime_binding,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    resolve_test_source as resolve_test_source,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _annotate_retained_failure as _annotate_retained_failure,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _coerce_restore_source as _coerce_restore_source,
+)
 from odoo_instance_sdk.internal.locks import (
     backup_lock_path,
     exclusive_lock,

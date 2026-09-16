@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 
 import psutil
 
+import odoo_instance_sdk.resources.instance as _instance_shim
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
 )
@@ -23,8 +24,6 @@ from odoo_instance_sdk.internal.proc import (
     ProcessExecutor,
     ProcessHandle,
     ProcessResult,
-    SubprocessExecutor,
-    terminate,
     wait_foreground,
 )
 from odoo_instance_sdk.internal.process_env import (
@@ -40,17 +39,20 @@ from odoo_instance_sdk.models import (
     StartConfig,
 )
 from odoo_instance_sdk.resources.database import DatabaseResource
+from odoo_instance_sdk.resources.instance import helpers as _helpers
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
         Command,
     )
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
-from odoo_instance_sdk.resources.instance import helpers as _helpers
 
 globals().update(
     {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
 )
+
+SubprocessExecutor = _instance_shim.SubprocessExecutor
+terminate = _instance_shim.terminate
 
 
 class _IdentityMixin:

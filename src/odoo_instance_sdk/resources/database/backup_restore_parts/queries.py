@@ -39,6 +39,21 @@ from odoo_instance_sdk.models import (
     PostgresStatsResult,
     SqlExecutionResult,
 )
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _annotate_backup_failure as _annotate_backup_failure,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _normalize_source_git_branch as _normalize_source_git_branch,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _trustworthy_content_length as _trustworthy_content_length,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _verify_database_via_psql as _verify_database_via_psql,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command

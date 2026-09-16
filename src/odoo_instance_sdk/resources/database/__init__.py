@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-import importlib
-
-_SUBMODULES = ["backup_restore", "lifecycle"]
-
-for _module_name in _SUBMODULES:
-    _module = importlib.import_module(f"odoo_instance_sdk.resources.database.{_module_name}")
-    for _key, _value in _module.__dict__.items():
-        if _key.startswith("__"):
-            continue
-        globals()[_key] = _value
-
-from odoo_instance_sdk.resources.database.backup_restore_parts import DatabaseResource
-
-__all__ = ["DatabaseResource"]
+from odoo_instance_sdk.resources.database.backup_restore import *  # noqa: F403
+from odoo_instance_sdk.resources.database.backup_restore_parts import (
+    DatabaseResource as DatabaseResource,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _normalize_source_git_branch as _normalize_source_git_branch,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _stream_response_to_file as _stream_response_to_file,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _verify_database_via_psql as _verify_database_via_psql,
+)

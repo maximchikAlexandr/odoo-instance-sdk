@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import base64
 import binascii
 import hashlib
@@ -26,6 +25,48 @@ from odoo_instance_sdk.models import (
     EnvironmentState,
 )
 from odoo_instance_sdk.storage.catalog import helpers as _helpers
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _READ_ONLY_PROJECT_SCOPE as _READ_ONLY_PROJECT_SCOPE,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    BackupEnvironmentLink as BackupEnvironmentLink,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    BackupProjection as BackupProjection,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    BackupProjectionPage as BackupProjectionPage,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    BackupRestoreLink as BackupRestoreLink,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    CatalogValue as CatalogValue,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    CopyJournalStage as CopyJournalStage,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    MonitorCatalogSnapshot as MonitorCatalogSnapshot,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    PostgresClusterClaim as PostgresClusterClaim,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _row_to_backup as _row_to_backup,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _row_to_cluster_claim as _row_to_cluster_claim,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _row_to_event as _row_to_event,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _translate_sqlite_error as _translate_sqlite_error,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    normalize_db_host as normalize_db_host,
+)
 from odoo_instance_sdk.storage.catalog_migrate import (
     ensure_catalog_migrated,
 )

@@ -15,6 +15,12 @@ from odoo_instance_sdk.internal.applied_settings import (
 )
 from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
 from odoo_instance_sdk.storage.catalog import helpers as _helpers
+from odoo_instance_sdk.storage.catalog.helpers import (
+    CatalogValue as CatalogValue,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _translate_sqlite_error as _translate_sqlite_error,
+)
 
 globals().update(
     {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}

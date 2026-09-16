@@ -19,7 +19,6 @@ from odoo_instance_sdk.commands.cli_parts.registration import (
     _generated_config_needs_repair,
     _OptionState,
     _register_initialized_project,
-    _run_doctor,
     _run_shell_command,
     _RunCommand,
     _ShellCommandFailure,
@@ -79,7 +78,6 @@ from odoo_instance_sdk.models import (
     PostgresClusterState,
 )
 from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.resources.deps import verify_deps_command
 from odoo_instance_sdk.resources.testing import module_tests_command  # noqa: F401
 
 if TYPE_CHECKING:
@@ -242,8 +240,10 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     try:
+        import odoo_instance_sdk.cli as _cli_shim
+
         resolved = cli_context._ready_instance_for_doctor(ctx)
-        report = _run_doctor()(
+        report = _cli_shim._run_doctor()(
             resolved.client,
             resolved.project_root,
             resolved_context=resolved,
@@ -601,8 +601,10 @@ def deps_verify(
         )
         deferred_runtime = getattr(runtime_context.instance.config, "deferred_runtime", None)
         uv_executable = getattr(deferred_runtime, "uv_executable", "uv")
+        import odoo_instance_sdk.cli as _cli_shim
+
         status, _result = run_or_preview(
-            lambda: verify_deps_command(
+            lambda: _cli_shim.verify_deps_command(
                 recorded_python=recorded_python,
                 worktree_root=runtime_context.worktree_path(),
                 uv_executable=uv_executable,

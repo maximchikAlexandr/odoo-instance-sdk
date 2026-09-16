@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import json
 import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, Union
 
@@ -93,11 +93,13 @@ class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
     hash_lock_sha256: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
 class _PythonMode:
     mode: Literal["create", "reuse"]
     interpreter: str | None
 
 
+@dataclass(frozen=True, slots=True)
 class CopyCleanupPlan:
     """Validated COPY ownership retained for one destructive cleanup operation."""
 
@@ -147,6 +149,7 @@ def _validate_retained_removal_evidence(
             )
 
 
+@dataclass(frozen=True, slots=True)
 class _CheckoutPlan:
     """Fully resolved immutable checkout inputs; no mutation is allowed while building it."""
 
@@ -183,6 +186,7 @@ class _CheckoutPlan:
     branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None] | None = None
 
 
+@dataclass(frozen=True, slots=True)
 class _CheckoutSnapshot:
     """One resolved checkout input set shared by preview and execution."""
 
@@ -191,6 +195,7 @@ class _CheckoutSnapshot:
     execution_plan: ExecutionPlan
 
 
+@dataclass(frozen=True, slots=True)
 class _CheckoutPlanningState:
     private: _CheckoutPlan
     provenance: BackupProvenanceComparison
@@ -201,6 +206,7 @@ class _CheckoutPlanningState:
     snapshot: _CheckoutSnapshot | None = None
 
 
+@dataclass(frozen=True, slots=True)
 class _PgAdminCommandInputs:
     """Private values needed by the locked pgAdmin provisioning phase."""
 
@@ -213,6 +219,7 @@ class _PgAdminCommandInputs:
     fingerprint_inputs: PgAdminFingerprintInputs | None = None
 
 
+@dataclass(frozen=True, slots=True)
 class _PlanningOutcome:
     state: _CheckoutPlanningState | None = None
     error: _PlanningError | None = None
@@ -264,6 +271,11 @@ def _resolve_checkout_dependency_inputs(
     worktree: Path,
     hash_lock: Path | None,
 ) -> tuple[str, ...]:
+    from odoo_instance_sdk.resources.environment.helpers_2_2 import (
+        _find_odoo_requirements,
+        _rebase_requirement_paths,
+    )
+
     if hash_lock is not None:
         return ()
     dependency_paths = list(project_cfg.requirements)

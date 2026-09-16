@@ -69,6 +69,8 @@ def _instance(
     odoo_bin.write_text("")
     env_row: dict[str, object] = {
         "id": environment_id,
+        "repository_root": str(tmp_path),
+        "git_common_dir": str(tmp_path / ".git"),
         "runtime_json": json.dumps({"odoo_bin": str(odoo_bin), "runtime_cwd": str(runtime_cwd)}),
         "generated_config_path": str(config_path),
         "python_environment_path": sys.executable,

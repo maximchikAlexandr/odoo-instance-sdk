@@ -1,4 +1,3 @@
-# ruff: noqa: F821
 """The single boundary for SDK-owned child-process effects."""
 
 from __future__ import annotations
@@ -160,7 +159,9 @@ class ProcessHandle:
 
     def terminate(self) -> None:
         """Terminate this owned process through the bounded process seam."""
-        terminate(self, process_group_id=self.process_group_id)
+        from .terminate import terminate as terminate_process
+
+        terminate_process(self, process_group_id=self.process_group_id)
 
 
 def owned_handle(

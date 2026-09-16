@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 from datetime import datetime
 
 import msgspec
@@ -8,6 +7,7 @@ import msgspec
 from odoo_instance_sdk.models._literals import (
     ClusterUnavailabilityReason,
 )
+from odoo_instance_sdk.models.runtime import PidScope, RuntimeState
 
 
 class PythonEnvFootprint(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

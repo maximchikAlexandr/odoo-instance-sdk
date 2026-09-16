@@ -115,6 +115,7 @@ def _project() -> ProjectSummary:
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/tmp/comerta",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,

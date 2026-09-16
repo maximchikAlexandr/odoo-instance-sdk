@@ -598,10 +598,14 @@ def env_show(
             usage=True,
         )
     try:
+        import odoo_instance_sdk.commands.env as _env_commands
+
         monitor = _monitor_class()()
         snapshot = monitor.snapshot()
-        paths = (
-            _catalog_worktree_paths(monitor, include_removed=True) if environment is None else {}
+        paths: dict[str, str] = (
+            _env_commands._catalog_worktree_paths(monitor, include_removed=True)
+            if environment is None
+            else {}
         )
         selected = select_snapshot_environment(
             snapshot, environment, cwd=Path.cwd(), worktree_paths=paths

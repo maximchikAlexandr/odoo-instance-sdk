@@ -208,6 +208,7 @@ def test_wheel_metadata_has_strict_core_and_dashboard_dependency_contract() -> N
     provides_extra = {value.lower() for value in metadata.get_all("Provides-Extra", [])}
 
     assert core == {
+        ("alembic", ("<2", ">=1.13")),
         ("click", ("<9", ">=8.2")),
         ("expression", ("<6", ">=5")),
         ("httpx", ("<1.0", ">=0.27")),
@@ -218,6 +219,7 @@ def test_wheel_metadata_has_strict_core_and_dashboard_dependency_contract() -> N
         ("python-toon", ("==0.1.3",)),
         ("rich", ("<16", ">=15")),
         ("rich-click", ("<2", ">=1.9")),
+        ("sqlalchemy", ("<3", ">=2")),
     }
     assert dashboard == {
         ("fastapi", ("<1.0", ">=0.141")),

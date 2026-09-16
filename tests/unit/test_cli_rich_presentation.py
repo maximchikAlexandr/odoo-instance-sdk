@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from click.testing import CliRunner
@@ -15,6 +16,9 @@ from tests.unit.test_cli_env_list_grouping import (
     _healthy_cluster,
     _snapshot,
 )
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.models import ProjectSummary
 
 
 @pytest.mark.unit
@@ -133,7 +137,7 @@ def _render(snapshot: object, *, width: int, worktree_path: str) -> str:
     return console.export_text()
 
 
-def _project() -> object:
+def _project() -> ProjectSummary:
     from odoo_instance_sdk.models import ProjectSummary
 
     return ProjectSummary(

@@ -60,6 +60,7 @@ def _project(
         id=project_id,
         name="demo",
         display_hint="demo",
+        repository_root="/tmp/demo",
         environment_count=0,
         cluster=cluster,
         runtime=runtime,

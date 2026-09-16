@@ -929,6 +929,7 @@ def _matrix_snapshot_selection() -> object:
         id="project-1",
         name="demo",
         display_hint="demo",
+        repository_root="/tmp/demo",
         environment_count=1,
         cluster=cluster,
         runtime=None,
@@ -1239,6 +1240,7 @@ def _patch_leaf_external(  # noqa: C901
                     id="project-1",
                     name="demo",
                     display_hint="demo",
+                    repository_root="/tmp/demo",
                     environment_count=0,
                     cluster=None,
                     runtime=None,
@@ -3101,6 +3103,7 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                             id="project",
                             name=payload,
                             display_hint=payload,
+                            repository_root="/tmp/demo",
                             environment_count=0,
                             cluster=None,
                             runtime=None,
@@ -3904,7 +3907,10 @@ def test_public_human_callbacks_neutralize_terminal_controls(
                     provenance="explicit",
                 ),
             ),
-            patch("odoo_instance_sdk.cli._run_doctor", return_value=report),
+            patch(
+                "odoo_instance_sdk.cli._run_doctor",
+                return_value=lambda *_args, **_kwargs: report,
+            ),
         ):
             result = runner.invoke(cli, ["doctor"])
     else:

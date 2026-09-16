@@ -15,6 +15,12 @@ from odoo_instance_sdk.internal.proc.run import (
     run_captured,
     run_captured_limited,
 )
+from odoo_instance_sdk.internal.proc.run import (
+    _environment as _environment,
+)
+from odoo_instance_sdk.internal.proc.run import (
+    _run_pump as _run_pump,
+)
 from odoo_instance_sdk.internal.proc.spawn import spawn
 from odoo_instance_sdk.internal.proc.terminate import (
     is_process_alive,
