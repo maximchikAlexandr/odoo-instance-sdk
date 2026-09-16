@@ -621,6 +621,7 @@ def test_discovered_public_methods() -> None:
             "record_environment_use",
             "record_restore",
             "record_validation",
+            "relink_backup_project",
             "start_download",
             "success_download",
             "update_environment",

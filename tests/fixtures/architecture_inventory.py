@@ -70,7 +70,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("tests/unit/resources/test_database_resource.py", 637),
+        ("tests/unit/resources/test_database_resource.py", 638),
         ("tests/unit/test_monitor_cache_and_docker.py", 129),
         ("tests/unit/test_cluster_resources.py", 190),
         ("tests/unit/test_real_odoo_ci_components.py", 38),

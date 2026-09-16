@@ -351,9 +351,16 @@ def prepare_restore(  # noqa: C901
                         source.config.base_url, master_password=remote_password
                     )
                     _consume_action_if_planned("database.prepare.remote-backup")
+                    catalog_project_id = f"project_{preflight.project_id}"
+                    from odoo_instance_sdk.internal.repo_key import git_common_dir
+
+                    client.get_catalog()._register_project(
+                        catalog_project_id, root, git_common_dir(root)
+                    )
                     backup = remote.databases.backup(
                         source.config.database,
                         source_git_branch=source.branch,
+                        project_id=catalog_project_id,
                     )
                 _consume_action_if_planned("database.prepare.local-restore")
                 assert backup is not None
@@ -468,9 +475,9 @@ def prepare_download(
     password = _remote_password()
     source = resolve_test_source(initial, options)
     require_test_instance_origin_approval(source.config.base_url)
-    _, _, project_id = _dbprep_shim().canonical_project_identity(root)
+    repo_root, git_common, project_key = _dbprep_shim().canonical_project_identity(root)
     lock_context = (
-        _wait_for_preparation_lock(project_id) if wait_for_lock else preparation_lock(project_id)
+        _wait_for_preparation_lock(project_key) if wait_for_lock else preparation_lock(project_key)
     )
     _consume_action_if_planned("database.prepare.lock")
     with lock_context:
@@ -479,9 +486,12 @@ def prepare_download(
         require_test_instance_origin_approval(source.config.base_url)
         remote = client.instance(source.config.base_url, master_password=password)
         _consume_action_if_planned("database.prepare.remote-backup")
+        catalog_project_id = f"project_{project_key}"
+        client.get_catalog()._register_project(catalog_project_id, repo_root, git_common)
         backup = remote.databases.backup(
             source.config.database,
             source_git_branch=source.branch,
+            project_id=catalog_project_id,
         )
         return DatabasePreparationResult(
             mode=DatabasePreparationAction.DOWNLOAD,

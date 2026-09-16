@@ -718,6 +718,7 @@ class _QueriesMixin:
         destination: str | Path | None = None,
         timeout: float | None = None,
         source_git_branch: str | None = None,
+        project_id: str | None = None,
     ) -> Backup:
         return self.backup_command(
             database_name,
@@ -726,6 +727,7 @@ class _QueriesMixin:
             destination=destination,
             timeout=timeout,
             source_git_branch=source_git_branch,
+            project_id=project_id,
         ).run()
 
     def backup_command(
@@ -737,6 +739,7 @@ class _QueriesMixin:
         destination: str | Path | None = None,
         timeout: float | None = None,
         source_git_branch: str | None = None,
+        project_id: str | None = None,
         executor: ProcessExecutor | None = None,
     ) -> Command[Backup]:
         from odoo_instance_sdk.internal.proc import PreparedAction
@@ -751,6 +754,7 @@ class _QueriesMixin:
                 destination=destination,
                 timeout=timeout,
                 source_git_branch=source_git_branch,
+                project_id=project_id,
             ),
             executor=executor,
             mutating=True,
@@ -779,6 +783,7 @@ class _QueriesMixin:
         destination: str | Path | None,
         timeout: float | None,
         source_git_branch: str | None,
+        project_id: str | None = None,
     ) -> Backup:
         source_git_branch = _normalize_source_git_branch(source_git_branch)
         pwd = self._require_password()
@@ -797,10 +802,14 @@ class _QueriesMixin:
         part_preexisted = part_path.exists()
         published = False
         catalog = self._instance._client.get_catalog()
-        project_id = (
-            self._instance._runtime_binding.project_id
-            if self._instance._runtime_binding is not None
-            else None
+        resolved_project_id = (
+            project_id
+            if project_id is not None
+            else (
+                self._instance._runtime_binding.project_id
+                if self._instance._runtime_binding is not None
+                else None
+            )
         )
         catalog.start_download(
             backup_id=backup_id,
@@ -810,7 +819,7 @@ class _QueriesMixin:
             filestore_requested=filestore,
             path=part_path,
             source_git_branch=source_git_branch,
-            project_id=project_id,
+            project_id=resolved_project_id,
         )
 
         try:

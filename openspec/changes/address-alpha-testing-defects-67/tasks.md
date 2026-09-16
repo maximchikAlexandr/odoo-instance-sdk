@@ -70,11 +70,11 @@
 
 ## 9. Project remote-backup ownership (item 9)
 
-- [ ] 9.1 Add a CLI/workflow-level regression test that runs a project download through the same path as `odcli db refresh` and asserts a non-null canonical `backups.project_id`.
-- [ ] 9.2 Pass the canonical `project_id` into `start_download()` before HTTP transfer in all project-owned download flows.
-- [ ] 9.3 Verify the new backup is visible in `odcli backup ls` of the current project and absent from another project's list; present with `--all-projects`.
-- [ ] 9.4 Preserve generic unowned SDK backup; add an explicit safe relink/repair path for already-unowned rows.
-- [ ] 9.5 Remove the test dependency on manual `_RuntimeBinding` injection; exercise the real preparation call chain.
+- [x] 9.1 Add a CLI/workflow-level regression test that runs a project download through the same path as `odcli db refresh` and asserts a non-null canonical `backups.project_id`.
+- [x] 9.2 Pass the canonical `project_id` into `start_download()` before HTTP transfer in all project-owned download flows.
+- [x] 9.3 Verify the new backup is visible in `odcli backup ls` of the current project and absent from another project's list; present with `--all-projects`.
+- [x] 9.4 Preserve generic unowned SDK backup; add an explicit safe relink/repair path for already-unowned rows.
+- [x] 9.5 Remove the test dependency on manual `_RuntimeBinding` injection; exercise the real preparation call chain.
 
 ## 10. Safe multi-target deletion (item 10)
 

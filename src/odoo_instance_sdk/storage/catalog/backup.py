@@ -513,6 +513,37 @@ class _BackupMixin:
         self._conn.commit()
 
     @_translate_sqlite_error
+    def relink_backup_project(self, backup_id: str, project_id: str) -> None:
+        """Relink an already-unowned backup row to a resolved canonical project.
+
+        The UUID, file, and history remain unchanged; only ``project_id`` is
+        set.  The target project MUST already be registered.  Automatic
+        ambiguous backfill is not performed; callers resolve the owner
+        explicitly before invoking this repair path.
+        """
+        canonical_id = self._canonical_backup_id(backup_id)
+        project = self._cluster_text(project_id, "project_id")
+        row = self._conn.execute(
+            "SELECT project_id FROM backups WHERE id = ?", (canonical_id,)
+        ).fetchone()
+        if row is None:
+            raise BackupNotFoundError(f"Backup {canonical_id} not found in catalog")
+        if row["project_id"] is not None:
+            raise BackupCatalogError(
+                f"Backup {canonical_id} is already owned by {row['project_id']}"
+            )
+        registered = self._conn.execute(
+            "SELECT 1 FROM projects WHERE project_id = ?", (project,)
+        ).fetchone()
+        if registered is None:
+            raise BackupCatalogError(f"project {project} is not registered")
+        with self._conn:
+            self._conn.execute(
+                "UPDATE backups SET project_id = ? WHERE id = ?",
+                (project, canonical_id),
+            )
+
+    @_translate_sqlite_error
     def get_backup_history(
         self,
         source_base_url: str | None = None,
