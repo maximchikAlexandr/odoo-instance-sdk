@@ -50,6 +50,9 @@ from odoo_instance_sdk.commands.env.checkout import (
 from odoo_instance_sdk.commands.env.checkout import (
     _TicketAllocation as _TicketAllocation,
 )
+from odoo_instance_sdk.commands.env.checkout import (
+    select_snapshot_environment as select_snapshot_environment,
+)
 from odoo_instance_sdk.commands.env.deps import _monitor_class as _monitor_class
 from odoo_instance_sdk.internal.git_worktree import (
     local_branch_names as local_branch_names,
@@ -81,6 +84,7 @@ __all__ = [
     "resolve_project_path",
     "rev_parse_git_common_dir",
     "rev_parse_toplevel",
+    "select_snapshot_environment",
 ]
 
 

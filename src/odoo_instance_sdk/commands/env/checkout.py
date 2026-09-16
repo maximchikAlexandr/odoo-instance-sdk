@@ -23,7 +23,6 @@ from rich.text import Text
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
-    resolve_environment,
 )
 from odoo_instance_sdk.commands.env.deps import (
     _client_class,
@@ -612,7 +611,7 @@ def env_show(
             if environment is None
             else {}
         )
-        selected = select_snapshot_environment(
+        selected = _env_commands.select_snapshot_environment(
             snapshot, environment, cwd=Path.cwd(), worktree_paths=paths
         )
         payload = _EnvShowResult(
@@ -836,9 +835,11 @@ def env_path(
             usage=True,
         )
 
+    import odoo_instance_sdk.commands.env as _env_commands
+
     client = _client_class()(config=_client_config_class()(executable="odoo"))
     try:
-        env_obj = resolve_environment(client, environment, cwd=Path.cwd())
+        env_obj = _env_commands.resolve_environment(client, environment, cwd=Path.cwd())
         worktree_path = _validated_env_path(env_obj)
     except Exception as exc:
         fail(output_mode, "env.path", exc, dry_run=False)

@@ -1257,7 +1257,8 @@ def _patch_leaf_external(  # noqa: C901
             return snapshot
 
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot_operation
+            "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",
+            snapshot_operation,
         )
         return
 

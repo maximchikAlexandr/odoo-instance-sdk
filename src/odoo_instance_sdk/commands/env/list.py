@@ -13,7 +13,6 @@ else:
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
-    resolve_environment,
 )
 from odoo_instance_sdk.commands.context import (
     project_provenance as _project_provenance,
@@ -37,6 +36,7 @@ from odoo_instance_sdk.commands.output import (
 from odoo_instance_sdk.models import DevelopmentEnvironment
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import JsonValue
 
 
@@ -44,6 +44,17 @@ def _resolve_project_path(ctx: CliContext) -> Path:
     import odoo_instance_sdk.commands.env as _env_module
 
     return _env_module.resolve_project_path(ctx)
+
+
+def _resolve_environment(
+    client: OdooClient,
+    selector: str | None = None,
+    *,
+    cwd: Path | None = None,
+) -> DevelopmentEnvironment:
+    import odoo_instance_sdk.commands.env as _env_module
+
+    return _env_module.resolve_environment(client, selector, cwd=cwd)
 
 
 def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
@@ -86,7 +97,7 @@ def env_remove(
                 usage=True,
             )
         try:
-            env_obj = resolve_environment(client, None)
+            env_obj = _resolve_environment(client, None)
         except Exception as e:
             fail(output_mode, "env.remove", str(e), dry_run=dry_run)
     else:
@@ -180,7 +191,7 @@ def env_sync(
                 usage=True,
             )
         try:
-            environment = str(resolve_environment(client, None).id)
+            environment = str(_resolve_environment(client, None).id)
         except Exception as e:
             fail(output_mode, "env.sync", str(e), dry_run=dry_run)
     try:
