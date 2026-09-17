@@ -5,7 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-_SUBMODULES = ["manifest_1", "manifest_2", "runtime", "manifest"]
+_SUBMODULES = ["manifest_1", "manifest_2", "runtime"]
 
 for _module_name in _SUBMODULES:
     _module = import_module(f"odoo_instance_sdk.internal.doctor.{_module_name}")

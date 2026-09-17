@@ -34,12 +34,12 @@ from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
+    ProcessResult,
     ProcessResultLike,
     RecordingExecutor,
     RunContext,
     active_context,
 )
-from odoo_instance_sdk.internal.proc.executor import ProcessResult
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,

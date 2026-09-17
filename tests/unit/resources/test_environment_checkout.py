@@ -910,7 +910,7 @@ class TestCheckoutShared:
             encoding="utf-8",
         )
 
-        from odoo_instance_sdk.internal.proc import executor as executor_module
+        from odoo_instance_sdk.internal.proc import run as executor_module
 
         original_pump = executor_module._run_pump
 

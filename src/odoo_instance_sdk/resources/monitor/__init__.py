@@ -20,7 +20,7 @@ from odoo_instance_sdk.internal.git_worktree import (
 )
 from odoo_instance_sdk.internal.postgres_compose import docker_available as docker_available
 from odoo_instance_sdk.internal.repo_key import repo_key as repo_key
-from odoo_instance_sdk.resources.monitor.collection import *  # noqa: F403
+from odoo_instance_sdk.resources.monitor.collection_parts import *  # noqa: F403
 from odoo_instance_sdk.resources.monitor.collection_parts import (
     EnvironmentMonitor as EnvironmentMonitor,
 )
@@ -33,7 +33,6 @@ from odoo_instance_sdk.resources.monitor.planning import (
 from odoo_instance_sdk.resources.monitor.planning import (
     select_snapshot_environment as select_snapshot_environment,
 )
-from odoo_instance_sdk.resources.monitor.projection import *  # noqa: F403
 
 _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
     "_PROBE_TIMEOUT_SECONDS": (

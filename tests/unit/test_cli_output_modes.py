@@ -2883,7 +2883,7 @@ def test_rich_dry_run_uses_real_command_builders(
         postgres_root.mkdir()
         (postgres_root / "compose.yaml").write_text("services: {}\n")
         monkeypatch.setattr(
-            "odoo_instance_sdk.resources.postgres._paths.get_project_postgres_dir",
+            "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
             lambda _project_id: postgres_root,
         )
         cluster = PostgresCluster(

@@ -1007,7 +1007,7 @@ class TestDepsVerify:
             )
 
         monkeypatch.setattr(
-            "odoo_instance_sdk.internal.proc.executor.SubprocessExecutor.execute", fake_execute
+            "odoo_instance_sdk.internal.proc.run.SubprocessExecutor.execute", fake_execute
         )
         result = verify_deps(recorded_python=fake_py, worktree_root=worktree, uv_executable="uv")
         assert any(

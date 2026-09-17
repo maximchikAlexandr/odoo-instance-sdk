@@ -17,7 +17,7 @@ from click.testing import CliRunner
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.execution import JsonValue
-from odoo_instance_sdk.internal.proc.executor import terminate_pid
+from odoo_instance_sdk.internal.proc import terminate_pid
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.instance.helpers_1 import _runtime_expectations

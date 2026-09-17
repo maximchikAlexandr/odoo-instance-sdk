@@ -70,7 +70,7 @@ def _stream_http(response: MagicMock) -> tuple[MagicMock, MagicMock]:
 
 
 def _patch_captured_process(monkeypatch: pytest.MonkeyPatch, fake_run: Any) -> None:
-    from odoo_instance_sdk.internal.proc.executor import _environment
+    from odoo_instance_sdk.internal.proc.run import _environment
 
     def fake_pump(step: Any, *, timeout: float | None, **_: Any) -> tuple[int, bytes, bytes, float]:
         try:
@@ -100,7 +100,7 @@ def _patch_captured_process(monkeypatch: pytest.MonkeyPatch, fake_run: Any) -> N
             0.0,
         )
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
 
 
 def _make_backup(**kw: Any) -> Backup:

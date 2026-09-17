@@ -224,7 +224,6 @@ disable_error_code = [
 module = [
   "odoo_instance_sdk.internal.database_preparation",
   "odoo_instance_sdk.internal.database_replacement",
-  "odoo_instance_sdk.internal.proc.executor",
 ]
 disable_error_code = ["attr-defined"]
 

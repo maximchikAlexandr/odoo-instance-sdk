@@ -63,8 +63,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
     "src/odoo_instance_sdk/commands/test.py": frozenset({78}),
     "src/odoo_instance_sdk/internal/doctor/__init__.py": frozenset({37}),
     "src/odoo_instance_sdk/internal/pg/__init__.py": frozenset({12}),
-    "src/odoo_instance_sdk/resources/monitor/__init__.py": frozenset({61}),
-    "src/odoo_instance_sdk/resources/postgres/__init__.py": frozenset({27}),
+    "src/odoo_instance_sdk/resources/monitor/__init__.py": frozenset({60}),
 }
 
 

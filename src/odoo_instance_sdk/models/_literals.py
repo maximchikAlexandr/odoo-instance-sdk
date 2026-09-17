@@ -26,8 +26,3 @@ type ServerUnavailabilityReason = Literal[
     "query_failed",
     "invalid_response",
 ]
-
-
-type ModuleJsonValue = (
-    None | bool | int | float | str | list["ModuleJsonValue"] | dict[str, "ModuleJsonValue"]
-)
