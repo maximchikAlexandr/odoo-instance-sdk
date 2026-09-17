@@ -61,11 +61,8 @@ def test_auxiliary_restore_session_captures_bounded_runtime_and_cleans_owned_pro
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
     )
-    monkeypatch.setattr(
-        OdooInstance,
-        "wait_ready",
-        lambda _self, _proc, *, timeout: MagicMock(ok=True),
-    )
+    wait_ready = MagicMock(return_value=MagicMock(ok=True))
+    monkeypatch.setattr(OdooInstance, "wait_ready", wait_ready)
 
     from odoo_instance_sdk.internal.proc import RunContext
 
@@ -83,7 +80,10 @@ def test_auxiliary_restore_session_captures_bounded_runtime_and_cleans_owned_pro
 
     assert session.start_step.long_running is True
     assert session.start_step.inherit_stdio is False
+    assert "--database=__odcli_restore__" not in session.start_step.argv
+    assert "--db-filter=^$" not in session.start_step.argv
     assert executor.spawned == [session.start_step]
+    assert wait_ready.call_args.kwargs == {"timeout": 60.0, "database_manager": True}
     cast("Any", instance._client.register_process).assert_called_once()
     cast("Any", instance._client.unregister_process).assert_called_once()
 
@@ -261,7 +261,11 @@ def test_stopped_manager_is_started_before_first_database_request(
         "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
     )
     monkeypatch.setattr(
-        OdooInstance, "wait_ready", lambda _self, _proc, *, timeout: MagicMock(ok=True)
+        OdooInstance,
+        "wait_ready",
+        lambda _self, _proc, *, timeout, version_info=False, database_manager=False: MagicMock(
+            ok=True
+        ),
     )
 
     class FakeResponse:
@@ -373,7 +377,11 @@ def test_cleanup_removes_secret_when_owned_termination_fails(
         "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
     )
     monkeypatch.setattr(
-        OdooInstance, "wait_ready", lambda _self, _proc, *, timeout: MagicMock(ok=True)
+        OdooInstance,
+        "wait_ready",
+        lambda _self, _proc, *, timeout, version_info=False, database_manager=False: MagicMock(
+            ok=True
+        ),
     )
     cleanup = MagicMock()
     monkeypatch.setattr("odoo_instance_sdk.resources.instance.cleanup_secret_config", cleanup)

@@ -1490,6 +1490,30 @@ class TestRestore:
         assert timeout.connect == client.config.backup_timeout_seconds
         assert timeout.read == client.config.backup_timeout_seconds
 
+    def test_http_failure_is_accepted_when_postgres_confirms_restore(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        backup_path = tmp_path / "test.zip"
+        backup_path.write_text("fake content")
+        backup = _make_backup(path=str(backup_path))
+        instance = _make_instance_with_cluster_key(client)
+        http_cm = _mock_http({})
+        http_cm.__enter__.return_value.post.side_effect = httpx.ConnectError("connection closed")
+
+        with (
+            patch.object(instance, "_client") as mock_client,
+            patch("httpx.Client", return_value=http_cm),
+            patch(
+                "odoo_instance_sdk.resources.database.DatabaseResource.exists",
+                side_effect=[False, True],
+            ),
+        ):
+            mock_client.config = client.config
+            mock_client.get_catalog.return_value = MagicMock()
+            result = instance.databases.restore(backup, "newdb")
+
+        assert result.new_db == "newdb"
+
     def test_http_failure_does_not_retain_request_or_backup_graph(
         self, client: OdooClient, tmp_path: Path
     ) -> None:

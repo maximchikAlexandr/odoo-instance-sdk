@@ -26,12 +26,10 @@ import msgspec
 from odoo_instance_sdk.exceptions import (
     ConfigError,
     DatabaseAlreadyExistsError,
-    DatabaseManagerUnavailableError,
     EnvironmentConflictError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
 )
-from odoo_instance_sdk.internal.backup_validation import _MAX_ZIP_ENTRY_BYTES
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.generated_config import project_generated_config_path
 from odoo_instance_sdk.internal.git_worktree import (
@@ -514,7 +512,7 @@ def materialize_selected_backup_dump(payload: SelectedBackupRestorePayload) -> N
             copied = 0
             while chunk := source.read(1024 * 1024):
                 copied += len(chunk)
-                if copied > dump_size or copied > _MAX_ZIP_ENTRY_BYTES:
+                if copied > dump_size:
                     raise ConfigError("selected backup dump exceeds its validated limit")  # noqa: TRY301
                 target.write(chunk)
             if copied != dump_size:
@@ -564,11 +562,7 @@ def materialize_selected_backup_filestore(  # noqa: C901
                     while chunk := source.read(1024 * 1024):
                         copied += len(chunk)
                         copied_total += len(chunk)
-                        if (
-                            copied > expected_size
-                            or copied > _MAX_ZIP_ENTRY_BYTES
-                            or copied_total > payload.zip_uncompressed_bytes
-                        ):
+                        if copied > expected_size or copied_total > payload.zip_uncompressed_bytes:
                             raise ConfigError(  # noqa: TRY301
                                 "selected backup filestore exceeds its validated limit"
                             )
@@ -1223,8 +1217,6 @@ def _restore_preflight(  # noqa: C901
         # the exact active cluster and data root into the local instance so a
         # later public ``db.drop`` can validate the same ownership evidence.
         local._postgres_cluster = cluster
-        if not local.databases.names():
-            raise DatabaseManagerUnavailableError("local database manager returned no databases")
         if target_database is None:
             source_database = (
                 source.config.database

@@ -11,8 +11,6 @@ from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
 
 _REQUIRED_ROOT_MEMBERS = {"manifest.json", "dump.sql"}
 _MAX_ZIP_ENTRIES = 4096
-_MAX_ZIP_ENTRY_BYTES = 512 * 1024 * 1024
-_MAX_ZIP_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_ZIP_COMPRESSION_RATIO = 100
 _MAX_ZIP_DIAGNOSTICS = 32
 _MAX_MANIFEST_BYTES = 64 * 1024
@@ -68,17 +66,12 @@ def validate_zip(path: Path) -> ZipValidationResult:  # noqa: C901
                     add_error(f"Encrypted ZIP member: {info.filename}")
                 if info.compress_type not in _SUPPORTED_ZIP_COMPRESSION:
                     add_error(f"Unsupported ZIP compression: {info.filename}")
-                if info.file_size > _MAX_ZIP_ENTRY_BYTES:
-                    add_error(f"ZIP member is too large: {info.filename}")
                 if info.file_size and (
                     info.compress_size == 0
                     or info.file_size > info.compress_size * _MAX_ZIP_COMPRESSION_RATIO
                 ):
                     add_error(f"ZIP member compression ratio is unsafe: {info.filename}")
                 uncompressed_bytes += info.file_size
-                if uncompressed_bytes > _MAX_ZIP_TOTAL_BYTES:
-                    add_error("ZIP uncompressed size is too large")
-                    break
                 entry_sizes.append((info.filename, info.file_size))
             try:
                 free_bytes = shutil.disk_usage(path.parent).free
@@ -110,7 +103,11 @@ def validate_zip(path: Path) -> ZipValidationResult:  # noqa: C901
                         manifest = json.loads(manifest_bytes)
                         if isinstance(manifest, dict):
                             db_name = manifest.get("db_name")
-                            db_version = manifest.get("db_version")
+                            db_version = (
+                                manifest.get("db_version")
+                                or manifest.get("major_version")
+                                or manifest.get("version")
+                            )
                         else:
                             add_error("manifest.json is not a JSON object")
                 except json.JSONDecodeError as e:

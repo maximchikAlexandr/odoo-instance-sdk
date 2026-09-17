@@ -1349,6 +1349,18 @@ class DatabaseResource:
                 f"Database {target_database_name!r} already exists on {self.base_url}"
             )
 
+        from odoo_instance_sdk.internal.proc import active_context
+        from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
+
+        auxiliary_session = active_auxiliary_restore_session()
+        if auxiliary_session is not None:
+            context = active_context()
+            if context is None:
+                raise DatabaseManagerUnavailableError(
+                    "auxiliary database manager has no active execution context"
+                )
+            auxiliary_session.ensure_started(context)
+
         http_failure: tuple[int, str] | tuple[None, str] | None = None
         try:
             restore_timeout = (
@@ -1381,11 +1393,12 @@ class DatabaseResource:
         except httpx.HTTPError:
             http_failure = (None, "Database restore request failed")
 
-        if http_failure is not None:
-            status_code, message = http_failure
-            raise DatabaseError(status_code=status_code or 0, message=message, body=b"") from None
-
         if not skip_existence_checks and not target_exists(after_step_id):
+            if http_failure is not None:
+                status_code, message = http_failure
+                raise DatabaseError(
+                    status_code=status_code or 0, message=message, body=b""
+                ) from None
             raise RestoreFailedError(
                 f"Database {target_database_name!r} was not created after restore"
             )

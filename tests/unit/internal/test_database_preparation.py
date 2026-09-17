@@ -356,9 +356,7 @@ def test_selected_odoo_zip_rejects_manifest_database_mismatch(tmp_path: Path) ->
         capture_selected_backup_restore(backup)
 
 
-def test_validate_zip_rejects_duplicate_members_and_policy_limits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_validate_zip_rejects_duplicate_members(tmp_path: Path) -> None:
     from odoo_instance_sdk.internal import backup_validation
 
     archive_path = tmp_path / "duplicate.zip"
@@ -372,11 +370,6 @@ def test_validate_zip_rejects_duplicate_members_and_policy_limits(
     duplicate = backup_validation.validate_zip(archive_path)
     assert not duplicate.valid
     assert any("Duplicate ZIP member" in error for error in duplicate.errors)
-
-    monkeypatch.setattr(backup_validation, "_MAX_ZIP_ENTRY_BYTES", 1)
-    limited = backup_validation.validate_zip(archive_path)
-    assert not limited.valid
-    assert any("too large" in error for error in limited.errors)
 
 
 def test_validate_zip_counts_duplicate_central_directory_entries(
@@ -419,24 +412,6 @@ def test_validate_zip_bounds_policy_diagnostics(
     assert len(result.errors) == backup_validation._MAX_ZIP_DIAGNOSTICS
 
 
-def test_validate_zip_rejects_aggregate_uncompressed_size_independently(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from odoo_instance_sdk.internal import backup_validation
-
-    archive_path = tmp_path / "aggregate-size.zip"
-    with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.writestr("manifest.json", '{"db_name":"remote_test"}')
-        archive.writestr("dump.sql", "select 1;\n")
-    monkeypatch.setattr(backup_validation, "_MAX_ZIP_TOTAL_BYTES", 1)
-
-    result = backup_validation.validate_zip(archive_path)
-
-    assert not result.valid
-    assert any("uncompressed size is too large" in error for error in result.errors)
-    assert not any("too many members" in error for error in result.errors)
-
-
 def test_validate_zip_rejects_compression_ratio_independently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -452,7 +427,6 @@ def test_validate_zip_rejects_compression_ratio_independently(
 
     assert not result.valid
     assert any("compression ratio is unsafe" in error for error in result.errors)
-    assert not any("uncompressed size is too large" in error for error in result.errors)
 
 
 def test_validate_zip_rejects_oversized_manifest_before_json_decode(
@@ -1426,15 +1400,10 @@ def test_restore_preflight_orders_lock_cluster_manager_and_target_check(
     cluster.ensure_running.side_effect = ensure_cluster
     local = MagicMock()
 
-    def list_names() -> tuple[str, ...]:
-        events.append("names")
-        return ("source",)
-
     def database_exists(_: str) -> bool:
         events.append("exists")
         return False
 
-    local.databases.names.side_effect = list_names
     local.databases.exists.side_effect = database_exists
     client = MagicMock()
     client.instance.from_config.return_value = local
@@ -1452,7 +1421,7 @@ def test_restore_preflight_orders_lock_cluster_manager_and_target_check(
     preflight = preparation.preflight_restore(client, project)
 
     assert preflight.target_database
-    assert events == ["preparation-lock", "cluster", "names", "exists"]
+    assert events == ["preparation-lock", "cluster", "exists"]
     client.instance.assert_not_called()
     client.instance.from_config.assert_called_once()
     assert local._postgres_cluster is cluster
