@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from odoo_instance_sdk.models import (
     CheckoutClusterSummary,
@@ -36,10 +36,6 @@ from odoo_instance_sdk.models import (
     RuntimeState,
     Snapshot,
 )
-
-if TYPE_CHECKING:
-    from typing import Any  # noqa: F401
-
 
 _CHECKOUT_INVENTORY_SCHEMA_VERSION = 1
 _ENVIRONMENT_FACTS_ENTRY_POINT_GROUP = "odoo_instance_sdk.environment_facts"

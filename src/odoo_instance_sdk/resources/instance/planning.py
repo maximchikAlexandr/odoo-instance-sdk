@@ -221,7 +221,6 @@ class _PlanningMixin:
             # DEVNULL at the proc boundary if a non-logfile Odoo ever blocks.
             inherit_stdio=False,
         )
-        from odoo_instance_sdk.internal.proc import PreparedStep as _PreparedStep
 
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
         prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (*dependency_steps, step)
@@ -230,14 +229,14 @@ class _PlanningMixin:
         ) and resolved_cwd is not None:
             target = str(resolved_cwd)
             prepared_steps += (
-                _PreparedStep(
+                PreparedStep(
                     step_id="instance.foreground.git.branch",
                     argv=("git", "-C", target, "rev-parse", "--abbrev-ref", "HEAD"),
                     cwd=target,
                     timeout=10.0,
                     read_only=True,
                 ),
-                _PreparedStep(
+                PreparedStep(
                     step_id="instance.foreground.git.commit",
                     argv=("git", "-C", target, "rev-parse", "HEAD"),
                     cwd=target,

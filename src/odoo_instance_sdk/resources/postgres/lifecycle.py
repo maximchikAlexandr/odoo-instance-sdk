@@ -3,15 +3,12 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-from typing import TypeVar
 
 from odoo_instance_sdk.exceptions import (
     PostgresClusterError,
 )
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import StartConfig
-
-T = TypeVar("T")
 
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_STOP_TIMEOUT = 30.0

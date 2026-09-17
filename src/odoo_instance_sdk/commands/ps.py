@@ -152,11 +152,12 @@ def _run_ps_live(
     interval: float,
 ) -> None:
     last_renderable: Group | None = None
+    console = Console()
     with Live(None, transient=True) as live:
         while True:
             try:
                 inventory = monitor.processes(project_id=project_id)
-                last_renderable = _render_ps_rich(inventory, width=Console().width)
+                last_renderable = _render_ps_rich(inventory, width=console.width)
                 live.update(last_renderable, refresh=True)
             except KeyboardInterrupt:
                 raise
