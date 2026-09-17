@@ -1848,7 +1848,14 @@ class OdooInstance:
         self._client.get_process(proc.id)
         return get_process_status(self._client.get_handle(proc.id))
 
-    def wait_ready(self, proc: OdooProcess, *, timeout: float = 60.0) -> ReadinessResult:
+    def wait_ready(
+        self,
+        proc: OdooProcess,
+        *,
+        timeout: float = 60.0,
+        version_info: bool = False,
+        database_manager: bool = False,
+    ) -> ReadinessResult:
         self._client.get_process(proc.id)
         from odoo_instance_sdk.internal.health import poll_health
 
@@ -1860,6 +1867,8 @@ class OdooInstance:
             self.config.base_url,
             timeout=timeout,
             alive_check=alive_check,
+            version_info=version_info,
+            database_manager=database_manager,
         )
 
 
@@ -1991,7 +2000,7 @@ class AuxiliaryRestoreSession:
             self.process = process
             context.action(self.ready_action.step_id)
             try:
-                self.instance.wait_ready(process, timeout=60.0)
+                self.instance.wait_ready(process, timeout=60.0, database_manager=True)
             except BaseException as error:
                 context.fail_action(self.ready_action.step_id, error)
                 from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError

@@ -86,7 +86,11 @@ class TestRestore:
             "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
         )
         monkeypatch.setattr(
-            OdooInstance, "wait_ready", lambda _self, _proc, *, timeout: MagicMock(ok=True)
+            OdooInstance,
+            "wait_ready",
+            lambda _self, _proc, *, timeout, version_info=False, database_manager=False: MagicMock(
+                ok=True
+            ),
         )
         response = MagicMock()
         response.raise_for_status.return_value = None
@@ -194,8 +198,55 @@ class TestRestore:
         assert result.source.filestore_requested is True
         assert result.source.database_name == "testdb"
 
-    @pytest.mark.parametrize("failure", [None, "spawn", "foreign", "preflight"])
-    def test_public_stopped_restore_runs_real_coordinator_and_preserves_zip_contract(  # noqa: C901
+    def test_restore_rejects_odoo_error_page_with_http_200(
+        self,
+        instance: OdooInstance,
+        tmp_path: Path,
+        httpx_mock: HTTPXMock,
+    ) -> None:
+        backup_file = tmp_path / "test.zip"
+        backup_file.write_bytes(b"backup")
+        backup = make_backup(
+            source_base_url="http://localhost:8069",
+            database_name="testdb",
+            path=str(backup_file),
+            filename=backup_file.name,
+            size_bytes=backup_file.stat().st_size,
+        )
+        catalog = instance._client.get_catalog()
+        catalog.start_download(
+            str(backup.id),
+            backup.source_base_url,
+            backup.database_name,
+            backup.format.value,
+            backup.filestore_requested,
+            backup_file,
+        )
+        catalog.success_download(str(backup.id), backup.filename, backup.size_bytes, backup.sha256)
+        httpx_mock.add_response(
+            url="http://localhost:8069/web/database/list",
+            method="POST",
+            json={"result": []},
+        )
+        httpx_mock.add_response(
+            url="http://localhost:8069/web/database/restore",
+            method="POST",
+            status_code=200,
+            text="Database restore error",
+        )
+        httpx_mock.add_response(
+            url="http://localhost:8069/web/database/list",
+            method="POST",
+            json={"result": []},
+        )
+
+        from odoo_instance_sdk.exceptions import RestoreFailedError
+
+        with pytest.raises(RestoreFailedError, match="was not created"):
+            instance.databases.restore(backup, "testdb")
+
+    @pytest.mark.parametrize("failure", [None, "spawn", "foreign"])
+    def test_public_stopped_restore_runs_real_coordinator_and_preserves_zip_contract(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
     ) -> None:
         """The public stopped-project path must exercise coordinator postconditions."""
@@ -313,13 +364,17 @@ class TestRestore:
                 "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
             )
         monkeypatch.setattr(
-            OdooInstance, "wait_ready", lambda _self, _proc, *, timeout: MagicMock(ok=True)
+            OdooInstance,
+            "wait_ready",
+            lambda _self, _proc, *, timeout, version_info=False, database_manager=False: MagicMock(
+                ok=True
+            ),
         )
         restore = MagicMock()
         monkeypatch.setattr(DatabaseResource, "restore", restore)
         response = MagicMock()
         response.raise_for_status.return_value = None
-        response.json.return_value = {"result": [] if failure == "preflight" else ["source"]}
+        response.json.return_value = {"result": ["source"]}
 
         @contextlib.contextmanager
         def fake_http(_self: DatabaseResource, timeout: float | None = None) -> Any:
@@ -379,13 +434,8 @@ class TestRestore:
                 assert "odcli run" in result.stdout
             elif failure == "foreign":
                 assert "port-conflict" in result.stdout
-            else:
-                assert "local database manager returned no databases" in result.stdout
             restore.assert_not_called()
-            if failure == "preflight":
-                client.unregister_process.assert_called_once()
-            else:
-                client.unregister_process.assert_not_called()
+            client.unregister_process.assert_not_called()
             return
 
         assert result.exit_code == 0, result.output
