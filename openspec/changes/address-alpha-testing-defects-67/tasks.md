@@ -109,8 +109,8 @@
 
 ## 14. Compatibility, documentation, and delivery gates
 
-- [ ] 14.1 Update README/CLI documentation for `odcli ps`, `CheckoutInventory`, `run -d`, multi-target deletion, local-time formatting, Alembic, badges, and the SDK-first rule.
-- [ ] 14.2 Run focused characterization, monitor, output-parity, Live, security/redaction, FastAPI, frontend-build, and packaging tests; record skipped external prerequisites separately from regressions.
-- [ ] 14.3 Run the full `make pr` gate and `uv build`; inspect wheel/sdist contents and metadata.
-- [ ] 14.4 Review `git diff` for scoped changes, verify Conventional Commit messages, and ensure no unrelated feature work is included.
-- [ ] 14.5 Open the implementation PR from `feat/issue-67-alpha-testing-defects` with `#67` in the title/body, link GitHub issue #67, and report local `make pr`/build results.
+- [x] 14.1 Update README/CLI documentation for `odcli ps`, `CheckoutInventory`, `run -d`, multi-target deletion, local-time formatting, Alembic, badges, and the SDK-first rule.
+- [x] 14.2 Run focused characterization, monitor, output-parity, Live, security/redaction, FastAPI, frontend-build, and packaging tests; record skipped external prerequisites separately from regressions.
+- [x] 14.3 Run the full `make pr` gate and `uv build`; inspect wheel/sdist contents and metadata.
+- [x] 14.4 Review `git diff` for scoped changes, verify Conventional Commit messages, and ensure no unrelated feature work is included.
+- [x] 14.5 Open the implementation PR from `feat/issue-67-alpha-testing-defects` with `#67` in the title/body, link GitHub issue #67, and report local `make pr`/build results.
