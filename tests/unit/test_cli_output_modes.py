@@ -75,6 +75,7 @@ from odoo_instance_sdk.models import (
     PgAdminEligibilityState,
     PortObservation,
     PostgresClusterState,
+    ProcessInventory,
     ProjectSummary,
     PythonEnvFootprint,
     RuntimeMetrics,
@@ -594,6 +595,16 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         True,
         e2e_disposition="not-applicable",
         e2e_rationale="upstream remote Git publication is intentionally outside E2E",
+    ),
+    PublicLeafCase(
+        ("ps",),
+        ("ps",),
+        "bounded-read-only",
+        False,
+        variants=("rich-live",),
+        e2e_disposition="critical",
+        e2e_evidence=("E2E-CP-12",),
+        e2e_rationale="single-snapshot process/resource inventory",
     ),
 )
 
@@ -1136,6 +1147,23 @@ def _patch_leaf_external(  # noqa: C901
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot_operation
         )
+        return
+
+    if path == ("ps",):
+        ps_inventory = ProcessInventory(
+            schema_version=1,
+            generated_at=datetime(2020, 1, 1, tzinfo=UTC),
+            sample_time=datetime(2020, 1, 1, tzinfo=UTC),
+            project_id=None,
+        )
+
+        class FakePsMonitor:
+            def processes(self, project_id: str | None = None) -> ProcessInventory:
+                if failing:
+                    raise RuntimeError("isolated external operation failed")
+                return ps_inventory
+
+        monkeypatch.setattr("odoo_instance_sdk.commands.ps._monitor_class", lambda: FakePsMonitor)
         return
 
     if path[:2] == ("env", "path"):
@@ -3109,15 +3137,30 @@ def test_project_module_update_incomplete_result_is_a_failure_document(tmp_path:
 
 
 def test_env_list_toon_is_one_machine_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+
     snapshot = Snapshot(
         schema_version=3,
         generated_at=datetime.now(UTC),
         projects=(),
         environments=(),
     )
+    inventory = build_checkout_inventory(
+        snapshot,
+        git_collector=lambda _p, _r: GitActivity(
+            default_branch="main",
+            head_sha="abc",
+            short_sha="abc",
+            branch="main",
+            ahead=0,
+            behind=0,
+            diff=None,
+            state=GitActivityState.CLEAN,
+        ),
+    )
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
-        lambda self, project_id=None, *, include_removed=False: snapshot,
+        "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",
+        lambda self, project_id=None, *, include_removed=False: inventory,
     )
     result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "toon"])
     assert result.exit_code == 0, result.output
@@ -3387,15 +3430,30 @@ def test_bounded_rich_leaf_renderers_use_labelled_summaries(
 def test_env_list_format_json_emits_v1_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+
     snapshot = Snapshot(
         schema_version=3,
         generated_at=datetime.now(UTC),
         projects=(),
         environments=(),
     )
+    inventory = build_checkout_inventory(
+        snapshot,
+        git_collector=lambda _p, _r: GitActivity(
+            default_branch="main",
+            head_sha="abc",
+            short_sha="abc",
+            branch="main",
+            ahead=0,
+            behind=0,
+            diff=None,
+            state=GitActivityState.CLEAN,
+        ),
+    )
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
-        lambda self, project_id=None, *, include_removed=False: snapshot,
+        "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",
+        lambda self, project_id=None, *, include_removed=False: inventory,
     )
     result = CliRunner().invoke(cli, ["env", "ls", "--all-projects", "--format", "json"])
     assert result.exit_code == 0, result.output
@@ -3414,7 +3472,9 @@ def test_conflicting_machine_alias_is_rejected_before_snapshot(
         called = True
         raise AssertionError("conflicting mode must fail before operation")
 
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", snapshot)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory", snapshot
+    )
     result = CliRunner().invoke(cli, ["env", "ls", "--json", "--format", "toon"])
     assert result.exit_code == 2
     assert result.stdout == ""

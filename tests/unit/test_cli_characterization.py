@@ -191,6 +191,7 @@ def test_cli_tree_help_and_root_selectors_are_stable() -> None:
         "psql",
         "monitor",
         "resource",
+        "ps",
     }
     assert "--project" in result.output
     assert "--env" in result.output
@@ -499,7 +500,13 @@ def test_discovered_public_methods() -> None:
             "sync_python",
             "sync_python_command",
         ),
-        EnvironmentMonitor: ("snapshot", "snapshot_command", "watch"),
+        EnvironmentMonitor: (
+            "processes",
+            "processes_command",
+            "snapshot",
+            "snapshot_command",
+            "watch",
+        ),
         PostgresCluster: (
             "approve_image",
             "approve_image_command",

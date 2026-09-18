@@ -7,7 +7,6 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from odoo_instance_sdk.internal.server import _build_cli_args
 from odoo_instance_sdk.models import StartConfig
 
 if TYPE_CHECKING:
@@ -20,7 +19,9 @@ _MUTATING_FLAGS = {"-u", "-i", "--update", "--init", "--stop-after-init"}
 def build_launch_profile(runtime: RuntimeView) -> dict[str, JsonValue]:
     """Build one debugpy profile from the resolved owner-neutral runtime."""
     odoo_bin = _odoo_bin_from_prefix(runtime.command_prefix)
-    args = _build_profile_args(runtime.start_config, runtime.database or "")
+    args = _build_profile_args(
+        runtime.start_config, runtime.default_run_args, runtime.database or ""
+    )
 
     return {
         "name": f"Odoo {runtime.environment_name or runtime.project_id}",
@@ -41,8 +42,12 @@ def _odoo_bin_from_prefix(command_prefix: tuple[str, ...]) -> str:
     return command_prefix[-1]
 
 
-def _build_profile_args(start_cfg: StartConfig, bound_db: str) -> list[str]:
-    raw_args = _build_cli_args(start_cfg)
+def _build_profile_args(
+    start_cfg: StartConfig, default_run_args: tuple[str, ...], bound_db: str
+) -> list[str]:
+    from odoo_instance_sdk.resources.instance import resolve_runtime_argv
+
+    raw_args = resolve_runtime_argv(start_cfg, default_run_args)
     args: list[str] = []
     skip_next = False
     for tok in raw_args:

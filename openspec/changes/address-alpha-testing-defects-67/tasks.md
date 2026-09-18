@@ -1,29 +1,29 @@
 ## 1. VS Code `default_run_args` propagation (item 1)
 
-- [ ] 1.1 Add a regression test that generates a profile from a project with `default_run_args = ["--dev=qweb,xml"]` and asserts `--dev=qweb,xml` appears in `args` exactly once.
-- [ ] 1.2 Add a regression test for an empty `default_run_args` list asserting no extra arguments.
-- [ ] 1.3 Refactor `vscode generate` to reuse the same resolved runtime/argv source as `run` in project context; preserve disallowed-override validation.
-- [ ] 1.4 Verify managed-environment context behavior is unchanged; run focused tests, Ruff, and mypy.
+- [x] 1.1 Add a regression test that generates a profile from a project with `default_run_args = ["--dev=qweb,xml"]` and asserts `--dev=qweb,xml` appears in `args` exactly once.
+- [x] 1.2 Add a regression test for an empty `default_run_args` list asserting no extra arguments.
+- [x] 1.3 Refactor `vscode generate` to reuse the same resolved runtime/argv source as `run` in project context; preserve disallowed-override validation.
+- [x] 1.4 Verify managed-environment context behavior is unchanged; run focused tests, Ruff, and mypy.
 
 ## 2. `odcli ps` process/resource inventory (item 2)
 
-- [ ] 2.1 Add the frozen `ProcessInventory` typed model and its subtypes (process groups, backend groups, external contributions) in `models.py`.
-- [ ] 2.2 Implement `EnvironmentMonitor.processes_command()` and `processes()` projecting one canonical snapshot per sample.
-- [ ] 2.3 Implement PostgreSQL backend attribution bounded to `pg_stat_activity` with Linux/macOS PID-scope modelling and `shared_database` handling.
-- [ ] 2.4 Implement the bounded process-contribution contract for external sources without a plugin framework.
-- [ ] 2.5 Register `odcli ps` as a bounded structured leaf with `--all-projects`, `--watch`, `--interval`, `--format`, and `--fields`; delegate to the SDK primitive.
-- [ ] 2.6 Implement Rich rendering with shared resources, main checkout, and environment blocks; reuse the live loop pattern.
-- [ ] 2.7 Add tests covering stopped/running main checkout, multiple Odoo workers, unique/shared database, multiple PostgreSQL connections, Linux/macOS PID scope, privilege failure, stale PID, shared external process, and no double counting.
+- [x] 2.1 Add the frozen `ProcessInventory` typed model and its subtypes (process groups, backend groups, external contributions) in `models.py`.
+- [x] 2.2 Implement `EnvironmentMonitor.processes_command()` and `processes()` projecting one canonical snapshot per sample.
+- [x] 2.3 Implement PostgreSQL backend attribution bounded to `pg_stat_activity` with Linux/macOS PID-scope modelling and `shared_database` handling.
+- [x] 2.4 Implement the bounded process-contribution contract for external sources without a plugin framework.
+- [x] 2.5 Register `odcli ps` as a bounded structured leaf with `--all-projects`, `--watch`, `--interval`, `--format`, and `--fields`; delegate to the SDK primitive.
+- [x] 2.6 Implement Rich rendering with shared resources, main checkout, and environment blocks; reuse the live loop pattern.
+- [x] 2.7 Add tests covering stopped/running main checkout, multiple Odoo workers, unique/shared database, multiple PostgreSQL connections, Linux/macOS PID scope, privilege failure, stale PID, shared external process, and no double counting.
 
 ## 3. `env list` checkout inventory (item 3)
 
-- [ ] 3.1 Add the frozen `CheckoutInventory` typed model with `kind = main | environment` rows.
-- [ ] 3.2 Implement `CheckoutInventory` projection from one snapshot per sample plus Git facts of the main checkout.
-- [ ] 3.3 Refactor `odcli env list` Rich to drop `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, and detailed process/artifact columns; keep a readable `Table` on normal and compact widths.
-- [ ] 3.4 Add the main checkout as the first typed row of each project group without creating a synthetic environment.
-- [ ] 3.5 Implement the narrow environment-facts entry point (typed callable/protocol, Python entry points, deterministic order, bounded timeout, isolated errors, at most one Rich column per provider).
-- [ ] 3.6 Update `env list --watch` to use one snapshot per sample and the same table contract.
-- [ ] 3.7 Add tests covering main + environments, all-projects, stopped runtime, Git ahead/diff, no extensions, three installed providers, one failed/slow provider, stable order, and watch interruption.
+- [x] 3.1 Add the frozen `CheckoutInventory` typed model with `kind = main | environment` rows.
+- [x] 3.2 Implement `CheckoutInventory` projection from one snapshot per sample plus Git facts of the main checkout.
+- [x] 3.3 Refactor `odcli env list` Rich to drop `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, and detailed process/artifact columns; keep a readable `Table` on normal and compact widths.
+- [x] 3.4 Add the main checkout as the first typed row of each project group without creating a synthetic environment.
+- [x] 3.5 Implement the narrow environment-facts entry point (typed callable/protocol, Python entry points, deterministic order, bounded timeout, isolated errors, at most one Rich column per provider).
+- [x] 3.6 Update `env list --watch` to use one snapshot per sample and the same table contract.
+- [x] 3.7 Add tests covering main + environments, all-projects, stopped runtime, Git ahead/diff, no extensions, three installed providers, one failed/slow provider, stable order, and watch interruption.
 
 ## 4. Alembic + SQLAlchemy Core catalogue migration (item 4)
 

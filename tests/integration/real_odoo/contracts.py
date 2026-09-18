@@ -57,7 +57,7 @@ def matrix_row(case: Any) -> str:
 _MATRIX_PREFIX = "# Public CLI traceability matrix\n\n"
 CANONICAL_INVENTORY_BASE = "af9e1b3e8d127145b9488f11ec79519f9442db46"
 ORIGINAL_AUDIT_BASE = "0ff164636617c03a51277055af45cef009277368"
-CANONICAL_LEAF_COUNT = 50
+CANONICAL_LEAF_COUNT = 51
 _MATRIX_PROVENANCE = (
     "This is a reviewed projection of "
     "`tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at "

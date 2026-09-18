@@ -378,6 +378,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "PostgresBloatResult": ("odoo_instance_sdk.models", "PostgresBloatResult"),
     "PostgresServerInfo": ("odoo_instance_sdk.models", "PostgresServerInfo"),
     "PostgresStatsResult": ("odoo_instance_sdk.models", "PostgresStatsResult"),
+    "ProcessContribution": ("odoo_instance_sdk.models", "ProcessContribution"),
+    "ProcessInventory": ("odoo_instance_sdk.models", "ProcessInventory"),
     "PostgresClusterStopError": (
         "odoo_instance_sdk.exceptions",
         "PostgresClusterStopError",

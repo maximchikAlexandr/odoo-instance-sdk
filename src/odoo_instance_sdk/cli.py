@@ -55,6 +55,7 @@ from odoo_instance_sdk.commands.pg import (
 from odoo_instance_sdk.commands.pg import (
     register_database_commands,
 )
+from odoo_instance_sdk.commands.ps import ps_command
 from odoo_instance_sdk.commands.resource import (
     configure_catalog_path_provider as configure_resource_catalog_path_provider,
 )
@@ -433,6 +434,7 @@ cli.add_command(_postgres_group, name="postgres")
 register_database_commands(db_group)
 cli.add_command(_psql, name="psql")
 cli.add_command(resource_group, name="resource")
+cli.add_command(ps_command, name="ps")
 
 
 class _LazyGitGroup(click.RichGroup):  # type: ignore[misc,valid-type]
