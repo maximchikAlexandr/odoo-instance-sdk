@@ -110,13 +110,13 @@ exclude_lines = [
 show_missing = true
 
 [tool.coverage.regexs]
-cli = "odoo_instance_sdk/(cli\\.py|commands/(context|output|env)\\.py)$"
-process = "odoo_instance_sdk/(internal/server\\.py|internal/health\\.py|resources/instance\\.py)$"
-environment = "odoo_instance_sdk/(resources/environment\\.py|internal/git_worktree\\.py|internal/doctor\\.py)$"
-catalog = "odoo_instance_sdk/(resources/database\\.py|storage/backup_catalog\\.py)$"
+cli = "odoo_instance_sdk/(cli\\.py|commands/(context|output)\\.py|commands/env(?:\\.py|/))"
+process = "odoo_instance_sdk/(internal/(server|health)\\.py|resources/instance(?:\\.py|/))"
+environment = "odoo_instance_sdk/(resources/environment(?:\\.py|/)|internal/git_worktree\\.py|internal/doctor(?:\\.py|/))"
+catalog = "odoo_instance_sdk/(resources/database(?:\\.py|/)|storage/(backup_catalog\\.py|catalog/))"
 security = "odoo_instance_sdk/internal/(redact|sanitize|db_name|urls|address)\\.py$"
-postgres = "odoo_instance_sdk/(resources/postgres\\.py|internal/postgres_compose\\.py)$"
-monitor = "odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)$"
+postgres = "odoo_instance_sdk/(resources/postgres(?:\\.py|/)|internal/postgres_compose\\.py)"
+monitor = "odoo_instance_sdk/(resources/monitor(?:\\.py|/)|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)"
 developer_workflow = "odoo_instance_sdk/(resources/(git|module)\\.py|internal/storage_migration\\.py|commands/translations\\.py)$"
 
 [tool.coverage.thresholds]

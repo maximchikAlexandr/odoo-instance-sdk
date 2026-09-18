@@ -35,7 +35,6 @@ ignore = [
 "src/odoo_instance_sdk/internal/dbprep/materialize.py" = ["PLC0414"]
 "src/odoo_instance_sdk/internal/dbreplace/__init__.py" = ["PLC0414"]
 "src/odoo_instance_sdk/internal/dbreplace/validation.py" = ["PLC0414"]
-"src/odoo_instance_sdk/internal/doctor.py" = ["PLC0414"]
 "src/odoo_instance_sdk/internal/doctor/__init__.py" = ["E402", "PLC0414"]
 "src/odoo_instance_sdk/internal/doctor/manifest_1.py" = ["PLC0414"]
 "src/odoo_instance_sdk/internal/proc/executor.py" = ["PLC0414"]

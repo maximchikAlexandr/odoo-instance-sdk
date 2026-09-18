@@ -71,6 +71,33 @@ def test_developer_workflow_paths_are_covered_by_a_floor() -> None:
         assert pattern.search(path), path
 
 
+def test_split_package_zones_cover_implementation_modules() -> None:
+    root = Path(__file__).parents[2]
+    regexs, _, _ = _load_coverage_config(root)
+    expected = {
+        "cli": (
+            "odoo_instance_sdk/commands/env/list.py",
+            "odoo_instance_sdk/commands/context.py",
+        ),
+        "process": ("odoo_instance_sdk/resources/instance/planning.py",),
+        "environment": (
+            "odoo_instance_sdk/resources/environment/checkout.py",
+            "odoo_instance_sdk/internal/doctor/runtime.py",
+        ),
+        "catalog": (
+            "odoo_instance_sdk/resources/database/backup_restore_parts/backup.py",
+            "odoo_instance_sdk/storage/catalog/backup.py",
+            "odoo_instance_sdk/storage/backup_catalog.py",
+        ),
+        "postgres": ("odoo_instance_sdk/resources/postgres/lifecycle.py",),
+        "monitor": ("odoo_instance_sdk/resources/monitor/planning.py",),
+    }
+    for zone, paths in expected.items():
+        pattern = re.compile(regexs[zone])
+        for path in paths:
+            assert pattern.search(path), f"{zone} should match {path}"
+
+
 def _write_developer_workflow_project(root: Path) -> None:
     (root / "pyproject.toml").write_text(
         "[tool.coverage.regexs]\n"
