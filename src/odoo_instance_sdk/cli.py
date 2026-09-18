@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.cli_parts.registration import (
@@ -19,24 +18,13 @@ from odoo_instance_sdk.commands.cli_parts.registration import (
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.commands.cli_parts.callbacks import _rich_vscode_generate
     from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeView
     from odoo_instance_sdk.commands.output import OutputDocument
-    from odoo_instance_sdk.commands.test import resolve_module_test_selection
     from odoo_instance_sdk.execution import Command, JsonValue
-    from odoo_instance_sdk.internal.automation import (
-        TranslationExportResult,
-        eval_expression_command,
-        exec_script_command,
-        export_translations_command,
-        list_modules_command,
-    )
-    from odoo_instance_sdk.internal.doctor import run_doctor
+    from odoo_instance_sdk.internal.automation import TranslationExportResult
     from odoo_instance_sdk.internal.doctor.manifest import DoctorReport
-    from odoo_instance_sdk.internal.paths import get_catalog_path
     from odoo_instance_sdk.internal.proc import ProcessExecutor
     from odoo_instance_sdk.internal.test_selection import _TestSelection
-    from odoo_instance_sdk.internal.vscode_generate import build_launch_profile
     from odoo_instance_sdk.models import (
         CommandResult,
         DepsVerifyResult,
@@ -45,34 +33,125 @@ if TYPE_CHECKING:
         StartConfig,
     )
     from odoo_instance_sdk.project import ProjectConfig
-    from odoo_instance_sdk.project_init import init_project_command
-    from odoo_instance_sdk.resources.deps import verify_deps_command
     from odoo_instance_sdk.resources.instance import OdooInstance
-    from odoo_instance_sdk.resources.testing import module_tests_command
+
+    class _RichVscodeGenerate(Protocol):
+        def __call__(self, document: OutputDocument) -> str: ...
+
+    class _BuildLaunchProfile(Protocol):
+        def __call__(self, runtime: RuntimeView) -> dict[str, JsonValue]: ...
+
+    class _EvalExpressionCommand(Protocol):
+        def __call__(
+            self, instance: OdooInstance, expression: str, *, commit: bool = False
+        ) -> Command[CommandResult]: ...
+
+    class _ExecScriptCommand(Protocol):
+        def __call__(
+            self,
+            instance: OdooInstance,
+            script: str,
+            argv: tuple[str, ...] = (),
+            *,
+            commit: bool = False,
+        ) -> Command[CommandResult]: ...
+
+    class _ExportTranslationsCommand(Protocol):
+        def __call__(
+            self,
+            instance: OdooInstance,
+            modules: tuple[str, ...],
+            languages: tuple[str, ...],
+            *,
+            worktree_root: Path,
+        ) -> Command[list[TranslationExportResult]]: ...
+
+    class _GetCatalogPath(Protocol):
+        def __call__(self, *, ensure_exists: bool = True) -> Path: ...
+
+    class _InitProjectCommand(Protocol):
+        def __call__(
+            self,
+            project_path: Path,
+            config: ProjectConfig,
+            *,
+            postgres_allocated: bool,
+        ) -> Command[dict[str, JsonValue]]: ...
+
+    class _ListModulesCommand(Protocol):
+        def __call__(
+            self,
+            instance: OdooInstance,
+            names: tuple[str, ...] = (),
+            *,
+            state: str | None = None,
+        ) -> Command[CommandResult]: ...
+
+    class _ModuleTestsCommand(Protocol):
+        def __call__(
+            self,
+            instance: OdooInstance,
+            spec: OdooTestSpec,
+            *,
+            http_interface: str,
+            http_port: int,
+        ) -> Command[tuple[OdooTestResult, str | None]]: ...
+
+    class _ResolveModuleTestSelection(Protocol):
+        def __call__(
+            self,
+            worktree_path: str | Path,
+            start_config: StartConfig,
+            modules: tuple[str, ...],
+            test_tags: str,
+        ) -> tuple[_TestSelection, ...]: ...
+
+    class _RunDoctor(Protocol):
+        def __call__(
+            self,
+            client: OdooClient,
+            project_path: Path | None,
+            *,
+            resolved_context: ResolvedContext | None = None,
+        ) -> DoctorReport: ...
+
+    class _VerifyDepsCommand(Protocol):
+        def __call__(
+            self,
+            *,
+            recorded_python: Path | str,
+            worktree_root: Path,
+            uv_executable: str | Path = "uv",
+            executor: ProcessExecutor | None = None,
+        ) -> Command[DepsVerifyResult]: ...
 
     type _LazyExport = (
-        Callable[[OutputDocument], str]
-        | Callable[[RuntimeView], dict[str, JsonValue]]
-        | Callable[[OdooInstance, str, bool], Command[CommandResult]]
-        | Callable[[OdooInstance, str, tuple[str, ...], bool], Command[CommandResult]]
-        | Callable[
-            [OdooInstance, tuple[str, ...], tuple[str, ...], Path],
-            Command[list[TranslationExportResult]],
-        ]
-        | Callable[[], Path]
-        | Callable[[Path, ProjectConfig, bool], Command[dict[str, JsonValue]]]
-        | Callable[[OdooInstance, tuple[str, ...], str | None], Command[CommandResult]]
-        | Callable[
-            [OdooInstance, OdooTestSpec, str, int],
-            Command[tuple[OdooTestResult, str | None]],
-        ]
-        | Callable[[str | Path, StartConfig, tuple[str, ...], str], tuple[_TestSelection, ...]]
-        | Callable[[OdooClient, Path | None, ResolvedContext | None], DoctorReport]
-        | Callable[
-            [Path | str, Path, Path | str, ProcessExecutor | None],
-            Command[DepsVerifyResult],
-        ]
+        _RichVscodeGenerate
+        | _BuildLaunchProfile
+        | _EvalExpressionCommand
+        | _ExecScriptCommand
+        | _ExportTranslationsCommand
+        | _GetCatalogPath
+        | _InitProjectCommand
+        | _ListModulesCommand
+        | _ModuleTestsCommand
+        | _ResolveModuleTestSelection
+        | _RunDoctor
+        | _VerifyDepsCommand
     )
+
+    _rich_vscode_generate: _RichVscodeGenerate
+    build_launch_profile: _BuildLaunchProfile
+    eval_expression_command: _EvalExpressionCommand
+    exec_script_command: _ExecScriptCommand
+    export_translations_command: _ExportTranslationsCommand
+    get_catalog_path: _GetCatalogPath
+    init_project_command: _InitProjectCommand
+    list_modules_command: _ListModulesCommand
+    module_tests_command: _ModuleTestsCommand
+    resolve_module_test_selection: _ResolveModuleTestSelection
+    run_doctor: _RunDoctor
+    verify_deps_command: _VerifyDepsCommand
 
 
 __all__ = [
