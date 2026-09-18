@@ -843,7 +843,10 @@ def test_open_pgadmin_real_cluster_uses_one_captured_docker_ledger(  # noqa: C90
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.pgadmin_files.shutil.which", lambda _: "/bin/tool"
     )
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.docker_available",
+        lambda: True,
+    )
     monkeypatch.setattr(
         EnvironmentResource, "_configured_pgadmin_instance", lambda _self, _env: instance
     )

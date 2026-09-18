@@ -562,7 +562,9 @@ def init(
 
     if config.postgres is not None and config.postgres.mode == "compose":
         try:
-            _validate_generated_config_target(project_generated_config_path(resolved_project))
+            _validate_generated_config_target(
+                project_generated_config_path(resolved_project), project_root=resolved_project
+            )
         except InstanceConfigurationError as exc:
             fail(output_mode, "init", str(exc), dry_run=dry_run)
 

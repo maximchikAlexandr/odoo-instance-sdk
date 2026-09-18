@@ -15,8 +15,10 @@ bounded timeout, and isolated per-provider/per-row errors.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Mapping, Sequence
 from importlib.metadata import entry_points
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -238,17 +240,55 @@ def _collect_one_provider(
     *,
     timeout_seconds: float,
 ) -> Mapping[str, EnvironmentFactsSummary]:
-    """Call one provider with a bounded timeout, isolating any failure."""
-    import concurrent.futures
+    """Call one provider in a terminable process with a hard deadline."""
+    import multiprocessing
+    import time
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(provider.collect, rows)
-        try:
-            return future.result(timeout=timeout_seconds)
-        except TimeoutError:
-            return {}
-        finally:
-            future.cancel()
+    methods = multiprocessing.get_all_start_methods()
+    method = "fork" if "fork" in methods else "spawn"
+    context = multiprocessing.get_context(method)
+    received, sender = context.Pipe(duplex=False)
+    process = context.Process(  # type: ignore[attr-defined]
+        target=_collect_provider_worker,
+        args=(provider, tuple(rows), sender),
+        daemon=True,
+    )
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    try:
+        process.start()
+    except Exception:
+        return {}
+    finally:
+        sender.close()
+
+    try:
+        process.join(max(0.0, deadline - time.monotonic()))
+        if process.is_alive():
+            process.kill()
+            process.join(0.2)
+        if received.poll():
+            status, result = received.recv()
+            if status == "ok" and isinstance(result, Mapping):
+                return result
+        return {}
+    finally:
+        received.close()
+
+
+def _collect_provider_worker(
+    provider: EnvironmentFactsProvider,
+    rows: Sequence[CheckoutRow],
+    sender: Connection,
+) -> None:
+    """Run untrusted provider code outside the CLI process."""
+    try:
+        result = provider.collect(rows)
+        sender.send(("ok", result))
+    except BaseException:
+        with contextlib.suppress(Exception):
+            sender.send(("error", None))
+    finally:
+        sender.close()
 
 
 def _attach_facts(

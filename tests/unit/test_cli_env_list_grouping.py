@@ -12,7 +12,7 @@ from rich.console import Console, Group
 from rich.table import Table
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands import env as env_commands
+from odoo_instance_sdk.commands.env import checkout as env_commands
 from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
 from odoo_instance_sdk.models import (
     CheckoutInventory,
@@ -932,7 +932,7 @@ def test_env_list_watch_retains_project_selector_across_refreshes(
         lambda *_args, **_kwargs: client,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.checkout._resolve_monitor_project_id",
+        "odoo_instance_sdk.commands.env.checkout.resolve_monitor_project_id",
         lambda _ctx, all_projects: None if all_projects else "project_a",
     )
     monkeypatch.setattr("odoo_instance_sdk.commands.env.checkout.time.sleep", lambda _seconds: None)

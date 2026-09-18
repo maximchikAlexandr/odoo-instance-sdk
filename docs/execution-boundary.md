@@ -84,8 +84,10 @@ revalidation, optional target-session termination, drop, and absence-verificatio
 steps. Dry-run performs only the planning inspection and never mutates the
 cluster or catalogue. `backup rm`, `db rm`, and `env rm` additionally accept
 variadic multi-target arguments: each target is resolved and previewed
-independently, and execution aborts on the first guarded failure without
-silently skipping a target.
+independently. Planning/preflight failures abort before mutation; once
+execution starts, a guarded failure is recorded for that target and the
+remaining prepared targets continue. The aggregate result exits non-zero when
+any target fails and does not claim to roll back earlier targets.
 
 `ps` and `postgres ps` are bounded read-only leaves. Root `ps` is backed by
 the public `EnvironmentMonitor.processes_command()` SDK primitive; `postgres ps`

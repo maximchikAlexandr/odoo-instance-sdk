@@ -307,6 +307,20 @@ def test_build_checkout_inventory_three_providers_and_failed_provider() -> None:
 
 
 @pytest.mark.unit
+def test_slow_provider_is_killed_at_the_configured_deadline() -> None:
+    started = time.monotonic()
+    inventory = build_checkout_inventory(
+        _snapshot((_project(),), ()),
+        facts_providers=(_SlowProvider(),),
+        facts_timeout_seconds=0.05,
+        git_collector=lambda _path, _ref: _git(),
+    )
+
+    assert time.monotonic() - started < 1.0
+    assert inventory.rows[0].facts == ()
+
+
+@pytest.mark.unit
 def test_build_checkout_inventory_no_providers() -> None:
     project = _project()
     inventory = build_checkout_inventory(

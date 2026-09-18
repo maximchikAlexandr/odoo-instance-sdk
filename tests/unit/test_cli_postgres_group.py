@@ -224,7 +224,7 @@ def test_postgres_status_external_no_docker(
     from odoo_instance_sdk.internal.address import AddressState
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
         lambda host, port: AddressState.OCCUPIED,
     )
     runner = CliRunner()
@@ -253,7 +253,7 @@ def test_postgres_up_external_reachable(tmp_path: Path, monkeypatch: pytest.Monk
     from odoo_instance_sdk.internal.address import AddressState
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
         lambda host, port: AddressState.OCCUPIED,
     )
     runner = CliRunner()
@@ -270,7 +270,7 @@ def test_postgres_up_external_unreachable_fails(
     from odoo_instance_sdk.internal.address import AddressState
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
         lambda host, port: AddressState.FREE,
     )
     runner = CliRunner()

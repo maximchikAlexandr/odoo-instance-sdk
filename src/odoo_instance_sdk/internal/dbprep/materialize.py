@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import contextlib
-import types
+import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -66,9 +66,6 @@ from odoo_instance_sdk.internal.dbprep.source import (
     _target_config_path as _target_config_path,
 )
 from odoo_instance_sdk.internal.dbprep.source import (
-    _wait_for_preparation_lock as _wait_for_preparation_lock,
-)
-from odoo_instance_sdk.internal.dbprep.source import (
     build_selected_backup_restore_steps as build_selected_backup_restore_steps,
 )
 from odoo_instance_sdk.internal.dbprep.source import (
@@ -79,9 +76,6 @@ from odoo_instance_sdk.internal.dbprep.source import (
 )
 from odoo_instance_sdk.internal.dbprep.source import (
     generate_target_database as generate_target_database,
-)
-from odoo_instance_sdk.internal.dbprep.source import (
-    preparation_lock as preparation_lock,
 )
 from odoo_instance_sdk.internal.dbprep.source import (
     reserve_target_database as reserve_target_database,
@@ -112,12 +106,16 @@ from odoo_instance_sdk.internal.dbprep.source_binding import (
 )
 from odoo_instance_sdk.internal.locks import (
     backup_lock_path,
+    database_preparation_lock_path,
+    exclusive_lock,
+    exclusive_lock_until,
 )
 from odoo_instance_sdk.internal.odoo_config import infer_base_url, parse_odoo_config
 from odoo_instance_sdk.internal.project_env import (
     effective_project_environment,
     load_project_environment,
 )
+from odoo_instance_sdk.internal.project_manifest import write_manifest
 from odoo_instance_sdk.internal.project_runtime import (
     resolve_project_http_port,
 )
@@ -134,13 +132,6 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.project import ProjectConfig
 
-
-def _dbprep_shim() -> types.ModuleType:
-    import odoo_instance_sdk.internal.database_preparation as preparation
-
-    return preparation
-
-
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
@@ -152,6 +143,14 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.models import DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
+
+
+@contextlib.contextmanager
+def _wait_for_preparation_lock(project_id: str, *, timeout: float = 300.0) -> Iterator[None]:
+    with exclusive_lock_until(
+        database_preparation_lock_path(project_id), time.monotonic() + timeout
+    ):
+        yield
 
 
 @contextlib.contextmanager
@@ -178,9 +177,10 @@ def _restore_preflight(  # noqa: C901
     )
     if initial_source is not None:
         require_test_instance_origin_approval(initial_source.config.base_url)
-    _, _, project_id = _dbprep_shim().canonical_project_identity(root)
+    _, _, project_id = canonical_project_identity(root)
+    lock_path = database_preparation_lock_path(project_id)
     lock_context = (
-        _wait_for_preparation_lock(project_id) if wait_for_lock else preparation_lock(project_id)
+        _wait_for_preparation_lock(project_id) if wait_for_lock else exclusive_lock(lock_path)
     )
     _consume_action_if_planned("database.prepare.lock")
     with lock_context:
@@ -195,7 +195,7 @@ def _restore_preflight(  # noqa: C901
         catalogue_backup = None
         if isinstance(selected_source, _CatalogueRestoreSource):
             _consume_action_if_planned("database.prepare.catalogue-backup")
-            with _dbprep_shim().exclusive_lock(backup_lock_path(str(selected_source.backup_id))):
+            with exclusive_lock(backup_lock_path(str(selected_source.backup_id))):
                 catalogue_backup = _catalogue_backup_preflight(
                     client.get_catalog(), selected_source, current
                 )
@@ -329,7 +329,7 @@ def prepare_restore(  # noqa: C901
         else None
     )
     try:
-        preflight_context = _dbprep_shim()._restore_preflight(
+        preflight_context = _restore_preflight(
             client,
             project,
             options=options,
@@ -337,7 +337,7 @@ def prepare_restore(  # noqa: C901
             target_database=restore_inputs[0] if restore_inputs is not None else None,
         )
         if not isinstance(selected_source, _RemoteRestoreSource):
-            preflight_context = _dbprep_shim()._restore_preflight(
+            preflight_context = _restore_preflight(
                 client,
                 project,
                 options=options,
@@ -398,12 +398,12 @@ def prepare_restore(  # noqa: C901
                         target_instance.databases.reset_admin_password()
                     reset_completed = True
 
-                final_config = _dbprep_shim()._manifest_after_preparation(root, current)
+                final_config = _manifest_after_preparation(root, current)
                 switched = msgspec.structs.replace(
                     final_config, default_source_database=preflight.target_database
                 )
                 _consume_action_if_planned("database.prepare.default-switch")
-                _dbprep_shim().write_manifest(root, switched)
+                write_manifest(root, switched)
                 default_switch_confirmed = True
                 return DatabasePreparationResult(
                     mode=DatabasePreparationAction.RESTORE,
@@ -483,9 +483,10 @@ def prepare_download(
     password = _remote_password()
     source = resolve_test_source(initial, options)
     require_test_instance_origin_approval(source.config.base_url)
-    repo_root, git_common, project_key = _dbprep_shim().canonical_project_identity(root)
+    repo_root, git_common, project_key = canonical_project_identity(root)
+    lock_path = database_preparation_lock_path(project_key)
     lock_context = (
-        _wait_for_preparation_lock(project_key) if wait_for_lock else preparation_lock(project_key)
+        _wait_for_preparation_lock(project_key) if wait_for_lock else exclusive_lock(lock_path)
     )
     _consume_action_if_planned("database.prepare.lock")
     with lock_context:

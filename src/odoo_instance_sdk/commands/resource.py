@@ -260,7 +260,8 @@ def _build_resource_plan(  # noqa: C901
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.project import ProjectConfig
-    from odoo_instance_sdk.resources.postgres import PostgresCluster, _resolve_project_id
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.resources.postgres.lifecycle import _resolve_project_id
 
     catalog: BackupCatalog | None = None
     path = _catalog_path()

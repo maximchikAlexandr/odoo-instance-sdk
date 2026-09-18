@@ -1114,7 +1114,7 @@ def _patch_leaf_external(  # noqa: C901
             FakeMonitor,
         )
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env.select_snapshot_environment",
+            "odoo_instance_sdk.commands.env.checkout.select_snapshot_environment",
             fail_operation if failing else lambda *_args, **_kwargs: _matrix_snapshot_selection(),
         )
         return
@@ -1173,11 +1173,11 @@ def _patch_leaf_external(  # noqa: C901
             return checkout_command, allocation
 
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env._build_ticket_checkout_command",
+            "odoo_instance_sdk.commands.env.checkout._build_ticket_checkout_command",
             build_ticket_checkout,
         )
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env.resolve_project_path", lambda _ctx: tmp_path
+            "odoo_instance_sdk.commands.env.checkout.resolve_project_path", lambda _ctx: tmp_path
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.env.checkout.OdooClient", lambda **_kwargs: MagicMock()
@@ -1383,7 +1383,7 @@ def _patch_leaf_external(  # noqa: C901
         path_environment.worktree_path = str(worktree)
         monkeypatch.setattr("odoo_instance_sdk.client.OdooClient", lambda **_kwargs: MagicMock())
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env.resolve_environment",
+            "odoo_instance_sdk.commands.env.checkout.resolve_environment",
             fail_operation if failing else lambda *_args, **_kwargs: path_environment,
         )
         return
@@ -2087,7 +2087,7 @@ def test_public_cli_leaf_matrix_rejects_env_list_watch_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
+        "odoo_instance_sdk.commands.env.checkout.EnvironmentMonitor.snapshot",
         lambda *_args, **_kwargs: pytest.fail("watch rejection must precede collection"),
     )
     result = CliRunner().invoke(cli, ["env", "ls", "--watch", "--format", "json"])
@@ -3756,8 +3756,8 @@ def test_machine_env_remove_requires_yes_without_prompt_or_operation(
     client = MagicMock()
     client.environments.get.return_value = env
     with (
-        patch("odoo_instance_sdk.client.OdooClient", return_value=client),
-        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.commands.env.list.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.list.resolve_project_path", return_value=tmp_path),
         patch("odoo_instance_sdk.commands.env.list.click.confirm") as confirm,
     ):
         result = CliRunner().invoke(cli, ["env", "rm", "env-1", *args])
@@ -3786,8 +3786,8 @@ def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path
     client.environments.get.return_value = env
     client.environments.remove_command.return_value = _matrix_command(None)
     with (
-        patch("odoo_instance_sdk.client.OdooClient", return_value=client),
-        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.commands.env.list.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.list.resolve_project_path", return_value=tmp_path),
         patch("odoo_instance_sdk.commands.env.list.click.confirm") as confirm,
     ):
         result = CliRunner().invoke(cli, ["env", "rm", "env-1", "--yes", *args])
@@ -3813,8 +3813,8 @@ def test_rich_env_remove_retains_confirmation_prompt(tmp_path: object) -> None:
     client = MagicMock()
     client.environments.get.return_value = env
     with (
-        patch("odoo_instance_sdk.client.OdooClient", return_value=client),
-        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.commands.env.list.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.list.resolve_project_path", return_value=tmp_path),
     ):
         result = CliRunner().invoke(cli, ["env", "rm", "env-1"], input="n\n")
 
@@ -3851,8 +3851,10 @@ def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) 
     )
 
     with (
-        patch("odoo_instance_sdk.client.OdooClient", return_value=client),
-        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.commands.env.checkout.OdooClient", return_value=client),
+        patch(
+            "odoo_instance_sdk.commands.env.checkout.resolve_project_path", return_value=tmp_path
+        ),
     ):
         result = CliRunner().invoke(cli, ["env", "create", "PROJ-123"])
 
@@ -3932,8 +3934,10 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
     client.environments.checkout_command.return_value = dry_command
 
     with (
-        patch("odoo_instance_sdk.client.OdooClient", return_value=client),
-        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.commands.env.checkout.OdooClient", return_value=client),
+        patch(
+            "odoo_instance_sdk.commands.env.checkout.resolve_project_path", return_value=tmp_path
+        ),
     ):
         dry_result = CliRunner().invoke(
             cli, ["env", "create", "PROJ-123", "--dry-run", "--format", "json"]
@@ -3971,8 +3975,10 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
     client.environments.checkout_command.reset_mock()
     client.environments.checkout_command.return_value = run_command
     with (
-        patch("odoo_instance_sdk.client.OdooClient", return_value=client),
-        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.commands.env.checkout.OdooClient", return_value=client),
+        patch(
+            "odoo_instance_sdk.commands.env.checkout.resolve_project_path", return_value=tmp_path
+        ),
     ):
         run_result = CliRunner().invoke(cli, ["env", "create", "PROJ-123"])
 
@@ -4064,8 +4070,15 @@ def test_public_human_callbacks_neutralize_terminal_controls(
         else:
             client.environments.sync_python_command.return_value = _matrix_command(env)
         with (
-            patch("odoo_instance_sdk.client.OdooClient", return_value=client),
-            patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+            patch("odoo_instance_sdk.commands.env.checkout.OdooClient", return_value=client),
+            patch("odoo_instance_sdk.commands.env.list.OdooClient", return_value=client),
+            patch(
+                "odoo_instance_sdk.commands.env.checkout.resolve_project_path",
+                return_value=tmp_path,
+            ),
+            patch(
+                "odoo_instance_sdk.commands.env.list.resolve_project_path", return_value=tmp_path
+            ),
         ):
             args = {
                 "checkout": ["env", "create", "PROJ-123"],

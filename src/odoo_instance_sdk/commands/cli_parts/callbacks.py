@@ -124,7 +124,7 @@ def _handle_existing_manifest(  # noqa: C901
                     rich_print(f"Dry run — generated config needs repair: {target}")
                 return True
             try:
-                validate_generated_config_target(target)
+                validate_generated_config_target(target, project_root=resolved_project)
             except InstanceConfigurationError as exc:
                 fail(output_mode, "init", str(exc), dry_run=dry_run)
             write_project_generated_config(resolved_project, existing_cfg)

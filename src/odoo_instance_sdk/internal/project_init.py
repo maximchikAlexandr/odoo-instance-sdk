@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -73,6 +74,14 @@ def manifest_dict(
 def write_project_generated_config(project_path: Path, config: ProjectConfig) -> None:
     """Bind a Compose project config to its existing private cluster secret."""
     root = project_path.resolve()
+    destination = project_generated_config_path(root)
+    from odoo_instance_sdk.internal.proc import active_context
+
+    validate_generated_config_target(
+        destination,
+        project_root=root,
+        check_tracking=active_context() is None,
+    )
     source_path = _resolve_source_config_path(root, config.source_config)
     if config.source_config is not None and source_path is None:
         raise InstanceConfigurationError("local source config is missing")
@@ -89,7 +98,7 @@ def write_project_generated_config(project_path: Path, config: ProjectConfig) ->
     assert postgres is not None
     generate_config(
         source_path,
-        project_generated_config_path(root),
+        destination,
         repo_root=root,
         worktree=root,
         http_interface=source_start.http_interface,
@@ -102,8 +111,31 @@ def write_project_generated_config(project_path: Path, config: ProjectConfig) ->
     )
 
 
-def validate_generated_config_target(path: Path) -> None:
+def validate_generated_config_target(  # noqa: C901
+    path: Path,
+    *,
+    project_root: Path | None = None,
+    check_tracking: bool = True,
+) -> None:
     """Reject unsafe targets before any generated-config or secret write."""
+    root = (project_root or path.parent.parent).resolve()
+    expected = root / ".odcli" / "odoo.conf"
+    if path.absolute() != expected:
+        raise InstanceConfigurationError(
+            f"generated config target is outside the project-owned path: {path}"
+        )
+    relative = path.relative_to(root)
+    current = root
+    for component in relative.parts[:-1]:
+        current /= component
+        try:
+            parent = current.lstat()
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+            raise InstanceConfigurationError(
+                f"generated config parent must be a project-owned directory: {current}"
+            )
     try:
         target = path.lstat()
     except FileNotFoundError:
@@ -116,17 +148,18 @@ def validate_generated_config_target(path: Path) -> None:
         raise InstanceConfigurationError(
             f"generated config is not owned by the current user: {path}"
         )
-    from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
+    if check_tracking:
+        from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
 
-    try:
-        if is_tracked_path(path):
+        try:
+            if is_tracked_path(path):
+                raise InstanceConfigurationError(
+                    "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf"
+                )
+        except GitError as exc:
             raise InstanceConfigurationError(
-                "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf"
-            )
-    except GitError as exc:
-        raise InstanceConfigurationError(
-            "unable to verify project-owned runtime config tracking; refusing secret write"
-        ) from exc
+                "unable to verify project-owned runtime config tracking; refusing secret write"
+            ) from exc
 
 
 def generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> bool:

@@ -47,10 +47,7 @@ def _invoke(
 ) -> object:
     client = MagicMock()
     client.environments.list.return_value = environments
-    with (
-        patch("odoo_instance_sdk.commands.context.OdooClient", return_value=client),
-        patch("odoo_instance_sdk.client.OdooClient", return_value=client),
-    ):
+    with patch("odoo_instance_sdk.commands.env.checkout.OdooClient", return_value=client):
         return CliRunner().invoke(cli, args, catch_exceptions=False)
 
 

@@ -8,7 +8,6 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
-import odoo_instance_sdk.resources.postgres as _postgres_shim
 from odoo_instance_sdk.exceptions import (
     PostgresClusterError,
     PostgresClusterNotOwnedError,
@@ -16,13 +15,14 @@ from odoo_instance_sdk.exceptions import (
     PostgresImageNotTrustedError,
 )
 from odoo_instance_sdk.internal import paths as _paths
-from odoo_instance_sdk.internal.address import AddressState
+from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.postgres_compose import (
     ComposeRunner,
     SubprocessComposeRunner,
     compose_project_name,
     compose_volume_name,
     derive_state,
+    docker_available,
     ensure_password_file,
     is_oci_digest,
     render_compose_yaml,
@@ -542,7 +542,7 @@ class _BackupMixin:
             )
             steps = (action,)
         elif not self._compose_file().is_file() or (
-            self._compose_runner.requires_docker and not _postgres_shim.docker_available()
+            self._compose_runner.requires_docker and not docker_available()
         ):
             action = PreparedAction(
                 step_id="postgres.status.unavailable",
@@ -597,7 +597,7 @@ class _BackupMixin:
 
         unavailable_state = (
             PostgresClusterState.UNKNOWN
-            if self._compose_runner.requires_docker and not _postgres_shim.docker_available()
+            if self._compose_runner.requires_docker and not docker_available()
             else PostgresClusterState.STOPPED
         )
 
@@ -645,7 +645,7 @@ class _BackupMixin:
         return self._status_compose()
 
     def _status_external(self) -> PostgresClusterState:
-        state = _postgres_shim.probe_address(self._endpoint_host, self._endpoint_port)
+        state = probe_address(self._endpoint_host, self._endpoint_port)
         if state is AddressState.FREE:
             return PostgresClusterState.UNREACHABLE
         if state is AddressState.OCCUPIED:
@@ -659,7 +659,7 @@ class _BackupMixin:
         health_step_id: str | None = None,
         ps_step_id: str | None = None,
     ) -> PostgresClusterState:
-        if self._compose_runner.requires_docker and not _postgres_shim.docker_available():
+        if self._compose_runner.requires_docker and not docker_available():
             return PostgresClusterState.UNKNOWN
         compose_file = self._compose_file()
         if not compose_file.is_file():

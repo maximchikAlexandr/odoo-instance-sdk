@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 from odoo_instance_sdk.internal.project_init import (
     manifest_dict,
     register_initialized_project,
+    validate_generated_config_target,
     write_project_generated_config,
 )
 from odoo_instance_sdk.internal.project_manifest import write_manifest
@@ -25,6 +26,13 @@ def init_project_command(
 ) -> Command[dict[str, JsonValue]]:
     """Capture one immutable init command for preview and execution."""
     from odoo_instance_sdk.commands.output import action_command
+
+    if config.postgres is not None and config.postgres.mode == "compose":
+        from odoo_instance_sdk.internal.generated_config import project_generated_config_path
+
+        validate_generated_config_target(
+            project_generated_config_path(project_path), project_root=project_path.resolve()
+        )
 
     return cast(
         "Command[dict[str, JsonValue]]",

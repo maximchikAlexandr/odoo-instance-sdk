@@ -9,7 +9,7 @@ import pytest
 from odoo_instance_sdk.internal.git_activity import collect_git_activity
 from odoo_instance_sdk.internal.proc import ProcessResult
 from odoo_instance_sdk.models import GitActivityState
-from odoo_instance_sdk.resources.monitor import _recorded_git_activity
+from odoo_instance_sdk.resources.monitor.planning import _recorded_git_activity
 
 # These are deterministic local-repository integration tests, not pure unit tests.
 pytestmark = pytest.mark.integration

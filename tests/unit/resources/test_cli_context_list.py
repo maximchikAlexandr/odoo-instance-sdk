@@ -101,7 +101,9 @@ def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
     fake_python: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.remote_branch_names", lambda *_args: ())
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.remote_branch_names", lambda *_args: ()
+    )
     before = env_client.environments.list(project=project_manifest, include_removed=True)
     result = _invoke(
         CliRunner(),
@@ -299,7 +301,7 @@ def test_cwd_project_resolution_records_cwd_provenance(
     monkeypatch.chdir(project_manifest)
     empty = Snapshot(schema_version=3, generated_at=datetime.now(UTC), projects=(), environments=())
     with patch(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
+        "odoo_instance_sdk.commands.env.checkout.EnvironmentMonitor.snapshot",
         return_value=empty,
     ):
         result = _invoke(CliRunner(), env_client, ["env", "list", "--format", "json"])

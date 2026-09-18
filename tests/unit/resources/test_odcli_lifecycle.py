@@ -35,7 +35,9 @@ class TestOdcliLifecycle:
         source_config: Path,
         monkeypatch: Any,
     ) -> None:
-        monkeypatch.setattr("odoo_instance_sdk.commands.env.remote_branch_names", lambda *_args: ())
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.env.checkout.remote_branch_names", lambda *_args: ()
+        )
 
         def revalidate_ticket(*_args: object, context: Any = None, **_kwargs: object) -> None:
             if context is not None:
@@ -43,7 +45,7 @@ class TestOdcliLifecycle:
                 context.process("checkout.ticket.remote-heads")
 
         monkeypatch.setattr(
-            "odoo_instance_sdk.commands.env._revalidate_ticket_absence", revalidate_ticket
+            "odoo_instance_sdk.commands.env.checkout._revalidate_ticket_absence", revalidate_ticket
         )
         fake_odoo = fake_python.parent / "odoo-bin"
         fake_odoo.write_text("#!/bin/sh\nexit 0\n")
