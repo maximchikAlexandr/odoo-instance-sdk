@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from importlib import import_module
-from typing import TYPE_CHECKING, Protocol, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.cli_parts.registration import (
@@ -16,26 +18,61 @@ from odoo_instance_sdk.commands.cli_parts.registration import (
 )
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.commands.cli_parts.callbacks import _rich_vscode_generate
+    from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeView
+    from odoo_instance_sdk.commands.output import OutputDocument
     from odoo_instance_sdk.commands.test import resolve_module_test_selection
+    from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.automation import (
+        TranslationExportResult,
         eval_expression_command,
         exec_script_command,
         export_translations_command,
         list_modules_command,
     )
     from odoo_instance_sdk.internal.doctor import run_doctor
+    from odoo_instance_sdk.internal.doctor.manifest import DoctorReport
     from odoo_instance_sdk.internal.paths import get_catalog_path
+    from odoo_instance_sdk.internal.proc import ProcessExecutor
+    from odoo_instance_sdk.internal.test_selection import _TestSelection
     from odoo_instance_sdk.internal.vscode_generate import build_launch_profile
+    from odoo_instance_sdk.models import (
+        CommandResult,
+        DepsVerifyResult,
+        OdooTestResult,
+        OdooTestSpec,
+        StartConfig,
+    )
+    from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.project_init import init_project_command
     from odoo_instance_sdk.resources.deps import verify_deps_command
+    from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.testing import module_tests_command
 
-
-class _LazyExport(Protocol):
-    """Typed boundary for callable compatibility exports resolved on demand."""
-
-    def __call__(self, *args: str, **kwargs: str) -> str: ...
+    type _LazyExport = (
+        Callable[[OutputDocument], str]
+        | Callable[[RuntimeView], dict[str, JsonValue]]
+        | Callable[[OdooInstance, str, bool], Command[CommandResult]]
+        | Callable[[OdooInstance, str, tuple[str, ...], bool], Command[CommandResult]]
+        | Callable[
+            [OdooInstance, tuple[str, ...], tuple[str, ...], Path],
+            Command[list[TranslationExportResult]],
+        ]
+        | Callable[[], Path]
+        | Callable[[Path, ProjectConfig, bool], Command[dict[str, JsonValue]]]
+        | Callable[[OdooInstance, tuple[str, ...], str | None], Command[CommandResult]]
+        | Callable[
+            [OdooInstance, OdooTestSpec, str, int],
+            Command[tuple[OdooTestResult, str | None]],
+        ]
+        | Callable[[str | Path, StartConfig, tuple[str, ...], str], tuple[_TestSelection, ...]]
+        | Callable[[OdooClient, Path | None, ResolvedContext | None], DoctorReport]
+        | Callable[
+            [Path | str, Path, Path | str, ProcessExecutor | None],
+            Command[DepsVerifyResult],
+        ]
+    )
 
 
 __all__ = [

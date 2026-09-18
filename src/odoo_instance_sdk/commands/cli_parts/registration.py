@@ -5,7 +5,7 @@ import sys
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import click
@@ -69,10 +69,24 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
-class _ClickCallback(Protocol):
-    """The keyword-only callback contract used by registered Click leaves."""
-
-    def __call__(self, **kwargs: JsonValue) -> None: ...
+type _ClickCallback = (
+    Callable[[CliContext, bool, bool, float, str | None, bool], None]
+    | Callable[
+        [
+            CliContext,
+            str | None,
+            str | None,
+            bool,
+            bool,
+            bool,
+            str | None,
+            bool,
+            str | None,
+            bool,
+        ],
+        None,
+    ]
+)
 
 
 class _ShellCommandFailure(RuntimeError):

@@ -194,6 +194,10 @@ def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
         "odoo_instance_sdk.resources.postgres.backup_restore_parts.restore.docker_available",
         lambda: True,
     )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.cluster_resources.docker_available",
+        lambda: True,
+    )
     runner = SubprocessComposeRunner()
     cluster = PostgresCluster(
         _repository_root=tmp_path,
