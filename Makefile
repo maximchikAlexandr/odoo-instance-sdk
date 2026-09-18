@@ -15,6 +15,7 @@ help:
 lint:
 	uv run ruff format --check .
 	uv run ruff check .
+	uv run python scripts/check_alembic_catalog.py
 
 types:
 	uv run mypy --strict src/odoo_instance_sdk

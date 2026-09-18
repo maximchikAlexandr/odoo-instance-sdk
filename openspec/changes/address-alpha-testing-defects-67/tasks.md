@@ -27,13 +27,13 @@
 
 ## 4. Alembic + SQLAlchemy Core catalogue migration (item 4)
 
-- [ ] 4.1 Add `alembic` and `sqlalchemy` (Core, no ORM) to runtime dependencies; refresh the uv lock.
-- [ ] 4.2 Create the first Alembic revision that creates the full current schema, constraints, and indexes in one step.
-- [ ] 4.3 Implement clean-install application of only the first revision without running v2–v16.
-- [ ] 4.4 Back up known alpha catalogues, verify schema equivalence, and stamp the first revision.
-- [ ] 4.5 Remove the old `PRAGMA user_version` ledger, `_run_migrations()`, `_migrate_v*`, intermediate schema fixtures, and stale compatibility branches.
-- [ ] 4.6 Add a CI gate rejecting multiple Alembic heads and unverified schema-metadata divergence.
-- [ ] 4.7 Add tests covering fresh install, supported alpha-catalogue transition, repeated run, migration failure, foreign keys/indexes, and data writes after upgrade.
+- [x] 4.1 Add `alembic` and `sqlalchemy` (Core, no ORM) to runtime dependencies; refresh the uv lock.
+- [x] 4.2 Create the first Alembic revision that creates the full current schema, constraints, and indexes in one step.
+- [x] 4.3 Implement clean-install application of only the first revision without running v2–v16.
+- [x] 4.4 Back up known alpha catalogues, verify schema equivalence, and stamp the first revision.
+- [x] 4.5 Remove the old `PRAGMA user_version` ledger, `_run_migrations()`, `_migrate_v*`, intermediate schema fixtures, and stale compatibility branches.
+- [x] 4.6 Add a CI gate rejecting multiple Alembic heads and unverified schema-metadata divergence.
+- [x] 4.7 Add tests covering fresh install, supported alpha-catalogue transition, repeated run, migration failure, foreign keys/indexes, and data writes after upgrade.
 
 ## 5. Split oversized production Python files (item 5)
 
