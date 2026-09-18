@@ -11,14 +11,12 @@ if TYPE_CHECKING:
     import click
 else:
     import rich_click as click
-import odoo_instance_sdk.commands.env.list as _env_list_commands  # noqa: F401
 from odoo_instance_sdk.commands.backup import (
     backup_group,
     configure_catalog_path_provider,
 )
 from odoo_instance_sdk.commands.context import CliContext
 from odoo_instance_sdk.commands.db import db_group
-from odoo_instance_sdk.commands.env import env_group
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
@@ -38,14 +36,12 @@ from odoo_instance_sdk.commands.pg import (
 from odoo_instance_sdk.commands.pg import (
     register_database_commands,
 )
-from odoo_instance_sdk.commands.ps import ps_command
 from odoo_instance_sdk.commands.resource import (
     configure_catalog_path_provider as configure_resource_catalog_path_provider,
 )
 from odoo_instance_sdk.commands.resource import (
     resource_group,
 )
-from odoo_instance_sdk.commands.test import test_command
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     VscodeImportError,
@@ -71,6 +67,9 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+
+_ClickCallback = Callable[..., object]
 
 
 class _ShellCommandFailure(RuntimeError):
@@ -275,6 +274,101 @@ def _cluster_rich(document: OutputDocument) -> str:
     return render_cluster(document)
 
 
+class _LazyEnvGroup(click.RichGroup):  # type: ignore[misc,valid-type]
+    """Keep environment/monitor imports out of metadata-only startup."""
+
+    def __init__(self) -> None:
+        self._env_initializing = True
+        self._env_loaded = False
+        self._env_commands: MutableMapping[str, click.Command] = {}
+        super().__init__(name="env", help="Manage isolated development environments.")
+        self._env_initializing = False
+
+    @property
+    def commands(self) -> MutableMapping[str, click.Command]:
+        if self._env_initializing:
+            return self._env_commands
+        if not self._env_loaded:
+            self._env_commands = self._loaded().commands
+            self._env_loaded = True
+        return self._env_commands
+
+    @commands.setter
+    def commands(self, value: MutableMapping[str, click.Command]) -> None:
+        self._env_commands = value
+
+    @staticmethod
+    def _loaded() -> click.Group:
+        import odoo_instance_sdk.commands.env.list as _env_list_commands  # noqa: F401
+        from odoo_instance_sdk.commands.env import env_group
+
+        return env_group
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        return sorted(self.commands)
+
+    def get_command(self, ctx: click.Context, name: str) -> click.Command | None:
+        if name not in self.commands:
+            return None
+        return self.commands[name]
+
+
+class _LazyPsCommand(click.RichCommand):  # type: ignore[misc,valid-type]
+    """Load the process inventory command only when the command is selected."""
+
+    def __init__(self) -> None:
+        self._lazy_callback: _ClickCallback | None = None
+        super().__init__(
+            name="ps",
+            help="Show one read-only process and resource inventory from a single snapshot.",
+        )
+
+    @property
+    def callback(self) -> _ClickCallback | None:
+        if "odoo_instance_sdk.commands.cli_parts.callbacks" not in sys.modules:
+            return None
+        if self._lazy_callback is None:
+            self._lazy_callback = cast("_ClickCallback | None", self._loaded().callback)
+        return self._lazy_callback
+
+    @callback.setter
+    def callback(self, value: _ClickCallback | None) -> None:
+        self._lazy_callback = value
+
+    @staticmethod
+    def _loaded() -> click.Command:
+        from odoo_instance_sdk.commands.ps import ps_command
+
+        return ps_command
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        command = self._loaded()
+        self.params = command.params
+        self.callback = command.callback
+        return command.parse_args(ctx, args)
+
+    def invoke(self, ctx: click.Context) -> None:
+        self._loaded().invoke(ctx)
+
+    def get_help(self, ctx: click.Context) -> str:
+        return self._loaded().get_help(ctx)
+
+
+class _LazyTestCommand(_LazyPsCommand):
+    """Load the Odoo test command only when the command is selected."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "test"
+        self.help = "Select and run Odoo tests."
+
+    @staticmethod
+    def _loaded() -> click.Command:
+        from odoo_instance_sdk.commands.test import test_command
+
+        return test_command
+
+
 @click.rich_config(  # type: ignore[operator]
     {
         "commands_before_options": True,
@@ -319,15 +413,36 @@ def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> No
     ctx.obj = CliContext(project=project, env=env_selector)
 
 
-cli.add_command(env_group, name="env")
-cli.add_command(test_command, name="test")
+cli.add_command(_LazyEnvGroup(), name="env")
+cli.add_command(_LazyTestCommand(), name="test")
 cli.add_command(db_group, name="db")
 cli.add_command(backup_group, name="backup")
 cli.add_command(_postgres_group, name="postgres")
 register_database_commands(db_group)
 cli.add_command(_psql, name="psql")
 cli.add_command(resource_group, name="resource")
-cli.add_command(ps_command, name="ps")
+cli.add_command(_LazyPsCommand(), name="ps")
+
+_rich_command = cast("Callable[..., click.Command]", click.RichCommand)
+_rich_group = cast("Callable[..., click.Group]", click.RichGroup)
+
+for _name, _help in {
+    "stop": "Stop the selected environment's proven-owned runtime.",
+    "run": "Start resolved Odoo in the foreground or detached.",
+    "logs": "Read or follow retained Odoo logs.",
+    "shell": "Open an interactive Odoo shell.",
+    "monitor": "Start the observability monitor (FastAPI + React UI).",
+    "eval": "Evaluate a Python expression in Odoo.",
+    "exec": "Execute a Python script in Odoo.",
+}.items():
+    cli.add_command(_rich_command(name=_name, help=_help), name=_name)
+for _name, _help in {
+    "deps": "Verify Python and add-on dependencies.",
+    "vscode": "Generate VS Code launch configuration.",
+    "module": "Discover, test, and upgrade Odoo modules.",
+    "translations": "Export Odoo module translations.",
+}.items():
+    cli.add_command(_rich_group(name=_name, help=_help), name=_name)
 
 _callbacks_loaded = False
 _original_get_command = cli.get_command
@@ -343,7 +458,7 @@ def _ensure_callbacks_loaded() -> None:
 
 
 def _lazy_get_command(ctx: click.Context, name: str) -> click.Command | None:
-    if not ctx.resilient_parsing:
+    if not ctx.resilient_parsing and (ctx.parent is not None or ctx.params or ctx._protected_args):
         _ensure_callbacks_loaded()
     return cast("click.Command | None", _original_get_command(ctx, name))
 
