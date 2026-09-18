@@ -5,7 +5,7 @@ import sys
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     import click
@@ -69,7 +69,10 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
-_ClickCallback = Callable[..., object]
+class _ClickCallback(Protocol):
+    """The keyword-only callback contract used by registered Click leaves."""
+
+    def __call__(self, **kwargs: JsonValue) -> None: ...
 
 
 class _ShellCommandFailure(RuntimeError):
@@ -274,99 +277,107 @@ def _cluster_rich(document: OutputDocument) -> str:
     return render_cluster(document)
 
 
-class _LazyEnvGroup(click.RichGroup):  # type: ignore[misc,valid-type]
-    """Keep environment/monitor imports out of metadata-only startup."""
+class _LazyGroup(click.RichGroup):  # type: ignore[misc,valid-type]
+    """Load a command group only after metadata-only CLI startup."""
 
-    def __init__(self) -> None:
-        self._env_initializing = True
-        self._env_loaded = False
-        self._env_commands: MutableMapping[str, click.Command] = {}
-        super().__init__(name="env", help="Manage isolated development environments.")
-        self._env_initializing = False
+    def __init__(self, *, name: str, help: str, loader: Callable[[], click.Group]) -> None:
+        self._initializing = True
+        self._loaded_group: click.Group | None = None
+        self._loader = loader
+        self._lazy_commands: MutableMapping[str, click.Command] = {}
+        super().__init__(name=name, help=help)
+        self._initializing = False
 
     @property
     def commands(self) -> MutableMapping[str, click.Command]:
-        if self._env_initializing:
-            return self._env_commands
-        if not self._env_loaded:
-            self._env_commands = self._loaded().commands
-            self._env_loaded = True
-        return self._env_commands
+        if self._initializing:
+            return self._lazy_commands
+        if self._loaded_group is None:
+            self._loaded_group = self._loader()
+            self._lazy_commands = self._loaded_group.commands
+        return self._lazy_commands
 
     @commands.setter
     def commands(self, value: MutableMapping[str, click.Command]) -> None:
-        self._env_commands = value
-
-    @staticmethod
-    def _loaded() -> click.Group:
-        import odoo_instance_sdk.commands.env.list as _env_list_commands  # noqa: F401
-        from odoo_instance_sdk.commands.env import env_group
-
-        return env_group
+        self._lazy_commands = value
 
     def list_commands(self, ctx: click.Context) -> list[str]:
         return sorted(self.commands)
 
     def get_command(self, ctx: click.Context, name: str) -> click.Command | None:
-        if name not in self.commands:
-            return None
-        return self.commands[name]
-
-
-class _LazyPsCommand(click.RichCommand):  # type: ignore[misc,valid-type]
-    """Load the process inventory command only when the command is selected."""
-
-    def __init__(self) -> None:
-        self._lazy_callback: _ClickCallback | None = None
-        super().__init__(
-            name="ps",
-            help="Show one read-only process and resource inventory from a single snapshot.",
+        command = self.commands.get(name)
+        if command is not None:
+            return command
+        return next(
+            (
+                candidate
+                for candidate in self.commands.values()
+                if name in cast("list[str]", getattr(candidate, "aliases", []))
+            ),
+            None,
         )
+
+
+class _LazyCommand(click.RichCommand):  # type: ignore[misc,valid-type]
+    """Load a concrete command only when the command is selected."""
+
+    def __init__(self, *, name: str, help: str, loader: Callable[[], click.Command]) -> None:
+        self._lazy_callback: _ClickCallback | None = None
+        self._loader = loader
+        super().__init__(name=name, help=help)
 
     @property
     def callback(self) -> _ClickCallback | None:
         if "odoo_instance_sdk.commands.cli_parts.callbacks" not in sys.modules:
             return None
         if self._lazy_callback is None:
-            self._lazy_callback = cast("_ClickCallback | None", self._loaded().callback)
+            self._lazy_callback = cast("_ClickCallback | None", self._loader().callback)
         return self._lazy_callback
 
     @callback.setter
     def callback(self, value: _ClickCallback | None) -> None:
         self._lazy_callback = value
 
-    @staticmethod
-    def _loaded() -> click.Command:
-        from odoo_instance_sdk.commands.ps import ps_command
-
-        return ps_command
-
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        command = self._loaded()
+        command = self._loader()
         self.params = command.params
         self.callback = command.callback
         return command.parse_args(ctx, args)
 
     def invoke(self, ctx: click.Context) -> None:
-        self._loaded().invoke(ctx)
+        self._loader().invoke(ctx)
 
     def get_help(self, ctx: click.Context) -> str:
-        return self._loaded().get_help(ctx)
+        return self._loader().get_help(ctx)
 
 
-class _LazyTestCommand(_LazyPsCommand):
-    """Load the Odoo test command only when the command is selected."""
+def _load_env_group() -> click.Group:
+    import odoo_instance_sdk.commands.env.list as _env_list_commands  # noqa: F401
+    from odoo_instance_sdk.commands.env import env_group
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.name = "test"
-        self.help = "Select and run Odoo tests."
+    return env_group
 
-    @staticmethod
-    def _loaded() -> click.Command:
-        from odoo_instance_sdk.commands.test import test_command
 
-        return test_command
+def _load_git_group() -> click.Group:
+    from odoo_instance_sdk.commands.git import git_group
+
+    return git_group
+
+
+def _load_ps_command() -> click.Command:
+    from odoo_instance_sdk.commands.ps import ps_command
+
+    return ps_command
+
+
+def _load_test_command() -> click.Command:
+    from odoo_instance_sdk.commands.test import test_command
+
+    return test_command
+
+
+def _lazy_command(*, name: str, help: str, loader: Callable[[], click.Command]) -> click.Command:
+    return _LazyCommand(name=name, help=help, loader=loader)
 
 
 @click.rich_config(  # type: ignore[operator]
@@ -413,15 +424,32 @@ def cli(ctx: click.Context, project: str | None, env_selector: str | None) -> No
     ctx.obj = CliContext(project=project, env=env_selector)
 
 
-cli.add_command(_LazyEnvGroup(), name="env")
-cli.add_command(_LazyTestCommand(), name="test")
+cli.add_command(
+    _LazyGroup(
+        name="env",
+        help="Manage isolated development environments.",
+        loader=_load_env_group,
+    ),
+    name="env",
+)
+cli.add_command(
+    _lazy_command(name="test", help="Select and run Odoo tests.", loader=_load_test_command),
+    name="test",
+)
 cli.add_command(db_group, name="db")
 cli.add_command(backup_group, name="backup")
 cli.add_command(_postgres_group, name="postgres")
 register_database_commands(db_group)
 cli.add_command(_psql, name="psql")
 cli.add_command(resource_group, name="resource")
-cli.add_command(_LazyPsCommand(), name="ps")
+cli.add_command(
+    _lazy_command(
+        name="ps",
+        help="Show one read-only process and resource inventory from a single snapshot.",
+        loader=_load_ps_command,
+    ),
+    name="ps",
+)
 
 _rich_command = cast("Callable[..., click.Command]", click.RichCommand)
 _rich_group = cast("Callable[..., click.Group]", click.RichGroup)
@@ -466,43 +494,14 @@ def _lazy_get_command(ctx: click.Context, name: str) -> click.Command | None:
 cli.get_command = _lazy_get_command
 
 
-class _LazyGitGroup(click.RichGroup):  # type: ignore[misc,valid-type]
-    """Expose Git help at the root without importing the Git execution stack."""
-
-    def __init__(self) -> None:
-        self._git_initializing = True
-        self._git_loaded = False
-        self._git_commands: MutableMapping[str, click.Command] = {}
-        super().__init__(name="git", help="Generate and safely synchronize Odoo Git workflows.")
-        self._git_initializing = False
-
-    @property
-    def commands(self) -> MutableMapping[str, click.Command]:
-        if self._git_initializing:
-            return self._git_commands
-        if not self._git_loaded:
-            self._git_commands = self._loaded().commands
-            self._git_loaded = True
-        return self._git_commands
-
-    @commands.setter
-    def commands(self, value: MutableMapping[str, click.Command]) -> None:
-        self._git_commands = value
-
-    @staticmethod
-    def _loaded() -> click.Group:
-        from odoo_instance_sdk.commands.git import git_group
-
-        return git_group
-
-    def list_commands(self, ctx: click.Context) -> list[str]:
-        return self._loaded().list_commands(ctx)
-
-    def get_command(self, ctx: click.Context, name: str) -> click.Command | None:
-        return self._loaded().get_command(ctx, name)
-
-
-cli.add_command(_LazyGitGroup(), name="git")
+cli.add_command(
+    _LazyGroup(
+        name="git",
+        help="Generate and safely synchronize Odoo Git workflows.",
+        loader=_load_git_group,
+    ),
+    name="git",
+)
 
 
 def _cli_catalog_path(*, ensure_exists: bool = True) -> Path:

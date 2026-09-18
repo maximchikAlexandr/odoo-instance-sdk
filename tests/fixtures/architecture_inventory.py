@@ -63,7 +63,7 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("tests/unit/resources/test_database_resource.py", 643),
         ("tests/unit/test_monitor_cache_and_docker.py", 129),
-        ("tests/unit/test_cluster_resources.py", 189),
+        ("tests/unit/test_cluster_resources.py", 188),
         ("tests/unit/test_real_odoo_ci_components.py", 38),
         ("tests/unit/test_real_odoo_ci_components.py", 107),
         ("tests/unit/test_real_odoo_ci_components.py", 149),

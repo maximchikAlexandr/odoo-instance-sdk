@@ -126,7 +126,6 @@ def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The standard Compose adapter consumes the same IDs it exposes in preview."""
-    from odoo_instance_sdk.internal import cluster_resources as cluster_resources_module
     from odoo_instance_sdk.internal.proc import (
         PreparedProcess,
         PreparedStep,
@@ -191,7 +190,10 @@ def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
         "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda _project_id: tmp_path,
     )
-    monkeypatch.setattr(cluster_resources_module, "docker_available", lambda: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.restore.docker_available",
+        lambda: True,
+    )
     runner = SubprocessComposeRunner()
     cluster = PostgresCluster(
         _repository_root=tmp_path,

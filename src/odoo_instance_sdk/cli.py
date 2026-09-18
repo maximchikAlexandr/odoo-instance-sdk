@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from importlib import import_module
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.cli_parts.registration import (
@@ -32,6 +31,13 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.deps import verify_deps_command
     from odoo_instance_sdk.resources.testing import module_tests_command
 
+
+class _LazyExport(Protocol):
+    """Typed boundary for callable compatibility exports resolved on demand."""
+
+    def __call__(self, *args: str, **kwargs: str) -> str: ...
+
+
 __all__ = [
     "_ShellCommandFailure",
     "_rich_shell_projection",
@@ -54,29 +60,28 @@ __all__ = [
     "verify_deps_command",
 ]
 
-_LazyExport = Callable[..., object]
 
-_LAZY_EXPORTS = {
-    "_rich_vscode_generate": ("odoo_instance_sdk.commands.cli_parts.callbacks", None),
-    "build_launch_profile": ("odoo_instance_sdk.internal.vscode_generate", None),
-    "eval_expression_command": ("odoo_instance_sdk.internal.automation", None),
-    "exec_script_command": ("odoo_instance_sdk.internal.automation", None),
-    "export_translations_command": ("odoo_instance_sdk.internal.automation", None),
-    "get_catalog_path": ("odoo_instance_sdk.internal.paths", None),
-    "init_project_command": ("odoo_instance_sdk.project_init", None),
-    "list_modules_command": ("odoo_instance_sdk.internal.automation", None),
-    "module_tests_command": ("odoo_instance_sdk.resources.testing", None),
-    "resolve_module_test_selection": ("odoo_instance_sdk.commands.test", None),
-    "run_doctor": ("odoo_instance_sdk.internal.doctor", None),
-    "verify_deps_command": ("odoo_instance_sdk.resources.deps", None),
+_LAZY_EXPORTS: dict[str, str] = {
+    "_rich_vscode_generate": "odoo_instance_sdk.commands.cli_parts.callbacks",
+    "build_launch_profile": "odoo_instance_sdk.internal.vscode_generate",
+    "eval_expression_command": "odoo_instance_sdk.internal.automation",
+    "exec_script_command": "odoo_instance_sdk.internal.automation",
+    "export_translations_command": "odoo_instance_sdk.internal.automation",
+    "get_catalog_path": "odoo_instance_sdk.internal.paths",
+    "init_project_command": "odoo_instance_sdk.project_init",
+    "list_modules_command": "odoo_instance_sdk.internal.automation",
+    "module_tests_command": "odoo_instance_sdk.resources.testing",
+    "resolve_module_test_selection": "odoo_instance_sdk.commands.test",
+    "run_doctor": "odoo_instance_sdk.internal.doctor",
+    "verify_deps_command": "odoo_instance_sdk.resources.deps",
 }
 
 
 def __getattr__(name: str) -> _LazyExport:
-    spec = _LAZY_EXPORTS.get(name)
-    if spec is None:
+    module_path = _LAZY_EXPORTS.get(name)
+    if module_path is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    module = import_module(spec[0])
+    module = import_module(module_path)
     value = getattr(module, name)
     globals()[name] = value
     return cast("_LazyExport", value)
