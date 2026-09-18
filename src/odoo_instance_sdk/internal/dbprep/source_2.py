@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import contextlib
 import os
 import uuid
@@ -13,6 +12,19 @@ if TYPE_CHECKING:
 from odoo_instance_sdk.exceptions import (
     ConfigError,
     EnvironmentConflictError,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    DatabasePreparationFailureContext,
+    ProjectRuntimeBinding,
+    _CatalogueRestoreSource,
+    _RemoteRestoreSource,
+    _resolve_source_config,
+    _RestoreSource,
+    _target_config_path,
+    _write_target_config,
+    relevant_manifest_conflicts,
+    resolve_test_source,
+    retained_artifact_context,
 )
 from odoo_instance_sdk.internal.locks import (
     database_preparation_artifact_lock_path,
@@ -36,6 +48,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
+@contextlib.contextmanager
 def build_target_instance(
     client: OdooClient,
     *,

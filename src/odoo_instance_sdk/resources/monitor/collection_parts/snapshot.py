@@ -4,28 +4,22 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-import time
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-import httpx
 from msgspec.structs import replace
 
-from odoo_instance_sdk.internal.address import probe_address
+import odoo_instance_sdk.resources.monitor as _monitor_shim
 from odoo_instance_sdk.internal.cluster_resources import (
     BatchClusterRequest,
     collect_cluster_resource_batch,
 )
 from odoo_instance_sdk.internal.git_activity import (
-    _resolve_identity,
     _validated_base_ref,
-    collect_git_activity_from_identity,
 )
-from odoo_instance_sdk.internal.git_worktree import worktree_list_porcelain
 from odoo_instance_sdk.internal.postgres_compose import (
     SubprocessComposeRunner,
-    docker_available,
 )
 from odoo_instance_sdk.internal.storage_footprint import (
     DatabaseStorageInput,
@@ -80,12 +74,13 @@ class _SnapshotMixin:
                     project_runtime = self._collect_runtime(plan.project_runtime)
                 except Exception:
                     project_runtime = _stopped_runtime()
+            display_hint = plan.project_id.removeprefix("project_")
             projects.append(
                 ProjectSummary(
                     id=plan.project_id,
                     name=plan.repo_root.name,
-                    display_hint=plan.project_id.removeprefix("project_"),
-                    repository_root=str(plan.repo_root),
+                    display_hint=display_hint,
+                    repository_root=display_hint,
                     environment_count=len(plan.environments),
                     cluster=self._cluster_snapshot(plan, resources.get(plan.project_id)),
                     runtime=project_runtime,
@@ -186,7 +181,7 @@ class _SnapshotMixin:
         # A compose project name is user-configurable and can collide.  The
         # manifest root is the ownership boundary for status caching.
         name = str(cluster.compose_file.resolve())
-        now = time.monotonic()
+        now = _monitor_shim.time.monotonic()
         cached = self._cluster_status_cache.get(name)
         if cached is not None and now - cached[0] < _CLUSTER_STATUS_TTL:
             return cached[1]
@@ -234,7 +229,7 @@ class _SnapshotMixin:
         result: dict[str, ClusterResourceSnapshot] = {}
         active_ids: set[str] = set()
         pending: list[BatchClusterRequest] = []
-        now = time.monotonic()
+        now = _monitor_shim.time.monotonic()
 
         if probe_results is not None:
             for plan in plans:
@@ -278,7 +273,7 @@ class _SnapshotMixin:
                 if isinstance(cluster.compose_runner, SubprocessComposeRunner)
                 else cluster.compose_runner
             )
-            if getattr(runner, "requires_docker", True) and not docker_available():
+            if getattr(runner, "requires_docker", True) and not _monitor_shim.docker_available():
                 result[plan.project_id] = ClusterResourceSnapshot(
                     container=None,
                     metrics=None,
@@ -464,7 +459,7 @@ class _SnapshotMixin:
             try:
                 registered = any(
                     Path(entry.worktree).resolve() == worktree.resolve()
-                    for entry in worktree_list_porcelain(repository_root)
+                    for entry in _monitor_shim.worktree_list_porcelain(repository_root)
                 )
             except Exception:
                 registered = False
@@ -518,7 +513,9 @@ class _SnapshotMixin:
             from odoo_instance_sdk.models import StartConfig
 
             cfg = StartConfig.from_odoo_config(str(row["generated_config_path"]))
-            return PortObservation(probe_address(cfg.http_interface, allocated_port).value)
+            return PortObservation(
+                _monitor_shim.probe_address(cfg.http_interface, allocated_port).value
+            )
         except Exception:
             return PortObservation.UNKNOWN
 
@@ -579,7 +576,9 @@ class _SnapshotMixin:
 
     def _probe_readiness(self, http_url: str) -> RuntimeState:
         try:
-            resp = httpx.get(f"{http_url}/web/health?db_server_status=true", timeout=2.0)
+            resp = _monitor_shim.httpx.get(
+                f"{http_url}/web/health?db_server_status=true", timeout=2.0
+            )
         except Exception:
             return RuntimeState.NOT_READY
         if resp.status_code == 200:
@@ -613,18 +612,21 @@ class _SnapshotMixin:
                     validated_base_ref,
                 )
                 cached = self._git_cache.get(cache_key)
-                if cached is not None and time.monotonic() - cached[0] < _EXPENSIVE_TTL:
+                if (
+                    cached is not None
+                    and _monitor_shim.time.monotonic() - cached[0] < _EXPENSIVE_TTL
+                ):
                     return cached[1]
                 result = self.git_provider.collect(worktree)
                 if result.default_branch != validated_base_ref:
                     result = replace(result, default_branch=validated_base_ref)
-                self._git_cache[cache_key] = (time.monotonic(), result)
+                self._git_cache[cache_key] = (_monitor_shim.time.monotonic(), result)
             else:
                 resolved = worktree.resolve()
                 identity = (
-                    _resolve_identity(resolved)
+                    _monitor_shim._resolve_identity(resolved)
                     if validated_base_ref == "main"
-                    else _resolve_identity(resolved, validated_base_ref)
+                    else _monitor_shim._resolve_identity(resolved, validated_base_ref)
                 )
                 cache_key = (resolved, identity[0], identity[3], validated_base_ref)
                 # Identity probing is cheap.  Keep at most one expensive value
@@ -634,16 +636,19 @@ class _SnapshotMixin:
                     if stale_key[0] == resolved and stale_key != cache_key:
                         del self._git_cache[stale_key]
                 cached = self._git_cache.get(cache_key)
-                if cached is not None and time.monotonic() - cached[0] < _EXPENSIVE_TTL:
+                if (
+                    cached is not None
+                    and _monitor_shim.time.monotonic() - cached[0] < _EXPENSIVE_TTL
+                ):
                     return cached[1]
                 result = (
-                    collect_git_activity_from_identity(resolved, identity)
+                    _monitor_shim.collect_git_activity_from_identity(resolved, identity)
                     if validated_base_ref == "main"
-                    else collect_git_activity_from_identity(
+                    else _monitor_shim.collect_git_activity_from_identity(
                         resolved, identity, base_ref=validated_base_ref
                     )
                 )
-                self._git_cache[cache_key] = (time.monotonic(), result)
+                self._git_cache[cache_key] = (_monitor_shim.time.monotonic(), result)
         except Exception:
             result = _orphan_git(validated_base_ref or "unknown")
         return result
@@ -656,7 +661,7 @@ class _SnapshotMixin:
         *,
         recorded: Mapping[str, ProcessResult] | None = None,
     ) -> StorageFootprint:
-        now = time.monotonic()
+        now = _monitor_shim.time.monotonic()
         if recorded is not None:
             cached = self._storage_cache.get(env_id)
             if cached is not None and now - cached[0] < _EXPENSIVE_TTL:

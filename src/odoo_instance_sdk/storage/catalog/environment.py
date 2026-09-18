@@ -15,6 +15,12 @@ from odoo_instance_sdk.internal.applied_settings import (
 )
 from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
 from odoo_instance_sdk.storage.catalog import helpers as _helpers
+from odoo_instance_sdk.storage.catalog.helpers import (
+    CatalogValue as CatalogValue,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _translate_sqlite_error as _translate_sqlite_error,
+)
 
 globals().update(
     {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
@@ -22,6 +28,7 @@ globals().update(
 
 
 class _EnvironmentMixin:
+    @_translate_sqlite_error
     def create_environment(self, env: Mapping[str, CatalogValue]) -> None:
         applied_settings = env.get("applied_settings_json", LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON)
         if not isinstance(applied_settings, str):

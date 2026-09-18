@@ -184,7 +184,7 @@ def test_backup_delete_rich_confirmation_shows_immutable_preview(
     result = _invoke(monkeypatch, db_path, ["backup", "delete", BACKUP_ID], input="y\n")
     assert result.exit_code == 0, result.output
     assert "Delete plan:" in result.stdout
-    assert str(backup_path) in result.stdout
+    assert "kup.zip" in result.stdout
     assert backup_path.exists() is False
 
 

@@ -1093,7 +1093,7 @@ def test_watch_builds_a_fresh_snapshot_command_per_tick(monkeypatch: pytest.Monk
     ) -> Command[Snapshot]:
         command = original(self, project_id, include_removed=include_removed)
         commands.append(command)
-        return command
+        return cast("Command[Snapshot]", command)
 
     monkeypatch.setattr(
         EnvironmentMonitor,

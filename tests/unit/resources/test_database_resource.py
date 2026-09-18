@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import subprocess
 import uuid
@@ -99,7 +100,7 @@ def _patch_captured_process(monkeypatch: pytest.MonkeyPatch, fake_run: Any) -> N
             0.0,
         )
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
 
 
 def _make_backup(**kw: Any) -> Backup:
@@ -740,51 +741,51 @@ class TestVerifyPsql:
 
 
 class TestBackupProvenance:
-    @pytest.mark.parametrize(
-        ("base_url", "path_label"),
-        [("http://localhost:8069", "local"), ("https://example.test", "remote")],
-        ids=["local-project", "remote-project"],
-    )
-    def test_project_download_records_canonical_owner_for_local_and_remote_entries(
+    def test_project_download_records_canonical_owner_through_real_preparation_chain(
         self,
         client: OdooClient,
         tmp_path: Path,
-        base_url: str,
-        path_label: str,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from odoo_instance_sdk.internal.repo_key import repo_key
-        from odoo_instance_sdk.resources.instance import _RuntimeBinding
+        from odoo_instance_sdk.internal import database_preparation as preparation
+        from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
+        from odoo_instance_sdk.project import ProjectConfig
+        from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
 
-        root = tmp_path / path_label
-        common = root / ".git"
+        root = tmp_path
+        common = git_common_dir(root)
         project_id = f"project_{repo_key(root, common)}"
-        instance = client.instance(base_url, master_password="admin")
-        object.__setattr__(
-            instance,
-            "_runtime_binding",
-            _RuntimeBinding(
-                owner_kind="project",
-                owner_id=project_id,
-                project_id=project_id,
-                repository_root=root,
-                git_common_dir=common,
-            ),
-        )
-        catalog = MagicMock()
+        catalog = client.get_catalog()
+        catalog._register_project(project_id, root, common)
         response = MagicMock(spec=httpx.Response)
-        response.headers = {}
-        response.iter_bytes.return_value = [b"backup"]
+        response.headers = {"content-disposition": 'attachment; filename="snapshot.zip"'}
+        response.iter_bytes.return_value = [b"snapshot"]
         response.raise_for_status.return_value = None
         http_cm = _mock_http({})
         http_cm.__enter__.return_value.post.return_value = response
+        project = ProjectConfig(
+            repository_root=root,
+            test_instance=ConfigTestInstance(
+                base_url="https://example.test", database="remote_test", git_branch="develop"
+            ),
+            default_source_database="source",
+        )
+        monkeypatch.setattr(
+            preparation,
+            "canonical_project_identity",
+            lambda _: (root, common, repo_key(root, common)),
+        )
+        monkeypatch.setattr(preparation, "exclusive_lock", lambda _: contextlib.nullcontext())
+        monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
+        monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "https://example.test:443")
 
-        with (
-            patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
-        ):
-            instance.databases.backup("testdb", destination=tmp_path / path_label)
+        with patch("httpx.Client", return_value=http_cm):
+            result = preparation.prepare_download(client, project)
 
-        assert catalog.start_download.call_args.kwargs["project_id"] == project_id
+        assert result.backup is not None
+        row = catalog.get_by_id(str(result.backup.id))
+        assert row is not None and row["project_id"] == project_id
+        catalog.close()
 
     @pytest.mark.parametrize(
         ("headers", "expected_total"),

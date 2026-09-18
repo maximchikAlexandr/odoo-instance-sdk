@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -27,6 +27,7 @@ from odoo_instance_sdk.commands.context import (
     resolve_project_path,
 )
 from odoo_instance_sdk.commands.output import (
+    JsonObject,
     OutputDocument,
     OutputMode,
     _InspectableCommand,
@@ -56,7 +57,7 @@ _RestoreResult = TypeVar("_RestoreResult")
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
-    from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext, StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
@@ -500,9 +501,9 @@ def db_reset_admin_password(
 @db_group.command(
     "drop",
     aliases=["rm"],
-    help="Safely drop one database from the project PostgreSQL cluster.",
+    help="Safely drop one or more databases from the project PostgreSQL cluster.",
 )
-@click.argument("database")
+@click.argument("databases", nargs=-1, required=False)
 @click.option(
     "--force-default", is_flag=True, default=False, help="Allow dropping the project default."
 )
@@ -518,7 +519,7 @@ def db_reset_admin_password(
 @pass_cli_context
 def db_drop(
     ctx: CliContext,
-    database: str,
+    databases: tuple[str, ...],
     force_default: bool,
     force_connections: bool,
     yes: bool,
@@ -526,8 +527,88 @@ def db_drop(
     output_format: str | None,
     json_output: bool,
 ) -> None:
-    """Safely drop one exact database from the resolved project cluster."""
+    """Safely drop one or more exact databases from the resolved project cluster."""
     output_mode = resolve_output_mode(output_format, json_output)
+    if not databases:
+        raise click.UsageError("db drop requires at least one DATABASE name")
+    if len(databases) == 1:
+        database = databases[0]
+        if not dry_run and not yes and output_mode is not OutputMode.RICH:
+            emit_json_envelope(
+                ok=False,
+                command="db.drop",
+                error_code="confirmation_required",
+                error_message="db drop requires --yes in machine output mode",
+                mode=output_mode,
+            )
+            raise click.exceptions.Exit(1)
+        try:
+            from odoo_instance_sdk.commands.pg import _database_instance
+            from odoo_instance_sdk.internal.pg.drop import build_database_drop_command
+
+            project_root = resolve_project_path(ctx)
+            _environment, instance = _database_instance(ctx)
+            command = build_database_drop_command(
+                instance,
+                project_root,
+                database,
+                force_default=force_default,
+                force_connections=force_connections,
+            )
+            cluster = getattr(instance, "_postgres_cluster", None)
+            cluster_endpoint = getattr(cluster, "endpoint", "bound cluster")
+
+            def confirm() -> None:
+                click.confirm(
+                    f"Drop database {database!r} on cluster {cluster_endpoint}?",
+                    default=False,
+                    abort=True,
+                )
+
+            status, _result = run_or_preview(
+                lambda: command,
+                command_name="db.drop",
+                mode=output_mode,
+                dry_run=dry_run,
+                result=cast(
+                    "Callable[[DatabaseDropResult | None], dict[str, JsonValue]]", model_to_dict
+                ),
+                context={"database": database, "cluster": str(cluster_endpoint)},
+                provenance={"project_source": project_provenance(ctx)},
+                confirm=None if yes or dry_run else confirm,
+                rich=_drop_rich,
+            )
+        except click.exceptions.Exit:
+            raise
+        except Exception as exc:
+            fail(output_mode, "db.drop", exc, dry_run=dry_run)
+        raise click.exceptions.Exit(status)
+        return
+    _db_drop_multi(
+        ctx,
+        databases,
+        force_default=force_default,
+        force_connections=force_connections,
+        yes=yes,
+        dry_run=dry_run,
+        output_mode=output_mode,
+    )
+
+
+def _db_drop_multi(
+    ctx: CliContext,
+    databases: tuple[str, ...],
+    *,
+    force_default: bool,
+    force_connections: bool,
+    yes: bool,
+    dry_run: bool,
+    output_mode: OutputMode,
+) -> None:
+    from odoo_instance_sdk.commands.multi_target import run_multi_target_deletion
+    from odoo_instance_sdk.internal.sanitize import sanitize_last_error
+
+    targets = _dedup_databases(databases)
     if not dry_run and not yes and output_mode is not OutputMode.RICH:
         emit_json_envelope(
             ok=False,
@@ -543,41 +624,117 @@ def db_drop(
 
         project_root = resolve_project_path(ctx)
         _environment, instance = _database_instance(ctx)
-        command = build_database_drop_command(
-            instance,
-            project_root,
-            database,
-            force_default=force_default,
-            force_connections=force_connections,
-        )
         cluster = getattr(instance, "_postgres_cluster", None)
         cluster_endpoint = getattr(cluster, "endpoint", "bound cluster")
+        plans: list[tuple[str, Command[DatabaseDropResult]]] = []
+        for database in targets:
+            try:
+                command = build_database_drop_command(
+                    instance,
+                    project_root,
+                    database,
+                    force_default=force_default,
+                    force_connections=force_connections,
+                )
+            except Exception as exc:
+                fail(
+                    output_mode,
+                    "db.drop",
+                    f"{database}: {exc}",
+                    dry_run=dry_run,
+                )
+                return
+            plans.append((database, command))
 
-        def confirm() -> None:
+        def build_plan(item: tuple[str, Command[DatabaseDropResult]]) -> JsonObject:
+            _name, command = item
+            return model_to_dict(command.plan)
+
+        def execute_target(
+            item: tuple[str, Command[DatabaseDropResult]],
+        ) -> tuple[bool, JsonObject, str | None]:
+            name, _command = item
+            try:
+                rebuilt = build_database_drop_command(
+                    instance,
+                    project_root,
+                    name,
+                    force_default=force_default,
+                    force_connections=force_connections,
+                )
+                result = rebuilt.run()
+            except Exception as exc:
+                return False, {}, sanitize_last_error(str(exc))
+            return True, model_to_dict(result), None
+
+        def confirm_prompt(items: Sequence[tuple[str, Command[DatabaseDropResult]]]) -> None:
             click.confirm(
-                f"Drop database {database!r} on cluster {cluster_endpoint}?",
+                f"Drop {len(items)} database(s) on cluster {cluster_endpoint}?",
                 default=False,
                 abort=True,
             )
 
-        status, _result = run_or_preview(
-            lambda: command,
-            command_name="db.drop",
+        run_multi_target_deletion(
+            tuple(plans),
+            command="db.drop",
             mode=output_mode,
             dry_run=dry_run,
-            result=cast(
-                "Callable[[DatabaseDropResult | None], dict[str, JsonValue]]", model_to_dict
-            ),
-            context={"database": database, "cluster": str(cluster_endpoint)},
+            yes=yes,
+            target_id=lambda item: item[0],
+            target_label=lambda item: f"database {item[0]!r} on {cluster_endpoint}",
+            build_plan=build_plan,
+            execute_target=execute_target,
+            rich_summary=_drop_multi_rich,
             provenance={"project_source": project_provenance(ctx)},
-            confirm=None if yes or dry_run else confirm,
-            rich=_drop_rich,
+            confirm_prompt=confirm_prompt,
         )
     except click.exceptions.Exit:
         raise
     except Exception as exc:
         fail(output_mode, "db.drop", exc, dry_run=dry_run)
-    raise click.exceptions.Exit(status)
+
+
+def _dedup_databases(databases: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for database in databases:
+        if database in seen:
+            raise click.UsageError(f"duplicate database name {database!r}")
+        seen.add(database)
+        ordered.append(database)
+    return tuple(ordered)
+
+
+def _drop_multi_rich(document: OutputDocument) -> str:
+    if not document.ok:
+        return document.error.message if document.error is not None else "operation failed"
+    result = document.result if isinstance(document.result, dict) else {}
+    targets = result.get("targets")
+    if not isinstance(targets, list):
+        return "Dropped databases."
+    lines: list[str] = []
+    for entry in targets:
+        if not isinstance(entry, dict):
+            continue
+        target = entry.get("target", "unknown")
+        if document.dry_run:
+            plan = entry.get("plan")
+            if isinstance(plan, dict):
+                lines.append(_rich_plan_projection(plan, command=document.command))
+            else:
+                lines.append(f"Plan for {target}")
+        elif entry.get("ok"):
+            res = entry.get("result")
+            if isinstance(res, dict):
+                lines.append(
+                    f"Dropped database {res.get('database', target)} on {res.get('cluster', 'cluster')}"
+                )
+            else:
+                lines.append(f"Dropped database {target}.")
+        else:
+            err = entry.get("error", "failed")
+            lines.append(f"Failed to drop database {target}: {err}")
+    return "\n".join(lines).rstrip()
 
 
 def _drop_rich(document: OutputDocument) -> str:

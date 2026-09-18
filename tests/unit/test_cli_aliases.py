@@ -67,7 +67,7 @@ def _without_dynamic_timestamps(value: object) -> object:
     if isinstance(value, dict):
         return {
             key: "<dynamic>"
-            if key in {"generated_at", "sampled_at"}
+            if key in {"generated_at", "sampled_at", "sample_time"}
             else _without_dynamic_timestamps(item)
             for key, item in value.items()
         }

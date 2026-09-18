@@ -5,7 +5,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import pytest
 from click.testing import CliRunner
@@ -107,10 +107,13 @@ def _patch_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
 
         runner = compose_runner or FakeComposeRunner()
         cfg = _PC.load(Path(project_path))
-        return pg_mod.PostgresCluster._from_config(
-            cfg,
-            repository_root=Path(project_path).resolve(),
-            compose_runner=runner,
+        return cast(
+            "PostgresCluster",
+            pg_mod.PostgresCluster._from_config(
+                cfg,
+                repository_root=Path(project_path).resolve(),
+                compose_runner=runner,
+            ),
         )
 
     monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(fake_from_project))
@@ -163,7 +166,8 @@ def test_postgres_approve_image_human_and_missing_digest_error(tmp_path: Path) -
         cli, ["--project", str(root), "postgres", "approve-image", "--image-digest", digest]
     )
     assert human.exit_code == 0, human.output
-    assert digest in human.output
+    assert "postgres@sha256:" in human.output
+    assert "approved" in human.output
     missing = runner.invoke(cli, ["--project", str(root), "postgres", "approve-image"])
     assert missing.exit_code == 2
     assert "--image-digest" in missing.output

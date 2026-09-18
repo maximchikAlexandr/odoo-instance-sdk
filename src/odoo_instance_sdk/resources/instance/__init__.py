@@ -86,9 +86,53 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.git import GitResource
     from odoo_instance_sdk.resources.module import ModuleResource
     from odoo_instance_sdk.resources.postgres import PostgresCluster
-from odoo_instance_sdk.resources.instance import helpers as _helpers
-from odoo_instance_sdk.resources.instance.helpers import *  # noqa: F403
-from odoo_instance_sdk.resources.instance.helpers_1 import _RuntimeBinding
+import importlib
+
+for _module_name in ("helpers_1", "helpers_2"):
+    _module = importlib.import_module(f"odoo_instance_sdk.resources.instance.{_module_name}")
+    for _key, _value in _module.__dict__.items():
+        if _key.startswith("__"):
+            continue
+        globals()[_key] = _value
+from odoo_instance_sdk.resources.instance.helpers_1 import (
+    _LOGFILE_SENTINEL_BYTES as _LOGFILE_SENTINEL_BYTES,
+)
+from odoo_instance_sdk.resources.instance.helpers_1 import (
+    InstanceFactory as InstanceFactory,
+)
+from odoo_instance_sdk.resources.instance.helpers_1 import (
+    _RuntimeBinding as _RuntimeBinding,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    AuxiliaryRestoreSession as AuxiliaryRestoreSession,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    _build_shell_script_step as _build_shell_script_step,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    _command_result as _command_result,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    _project_runtime_owns_port as _project_runtime_owns_port,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    _validate_runtime_args as _validate_runtime_args,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    activate_auxiliary_restore_session as activate_auxiliary_restore_session,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    active_auxiliary_restore_session as active_auxiliary_restore_session,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    auxiliary_restore_session as auxiliary_restore_session,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    reset_auxiliary_restore_session as reset_auxiliary_restore_session,
+)
+from odoo_instance_sdk.resources.instance.helpers_2 import (
+    resolve_runtime_argv as resolve_runtime_argv,
+)
 from odoo_instance_sdk.resources.instance.identity import _IdentityMixin
 from odoo_instance_sdk.resources.instance.planning import _PlanningMixin
 
@@ -110,20 +154,13 @@ import odoo_instance_sdk.resources.instance.helpers_1 as _helpers_1_module
 
 _helpers_1_module.OdooInstance = OdooInstance
 
-from odoo_instance_sdk.resources.instance.helpers_1 import InstanceFactory
-from odoo_instance_sdk.resources.instance.helpers_2 import (
-    AuxiliaryRestoreSession,
-    activate_auxiliary_restore_session,
-    auxiliary_restore_session,
-    reset_auxiliary_restore_session,
-    resolve_runtime_argv,
-)
 
 __all__ = [
     "AuxiliaryRestoreSession",
     "InstanceFactory",
     "OdooInstance",
     "activate_auxiliary_restore_session",
+    "active_auxiliary_restore_session",
     "auxiliary_restore_session",
     "reset_auxiliary_restore_session",
     "resolve_runtime_argv",

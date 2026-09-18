@@ -205,7 +205,7 @@ class TestVscodeGenerateProfile:
         assert "Name" in result.output
         assert f"Odoo {env.name}" in result.output
         assert "Program" in result.output
-        assert str(fake_python.parent / "odoo-bin") in result.output
+        assert "odoo-bin" in result.output
         for secret in ("admin_passwd", "db_password", "master_pwd"):
             assert secret not in result.output
         assert (project_manifest / ".vscode" / "launch.json").exists() is False

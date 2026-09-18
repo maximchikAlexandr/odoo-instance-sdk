@@ -32,6 +32,7 @@ from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
 @pytest.fixture(autouse=True)
@@ -766,3 +767,194 @@ class TestRetainedReplacementRemove:
         assert dropped == expected
         assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED
         assert not (data_dir / "filestore" / rollback).exists()
+
+
+def _activate_managed_cluster(
+    env_client: OdooClient, project_manifest: Path
+) -> tuple[str, PostgresCluster]:
+    from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    manifest = project_manifest / ".odcli" / "project.toml"
+    manifest.write_text(
+        manifest.read_text()
+        + '\n[postgres]\nmode = "compose"\nimage = "postgres:16"\nport = 5432\n'
+    )
+    cluster = PostgresCluster.from_project(project_manifest)
+    catalog = env_client.get_catalog()
+    project_id = cluster._project_id
+    claim = catalog._ensure_postgres_cluster_pending(
+        project_id,
+        cluster.compose_project_name,
+        compose_volume_name(project_id),
+    )
+    active = catalog._activate_postgres_cluster(
+        claim.cluster_id,
+        project_id,
+        cluster.compose_project_name,
+        compose_volume_name(project_id),
+    )
+    return str(active.cluster_id), cluster
+
+
+class TestCopyRestoreClusterIdentity:
+    @pytest.fixture(autouse=True)
+    def _fake_psql(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        executable = tmp_path / "psql"
+        marker = tmp_path / "psql-called"
+        executable.write_text(
+            "#!/bin/sh\n"
+            'if [ "${ODCLI_TEST_PSQL_FAILURE:-}" = "1" ]; then\n'
+            "  printf 'probe failed\\n' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            'if [ "${ODCLI_TEST_PSQL_EXISTS_BEFORE:-}" = "1" ]; then\n'
+            "  printf '1\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            f'if [ -f "{marker}" ]; then\n'
+            "  printf '1\\n'\n"
+            "else\n"
+            f'  : > "{marker}"\n'
+            "fi\n"
+        )
+        executable.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    def test_copy_restore_binds_cluster_id_and_removes(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cluster_id, cluster = _activate_managed_cluster(env_client, project_manifest)
+        catalog = env_client.get_catalog()
+
+        instance = _copy_instance(target_exists=True)
+        backup = instance.databases.backup.return_value
+
+        captured_cluster_ids: list[str | None] = []
+        original_record_restore = catalog.record_restore
+
+        def capture_restore(
+            db_host: str | None,
+            db_port: int,
+            database_name: str,
+            backup_id: str,
+            *,
+            cluster_id: str | None = None,
+            data_directory: str | Path | None = None,
+        ) -> None:
+            captured_cluster_ids.append(cluster_id)
+            original_record_restore(
+                db_host,
+                db_port,
+                database_name,
+                backup_id,
+                cluster_id=cluster_id,
+                data_directory=data_directory,
+            )
+
+        catalog.record_restore = capture_restore  # type: ignore[assignment]
+
+        def record_restore_with_cluster(_backup: Backup, target: str, **_kwargs: object) -> None:
+            provenance = cluster._restore_provenance()
+            cid, _ = provenance
+            catalog.record_restore("localhost", 5432, target, str(_backup.id), cluster_id=cid)
+
+        instance.databases._restore_after_verified_absence.side_effect = record_restore_with_cluster
+        env = _checkout_copy(
+            env_client, project_manifest, fake_python, "feat/copy-cluster-id", instance
+        )
+
+        assert env.state is EnvironmentState.READY
+        assert captured_cluster_ids == [cluster_id]
+
+        restore_row = catalog._conn.execute(
+            "SELECT cluster_id FROM restores WHERE database_name=? AND backup_id=?",
+            ("copy_target", str(backup.id)),
+        ).fetchone()
+        assert restore_row is not None
+        assert str(restore_row["cluster_id"]) == cluster_id
+
+        dropped: list[str] = []
+
+        class FakeDropCommand:
+            def __init__(self, database: str) -> None:
+                self._database = database
+                step = PreparedAction(
+                    step_id="test.copy.database.drop",
+                    action="drop-owned-copy-database",
+                    description="guarded COPY database drop",
+                    mutating=True,
+                )
+
+                def run(context: Any) -> object:
+                    context.action(step.step_id)
+                    dropped.append(database)
+                    context.complete_action(step.step_id)
+                    return object()
+
+                self._command = prepared_command(run, (step,))
+
+            def _prepared(self) -> Any:
+                return self._command
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.drop.build_database_drop_command",
+            lambda _inst, _root, database, **_kwargs: FakeDropCommand(database),
+        )
+
+        selected = env_client.environments.get(str(env.id))
+        executor = RecordingExecutor()
+        command = env_client.environments.remove_command(selected, executor=executor)
+
+        step_ids = [step.step_id for step in command.plan.steps]
+        assert "test.copy.database.drop" in step_ids or any("drop" in sid for sid in step_ids), (
+            f"plan missing guarded drop step: {step_ids}"
+        )
+
+        env_client.environments.remove(selected)
+
+        assert dropped == ["copy_target"]
+        assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED
+        assert not Path(env.generated_config_path).exists()
+        assert not Path(env.worktree_path).exists()
+        backup_row = catalog.get_by_id(str(env.backup_id))
+        assert backup_row is None or backup_row["state"] != "available"
+
+    def test_drop_plan_failure_reports_sanitized_reason(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, _cluster = _activate_managed_cluster(env_client, project_manifest)
+        catalog = env_client.get_catalog()
+
+        instance = _copy_instance(target_exists=True)
+
+        def record_restore(_backup: Backup, target: str, **_kwargs: object) -> None:
+            catalog.record_restore("localhost", 5432, target, str(_backup.id))
+
+        instance.databases._restore_after_verified_absence.side_effect = record_restore
+
+        env = _checkout_copy(
+            env_client, project_manifest, fake_python, "feat/copy-drop-fail-reason", instance
+        )
+
+        def fail_build(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("password=admin_passwd leaked in psql output")
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.drop.build_database_drop_command", fail_build
+        )
+
+        selected = env_client.environments.get(str(env.id))
+        with pytest.raises(EnvironmentConflictError, match="guarded COPY database drop plan"):
+            env_client.environments.remove_command(selected, executor=RecordingExecutor())
+
+        assert env_client.environments.get(str(env.id)).state is EnvironmentState.READY
+        assert Path(env.generated_config_path).is_file()

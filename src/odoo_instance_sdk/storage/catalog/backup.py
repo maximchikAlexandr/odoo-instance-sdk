@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import base64
 import binascii
 import hashlib
@@ -26,6 +25,48 @@ from odoo_instance_sdk.models import (
     EnvironmentState,
 )
 from odoo_instance_sdk.storage.catalog import helpers as _helpers
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _READ_ONLY_PROJECT_SCOPE as _READ_ONLY_PROJECT_SCOPE,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    BackupEnvironmentLink as BackupEnvironmentLink,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    BackupProjection as BackupProjection,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    BackupProjectionPage as BackupProjectionPage,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    BackupRestoreLink as BackupRestoreLink,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    CatalogValue as CatalogValue,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    CopyJournalStage as CopyJournalStage,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    MonitorCatalogSnapshot as MonitorCatalogSnapshot,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    PostgresClusterClaim as PostgresClusterClaim,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _row_to_backup as _row_to_backup,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _row_to_cluster_claim as _row_to_cluster_claim,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _row_to_event as _row_to_event,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    _translate_sqlite_error as _translate_sqlite_error,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    normalize_db_host as normalize_db_host,
+)
 from odoo_instance_sdk.storage.catalog_migrate import (
     ensure_catalog_migrated,
 )
@@ -470,6 +511,37 @@ class _BackupMixin:
                       WHERE e.backup_id = backups.id) = 1"""
         )
         self._conn.commit()
+
+    @_translate_sqlite_error
+    def relink_backup_project(self, backup_id: str, project_id: str) -> None:
+        """Relink an already-unowned backup row to a resolved canonical project.
+
+        The UUID, file, and history remain unchanged; only ``project_id`` is
+        set.  The target project MUST already be registered.  Automatic
+        ambiguous backfill is not performed; callers resolve the owner
+        explicitly before invoking this repair path.
+        """
+        canonical_id = self._canonical_backup_id(backup_id)
+        project = self._cluster_text(project_id, "project_id")
+        row = self._conn.execute(
+            "SELECT project_id FROM backups WHERE id = ?", (canonical_id,)
+        ).fetchone()
+        if row is None:
+            raise BackupNotFoundError(f"Backup {canonical_id} not found in catalog")
+        if row["project_id"] is not None:
+            raise BackupCatalogError(
+                f"Backup {canonical_id} is already owned by {row['project_id']}"
+            )
+        registered = self._conn.execute(
+            "SELECT 1 FROM projects WHERE project_id = ?", (project,)
+        ).fetchone()
+        if registered is None:
+            raise BackupCatalogError(f"project {project} is not registered")
+        with self._conn:
+            self._conn.execute(
+                "UPDATE backups SET project_id = ? WHERE id = ?",
+                (project, canonical_id),
+            )
 
     @_translate_sqlite_error
     def get_backup_history(

@@ -216,11 +216,8 @@ def test_restore_replace_click_path_has_one_machine_envelope_for_both_context_sp
         "odoo_instance_sdk.commands.db.resolve_environment",
         lambda *_args, **_kwargs: environment,
     )
-    builder = MagicMock(return_value=command)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement.build_copy_replacement_command",
-        builder,
-    )
+    builder = client.environments.replace_copy_database_command
+    builder.return_value = command
     result = CliRunner().invoke(
         cli,
         [
@@ -237,7 +234,7 @@ def test_restore_replace_click_path_has_one_machine_envelope_for_both_context_sp
     )
 
     assert result.exit_code == 0, result.output
-    assert builder.call_args.args[:3] == (client, environment, backup_id)
+    builder.assert_called_once_with(environment, backup_id, reset_admin_password=False)
     if format_args == ["--format", "json"]:
         payload = json.loads(result.stdout)
         assert payload["dry_run"] is dry_run
@@ -508,15 +505,12 @@ def test_restore_replace_rich_confirmation_refusal_and_acceptance(
         )
 
     command = Command.create(ExecutionPlan(), callback)
-    builder = MagicMock(return_value=command)
+    builder = client.environments.replace_copy_database_command
+    builder.return_value = command
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.db.resolve_environment",
         lambda *_args, **_kwargs: environment,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement.build_copy_replacement_command",
-        builder,
     )
 
     refused = CliRunner().invoke(
@@ -536,12 +530,8 @@ def test_restore_replace_rich_confirmation_refusal_and_acceptance(
 def test_restore_replace_machine_output_requires_yes_before_builder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    builder = MagicMock()
-    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", MagicMock)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement.build_copy_replacement_command",
-        builder,
-    )
+    client = MagicMock()
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
 
     result = CliRunner().invoke(
         cli, ["db", "restore", str(uuid.uuid4()), "--replace", "--format", "json"]
@@ -549,7 +539,7 @@ def test_restore_replace_machine_output_requires_yes_before_builder(
 
     assert result.exit_code == 1
     assert json.loads(result.stdout)["error"]["code"] == "confirmation_required"
-    builder.assert_not_called()
+    client.environments.replace_copy_database_command.assert_not_called()
 
 
 @pytest.mark.parametrize("mode_args", [["--format", "json"], ["--format", "toon"]])
@@ -562,9 +552,8 @@ def test_restore_replace_execution_failure_is_one_machine_envelope(
         "odoo_instance_sdk.commands.db.resolve_environment",
         lambda *_args, **_kwargs: MagicMock(),
     )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement.build_copy_replacement_command",
-        MagicMock(return_value=_command(error=RuntimeError("restore failed"))),
+    client.environments.replace_copy_database_command.return_value = _command(
+        error=RuntimeError("restore failed")
     )
 
     result = CliRunner().invoke(
@@ -601,10 +590,7 @@ def test_restore_replace_reset_failure_preserves_replacement_context(
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.db.resolve_environment", lambda *_args, **_kwargs: MagicMock()
     )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement.build_copy_replacement_command",
-        MagicMock(return_value=_command(error=failure)),
-    )
+    client.environments.replace_copy_database_command.return_value = _command(error=failure)
 
     result = CliRunner().invoke(
         cli,
@@ -670,7 +656,6 @@ def test_restore_replace_rejects_unsafe_contexts_before_builder(
     label: str,
     environment: DevelopmentEnvironment,
 ) -> None:
-    builder = MagicMock()
     client = MagicMock()
     if label == "live-runtime":
         catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
@@ -680,10 +665,6 @@ def test_restore_replace_rejects_unsafe_contexts_before_builder(
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.db.resolve_environment",
         lambda *_args, **_kwargs: environment,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement.build_copy_replacement_command",
-        builder,
     )
 
     result = CliRunner().invoke(
@@ -703,7 +684,7 @@ def test_restore_replace_rejects_unsafe_contexts_before_builder(
 
     assert result.exit_code == 1
     assert label in result.stdout or label in result.stderr or "replacement" in result.stdout
-    builder.assert_not_called()
+    client.environments.replace_copy_database_command.assert_not_called()
     if label == "live-runtime":
         catalog.close()
 
@@ -711,14 +692,9 @@ def test_restore_replace_rejects_unsafe_contexts_before_builder(
 def test_restore_replace_project_selector_rejects_before_builder(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    builder = MagicMock()
     client = MagicMock()
     client.environments.list.return_value = []
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement.build_copy_replacement_command",
-        builder,
-    )
 
     result = CliRunner().invoke(
         cli,
@@ -737,21 +713,16 @@ def test_restore_replace_project_selector_rejects_before_builder(
 
     assert result.exit_code == 1
     assert "No environment resolved" in result.stdout
-    builder.assert_not_called()
+    client.environments.replace_copy_database_command.assert_not_called()
 
 
 def test_restore_replace_ambiguous_selector_rejects_before_builder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    builder = MagicMock()
     environment = _cli_replace_environment()
     client = MagicMock()
     client.environments.list.return_value = [environment, environment]
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement.build_copy_replacement_command",
-        builder,
-    )
 
     result = CliRunner().invoke(
         cli,
@@ -770,7 +741,7 @@ def test_restore_replace_ambiguous_selector_rejects_before_builder(
 
     assert result.exit_code == 1
     assert "Ambiguous environment selector" in result.stdout
-    builder.assert_not_called()
+    client.environments.replace_copy_database_command.assert_not_called()
 
 
 @pytest.mark.parametrize("mode_args", [["--format", "json"], ["--format", "toon"], []])
@@ -788,15 +759,12 @@ def test_restore_replace_reset_option_reaches_builder_for_each_output_mode(
             filestore="/owned/filestore/copy_target",
         )
     )
-    builder = MagicMock(return_value=command)
+    builder = client.environments.replace_copy_database_command
+    builder.return_value = command
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.db.resolve_environment",
         lambda *_args, **_kwargs: environment,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement.build_copy_replacement_command",
-        builder,
     )
 
     result = CliRunner().invoke(
