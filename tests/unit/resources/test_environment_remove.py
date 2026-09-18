@@ -9,15 +9,19 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from odoo_instance_sdk.exceptions import EnvironmentConflictError
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
+    PreparedStep,
     ProcessExecutor,
+    ProcessHandle,
+    ProcessResultLike,
     RecordingExecutor,
+    StepObserver,
     SubprocessExecutor,
     prepared_command,
 )
@@ -32,6 +36,7 @@ from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
 @pytest.fixture(autouse=True)
@@ -766,3 +771,328 @@ class TestRetainedReplacementRemove:
         assert dropped == expected
         assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED
         assert not (data_dir / "filestore" / rollback).exists()
+
+
+def _activate_managed_cluster(
+    env_client: OdooClient, project_manifest: Path
+) -> tuple[str, PostgresCluster]:
+    from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+    manifest = project_manifest / ".odcli" / "project.toml"
+    manifest.write_text(
+        manifest.read_text()
+        + '\n[postgres]\nmode = "compose"\nimage = "postgres:16"\nport = 5432\n'
+    )
+    cluster = PostgresCluster.from_project(project_manifest)
+    catalog = env_client.get_catalog()
+    project_id = cluster._project_id
+    claim = catalog._ensure_postgres_cluster_pending(
+        project_id,
+        cluster.compose_project_name,
+        compose_volume_name(project_id),
+    )
+    active = catalog._activate_postgres_cluster(
+        claim.cluster_id,
+        project_id,
+        cluster.compose_project_name,
+        compose_volume_name(project_id),
+    )
+    return str(active.cluster_id), cluster
+
+
+class TestCopyRestoreClusterIdentity:
+    @pytest.fixture(autouse=True)
+    def _fake_psql(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        executable = tmp_path / "psql"
+        marker = tmp_path / "psql-called"
+        executable.write_text(
+            "#!/bin/sh\n"
+            'if [ "${ODCLI_TEST_PSQL_FAILURE:-}" = "1" ]; then\n'
+            "  printf 'probe failed\\n' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            'if [ "${ODCLI_TEST_PSQL_EXISTS_BEFORE:-}" = "1" ]; then\n'
+            "  printf '1\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            f'if [ -f "{marker}" ]; then\n'
+            "  printf '1\\n'\n"
+            "else\n"
+            f'  : > "{marker}"\n'
+            "fi\n"
+        )
+        executable.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+    def test_copy_restore_binds_cluster_id_and_removes(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.config import InstanceConfig
+        from odoo_instance_sdk.resources.instance import InstanceFactory
+
+        cluster_id, cluster = _activate_managed_cluster(env_client, project_manifest)
+        catalog = env_client.get_catalog()
+        db_host = cluster.endpoint_host
+        db_port = cluster.endpoint_port
+
+        backup = Backup(
+            id=uuid.uuid4(),
+            source_base_url="http://127.0.0.1:8069",
+            database_name="comerta",
+            format=BackupFormat.ZIP,
+            filestore_requested=True,
+            path=str(Path("/tmp") / f"{uuid.uuid4()}.zip"),
+            filename="comerta.zip",
+            size_bytes=1,
+            sha256="a" * 64,
+            downloaded_at=datetime.now(UTC),
+        )
+        Path(backup.path).write_bytes(b"backup")
+        _record_backup(env_client, backup)
+
+        instance = env_client.instance("http://127.0.0.1:8069", master_password="admin")
+        object.__setattr__(
+            instance,
+            "config",
+            InstanceConfig(
+                base_url="http://127.0.0.1:8069",
+                master_password="admin",
+                db_host=db_host,
+                db_port=db_port,
+                db_user="odoo",
+                db_password="secret",
+                configured_database_names=("comerta",),
+            ),
+        )
+
+        captured_cluster_ids: list[str | None] = []
+        original_record_restore = catalog.record_restore
+
+        def capture_restore(
+            db_host: str | None,
+            db_port: int,
+            database_name: str,
+            backup_id: str,
+            *,
+            cluster_id: str | None = None,
+            data_directory: str | Path | None = None,
+        ) -> None:
+            captured_cluster_ids.append(cluster_id)
+            original_record_restore(
+                db_host,
+                db_port,
+                database_name,
+                backup_id,
+                cluster_id=cluster_id,
+                data_directory=data_directory,
+            )
+
+        catalog.record_restore = capture_restore  # type: ignore[assignment]
+
+        from tests.unit.resources.test_database_resource import _mock_http
+
+        with (
+            patch.object(
+                instance.databases,
+                "list",
+                return_value=(Database(name="comerta", backup=NoBackup()),),
+            ),
+            patch.object(instance.databases, "names", return_value=("comerta",)),
+            patch.object(instance.databases, "backup", return_value=backup),
+            patch(
+                "odoo_instance_sdk.resources.database.backup_restore_parts.backup.httpx.Client",
+                return_value=_mock_http({"result": True}),
+            ),
+        ):
+            InstanceFactory.from_config = MagicMock(return_value=instance)  # type: ignore[method-assign]
+            env = env_client.environments.checkout(
+                project_manifest,
+                "feat/copy-cluster-id",
+                options=EnvironmentCheckoutOptions(
+                    python=str(fake_python),
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    target_database="copy_target",
+                    source_database="comerta",
+                ),
+            )
+
+        assert env.state is EnvironmentState.READY
+        assert captured_cluster_ids == [cluster_id]
+
+        restore_row = catalog._conn.execute(
+            "SELECT cluster_id FROM restores WHERE database_name=? AND backup_id=?",
+            ("copy_target", str(backup.id)),
+        ).fetchone()
+        assert restore_row is not None
+        assert str(restore_row["cluster_id"]) == cluster_id
+
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+        from tests.unit.internal.test_postgres_drop import _executor
+
+        monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+        monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+
+        selected = env_client.environments.get(str(env.id))
+        drop_executor = _executor(exists=False)
+        subprocess_executor = SubprocessExecutor()
+
+        class _HybridRemoveExecutor:
+            def execute(
+                self,
+                step: PreparedStep,
+                *,
+                observer: StepObserver | None = None,
+                observe_output: bool = False,
+            ) -> ProcessResultLike:
+                if step.step_id.startswith("database.drop"):
+                    return drop_executor.execute(
+                        step, observer=observer, observe_output=observe_output
+                    )
+                return subprocess_executor.execute(
+                    step, observer=observer, observe_output=observe_output
+                )
+
+            def spawn(
+                self,
+                step: PreparedStep,
+                *,
+                observer: StepObserver | None = None,
+                observe_output: bool = False,
+            ) -> ProcessHandle:
+                if step.step_id.startswith("database.drop"):
+                    return drop_executor.spawn(
+                        step, observer=observer, observe_output=observe_output
+                    )
+                return subprocess_executor.spawn(
+                    step, observer=observer, observe_output=observe_output
+                )
+
+        command = env_client.environments.remove_command(selected, executor=_HybridRemoveExecutor())
+
+        step_ids = [step.step_id for step in command.plan.steps]
+        assert "database.drop" in step_ids
+        assert any(step_id.startswith("database.drop.") for step_id in step_ids)
+
+        command.run()
+        assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED
+        assert not Path(env.generated_config_path).exists()
+        assert not Path(env.worktree_path).exists()
+        backup_row = catalog.get_by_id(str(env.backup_id))
+        assert backup_row is None or backup_row["state"] != "available"
+
+    def test_drop_plan_failure_reports_sanitized_reason(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.config import InstanceConfig
+        from odoo_instance_sdk.resources.instance import InstanceFactory
+
+        cluster_id, cluster = _activate_managed_cluster(env_client, project_manifest)
+        catalog = env_client.get_catalog()
+        db_host = cluster.endpoint_host
+        db_port = cluster.endpoint_port
+
+        backup = Backup(
+            id=uuid.uuid4(),
+            source_base_url="http://127.0.0.1:8069",
+            database_name="comerta",
+            format=BackupFormat.ZIP,
+            filestore_requested=True,
+            path=str(Path("/tmp") / f"{uuid.uuid4()}.zip"),
+            filename="comerta.zip",
+            size_bytes=1,
+            sha256="a" * 64,
+            downloaded_at=datetime.now(UTC),
+        )
+        Path(backup.path).write_bytes(b"backup")
+        _record_backup(env_client, backup)
+
+        instance = env_client.instance("http://127.0.0.1:8069", master_password="admin")
+        object.__setattr__(
+            instance,
+            "config",
+            InstanceConfig(
+                base_url="http://127.0.0.1:8069",
+                master_password="admin",
+                db_host=db_host,
+                db_port=db_port,
+                db_user="odoo",
+                db_password="secret",
+                configured_database_names=("comerta",),
+            ),
+        )
+
+        captured_cluster_ids: list[str | None] = []
+        original_record_restore = catalog.record_restore
+
+        def capture_restore(
+            db_host: str | None,
+            db_port: int,
+            database_name: str,
+            backup_id: str,
+            *,
+            cluster_id: str | None = None,
+            data_directory: str | Path | None = None,
+        ) -> None:
+            captured_cluster_ids.append(cluster_id)
+            original_record_restore(
+                db_host,
+                db_port,
+                database_name,
+                backup_id,
+                cluster_id=cluster_id,
+                data_directory=data_directory,
+            )
+
+        catalog.record_restore = capture_restore  # type: ignore[assignment]
+
+        from tests.unit.resources.test_database_resource import _mock_http
+
+        with (
+            patch.object(
+                instance.databases,
+                "list",
+                return_value=(Database(name="comerta", backup=NoBackup()),),
+            ),
+            patch.object(instance.databases, "names", return_value=("comerta",)),
+            patch.object(instance.databases, "backup", return_value=backup),
+            patch(
+                "odoo_instance_sdk.resources.database.backup_restore_parts.backup.httpx.Client",
+                return_value=_mock_http({"result": True}),
+            ),
+        ):
+            InstanceFactory.from_config = MagicMock(return_value=instance)  # type: ignore[method-assign]
+            env = env_client.environments.checkout(
+                project_manifest,
+                "feat/copy-drop-fail-reason",
+                options=EnvironmentCheckoutOptions(
+                    python=str(fake_python),
+                    db_mode=EnvironmentDatabaseMode.COPY,
+                    target_database="copy_target",
+                    source_database="comerta",
+                ),
+            )
+
+        assert captured_cluster_ids == [cluster_id]
+
+        def fail_build(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("password=admin_passwd leaked in psql output")
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.drop.build_database_drop_command", fail_build
+        )
+
+        selected = env_client.environments.get(str(env.id))
+        with pytest.raises(EnvironmentConflictError, match="guarded COPY database drop plan"):
+            env_client.environments.remove_command(selected, executor=RecordingExecutor())
+
+        assert env_client.environments.get(str(env.id)).state is EnvironmentState.READY
+        assert Path(env.generated_config_path).is_file()

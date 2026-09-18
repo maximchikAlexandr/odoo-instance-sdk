@@ -6,7 +6,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -16,7 +16,12 @@ from odoo_instance_sdk.commands.context import ResolvedContext
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
 from odoo_instance_sdk.internal.automation import ModuleUpdatePlan as AdapterPlan
-from odoo_instance_sdk.models import CommandResult, DevelopmentEnvironment, StartConfig
+from odoo_instance_sdk.models import (
+    CommandResult,
+    DevelopmentEnvironment,
+    ModuleUpdatePlan,
+    StartConfig,
+)
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.module import ModuleResource
@@ -90,7 +95,7 @@ def test_module_where_and_deps_have_rich_projections_and_no_fields_option(
 
     assert where.exit_code == 0, where.output
     assert "Odoo module location" in where.output
-    assert str(addons / "sale") in where.output
+    assert "ddons/sale" in where.output
     assert deps.exit_code == 0, deps.output
     assert "missing" in deps.output
     assert fields.exit_code == 2
@@ -117,11 +122,13 @@ def test_module_update_cli_classifies_failures_without_retry(
         python=sys.executable,
         odoo_bin=Path(sys.executable),
     )
+    modules = MagicMock()
     instance = SimpleNamespace(
         config=SimpleNamespace(
             start_config=StartConfig(db_name="db"),
             command_prefix=(sys.executable, str(tmp_path / "odoo-bin")),
-        )
+        ),
+        modules=modules,
     )
     context = ResolvedContext(
         client=object(),  # type: ignore[arg-type]
@@ -137,9 +144,10 @@ def test_module_update_cli_classifies_failures_without_retry(
         return CommandResult(args=[], returncode=2, stdout=stdout, stderr=stderr, duration=0.0)
 
     command = Command.create(ExecutionPlan(), run)
-    with (
-        patch("odoo_instance_sdk.commands.module.cli_context.ready_instance", return_value=context),
-        patch("odoo_instance_sdk.cli.update_modules_command", return_value=command),
+    modules.plan_update.return_value = ModuleUpdatePlan(modules=("sale",))
+    modules.update_command.return_value = command
+    with patch(
+        "odoo_instance_sdk.commands.module.cli_context.ready_instance", return_value=context
     ):
         result = CliRunner().invoke(cli, ["module", "update", "sale", "--yes", "--format", "json"])
 

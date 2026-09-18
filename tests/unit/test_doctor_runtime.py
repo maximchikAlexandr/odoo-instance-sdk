@@ -18,6 +18,7 @@ from odoo_instance_sdk.exceptions import EnvironmentResolutionError
 from odoo_instance_sdk.internal import context as resolution
 from odoo_instance_sdk.internal import doctor
 from odoo_instance_sdk.internal.doctor import DoctorReport
+from odoo_instance_sdk.internal.doctor import manifest as doctor_manifest
 from odoo_instance_sdk.models import (
     DevelopmentEnvironment,
     EnvironmentDatabaseMode,
@@ -46,8 +47,12 @@ def test_doctor_project_runtime_uses_runtime_view_and_reports_resolved_paths(
         source_config=source,
     )
     (manifest_dir / "project.toml").write_text(project.to_manifest())
-    monkeypatch.setattr(doctor, "_database_available", lambda *_args: True)
-    monkeypatch.setattr(doctor, "_http_available", lambda *_args: True)
+    monkeypatch.setattr(doctor_manifest, "_database_available", lambda *_args: True)
+    monkeypatch.setattr(doctor_manifest, "_http_available", lambda *_args: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.project_runtime.resolve_project_runtime",
+        lambda _root, value, **kwargs: Path(sys.executable),
+    )
 
     report = DoctorReport()
     doctor._check_project_runtime(
@@ -110,8 +115,8 @@ def test_doctor_environment_runtime_uses_environment_runtime_view(
         get_environment_runtime=lambda _environment_id: {"odoo_bin": sys.executable}
     )
     client = SimpleNamespace(get_catalog=lambda: catalog)
-    monkeypatch.setattr(doctor, "_database_available", lambda *_args: True)
-    monkeypatch.setattr(doctor, "_http_available", lambda *_args: True)
+    monkeypatch.setattr(doctor_manifest, "_database_available", lambda *_args: True)
+    monkeypatch.setattr(doctor_manifest, "_http_available", lambda *_args: True)
 
     report = DoctorReport()
     doctor._check_environment_runtime(report, cast("OdooClient", client), environment)
@@ -159,11 +164,11 @@ def _patch_public_doctor_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
         "_check_orphaned",
         "_check_postgres",
     ):
-        monkeypatch.setattr(doctor, name, lambda *args: None)
-    monkeypatch.setattr(doctor, "_check_manifest", lambda *args: None)
-    monkeypatch.setattr(doctor, "_database_available", lambda *_args: True)
-    monkeypatch.setattr(doctor, "_database_status", lambda *_args: "available")
-    monkeypatch.setattr(doctor, "_http_available", lambda *_args: True)
+        monkeypatch.setattr(doctor_manifest, name, lambda *args: None)
+    monkeypatch.setattr(doctor_manifest, "_check_manifest", lambda *args: None)
+    monkeypatch.setattr(doctor_manifest, "_database_available", lambda *_args: True)
+    monkeypatch.setattr(doctor_manifest, "_database_status", lambda *_args: "available")
+    monkeypatch.setattr(doctor_manifest, "_http_available", lambda *_args: True)
 
 
 def test_public_doctor_keeps_invalid_project_python_as_runtime_finding(
@@ -303,7 +308,7 @@ def test_doctor_project_runtime_marks_ambiguous_database_unavailable(
     )
     (tmp_path / ".odcli").mkdir()
     (tmp_path / ".odcli" / "project.toml").write_text(project.to_manifest())
-    monkeypatch.setattr(doctor, "_http_available", lambda *_args: True)
+    monkeypatch.setattr(doctor_manifest, "_http_available", lambda *_args: True)
 
     report = DoctorReport()
     doctor._check_project_runtime(report, cast("OdooClient", SimpleNamespace()), tmp_path)
@@ -351,7 +356,24 @@ def test_cli_doctor_uses_effective_owner_from_ready_instance(
 ) -> None:
     ready_calls: list[object] = []
     doctor_calls: list[dict[str, object]] = []
-    resolved = SimpleNamespace(client=SimpleNamespace(), project_root=tmp_path)
+    if owner_kind == "environment":
+        output_provenance = {
+            "project_source": "worktree" if selection_source == "worktree" else "null",
+            "environment_source": "cwd" if selection_source == "worktree" else "explicit",
+        }
+    else:
+        output_provenance = {
+            "project_source": selection_source,
+            "environment_source": "null",
+        }
+    resolved = SimpleNamespace(
+        client=SimpleNamespace(),
+        project_root=tmp_path,
+        provenance=selection_source,
+        source=SimpleNamespace(),
+        materialization_error=None,
+        output_provenance=output_provenance,
+    )
 
     def ready_instance(context: object) -> object:
         ready_calls.append(context)
@@ -384,8 +406,8 @@ def test_cli_doctor_uses_effective_owner_from_ready_instance(
             ]
         )
 
-    monkeypatch.setattr(cli_context, "ready_instance", ready_instance)
-    monkeypatch.setattr(cli_module, "run_doctor", run_selected)
+    monkeypatch.setattr(cli_module.cli_context, "_ready_instance_for_doctor", ready_instance)
+    monkeypatch.setattr("odoo_instance_sdk.internal.doctor.run_doctor", run_selected)
 
     result = CliRunner().invoke(cli_module.cli, [*args, "--format", "json"])
 

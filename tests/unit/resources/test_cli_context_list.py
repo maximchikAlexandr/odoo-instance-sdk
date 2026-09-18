@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 def _invoke(runner: CliRunner, client: OdooClient, args: list[str]) -> Result:
-    with patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client):
+    with patch("odoo_instance_sdk.client.OdooClient", return_value=client):
         return runner.invoke(cli, args)
 
 
@@ -39,10 +39,6 @@ def _inject_monitor_process_provider(
         original_init(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(EnvironmentMonitor, "__init__", init)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env._monitor_class",
-        lambda: lambda: EnvironmentMonitor(catalog_path=env_client.get_catalog().db_path),
-    )
 
 
 def test_nested_worktree_infers_remove_selector(
@@ -84,9 +80,9 @@ def test_outside_context_lists_all_projects(
     result = _invoke(CliRunner(), env_client, ["env", "list", "--format", "json"])
 
     assert result.exit_code == 0, result.output
-    snapshot = json.loads(result.output)["result"]
-    assert snapshot["environments"] == []
-    assert snapshot["projects"] == []
+    inventory = json.loads(result.output)["result"]
+    assert inventory["rows"] == []
+    assert inventory["clusters"] == []
 
 
 def test_sync_rejects_root_env_as_usage_error(env_client: OdooClient) -> None:
@@ -105,7 +101,9 @@ def test_checkout_dry_run_has_full_plan_and_no_catalog_mutation(
     fake_python: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.remote_branch_names", lambda *_args: ())
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.remote_branch_names", lambda *_args: ()
+    )
     before = env_client.environments.list(project=project_manifest, include_removed=True)
     result = _invoke(
         CliRunner(),
@@ -165,13 +163,12 @@ def test_list_json_emits_snapshot_and_human_has_project_header(
     assert "Project " in human.output and "PostgreSQL" in human.output
     assert "\x1b" not in human.output
     payload = json.loads(data.output)["result"]
-    # Snapshot contract parity: projects + environments with runtime/git/storage.
     assert "schema_version" in payload
-    assert "projects" in payload and "environments" in payload
-    listed = payload["environments"][0]
-    assert listed["id"] == str(env.id)
-    assert listed["branch"] == "feat/list-cli"
-    assert "runtime" in listed and "git" in listed and "storage" in listed
+    assert "rows" in payload and "clusters" in payload
+    listed = next(row for row in payload["rows"] if row["kind"] == "environment")
+    assert listed["environment_id"] == str(env.id)
+    assert listed["git"]["branch"] == "feat/list-cli"
+    assert listed["git"] is not None
     assert listed["lifecycle_state"] == "ready"
 
 
@@ -225,9 +222,10 @@ def test_list_all_projects_works_outside_a_project(
     result = _invoke(CliRunner(), env_client, ["env", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 0, result.output
-    assert [row["id"] for row in json.loads(result.output)["result"]["environments"]] == [
-        str(env.id)
+    environment_rows = [
+        row for row in json.loads(result.output)["result"]["rows"] if row["kind"] == "environment"
     ]
+    assert [row["environment_id"] for row in environment_rows] == [str(env.id)]
 
 
 def test_list_excludes_removed_unless_all(
@@ -251,8 +249,12 @@ def test_list_excludes_removed_unless_all(
 
     assert default.exit_code == all_json.exit_code == 0
     # --format json always wraps non-removed Snapshot only; --all does NOT change JSON.
-    assert json.loads(default.output)["result"]["environments"] == []
-    assert json.loads(all_json.output)["result"]["environments"] == []
+    assert [
+        row for row in json.loads(default.output)["result"]["rows"] if row["kind"] == "environment"
+    ] == []
+    assert [
+        row for row in json.loads(all_json.output)["result"]["rows"] if row["kind"] == "environment"
+    ] == []
     # --all is human-only: removed row appears in human output.
     assert all_human.output != default_human.output
 
@@ -299,7 +301,7 @@ def test_cwd_project_resolution_records_cwd_provenance(
     monkeypatch.chdir(project_manifest)
     empty = Snapshot(schema_version=3, generated_at=datetime.now(UTC), projects=(), environments=())
     with patch(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
+        "odoo_instance_sdk.commands.env.checkout.EnvironmentMonitor.snapshot",
         return_value=empty,
     ):
         result = _invoke(CliRunner(), env_client, ["env", "list", "--format", "json"])

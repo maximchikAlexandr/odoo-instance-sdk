@@ -20,7 +20,7 @@ from odoo_instance_sdk.models import EnvironmentCheckoutPlan
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import ActionStep, JsonValue, ProcessStep
 
-    from .executor import ProcessHandle
+    from .run import ProcessHandle
 
 
 class PreparedProcess(Protocol):
@@ -783,19 +783,21 @@ __all__ = [
 # Imported at the end to keep the private snapshot definitions independent of
 # the real subprocess implementation.  The package remains one seam for
 # callers while the implementation stays split by responsibility.
-from .executor import (  # noqa: E402
+from .run import (  # noqa: E402
     ProcessExecutionError,
     ProcessHandle,
     ProcessResult,
     ProcessSpawnError,
     ProcessTimeoutError,
     SubprocessExecutor,
-    is_process_alive,
     owned_handle,
     prepared_step,
     run_captured,
     run_captured_limited,
-    spawn,
+)
+from .spawn import spawn  # noqa: E402
+from .terminate import (  # noqa: E402
+    is_process_alive,
     terminate,
     terminate_pid,
     wait_foreground,

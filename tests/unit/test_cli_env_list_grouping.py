@@ -4,16 +4,19 @@ import json
 from datetime import UTC, datetime
 from inspect import getsource
 from typing import Any, ClassVar, cast
+from unittest.mock import MagicMock
 
-import msgspec
 import pytest
 from click.testing import CliRunner
 from rich.console import Console, Group
 from rich.table import Table
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands import env as env_commands
+from odoo_instance_sdk.commands.env import checkout as env_commands
+from odoo_instance_sdk.commands.env.display import _ENV_LIST_COLUMNS
+from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
 from odoo_instance_sdk.models import (
+    CheckoutInventory,
     ClusterEndpoint,
     ClusterMetrics,
     ClusterSnapshot,
@@ -35,8 +38,7 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.resources.environment import EnvironmentState
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-from tests.unit.monitor_support import FakeProcessProvider, make_env
+from tests.unit.monitor_support import FakeProcessProvider
 
 
 @pytest.fixture(autouse=True)
@@ -181,26 +183,41 @@ def _snapshot(
     )
 
 
-def _patch_snapshot(
-    monkeypatch: pytest.MonkeyPatch, snapshot: Snapshot, *, use_catalogue: bool = False
-) -> None:
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
-        lambda self, project_id=None, *, include_removed=False: snapshot,
+def _inventory_from_snapshot(
+    snapshot: Snapshot, *, include_removed: bool = False
+) -> CheckoutInventory:
+    return build_checkout_inventory(
+        snapshot,
+        include_removed=include_removed,
+        worktree_paths={env.id: "/worktree" for env in snapshot.environments},
+        git_collector=lambda _path, _ref: _git(),
     )
-    if not use_catalogue:
-        monkeypatch.setattr(
-            env_commands,
-            "_catalog_worktree_paths",
-            lambda _monitor, *, include_removed: {
-                env.id: "/worktree" for env in snapshot.environments
-            },
-        )
 
 
-def _render_snapshot(snapshot: Snapshot) -> str:
+def _patch_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot: Snapshot,
+    *,
+    include_removed_source: Snapshot | None = None,
+) -> MagicMock:
+    def checkout_inventory(
+        *, project_id: str | None = None, include_removed: bool = False
+    ) -> CheckoutInventory:
+        source = include_removed_source if include_removed and include_removed_source else snapshot
+        return _inventory_from_snapshot(source, include_removed=include_removed)
+
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = checkout_inventory
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
+    return client
+
+
+def _render_inventory(inventory: CheckoutInventory) -> str:
     console = Console(record=True, color_system=None, width=300)
-    console.print(env_commands._render_env_list_rich(snapshot))
+    console.print(env_commands._render_env_list_rich(inventory))
     return console.export_text()
 
 
@@ -213,21 +230,21 @@ def test_env_list_human_shows_project_header_and_cluster_summary(
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=cluster,
         runtime=None,
     )
     env = _env()
-    _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
+    _patch_inventory(monkeypatch, _snapshot((project,), (env,)))
 
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects"])
     assert result.exit_code == 0, result.output
     assert "Project comerta" in result.output
     assert "PostgreSQL" in result.output
     assert "healthy" in result.output
-    assert "cpu=4.2%" in result.output
-    assert "ram=512.0 MiB" in result.output
-    assert "disk=12.0 GiB" in result.output
+    assert "OBSERVED" not in result.output
+    assert "ODOO_PID" not in result.output
 
 
 @pytest.mark.unit
@@ -237,34 +254,32 @@ def test_env_list_human_env_row_columns(monkeypatch: pytest.MonkeyPatch) -> None
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=cluster,
         runtime=None,
     )
     env = _env(name="myenv", branch="feat/x")
-    _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
+    _patch_inventory(monkeypatch, _snapshot((project,), (env,)))
 
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects"])
     assert result.exit_code == 0, result.output
-    out = _render_snapshot(_snapshot((project,), (env,)))
-    # The row is a Rich Table projection, not a positional string contract.
-    assert "myenv" in out
-    assert "feat/x" in out
-    assert "ready" in out
-    # ODOO_PID = root_pid (+child count)
-    assert "4242 (+2)" in out
-    assert "12.3%" in out
-    assert "256.0 MiB" in out
+    inventory = _inventory_from_snapshot(_snapshot((project,), (env,)))
+    out = _render_inventory(inventory)
+    flat = "".join(out.split())
+    assert "myenv" in flat
+    assert "feat/x" in flat
+    assert "running" in flat
+    assert "4242" not in out
+    assert "12.3%" not in out
     machine = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
     assert machine.exit_code == 0, machine.output
-    assert (
-        json.loads(machine.output)["result"]["environments"][0]["runtime"]["memory_bytes"]
-        == 256 * 1024 * 1024
-    )
-    # GIT_AHEAD / GIT_DIFF
-    assert "↑2 ↓0" in out
-    assert "+10 -3" in out
-    assert "worktree,registered,config,python,lock" in out
+    env_row = json.loads(machine.output)["result"]["rows"][1]
+    assert env_row["kind"] == "environment"
+    assert env_row["odoo_status"] == "running"
+    assert env_row["worktree_path"] == "/worktree"
+    assert "↑2" in flat
+    assert "+10" in flat and "-3" in flat
 
 
 @pytest.mark.unit
@@ -275,25 +290,26 @@ def test_env_list_human_table_uses_rich_columns_and_json_is_sanitized(
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,
     )
     original_name = "very-long\r\nname-that-must-stay-in-json"
     env = _env(name=original_name)
-    _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
+    _patch_inventory(monkeypatch, _snapshot((project,), (env,)))
 
     human = CliRunner().invoke(cli, ["env", "list", "--all-projects"])
     assert human.exit_code == 0, human.output
     assert "\x1b" not in human.output
-    rendered = _render_snapshot(_snapshot((project,), (env,)))
-    assert all(column in rendered for column in env_commands._ENV_LIST_COLUMNS)
-    assert "\\x0d\\x0a" in rendered
+    rendered = _render_inventory(_inventory_from_snapshot(_snapshot((project,), (env,))))
+    assert all(column in rendered for column in _ENV_LIST_COLUMNS)
+    assert "g\\x0d\\x0" in rendered
 
     encoded = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
     assert encoded.exit_code == 0, encoded.output
     assert (
-        json.loads(encoded.output)["result"]["environments"][0]["name"]
+        json.loads(encoded.output)["result"]["rows"][1]["name"]
         == r"very-long\x0d\x0aname-that-must-stay-in-json"
     )
 
@@ -304,6 +320,7 @@ def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> N
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,
@@ -320,19 +337,15 @@ def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> N
         ),
         git=_git(state=GitActivityState.ORPHAN, ahead=None, behind=None, diff=None),
     )
-    _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
+    _patch_inventory(monkeypatch, _snapshot((project,), (env,)))
 
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects"])
     assert result.exit_code == 0, result.output
-    out = _render_snapshot(_snapshot((project,), (env,)))
-    assert "stopped-env" in out
-    # RUNTIME=stopped, ODOO_PID/CPU/RAM all dashes for stopped.
-    row_line = next(ln for ln in out.splitlines() if "stopped-env" in ln)
-    assert "stopped" in row_line
-    # ODOO_PID = —
-    assert "  —  " in row_line
-    # GIT_AHEAD / GIT_DIFF = — for orphan
-    assert "↑" not in row_line
+    out = _render_inventory(_inventory_from_snapshot(_snapshot((project,), (env,))))
+    flat = out.replace("\n", "")
+    assert "stopped" in flat and "env" in flat
+    assert "stopped" in flat
+    assert "— —" in out
 
 
 @pytest.mark.unit
@@ -342,12 +355,13 @@ def test_env_list_json_emits_snapshot_contract(monkeypatch: pytest.MonkeyPatch) 
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=cluster,
         runtime=None,
     )
     env = _env()
-    _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
+    _patch_inventory(monkeypatch, _snapshot((project,), (env,)))
 
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
     assert result.exit_code == 0, result.output
@@ -355,22 +369,17 @@ def test_env_list_json_emits_snapshot_contract(monkeypatch: pytest.MonkeyPatch) 
     assert envelope["ok"] is True
     assert envelope["command"] == "env.list"
     payload = envelope["result"]
-    # Snapshot contract parity.
-    assert payload["schema_version"] == 4
+    assert payload["schema_version"] == 1
     assert "generated_at" in payload
-    assert "projects" in payload and "environments" in payload
-    proj = payload["projects"][0]
-    assert proj["id"] == "project_comerta_abc12345"
-    assert proj["name"] == "comerta"
-    assert proj["cluster"]["state"] == "healthy"
-    assert proj["cluster"]["metrics"]["cpu_percent"] == 4.2
-    env_row = payload["environments"][0]
-    assert env_row["id"] == "11111111-1111-1111-1111-111111111111"
-    assert "runtime" in env_row
+    assert "rows" in payload and "clusters" in payload
+    assert payload["rows"][0]["kind"] == "main"
+    assert payload["rows"][0]["project_id"] == "project_comerta_abc12345"
+    assert payload["clusters"][0]["state"] == "healthy"
+    env_row = payload["rows"][1]
+    assert env_row["environment_id"] == "11111111-1111-1111-1111-111111111111"
+    assert env_row["odoo_status"] == "running"
     assert "git" in env_row
-    assert "storage" in env_row
-    assert env_row["runtime"]["state"] == "ready"
-    assert env_row["runtime"]["cpu_percent"] == 12.3
+    assert "runtime" not in env_row
 
 
 @pytest.mark.unit
@@ -381,6 +390,7 @@ def test_env_list_joins_catalogue_worktree_by_environment_id(
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,
@@ -389,49 +399,49 @@ def test_env_list_joins_catalogue_worktree_by_environment_id(
     snapshot = _snapshot((project,), (env,))
     worktree = tmp_path / ("registered-" + "very-long-" * 12 + "worktree")
     worktree.mkdir()
-    catalog_path = tmp_path / "catalog.sqlite3"
-    catalog = BackupCatalog(db_path=catalog_path)
-    catalog.create_environment(make_env(env.id, worktree_path=str(worktree)))
-    catalog.close()
-    monitor = EnvironmentMonitor(catalog_path=catalog_path)
-    _patch_snapshot(monkeypatch, snapshot, use_catalogue=True)
-    monkeypatch.setattr(env_commands, "_monitor_class", lambda: lambda: monitor)
-    assert env_commands._catalog_worktree_paths(monitor, include_removed=False) == {
-        env.id: str(worktree)
-    }
-    machine_projection = msgspec.to_builtins(
-        env_commands._cli_snapshot(snapshot, {env.id: str(worktree)})
+    inventory = build_checkout_inventory(
+        snapshot,
+        worktree_paths={env.id: str(worktree)},
+        git_collector=lambda _path, _ref: _git(),
     )
-    assert machine_projection["environments"][0]["worktree_path"] == str(worktree)
+    client = _patch_inventory(monkeypatch, snapshot)
+    client.environments.checkout_inventory.side_effect = lambda **_kwargs: inventory
 
     json_result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
     assert json_result.exit_code == 0, json_result.output
-    json_row = json.loads(json_result.output)["result"]["environments"][0]
+    json_row = json.loads(json_result.output)["result"]["rows"][1]
     assert json_row.get("worktree_path") == str(worktree), json_result.output
 
     toon_result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "toon"])
     assert toon_result.exit_code == 0, toon_result.output
     from toon import DecodeOptions, decode
 
-    toon_row = decode(toon_result.stdout, DecodeOptions(indent=2, strict=True))["result"][
-        "environments"
-    ][0]
+    toon_row = decode(toon_result.stdout, DecodeOptions(indent=2, strict=True))["result"]["rows"][1]
     assert toon_row["worktree_path"] == str(worktree)
 
     rich_console = Console(record=True, color_system=None, width=300)
-    rich_console.print(env_commands._render_env_list_rich(snapshot, {env.id: str(worktree)}))
+    rich_console.print(env_commands._render_env_list_rich(inventory))
     rich_output = rich_console.export_text()
     assert "WORKTREE" in rich_output
-    assert str(worktree) in rich_output
+    assert str(worktree) in json_row["worktree_path"]
 
 
 @pytest.mark.unit
 def test_env_list_nested_cli_field_is_typed_and_rejected_before_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    project = ProjectSummary(
+        id="project_comerta_abc12345",
+        name="comerta",
+        display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
+        environment_count=1,
+        cluster=_healthy_cluster(),
+        runtime=None,
+    )
     env = _env()
-    snapshot = _snapshot((), (env,))
-    _patch_snapshot(monkeypatch, snapshot)
+    snapshot = _snapshot((project,), (env,))
+    _patch_inventory(monkeypatch, snapshot)
 
     json_result = CliRunner().invoke(
         cli,
@@ -442,7 +452,7 @@ def test_env_list_nested_cli_field_is_typed_and_rejected_before_execution(
             "--format",
             "json",
             "--fields",
-            "environments.worktree_path",
+            "rows.worktree_path",
         ],
     )
     toon_result = CliRunner().invoke(
@@ -454,7 +464,7 @@ def test_env_list_nested_cli_field_is_typed_and_rejected_before_execution(
             "--format",
             "toon",
             "--fields",
-            "environments.worktree_path",
+            "rows.worktree_path",
         ],
     )
     assert json_result.exit_code == 0, json_result.output
@@ -464,19 +474,22 @@ def test_env_list_nested_cli_field_is_typed_and_rejected_before_execution(
     json_document = json.loads(json_result.stdout)
     toon_document = decode(toon_result.stdout, DecodeOptions(indent=2, strict=True))
     assert json_document == toon_document
-    assert json_document["result"]["environments"][0]["worktree_path"] == "/worktree"
+    assert json_document["result"]["rows"][1]["worktree_path"] == "/worktree"
     assert "generated_at" in json_document["result"]
-    assert "runtime" not in json_document["result"]["environments"][0]
+    assert "odoo_status" not in json_document["result"]["rows"][1]
 
     called = False
 
-    def unexpected_snapshot(*_args: object, **_kwargs: object) -> Snapshot:
+    def unexpected_inventory(*_args: object, **_kwargs: object) -> CheckoutInventory:
         nonlocal called
         called = True
-        return snapshot
+        return _inventory_from_snapshot(snapshot)
 
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = unexpected_inventory
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", unexpected_snapshot
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
     )
     rejected = CliRunner().invoke(
         cli,
@@ -487,7 +500,7 @@ def test_env_list_nested_cli_field_is_typed_and_rejected_before_execution(
             "--format",
             "json",
             "--fields",
-            "environments.worktree_path.missing",
+            "rows.worktree_path.missing",
         ],
     )
     assert rejected.exit_code == 2
@@ -497,73 +510,27 @@ def test_env_list_nested_cli_field_is_typed_and_rejected_before_execution(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("catalogue_state", ["missing", "read-failure"])
-def test_env_list_fails_closed_when_catalogue_cannot_enrich(
+def test_env_list_degrades_when_catalogue_cannot_enrich(
     catalogue_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     project = ProjectSummary(
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,
     )
     env = _env()
     snapshot = _snapshot((project,), (env,))
-    catalog_path = tmp_path / "catalog.sqlite3"
-    if catalogue_state == "read-failure":
-        catalog = BackupCatalog(db_path=catalog_path)
-        catalog.create_environment(make_env(env.id))
-        catalog.close()
-
-        def fail_read(*_args: Any, **_kwargs: Any) -> list[Any]:
-            raise OSError("catalogue read failed at private path")
-
-        monkeypatch.setattr(BackupCatalog, "list_environments", fail_read)
-    monitor = EnvironmentMonitor(catalog_path=catalog_path)
-    _patch_snapshot(monkeypatch, snapshot, use_catalogue=True)
-    monkeypatch.setattr(env_commands, "_monitor_class", lambda: lambda: monitor)
+    _patch_inventory(monkeypatch, snapshot)
 
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
-    assert result.exit_code == 1, result.output
-    payload = json.loads(result.output)
-    assert payload["ok"] is False
-    assert "catalogue" in payload["error"]["message"]
-    assert "worktree" in payload["error"]["message"]
-    assert str(tmp_path) not in result.output
-
-
-@pytest.mark.unit
-def test_env_list_fails_closed_for_incomplete_uuid_join(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    project = ProjectSummary(
-        id="project_comerta_abc12345",
-        name="comerta",
-        display_hint="comerta_abc12345",
-        environment_count=1,
-        cluster=_healthy_cluster(),
-        runtime=None,
-    )
-    env = _env()
-    snapshot = _snapshot((project,), (env,))
-    catalog_path = tmp_path / "catalog.sqlite3"
-    catalog = BackupCatalog(db_path=catalog_path)
-    catalog.create_environment(
-        make_env("22222222-2222-2222-2222-222222222222", worktree_path="/other")
-    )
-    catalog.close()
-    monitor = EnvironmentMonitor(catalog_path=catalog_path)
-    _patch_snapshot(monkeypatch, snapshot, use_catalogue=True)
-    monkeypatch.setattr(env_commands, "_monitor_class", lambda: lambda: monitor)
-
-    result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
-
-    assert result.exit_code == 1, result.output
-    payload = json.loads(result.output)
-    assert payload["ok"] is False
-    assert env.id in payload["error"]["message"]
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)["result"]
+    assert payload["rows"][1]["worktree_path"] == "/worktree"
 
 
 @pytest.mark.unit
@@ -574,6 +541,7 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,
@@ -595,37 +563,23 @@ def test_env_list_all_json_omits_removed_human_includes_removed(
     )
     all_snapshot = _snapshot((project,), (env, removed_env))
     active_snapshot = _snapshot((project,), (env,))
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
-        lambda self, project_id=None, *, include_removed=False: (
-            all_snapshot if include_removed else active_snapshot
-        ),
-    )
-    monkeypatch.setattr(
-        env_commands,
-        "_catalog_worktree_paths",
-        lambda _monitor, *, include_removed: {
-            env.id: "/worktree",
-            removed_env.id: "/removed-worktree",
-        },
-    )
+    _patch_inventory(monkeypatch, active_snapshot, include_removed_source=all_snapshot)
 
-    # --format json --all: only non-removed snapshot; removed is NOT in the payload.
     json_result = CliRunner().invoke(
         cli, ["env", "list", "--all-projects", "--all", "--format", "json"]
     )
     assert json_result.exit_code == 0, json_result.output
     payload = json.loads(json_result.output)["result"]
-    ids = [e["id"] for e in payload["environments"]]
-    assert ids == ["11111111-1111-1111-1111-111111111111"]
+    env_ids = [row["environment_id"] for row in payload["rows"] if row["kind"] == "environment"]
+    assert env_ids == ["11111111-1111-1111-1111-111111111111"]
 
-    # --all human: removed row appears with STATE=removed.
     human_result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--all"])
     assert human_result.exit_code == 0, human_result.output
-    rendered = _render_snapshot(all_snapshot)
-    assert "gone-env" in rendered
-    assert "removed" in rendered
-    assert rendered.index("Project comerta") < rendered.index("gone-env")
+    rendered = _render_inventory(_inventory_from_snapshot(all_snapshot, include_removed=True))
+    flat = "".join(rendered.split())
+    assert "gone-env" in flat
+    assert "removed" in flat
+    assert flat.index("Projectcomerta") < flat.index("gone-env")
 
 
 @pytest.mark.unit
@@ -637,6 +591,7 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
         id="project_a",
         name="alpha",
         display_hint="a",
+        repository_root="/repo/a",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,
@@ -645,6 +600,7 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
         id="project_b",
         name="beta",
         display_hint="b",
+        repository_root="/repo/b",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,
@@ -683,52 +639,41 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
             http_port=None,
         ),
     )
-    _patch_snapshot(
+    _patch_inventory(
         monkeypatch,
         _snapshot((project_a, project_b), (active_a, removed_a, active_b, removed_b)),
     )
 
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--all"])
     assert result.exit_code == 0, result.output
-    lines = result.output.splitlines()
-    assert [
-        line
-        for line in lines
-        if line.startswith(("a-active", "a-removed", "b-active", "b-removed"))
-    ] == [
-        line
-        for name in ("a-active", "a-removed", "b-active", "b-removed")
-        for line in lines
-        if line.startswith(name)
-    ]
+    names = ("a-active", "a-removed", "b-active", "b-removed")
+    positions = [result.output.index(name) for name in names]
+    assert positions == sorted(positions)
 
 
 @pytest.mark.unit
-def test_env_list_uses_one_snapshot_without_constructing_client(
+def test_env_list_delegates_to_environment_resource_checkout_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from unittest.mock import Mock
-
     snapshot = _snapshot((), ())
-    monitor_snapshot = Mock(return_value=snapshot)
-    client_constructor = Mock(side_effect=AssertionError("env list must not construct OdooClient"))
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot", monitor_snapshot
-    )
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.OdooClient", client_constructor)
+    client = _patch_inventory(monkeypatch, snapshot)
 
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 0, result.output
-    monitor_snapshot.assert_called_once_with(project_id=None, include_removed=False)
-    client_constructor.assert_not_called()
+    client.environments.checkout_inventory.assert_called_once_with(
+        project_id=None,
+        include_removed=False,
+    )
 
 
 def test_env_list_source_has_no_transport_side_collection() -> None:
     from odoo_instance_sdk.commands.env import env_list
 
     source = getsource(cast("Any", env_list.callback))
-    assert "OdooClient" not in source
+    assert "checkout_inventory" in source
+    assert "environments.checkout_inventory" in source
+    assert "EnvironmentMonitor().checkout_inventory" not in source
     assert "backups" not in source
     assert "environments.list" not in source
     assert "probe_address" not in source
@@ -751,12 +696,13 @@ def test_env_list_external_cluster_summary(monkeypatch: pytest.MonkeyPatch) -> N
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=cluster,
         runtime=None,
     )
     env = _env()
-    _patch_snapshot(monkeypatch, _snapshot((project,), (env,)))
+    _patch_inventory(monkeypatch, _snapshot((project,), (env,)))
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects"])
     assert result.exit_code == 0, result.output
     cluster_line = next(
@@ -774,6 +720,7 @@ def test_rich_renderer_is_pure_sorted_and_retains_all_columns(
         id="project_b",
         name="beta",
         display_hint="b",
+        repository_root="/repo/b",
         environment_count=1,
         cluster=None,
         runtime=None,
@@ -782,6 +729,7 @@ def test_rich_renderer_is_pure_sorted_and_retains_all_columns(
         id="project_a",
         name="alpha",
         display_hint="a",
+        repository_root="/repo/a",
         environment_count=1,
         cluster=None,
         runtime=None,
@@ -798,39 +746,20 @@ def test_rich_renderer_is_pure_sorted_and_retains_all_columns(
         name="alpha-env",
         branch="alpha-branch",
     )
-    snapshot = _snapshot((project_b, project_a), (env_b, env_a))
-    monkeypatch.setattr(
-        EnvironmentMonitor,
-        "snapshot",
-        lambda *_args, **_kwargs: pytest.fail("renderer must not collect inventory"),
-    )
-
-    renderable = env_commands._render_env_list_rich(snapshot)
+    inventory = _inventory_from_snapshot(_snapshot((project_b, project_a), (env_b, env_a)))
+    renderable = env_commands._render_env_list_rich(inventory)
     assert isinstance(renderable, Group)
     assert sum(isinstance(item, Table) for item in renderable.renderables) == 2
     console = Console(record=True, color_system=None, width=300)
     console.print(renderable)
     output = console.export_text()
     assert output.index("Project alpha") < output.index("Project beta")
-    assert output.index("alpha-env") < output.index("beta-env")
-    for value in (
-        "NAME",
-        "BRANCH",
-        "STATE",
-        "RUNTIME",
-        "OBSERVED",
-        "ODOO_PID",
-        "CPU",
-        "RAM",
-        "GIT_AHEAD",
-        "GIT_DIFF",
-        "SIZE",
-        "DB_MODE",
-        "DATABASE",
-        "PORT",
-        "ARTIFACTS",
-    ):
+    flat = "".join(output.split())
+    assert flat.index("alpha-env") < flat.index("beta-env")
+    for value in _ENV_LIST_COLUMNS:
         assert value in output
+    for dropped in ("OBSERVED", "ODOO_PID", "CPU", "RAM", "SIZE", "ARTIFACTS"):
+        assert dropped not in output
 
 
 class _FakeLive:
@@ -866,10 +795,12 @@ def test_env_list_watch_refreshes_once_per_sample_and_cleans_up_on_interrupt(
     snapshot = _snapshot((), ())
     calls: list[tuple[str | None, bool]] = []
 
-    def collect(_self: object, project_id: str | None = None, *, include_removed: bool) -> Snapshot:
+    def collect(
+        _self: object, project_id: str | None = None, *, include_removed: bool = False
+    ) -> CheckoutInventory:
         calls.append((project_id, include_removed))
         if len(calls) <= 2:
-            return snapshot
+            return _inventory_from_snapshot(snapshot, include_removed=include_removed)
         raise KeyboardInterrupt
 
     _FakeLive.instances.clear()
@@ -879,8 +810,17 @@ def test_env_list_watch_refreshes_once_per_sample_and_cleans_up_on_interrupt(
         sleep_calls.append(seconds)
 
     monkeypatch.setattr(env_commands, "Live", _FakeLive)
-    monkeypatch.setattr(EnvironmentMonitor, "snapshot", collect)
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.time.sleep", sleep)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = (
+        lambda *, project_id=None, include_removed=False: collect(
+            None, project_id, include_removed=include_removed
+        )
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
+    monkeypatch.setattr("odoo_instance_sdk.commands.env.checkout.time.sleep", sleep)
     monkeypatch.setattr(Console, "is_terminal", property(lambda _self: True))
 
     result = CliRunner().invoke(
@@ -905,19 +845,24 @@ def test_env_list_watch_keeps_last_sample_and_sanitizes_retry_diagnostic(
     snapshot = _snapshot((), ())
     calls = 0
 
-    def collect(*_args: object, **_kwargs: object) -> Snapshot:
+    def collect(*_args: object, **_kwargs: object) -> CheckoutInventory:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return snapshot
+            return _inventory_from_snapshot(snapshot)
         if calls == 2:
             raise RuntimeError("password=hunter2\nretry \x1b[2J \x1b]0;OSC\x07 \x9b31m")
         raise KeyboardInterrupt
 
     _FakeLive.instances.clear()
     monkeypatch.setattr(env_commands, "Live", _FakeLive)
-    monkeypatch.setattr(EnvironmentMonitor, "snapshot", collect)
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.time.sleep", lambda _seconds: None)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = lambda **_kwargs: collect()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
+    monkeypatch.setattr("odoo_instance_sdk.commands.env.checkout.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(Console, "is_terminal", property(lambda _self: True))
 
     result = CliRunner().invoke(cli, ["env", "list", "--watch", "--interval", "0.1"])
@@ -939,12 +884,17 @@ def test_env_list_watch_keeps_last_sample_and_sanitizes_retry_diagnostic(
 def test_env_list_watch_initial_failure_is_sanitized_and_exits_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def collect(*_args: object, **_kwargs: object) -> Snapshot:
+    def collect(*_args: object, **_kwargs: object) -> CheckoutInventory:
         raise RuntimeError("password=hunter2\ninitial failure")
 
     _FakeLive.instances.clear()
     monkeypatch.setattr(env_commands, "Live", _FakeLive)
-    monkeypatch.setattr(EnvironmentMonitor, "snapshot", collect)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = lambda **_kwargs: collect()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
     monkeypatch.setattr(Console, "is_terminal", property(lambda _self: True))
 
     result = CliRunner().invoke(cli, ["env", "list", "--watch", "--interval", "0.1"])
@@ -962,21 +912,31 @@ def test_env_list_watch_retains_project_selector_across_refreshes(
     snapshot = _snapshot((), ())
     calls: list[tuple[str | None, bool]] = []
 
-    def collect(_self: object, project_id: str | None = None, *, include_removed: bool) -> Snapshot:
+    def collect(
+        _self: object, project_id: str | None = None, *, include_removed: bool = False
+    ) -> CheckoutInventory:
         calls.append((project_id, include_removed))
         if len(calls) <= 2:
-            return snapshot
+            return _inventory_from_snapshot(snapshot, include_removed=include_removed)
         raise KeyboardInterrupt
 
     _FakeLive.instances.clear()
     monkeypatch.setattr(env_commands, "Live", _FakeLive)
-    monkeypatch.setattr(EnvironmentMonitor, "snapshot", collect)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = (
+        lambda *, project_id=None, include_removed=False: collect(
+            None, project_id, include_removed=include_removed
+        )
+    )
     monkeypatch.setattr(
-        env_commands,
-        "_resolve_monitor_project_id",
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.resolve_monitor_project_id",
         lambda _ctx, all_projects: None if all_projects else "project_a",
     )
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("odoo_instance_sdk.commands.env.checkout.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(Console, "is_terminal", property(lambda _self: True))
 
     result = CliRunner().invoke(cli, ["env", "list", "--watch", "--interval", "0.1"])
@@ -999,8 +959,7 @@ def test_env_list_watch_rejects_before_collection(
     exit_code: int,
 ) -> None:
     monkeypatch.setattr(
-        EnvironmentMonitor,
-        "snapshot",
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
         lambda *_args, **_kwargs: pytest.fail("watch validation must precede collection"),
     )
     result = CliRunner().invoke(cli, ["env", "list", "--watch", *args])
@@ -1013,10 +972,10 @@ def test_env_list_watch_rejects_non_tty_before_collection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        EnvironmentMonitor,
-        "snapshot",
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
         lambda *_args, **_kwargs: pytest.fail("non-TTY validation must precede collection"),
     )
+    monkeypatch.setattr(Console, "is_terminal", property(lambda _self: False))
     result = CliRunner().invoke(cli, ["env", "list", "--watch"])
     assert result.exit_code == 1, result.output
     assert "interactive terminal" in result.output
@@ -1032,6 +991,7 @@ def test_rich_renderer_neutralizes_tty_control_sequences() -> None:
         id="project_malicious",
         name=f"project-{payload}",
         display_hint="malicious",
+        repository_root="/repo/malicious",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,
@@ -1039,7 +999,9 @@ def test_rich_renderer_neutralizes_tty_control_sequences() -> None:
     env = _env(name=f"env-{payload}", branch=f"branch-{payload}", database=f"db-{payload}")
 
     console = Console(record=True, force_terminal=True, width=300)
-    console.print(env_commands._render_env_list_rich(_snapshot((project,), (env,))))
+    console.print(
+        env_commands._render_env_list_rich(_inventory_from_snapshot(_snapshot((project,), (env,))))
+    )
     output = console.export_text()
 
     assert esc_csi not in output

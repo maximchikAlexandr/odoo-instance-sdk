@@ -13,8 +13,9 @@ Every eligible bounded leaf resolves inputs once and captures one immutable
 `Command` before confirmation or mutation. `--dry-run` emits its redacted
 `ExecutionPlan` and does not call `.run()`, prompt, or launch a process.
 The normal path confirms only after planning and runs that same command object.
-`--json` and `--format json` are aliases over the same frozen document;
-Rich, JSON, and TOON are projections, not independent planners.
+`--format json` is the only JSON selector; removed `--json` is a Click usage
+error with exit code `2`. Rich, JSON, and TOON are projections, not independent
+planners.
 
 Plans preserve ordered process/action steps, argv boundaries, sanitized
 environment policy, multiline stdin/source previews, observations, warnings,
@@ -31,34 +32,35 @@ classification is bounded and whose contract requires `--dry-run`:
 | CLI leaf | canonical classification |
 | --- | --- |
 | `init` | mutating-or-spawning |
+| `stop` | mutating-or-spawning |
 | `env create` | mutating-or-spawning |
-| `env path` | bounded-read-only |
 | `env rm` | mutating-or-spawning |
 | `env sync` | mutating-or-spawning |
 | `backup rm` | mutating-or-spawning |
 | `db refresh` | mutating-or-spawning |
-| `db ls` | bounded-read-only |
+| `db restore` | mutating-or-spawning |
 | `db rm` | guarded mutating-or-spawning |
 | `db reset-admin-password` | mutating-or-spawning |
-| `resource ls` | bounded-read-only |
-| `resource doctor` | bounded-read-only |
+| `db init-monitoring` | mutating-or-spawning |
 | `eval` | process-previewable-read-only |
 | `exec` | mutating-or-spawning |
 | `test` | process-previewable-read-only |
 | `module ls` | process-previewable-read-only |
 | `module update` | mutating-or-spawning |
 | `module test` | mutating-or-spawning |
-| `git commit` | mutating-or-spawning |
-| `git check` | bounded-read-only |
-| `git absorb` | mutating-or-spawning |
-| `git sync` | mutating-or-spawning |
+| `module install-order` | process-previewable-read-only |
 | `translations export` | mutating-or-spawning |
 | `deps verify` | process-previewable-read-only |
 | `vscode generate` | mutating-or-spawning |
 | `postgres approve-image` | mutating-or-spawning |
-| `postgres ps` | process-previewable-read-only |
 | `postgres up` | mutating-or-spawning |
 | `postgres stop` | mutating-or-spawning |
+| `git commit` | mutating-or-spawning |
+| `git absorb` | mutating-or-spawning |
+| `git sync` | mutating-or-spawning |
+| `psql` | native-passthrough |
+| `run` | native-passthrough |
+| `shell` | native-passthrough |
 
 PostgreSQL database diagnostics (`db locks`, `db stats`, and `db bloat`) are
 bounded read-only typed documents and use the same resolver, captured
@@ -80,12 +82,28 @@ the other guarded mutations.
 read-only planning inspection as an observation; execution retains separate
 revalidation, optional target-session termination, drop, and absence-verification
 steps. Dry-run performs only the planning inspection and never mutates the
-cluster or catalogue.
+cluster or catalogue. `backup rm`, `db rm`, and `env rm` additionally accept
+variadic multi-target arguments: each target is resolved and previewed
+independently. Planning/preflight failures abort before mutation; once
+execution starts, a guarded failure is recorded for that target and the
+remaining prepared targets continue. The aggregate result exits non-zero when
+any target fails and does not claim to roll back earlier targets.
+
+`ps` and `postgres ps` are bounded read-only leaves. Root `ps` is backed by
+the public `EnvironmentMonitor.processes_command()` SDK primitive; `postgres ps`
+is backed by `PostgresCluster.status_command()`. Both project typed read-only
+inventory without `--dry-run` and support Rich, JSON, and TOON output where
+applicable.
 
 The complete shipped CLI also contains `doctor` and `env ls` as bounded
-read-only leaves, plus `resource ls`, `resource doctor`, `run`, `shell`,
+read only leaves, plus `resource ls`, `resource doctor`, `run`, `shell`,
 `logs`, and `monitor` native/stream leaves. They remain in `PUBLIC_LEAF_CASES` with their explicit classifications
 and reasons; no parallel eligibility table is permitted.
+
+`run` is a native foreground/stream leaf, but `run -d` / `--detach` is a
+bounded detached launch: its `--dry-run` captures the detached plan without
+spawning, and execution returns a typed `DetachedLaunchResult` once Odoo is
+alive. The SDK sibling is `instance.run_detached_command()`.
 
 The Git workflow leaves use the same captured-plan boundary: `git commit` and
 `git absorb` require explicit confirmation for mutation, while `git check` is
@@ -104,10 +122,12 @@ proof, active-reference protection, and postcondition-tested cleanup policy.
 
 The catalogue migration is additive and preserves legacy rows with nullable
 cluster and restore provenance. Older rows remain readable as unknown; no
-second store is introduced. Deployments should retain the existing catalogue
-backup before applying a schema migration and restore that backup before
-running older code. No migration deletes backups, restores, databases,
-filestores, volumes, or audit history.
+second store is introduced. The schema is managed by Alembic migrations; the
+first catalogue-backed operation stamps the current revision and applies any
+pending upgrade under one locked, journaled transaction. Deployments should
+retain the existing catalogue backup before applying a schema migration and
+restore that backup before running older code. No migration deletes backups,
+restores, databases, filestores, volumes, or audit history.
 
 Streaming failures retain the exact backup UUID and sanitized state context.
 The `.part` file is removed only for a handled pre-publication failure; a
@@ -134,6 +154,15 @@ These are transport exceptions, not process-boundary exceptions: Odoo child
 launches still go through `internal/proc`, and output-option validation for
 `run`/`shell` still happens before SDK resolution.
 
+## SDK-first leaf inventory
+
+`tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` is the only CLI leaf
+inventory. Every entry records either a public `sdk_primitive` or a concrete
+`cli_only_reason` for transport-only leaves such as `run`, `shell`, `logs
+--follow`, and `monitor`. The contract test rejects a leaf without one of
+those two values, and an architecture gate rejects Click callbacks that call
+parallel internal domain builders where a public SDK primitive already exists.
+
 ## Checked architectural inventories and allowlists
 
 The exact checked fixture is `tests/fixtures/architecture_inventory.py` and
@@ -154,9 +183,10 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/cli.py:1256-1257` — documented `logs --follow` JSONL
-  stream; remove when that stream gets an explicit bounded transport.
-- `src/odoo_instance_sdk/commands/backup.py:293` — shared Rich validation
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:421-422` — documented
+  `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
+  transport.
+- `src/odoo_instance_sdk/commands/backup.py:342` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/output.py:236` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
@@ -168,7 +198,7 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:392` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance.py:1200` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:457` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
@@ -186,13 +216,11 @@ protocol—not to add an exception.
 `MODULE_LOCAL_SUBPROCESS_PATCHES` records the remaining legacy test patch
 locations while the production launch inventory is empty:
 
-- `tests/unit/internal/test_pgadmin_files.py:421,480`
-- `tests/unit/internal/test_postgres_size.py:28,55,78,109`
-- `tests/unit/internal/test_postgres_transport.py:25,72,89,110,132,175`
-- `tests/unit/resources/test_cli_automation.py:607`
-- `tests/unit/resources/test_database_resource.py:395,421,448,473,518,539,558,573,585,599,617`
-- `tests/unit/resources/test_environment_python.py:42,233,271`
-- `tests/unit/test_monitor_cache_and_docker.py:128`
+- `tests/unit/resources/test_database_resource.py:638`
+- `tests/unit/test_monitor_cache_and_docker.py:129`
+- `tests/unit/test_cluster_resources.py:190`
+- `tests/unit/test_real_odoo_ci_components.py:38,107,149`
+- `tests/unit/test_real_odoo_foundation.py:325,348,367`
 
 These are not production launches or public behavior exceptions. Their removal
 condition is migration of each fixture to the shared recording executor; the

@@ -409,9 +409,14 @@ def _run_pty_cli(  # noqa: C901
         ready, _, _ = select.select([master], [], [], 0.1)
         if ready:
             try:
-                output.extend(os.read(master, 4096))
-            except (BlockingIOError, OSError):
-                break
+                chunk = os.read(master, 4096)
+            except BlockingIOError:
+                continue
+            except OSError:
+                continue
+            if not chunk:
+                continue
+            output.extend(chunk)
         if signal_case and not signal_sent and b"native-ready" in output:
             os.killpg(process.pid, signal.SIGINT)
             signal_sent = True

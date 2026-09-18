@@ -450,7 +450,7 @@ def test_project_restore_accepts_matching_environment_runtime_port(
     from types import SimpleNamespace
     from typing import Any, cast
 
-    from odoo_instance_sdk.resources import instance as instance_module
+    from odoo_instance_sdk.resources.instance import auxiliary_restore as instance_auxiliary
 
     runtime = {
         "owner_kind": "environment",
@@ -472,9 +472,11 @@ def test_project_restore_accepts_matching_environment_runtime_port(
         status=lambda: "running",
         create_time=lambda: 10.0,
     )
-    monkeypatch.setattr("odoo_instance_sdk.resources.instance.psutil.Process", lambda _pid: process)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.psutil.Process", lambda _pid: process
+    )
 
-    assert instance_module._project_runtime_owns_port(
+    assert instance_auxiliary._project_runtime_owns_port(
         cast("Any", instance), cast("Any", SimpleNamespace(http_port=12345))
     )
 

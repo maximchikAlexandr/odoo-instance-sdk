@@ -132,7 +132,7 @@ def test_real_instance_update_revalidates_head_before_exclusive_mutation(tmp_pat
     executor = RecordingExecutor(results={"module.update.provenance.git": result})
     selection = ModuleUpdatePlan(modules=("sale",), head=head)
     with patch(
-        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
         return_value=executor,
     ):
         command = instance.modules.update_command(("sale",), selection=selection)

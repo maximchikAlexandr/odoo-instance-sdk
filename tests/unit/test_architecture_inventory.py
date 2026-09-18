@@ -14,7 +14,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from odoo_instance_sdk.internal.proc import executor as process_executor
+from odoo_instance_sdk.internal.proc import run as process_executor
 from tests.fixtures.architecture_inventory import (
     DIRECT_OUTPUT_WRITES,
     DIRECT_SUBPROCESS_LAUNCHES,
@@ -343,14 +343,23 @@ def test_captured_paths_use_one_internal_pump() -> None:
         if isinstance(node, ast.FunctionDef) and node.name == "_execute"
     )
 
-    def calls_named(node: ast.AST, name: str) -> int:
-        return sum(
-            isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == name
-            for call in ast.walk(node)
-        )
+    def calls_pump(node: ast.AST) -> int:
+        count = 0
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            if (isinstance(func, ast.Name) and func.id == "_run_pump") or (
+                isinstance(func, ast.Attribute)
+                and func.attr == "_run_pump"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "_proc_shim"
+            ):
+                count += 1
+        return count
 
-    assert calls_named(limited, "_run_pump") == 1
-    assert calls_named(execute, "_run_pump") == 1
+    assert calls_pump(limited) == 1
+    assert calls_pump(execute) == 1
     assert (
         sum(
             isinstance(call, ast.Call)
@@ -443,8 +452,10 @@ def test_runtime_dependency_inventory_is_exact_and_bounded() -> None:
         "rich>=15,<16",
         "python-toon==0.1.3",
         "expression>=5,<6",
+        "alembic>=1.13,<2",
+        "sqlalchemy>=2,<3",
     ]
-    assert len(project["dependencies"]) == 10
+    assert len(project["dependencies"]) == 12
     assert project["optional-dependencies"] == {
         "dashboard": [
             "fastapi>=0.141,<1.0",

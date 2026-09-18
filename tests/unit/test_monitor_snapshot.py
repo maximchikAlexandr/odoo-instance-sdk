@@ -597,7 +597,8 @@ def test_malformed_health_response_is_not_ready_and_keeps_metrics(
 
     response = httpx.Response(200, text=payload)
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.httpx.get", lambda *args, **kwargs: response
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.httpx.get",
+        lambda *args, **kwargs: response,
     )
     provider = FakeProcessProvider(
         result=ProcessTreeResult(
@@ -1056,8 +1057,10 @@ def test_hanging_storage_probe_is_bounded_and_keeps_sibling_observations(
     def which(name: str) -> str | None:
         return str(hanging) if name == "du" else real_which(name)
 
-    monkeypatch.setattr("odoo_instance_sdk.resources.monitor.shutil.which", which)
-    monkeypatch.setattr("odoo_instance_sdk.resources.monitor._PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.monitor.collection_parts.collect.shutil.which", which
+    )
+    monkeypatch.setattr("odoo_instance_sdk.resources.monitor.planning._PROBE_TIMEOUT_SECONDS", 0.05)
 
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3",
@@ -1225,7 +1228,10 @@ def test_default_monitor_works_with_core_process_dependency(tmp_path: Path) -> N
 
 
 def test_cluster_status_cached_5s(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("odoo_instance_sdk.resources.monitor.time.monotonic", lambda: 0.0)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.time.monotonic",
+        lambda: 0.0,
+    )
     catalog = _make_catalog(tmp_path)
     e1 = str(uuid.uuid4())
     wt = tmp_path / "wt"

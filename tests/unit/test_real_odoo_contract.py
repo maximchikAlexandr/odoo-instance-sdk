@@ -32,7 +32,7 @@ def test_generated_matrix_matches_canonical_inventory() -> None:
     actual = path.read_bytes()
     check_matrix_document(str(path), PUBLIC_LEAF_CASES)
     assert actual == path.read_bytes()
-    assert actual.count(b"| `") == 50
+    assert actual.count(b"| `") == 51
 
 
 def test_new_leaf_without_metadata_fails_closed() -> None:
@@ -40,6 +40,14 @@ def test_new_leaf_without_metadata_fails_closed() -> None:
         PUBLIC_LEAF_CASES[0], e2e_disposition=None, e2e_evidence=(), e2e_rationale=""
     )
     with pytest.raises(ContractError, match="missing E2E disposition"):
+        from tests.integration.real_odoo.contracts import validate_leaf_metadata
+
+        validate_leaf_metadata((incomplete,))
+
+
+def test_new_leaf_without_sdk_boundary_fails_closed() -> None:
+    incomplete = replace(PUBLIC_LEAF_CASES[0], sdk_primitive=None, cli_only_reason=None)
+    with pytest.raises(ContractError, match="sdk_primitive or cli_only_reason"):
         from tests.integration.real_odoo.contracts import validate_leaf_metadata
 
         validate_leaf_metadata((incomplete,))

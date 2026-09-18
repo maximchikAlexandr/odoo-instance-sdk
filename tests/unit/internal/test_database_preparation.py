@@ -181,7 +181,7 @@ def test_selected_native_dump_uses_pg_restore_process_boundary(
         raising=False,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_preparation.shutil.which",
+        "odoo_instance_sdk.internal.dbprep.source.shutil.which",
         lambda name: "/usr/bin/pg_restore" if name == "pg_restore" else "/usr/bin/psql",
     )
     monkeypatch.setattr(
@@ -213,8 +213,8 @@ def test_selected_native_dump_uses_pg_restore_process_boundary(
 def test_selected_native_dump_uses_verified_snapshot_after_source_path_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation
     from odoo_instance_sdk.internal.backup_validation import DumpValidationResult
+    from odoo_instance_sdk.internal.dbprep import source as database_preparation
 
     dump_path = tmp_path / "production.dump"
     replacement_path = tmp_path / "replacement.dump"
@@ -505,7 +505,7 @@ def test_validate_zip_rejects_insufficient_available_space(
 def test_selected_dump_stream_counter_cleans_up_lying_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation
+    from odoo_instance_sdk.internal.dbprep import source as database_preparation
 
     archive_path = tmp_path / "lying.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
@@ -553,7 +553,7 @@ def test_selected_dump_stream_counter_cleans_up_lying_metadata(
 def test_selected_filestore_stream_counter_removes_partial_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation
+    from odoo_instance_sdk.internal.dbprep import source as database_preparation
 
     archive_path = tmp_path / "lying-filestore.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
@@ -785,11 +785,11 @@ def _production_restore_command(
     """Build the public preparation command with real active adapters."""
     import shutil
 
-    from odoo_instance_sdk.internal import database_preparation as preparation
     from odoo_instance_sdk.internal.database_preparation import (
         RestorePreflight,
         resolve_test_source,
     )
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
     from odoo_instance_sdk.internal.proc import (
         PreparedProcess,
         PreparedStep,
@@ -896,7 +896,7 @@ def _production_restore_command(
     executor = RecordingExecutor(result_factory=result_for)
     monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
     monkeypatch.setattr(ProjectConfig, "load", MagicMock(return_value=project))
-    monkeypatch.setattr("odoo_instance_sdk.internal.project_manifest.write_manifest", write)
+    monkeypatch.setattr(preparation, "write_manifest", write, raising=False)
     monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
     command = preparation.DatabasePreparationCoordinator(client).prepare_command(
         project, options=options, executor=executor
@@ -1231,7 +1231,7 @@ def test_manifest_conflicts_ignore_repository_identity() -> None:
 def test_download_preparation_reads_secret_before_lock_and_never_requires_local_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     project = _project(tmp_path)
     loaded = MagicMock(return_value=project)
@@ -1255,14 +1255,14 @@ def test_download_preparation_reads_secret_before_lock_and_never_requires_local_
     client.instance.assert_called_with("https://example.test", master_password="remote-secret")
     assert client.instance.return_value.databases.backup.call_count == 2
     client.instance.return_value.databases.backup.assert_called_with(
-        "remote_test", source_git_branch="develop"
+        "remote_test", source_git_branch="develop", project_id="project_repo"
     )
 
 
 def test_missing_remote_secret_fails_before_client_or_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     monkeypatch.delenv("ODCLI_TEST_MASTER_PASSWORD", raising=False)
     client = MagicMock()
@@ -1277,7 +1277,7 @@ def test_missing_remote_secret_fails_before_client_or_lock(
 def test_restore_missing_remote_secret_fails_before_preparation_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     monkeypatch.delenv("ODCLI_TEST_MASTER_PASSWORD", raising=False)
     client = MagicMock()
@@ -1300,7 +1300,7 @@ def test_restore_missing_remote_secret_fails_before_preparation_work(
 def test_unpinned_download_preparation_fails_before_lock_or_catalog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     monkeypatch.delenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", raising=False)
     monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
@@ -1319,7 +1319,7 @@ def test_unpinned_download_preparation_fails_before_lock_or_catalog(
 def test_unpinned_restore_preflight_fails_before_lock_or_local_manager(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     monkeypatch.delenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", raising=False)
     client = MagicMock()
@@ -1362,7 +1362,7 @@ def test_project_runtime_executable_cannot_read_remote_master_password(
 def test_restore_preflight_orders_lock_cluster_manager_and_target_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     source = tmp_path / "odoo.conf"
     source.write_text(
@@ -1431,7 +1431,7 @@ def test_restore_preflight_orders_lock_cluster_manager_and_target_check(
 def test_restore_entrypoints_reject_invalid_local_config_before_network_or_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     source = tmp_path / "odoo.conf"
     source.write_text(
@@ -1467,7 +1467,7 @@ def test_restore_entrypoints_reject_invalid_local_config_before_network_or_runti
 def test_restore_entrypoints_report_lock_contention_consistently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     @contextlib.contextmanager
     def fail_lock(*_args: object, **_kwargs: object) -> Iterator[None]:
@@ -1547,7 +1547,7 @@ def test_target_instance_is_target_only_secure_and_ephemeral(
 def test_restore_coordinator_switches_default_only_after_restore(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
     from odoo_instance_sdk.internal.project_manifest import write_manifest
 
     source = tmp_path / "odoo.conf"
@@ -1602,7 +1602,9 @@ def test_restore_coordinator_switches_default_only_after_restore(
     assert result.default_switched is True
     assert result.previous_default == "old"
     assert result.effective_default == result.restored_database
-    remote.databases.backup.assert_called_once_with("remote", source_git_branch=None)
+    remote.databases.backup.assert_called_once_with(
+        "remote", source_git_branch=None, project_id="project_repo"
+    )
     local.databases.restore.assert_called_once_with(
         backup,
         result.restored_database,
@@ -1616,7 +1618,7 @@ def test_restore_coordinator_switches_default_only_after_restore(
 def test_restore_failure_retains_backup_and_does_not_write_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     source = tmp_path / "odoo.conf"
     source.write_text(
@@ -1675,7 +1677,7 @@ def test_restore_failure_retains_backup_and_does_not_write_manifest(
 def test_restore_admin_reset_failure_retains_target_and_removes_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     source = tmp_path / "odoo.conf"
     source.write_text(
@@ -1786,12 +1788,12 @@ def test_catalogue_source_preflight_validates_exact_published_artifact(
 def test_catalogue_restore_uses_common_restore_stages_without_remote_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
     from odoo_instance_sdk.internal.database_preparation import (
         ProjectRuntimeBinding,
         RestorePreflight,
         _CatalogueRestoreSource,
     )
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     source_config = tmp_path / "odoo.conf"
     source_config.write_text(
@@ -1856,7 +1858,7 @@ def test_catalogue_restore_uses_common_restore_stages_without_remote_call(
 def test_pinned_http_download_reaches_remote_database_operation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     project = ProjectConfig(
         repository_root=tmp_path,
@@ -1882,14 +1884,14 @@ def test_pinned_http_download_reaches_remote_database_operation(
         "http://example.test:8069", master_password="remote-secret"
     )
     client.instance.return_value.databases.backup.assert_called_once_with(
-        "remote_test", source_git_branch=None
+        "remote_test", source_git_branch=None, project_id="project_repo"
     )
 
 
 def test_checkout_coalesces_fresh_result_under_preparation_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation as preparation
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
     source = tmp_path / "odoo.conf"
     source.write_text(

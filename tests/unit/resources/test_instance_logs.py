@@ -107,7 +107,7 @@ def test_iter_logs_follow_sentinel_read_is_bounded(
     log = tmp_path / "odoo.log"
     log.write_bytes(b"x" * 100_000)
     inst = _instance_from_config(tmp_path, logfile=str(log))
-    import odoo_instance_sdk.resources.instance as instance_module
+    from odoo_instance_sdk.resources.instance import runtime as instance_runtime
 
     original_pread = os.pread
     read_lengths: list[int] = []
@@ -123,7 +123,7 @@ def test_iter_logs_follow_sentinel_read_is_bounded(
         handle.write("\n")
     assert next(it) == "\n"
     assert read_lengths
-    assert max(read_lengths) <= instance_module._LOGFILE_SENTINEL_BYTES
+    assert max(read_lengths) <= instance_runtime._LOGFILE_SENTINEL_BYTES
 
 
 def test_iter_logs_follow_replacement(tmp_path: Path) -> None:

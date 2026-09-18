@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
+import odoo_instance_sdk.internal.project_runtime as _project_runtime
 from odoo_instance_sdk.exceptions import EnvironmentResolutionError
-from odoo_instance_sdk.internal.project_runtime import resolve_project_runtime
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.models import DevelopmentEnvironment, EnvironmentState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
@@ -63,6 +63,7 @@ class RuntimeView:
     http_port: int
     base_ref: str | None
     base_provenance: BaseProvenance
+    default_run_args: tuple[str, ...] = ()
 
     @property
     def http_url(self) -> str:
@@ -170,6 +171,7 @@ class ResolvedContext:
                 http_port=start_config.http_port,
                 base_ref=self.source.default_base_ref,
                 base_provenance="project",
+                default_run_args=tuple(getattr(config, "default_run_args", ()) or ()),
             )
 
         environment = self.source
@@ -197,6 +199,7 @@ class ResolvedContext:
             http_port=start_config.http_port,
             base_ref=getattr(environment, "base_ref", None),
             base_provenance="environment",
+            default_run_args=tuple(getattr(config, "default_run_args", ()) or ()),
         )
 
     def require_environment(self) -> DevelopmentEnvironment:
@@ -213,7 +216,7 @@ class ResolvedContext:
 
     def python_path(self) -> Path:
         if isinstance(self.source, ProjectConfig):
-            return resolve_project_runtime(
+            return _project_runtime.resolve_project_runtime(
                 self.source.repository_root, self.source.python, field="python"
             )
         path_value = getattr(self.source, "python_environment_path", None)
@@ -238,7 +241,11 @@ class ResolvedContext:
         from odoo_instance_sdk.internal import context as _resolution
 
         if self.is_environment:
-            return _resolution._check_port_free(cast("DevelopmentEnvironment", self.source))
+            available, _detail = _resolution._environment_http_port_preflight(
+                cast("DevelopmentEnvironment", self.source),
+                self.client,
+            )
+            return available
         start_config = self.instance.config.start_config
         if start_config is None:
             raise RuntimeError("resolved project instance has no Odoo start configuration")

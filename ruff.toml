@@ -19,9 +19,39 @@ ignore = [
     "TRY003",
     "T201",
     "PYI034",
+    "PYI046",
+    "PYI047",
     "UP046",
     "UP047",
 ]
+
+[lint.per-file-ignores]
+"src/odoo_instance_sdk/cli.py" = ["E402", "PLC0414"]
+"src/odoo_instance_sdk/commands/cli_parts/__init__.py" = ["PLC0414"]
+"src/odoo_instance_sdk/commands/env/__init__.py" = ["E402", "PLC0414"]
+"src/odoo_instance_sdk/internal/database_preparation.py" = ["PLC0414"]
+"src/odoo_instance_sdk/internal/database_replacement.py" = ["PLC0414"]
+"src/odoo_instance_sdk/internal/dbprep/__init__.py" = ["PLC0414"]
+"src/odoo_instance_sdk/internal/dbprep/materialize.py" = ["PLC0414"]
+"src/odoo_instance_sdk/internal/dbreplace/__init__.py" = ["PLC0414"]
+"src/odoo_instance_sdk/internal/dbreplace/validation.py" = ["PLC0414"]
+"src/odoo_instance_sdk/internal/doctor/__init__.py" = ["E402", "PLC0414"]
+"src/odoo_instance_sdk/internal/doctor/manifest.py" = ["PLC0414"]
+"src/odoo_instance_sdk/models/__init__.py" = ["PLC0414"]
+"src/odoo_instance_sdk/resources/database/__init__.py" = ["E402", "PLC0414"]
+"src/odoo_instance_sdk/resources/database/backup_restore_parts/backup.py" = ["PLC0414"]
+"src/odoo_instance_sdk/resources/database/backup_restore_parts/queries.py" = ["PLC0414"]
+"src/odoo_instance_sdk/resources/environment/__init__.py" = ["E402", "PLC0414"]
+"src/odoo_instance_sdk/resources/environment/checkout_artifacts.py" = ["PLC0414"]
+"src/odoo_instance_sdk/resources/environment/checkout_planning.py" = ["PLC0414"]
+"src/odoo_instance_sdk/resources/instance/__init__.py" = ["E402", "PLC0414"]
+"src/odoo_instance_sdk/resources/monitor/__init__.py" = ["E402", "PLC0414"]
+"src/odoo_instance_sdk/resources/postgres/__init__.py" = ["E402", "PLC0414"]
+"src/odoo_instance_sdk/resources/postgres/backup_restore_parts/backup.py" = ["PLC0414"]
+"src/odoo_instance_sdk/resources/postgres/backup_restore_parts/restore.py" = ["PLC0414"]
+"src/odoo_instance_sdk/storage/backup_catalog.py" = ["PLC0414"]
+"src/odoo_instance_sdk/storage/catalog/backup.py" = ["PLC0414"]
+"src/odoo_instance_sdk/storage/catalog/environment.py" = ["PLC0414"]
 
 [lint.isort]
 known-first-party = ["odoo_instance_sdk"]

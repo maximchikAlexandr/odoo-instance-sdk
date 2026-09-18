@@ -259,7 +259,7 @@ async for snapshot in monitor.watch(
 
 `watch(interval: float = 2.0, project_id: str | None = None, *, include_removed: bool = False) -> AsyncIterator[Snapshot]` MUST быть thin async generator поверх `snapshot(project_id=..., include_removed=...)` и stdlib `asyncio.sleep(interval)`; без собственного scheduler/queue/threadpool/background task. Consumer cancellation (`asyncio.CancelledError`, `break`, generator `aclose`) MUST корректно завершать `watch()`; collector не оставляет background threads/processes после остановки consumer task. `interval` MUST быть `>= 0.1`; `interval < 0.1` — `ValueError`.
 
-`EnvironmentMonitor` MUST быть единственным владельцем discovery, reconciliation и metric computation. FastAPI endpoint, CLI `env list`/`monitor` и React UI потребляют `EnvironmentMonitor.snapshot()` / `watch()` и MUST NOT дублировать расчёт или сбор. Не добавлять public interfaces/factories/ABC or `CliEnvironmentSnapshot`. Internal test Protocols (`ProcessProvider`, `GitProvider`, `DockerProvider`) allowed only as optional constructor injection; production path uses the default `None` implementations.
+`EnvironmentMonitor` MUST быть единственным владельцем discovery, reconciliation и metric computation. FastAPI endpoint, CLI `monitor`, `odcli ps`, and React UI consume `EnvironmentMonitor.snapshot()` / `watch()` / `processes_command()` and MUST NOT duplicate collection or metric computation. CLI `env list` MUST call `EnvironmentResource.checkout_inventory_command()` (or its `checkout_inventory()` convenience), which delegates to the monitor checkout projection without duplicating snapshot logic. Не добавлять public interfaces/factories/ABC or `CliEnvironmentSnapshot`. Internal test Protocols (`ProcessProvider`, `GitProvider`, `DockerProvider`) allowed only as optional constructor injection; production path uses the default `None` implementations.
 
 #### Scenario: Default constructor works
 
@@ -288,7 +288,7 @@ async for snapshot in monitor.watch(
 
 ### Requirement: Snapshot top-level contract
 
-`Snapshot.schema_version` MUST always be `4`. Version 4 is an additive migration from version 3: every `ProjectSummary` gains only required `runtime: RuntimeMetrics | None`; every environment field including `pgadmin`, required `observed_port` and `artifacts`, and all v3 collection/filter/removed-row meanings remain unchanged. `generated_at` MUST be tz-aware UTC. `projects` ordered by `project_id` ascending; `environments` ordered by `id` ascending. `GET /api/v1/snapshot` returns the default non-removed version-4 JSON (msgspec encode). `odcli env list --json` wraps the same `Snapshot` object in CLI envelope v1 `result`/`data` (`command="env.list"`); CLI envelope version remains `1` and is independent of snapshot schema version.
+`Snapshot.schema_version` MUST always be `4`. Version 4 is an additive migration from version 3: every `ProjectSummary` gains only required `runtime: RuntimeMetrics | None`; every environment field including `pgadmin`, required `observed_port` and `artifacts`, and all v3 collection/filter/removed-row meanings remain unchanged. `generated_at` MUST be tz-aware UTC. `projects` ordered by `project_id` ascending; `environments` ordered by `id` ascending. `GET /api/v1/snapshot` returns the default non-removed version-4 JSON (msgspec encode). `odcli env list --format json` wraps the frozen `CheckoutInventory` model in CLI envelope v1 `result`/`data` (`command="env.list"`); process/resource columns live in `odcli ps`, not in `env list`. CLI envelope version remains `1` and is independent of snapshot schema version.
 
 `project_id` filter: `None` MUST select all discovered projects; an opaque id matching a discovered project MUST select that project and its environments; an unknown id MUST return `projects == ()` and `environments == ()` without raising. A registered project exists even with no environment rows. `include_removed` SHALL govern environment rows only: with `include_removed=False`, removed rows are omitted while their registered project remains; with `include_removed=True`, a project containing only removed environments MUST appear with those rows, all from the single atomic catalog selection. `ProjectSummary.environment_count` MUST count the environments included in the returned snapshot; project counts and partial-result behavior remain unchanged. pgAdmin eligibility for an included removed row MUST be `environment_not_ready` without adding a database, port, health, or Docker probe.
 
@@ -919,3 +919,54 @@ The monitor boundary SHALL provide a pure selector for one environment and its m
 #### Scenario: Select explicit environment
 - **WHEN** a known UUID or unambiguous name is selected from a captured snapshot
 - **THEN** the selector returns its environment, project, and cluster records without another metrics collection
+
+### Requirement: ProcessInventory projection from one snapshot
+
+`EnvironmentMonitor` SHALL expose `processes_command(project_id: str | None = None) -> Command[ProcessInventory]` and a convenience `processes(project_id: str | None = None) -> ProcessInventory`. Both SHALL use one captured canonical snapshot; the convenience method SHALL NOT perform a second sample. `ProcessInventory` SHALL be a frozen `msgspec.Struct(frozen=True, forbid_unknown_fields=True, kw_only=True)` and SHALL be the single projection for Rich, JSON, and TOON.
+
+`ProcessInventory` SHALL represent three ownership kinds in this order: shared project resources, the main checkout, and each non-removed environment. The main checkout's Odoo process group SHALL be surfaced from `ProjectSummary.runtime` and SHALL NOT be collected silently. Stopped checkouts and environments SHALL remain visible with runtime metrics marked unavailable and storage still reported. Shared Git objects and the PostgreSQL volume SHALL appear exactly once and SHALL NOT be added to each environment. Root Odoo and recursive workers SHALL be aggregated exactly once using the existing recursive process tree.
+
+#### Scenario: One snapshot per process inventory sample
+
+- **WHEN** `monitor.processes()` is called
+- **THEN** it captures one canonical snapshot and projects it into `ProcessInventory` without a second sample
+
+#### Scenario: Main checkout runtime surfaced
+
+- **WHEN** the main checkout has a running Odoo runtime
+- **THEN** `ProcessInventory` shows that runtime under the main checkout block
+
+### Requirement: PostgreSQL backend attribution bounded to pg_stat_activity
+
+Backend attribution SHALL be bounded to the existing safe PostgreSQL boundary and `pg_stat_activity`. One Odoo instance holding multiple connections SHALL be modelled as a group of backend processes. A backend group SHALL be attached to the main checkout or an environment only when database ownership is unambiguous in the current snapshot. When one database is used by multiple checkouts, the group SHALL appear once under shared resources with reason `shared_database`. Backend RSS SHALL NOT be added to the container's total memory.
+
+For native Linux or external PostgreSQL, per-backend CPU/RSS SHALL be reported on host-visible PIDs only after PID plus create-time verification and privilege availability. For PostgreSQL inside Docker Desktop or Colima on macOS, backend PIDs SHALL be marked VM-scoped: PID and count MAY be shown, but per-backend CPU/RSS SHALL be unavailable. A `pg_stat_activity` error or privilege failure SHALL degrade only the PostgreSQL portion of the row. Arbitrary system postgres processes SHALL NOT be scanned and the Odoo client PID SHALL NOT be guessed.
+
+#### Scenario: Unique database attribution
+
+- **WHEN** one environment owns a database unambiguously
+- **THEN** that environment's block shows the backend group with PID, count, state, and connection identity
+
+#### Scenario: Shared database shown once
+
+- **WHEN** two environments use the same database
+- **THEN** the backend group appears once under shared resources with reason `shared_database`
+
+#### Scenario: macOS Docker backend PID is VM-scoped
+
+- **WHEN** PostgreSQL runs inside Docker Desktop on macOS
+- **THEN** backend PID and count are shown but per-backend CPU/RSS are unavailable with an explicit reason
+
+### Requirement: Bounded external process contribution
+
+One bounded frozen process-contribution contract SHALL allow external sources to add typed process groups to `ProcessInventory`. Each contribution SHALL contain `source`, stable local identity, lifecycle state, owner kind `shared | project | environment`, canonical owner ID, confirmed root/child PIDs and PID scope when observable, CPU/RSS, sample time, and explicit availability/completeness. Contributions SHALL NOT carry prompts, transcripts, secrets, raw command lines, or environment values. Both sources SHALL reuse core PID identity/metrics collection and deduplication: one PID has one owner and a shared process is shown once. A provider SHALL NOT create its own sampler, live loop, serializer, or process hierarchy. This contract SHALL NOT be generalized into a plugin or lifecycle framework.
+
+#### Scenario: External process group attributed once
+
+- **WHEN** an external process contribution is available
+- **THEN** `ProcessInventory` contains one typed process group with a single owner and no duplicate PID
+
+#### Scenario: No secrets in contribution
+
+- **WHEN** a process contribution is inspected
+- **THEN** it contains no prompt, transcript, secret, raw command line, or environment value

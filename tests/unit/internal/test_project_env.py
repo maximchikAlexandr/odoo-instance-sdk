@@ -23,7 +23,7 @@ from odoo_instance_sdk.internal.project_env import (
 )
 from odoo_instance_sdk.internal.vscode_generate import build_launch_profile, launch_json
 from odoo_instance_sdk.models import StartConfig
-from odoo_instance_sdk.resources.instance import _build_shell_script_step
+from odoo_instance_sdk.resources.instance.auxiliary_restore import _build_shell_script_step
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 if TYPE_CHECKING:
@@ -283,6 +283,7 @@ def test_editor_and_browser_builders_do_not_embed_project_dotenv(
             project_id="project_demo",
             python_path=tmp_path / "venv" / "bin" / "python",
             root=tmp_path,
+            default_run_args=(),
         ),
     )
     profile = build_launch_profile(cast("RuntimeView", runtime))
