@@ -73,19 +73,3 @@ React SPA assets SHALL ship in sdist + wheel; Node.js SHALL NOT be required for 
 
 - **WHEN** the published metadata is inspected
 - **THEN** it exposes no `metrics` optional extra and does not require an extra install for process collection
-
-## ADDED Requirements
-
-### Requirement: Production Python file line limit
-
-CI SHALL run a simple check that rejects manually maintained production Python files larger than 1000 physical lines. Generated or vendored code SHALL be excluded with an explicit marker; an allowlist of existing large files SHALL NOT be created. Behaviour-preserving refactor along confirmed responsibility boundaries SHALL bring the thirteen currently oversized files under the limit without changing user behavior, public imports, CLI command names, immutable command plans, Rich/JSON/TOON output, or FastAPI/OpenAPI contracts.
-
-#### Scenario: Oversized file fails CI
-
-- **WHEN** CI runs the line-limit check against production Python files
-- **THEN** any manually maintained file over 1000 physical lines is rejected unless it is generated or vendored
-
-#### Scenario: No existing-file allowlist
-
-- **WHEN** the line-limit check configuration is inspected
-- **THEN** there is no allowlist of pre-existing oversized files
