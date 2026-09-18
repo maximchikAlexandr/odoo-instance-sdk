@@ -1007,7 +1007,7 @@ class TestDepsVerify:
             )
 
         monkeypatch.setattr(
-            "odoo_instance_sdk.internal.proc.executor.SubprocessExecutor.execute", fake_execute
+            "odoo_instance_sdk.internal.proc.run.SubprocessExecutor.execute", fake_execute
         )
         result = verify_deps(recorded_python=fake_py, worktree_root=worktree, uv_executable="uv")
         assert any(
@@ -1307,7 +1307,7 @@ class TestCliEval:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         def deterministic_port(*_args: object, **_kwargs: object) -> int:
             return 18085
@@ -1352,7 +1352,7 @@ class TestCliEval:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18086)
         opts = EnvironmentCheckoutOptions(
@@ -1424,7 +1424,7 @@ class TestCliEval:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18087)
         opts = EnvironmentCheckoutOptions(
@@ -1472,7 +1472,7 @@ class TestCliEval:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18088)
         opts = EnvironmentCheckoutOptions(
@@ -1733,7 +1733,7 @@ class TestCliExecStdin:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18089)
         opts = EnvironmentCheckoutOptions(

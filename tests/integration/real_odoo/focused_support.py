@@ -1,6 +1,6 @@
 """Shared evidence and catalog helpers for focused real-Odoo leaves."""
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import hashlib
 import json
@@ -19,8 +19,10 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.models import BackupState, StartConfig
-from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.project import TestInstanceProjectConfig as _TestInstanceConfig
+from odoo_instance_sdk.project import (
+    ProjectConfig,
+    TestInstanceProjectConfig as _TestInstanceConfig,
+)
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from scripts.real_odoo_bootstrap import PYTHON_RESOLUTION_LOCK
 from scripts.real_odoo_pins import E2E_PINS
@@ -667,7 +669,7 @@ def _bind_catalog_path(monkeypatch: pytest.MonkeyPatch, catalog_path: Path) -> N
         "odoo_instance_sdk.cli.get_catalog_path",
         "odoo_instance_sdk.internal.paths.get_catalog_path",
         "odoo_instance_sdk.internal.context.get_catalog_path",
-        "odoo_instance_sdk.commands.env.get_catalog_path",
+        "odoo_instance_sdk.commands.env.checkout.get_catalog_path",
     ):
         monkeypatch.setattr(target, provider)
     from odoo_instance_sdk.commands import backup as backup_commands

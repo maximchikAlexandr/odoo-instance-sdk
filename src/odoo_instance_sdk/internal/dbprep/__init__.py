@@ -1,12 +1,67 @@
-"""Split package; public imports preserved via re-exports."""
+"""Database preparation package."""
 
 from __future__ import annotations
 
-import importlib
+from odoo_instance_sdk.internal.dbprep.materialize import (
+    DatabasePreparationCoordinator,
+    _preparation_process_steps,
+    preflight_restore,
+    prepare_download,
+    prepare_restore,
+)
+from odoo_instance_sdk.internal.dbprep.source import (
+    DatabasePreparationFailureContext,
+    ProjectRuntimeBinding,
+    RestorePreflight,
+    _CatalogueRestoreSource,
+    _open_verified_zip,
+    _planned_project_identity,
+    build_selected_backup_restore_steps,
+    canonical_project_identity,
+    capture_selected_backup_restore,
+    classify_freshness,
+    compare_provenance,
+    generate_target_database,
+    materialize_selected_backup_dump,
+    materialize_selected_backup_filestore,
+    preparation_lock,
+    relevant_manifest_conflicts,
+    reserve_target_database,
+    resolve_runtime_binding,
+    resolve_test_source,
+)
+from odoo_instance_sdk.internal.dbprep.source_binding import (
+    _catalogue_backup_preflight,
+    _manifest_after_preparation,
+    build_target_instance,
+)
 
-for _module_name in ("source", "source_1", "source_2", "materialize"):
-    _module = importlib.import_module(f"odoo_instance_sdk.internal.dbprep.{_module_name}")
-    for _key, _value in _module.__dict__.items():
-        if _key.startswith("__"):
-            continue
-        globals()[_key] = _value
+__all__ = [
+    "DatabasePreparationCoordinator",
+    "DatabasePreparationFailureContext",
+    "ProjectRuntimeBinding",
+    "RestorePreflight",
+    "_CatalogueRestoreSource",
+    "_catalogue_backup_preflight",
+    "_manifest_after_preparation",
+    "_open_verified_zip",
+    "_planned_project_identity",
+    "_preparation_process_steps",
+    "build_selected_backup_restore_steps",
+    "build_target_instance",
+    "canonical_project_identity",
+    "capture_selected_backup_restore",
+    "classify_freshness",
+    "compare_provenance",
+    "generate_target_database",
+    "materialize_selected_backup_dump",
+    "materialize_selected_backup_filestore",
+    "preflight_restore",
+    "preparation_lock",
+    "prepare_download",
+    "prepare_restore",
+    "relevant_manifest_conflicts",
+    "reserve_target_database",
+    "resolve_runtime_binding",
+    "resolve_test_source",
+]

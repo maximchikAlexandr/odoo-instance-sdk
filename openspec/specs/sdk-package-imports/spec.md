@@ -1,7 +1,8 @@
 # sdk-package-imports Specification
 
 ## Purpose
-TBD - created by archiving change preserve-lightweight-cli-startup. Update Purpose after archive.
+
+Keep the public SDK import surface lazy and lightweight while enforcing that CLI domain leaves delegate to typed public primitives recorded in `PUBLIC_LEAF_CASES`. Package roots defer heavy implementation imports until a caller resolves a declared export; architecture gates reject parallel domain execution inside Click callbacks.
 ## Requirements
 ### Requirement: Package root defers public export imports
 

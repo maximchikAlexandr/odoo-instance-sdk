@@ -263,8 +263,10 @@ Remote instances, configured defaults, and template databases remain refused.
 
 `backup rm`, `db rm`, and `env rm` accept variadic multi-target arguments.
 Each target is resolved and previewed independently before any mutation; a
-dry-run lists every target's plan, and execution aborts on the first guarded
-failure without silently skipping a target:
+dry-run lists every target's plan. Any guarded failure during resolution or
+preflight aborts before mutation; once execution starts, prepared targets are
+attempted in order, failures are reported in the ordered aggregate result, and
+the command exits nonzero without silently skipping targets or claiming rollback:
 
 ```bash
 odcli db rm feature_a feature_b --dry-run

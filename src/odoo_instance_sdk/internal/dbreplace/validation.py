@@ -10,10 +10,12 @@ from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
-from odoo_instance_sdk.internal.database_preparation import (
+from odoo_instance_sdk.internal.dbprep.materialize import (
+    _preparation_process_steps,
+)
+from odoo_instance_sdk.internal.dbprep.source import (
     _assert_verified_snapshot_unchanged,
     _materialize_verified_snapshot,
-    _preparation_process_steps,
     capture_selected_backup_restore,
     materialize_selected_backup_dump,
     materialize_selected_backup_filestore,
@@ -42,6 +44,7 @@ from odoo_instance_sdk.internal.dbreplace.planning import (
     _exists_sql,
     _inspect,
     _inspect_sql,
+    _rename,
     _rename_sql,
     _revalidate,
     _skip_remaining,
@@ -79,9 +82,7 @@ if TYPE_CHECKING:
 
 
 def _apply_rename(context: RunContext[None], step_id: str, *, message: str) -> None:
-    import odoo_instance_sdk.internal.database_replacement as _replacement_shim
-
-    _replacement_shim._rename(context, step_id, message=message)
+    _rename(context, step_id, message=message)
 
 
 def build_copy_replacement_command(  # noqa: C901

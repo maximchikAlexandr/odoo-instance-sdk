@@ -95,7 +95,7 @@ class _EventCluster(_FakeCluster):
 def test_manual_instance_no_preflight() -> None:
     instance = _make_instance(cluster=None)
     with patch(
-        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
         return_value=_executor("instance.foreground"),
     ):
         exit_code = instance.run_foreground()
@@ -107,7 +107,7 @@ def test_preflight_runs_before_run_foreground() -> None:
     cluster = _FakeCluster()
     instance = _make_instance(cluster=cluster)
     with patch(
-        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
         return_value=_executor("instance.foreground"),
     ):
         instance.run_foreground()
@@ -119,7 +119,7 @@ def test_preflight_runs_before_shell() -> None:
     cluster = _FakeCluster()
     instance = _make_instance(cluster=cluster)
     with patch(
-        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
         return_value=_executor("instance.shell"),
     ):
         instance.shell(args=())
@@ -131,7 +131,7 @@ def test_preflight_runs_before_run_shell_script() -> None:
     cluster = _FakeCluster()
     instance = _make_instance(cluster=cluster)
     with patch(
-        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
         return_value=_executor("instance.shell_script"),
     ):
         instance.run_shell_script("print(1)")
@@ -143,7 +143,7 @@ def test_preflight_runs_once_per_call() -> None:
     cluster = _FakeCluster()
     instance = _make_instance(cluster=cluster)
     with patch(
-        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
         return_value=_executor("instance.foreground"),
     ):
         instance.run_foreground()
@@ -171,8 +171,11 @@ def test_start_readiness_failure_precedes_secret_write_and_spawn() -> None:
     executor = _executor("instance.start")
 
     with (
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
-        patch("odoo_instance_sdk.resources.instance._write_secret_config") as write_secret,
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch("odoo_instance_sdk.resources.instance.identity._write_secret_config") as write_secret,
         pytest.raises(PostgresClusterUnreachableError, match="not ready"),
     ):
         instance.start(StartConfig(http_port=_free_loopback_port(), db_password="private"))
@@ -199,13 +202,17 @@ def test_foreground_spawn_failure_preserves_typed_error_and_cleans_secret(
             raise ProcessSpawnError(step.argv, "spawn denied", duration=0.0)
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.tempfile.gettempdir", lambda: str(tmp_path)
+        "odoo_instance_sdk.resources.instance.auxiliary_restore.tempfile.gettempdir",
+        lambda: str(tmp_path),
     )
     executor = FailingExecutor()
     instance = _make_instance()
 
     with (
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
+            return_value=executor,
+        ),
         pytest.raises(ProcessSpawnError, match="spawn denied"),
     ):
         instance.run_foreground(StartConfig(db_password="private"))
@@ -245,7 +252,9 @@ def test_preflight_event_precedes_foreground_shell_and_script_spawn() -> None:
     handle = _executor("instance.foreground").handles["instance.foreground"]
     executor = EventExecutor(handles={"instance.foreground": handle, "instance.shell": handle})
 
-    with patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor):
+    with patch(
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor", return_value=executor
+    ):
         instance.run_foreground()
         assert events[:2] == ["ensure", "spawn"]
         events.clear()
@@ -274,7 +283,7 @@ def test_preflight_event_precedes_exclusive_script_operation() -> None:
             return super().execute(step)  # type: ignore[arg-type]
 
     with patch(
-        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
         return_value=EventExecutor(),
     ):
         instance._run_shell_script_exclusive("print(1)")
@@ -297,7 +306,7 @@ def test_exclusive_script_rechecks_cluster_after_claiming_artifact_lock(
 
     monkeypatch.setattr(OdooInstance, "_artifact_operation", claimed_operation)
     with patch(
-        "odoo_instance_sdk.resources.instance.SubprocessExecutor",
+        "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
         return_value=RecordingExecutor(),
     ):
         instance._run_shell_script_exclusive("print(1)", commit=True)

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from odoo_instance_sdk.commands.context import (
+from odoo_instance_sdk.commands.context import (  # noqa: I001
     CliContext,
     environment_provenance,
     pass_cli_context,
@@ -36,8 +36,7 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     run_or_preview,
 )
-from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
-from odoo_instance_sdk.internal.cli_format import rich_cell
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes, rich_cell
 from odoo_instance_sdk.models import (
     LocksResult,
     PostgresBloatResult,
@@ -62,10 +61,7 @@ def _postgres_cluster(ctx: CliContext) -> PostgresCluster:
     resolve_project_path = cast(
         "Callable[[CliContext], str | Path]", getattr(postgres_cli, "resolve_project_path")
     )
-    return cast(
-        "PostgresCluster",
-        PostgresCluster.from_project(resolve_project_path(ctx)),
-    )
+    return PostgresCluster.from_project(resolve_project_path(ctx))
 
 
 def _cluster_rich(document: OutputDocument) -> str:

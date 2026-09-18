@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import contextlib
 import shutil
 import sqlite3
@@ -28,10 +27,28 @@ from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
     Backup,
 )
+from odoo_instance_sdk.models.backup import DevelopmentEnvironment
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.environment.checkout_artifacts import (
+    _has_symlink_component,
+    _port_free,
+    _row_to_backup,
+    _row_to_env,
+    _validate_owned_artifact,
+)
+from odoo_instance_sdk.resources.environment.checkout_planning import (
+    CopyCleanupPlan,
+    EnvironmentDatabaseMode,
+    EnvironmentSelector,
+    EnvironmentState,
+    T,
+    _replacement_retained_error,
+    _validate_retained_removal_evidence,
+)
 from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage, normalize_db_host
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
@@ -41,24 +58,50 @@ if TYPE_CHECKING:
         ProcessResult,
         RunContext,
     )
-    from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-from odoo_instance_sdk.resources.environment import helpers as _helpers
-
-globals().update(
-    {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
-)
 
 
 class _CleanupMixin:
+    if TYPE_CHECKING:
+        _client: OdooClient
+
+        def _resolve_selector(
+            self, selector: str, *, include_removed: bool = False
+        ) -> DevelopmentEnvironment: ...
+
+        def _remove_worktree(
+            self,
+            cat: BackupCatalog,
+            env: DevelopmentEnvironment,
+            repo_root: Path,
+            worktree: Path,
+            failures: list[str],
+            *,
+            dirty_checked: bool = False,
+            context: RunContext[None] | None = None,
+        ) -> bool: ...
+
+        def _remove_files(
+            self, generated_cfg: Path, lock_file: Path, failures: list[str]
+        ) -> bool: ...
+
+        def _remove_venv(self, env_root: Path, venv: Path | None, failures: list[str]) -> bool: ...
+
+        def _remove_backup(
+            self,
+            cat: BackupCatalog,
+            env: DevelopmentEnvironment,
+            failures: list[str],
+        ) -> bool: ...
+
     def list_command(
         self,
         *,
         project: ProjectConfig | Path | None = None,
         include_removed: bool = False,
         executor: ProcessExecutor | None = None,
-    ) -> Command[_EnvironmentList]:
+    ) -> Command[list[DevelopmentEnvironment]]:
         """Capture Git identity probes and catalog selection as one command."""
         from odoo_instance_sdk.execution import Command, ExecutionPlan
         from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, SubprocessExecutor
@@ -105,7 +148,7 @@ class _CleanupMixin:
                 return value.decode(errors="replace")
             return value if isinstance(value, str) else ""
 
-        def run(context: RunContext[_EnvironmentList]) -> _EnvironmentList:
+        def run(context: RunContext[list[DevelopmentEnvironment]]) -> list[DevelopmentEnvironment]:
             context.action("environment.list")
             catalog = self._client.get_catalog()
             if project_path is None:
@@ -807,7 +850,7 @@ class _CleanupMixin:
     def _drop_copy_target(
         self,
         plan: CopyCleanupPlan,
-        failures: _StrList,
+        failures: list[str],
         *,
         context: RunContext[None] | None = None,
         copy_drop: PreparedCommand[None] | None = None,
@@ -825,7 +868,7 @@ class _CleanupMixin:
             return True
         return False
 
-    def _delete_copy_backup(self, plan: CopyCleanupPlan, failures: _StrList) -> bool:
+    def _delete_copy_backup(self, plan: CopyCleanupPlan, failures: list[str]) -> bool:
         if plan.backup is None:
             # The catalog still proves ownership, but the payload has already
             # disappeared.  Deletion is idempotent: advance the durable stage

@@ -1,6 +1,5 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-# ruff: noqa: F821
 import configparser
 import contextlib
 import json
@@ -43,40 +42,21 @@ from odoo_instance_sdk.models import (
     PostgresClusterState,
 )
 from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.resources.environment.helpers_1 import (
+from odoo_instance_sdk.resources.environment.checkout_planning import (
     _APPLIED_CONFIG_BINDINGS as _APPLIED_CONFIG_BINDINGS,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
     _CHECKOUT_WORKTREE_TIMEOUT as _CHECKOUT_WORKTREE_TIMEOUT,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
+    EnvironmentSelector as EnvironmentSelector,
+    T as T,
     _CheckoutPlan as _CheckoutPlan,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
     _CheckoutPlanningState as _CheckoutPlanningState,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
     _CheckoutSnapshot as _CheckoutSnapshot,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
     _configured_addons as _configured_addons,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
     _dependency_evidence as _dependency_evidence,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
     _ExpressionApi as _ExpressionApi,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
     _ExpressionResult as _ExpressionResult,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
     _git_ticket as _git_ticket,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
     _PgAdminCommandInputs as _PgAdminCommandInputs,
-)
-from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _PlanningError as _PlanningError,
     _PlanningOutcome as _PlanningOutcome,
 )
 from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
@@ -937,7 +917,7 @@ def _validate_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
 
 def _normalize_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
     """Build immutable public projections from already captured values."""
-    from odoo_instance_sdk.resources.environment.helpers_2_2 import (
+    from odoo_instance_sdk.resources.environment.checkout_planning import (
         _execution_plan,
         _public_checkout_plan,
     )

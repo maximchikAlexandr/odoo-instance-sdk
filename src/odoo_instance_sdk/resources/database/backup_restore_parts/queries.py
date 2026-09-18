@@ -1,13 +1,12 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-# ruff: noqa: F821
 import contextlib
 import os
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 import httpx
 
@@ -41,18 +40,15 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.resources.database.lifecycle import (
     _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
-)
-from odoo_instance_sdk.resources.database.lifecycle import (
     _annotate_backup_failure as _annotate_backup_failure,
-)
-from odoo_instance_sdk.resources.database.lifecycle import (
     _normalize_source_git_branch as _normalize_source_git_branch,
-)
-from odoo_instance_sdk.resources.database.lifecycle import (
     _trustworthy_content_length as _trustworthy_content_length,
+    _verify_database_via_psql as _verify_database_via_psql,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Sequence
+
     from odoo_instance_sdk.execution import Command
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
@@ -61,9 +57,42 @@ if TYPE_CHECKING:
         ProcessResult,
         RunContext,
     )
+    from odoo_instance_sdk.resources.instance import OdooInstance
+
+T = TypeVar("T")
 
 
 class _QueriesMixin:
+    if TYPE_CHECKING:
+        base_url: str
+        master_password: str | None
+        _instance: OdooInstance
+
+        def _action_command(
+            self,
+            step_id: str,
+            description: str,
+            callback: Callable[[], T],
+            *,
+            executor: ProcessExecutor | None,
+            read_only: bool = False,
+            mutating: bool = False,
+            action_steps: Sequence[PreparedAction] = (),
+            steps: Sequence[PreparedStep] = (),
+            optional_steps: Sequence[str] = (),
+        ) -> Command[T]: ...
+        def _download_backup_part(
+            self,
+            database_name: str,
+            password: str,
+            part_path: Path,
+            *,
+            backup_id: str,
+            timeout: float | None,
+            format: BackupFormat,
+            filestore: bool,
+        ) -> tuple[str | None, int, str]: ...
+
     def _url(self, path: str) -> str:
         return f"{self.base_url.rstrip('/')}/web/database/{path}"
 
@@ -422,15 +451,11 @@ class _QueriesMixin:
 
     @contextlib.contextmanager
     def _http(self, timeout: float | None = None) -> Iterator[httpx.Client]:
-        import odoo_instance_sdk.resources.database as _database_shim
-
         warn_if_cleartext_secret(self.base_url)
         effective = (
             timeout if timeout is not None else self._instance._client.config.http_timeout_seconds
         )
-        with _database_shim.httpx.Client(
-            timeout=_database_shim.httpx.Timeout(effective),
-        ) as http:
+        with httpx.Client(timeout=httpx.Timeout(effective)) as http:
             yield http
 
     def names(self) -> tuple[str, ...]:
@@ -551,9 +576,7 @@ class _QueriesMixin:
         except DatabaseManagerUnavailableError:
             if ck is not None and self._instance.config.db_user is not None:
                 db_host, db_port = ck
-                import odoo_instance_sdk.resources.database as _database_shim
-
-                result = _database_shim._verify_database_via_psql(
+                result = _verify_database_via_psql(
                     db_host,
                     db_port,
                     self._instance.config.db_user,
@@ -587,9 +610,7 @@ class _QueriesMixin:
         if step_id is None or ck is None or user is None:
             return None
         db_host, db_port = ck
-        import odoo_instance_sdk.resources.database as _database_shim
-
-        result = _database_shim._verify_database_via_psql(
+        result = _verify_database_via_psql(
             db_host,
             db_port,
             user,
@@ -670,9 +691,7 @@ class _QueriesMixin:
             ck = self._cluster
             if ck is not None and self._instance.config.db_user is not None:
                 db_host, db_port = ck
-                import odoo_instance_sdk.resources.database as _database_shim
-
-                exists_result = _database_shim._verify_database_via_psql(
+                exists_result = _verify_database_via_psql(
                     db_host,
                     db_port,
                     self._instance.config.db_user,
@@ -857,9 +876,7 @@ class _QueriesMixin:
             )
             published = True
 
-            import odoo_instance_sdk.resources.database as _database_shim
-
-            return _database_shim.Backup(
+            return Backup(
                 id=uuid.UUID(backup_id),
                 source_base_url=self.base_url,
                 database_name=database_name,

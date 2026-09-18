@@ -5,7 +5,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import TypeVar
 
 import pytest
 from click.testing import CliRunner
@@ -107,13 +107,10 @@ def _patch_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
 
         runner = compose_runner or FakeComposeRunner()
         cfg = _PC.load(Path(project_path))
-        return cast(
-            "PostgresCluster",
-            pg_mod.PostgresCluster._from_config(
-                cfg,
-                repository_root=Path(project_path).resolve(),
-                compose_runner=runner,
-            ),
+        return pg_mod.PostgresCluster._from_config(
+            cfg,
+            repository_root=Path(project_path).resolve(),
+            compose_runner=runner,
         )
 
     monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(fake_from_project))
@@ -227,7 +224,7 @@ def test_postgres_status_external_no_docker(
     from odoo_instance_sdk.internal.address import AddressState
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
         lambda host, port: AddressState.OCCUPIED,
     )
     runner = CliRunner()
@@ -256,7 +253,7 @@ def test_postgres_up_external_reachable(tmp_path: Path, monkeypatch: pytest.Monk
     from odoo_instance_sdk.internal.address import AddressState
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
         lambda host, port: AddressState.OCCUPIED,
     )
     runner = CliRunner()
@@ -273,7 +270,7 @@ def test_postgres_up_external_unreachable_fails(
     from odoo_instance_sdk.internal.address import AddressState
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
         lambda host, port: AddressState.FREE,
     )
     runner = CliRunner()

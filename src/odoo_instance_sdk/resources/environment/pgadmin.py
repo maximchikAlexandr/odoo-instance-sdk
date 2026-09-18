@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import hashlib
 import shutil
 from pathlib import Path
@@ -17,29 +16,43 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.environment.checkout_artifacts import (
+    _infer_single_db,
+    _is_venv,
+    _resolve_python_bin,
+    _row_to_backup,
+    _row_to_env,
+)
+from odoo_instance_sdk.resources.environment.checkout_planning import (
+    _SLUG_RE,
+    EnvironmentCheckoutOptions,
+    EnvironmentDatabaseMode,
+    EnvironmentState,
+    _process_stderr,
+    _PythonMode,
+)
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.internal.proc import (
         ProcessResult,
         RunContext,
     )
     from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-from odoo_instance_sdk.resources.environment import helpers as _helpers
-
-globals().update(
-    {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
-)
 
 
 class _PgadminMixin:
+    if TYPE_CHECKING:
+        _client: OdooClient
+
     def _remove_worktree(
         self,
         cat: BackupCatalog,
         env: DevelopmentEnvironment,
         repo_root: Path,
         worktree: Path,
-        failures: _StrList,
+        failures: list[str],
         *,
         dirty_checked: bool = False,
         context: RunContext[None] | None = None,
@@ -77,7 +90,7 @@ class _PgadminMixin:
             return True
         return False
 
-    def _remove_files(self, generated_cfg: Path, lock_file: Path, failures: _StrList) -> bool:
+    def _remove_files(self, generated_cfg: Path, lock_file: Path, failures: list[str]) -> bool:
         failed = False
         for p in (generated_cfg, lock_file):
             try:
@@ -87,7 +100,7 @@ class _PgadminMixin:
                 failures.append(f"{p}: {e}")
         return failed
 
-    def _remove_venv(self, env_root: Path, venv: Path | None, failures: _StrList) -> bool:
+    def _remove_venv(self, env_root: Path, venv: Path | None, failures: list[str]) -> bool:
         if venv is None:
             return False
         try:
@@ -109,7 +122,7 @@ class _PgadminMixin:
         self,
         cat: BackupCatalog,
         env: DevelopmentEnvironment,
-        failures: _StrList,
+        failures: list[str],
     ) -> bool:
 
         catalog = cat

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 else:
     import rich_click as click
-from rich.console import Console
+from rich.console import Console  # noqa: I001
 from rich.table import Table
 
 from odoo_instance_sdk.commands import context as cli_context
@@ -38,8 +38,10 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     run_or_preview,
 )
-from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
-from odoo_instance_sdk.internal.cli_format import rich_cell
+from odoo_instance_sdk.internal.cli_format import (
+    human_bytes as _human_bytes,
+    rich_cell,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,7 +410,7 @@ def translations_export(
     try:
         runtime_context = cli_context.ready_instance(ctx)
         status, _results = run_or_preview(
-            lambda: _translation_command_builder()(
+            lambda: export_translations_command(
                 runtime_context.instance,
                 tuple(modules),
                 tuple(languages),

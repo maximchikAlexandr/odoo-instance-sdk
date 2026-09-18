@@ -1,4 +1,4 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import subprocess
@@ -18,20 +18,10 @@ from tests.unit.monitor_support import (
     FakeGitProvider,
     FakePostgresCluster,
     FakeProcessProvider,
-)
-from tests.unit.monitor_support import (
     make_catalog as _make_catalog,
-)
-from tests.unit.monitor_support import (
     make_env as _make_env,
-)
-from tests.unit.monitor_support import (
     patch_from_project as _patch_from_project,
-)
-from tests.unit.monitor_support import (
     seed_env as _seed_env,
-)
-from tests.unit.monitor_support import (
     write_odoo_conf as _write_odoo_conf,
 )
 
@@ -137,7 +127,10 @@ def test_production_docker_collection_batches_two_projects(
         "from_project",
         staticmethod(lambda path, **_: clusters[str(path)]),
     )
-    monkeypatch.setattr("odoo_instance_sdk.resources.monitor.docker_available", lambda: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.docker_available",
+        lambda: True,
+    )
 
     monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
     snapshot = monitor.snapshot()
@@ -293,7 +286,8 @@ def test_production_git_cache_reuses_and_invalidates_identity(
     )
     calls: list[tuple[str, str | None]] = []
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor._resolve_identity", lambda _: next(identities)
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot._resolve_identity",
+        lambda _: next(identities),
     )
 
     def collect(_: Path, identity: tuple[str, str, str, str | None]) -> GitActivity:
@@ -301,7 +295,8 @@ def test_production_git_cache_reuses_and_invalidates_identity(
         return FakeGitProvider().collect(worktree)
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.collect_git_activity_from_identity", collect
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.collect_git_activity_from_identity",
+        collect,
     )
     monitor = EnvironmentMonitor()
     for _ in range(4):
@@ -339,9 +334,12 @@ def test_git_cache_identity_includes_base_ref(
         collected_refs.append(base_ref)
         return replace(FakeGitProvider().collect(worktree), default_branch=base_ref)
 
-    monkeypatch.setattr("odoo_instance_sdk.resources.monitor._resolve_identity", resolve)
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.collect_git_activity_from_identity", collect
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot._resolve_identity", resolve
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.collect_git_activity_from_identity",
+        collect,
     )
     monitor = EnvironmentMonitor()
 

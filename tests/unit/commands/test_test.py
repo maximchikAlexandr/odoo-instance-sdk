@@ -41,6 +41,11 @@ def _instance(worktree: Path) -> SimpleNamespace:
         config=SimpleNamespace(
             start_config=StartConfig(addons_path=["addons"]),
             default_cwd=worktree,
+            configured_database_names=("demo",),
+            db_host="127.0.0.1",
+            db_port=5432,
+            db_user="odoo",
+            db_password=None,
         )
     )
 
@@ -556,7 +561,7 @@ def test_module_alias_projects_registered_worktree_selection_provenance(tmp_path
             return_value=_resolved_context(env, instance),
         ),
         patch(
-            "odoo_instance_sdk.cli.module_tests_command",
+            "odoo_instance_sdk.commands.module.run_odoo_tests_command",
             return_value=_result_command((typed, None)),
         ) as runner,
         patch(
@@ -643,7 +648,7 @@ def test_direct_and_module_test_share_owner_and_format_contracts(
             return_value=_result_command((typed, None)),
         ),
         patch(
-            "odoo_instance_sdk.cli.module_tests_command",
+            "odoo_instance_sdk.commands.module.run_odoo_tests_command",
             return_value=_result_command((typed, None)),
         ),
     ):

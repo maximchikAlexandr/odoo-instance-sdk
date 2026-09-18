@@ -110,13 +110,13 @@ exclude_lines = [
 show_missing = true
 
 [tool.coverage.regexs]
-cli = "odoo_instance_sdk/(cli\\.py|commands/(context|output|env)\\.py)$"
-process = "odoo_instance_sdk/(internal/server\\.py|internal/health\\.py|resources/instance\\.py)$"
-environment = "odoo_instance_sdk/(resources/environment\\.py|internal/git_worktree\\.py|internal/doctor\\.py)$"
-catalog = "odoo_instance_sdk/(resources/database\\.py|storage/backup_catalog\\.py)$"
+cli = "odoo_instance_sdk/(cli\\.py|commands/(context|output|cli_parts)\\.py|commands/cli_parts/|commands/env(?:\\.py|/))"
+process = "odoo_instance_sdk/(internal/(server|health)\\.py|resources/instance(?:\\.py|/))"
+environment = "odoo_instance_sdk/(resources/environment(?:\\.py|/)|internal/git_worktree\\.py|internal/doctor(?:\\.py|/))"
+catalog = "odoo_instance_sdk/(resources/database(?:\\.py|/)|storage/(backup_catalog\\.py|catalog/))"
 security = "odoo_instance_sdk/internal/(redact|sanitize|db_name|urls|address)\\.py$"
-postgres = "odoo_instance_sdk/(resources/postgres\\.py|internal/postgres_compose\\.py)$"
-monitor = "odoo_instance_sdk/(resources/monitor\\.py|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)$"
+postgres = "odoo_instance_sdk/(resources/postgres(?:\\.py|/)|internal/postgres_compose\\.py)"
+monitor = "odoo_instance_sdk/(resources/monitor(?:\\.py|/)|internal/(process_metrics|git_activity|storage_footprint|cluster_resources|postgres_size|serve)\\.py)"
 developer_workflow = "odoo_instance_sdk/(resources/(git|module)\\.py|internal/storage_migration\\.py|commands/translations\\.py)$"
 
 [tool.coverage.thresholds]
@@ -186,47 +186,6 @@ module = [
   "odoo_instance_sdk.commands.env.*",
 ]
 disallow_untyped_decorators = false
-
-[[tool.mypy.overrides]]
-# Block #67 split submodules compose mixins through importlib shims; public
-# package entrypoints and pre-split modules remain strictly checked.
-module = [
-  "odoo_instance_sdk.models.*",
-  "odoo_instance_sdk.resources.environment.*",
-  "odoo_instance_sdk.resources.instance.*",
-  "odoo_instance_sdk.resources.database.*",
-  "odoo_instance_sdk.resources.postgres.*",
-  "odoo_instance_sdk.resources.monitor.*",
-  "odoo_instance_sdk.storage.catalog.*",
-  "odoo_instance_sdk.internal.dbprep.*",
-  "odoo_instance_sdk.internal.dbreplace.*",
-  "odoo_instance_sdk.internal.doctor.*",
-  "odoo_instance_sdk.internal.proc.run",
-  "odoo_instance_sdk.internal.proc.spawn",
-  "odoo_instance_sdk.internal.proc.terminate",
-]
-disallow_untyped_decorators = false
-disable_error_code = [
-  "attr-defined",
-  "name-defined",
-  "union-attr",
-  "no-redef",
-  "import-not-found",
-  "import-untyped",
-  "no-any-return",
-  "call-arg",
-  "arg-type",
-  "untyped-decorator",
-]
-
-[[tool.mypy.overrides]]
-# Compatibility shims re-export split internals through importlib loops.
-module = [
-  "odoo_instance_sdk.internal.database_preparation",
-  "odoo_instance_sdk.internal.database_replacement",
-  "odoo_instance_sdk.internal.proc.executor",
-]
-disable_error_code = ["attr-defined"]
 
 [[tool.mypy.overrides]]
 module = ["tests.*", "scripts.*"]

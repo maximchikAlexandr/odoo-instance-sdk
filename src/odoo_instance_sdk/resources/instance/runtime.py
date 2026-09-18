@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.environment import DevelopmentEnvironment
-    from odoo_instance_sdk.resources.instance import OdooInstance  # noqa: TC004
+    from odoo_instance_sdk.resources.instance import OdooInstance
 T = TypeVar("T")
 
 
@@ -125,6 +125,8 @@ class InstanceFactory:
     _client: OdooClient
 
     def __call__(self, base_url: str, *, master_password: str | None = None) -> OdooInstance:
+        from odoo_instance_sdk.resources.instance import OdooInstance
+
         normalized = normalize_base_url(base_url)
         return OdooInstance(
             config=InstanceConfig(
@@ -141,6 +143,8 @@ class InstanceFactory:
         base_url: str | None = None,
         master_password: str | None = None,
     ) -> OdooInstance:
+        from odoo_instance_sdk.resources.instance import OdooInstance
+
         config = parse_odoo_config(path)
         url = infer_base_url(config, base_url=base_url)
         normalized = normalize_base_url(url)
@@ -173,10 +177,9 @@ class InstanceFactory:
         )
 
     def from_environment(self, environment: DevelopmentEnvironment) -> OdooInstance:
-        from odoo_instance_sdk.resources.environment import (
-            EnvironmentState,
-            _decode_runtime_json,
-        )
+        from odoo_instance_sdk.resources.environment import EnvironmentState
+        from odoo_instance_sdk.resources.environment.checkout_artifacts import _decode_runtime_json
+        from odoo_instance_sdk.resources.instance import OdooInstance
         from odoo_instance_sdk.resources.postgres import PostgresCluster
 
         if environment.state != EnvironmentState.READY:
@@ -267,6 +270,7 @@ class InstanceFactory:
 
     def from_project(self, project: ProjectConfig) -> OdooInstance:
         """Construct a local instance from an initialized project manifest."""
+        from odoo_instance_sdk.resources.instance import OdooInstance
         from odoo_instance_sdk.resources.postgres import PostgresCluster
 
         root = project.repository_root.resolve()
@@ -281,7 +285,7 @@ class InstanceFactory:
         else:
             config_path = _project_path(root, project.source_config, field="source_config")
         odoo_bin = _project_path(root, project.odoo_bin, field="odoo_bin")
-        from odoo_instance_sdk.resources.instance.helpers_2 import _project_runtime_binding
+        from odoo_instance_sdk.resources.instance.auxiliary_restore import _project_runtime_binding
 
         python_bin, deferred_runtime = _project_runtime_binding(root, project, odoo_bin)
         default_cwd = (
@@ -375,7 +379,7 @@ def _canonical_runtime_argv(argv: Sequence[str]) -> tuple[str, ...]:
 def _runtime_expectations(
     env_row: Mapping[str, JsonValue],
 ) -> tuple[str, tuple[str, ...], str, str]:
-    from odoo_instance_sdk.resources.environment import _decode_runtime_json
+    from odoo_instance_sdk.resources.environment.checkout_artifacts import _decode_runtime_json
 
     try:
         runtime_json = _decode_runtime_json(cast("str | None", env_row["runtime_json"]))
@@ -384,7 +388,7 @@ def _runtime_expectations(
             environment_id=str(env_row["id"]),
             repository_root=str(env_row["repository_root"]),
             git_common_dir=str(env_row["git_common_dir"]),
-            python_environment_owned=bool(int(env_row["python_environment_owned"])),
+            python_environment_owned=bool(int(str(env_row["python_environment_owned"]))),
             python_environment_path=str(env_row["python_environment_path"]),
         )
         config_path = _canonical_runtime_path(str(artifacts.generated_config_path))

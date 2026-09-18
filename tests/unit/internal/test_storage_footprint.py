@@ -191,7 +191,7 @@ def test_du_path_uses_du(tmp_path: Path) -> None:
     if du is None:
         pytest.skip("du not installed")
     with patch(
-        "odoo_instance_sdk.internal.proc.executor._run_pump",
+        "odoo_instance_sdk.internal.proc.run._run_pump",
         wraps=_run_pump_impl,
     ) as spy:
         _directory_size(worktree)

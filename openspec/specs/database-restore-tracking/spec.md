@@ -77,22 +77,16 @@ CREATE INDEX IF NOT EXISTS database_events_cluster_idx ON database_events (db_ho
 
 ### Requirement: Schema v0 → v2 миграция
 
-`_create_schema` MUST после существующего `executescript` (создающего `backups` и `backup_events` через `CREATE TABLE IF NOT EXISTS`) проверять `PRAGMA user_version`:
-
-- `0` → `CREATE TABLE IF NOT EXISTS restores (...)`, `CREATE INDEX IF NOT EXISTS restores_cluster_idx ...`, `CREATE TABLE IF NOT EXISTS database_events (...)`, `CREATE INDEX IF NOT EXISTS database_events_cluster_idx ...`, `PRAGMA user_version = 2`.
-- `1` → те же creates для `restores`/`database_events`, `PRAGMA user_version = 2`. (Теоретическая ветка; текущие production-каталоги имеют 0, т.к. существующий `_create_schema` никогда не ставил `user_version`.)
-- `2` → no-op (schema актуальна).
-
-Все `CREATE TABLE` и `CREATE INDEX` MUST использовать `IF NOT EXISTS`. Миграция MUST быть идемпотентной и не трогать существующие данные в `backups` и `backup_events`.
+The first Alembic revision SHALL create `restores` and `database_events` with their indexes as part of the complete current catalogue schema. Sequential `PRAGMA user_version` v0→v2 steps SHALL NOT remain as a production migration ledger. Existing backup rows SHALL be preserved when a known alpha catalogue is stamped. All `CREATE TABLE` and `CREATE INDEX` in that revision SHALL be the current schema, not a historical partial upgrade.
 
 #### Scenario: Существующая инсталляция v0
 
-- **WHEN** catalog открывается с `user_version = 0` (все текущие production-каталоги)
-- **THEN** таблицы `restores` и `database_events` создаются через `IF NOT EXISTS`, `user_version` становится 2, существующие backup rows не изменяются
+- **WHEN** a known alpha catalogue that historically started as `user_version = 0` is stamped
+- **THEN** таблицы `restores` и `database_events` exist, existing backup rows are unchanged, and no `PRAGMA user_version` step runs
 
 #### Scenario: Повторное открытие v2-каталога
 
-- **WHEN** catalog открывается с `user_version = 2`
+- **WHEN** catalog opens already stamped at the first Alembic revision
 - **THEN** schema не модифицируется, no-op
 
 ### Requirement: Catalog methods для restore-tracking

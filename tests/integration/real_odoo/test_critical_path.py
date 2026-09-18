@@ -34,7 +34,7 @@ _CATALOG_PATCH_TARGETS = (
     "odoo_instance_sdk.cli.get_catalog_path",
     "odoo_instance_sdk.internal.paths.get_catalog_path",
     "odoo_instance_sdk.internal.context.get_catalog_path",
-    "odoo_instance_sdk.commands.env.get_catalog_path",
+    "odoo_instance_sdk.commands.env.checkout.get_catalog_path",
 )
 
 

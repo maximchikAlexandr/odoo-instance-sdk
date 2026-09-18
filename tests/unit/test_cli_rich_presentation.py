@@ -9,7 +9,7 @@ from click.testing import CliRunner
 from rich.console import Console
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands import env as env_commands
+from odoo_instance_sdk.commands.env import checkout as env_commands
 from tests.unit.test_cli_backup import BACKUP_ID, _seed_backup
 from tests.unit.test_cli_env_list_grouping import (
     _env,
@@ -109,7 +109,9 @@ def test_backup_validate_rich_leaf_is_width_safe(
         valid_zip=valid_zip,
         database_name=database_name,
     )
-    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda **_kwargs: db_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: db_path
+    )
     if expected_status == "unavailable":
         monkeypatch.setattr(shutil, "which", lambda _name: None)
 

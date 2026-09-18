@@ -244,7 +244,7 @@ def test_status_external_reachable_is_healthy(
     root = _write_compose_project(tmp_path, mode="external", source_config=cfg_path)
     cluster = PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
         lambda host, port: AddressState.OCCUPIED,
     )
     assert cluster.status() is PostgresClusterState.HEALTHY
@@ -300,7 +300,10 @@ def test_status_command_consumes_the_inspected_process_steps(
     cluster = PostgresCluster.from_project(root, compose_runner=SubprocessComposeRunner())
     cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
     cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.docker_available",
+        lambda: True,
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: "/usr/bin/psql"
     )
@@ -367,7 +370,10 @@ def test_status_command_rejects_legacy_executor_during_planning(
     cluster = PostgresCluster.from_project(root, compose_runner=SubprocessComposeRunner())
     cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
     cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.docker_available",
+        lambda: True,
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: "/usr/bin/psql"
     )
@@ -415,7 +421,10 @@ def test_status_compose_unknown_when_docker_missing(
 ) -> None:
     root = _write_compose_project(tmp_path)
     cluster = PostgresCluster.from_project(root)
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: False)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.docker_available",
+        lambda: False,
+    )
     state = cluster.status()
     assert state is PostgresClusterState.UNKNOWN
 
@@ -428,7 +437,8 @@ def test_ensure_running_external_unreachable_raises(
     root = _write_compose_project(tmp_path, mode="external", source_config=cfg_path)
     cluster = PostgresCluster.from_project(root, compose_runner=FakeComposeRunner())
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address", lambda host, port: AddressState.FREE
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
+        lambda host, port: AddressState.FREE,
     )
     with pytest.raises(PostgresClusterUnreachableError):
         cluster.ensure_running(timeout=1.0)
@@ -443,7 +453,7 @@ def test_ensure_running_external_healthy_is_noop(
     fake = FakeComposeRunner()
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
         lambda host, port: (
             __import__(
                 "odoo_instance_sdk.internal.address", fromlist=["AddressState"]
@@ -481,7 +491,10 @@ def test_stop_compose_invokes_compose_stop(tmp_path: Path, monkeypatch: pytest.M
     fake = FakeComposeRunner(ps_rows=[{"Name": "postgres"}], stop_rc=0)
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     # Simulate artifacts existing by pre-creating compose.yaml.
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.restore.docker_available",
+        lambda: True,
+    )
     cluster._compose_file().parent.mkdir(parents=True, exist_ok=True)
     cluster._compose_file().write_text("services:\n  postgres:\n    image: x\n")
     cluster.stop(timeout=5.0)
@@ -573,8 +586,14 @@ def test_ensure_running_compose_invalid_config_raises(
     fake = FakeComposeRunner(config_rc=1)
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: 1000.0)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.docker_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.restore.time.monotonic",
+        lambda: 1000.0,
+    )
     with pytest.raises(PostgresComposeInvalidError):
         cluster.ensure_running(timeout=1.0)
     assert not cluster._compose_file().is_file()
@@ -604,8 +623,14 @@ def test_ensure_running_validates_config_before_image_resolution(
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     fake.calls.clear()
     fake.reject_image = True
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: 1000.0)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.docker_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.restore.time.monotonic",
+        lambda: 1000.0,
+    )
 
     with pytest.raises(PostgresComposeInvalidError):
         cluster.ensure_running(timeout=1.0)
@@ -766,7 +791,10 @@ def test_lifecycle_command_budgets_decrease_with_controlled_monotonic_clock(
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     fake.timeouts.clear()
     tick = iter(0.01 * number for number in range(1, 200))
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: next(tick))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.restore.time.monotonic",
+        lambda: next(tick),
+    )
     cluster.ensure_running(timeout=2.0)
     budgets = [timeout for timeout in fake.timeouts if timeout is not None]
     assert budgets == sorted(budgets, reverse=True)

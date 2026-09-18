@@ -4,8 +4,8 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
@@ -14,9 +14,6 @@ from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def test_module_init_executes_helpers_defined_after_commands(tmp_path: Path) -> None:
@@ -368,6 +365,106 @@ def test_reinit_validates_generated_target_before_noop_and_dry_run(
     assert generated.is_symlink()
 
 
+@pytest.mark.parametrize("target_kind", ["tracked", "symlink"])
+def test_sdk_init_command_rejects_secret_target_before_cluster_password_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_kind: str
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    args = [
+        *_base_args(tmp_path),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+    ]
+    first = CliRunner().invoke(cli, args)
+    assert first.exit_code == 0, first.output
+
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    original = generated.read_bytes()
+    outside = tmp_path.parent / f"outside-{target_kind}.conf"
+    if target_kind == "tracked":
+        subprocess.run(["git", "-C", str(tmp_path), "add", "-f", str(generated)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(tmp_path),
+                "-c",
+                "user.email=test@test.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-qm",
+                "tracked-runtime-config",
+            ],
+            check=True,
+        )
+    else:
+        outside.write_bytes(b"outside-secret\n")
+        generated.unlink()
+        generated.symlink_to(outside)
+
+    from odoo_instance_sdk.exceptions import InstanceConfigurationError
+    from odoo_instance_sdk.project import ProjectConfig
+    from odoo_instance_sdk.project_init import init_project, init_project_command
+
+    config = ProjectConfig.load(tmp_path)
+    with pytest.raises(InstanceConfigurationError, match=r"tracked|symlink"):
+        init_project_command(tmp_path, config, postgres_allocated=False).run()
+
+    if target_kind == "tracked":
+        assert generated.read_bytes() == original
+    else:
+        assert outside.read_bytes() == b"outside-secret\n"
+
+    if target_kind == "tracked":
+        with pytest.raises(InstanceConfigurationError, match="tracked"):
+            init_project(tmp_path, config, postgres_allocated=False)
+        assert generated.read_bytes() == original
+
+
+def test_sdk_init_rejects_group_writable_secret_parent_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    args = [
+        *_base_args(tmp_path),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+    ]
+    first = CliRunner().invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    original = generated.read_bytes()
+    generated.parent.chmod(0o777)
+
+    from odoo_instance_sdk.exceptions import InstanceConfigurationError
+    from odoo_instance_sdk.project import ProjectConfig
+    from odoo_instance_sdk.project_init import init_project
+
+    config = ProjectConfig.load(tmp_path)
+    with pytest.raises(InstanceConfigurationError, match="ownership or permissions"):
+        init_project(tmp_path, config, postgres_allocated=False)
+    assert generated.read_bytes() == original
+
+
 def test_reinit_repairs_stale_generated_config_without_manifest_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -605,7 +702,9 @@ def test_init_retries_registration_after_catalog_failure_and_monitor_discovers_p
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog_path = tmp_path / "catalog.sqlite3"
-    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda **_kwargs: catalog_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: catalog_path
+    )
     original_register = BackupCatalog._register_project
     attempts = 0
 

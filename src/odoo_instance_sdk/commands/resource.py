@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from rich.console import Console
+from rich.console import Console  # noqa: I001
 from rich.table import Table
 
 from odoo_instance_sdk.commands.context import (
@@ -43,8 +43,7 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     success_document,
 )
-from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
-from odoo_instance_sdk.internal.cli_format import rich_cell
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes, rich_cell
 from odoo_instance_sdk.internal.paths import get_backups_dir, get_catalog_path, get_data_root
 from odoo_instance_sdk.internal.resource_inventory import (
     FileResourceSource,
@@ -260,7 +259,8 @@ def _build_resource_plan(  # noqa: C901
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.project import ProjectConfig
-    from odoo_instance_sdk.resources.postgres import PostgresCluster, _resolve_project_id
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.resources.postgres.lifecycle import _resolve_project_id
 
     catalog: BackupCatalog | None = None
     path = _catalog_path()

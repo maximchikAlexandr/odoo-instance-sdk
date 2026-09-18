@@ -7,7 +7,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.exceptions import (
     BackupDownloadError,
@@ -20,8 +20,6 @@ from odoo_instance_sdk.models import (
 
 if TYPE_CHECKING:
     import httpx
-
-T = TypeVar("T")
 
 
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB

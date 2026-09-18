@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -30,7 +29,7 @@ from odoo_instance_sdk.commands.output import (
 )
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command, JsonValue
+    from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.models.command import OdooTestResult
     from odoo_instance_sdk.resources.instance import OdooInstance
@@ -47,41 +46,7 @@ from odoo_instance_sdk.internal.test_selection import (
 from odoo_instance_sdk.models.command import OdooTestResult, OdooTestSpec
 from odoo_instance_sdk.models.config import StartConfig
 from odoo_instance_sdk.models.testing import TestCommandSnapshot
-
-
-def _run_odoo_tests_command(
-    instance: OdooInstance,
-    spec: OdooTestSpec,
-    *,
-    http_interface: str | None = None,
-    http_port: int | None = None,
-    selection_snapshot: TestCommandSnapshot | None = None,
-) -> Command[tuple[OdooTestResult, str | None]]:
-    runner = globals().get("run_odoo_tests_command")
-    if runner is None:
-        from odoo_instance_sdk.resources.testing import run_odoo_tests_command as imported
-
-        runner = imported
-        globals()["run_odoo_tests_command"] = runner
-    return cast(
-        "Callable[..., Command[tuple[OdooTestResult, str | None]]]",
-        runner,
-    )(
-        instance,
-        spec,
-        http_interface=http_interface,
-        http_port=http_port,
-        selection_snapshot=selection_snapshot,
-    )
-
-
-def __getattr__(name: str) -> object:
-    if name == "run_odoo_tests_command":
-        from odoo_instance_sdk.resources.testing import run_odoo_tests_command
-
-        globals()[name] = run_odoo_tests_command
-        return run_odoo_tests_command
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+from odoo_instance_sdk.resources.testing import run_odoo_tests_command
 
 
 def _looks_like_file_target(target: str) -> bool:
@@ -280,7 +245,7 @@ def _execute_selection(
         allow_empty=allow_empty,
     )
     preflight_installed_modules(instance, spec.modules)
-    command = _run_odoo_tests_command(
+    command = run_odoo_tests_command(
         instance,
         spec,
         http_interface=runtime.http_interface,
@@ -380,7 +345,7 @@ def test_command(  # noqa: C901
                 reload_tests=reload_tests,
                 allow_empty=allow_empty,
             )
-            command = _run_odoo_tests_command(
+            command = run_odoo_tests_command(
                 instance,
                 spec,
                 http_interface=runtime.http_interface,
@@ -489,7 +454,7 @@ def run_module_tests(
     if tuple(item.modules[0] for item in selection) != spec.modules:
         raise ConfigError("module test selection does not match requested modules")
     preflight_installed_modules(instance, spec.modules)
-    typed, diagnostic = _run_odoo_tests_command(
+    typed, diagnostic = run_odoo_tests_command(
         instance,
         spec,
         http_interface=http_interface,

@@ -1,4 +1,4 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,20 +10,13 @@ from odoo_instance_sdk.internal.applied_settings import (
     encode_applied_settings,
 )
 from odoo_instance_sdk.internal.git_activity import collect_git_activity
-from odoo_instance_sdk.internal.git_worktree import (
-    _run as _run_git,
-)
-from odoo_instance_sdk.internal.git_worktree import (
-    worktree_is_dirty,
-)
-from odoo_instance_sdk.resources.environment import (
-    _git_ticket,
-)
+from odoo_instance_sdk.internal.git_worktree import _run as _run_git, worktree_is_dirty
+from odoo_instance_sdk.resources.environment.checkout_planning import _git_ticket
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
 
-from odoo_instance_sdk.internal.doctor.manifest_1 import _DriftComponent
+from odoo_instance_sdk.internal.doctor.manifest import _DriftComponent
 
 _REMEDIATION = {
     "python": "run odcli env sync",

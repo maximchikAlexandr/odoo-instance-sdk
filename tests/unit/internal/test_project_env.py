@@ -23,7 +23,7 @@ from odoo_instance_sdk.internal.project_env import (
 )
 from odoo_instance_sdk.internal.vscode_generate import build_launch_profile, launch_json
 from odoo_instance_sdk.models import StartConfig
-from odoo_instance_sdk.resources.instance import _build_shell_script_step
+from odoo_instance_sdk.resources.instance.auxiliary_restore import _build_shell_script_step
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 if TYPE_CHECKING:

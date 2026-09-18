@@ -195,7 +195,7 @@ def test_postgres_status_external_skips_resource_snapshot(
     from odoo_instance_sdk.internal.address import AddressState
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.probe_address",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.probe_address",
         lambda host, port: AddressState.OCCUPIED,
     )
     result = CliRunner().invoke(
