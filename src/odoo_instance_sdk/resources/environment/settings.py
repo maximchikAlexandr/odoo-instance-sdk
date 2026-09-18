@@ -62,6 +62,8 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+from odoo_instance_sdk.models.backup import DevelopmentEnvironment
 from odoo_instance_sdk.resources.environment import helpers as _helpers
 
 globals().update(
@@ -80,6 +82,7 @@ class _SettingsMixin:
         cfg_dict: Mapping[str, str],
         source_db: str,
         target_db: str,
+        repo_root: Path,
     ) -> uuid.UUID:
 
         catalog = cat
@@ -92,6 +95,9 @@ class _SettingsMixin:
             raise MasterPasswordRequiredError("copy mode requires admin_passwd in source config")
 
         instance = self._client.instance.from_config(source_config, master_password=master_pwd)
+        from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+        instance._postgres_cluster = PostgresCluster.from_project(repo_root)
         db_port = instance.config.db_port or 5432
         catalog.upsert_copy_journal(
             str(env_id),

@@ -12,6 +12,12 @@ from odoo_instance_sdk.models import (
     EnvironmentPythonMode,
 )
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _CheckoutPlan as _CheckoutPlan,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_1 import (
+    _checkout_steps as _checkout_steps,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import ExecutionPlan, JsonValue

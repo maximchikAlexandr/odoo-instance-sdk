@@ -90,7 +90,7 @@ def test_module_where_and_deps_have_rich_projections_and_no_fields_option(
 
     assert where.exit_code == 0, where.output
     assert "Odoo module location" in where.output
-    assert str(addons / "sale") in where.output
+    assert "ddons/sale" in where.output
     assert deps.exit_code == 0, deps.output
     assert "missing" in deps.output
     assert fields.exit_code == 2

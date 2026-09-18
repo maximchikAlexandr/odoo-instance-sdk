@@ -10,17 +10,16 @@ from rich.text import Text
 
 from odoo_instance_sdk.commands.output import sanitize_terminal_text
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
-from odoo_instance_sdk.models import (
+from odoo_instance_sdk.models.backup import EnvironmentState, PostgresClusterState
+from odoo_instance_sdk.models.footprint import ClusterMetrics
+from odoo_instance_sdk.models.monitor import (
     CheckoutClusterSummary,
     CheckoutGitFacts,
     CheckoutInventory,
     CheckoutRow,
-    ClusterMetrics,
     ClusterSnapshot,
-    EnvironmentState,
-    PidScope,
-    PostgresClusterState,
 )
+from odoo_instance_sdk.models.runtime import PidScope
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue

@@ -1230,7 +1230,7 @@ def test_limited_capture_delegates_to_the_common_pump(monkeypatch: pytest.Monkey
         calls.append((step, max_output_bytes))
         return 9, b"out", b"err", 0.5
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
     result = run_captured_limited(("tool",), max_output_bytes=3)
 
     assert result.returncode == 9
@@ -1579,7 +1579,7 @@ def test_subprocess_deadline_receives_remainder_and_floored_statement_timeout(
         )
         return 0, b"", b"", 0.0
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
     step = PreparedStep(
         step_id="subprocess-deadline-step",
         argv=("psql",),

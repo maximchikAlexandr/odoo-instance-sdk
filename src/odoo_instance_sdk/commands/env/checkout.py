@@ -16,20 +16,16 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 from rich.console import Console, Group
-from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
-    resolve_environment,
-    resolve_project_path,
 )
 from odoo_instance_sdk.commands.env.deps import (
     _client_class,
     _client_config_class,
-    _monitor_class,
 )
 from odoo_instance_sdk.commands.env.display import (
     _ENV_LIST_COMPACT_COLUMNS,
@@ -59,30 +55,25 @@ from odoo_instance_sdk.commands.output import (
     success_document,
 )
 from odoo_instance_sdk.exceptions import BackupCatalogError, ProjectContextError, StalePlanError
-from odoo_instance_sdk.internal.git_worktree import (
-    local_branch_names,
-    remote_branch_names,
-    rev_parse_git_common_dir,
-    rev_parse_toplevel,
-)
 from odoo_instance_sdk.internal.locks import exclusive_lock, provisioning_lock_path
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.repo_key import repo_key
-from odoo_instance_sdk.models import (
-    CheckoutInventory,
-    CheckoutRow,
-    ClusterSnapshot,
+from odoo_instance_sdk.models.backup import (
     DevelopmentEnvironment,
     EnvironmentCheckoutPlan,
     EnvironmentCheckoutResult,
     EnvironmentDatabaseMode,
-    EnvironmentSnapshot,
     EnvironmentState,
+)
+from odoo_instance_sdk.models.monitor import (
+    CheckoutInventory,
+    CheckoutRow,
+    ClusterSnapshot,
+    EnvironmentSnapshot,
     ProjectSummary,
     Snapshot,
 )
 from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -171,13 +162,17 @@ def _resolve_ticket_allocation(
     ticket: str,
     base_ref_override: str | None,
 ) -> _TicketAllocation:
-    repo_root = rev_parse_toplevel(project_path)
-    git_common_dir = rev_parse_git_common_dir(repo_root)
+    import odoo_instance_sdk.commands.env as _env_commands
+
+    repo_root = _env_commands.rev_parse_toplevel(project_path)
+    git_common_dir = _env_commands.rev_parse_git_common_dir(repo_root)
     project = ProjectConfig.load(repo_root)
     base_ref = base_ref_override or project.default_base_ref or "HEAD"
-    local_heads = tuple(sorted(set(local_branch_names(repo_root))))
-    catalogue_heads = tuple(sorted(set(_catalogue_branch_names(client, repo_root, git_common_dir))))
-    remote_heads = tuple(sorted(set(remote_branch_names(repo_root, ticket))))
+    local_heads = tuple(sorted(set(_env_commands.local_branch_names(repo_root))))
+    catalogue_heads = tuple(
+        sorted(set(_env_commands._catalogue_branch_names(client, repo_root, git_common_dir)))
+    )
+    remote_heads = tuple(sorted(set(_env_commands.remote_branch_names(repo_root, ticket))))
     all_heads = (*local_heads, *catalogue_heads, *remote_heads)
     iterations = [
         iteration
@@ -217,11 +212,17 @@ def _revalidate_ticket_absence(
         for line in str(remote_output or "").splitlines()
         if "\t" in line and line.split("\t", 1)[1].startswith("refs/heads/")
     }
+    import odoo_instance_sdk.commands.env as _env_commands
+
     sources = (
         ("local", local_heads),
         (
             "catalogue",
-            set(_catalogue_branch_names(client, allocation.repo_root, allocation.git_common_dir)),
+            set(
+                _env_commands._catalogue_branch_names(
+                    client, allocation.repo_root, allocation.git_common_dir
+                )
+            ),
         ),
         ("origin", remote_heads),
     )
@@ -392,13 +393,14 @@ def env_checkout(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
+        import odoo_instance_sdk.commands.env as _env_commands
         from odoo_instance_sdk.execution import ExecutionPlan
         from odoo_instance_sdk.resources.environment import (
             EnvironmentCheckoutOptions,
             _checkout_public_plan,
         )
 
-        project_path = resolve_project_path(cli_ctx)
+        project_path = _env_commands.resolve_project_path(cli_ctx)
         client = _client_class()(config=_client_config_class()(executable="odoo"))
         options = EnvironmentCheckoutOptions(
             base_ref=base_ref,
@@ -413,7 +415,7 @@ def env_checkout(
             hash_lock_sha256=hash_lock_sha256,
             http_port=http_port,
         )
-        command, allocation = _build_ticket_checkout_command(
+        command, allocation = _env_commands._build_ticket_checkout_command(
             client, project_path, ticket, base_ref, options
         )
         plan = _checkout_public_plan(command)
@@ -531,8 +533,10 @@ def env_list(
     output_mode = resolve_output_mode(output_format, json_output)
     _validate_watch_options(output_mode, watch=watch, interval=interval)
     try:
+        import odoo_instance_sdk.commands.env as _env_commands
+
         project_id = _resolve_monitor_project_id(ctx, all_projects)
-        monitor = _monitor_class()()
+        monitor = _env_commands._monitor_class()()
     except Exception as e:
         fail(output_mode, "env.list", str(e), dry_run=False)
 
@@ -598,12 +602,16 @@ def env_show(
             usage=True,
         )
     try:
-        monitor = _monitor_class()()
+        import odoo_instance_sdk.commands.env as _env_commands
+
+        monitor = _env_commands._monitor_class()()
         snapshot = monitor.snapshot()
-        paths = (
-            _catalog_worktree_paths(monitor, include_removed=True) if environment is None else {}
+        paths: dict[str, str] = (
+            _env_commands._catalog_worktree_paths(monitor, include_removed=True)
+            if environment is None
+            else {}
         )
-        selected = select_snapshot_environment(
+        selected = _env_commands.select_snapshot_environment(
             snapshot, environment, cwd=Path.cwd(), worktree_paths=paths
         )
         payload = _EnvShowResult(
@@ -688,14 +696,18 @@ def _run_env_list_live(
 ) -> None:
     """Run the foreground Rich refresh loop without creating background work."""
     last_renderable: Group | None = None
-    with Live(None, transient=True) as live:
+    import odoo_instance_sdk.commands.env as _env_commands
+
+    with _env_commands.Live(None, transient=True) as live:
         while True:
             try:
                 inventory = monitor.checkout_inventory(
                     project_id=project_id,
                     include_removed=include_removed,
                 )
-                last_renderable = _render_env_list_rich(inventory, width=Console().width)
+                last_renderable = _env_commands._render_env_list_rich(
+                    inventory, width=Console().width
+                )
                 live.update(last_renderable, refresh=True)
             except KeyboardInterrupt:
                 raise
@@ -717,12 +729,15 @@ def _resolve_monitor_project_id(ctx: CliContext, all_projects: bool) -> str | No
         return None
     # Outside a project, ``env list`` is the cross-project listing; this keeps
     # the command useful from a neutral working directory.
+    import odoo_instance_sdk.commands.env as _env_commands
+
     try:
-        project_path = resolve_project_path(ctx)
+        project_path = _env_commands.resolve_project_path(ctx)
     except ProjectContextError:
         return None
-    repo_root = rev_parse_toplevel(project_path)
-    git_common = rev_parse_git_common_dir(repo_root)
+
+    repo_root = _env_commands.rev_parse_toplevel(project_path)
+    git_common = _env_commands.rev_parse_git_common_dir(repo_root)
     return f"project_{repo_key(repo_root, git_common)}"
 
 
@@ -730,6 +745,8 @@ def _catalog_worktree_paths(
     monitor: EnvironmentMonitor, *, include_removed: bool
 ) -> dict[str, str]:
     """Read stored CLI-only paths after the monitor's single snapshot pass."""
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
     catalog_path = getattr(monitor, "catalog_path", None)
     if catalog_path is None:
         catalog_path = get_catalog_path(ensure_exists=False)
@@ -753,18 +770,26 @@ def _catalog_worktree_paths(
         raise RuntimeError(
             "environment catalogue read failed; cannot resolve worktree paths for env list"
         ) from exc
-    return {
-        str(row["id"]): worktree_path
-        for row in rows
-        if isinstance(row["worktree_path"], str)
-        and (worktree_path := row["worktree_path"].strip())
-        and Path(worktree_path).is_absolute()
-    }
+    from odoo_instance_sdk.internal.paths import resolve_environment_artifact_paths
+
+    paths: dict[str, str] = {}
+    for row in rows:
+        artifacts = resolve_environment_artifact_paths(
+            environment_id=str(row["id"]),
+            repository_root=str(row["repository_root"]),
+            git_common_dir=str(row["git_common_dir"]),
+            python_environment_owned=bool(int(row["python_environment_owned"])),
+            python_environment_path=str(row["python_environment_path"]),
+        )
+        paths[str(row["id"])] = str(artifacts.worktree_path)
+    return paths
 
 
 def _print_env_list_human(inventory: CheckoutInventory) -> None:
+    import odoo_instance_sdk.commands.env as _env_commands
+
     console = Console()
-    console.print(_render_env_list_rich(inventory, width=console.width))
+    console.print(_env_commands._render_env_list_rich(inventory, width=console.width))
 
 
 def _project_provenance(cli_context: CliContext) -> str:
@@ -818,9 +843,11 @@ def env_path(
             usage=True,
         )
 
+    import odoo_instance_sdk.commands.env as _env_commands
+
     client = _client_class()(config=_client_config_class()(executable="odoo"))
     try:
-        env_obj = resolve_environment(client, environment, cwd=Path.cwd())
+        env_obj = _env_commands.resolve_environment(client, environment, cwd=Path.cwd())
         worktree_path = _validated_env_path(env_obj)
     except Exception as exc:
         fail(output_mode, "env.path", exc, dry_run=False)

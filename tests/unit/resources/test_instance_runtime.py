@@ -565,7 +565,7 @@ class TestInstancePrefix:
             project_manifest, "feat/notready", options=opts
         )
         with pytest.raises(AttributeError):
-            env_client.instance.from_environment(env)  # type: ignore[arg-type]
+            env_client.instance.from_environment(env)
 
     def test_run_uses_instance_prefix(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
@@ -1298,7 +1298,10 @@ class TestPortConflictCli:
         runner = CliRunner()
         with (
             patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
-            patch("odoo_instance_sdk.internal.context._check_port_free", return_value=False),
+            patch(
+                "odoo_instance_sdk.internal.context._environment_http_port_preflight",
+                return_value=(False, "8069 occupied"),
+            ),
         ):
             result = runner.invoke(cli, ["--env", str(env.id), "run"])
         assert result.exit_code == 1

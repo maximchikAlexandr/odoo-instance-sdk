@@ -1,4 +1,4 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001 -- keep context test lookup aliases grouped; remove when Ruff supports grouped aliases.
 
 import re
 import shutil
@@ -20,8 +20,6 @@ from odoo_instance_sdk.commands.context import (
     project_provenance,
     ready_instance,
     resolve_project_path,
-)
-from odoo_instance_sdk.commands.context import (
     resolve_environment as resolve_cli_environment,
 )
 from odoo_instance_sdk.exceptions import (
@@ -38,6 +36,13 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentState,
 )
 from odoo_instance_sdk.resources.instance import OdooInstance
+
+
+def _patch_canonical_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context._canonical_environment",
+        lambda env: env,
+    )
 
 
 def _make_env(
@@ -240,7 +245,10 @@ def test_resolve_environment_explicit_name() -> None:
     assert result.name == "my-env"
 
 
-def test_cli_context_records_explicit_environment_resolution() -> None:
+def test_cli_context_records_explicit_environment_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_canonical_environment(monkeypatch)
     env = _make_env(name="my-env")
     client = MagicMock()
     client.environments.list.return_value = [env]
@@ -268,6 +276,7 @@ def test_cli_context_records_cwd_environment_resolution(
         "odoo_instance_sdk.internal.git_worktree.rev_parse_git_common_dir",
         lambda _path: Path(env.git_common_dir),
     )
+    _patch_canonical_environment(monkeypatch)
     context = CliContext()
 
     result = resolve_cli_environment(client, None, cwd=worktree)
@@ -310,6 +319,7 @@ def test_resolve_environment_single_ready_not_silently_selected() -> None:
 def test_resolve_environment_infers_from_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _patch_canonical_environment(monkeypatch)
     worktree = tmp_path / "wt"
     worktree.mkdir()
     env = _make_env(name="inferred", worktree=str(worktree))
@@ -331,6 +341,7 @@ def test_resolve_environment_infers_from_worktree(
 def test_ready_instance_reads_selector_from_typed_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _patch_canonical_environment(monkeypatch)
     worktree = tmp_path / "wt"
     worktree.mkdir()
     config = worktree / "odoo.conf"
@@ -553,6 +564,7 @@ def test_ready_instance_validates_recorded_runtime_artifacts(
         "odoo_instance_sdk.internal.context.resolve_environment",
         lambda _client, selector, **_kwargs: env if selector == env.name else None,
     )
+    _patch_canonical_environment(monkeypatch)
     if expected_error is None:
         ready_instance(ctx)
         client.instance.from_environment.assert_called_once_with(env)
@@ -584,6 +596,7 @@ def test_ready_instance_exact_worktree_wins_over_foreign_project(
         lambda _path: Path(env.git_common_dir),
     )
     monkeypatch.setattr("odoo_instance_sdk.internal.context._verify_env_runtime", lambda _env: None)
+    _patch_canonical_environment(monkeypatch)
     monkeypatch.chdir(worktree)
 
     resolved = ready_instance(ctx)

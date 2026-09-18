@@ -9,8 +9,11 @@ import click
 import pytest
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.cli_parts.registration import _ensure_callbacks_loaded
 from tests.fixtures.architecture_inventory import DIRECT_OUTPUT_WRITES
 from tests.unit.test_architecture_inventory import _discover_output_writes
+
+_ensure_callbacks_loaded()
 
 ROOT = Path(__file__).resolve().parents[2]
 README = ROOT / "README.md"
@@ -36,7 +39,24 @@ def _leaf_commands(group: click.Group, prefix: tuple[str, ...] = ()) -> set[str]
             leaves.update(_leaf_commands(command, path))
         else:
             leaves.add(" ".join(path))
+            for alias in getattr(command, "aliases", []) or []:
+                leaves.add(" ".join((*prefix, alias)))
     return leaves
+
+
+def _documented_to_cli_spelling(group: click.Group, prefix: tuple[str, ...] = ()) -> dict[str, str]:
+    """Map every accepted spelling (primary + aliases) to the primary leaf name."""
+    spellings: dict[str, str] = {}
+    for name, command in group.commands.items():
+        path = (*prefix, name)
+        primary = " ".join(path)
+        if isinstance(command, click.Group):
+            spellings.update(_documented_to_cli_spelling(command, path))
+        else:
+            spellings[primary] = primary
+            for alias in getattr(command, "aliases", []) or []:
+                spellings[" ".join((*prefix, alias))] = primary
+    return spellings
 
 
 def _fences(path: Path, language: str) -> tuple[str, ...]:
@@ -62,7 +82,13 @@ def test_readme_command_inventory_matches_click_tree() -> None:
     assert match is not None
     documented = COMMAND.findall(match.group(1))
     assert len(documented) == len(set(documented)), "duplicate documented command"
-    assert set(documented) == _leaf_commands(cli)
+    spelling_map = _documented_to_cli_spelling(cli)
+    documented_primaries = {spelling_map.get(cmd, cmd) for cmd in documented}
+    actual_primaries = set(spelling_map.values())
+    assert documented_primaries == actual_primaries, (
+        f"documented={sorted(documented_primaries - actual_primaries)} "
+        f"missing={sorted(actual_primaries - documented_primaries)}"
+    )
 
 
 @pytest.mark.unit

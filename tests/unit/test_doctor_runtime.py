@@ -48,6 +48,10 @@ def test_doctor_project_runtime_uses_runtime_view_and_reports_resolved_paths(
     (manifest_dir / "project.toml").write_text(project.to_manifest())
     monkeypatch.setattr(doctor, "_database_available", lambda *_args: True)
     monkeypatch.setattr(doctor, "_http_available", lambda *_args: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.project_runtime.resolve_project_runtime",
+        lambda _root, value, **kwargs: Path(sys.executable),
+    )
 
     report = DoctorReport()
     doctor._check_project_runtime(
@@ -384,8 +388,8 @@ def test_cli_doctor_uses_effective_owner_from_ready_instance(
             ]
         )
 
-    monkeypatch.setattr(cli_context, "ready_instance", ready_instance)
-    monkeypatch.setattr(cli_module, "run_doctor", run_selected)
+    monkeypatch.setattr(cli_module.cli_context, "_ready_instance_for_doctor", ready_instance)
+    monkeypatch.setattr(cli_module, "_run_doctor", lambda: run_selected)
 
     result = CliRunner().invoke(cli_module.cli, [*args, "--format", "json"])
 

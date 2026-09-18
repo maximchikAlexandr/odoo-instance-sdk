@@ -64,7 +64,7 @@ from odoo_instance_sdk.resources.postgres.backup_restore_parts.backup import _Ba
 from odoo_instance_sdk.resources.postgres.backup_restore_parts.restore import _RestoreMixin
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True, repr=False)
 class PostgresCluster(_BackupMixin, _RestoreMixin):
     """Project-level PostgreSQL cluster: ownership, status, readiness, managed lifecycle.
 

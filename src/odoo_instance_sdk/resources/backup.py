@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -89,13 +89,10 @@ class BackupResource:
         format: BackupFormat | None = None,
     ) -> Backup | None:
         catalog = self._client.get_catalog()
-        return cast(
-            "Backup | None",
-            catalog.latest_backup(
-                source_base_url=normalize_base_url(source_base_url),
-                database_name=database_name,
-                format=format.value if format else None,
-            ),
+        return catalog.latest_backup(
+            source_base_url=normalize_base_url(source_base_url),
+            database_name=database_name,
+            format=format.value if format else None,
         )
 
     def history(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: F821
+import contextlib
+import types
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -16,9 +18,92 @@ from odoo_instance_sdk.exceptions import (
     MasterPasswordRequiredError,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    DatabasePreparationFailureContext as DatabasePreparationFailureContext,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    RestorePreflight as RestorePreflight,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _CatalogueRestoreSource as _CatalogueRestoreSource,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _CoalescedRestore as _CoalescedRestore,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _consume_action_if_planned as _consume_action_if_planned,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _load_project as _load_project,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _planned_project_identity as _planned_project_identity,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _reload_project as _reload_project,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _remote_password as _remote_password,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _RemoteRestoreSource as _RemoteRestoreSource,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _resolve_source_config as _resolve_source_config,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _skip_preparation_branch as _skip_preparation_branch,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _target_config_path as _target_config_path,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    _wait_for_preparation_lock as _wait_for_preparation_lock,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    build_selected_backup_restore_steps as build_selected_backup_restore_steps,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    canonical_project_identity as canonical_project_identity,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    classify_freshness as classify_freshness,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    generate_target_database as generate_target_database,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    preparation_lock as preparation_lock,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    reserve_target_database as reserve_target_database,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    resolve_runtime_binding as resolve_runtime_binding,
+)
+from odoo_instance_sdk.internal.dbprep.source_1 import (
+    resolve_test_source as resolve_test_source,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _annotate_retained_failure as _annotate_retained_failure,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _catalogue_backup_preflight as _catalogue_backup_preflight,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _coerce_restore_source as _coerce_restore_source,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _latest_default_backup as _latest_default_backup,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    _manifest_after_preparation as _manifest_after_preparation,
+)
+from odoo_instance_sdk.internal.dbprep.source_2 import (
+    build_target_instance as build_target_instance,
+)
 from odoo_instance_sdk.internal.locks import (
     backup_lock_path,
-    exclusive_lock,
 )
 from odoo_instance_sdk.internal.odoo_config import infer_base_url, parse_odoo_config
 from odoo_instance_sdk.internal.project_env import (
@@ -41,6 +126,13 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.project import ProjectConfig
 
+
+def _dbprep_shim() -> types.ModuleType:
+    import odoo_instance_sdk.internal.database_preparation as preparation
+
+    return preparation
+
+
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
@@ -54,6 +146,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
+@contextlib.contextmanager
 def _restore_preflight(  # noqa: C901
     client: OdooClient,
     project: ProjectConfig | str | Path,
@@ -77,7 +170,7 @@ def _restore_preflight(  # noqa: C901
     )
     if initial_source is not None:
         require_test_instance_origin_approval(initial_source.config.base_url)
-    _, _, project_id = canonical_project_identity(root)
+    _, _, project_id = _dbprep_shim().canonical_project_identity(root)
     lock_context = (
         _wait_for_preparation_lock(project_id) if wait_for_lock else preparation_lock(project_id)
     )
@@ -94,7 +187,7 @@ def _restore_preflight(  # noqa: C901
         catalogue_backup = None
         if isinstance(selected_source, _CatalogueRestoreSource):
             _consume_action_if_planned("database.prepare.catalogue-backup")
-            with exclusive_lock(backup_lock_path(str(selected_source.backup_id))):
+            with _dbprep_shim().exclusive_lock(backup_lock_path(str(selected_source.backup_id))):
                 catalogue_backup = _catalogue_backup_preflight(
                     client.get_catalog(), selected_source, current
                 )
@@ -228,7 +321,7 @@ def prepare_restore(  # noqa: C901
         else None
     )
     try:
-        preflight_context = _restore_preflight(
+        preflight_context = _dbprep_shim()._restore_preflight(
             client,
             project,
             options=options,
@@ -236,7 +329,7 @@ def prepare_restore(  # noqa: C901
             target_database=restore_inputs[0] if restore_inputs is not None else None,
         )
         if not isinstance(selected_source, _RemoteRestoreSource):
-            preflight_context = _restore_preflight(
+            preflight_context = _dbprep_shim()._restore_preflight(
                 client,
                 project,
                 options=options,
@@ -258,9 +351,16 @@ def prepare_restore(  # noqa: C901
                         source.config.base_url, master_password=remote_password
                     )
                     _consume_action_if_planned("database.prepare.remote-backup")
+                    catalog_project_id = f"project_{preflight.project_id}"
+                    from odoo_instance_sdk.internal.repo_key import git_common_dir
+
+                    client.get_catalog()._register_project(
+                        catalog_project_id, root, git_common_dir(root)
+                    )
                     backup = remote.databases.backup(
                         source.config.database,
                         source_git_branch=source.branch,
+                        project_id=catalog_project_id,
                     )
                 _consume_action_if_planned("database.prepare.local-restore")
                 assert backup is not None
@@ -290,14 +390,12 @@ def prepare_restore(  # noqa: C901
                         target_instance.databases.reset_admin_password()
                     reset_completed = True
 
-                final_config = _manifest_after_preparation(root, current)
+                final_config = _dbprep_shim()._manifest_after_preparation(root, current)
                 switched = msgspec.structs.replace(
                     final_config, default_source_database=preflight.target_database
                 )
-                from odoo_instance_sdk.internal.project_manifest import write_manifest
-
                 _consume_action_if_planned("database.prepare.default-switch")
-                write_manifest(root, switched)
+                _dbprep_shim().write_manifest(root, switched)
                 default_switch_confirmed = True
                 return DatabasePreparationResult(
                     mode=DatabasePreparationAction.RESTORE,
@@ -377,9 +475,9 @@ def prepare_download(
     password = _remote_password()
     source = resolve_test_source(initial, options)
     require_test_instance_origin_approval(source.config.base_url)
-    _, _, project_id = canonical_project_identity(root)
+    repo_root, git_common, project_key = _dbprep_shim().canonical_project_identity(root)
     lock_context = (
-        _wait_for_preparation_lock(project_id) if wait_for_lock else preparation_lock(project_id)
+        _wait_for_preparation_lock(project_key) if wait_for_lock else preparation_lock(project_key)
     )
     _consume_action_if_planned("database.prepare.lock")
     with lock_context:
@@ -388,9 +486,12 @@ def prepare_download(
         require_test_instance_origin_approval(source.config.base_url)
         remote = client.instance(source.config.base_url, master_password=password)
         _consume_action_if_planned("database.prepare.remote-backup")
+        catalog_project_id = f"project_{project_key}"
+        client.get_catalog()._register_project(catalog_project_id, repo_root, git_common)
         backup = remote.databases.backup(
             source.config.database,
             source_git_branch=source.branch,
+            project_id=catalog_project_id,
         )
         return DatabasePreparationResult(
             mode=DatabasePreparationAction.DOWNLOAD,
@@ -409,7 +510,7 @@ def preflight_restore(
     options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
     restore_source: _RestoreSource | uuid.UUID | str | None = None,
 ) -> RestorePreflight:
-    with _restore_preflight(
+    with _dbprep_shim()._restore_preflight(
         client, project, options=options, wait_for_lock=False, restore_source=restore_source
     ) as preflight:
         return preflight

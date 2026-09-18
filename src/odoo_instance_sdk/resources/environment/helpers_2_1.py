@@ -33,12 +33,52 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_db_names,
     parse_odoo_config,
 )
+from odoo_instance_sdk.internal.paths import resolve_environment_artifact_paths
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
+    DevelopmentEnvironment,
+    EnvironmentDatabaseMode,
+    EnvironmentState,
     PostgresClusterState,
 )
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _APPLIED_CONFIG_BINDINGS as _APPLIED_CONFIG_BINDINGS,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _CHECKOUT_WORKTREE_TIMEOUT as _CHECKOUT_WORKTREE_TIMEOUT,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _CheckoutPlan as _CheckoutPlan,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _CheckoutPlanningState as _CheckoutPlanningState,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _CheckoutSnapshot as _CheckoutSnapshot,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _configured_addons as _configured_addons,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _dependency_evidence as _dependency_evidence,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _ExpressionApi as _ExpressionApi,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _ExpressionResult as _ExpressionResult,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _git_ticket as _git_ticket,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _PgAdminCommandInputs as _PgAdminCommandInputs,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _PlanningOutcome as _PlanningOutcome,
+)
 from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
 
 if TYPE_CHECKING:
@@ -187,22 +227,31 @@ def _row_to_env(row: sqlite3.Row) -> DevelopmentEnvironment:
     backup_raw: JsonValue = None
     with contextlib.suppress(KeyError, IndexError):
         backup_raw = cast("JsonValue", row["backup_id"])
+    env_id = str(_get("id"))
+    python_owned = bool(_get("python_environment_owned"))
+    artifacts = resolve_environment_artifact_paths(
+        environment_id=env_id,
+        repository_root=str(_get("repository_root")),
+        git_common_dir=str(_get("git_common_dir")),
+        python_environment_owned=python_owned,
+        python_environment_path=str(_get("python_environment_path")),
+    )
     http_interface, http_port = _http_fields_from_generated_config(
-        str(_get("generated_config_path"))
+        str(artifacts.generated_config_path)
     )
 
     return DevelopmentEnvironment(
-        id=uuid.UUID(str(_get("id"))),
+        id=uuid.UUID(env_id),
         name=str(_get("name")),
         repository_root=str(_get("repository_root")),
         git_common_dir=str(_get("git_common_dir")),
         branch=str(_get("branch")),
         base_ref=str(_get("base_ref")),
-        worktree_path=str(_get("worktree_path")),
-        generated_config_path=str(_get("generated_config_path")),
-        python_environment_path=str(_get("python_environment_path")),
-        python_environment_owned=bool(_get("python_environment_owned")),
-        dependency_lock_path=str(_get("dependency_lock_path")),
+        worktree_path=str(artifacts.worktree_path),
+        generated_config_path=str(artifacts.generated_config_path),
+        python_environment_path=str(artifacts.python_environment_path),
+        python_environment_owned=python_owned,
+        dependency_lock_path=str(artifacts.dependency_lock_path),
         http_interface=http_interface,
         http_port=http_port,
         db_mode=EnvironmentDatabaseMode(str(_get("db_mode"))),
@@ -888,6 +937,11 @@ def _validate_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
 
 def _normalize_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:
     """Build immutable public projections from already captured values."""
+    from odoo_instance_sdk.resources.environment.helpers_2_2 import (
+        _execution_plan,
+        _public_checkout_plan,
+    )
+
     public = _public_checkout_plan(state.private, state.provenance, state.freshness, state.warnings)
     execution_plan = _execution_plan(
         state.private, state.provenance, state.freshness, state.warnings

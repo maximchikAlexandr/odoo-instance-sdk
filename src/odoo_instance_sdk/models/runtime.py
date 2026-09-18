@@ -86,3 +86,13 @@ class StopEnvironmentResult(msgspec.Struct, frozen=True, forbid_unknown_fields=T
 
     status: str
     environment_id: str
+
+
+class DetachedLaunchResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Outcome of launching Odoo detached through the persisted runtime identity."""
+
+    pid: int
+    owner_kind: str
+    owner_id: str
+    http_endpoint: str
+    log_path: str

@@ -4,31 +4,39 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, cast
 
+import odoo_instance_sdk.resources.instance as _instance_shim
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
     ProcessHandle,
-    SubprocessExecutor,
-    terminate,
-    terminate_pid,
 )
-from odoo_instance_sdk.internal.server import (
-    cleanup_secret_config,
-    get_process_status,
-)
+from odoo_instance_sdk.internal.server import cleanup_secret_config
 from odoo_instance_sdk.models import (
+    DetachedLaunchResult,
     OdooProcess,
     ProcessStatus,
     ReadinessResult,
+    StartConfig,
     StopEnvironmentResult,
 )
+from odoo_instance_sdk.resources.instance import helpers as _helpers
+
+terminate = _instance_shim.terminate
+
+
+def _raise_if_exited(exited: bool) -> None:
+    if exited:
+        raise InstanceConfigurationError(
+            "detached Odoo process exited immediately after spawn; "
+            "check the bound logfile for the failure"
+        )
+
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
         Command,
     )
     from odoo_instance_sdk.internal.proc import RunContext
-from odoo_instance_sdk.resources.instance import helpers as _helpers
 
 globals().update(
     {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
@@ -133,7 +141,7 @@ class _PlanningMixin:
                         }
                     self._validate_runtime_identity(identity)
                     context.action(action_ids[2])
-                    terminate_pid(
+                    _instance_shim.terminate_pid(
                         identity.root_pid,
                         process_group_id=identity.process_group_id,
                         timeout=timeout,
@@ -158,6 +166,183 @@ class _PlanningMixin:
             ),
             execute,
             actions,
+        )
+
+    def run_detached(
+        self,
+        config: StartConfig | None = None,
+        *,
+        args: Sequence[str] = (),
+        cwd: str | Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> DetachedLaunchResult:
+        return self.run_detached_command(config, args=args, cwd=cwd, env=env).run()
+
+    def run_detached_command(  # noqa: C901
+        self,
+        config: StartConfig | None = None,
+        *,
+        args: Sequence[str] = (),
+        cwd: str | Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Command[DetachedLaunchResult]:
+        if config is None:
+            config = self.config.start_config
+            if config is None:
+                raise InstanceConfigurationError(
+                    "No StartConfig — pass one explicitly or create instance via from_config()"
+                )
+        raw_logfile = config.logfile
+        if raw_logfile is None or not raw_logfile.strip():
+            raise InstanceConfigurationError(
+                "detached launch requires a logfile in the bound odoo.conf; "
+                "set logfile before running detached"
+            )
+        validated_args = resolve_runtime_argv_extra(self.config.default_run_args, args)
+        resolved_cwd = cwd if cwd is not None else self.config.default_cwd
+        snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
+        environment_snapshot, environment_overrides = captured_child_environment(
+            env, project_environment=self.config.project_environment
+        )
+        secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
+        step = PreparedStep(
+            step_id="instance.detached",
+            argv=(*self._executable_prefix(), *cli_args, *validated_args),
+            cwd=None if resolved_cwd is None else str(resolved_cwd),
+            environment=environment_overrides,
+            environment_snapshot=environment_snapshot,
+            environment_overrides=environment_overrides,
+            mode="long-running",
+            secret_values=secrets,
+            long_running=True,
+            start_new_session=True,
+            # ponytail: inherit_stdio=False routes stdout/stderr to PIPE; Odoo
+            # writes to the bound logfile so the pipes stay empty.  Redirect to
+            # DEVNULL at the proc boundary if a non-logfile Odoo ever blocks.
+            inherit_stdio=False,
+        )
+        from odoo_instance_sdk.internal.proc import PreparedStep as _PreparedStep
+
+        dependency_steps, dependency_temporary_path = self._dependency_manifest()
+        prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (*dependency_steps, step)
+        if (
+            self._runtime_binding is not None or self._environment_id is not None
+        ) and resolved_cwd is not None:
+            target = str(resolved_cwd)
+            prepared_steps += (
+                _PreparedStep(
+                    step_id="instance.foreground.git.branch",
+                    argv=("git", "-C", target, "rev-parse", "--abbrev-ref", "HEAD"),
+                    cwd=target,
+                    timeout=10.0,
+                    read_only=True,
+                ),
+                _PreparedStep(
+                    step_id="instance.foreground.git.commit",
+                    argv=("git", "-C", target, "rev-parse", "HEAD"),
+                    cwd=target,
+                    timeout=10.0,
+                    read_only=True,
+                ),
+            )
+        action_ids = (
+            "instance.detached.assert_port",
+            "instance.detached.spawn",
+            "instance.detached.confirm_alive",
+            "instance.detached.persist",
+        )
+        actions = tuple(
+            PreparedAction(
+                step_id=step_id,
+                action=step_id,
+                description=step_id.replace(".", " "),
+                read_only=step_id == "instance.detached.assert_port",
+                mutating=step_id in {"instance.detached.spawn", "instance.detached.persist"},
+            )
+            for step_id in action_ids
+        )
+        process_executor = _instance_shim.SubprocessExecutor()
+        logfile_path = str((self.config.default_cwd or Path.cwd()) / raw_logfile.strip())
+
+        def execute(context: RunContext[DetachedLaunchResult]) -> DetachedLaunchResult:
+            if type(process_executor) is _instance_shim.SubprocessExecutor:
+                _assert_http_port_free(config)
+            context.action(action_ids[0])
+            context.complete_action(action_ids[0])
+            self._ensure_dependencies_ready(
+                context,
+                dependency_steps=dependency_steps,
+                temporary_path=dependency_temporary_path,
+            )
+            for dependency_step in dependency_steps:
+                if context.planned(dependency_step.step_id) and not context.consumed(
+                    dependency_step.step_id
+                ):
+                    context.skip(dependency_step.step_id)
+            with self._artifact_lock():
+                secret_created = False
+                if secret_path is not None:
+                    _instance_shim._write_secret_config(snapshot, secret_path)
+                    secret_created = True
+                handle: ProcessHandle | None = None
+                try:
+                    context.action(action_ids[1])
+                    handle = context.spawn(step.step_id)
+                    context.complete_action(action_ids[1])
+                    context.action(action_ids[2])
+                    exited = handle.poll() is not None
+                    context.complete_action(action_ids[2])
+                    _raise_if_exited(exited)
+                    context.action(action_ids[3])
+                    if self._runtime_binding is not None or self._environment_id is not None:
+                        self._persist_runtime_identity(
+                            handle.pid,
+                            snapshot,
+                            resolved_cwd,
+                            context=context,
+                        )
+                    context.complete_action(action_ids[3])
+                    owner_kind, owner_id = _runtime_owner(
+                        self._runtime_binding, self._environment_id
+                    )
+                    return DetachedLaunchResult(
+                        pid=handle.pid,
+                        owner_kind=owner_kind,
+                        owner_id=owner_id,
+                        http_endpoint=f"http://{config.http_interface}:{config.http_port}",
+                        log_path=logfile_path,
+                    )
+                except BaseException:
+                    if handle is not None:
+                        with contextlib.suppress(BaseException):
+                            _instance_shim.terminate(
+                                handle,
+                                process_group_id=handle.process_group_id,
+                                timeout=5.0,
+                            )
+                    self._clear_runtime_identity()
+                    raise
+                finally:
+                    if secret_created:
+                        _instance_shim.cleanup_secret_config(secret_path)
+
+        from odoo_instance_sdk.execution import Command
+
+        return Command.create(
+            _command_plan(
+                prepared_steps,
+                secrets=secrets,
+                observations=(
+                    _http_port_observation(
+                        config,
+                        environment_id=self._environment_id,
+                        client=self._client,
+                    ),
+                ),
+            ),
+            execute,
+            (*prepared_steps, *actions),
+            executor=process_executor,
         )
 
     def _clear_runtime_identity_if_matches(self, identity: _RuntimeIdentity) -> None:
@@ -215,7 +400,7 @@ class _PlanningMixin:
             else:
                 context.action("instance.stop.signal")
                 try:
-                    terminate(
+                    _instance_shim.terminate(
                         ProcessHandle(
                             process=owned,
                             argv=(),
@@ -239,12 +424,12 @@ class _PlanningMixin:
             _command_plan(frozen_steps),
             execute,
             frozen_steps,
-            executor=SubprocessExecutor(),
+            executor=_instance_shim.SubprocessExecutor(),
         )
 
     def status(self, proc: OdooProcess) -> ProcessStatus:
         self._client.get_process(proc.id)
-        return get_process_status(self._client.get_handle(proc.id))
+        return _instance_shim.get_process_status(self._client.get_handle(proc.id))
 
     def wait_ready(
         self,

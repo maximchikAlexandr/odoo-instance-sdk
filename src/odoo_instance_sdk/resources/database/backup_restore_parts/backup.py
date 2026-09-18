@@ -32,6 +32,13 @@ from odoo_instance_sdk.models import (
     DropResult,
     RestoreResult,
 )
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
+)
+from odoo_instance_sdk.resources.database.lifecycle import _stream_response_to_file
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _trustworthy_content_length as _trustworthy_content_length,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command

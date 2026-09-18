@@ -42,7 +42,7 @@ const snapshot: Snapshot = {
   generated_at: "2026-08-24T00:00:00Z",
   projects: [
     {
-      id: "project_a", name: "alpha", display_hint: "a", environment_count: 1,
+      id: "project_a", name: "alpha", display_hint: "a", repository_root: "/tmp/alpha", environment_count: 1,
       cluster: {
         mode: "compose", owned: true, state: PostgresClusterState.HEALTHY, endpoint: { host: "127.0.0.1", port: 5432 },
         container: { id: "abc123", name: "postgres", image: "postgres:16", pid: 42, pid_scope: PidScope.DOCKER_VM },
@@ -51,9 +51,9 @@ const snapshot: Snapshot = {
       },
       runtime: null,
     },
-    { id: "project_b", name: "beta", display_hint: "b", environment_count: 1, cluster: null, runtime: null },
+    { id: "project_b", name: "beta", display_hint: "b", repository_root: "/tmp/beta", environment_count: 1, cluster: null, runtime: null },
     {
-      id: "project_c", name: "gamma", display_hint: "c", environment_count: 0,
+      id: "project_c", name: "gamma", display_hint: "c", repository_root: "/tmp/gamma", environment_count: 0,
       cluster: {
         mode: "compose", owned: true, state: PostgresClusterState.STARTING, endpoint: { host: "127.0.0.1", port: 5433 },
         container: null, metrics: null, unavailability_reason: "stats_failed", sampled_at: null,

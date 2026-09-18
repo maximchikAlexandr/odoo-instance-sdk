@@ -2,13 +2,13 @@ from __future__ import annotations
 
 # ruff: noqa: F821
 import contextlib
-import shutil
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
+import odoo_instance_sdk.resources.monitor as _monitor_shim
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
     MonitorError,
@@ -23,7 +23,6 @@ from odoo_instance_sdk.internal.git_activity import (
 from odoo_instance_sdk.internal.postgres_compose import (
     SubprocessComposeRunner,
 )
-from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import (
     CheckoutInventory,
     PostgresClusterState,
@@ -193,12 +192,17 @@ class _CollectMixin:
             if env_id not in environment_ids:
                 continue
             if project_id is not None:
-                resolved_project = f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
+                resolved_project = f"project_{_monitor_shim.repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
                 if resolved_project != project_id:
                     continue
-            worktree_value = row["worktree_path"]
-            if isinstance(worktree_value, str) and worktree_value.strip():
-                paths[env_id] = worktree_value
+            artifacts = _paths.resolve_environment_artifact_paths(
+                environment_id=env_id,
+                repository_root=str(row["repository_root"]),
+                git_common_dir=str(row["git_common_dir"]),
+                python_environment_owned=bool(int(row["python_environment_owned"])),
+                python_environment_path=str(row["python_environment_path"]),
+            )
+            paths[env_id] = str(artifacts.worktree_path)
         return paths
 
     def processes_command(self, project_id: str | None = None) -> Command[ProcessInventory]:
@@ -271,7 +275,7 @@ class _CollectMixin:
         try:
             rows = catalog._monitor_snapshot_rows(include_removed=False)
             for row, _runtime in rows.environments:
-                resolved_project_id = f"project_{repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
+                resolved_project_id = f"project_{_monitor_shim.repo_key(Path(str(row['repository_root'])), Path(str(row['git_common_dir'])))}"
                 if project_id is not None and resolved_project_id != project_id:
                     continue
                 database_value = (
@@ -425,7 +429,9 @@ class _CollectMixin:
             worktree = Path(str(row["worktree_path"])).resolve()
             env_id = str(row["id"])
             repository = Path(str(row["repository_root"])).resolve()
-            resolved_project = f"project_{repo_key(repository, Path(str(row['git_common_dir'])))}"
+            resolved_project = (
+                f"project_{_monitor_shim.repo_key(repository, Path(str(row['git_common_dir'])))}"
+            )
             if project_id is not None and resolved_project != project_id:
                 continue
             base_ref = _validated_base_ref(row["base_ref"])
@@ -470,7 +476,7 @@ class _CollectMixin:
                         text=True,
                     )
                 )
-            du = shutil.which("du") or "du"
+            du = _monitor_shim.shutil.which("du") or "du"
             steps.append(
                 PreparedStep(
                     step_id=f"monitor.{env_id}.storage.worktree",
@@ -609,7 +615,10 @@ class _CollectMixin:
                 continue
             from odoo_instance_sdk.internal.proc import SubprocessExecutor
 
-            if isinstance(self._executor, SubprocessExecutor) and shutil.which("docker") is None:
+            if (
+                isinstance(self._executor, SubprocessExecutor)
+                and _monitor_shim.shutil.which("docker") is None
+            ):
                 continue
             compose_file = repository / "docker-compose.yml"
             try:
@@ -750,7 +759,7 @@ class _CollectMixin:
         for row, runtime in rows:
             repository = Path(str(row["repository_root"])).resolve()
             git_common = Path(str(row["git_common_dir"])).resolve()
-            resolved_project_id = f"project_{repo_key(repository, git_common)}"
+            resolved_project_id = f"project_{_monitor_shim.repo_key(repository, git_common)}"
             groups.setdefault(resolved_project_id, []).append(_EnvironmentPlan(row, runtime))
             project_details.setdefault(resolved_project_id, repository)
             environment_ids.add(str(row["id"]))

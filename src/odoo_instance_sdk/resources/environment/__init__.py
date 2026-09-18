@@ -4,7 +4,6 @@ from __future__ import annotations
 import configparser
 import contextlib
 import hashlib
-import importlib
 import json
 import os
 import re
@@ -125,22 +124,69 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
 from odoo_instance_sdk.resources.environment import helpers as _helpers
+from odoo_instance_sdk.resources.environment.checkout import *  # noqa: F403
+from odoo_instance_sdk.resources.environment.checkout import (
+    _CheckoutMixin as _CheckoutMixin,
+)
+from odoo_instance_sdk.resources.environment.cleanup import *  # noqa: F403
+from odoo_instance_sdk.resources.environment.cleanup import (
+    _CleanupMixin as _CleanupMixin,
+)
 from odoo_instance_sdk.resources.environment.helpers import *  # noqa: F403
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _CHECKOUT_WORKTREE_TIMEOUT as _CHECKOUT_WORKTREE_TIMEOUT,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _CheckoutPlanningState as _CheckoutPlanningState,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _dependency_evidence as _dependency_evidence,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _ExpressionApi as _ExpressionApi,
+)
+from odoo_instance_sdk.resources.environment.helpers_1 import (
+    _PlanningOutcome as _PlanningOutcome,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_1 import (
+    _capture_checkout_stage as _capture_checkout_stage,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_1 import (
+    _pgadmin_command_steps as _pgadmin_command_steps,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_1 import (
+    _planning_result as _planning_result,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_1 import (
+    _restore_audit_backup as _restore_audit_backup,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_1 import (
+    _validate_checkout_stage as _validate_checkout_stage,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_1 import (
+    _validate_owned_artifact as _validate_owned_artifact,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_2 import (
+    _find_odoo_requirements as _find_odoo_requirements,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_2 import (
+    _process_stderr as _process_stderr,
+)
+from odoo_instance_sdk.resources.environment.helpers_2_2 import (
+    _rebase_requirement_paths as _rebase_requirement_paths,
+)
+from odoo_instance_sdk.resources.environment.pgadmin import *  # noqa: F403
+from odoo_instance_sdk.resources.environment.pgadmin import (
+    _PgadminMixin as _PgadminMixin,
+)
+from odoo_instance_sdk.resources.environment.settings import *  # noqa: F403
+from odoo_instance_sdk.resources.environment.settings import (
+    _SettingsMixin as _SettingsMixin,
+)
 
 globals().update(
     {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
 )
-from odoo_instance_sdk.resources.environment.checkout import _CheckoutMixin
-from odoo_instance_sdk.resources.environment.cleanup import _CleanupMixin
-from odoo_instance_sdk.resources.environment.pgadmin import _PgadminMixin
-from odoo_instance_sdk.resources.environment.settings import _SettingsMixin
-
-for _module_name in ("checkout", "settings", "cleanup", "pgadmin"):
-    _module = importlib.import_module(f"odoo_instance_sdk.resources.environment.{_module_name}")
-    for _key, _value in _module.__dict__.items():
-        if _key.startswith("__"):
-            continue
-        globals()[_key] = _value
 
 
 @dataclass(slots=True, kw_only=True)

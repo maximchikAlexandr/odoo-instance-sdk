@@ -39,6 +39,18 @@ from odoo_instance_sdk.models import (
     PostgresStatsResult,
     SqlExecutionResult,
 )
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _annotate_backup_failure as _annotate_backup_failure,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _normalize_source_git_branch as _normalize_source_git_branch,
+)
+from odoo_instance_sdk.resources.database.lifecycle import (
+    _trustworthy_content_length as _trustworthy_content_length,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command
@@ -410,12 +422,14 @@ class _QueriesMixin:
 
     @contextlib.contextmanager
     def _http(self, timeout: float | None = None) -> Iterator[httpx.Client]:
+        import odoo_instance_sdk.resources.database as _database_shim
+
         warn_if_cleartext_secret(self.base_url)
         effective = (
             timeout if timeout is not None else self._instance._client.config.http_timeout_seconds
         )
-        with httpx.Client(
-            timeout=httpx.Timeout(effective),
+        with _database_shim.httpx.Client(
+            timeout=_database_shim.httpx.Timeout(effective),
         ) as http:
             yield http
 
@@ -537,7 +551,9 @@ class _QueriesMixin:
         except DatabaseManagerUnavailableError:
             if ck is not None and self._instance.config.db_user is not None:
                 db_host, db_port = ck
-                result = _verify_database_via_psql(
+                import odoo_instance_sdk.resources.database as _database_shim
+
+                result = _database_shim._verify_database_via_psql(
                     db_host,
                     db_port,
                     self._instance.config.db_user,
@@ -571,7 +587,9 @@ class _QueriesMixin:
         if step_id is None or ck is None or user is None:
             return None
         db_host, db_port = ck
-        result = _verify_database_via_psql(
+        import odoo_instance_sdk.resources.database as _database_shim
+
+        result = _database_shim._verify_database_via_psql(
             db_host,
             db_port,
             user,
@@ -652,7 +670,9 @@ class _QueriesMixin:
             ck = self._cluster
             if ck is not None and self._instance.config.db_user is not None:
                 db_host, db_port = ck
-                exists_result = _verify_database_via_psql(
+                import odoo_instance_sdk.resources.database as _database_shim
+
+                exists_result = _database_shim._verify_database_via_psql(
                     db_host,
                     db_port,
                     self._instance.config.db_user,
@@ -698,6 +718,7 @@ class _QueriesMixin:
         destination: str | Path | None = None,
         timeout: float | None = None,
         source_git_branch: str | None = None,
+        project_id: str | None = None,
     ) -> Backup:
         return self.backup_command(
             database_name,
@@ -706,6 +727,7 @@ class _QueriesMixin:
             destination=destination,
             timeout=timeout,
             source_git_branch=source_git_branch,
+            project_id=project_id,
         ).run()
 
     def backup_command(
@@ -717,6 +739,7 @@ class _QueriesMixin:
         destination: str | Path | None = None,
         timeout: float | None = None,
         source_git_branch: str | None = None,
+        project_id: str | None = None,
         executor: ProcessExecutor | None = None,
     ) -> Command[Backup]:
         from odoo_instance_sdk.internal.proc import PreparedAction
@@ -731,6 +754,7 @@ class _QueriesMixin:
                 destination=destination,
                 timeout=timeout,
                 source_git_branch=source_git_branch,
+                project_id=project_id,
             ),
             executor=executor,
             mutating=True,
@@ -759,6 +783,7 @@ class _QueriesMixin:
         destination: str | Path | None,
         timeout: float | None,
         source_git_branch: str | None,
+        project_id: str | None = None,
     ) -> Backup:
         source_git_branch = _normalize_source_git_branch(source_git_branch)
         pwd = self._require_password()
@@ -777,10 +802,14 @@ class _QueriesMixin:
         part_preexisted = part_path.exists()
         published = False
         catalog = self._instance._client.get_catalog()
-        project_id = (
-            self._instance._runtime_binding.project_id
-            if self._instance._runtime_binding is not None
-            else None
+        resolved_project_id = (
+            project_id
+            if project_id is not None
+            else (
+                self._instance._runtime_binding.project_id
+                if self._instance._runtime_binding is not None
+                else None
+            )
         )
         catalog.start_download(
             backup_id=backup_id,
@@ -790,7 +819,7 @@ class _QueriesMixin:
             filestore_requested=filestore,
             path=part_path,
             source_git_branch=source_git_branch,
-            project_id=project_id,
+            project_id=resolved_project_id,
         )
 
         try:
@@ -828,7 +857,9 @@ class _QueriesMixin:
             )
             published = True
 
-            return Backup(
+            import odoo_instance_sdk.resources.database as _database_shim
+
+            return _database_shim.Backup(
                 id=uuid.UUID(backup_id),
                 source_base_url=self.base_url,
                 database_name=database_name,

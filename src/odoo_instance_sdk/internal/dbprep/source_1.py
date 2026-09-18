@@ -33,8 +33,6 @@ from odoo_instance_sdk.internal.git_worktree import (
 )
 from odoo_instance_sdk.internal.locks import (
     database_preparation_lock_path,
-    exclusive_lock,
-    exclusive_lock_until,
 )
 from odoo_instance_sdk.internal.project_runtime import (
     is_uv_python_selector,
@@ -477,9 +475,12 @@ def materialize_selected_backup_dump(payload: SelectedBackupRestorePayload) -> N
         raise ConfigError("selected restore dump target is not absent")
     _materialize_verified_snapshot(payload)
     _assert_verified_snapshot_unchanged(payload)
+    import odoo_instance_sdk.internal.database_preparation as _dbprep_shim
+
+    open_verified_zip = _dbprep_shim._open_verified_zip
     try:
         with (
-            _open_verified_zip(payload.verified_snapshot_path) as archive,
+            open_verified_zip(payload.verified_snapshot_path) as archive,
             archive.open("dump.sql") as source,
             payload.dump_path.open("wb") as target,
         ):
@@ -519,8 +520,11 @@ def materialize_selected_backup_filestore(  # noqa: C901
         raise ConfigError("selected backup filestore space is unavailable") from exc
     destination.mkdir(parents=True)
     root = destination.resolve()
+    import odoo_instance_sdk.internal.database_preparation as _dbprep_shim
+
+    open_verified_zip = _dbprep_shim._open_verified_zip
     try:
-        with _open_verified_zip(payload.verified_snapshot_path) as archive:
+        with open_verified_zip(payload.verified_snapshot_path) as archive:
             copied_total = 0
             for relative in payload.filestore_members:
                 source_name = f"filestore/{payload.database_name}/{relative}"
@@ -869,7 +873,9 @@ def resolve_runtime_binding(project: ProjectConfig, root: Path) -> ProjectRuntim
 
 @contextlib.contextmanager
 def preparation_lock(project_id: str) -> Iterator[None]:
-    with exclusive_lock(database_preparation_lock_path(project_id)):
+    import odoo_instance_sdk.internal.database_preparation as _dbprep_shim
+
+    with _dbprep_shim.exclusive_lock(database_preparation_lock_path(project_id)):
         yield
 
 
@@ -877,7 +883,9 @@ def preparation_lock(project_id: str) -> Iterator[None]:
 def _wait_for_preparation_lock(project_id: str, *, timeout: float = 300.0) -> Iterator[None]:
     """Hold the project lock while allowing concurrent callers to queue."""
     deadline = time.monotonic() + timeout
-    with exclusive_lock_until(database_preparation_lock_path(project_id), deadline):
+    import odoo_instance_sdk.internal.database_preparation as _dbprep_shim
+
+    with _dbprep_shim.exclusive_lock_until(database_preparation_lock_path(project_id), deadline):
         yield
 
 

@@ -169,9 +169,10 @@ def _rich_module_where(document: OutputDocument) -> str:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
     table = Table("Field", "Value", title="Odoo module location")
+    table.columns[1].overflow = "fold"
     for field in ("name", "path", "manifest_path"):
         table.add_row(field, rich_cell(result.get(field, "")))
-    console = Console(record=True, color_system=None, width=180)
+    console = Console(record=True, color_system=None, width=9999)
     console.print(table)
     return console.export_text().rstrip()
 
