@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import odoo_instance_sdk.cli as cli
 
 
-def test_lazy_export_registry_is_closed_and_statistically_contract_checked() -> None:
+def test_lazy_export_registry_is_closed_and_statically_contract_checked() -> None:
     assert tuple(cli._LAZY_EXPORTS) == (
         "_rich_vscode_generate",
         "build_launch_profile",

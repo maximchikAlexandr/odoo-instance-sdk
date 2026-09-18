@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 
-from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.execution import Command, JsonValue
 from odoo_instance_sdk.internal import cluster_resources
 from odoo_instance_sdk.internal.cluster_resources import (
     _parse_cpu_percent,
@@ -17,6 +17,13 @@ from odoo_instance_sdk.internal.cluster_resources import (
     stats_containers,
 )
 from odoo_instance_sdk.internal.postgres_compose import SubprocessComposeRunner
+from odoo_instance_sdk.internal.proc import (
+    PreparedProcess,
+    PreparedStep,
+    ProcessResult,
+    RecordingExecutor,
+    active_context,
+)
 from odoo_instance_sdk.models import (
     ClusterResourceSnapshot,
     PidScope,
@@ -121,18 +128,11 @@ def test_resource_snapshot_reads_named_volume_usage() -> None:
     assert snap.metrics.volume_usage_bytes == int(1.5 * 1024**3)
 
 
-@pytest.mark.unit
-def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
+@pytest.fixture
+def _recorded_resource_snapshot_command(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+) -> tuple[Command[ClusterResourceSnapshot | None], RecordingExecutor]:
     """The standard Compose adapter consumes the same IDs it exposes in preview."""
-    from odoo_instance_sdk.internal.proc import (
-        PreparedProcess,
-        PreparedStep,
-        ProcessResult,
-        RecordingExecutor,
-        active_context,
-    )
 
     compose_file = tmp_path / "compose.yaml"
     compose_file.write_text("services: {}\n")
@@ -214,7 +214,17 @@ def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
         _compose_runner=runner,
     )
     executor = RecordingExecutor(result_factory=result_for)
-    command = cluster.resource_snapshot_command(executor=executor)
+    return cluster.resource_snapshot_command(executor=executor), executor
+
+
+@pytest.mark.unit
+def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
+    _recorded_resource_snapshot_command: tuple[
+        Command[ClusterResourceSnapshot | None], RecordingExecutor
+    ],
+) -> None:
+    """The standard Compose adapter consumes the same IDs it exposes in preview."""
+    command, executor = _recorded_resource_snapshot_command
 
     assert all(token not in repr(command.plan) for token in ("<runtime>", "<secret>"))
     assert any(
