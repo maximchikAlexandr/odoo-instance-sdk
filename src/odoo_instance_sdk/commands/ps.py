@@ -125,7 +125,7 @@ def ps_command(
         return
 
     try:
-        inventory = monitor.processes(project_id=project_id)
+        inventory = monitor.processes_command(project_id=project_id).run()
     except Exception as exc:
         fail(output_mode, "ps", exc, dry_run=False)
 

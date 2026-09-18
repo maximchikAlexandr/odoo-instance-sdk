@@ -267,11 +267,10 @@ def db_list(
     output_mode = resolve_output_mode(output_format, json_output)
     try:
         from odoo_instance_sdk.commands.pg import _database_instance
-        from odoo_instance_sdk.internal.pg.inventory import build_database_inventory_command
 
         project_root = resolve_project_path(ctx)
         _environment, instance = _database_instance(ctx)
-        command = build_database_inventory_command(instance, project_root, tracked=tracked)
+        command = instance.databases.list_inventory_command(project_root, tracked=tracked)
         status, _result = run_or_preview(
             lambda: command,
             command_name="db.list",
@@ -350,16 +349,11 @@ def db_restore(  # noqa: C901
         client = _client_class()(config=_client_config_class()(executable="odoo"))
         command: _InspectableCommand[msgspec.Struct]
         if replace_environment:
-            from odoo_instance_sdk.internal.database_replacement import (
-                build_copy_replacement_command,
-            )
-
             environment = resolve_environment(client, ctx.env, cwd=Path.cwd())
             _validate_replace_context(client, environment)
             command = cast(
                 "_InspectableCommand[msgspec.Struct]",
-                build_copy_replacement_command(
-                    client,
+                client.environments.replace_copy_database_command(
                     environment,
                     backup_id,
                     reset_admin_password=reset_admin_password,

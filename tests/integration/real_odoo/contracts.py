@@ -15,6 +15,19 @@ class ContractError(ValueError):
     """Raised when a test contract is incomplete or inconsistent."""
 
 
+def _validate_sdk_boundary(case: Any) -> None:
+    has_sdk = bool(getattr(case, "sdk_primitive", None))
+    has_cli_only = bool(getattr(case, "cli_only_reason", None))
+    if has_sdk == has_cli_only:
+        raise ContractError(
+            f"leaf {' '.join(case.path)} requires exactly one of sdk_primitive or cli_only_reason"
+        )
+    if has_sdk and not str(case.sdk_primitive).strip():
+        raise ContractError(f"empty sdk_primitive for {' '.join(case.path)}")
+    if has_cli_only and not str(case.cli_only_reason).strip():
+        raise ContractError(f"empty cli_only_reason for {' '.join(case.path)}")
+
+
 def validate_leaf_metadata(
     cases: Iterable[Any],
     *,
@@ -31,6 +44,7 @@ def validate_leaf_metadata(
         raise ContractError(f"leaf inventory drift: missing={missing!r}, extra={extra!r}")
 
     for case in rows:
+        _validate_sdk_boundary(case)
         if case.e2e_disposition not in E2E_DISPOSITIONS:
             raise ContractError(f"missing E2E disposition for {' '.join(case.path)}")
         if not case.e2e_evidence and case.e2e_disposition != "not-applicable":

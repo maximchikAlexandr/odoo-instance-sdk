@@ -52,6 +52,9 @@ The default suite is offline: no real Odoo, credentials, or external network.
 `make test` excludes `real_odoo`, `packaging`, and `dashboard`; run `make package`
 or `make dashboard` for those optional prerequisites and checks.
 
+Use `pytest.mark.parametrize` for repeated input/output/error matrices instead
+of copying near-identical test functions.
+
 ```bash
 make targeted PYTEST_ARGS='tests/unit/internal/test_urls.py'
 make coverage

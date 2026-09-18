@@ -1010,7 +1010,10 @@ class TestDepsVerify:
             "odoo_instance_sdk.internal.proc.executor.SubprocessExecutor.execute", fake_execute
         )
         result = verify_deps(recorded_python=fake_py, worktree_root=worktree, uv_executable="uv")
-        assert {"module": "myaddon", "import": "requests"} in result.missing_imports
+        assert any(
+            item.module == "myaddon" and item.import_name == "requests"
+            for item in result.missing_imports
+        )
 
     @pytest.mark.parametrize(
         ("pip_check_ok", "missing_imports", "expected"),
@@ -1027,11 +1030,14 @@ class TestDepsVerify:
         missing_imports: list[dict[str, str]],
         expected: bool,
     ) -> None:
-        from odoo_instance_sdk.internal.automation import DepsVerifyResult
+        from odoo_instance_sdk.models import DepsMissingImport, DepsVerifyResult
 
         result = DepsVerifyResult(
             pip_check_ok=pip_check_ok,
-            missing_imports=missing_imports,
+            missing_imports=tuple(
+                DepsMissingImport(module=str(item["module"]), import_name=str(item["import"]))
+                for item in missing_imports
+            ),
         )
         assert result.ok is expected
 

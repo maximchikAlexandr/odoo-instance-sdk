@@ -19,9 +19,22 @@ ignore = [
     "TRY003",
     "T201",
     "PYI034",
+    "PYI046",
+    "PYI047",
     "UP046",
     "UP047",
 ]
+
+[lint.per-file-ignores]
+"src/odoo_instance_sdk/internal/database_preparation.py" = ["PLC0414"]
+"src/odoo_instance_sdk/internal/database_replacement.py" = ["PLC0414"]
+"src/odoo_instance_sdk/models/__init__.py" = ["PLC0414"]
+"src/odoo_instance_sdk/internal/doctor/__init__.py" = ["E402"]
+"src/odoo_instance_sdk/resources/database/__init__.py" = ["E402"]
+"src/odoo_instance_sdk/resources/monitor/__init__.py" = ["E402"]
+"src/odoo_instance_sdk/resources/postgres/__init__.py" = ["E402"]
+"src/odoo_instance_sdk/resources/environment/__init__.py" = ["E402"]
+"src/odoo_instance_sdk/resources/instance/__init__.py" = ["E402"]
 
 [lint.isort]
 known-first-party = ["odoo_instance_sdk"]
