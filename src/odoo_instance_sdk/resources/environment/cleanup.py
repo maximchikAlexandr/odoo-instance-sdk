@@ -24,6 +24,7 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_odoo_config,
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
     Backup,
 )
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
         ProcessResult,
         RunContext,
     )
+    from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 from odoo_instance_sdk.resources.environment import helpers as _helpers
@@ -281,8 +283,12 @@ class _CleanupMixin:
 
                 return prepared_command(remove_retained, prepared.steps, executor=executor)
             return prepared  # noqa: TRY300
-        except Exception:
-            return None
+        except Exception as exc:
+            reason = sanitize_last_error(str(exc)) or type(exc).__name__
+            raise EnvironmentConflictError(
+                "copy_drop_plan_failed",
+                f"guarded COPY database drop plan construction failed: {reason}",
+            ) from exc
 
     def _remove_impl(
         self, env: DevelopmentEnvironment, *, copy_drop: PreparedCommand[None] | None

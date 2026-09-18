@@ -63,54 +63,54 @@
 
 ## 8. `run` uses canonical `~/.odcli` worktree path (item 8)
 
-- [ ] 8.1 Add a regression test that builds `run --dry-run` against a catalogue existing only under `~/.odcli` with no legacy path or symlink.
-- [ ] 8.2 Fix `run` to resolve worktree paths, `cwd`, `--addons-path`, and Git provenance from the canonical root.
-- [ ] 8.3 Verify runtime/session ownership, port preflight, and active-session lookup agree across `env list` and `run`.
-- [ ] 8.4 Search the repository for legacy path usage outside migration/compatibility code and remove it.
+- [x] 8.1 Add a regression test that builds `run --dry-run` against a catalogue existing only under `~/.odcli` with no legacy path or symlink.
+- [x] 8.2 Fix `run` to resolve worktree paths, `cwd`, `--addons-path`, and Git provenance from the canonical root.
+- [x] 8.3 Verify runtime/session ownership, port preflight, and active-session lookup agree across `env list` and `run`.
+- [x] 8.4 Search the repository for legacy path usage outside migration/compatibility code and remove it.
 
 ## 9. Project remote-backup ownership (item 9)
 
-- [ ] 9.1 Add a CLI/workflow-level regression test that runs a project download through the same path as `odcli db refresh` and asserts a non-null canonical `backups.project_id`.
-- [ ] 9.2 Pass the canonical `project_id` into `start_download()` before HTTP transfer in all project-owned download flows.
-- [ ] 9.3 Verify the new backup is visible in `odcli backup ls` of the current project and absent from another project's list; present with `--all-projects`.
-- [ ] 9.4 Preserve generic unowned SDK backup; add an explicit safe relink/repair path for already-unowned rows.
-- [ ] 9.5 Remove the test dependency on manual `_RuntimeBinding` injection; exercise the real preparation call chain.
+- [x] 9.1 Add a CLI/workflow-level regression test that runs a project download through the same path as `odcli db refresh` and asserts a non-null canonical `backups.project_id`.
+- [x] 9.2 Pass the canonical `project_id` into `start_download()` before HTTP transfer in all project-owned download flows.
+- [x] 9.3 Verify the new backup is visible in `odcli backup ls` of the current project and absent from another project's list; present with `--all-projects`.
+- [x] 9.4 Preserve generic unowned SDK backup; add an explicit safe relink/repair path for already-unowned rows.
+- [x] 9.5 Remove the test dependency on manual `_RuntimeBinding` injection; exercise the real preparation call chain.
 
 ## 10. Safe multi-target deletion (item 10)
 
-- [ ] 10.1 Make `backup rm` accept variadic UUIDs, reusing single-target resolvers and binding checks.
-- [ ] 10.2 Make `db rm` accept variadic database names within one resolved project cluster; preserve `--force-default` and `--force-connections` per-database checks.
-- [ ] 10.3 Make `env rm` accept variadic UUIDs/selectors with per-target repository/cluster resolution; preserve no-argument cwd semantics.
-- [ ] 10.4 Implement one planning preflight, one confirmation, sequential execution with per-target revalidation, per-target results, and non-zero exit on partial failure.
-- [ ] 10.5 Implement `--dry-run` returning one ordered aggregate plan.
-- [ ] 10.6 Add tests covering multi-target success, unknown/duplicate target abort, partial failure, single-target backward compatibility, cross-project UUIDs, cluster-scoped db names, shared vs copy environment cleanup, and machine-mode `--yes` behavior.
+- [x] 10.1 Make `backup rm` accept variadic UUIDs, reusing single-target resolvers and binding checks.
+- [x] 10.2 Make `db rm` accept variadic database names within one resolved project cluster; preserve `--force-default` and `--force-connections` per-database checks.
+- [x] 10.3 Make `env rm` accept variadic UUIDs/selectors with per-target repository/cluster resolution; preserve no-argument cwd semantics.
+- [x] 10.4 Implement one planning preflight, one confirmation, sequential execution with per-target revalidation, per-target results, and non-zero exit on partial failure.
+- [x] 10.5 Implement `--dry-run` returning one ordered aggregate plan.
+- [x] 10.6 Add tests covering multi-target success, unknown/duplicate target abort, partial failure, single-target backward compatibility, cross-project UUIDs, cluster-scoped db names, shared vs copy environment cleanup, and machine-mode `--yes` behavior.
 
 ## 11. Rich absolute-time formatting (item 11)
 
-- [ ] 11.1 Add one small helper in the existing internal formatting module converting aware UTC and naive SQLite UTC timestamps to local timezone `YYYY-MM-DD HH:MM`.
-- [ ] 11.2 Apply the helper to `backup ls` and `backup inspect` time fields; audit other Rich renderers for absolute timestamps.
-- [ ] 11.3 Add a parametrized test covering aware UTC, SQLite naive UTC, and local timezone with non-zero offset including day-boundary crossing; verify JSON/TOON keep ISO precision and durations are untouched.
+- [x] 11.1 Add one small helper in the existing internal formatting module converting aware UTC and naive SQLite UTC timestamps to local timezone `YYYY-MM-DD HH:MM`.
+- [x] 11.2 Apply the helper to `backup ls` and `backup inspect` time fields; audit other Rich renderers for absolute timestamps.
+- [x] 11.3 Add a parametrized test covering aware UTC, SQLite naive UTC, and local timezone with non-zero offset including day-boundary crossing; verify JSON/TOON keep ISO precision and durations are untouched.
 
 ## 12. Detached Odoo launch (item 12)
 
-- [ ] 12.1 Add `-d, --detach` to `odcli run` and a public SDK detached launch `*_command()` sibling that does not overload `run_foreground()`; preserve foreground behavior.
-- [ ] 12.2 Implement spawn, alive confirmation, runtime identity persistence, and return of PID/identity/endpoint/log path without waiting.
-- [ ] 12.3 Ensure no logfile fails fast before spawn; `iter_logs` works after detached launch.
-- [ ] 12.4 Implement `--dry-run -d` showing the sanitized process command and detached lifecycle plan without spawning.
-- [ ] 12.5 Reject incompatible combinations with native Odoo args and output formats through Click validation; treat `-d` after `--` as native.
-- [ ] 12.6 Add lifecycle/contract tests covering detached launch, immediate exit, stop, logs, dry-run, and foreground unchanged.
+- [x] 12.1 Add `-d, --detach` to `odcli run` and a public SDK detached launch `*_command()` sibling that does not overload `run_foreground()`; preserve foreground behavior.
+- [x] 12.2 Implement spawn, alive confirmation, runtime identity persistence, and return of PID/identity/endpoint/log path without waiting.
+- [x] 12.3 Ensure no logfile fails fast before spawn; `iter_logs` works after detached launch.
+- [x] 12.4 Implement `--dry-run -d` showing the sanitized process command and detached lifecycle plan without spawning.
+- [x] 12.5 Reject incompatible combinations with native Odoo args and output formats through Click validation; treat `-d` after `--` as native.
+- [x] 12.6 Add lifecycle/contract tests covering detached launch, immediate exit, stop, logs, dry-run, and foreground unchanged.
 
 ## 13. COPY-restore cluster identity (item 13)
 
-- [ ] 13.1 Bind the active managed cluster identity in `EnvironmentManager._do_copy_restore()` so `record_restore()` stores `cluster_id`.
-- [ ] 13.2 Replace the `None`-swallowing failure in `_remove_copy_database_command()` with a sanitized primary reason; retain fail-closed behavior.
-- [ ] 13.3 Add a test covering fresh backup → restore → COPY checkout → stop → `env rm --dry-run` showing guarded drop step → `env rm --yes` confirming COPY-DB and owned-artifact cleanup.
-- [ ] 13.4 Verify dirty worktree, active runtime, cluster/volume identity, restore binding, and related-resource checks are not weakened.
+- [x] 13.1 Bind the active managed cluster identity in `EnvironmentManager._do_copy_restore()` so `record_restore()` stores `cluster_id`.
+- [x] 13.2 Replace the `None`-swallowing failure in `_remove_copy_database_command()` with a sanitized primary reason; retain fail-closed behavior.
+- [x] 13.3 Add a test covering fresh backup → restore → COPY checkout → stop → `env rm --dry-run` showing guarded drop step → `env rm --yes` confirming COPY-DB and owned-artifact cleanup.
+- [x] 13.4 Verify dirty worktree, active runtime, cluster/volume identity, restore binding, and related-resource checks are not weakened.
 
 ## 14. Compatibility, documentation, and delivery gates
 
-- [ ] 14.1 Update README/CLI documentation for `odcli ps`, `CheckoutInventory`, `run -d`, multi-target deletion, local-time formatting, Alembic, badges, and the SDK-first rule.
-- [ ] 14.2 Run focused characterization, monitor, output-parity, Live, security/redaction, FastAPI, frontend-build, and packaging tests; record skipped external prerequisites separately from regressions.
-- [ ] 14.3 Run the full `make pr` gate and `uv build`; inspect wheel/sdist contents and metadata.
-- [ ] 14.4 Review `git diff` for scoped changes, verify Conventional Commit messages, and ensure no unrelated feature work is included.
-- [ ] 14.5 Open the implementation PR from `feat/issue-67-alpha-testing-defects` with `#67` in the title/body, link GitHub issue #67, and report local `make pr`/build results.
+- [x] 14.1 Update README/CLI documentation for `odcli ps`, `CheckoutInventory`, `run -d`, multi-target deletion, local-time formatting, Alembic, badges, and the SDK-first rule.
+- [x] 14.2 Run focused characterization, monitor, output-parity, Live, security/redaction, FastAPI, frontend-build, and packaging tests; record skipped external prerequisites separately from regressions.
+- [x] 14.3 Run the full `make pr` gate and `uv build`; inspect wheel/sdist contents and metadata.
+- [x] 14.4 Review `git diff` for scoped changes, verify Conventional Commit messages, and ensure no unrelated feature work is included.
+- [x] 14.5 Open the implementation PR from `feat/issue-67-alpha-testing-defects` with `#67` in the title/body, link GitHub issue #67, and report local `make pr`/build results.

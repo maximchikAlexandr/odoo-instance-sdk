@@ -2,7 +2,6 @@ from __future__ import annotations
 
 # ruff: noqa: F821
 import contextlib
-import os
 import sys
 import time
 import uuid
@@ -11,8 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-import psutil
-
+import odoo_instance_sdk.resources.instance as _instance_shim
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
 )
@@ -23,16 +21,10 @@ from odoo_instance_sdk.internal.proc import (
     ProcessExecutor,
     ProcessHandle,
     ProcessResult,
-    SubprocessExecutor,
-    terminate,
     wait_foreground,
 )
 from odoo_instance_sdk.internal.process_env import (
     captured_child_environment,
-)
-from odoo_instance_sdk.internal.server import (
-    _write_secret_config,
-    cleanup_secret_config,
 )
 from odoo_instance_sdk.models import (
     CommandResult,
@@ -40,17 +32,19 @@ from odoo_instance_sdk.models import (
     StartConfig,
 )
 from odoo_instance_sdk.resources.database import DatabaseResource
+from odoo_instance_sdk.resources.instance import helpers as _helpers
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
         Command,
     )
     from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext
-from odoo_instance_sdk.resources.instance import helpers as _helpers
 
 globals().update(
     {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
 )
+
+terminate = _instance_shim.terminate
 
 
 class _IdentityMixin:
@@ -174,7 +168,7 @@ class _IdentityMixin:
             _command_plan((step,)),
             execute,
             (step,),
-            executor=SubprocessExecutor(),
+            executor=_instance_shim.SubprocessExecutor(),
         )
 
     def start(
@@ -239,7 +233,7 @@ class _IdentityMixin:
             secret_created = False
             try:
                 if secret_path is not None:
-                    _write_secret_config(snapshot, secret_path)
+                    _instance_shim._write_secret_config(snapshot, secret_path)
                     secret_created = True
                 handle = context.spawn(step.step_id)
                 proc = OdooProcess(
@@ -251,7 +245,7 @@ class _IdentityMixin:
                 self._client.register_process(proc, handle.process, secret_path)
             except BaseException:
                 if secret_created:
-                    cleanup_secret_config(secret_path)
+                    _instance_shim.cleanup_secret_config(secret_path)
                 raise
             else:
                 return proc
@@ -262,7 +256,7 @@ class _IdentityMixin:
             _command_plan(prepared_steps, secrets=secrets),
             execute,
             prepared_steps,
-            executor=SubprocessExecutor(),
+            executor=_instance_shim.SubprocessExecutor(),
         )
 
     def run_foreground(
@@ -334,12 +328,12 @@ class _IdentityMixin:
                 ),
             )
 
-        process_executor = SubprocessExecutor()
+        process_executor = _instance_shim.SubprocessExecutor()
 
         def execute(context: RunContext[int]) -> int:
             # The planning probe is intentionally repeated at this mutation
             # boundary.  A stale preview must never turn into a spawn.
-            if type(process_executor) is SubprocessExecutor:
+            if type(process_executor) is _instance_shim.SubprocessExecutor:
                 _assert_http_port_free(config)
             self._ensure_dependencies_ready(
                 context,
@@ -354,7 +348,7 @@ class _IdentityMixin:
             with self._artifact_lock():
                 secret_created = False
                 if secret_path is not None:
-                    _write_secret_config(snapshot, secret_path)
+                    _instance_shim._write_secret_config(snapshot, secret_path)
                     secret_created = True
                 handle: ProcessHandle | None = None
                 try:
@@ -374,7 +368,7 @@ class _IdentityMixin:
                 except BaseException:
                     if handle is not None:
                         with contextlib.suppress(BaseException):
-                            terminate(
+                            _instance_shim.terminate(
                                 handle,
                                 process_group_id=handle.process_group_id,
                                 timeout=5.0,
@@ -383,7 +377,7 @@ class _IdentityMixin:
                 finally:
                     self._clear_runtime_identity()
                     if secret_created:
-                        cleanup_secret_config(secret_path)
+                        _instance_shim.cleanup_secret_config(secret_path)
 
         from odoo_instance_sdk.execution import Command
 
@@ -391,7 +385,13 @@ class _IdentityMixin:
             _command_plan(
                 prepared_steps,
                 secrets=secrets,
-                observations=(_http_port_observation(config),),
+                observations=(
+                    _http_port_observation(
+                        config,
+                        environment_id=self._environment_id,
+                        client=self._client,
+                    ),
+                ),
             ),
             execute,
             prepared_steps,
@@ -424,7 +424,7 @@ class _IdentityMixin:
         environment_id = self._environment_id
         if binding is None and environment_id is None:
             return
-        create_time = _process_create_time(root_pid)
+        create_time = _instance_shim._process_create_time(root_pid)
         checkout_branch, commit_sha = _worktree_ref(cwd, context=context)
         http_url = f"http://{config.http_interface}:{config.http_port}"
         catalog = cast("_RuntimeCatalog", self._client.get_catalog())
@@ -527,14 +527,14 @@ class _IdentityMixin:
             with self._artifact_lock():
                 secret_created = False
                 if secret_path is not None:
-                    _write_secret_config(snapshot, secret_path)
+                    _instance_shim._write_secret_config(snapshot, secret_path)
                     secret_created = True
                 try:
                     handle = context.spawn(step.step_id)
                     return wait_foreground(handle)
                 finally:
                     if secret_created:
-                        cleanup_secret_config(secret_path)
+                        _instance_shim.cleanup_secret_config(secret_path)
 
         from odoo_instance_sdk.execution import Command
 
@@ -542,7 +542,7 @@ class _IdentityMixin:
             _command_plan(prepared_steps, secrets=secrets),
             execute,
             prepared_steps,
-            executor=SubprocessExecutor(),
+            executor=_instance_shim.SubprocessExecutor(),
         )
 
     def run_shell_script(
@@ -621,7 +621,7 @@ class _IdentityMixin:
             def run_inside_lock() -> T:
                 secret_created = False
                 if secret_path is not None:
-                    _write_secret_config(snapshot, secret_path)
+                    _instance_shim._write_secret_config(snapshot, secret_path)
                     secret_created = True
                 try:
                     if callback_override is not None:
@@ -641,7 +641,7 @@ class _IdentityMixin:
                     return converted_result
                 finally:
                     if secret_created:
-                        cleanup_secret_config(secret_path)
+                        _instance_shim.cleanup_secret_config(secret_path)
 
             if exclusive:
                 with self._artifact_operation(exclusive=True):
@@ -665,7 +665,7 @@ class _IdentityMixin:
             _command_plan(captured_steps, secrets=secrets),
             execute,
             captured_steps,
-            executor=executor or SubprocessExecutor(),
+            executor=executor or _instance_shim.SubprocessExecutor(),
         )
 
     def _run_shell_script_in_context(
@@ -712,14 +712,14 @@ class _IdentityMixin:
             raise UnplannedStepError(captured.step_id, reason="shell inputs changed after capture")
         secret_created = False
         if secret_path is not None:
-            _write_secret_config(snapshot, secret_path)
+            _instance_shim._write_secret_config(snapshot, secret_path)
             secret_created = True
         try:
             result = cast("ProcessResult", context.process_prepared(captured))
             return _command_result(result, timeout, captured)
         finally:
             if secret_created:
-                cleanup_secret_config(secret_path)
+                _instance_shim.cleanup_secret_config(secret_path)
 
     def _run_shell_script_exclusive(
         self,
@@ -799,10 +799,14 @@ class _IdentityMixin:
             )
 
         try:
-            process = psutil.Process(root_pid)
-        except psutil.NoSuchProcess:
+            process = _instance_shim.psutil.Process(root_pid)
+        except _instance_shim.psutil.NoSuchProcess:
             return vanished_identity()
-        except (psutil.AccessDenied, psutil.ZombieProcess, OSError) as exc:
+        except (
+            _instance_shim.psutil.AccessDenied,
+            _instance_shim.psutil.ZombieProcess,
+            OSError,
+        ) as exc:
             raise RuntimeError("runtime identity is inaccessible") from exc
 
         try:
@@ -810,10 +814,17 @@ class _IdentityMixin:
             live_executable = _canonical_runtime_path(process.exe())
             live_argv = tuple(process.cmdline())
             live_cwd = _canonical_runtime_path(process.cwd())
-            process_group_id = os.getpgid(root_pid) if sys.platform != "win32" else None
-        except psutil.NoSuchProcess:
+            process_group_id = (
+                _instance_shim.os.getpgid(root_pid) if sys.platform != "win32" else None
+            )
+        except _instance_shim.psutil.NoSuchProcess:
             return vanished_identity()
-        except (psutil.AccessDenied, psutil.ZombieProcess, OSError, TypeError) as exc:
+        except (
+            _instance_shim.psutil.AccessDenied,
+            _instance_shim.psutil.ZombieProcess,
+            OSError,
+            TypeError,
+        ) as exc:
             raise RuntimeError("runtime identity is inaccessible") from exc
         return _RuntimeIdentity(
             environment_id=environment_id,

@@ -328,6 +328,76 @@ The Python monitor returns typed models. The local HTTP interface exposes the
 same snapshot contract at `/api/v1/snapshot`; see the README for its security
 and deployment boundaries.
 
+## Process and checkout inventory
+
+`EnvironmentMonitor.processes_command()` projects one `ProcessInventory` from
+a single canonical snapshot: runtime processes, CPU/memory metrics, and
+resource totals. `processes()` is the convenience sibling that delegates once
+to `processes_command()` and runs it:
+
+```python
+from odoo_instance_sdk import EnvironmentMonitor, ProcessInventory
+
+monitor = EnvironmentMonitor()
+command = monitor.processes_command()
+print(command.plan)  # redacted single-snapshot plan
+inventory: ProcessInventory = command.run()
+print(inventory)
+```
+
+`EnvironmentMonitor.checkout_inventory_command()` projects one
+`CheckoutInventory` from a single snapshot: the registered environments
+grouped by project, with their worktree, branch, and runtime state.
+`checkout_inventory()` delegates to it:
+
+```python
+from odoo_instance_sdk import CheckoutInventory
+
+command = monitor.checkout_inventory_command()
+print(command.plan)
+checkouts: CheckoutInventory = command.run()
+for project in checkouts.projects:
+    print(project.id, [env.name for env in project.environments])
+```
+
+Both are bounded read-only leaves (the CLI `odcli ps` spelling uses
+`processes_command()`) and never spawn a child or mutate state.
+
+## Detached Odoo launch
+
+`instance.run_detached_command()` captures one detached Odoo launch plan and
+returns a `Command[DetachedLaunchResult]`. The preview is redacted and never
+spawns; `.run()` launches Odoo in the background and returns once it is alive
+with its pid, endpoint, and log path:
+
+```python
+from odoo_instance_sdk import OdooClient, OdooClientConfig
+
+client = OdooClient(config=OdooClientConfig(executable="odoo-bin"))
+instance = client.instance.from_config("./odoo.conf")
+
+command = instance.run_detached_command(args=("--dev=reload",))
+print(command.plan)  # redacted detached argv
+result = command.run()  # DetachedLaunchResult: pid, endpoint, log_path
+print(result.pid, result.endpoint, result.log_path)
+```
+
+`instance.run_detached()` is the convenience sibling that delegates once to
+`run_detached_command()` and runs it. The CLI spelling is `odcli run -d`.
+
+## Backup project ownership
+
+`BackupCatalog.relink_backup_project(backup_id, project_id)` rebinds a
+retained backup record to the canonical project id after a project-owned
+remote download. It is a catalogue-only mutation and does not move files:
+
+```python
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+catalog = BackupCatalog.default()
+catalog.relink_backup_project("00000000-0000-0000-0000-000000000001", "my-project")
+```
+
 See [execution-boundary.md](execution-boundary.md) for the canonical CLI leaf
 inventory, native-stream exceptions, and the checked process/output/type
 allowlists.

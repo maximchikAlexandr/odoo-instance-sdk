@@ -896,7 +896,7 @@ def _production_restore_command(
     executor = RecordingExecutor(result_factory=result_for)
     monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
     monkeypatch.setattr(ProjectConfig, "load", MagicMock(return_value=project))
-    monkeypatch.setattr("odoo_instance_sdk.internal.project_manifest.write_manifest", write)
+    monkeypatch.setattr(preparation, "write_manifest", write, raising=False)
     monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
     command = preparation.DatabasePreparationCoordinator(client).prepare_command(
         project, options=options, executor=executor
@@ -1255,7 +1255,7 @@ def test_download_preparation_reads_secret_before_lock_and_never_requires_local_
     client.instance.assert_called_with("https://example.test", master_password="remote-secret")
     assert client.instance.return_value.databases.backup.call_count == 2
     client.instance.return_value.databases.backup.assert_called_with(
-        "remote_test", source_git_branch="develop"
+        "remote_test", source_git_branch="develop", project_id="project_repo"
     )
 
 
@@ -1602,7 +1602,9 @@ def test_restore_coordinator_switches_default_only_after_restore(
     assert result.default_switched is True
     assert result.previous_default == "old"
     assert result.effective_default == result.restored_database
-    remote.databases.backup.assert_called_once_with("remote", source_git_branch=None)
+    remote.databases.backup.assert_called_once_with(
+        "remote", source_git_branch=None, project_id="project_repo"
+    )
     local.databases.restore.assert_called_once_with(
         backup,
         result.restored_database,
@@ -1882,7 +1884,7 @@ def test_pinned_http_download_reaches_remote_database_operation(
         "http://example.test:8069", master_password="remote-secret"
     )
     client.instance.return_value.databases.backup.assert_called_once_with(
-        "remote_test", source_git_branch=None
+        "remote_test", source_git_branch=None, project_id="project_repo"
     )
 
 

@@ -26,6 +26,7 @@ from odoo_instance_sdk.internal.context import resolve_environment, resolve_proj
 from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
 from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor, RunContext
 from odoo_instance_sdk.models import CheckoutInventory
+from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.backup import BackupResource
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.environment import EnvironmentResource
@@ -48,7 +49,7 @@ ROOT_HELP_DESCRIPTIONS = (
     "Discover, test, and upgrade Odoo modules.",
     "Start the observability monitor (FastAPI + React UI).",
     "Inspect and manage project PostgreSQL.",
-    "Start resolved Odoo in the foreground.",
+    "Start resolved Odoo in the foreground or detached.",
     "Open an interactive Odoo shell.",
     "Select and run Odoo tests.",
     "Export Odoo module translations.",
@@ -75,9 +76,10 @@ def _passthrough_instance(
     *,
     input_text: str = "",
 ) -> Result:
+    project = ProjectConfig(repository_root=Path("/tmp/odcli-passthrough"), python="python3")
     with patch(
         "odoo_instance_sdk.cli.cli_context.ready_instance",
-        return_value=_resolved_context(MagicMock(), SimpleNamespace(), instance),
+        return_value=_resolved_context(MagicMock(), project, instance),
     ):
         return CliRunner().invoke(cli, args, input=input_text)
 
@@ -497,10 +499,14 @@ def test_discovered_public_methods() -> None:
             "refresh_database_command",
             "remove",
             "remove_command",
+            "replace_copy_database",
+            "replace_copy_database_command",
             "sync_python",
             "sync_python_command",
         ),
         EnvironmentMonitor: (
+            "checkout_inventory",
+            "checkout_inventory_command",
             "processes",
             "processes_command",
             "snapshot",
@@ -539,6 +545,8 @@ def test_discovered_public_methods() -> None:
             "init_monitoring",
             "init_monitoring_command",
             "list",
+            "list_inventory",
+            "list_inventory_command",
             "locks",
             "locks_command",
             "names",
@@ -555,6 +563,8 @@ def test_discovered_public_methods() -> None:
             "delete",
             "delete_command",
             "history",
+            "inspect",
+            "inspect_command",
             "latest",
             "list",
             "validate",
@@ -570,6 +580,8 @@ def test_discovered_public_methods() -> None:
             "iter_logs",
             "run",
             "run_command",
+            "run_detached",
+            "run_detached_command",
             "run_foreground",
             "run_foreground_command",
             "run_shell_script",
@@ -581,6 +593,8 @@ def test_discovered_public_methods() -> None:
             "status",
             "stop",
             "stop_command",
+            "stop_environment",
+            "stop_environment_command",
             "wait_ready",
         ),
         BackupCatalog: (
@@ -609,6 +623,7 @@ def test_discovered_public_methods() -> None:
             "record_environment_use",
             "record_restore",
             "record_validation",
+            "relink_backup_project",
             "start_download",
             "success_download",
             "update_environment",

@@ -443,7 +443,7 @@ def test_linux_acl_validation_rejects_extra_grants(
         result = fake_run(list(prepared))
         return 0, result.stdout.encode(), b"", 0.0
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
     with pytest.raises(PgAdminUnavailableError):
         pgadmin_files.prepare_files(
             paths=local_paths,
@@ -507,7 +507,7 @@ def test_linux_acl_layout_and_data_default_acl_are_exact(
         result = fake_run(list(prepared))
         return 0, result.stdout.encode(), b"", 0.0
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
     prepared = pgadmin_files.prepare_files(
         paths=local_paths,
         servers_json="{}",

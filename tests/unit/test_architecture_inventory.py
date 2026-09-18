@@ -343,14 +343,23 @@ def test_captured_paths_use_one_internal_pump() -> None:
         if isinstance(node, ast.FunctionDef) and node.name == "_execute"
     )
 
-    def calls_named(node: ast.AST, name: str) -> int:
-        return sum(
-            isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == name
-            for call in ast.walk(node)
-        )
+    def calls_pump(node: ast.AST) -> int:
+        count = 0
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            if (isinstance(func, ast.Name) and func.id == "_run_pump") or (
+                isinstance(func, ast.Attribute)
+                and func.attr == "_run_pump"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "_proc_shim"
+            ):
+                count += 1
+        return count
 
-    assert calls_named(limited, "_run_pump") == 1
-    assert calls_named(execute, "_run_pump") == 1
+    assert calls_pump(limited) == 1
+    assert calls_pump(execute) == 1
     assert (
         sum(
             isinstance(call, ast.Call)

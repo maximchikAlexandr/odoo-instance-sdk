@@ -10,6 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
 
+import odoo_instance_sdk.resources.environment as _environment_shim
 from odoo_instance_sdk.exceptions import (
     ConfigError,
     EnvironmentConflictError,
@@ -23,9 +24,6 @@ from odoo_instance_sdk.internal.database_preparation import (
     classify_freshness,
     compare_provenance,
 )
-from odoo_instance_sdk.internal.dependency_sync import (
-    revalidate_hash_lock,
-)
 from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.locks import (
     exclusive_lock,
@@ -35,7 +33,6 @@ from odoo_instance_sdk.internal.locks import (
 from odoo_instance_sdk.internal.odoo_config import (
     parse_odoo_config,
 )
-from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
@@ -58,6 +55,7 @@ if TYPE_CHECKING:
         ProcessResult,
         RunContext,
     )
+    from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
 from odoo_instance_sdk.resources.environment import helpers as _helpers
 
@@ -663,7 +661,7 @@ class _CheckoutMixin:
                 details={"branch": plan.branch, "existing_id": existing["id"]},
             )
         try:
-            find_free_port(
+            _environment_shim.find_free_port(
                 "http",
                 cat,
                 requested=plan.http_port,
@@ -770,7 +768,9 @@ class _CheckoutMixin:
                                 f"{_process_stderr(compile_result)}"
                             )
                     else:
-                        revalidate_hash_lock(plan.hash_lock, plan.options.hash_lock_sha256)
+                        _environment_shim.revalidate_hash_lock(
+                            plan.hash_lock, plan.options.hash_lock_sha256
+                        )
                     install_result = cast(
                         "ProcessResult", context.process("checkout.dependencies.install")
                     )
@@ -806,6 +806,7 @@ class _CheckoutMixin:
                     cfg_dict=plan.config_values,
                     source_db=plan.source_database,
                     target_db=plan.target_database,
+                    repo_root=plan.repo_root,
                 )
 
             cat._finalize_environment_checkout(str(plan.env_id), _checkout_applied_settings(plan))

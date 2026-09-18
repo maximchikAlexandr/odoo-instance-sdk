@@ -43,6 +43,7 @@ classification is bounded and whose contract requires `--dry-run`:
 | `db reset-admin-password` | mutating-or-spawning |
 | `resource ls` | bounded-read-only |
 | `resource doctor` | bounded-read-only |
+| `ps` | bounded-read-only |
 | `eval` | process-previewable-read-only |
 | `exec` | mutating-or-spawning |
 | `test` | process-previewable-read-only |
@@ -81,12 +82,25 @@ the other guarded mutations.
 read-only planning inspection as an observation; execution retains separate
 revalidation, optional target-session termination, drop, and absence-verification
 steps. Dry-run performs only the planning inspection and never mutates the
-cluster or catalogue.
+cluster or catalogue. `backup rm`, `db rm`, and `env rm` additionally accept
+variadic multi-target arguments: each target is resolved and previewed
+independently, and execution aborts on the first guarded failure without
+silently skipping a target.
+
+`ps` is a bounded read-only leaf backed by the public
+`EnvironmentMonitor.processes_command()` SDK primitive. It projects one
+process and resource inventory from a single canonical snapshot and supports
+Rich, JSON, and TOON output.
 
 The complete shipped CLI also contains `doctor` and `env ls` as bounded
-read-only leaves, plus `resource ls`, `resource doctor`, `run`, `shell`,
+read only leaves, plus `resource ls`, `resource doctor`, `run`, `shell`,
 `logs`, and `monitor` native/stream leaves. They remain in `PUBLIC_LEAF_CASES` with their explicit classifications
 and reasons; no parallel eligibility table is permitted.
+
+`run` is a native foreground/stream leaf, but `run -d` / `--detach` is a
+bounded detached launch: its `--dry-run` captures the detached plan without
+spawning, and execution returns a typed `DetachedLaunchResult` once Odoo is
+alive. The SDK sibling is `instance.run_detached_command()`.
 
 The Git workflow leaves use the same captured-plan boundary: `git commit` and
 `git absorb` require explicit confirmation for mutation, while `git check` is
@@ -105,10 +119,12 @@ proof, active-reference protection, and postcondition-tested cleanup policy.
 
 The catalogue migration is additive and preserves legacy rows with nullable
 cluster and restore provenance. Older rows remain readable as unknown; no
-second store is introduced. Deployments should retain the existing catalogue
-backup before applying a schema migration and restore that backup before
-running older code. No migration deletes backups, restores, databases,
-filestores, volumes, or audit history.
+second store is introduced. The schema is managed by Alembic migrations; the
+first catalogue-backed operation stamps the current revision and applies any
+pending upgrade under one locked, journaled transaction. Deployments should
+retain the existing catalogue backup before applying a schema migration and
+restore that backup before running older code. No migration deletes backups,
+restores, databases, filestores, volumes, or audit history.
 
 Streaming failures retain the exact backup UUID and sanitized state context.
 The `.part` file is removed only for a handled pre-publication failure; a
@@ -164,10 +180,10 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py:424-425` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py:484-485` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/backup.py:295` — shared Rich validation
+- `src/odoo_instance_sdk/commands/backup.py:342` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/output.py:236` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.

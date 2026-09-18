@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+import pytest
+
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
@@ -127,4 +129,50 @@ def test_legacy_backup_is_backfilled_only_for_one_deterministic_owner(tmp_path: 
 
     catalog._list_backup_projections(project_id=owner, include_all_states=True)
     assert catalog.get_by_id(backup_id)["project_id"] == owner  # type: ignore[index]
+    catalog.close()
+
+
+def test_project_backup_visible_in_owner_ls_absent_from_other_project_present_with_all_projects(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    first = _project(catalog, tmp_path, "first")
+    second = _project(catalog, tmp_path, "second")
+    first_backup = _backup(catalog, tmp_path, first)
+
+    owner_items = catalog._list_backup_projections(project_id=first, include_all_states=True).items
+    other_items = catalog._list_backup_projections(project_id=second, include_all_states=True).items
+    all_items = catalog._list_backup_projections(include_all_states=True).items
+
+    assert [str(item.backup.id) for item in owner_items] == [first_backup]
+    assert list(other_items) == []
+    assert {str(item.backup.id) for item in all_items} == {first_backup}
+    catalog.close()
+
+
+def test_generic_sdk_backup_stays_unowned_until_explicit_relink(tmp_path: Path) -> None:
+    from odoo_instance_sdk.exceptions import BackupCatalogError
+
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    owner = _project(catalog, tmp_path, "owner")
+    unowned_backup = _backup(catalog, tmp_path, None)
+
+    assert catalog.get_by_id(unowned_backup)["project_id"] is None  # type: ignore[index]
+    assert catalog._list_backup_projections(project_id=owner, include_all_states=True).items == ()
+
+    catalog.relink_backup_project(unowned_backup, owner)
+    assert catalog.get_by_id(unowned_backup)["project_id"] == owner  # type: ignore[index]
+    assert [
+        str(item.backup.id)
+        for item in catalog._list_backup_projections(
+            project_id=owner, include_all_states=True
+        ).items
+    ] == [unowned_backup]
+
+    with pytest.raises(BackupCatalogError, match="already owned"):
+        catalog.relink_backup_project(unowned_backup, owner)
+
+    unregistered_backup = _backup(catalog, tmp_path, None)
+    with pytest.raises(BackupCatalogError, match="not registered"):
+        catalog.relink_backup_project(unregistered_backup, "project_missing")
     catalog.close()

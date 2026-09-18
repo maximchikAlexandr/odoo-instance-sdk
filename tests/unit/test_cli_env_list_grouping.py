@@ -337,10 +337,8 @@ def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> N
     flat = "".join(out.split())
     assert "stopped" in flat
     assert "env" in flat
-    stopped_row = next(
-        line for line in out.splitlines() if "stopped-" in line or "stopped-env" in flat
-    )
-    assert "— —" in stopped_row or "— —" in flat
+    stopped_row = next(line for line in out.splitlines() if "stopped-env" in line)
+    assert "— —" in stopped_row
 
 
 @pytest.mark.unit
@@ -901,8 +899,7 @@ def test_env_list_watch_retains_project_selector_across_refreshes(
     monkeypatch.setattr(env_commands, "Live", _FakeLive)
     monkeypatch.setattr(EnvironmentMonitor, "checkout_inventory", collect)
     monkeypatch.setattr(
-        env_commands,
-        "_resolve_monitor_project_id",
+        "odoo_instance_sdk.commands.env.checkout._resolve_monitor_project_id",
         lambda _ctx, all_projects: None if all_projects else "project_a",
     )
     monkeypatch.setattr("odoo_instance_sdk.commands.env.time.sleep", lambda _seconds: None)

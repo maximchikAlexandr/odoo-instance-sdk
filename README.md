@@ -111,7 +111,9 @@ for the complete eligibility table and the intentionally narrow exceptions.
 
 Rich previews show the exact sanitized captured commands in execution order;
 identified progress lines use the captured step ID, operation, target, elapsed
-time, and process exit status. For example:
+time, and process exit status. Absolute timestamps in Rich output are rendered
+in the invoking user's local timezone; JSON and TOON retain the original
+UTC/ISO-8601 values. For example:
 
 ```bash
 odcli env create PROJ-123 --dry-run
@@ -259,6 +261,17 @@ prompt.
 `--force-connections` terminates sessions belonging only to the exact target.
 Remote instances, configured defaults, and template databases remain refused.
 
+`backup rm`, `db rm`, and `env rm` accept variadic multi-target arguments.
+Each target is resolved and previewed independently before any mutation; a
+dry-run lists every target's plan, and execution aborts on the first guarded
+failure without silently skipping a target:
+
+```bash
+odcli db rm feature_a feature_b --dry-run
+odcli backup rm UUID1 UUID2 UUID3 --yes
+odcli env rm PROJ-123 PROJ-456 --dry-run
+```
+
 ### Prepare a project database
 
 Database refresh can use a pinned remote test instance while keeping its
@@ -322,12 +335,13 @@ visible with sanitized paths and recommendations. `resource ls` and
 
 Global SDK state lives below `~/.odcli/`: configuration, the SQLite catalogue,
 environments, projects, backups, locks, and pgAdmin data share this root. The
-first catalogue-backed operation runs one locked, journaled migration from
-legacy platformdirs locations. A conflicting destination or interrupted stage
-keeps the source data and journal so the next invocation can report the exact
-problem and retry safely; sources are removed only after verification. The
-repository-local `.odcli/` project manifest and generated config are not part
-of this migration.
+catalogue schema is managed by Alembic migrations; the first
+catalogue-backed operation runs one locked, journaled migration from legacy
+platformdirs locations and stamps the schema revision. A conflicting
+destination or interrupted stage keeps the source data and journal so the next
+invocation can report the exact problem and retry safely; sources are removed
+only after verification. The repository-local `.odcli/` project manifest and
+generated config are not part of this migration.
 
 Global storage paths and machine-readable output retain absolute paths. Human
 Rich tables may shorten paths beneath `HOME`, but `odcli env path` always emits
@@ -402,6 +416,17 @@ launch. `logs
 --follow`, the monitor server, and normal interactive shell/run streams are
 documented native transports because they are intentionally unbounded or
 interactive rather than finite plan documents.
+
+`run -d` / `--detach` launches Odoo in the background through the same
+inspect-then-run boundary, then returns once the process is alive with its
+pid, endpoint, and log path. It is a bounded leaf: `--dry-run` captures the
+detached plan without spawning, and the SDK sibling is
+`instance.run_detached_command()` returning a typed `DetachedLaunchResult`:
+
+```bash
+odcli --env feature/customer-credit run -d --dry-run
+odcli --env feature/customer-credit run -d -- --dev=reload
+```
 
 The literal `--` delimiter is required for every non-empty native Odoo argv;
 the tokens after it are preserved in order and repeated values are allowed.
@@ -542,6 +567,14 @@ replacement, environments, PostgreSQL, monitoring, and inspect-then-run
 command siblings. `PUBLIC_LEAF_CASES` records the SDK primitive or CLI-only
 reason for every leaf; the complete boundary inventory and allowlist rationale
 are in [docs/execution-boundary.md](docs/execution-boundary.md).
+
+The SDK-first rule governs that boundary: every CLI leaf records either a
+public `sdk_primitive` or a concrete `cli_only_reason` for transport-only
+leaves such as `run`, `shell`, `logs --follow`, and `monitor`. CLI callbacks
+must not build self-contained domain read/mutation/spawn operations through
+`internal.*` when a public typed SDK primitive applies; convenience methods
+delegate to the corresponding `*_command()` sibling and do not rebuild argv,
+cwd, environment, or actions.
 
 ## Monitor and local API
 
