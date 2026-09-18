@@ -26,7 +26,7 @@
     "jsdom": "^26.1.0",
     "typescript": "^5",
     "vite": "^6.4.3",
-    "vitest": "^3.2.7"
+    "vitest": "^4.1.11"
   },
   "overrides": {
     "js-yaml": "^4.3.1"
