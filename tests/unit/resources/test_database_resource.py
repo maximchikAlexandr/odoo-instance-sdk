@@ -70,7 +70,7 @@ def _stream_http(response: MagicMock) -> tuple[MagicMock, MagicMock]:
 
 
 def _patch_captured_process(monkeypatch: pytest.MonkeyPatch, fake_run: Any) -> None:
-    from odoo_instance_sdk.internal.proc.executor import _environment
+    from odoo_instance_sdk.internal.proc.run import _environment
 
     def fake_pump(step: Any, *, timeout: float | None, **_: Any) -> tuple[int, bytes, bytes, float]:
         try:
@@ -100,7 +100,7 @@ def _patch_captured_process(monkeypatch: pytest.MonkeyPatch, fake_run: Any) -> N
             0.0,
         )
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
 
 
 def _make_backup(**kw: Any) -> Backup:
@@ -362,8 +362,10 @@ class TestExists:
                 side_effect=DatabaseManagerUnavailableError("down"),
             ),
             patch(
-                "odoo_instance_sdk.resources.database._verify_database_via_psql", return_value=True
+                "odoo_instance_sdk.resources.database.backup_restore_parts.queries._verify_database_via_psql",
+                return_value=True,
             ),
+            patch.object(inst.databases, "_psql_probe_for", return_value=None),
         ):
             assert inst.databases.exists("mydb") is True
 
@@ -376,8 +378,10 @@ class TestExists:
                 side_effect=DatabaseManagerUnavailableError("down"),
             ),
             patch(
-                "odoo_instance_sdk.resources.database._verify_database_via_psql", return_value=False
+                "odoo_instance_sdk.resources.database.backup_restore_parts.queries._verify_database_via_psql",
+                return_value=False,
             ),
+            patch.object(inst.databases, "_psql_probe_for", return_value=None),
             patch.object(inst, "_client") as mock_client,
         ):
             mock_client.get_catalog.return_value = mock_catalog
@@ -392,7 +396,8 @@ class TestExists:
                 side_effect=DatabaseManagerUnavailableError("down"),
             ),
             patch(
-                "odoo_instance_sdk.resources.database._verify_database_via_psql", return_value=None
+                "odoo_instance_sdk.resources.database.backup_restore_parts.queries._verify_database_via_psql",
+                return_value=None,
             ),
             pytest.raises(DatabaseManagerUnavailableError),
         ):
@@ -747,7 +752,7 @@ class TestBackupProvenance:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from odoo_instance_sdk.internal import database_preparation as preparation
+        from odoo_instance_sdk.internal.dbprep import materialize as preparation
         from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
         from odoo_instance_sdk.project import ProjectConfig
         from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
@@ -1020,7 +1025,7 @@ class TestBackupProvenance:
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
             patch("httpx.Client", return_value=http_cm),
             patch(
-                "odoo_instance_sdk.resources.database.Backup",
+                "odoo_instance_sdk.resources.database.backup_restore_parts.queries.Backup",
                 side_effect=KeyboardInterrupt,
             ),
             pytest.raises(KeyboardInterrupt) as raised,
@@ -1715,7 +1720,7 @@ class TestPlannedExistsProbe:
                 inst.databases.__class__, "list", side_effect=DatabaseManagerUnavailableError
             ),
             patch(
-                "odoo_instance_sdk.resources.database._verify_database_via_psql",
+                "odoo_instance_sdk.resources.database.backup_restore_parts.queries._verify_database_via_psql",
                 return_value=probe_result,
             ),
             patch.object(inst, "_client") as mock_client,

@@ -8,7 +8,7 @@ Persistent local SQLite catalog for backup metadata, environment ownership, and 
 
 Catalog MUST сохранять current backup row и append-only audit events. Failed downloads и deleted backups MUST оставаться в database.
 
-Schema MUST versionироваться через `PRAGMA user_version`. Текущая schema version MUST быть `3`.
+Schema MUST versionироваться through Alembic revisions. The first Alembic revision SHALL create the complete current schema in one step. The `PRAGMA user_version` chain SHALL NOT remain as a migration ledger after the controlled transition.
 
 Catalog/ownership/audit являются durable user data, не cache. Backup metadata, environment ownership и append-only history живут только в durable catalog. Existing backup ZIP payloads могут оставаться в `user_cache_dir("odoo-instance-sdk")`, потому что их отсутствие reconciliation умеет фиксировать как missing.
 
@@ -36,7 +36,7 @@ Catalog/ownership/audit являются durable user data, не cache. Backup m
 #### Scenario: Schema version 3
 
 - **WHEN** catalog opened after migration
-- **THEN** `PRAGMA user_version` is `3`
+- **THEN** the schema is at the first Alembic revision and no `PRAGMA user_version` ledger is consulted
 
 #### Scenario: Legacy DB не удаляется автоматически
 
@@ -263,36 +263,33 @@ Existing backup ZIP payloads могут оставаться в `user_cache_dir(
 - **WHEN** `odcli doctor` runs после migration
 - **THEN** legacy DB shown как migrated legacy artifact
 
-### Requirement: Schema migration to v3
+### Requirement: Alembic catalogue migration ledger
 
-`_create_schema` MUST проверять `PRAGMA user_version` и выполнять:
+Catalogue schema MUST be created and upgraded exclusively through Alembic revisions recorded in `storage/catalog_migrate.py`. Opening a catalogue MUST call `ensure_catalog_migrated()` before any read or write. The historical sequential `PRAGMA user_version` chain SHALL NOT remain as a production migration ledger; it may be mentioned only as removed legacy behavior.
 
-- `< 3` (v0, v1, v2) → если legacy DB существует и durable не существует — выполнить path migration (см. requirement ниже). Затем `CREATE TABLE IF NOT EXISTS` для ВСЕХ таблиц: `restores`, `database_events` (DDL в `database-restore-tracking` spec) и `environments`, `environment_events` (DDL ниже). `PRAGMA user_version = 3`. Все `CREATE` используют `IF NOT EXISTS` — для v2 catalog `restores`/`database_events` уже существуют (no-op), для v0/v1 они создаются.
-- `3` → no-op (schema актуальна).
+When a legacy cache-path SQLite file exists and the durable catalogue does not, the SDK MUST perform the one-time path migration described in the path-migration requirement, then stamp or upgrade the durable file through Alembic. Fresh installs MUST create the durable catalogue at the current Alembic head in one step without consulting `PRAGMA user_version`.
 
-Все `CREATE TABLE` и `CREATE INDEX` MUST использовать `IF NOT EXISTS`. Миграция MUST быть идемпотентной и не трогать существующие данные.
-
-Если ни durable, ни legacy DB не существуют (fresh install), SDK MUST создать durable `catalog.sqlite3` с полной schema v3 (все таблицы: `backups`, `backup_events`, `restores`, `database_events`, `environments`, `environment_events`) напрямую — без path migration, без error.
+All catalogue DDL in Alembic revisions MUST use idempotent `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` semantics where applicable and MUST preserve existing rows during upgrades.
 
 #### Scenario: Fresh install — neither DB exists
 
 - **WHEN** catalog opens, neither durable `user_data_dir/catalog.sqlite3` nor legacy `user_cache_dir/backups.sqlite3` exist
-- **THEN** durable DB created with schema v3 directly, `user_version = 3`, no path migration, no error
+- **THEN** durable DB is created at the current Alembic head with the complete schema, no path migration, and no `PRAGMA user_version` step
 
-#### Scenario: Legacy v0 migrated to durable v3
+#### Scenario: Legacy cache DB migrated to durable Alembic head
 
-- **WHEN** catalog opens, legacy `user_cache_dir/backups.sqlite3` exists with `user_version = 0`, durable не существует
-- **THEN** path migration copies DB to durable, schema migrated to v3, `user_version = 3`, legacy DB остаётся
+- **WHEN** catalog opens, legacy `user_cache_dir/backups.sqlite3` exists, durable does not
+- **THEN** path migration copies to durable, Alembic upgrades to the current head, legacy DB remains as a migrated artifact
 
-#### Scenario: Существующая инсталляция v2
+#### Scenario: Existing durable catalogue at prior Alembic revision
 
-- **WHEN** durable catalog открывается с `user_version = 2`
-- **THEN** таблицы `environments` и `environment_events` создаются, `user_version` становится 3, существующие rows не изменяются
+- **WHEN** durable catalog opens below the current Alembic head
+- **THEN** Alembic applies pending revisions once, existing rows are preserved, and no `PRAGMA user_version` ledger runs
 
-#### Scenario: Повторное открытие v3-каталога
+#### Scenario: Reopen at current Alembic head
 
-- **WHEN** catalog открывается с `user_version = 3`
-- **THEN** schema не модифицируется, no-op
+- **WHEN** catalog opens at the current Alembic head
+- **THEN** schema is not modified beyond the Alembic no-op check
 
 ### Requirement: `environments` table
 
@@ -517,12 +514,12 @@ UUID deletion SHALL capture and display the exact selected file, recorded size, 
 
 ### Requirement: Environment child foreign keys survive catalogue migration
 
-The next applicable sequential catalogue migration SHALL ensure `environment_events.environment_id` and `environment_copy_journal.environment_id` reference the current `environments` table rather than a removed staging table such as `environments_v7`. It SHALL preserve all child and parent rows, indexes, constraints, and identifiers, advance `PRAGMA user_version` exactly once, remain retry-safe through the existing migration transaction/lock, and create fresh catalogues with the correct references directly. If the approved base already contains this migration, implementation SHALL retain it and add the missing behavioral regression coverage rather than create a duplicate version.
+The next applicable Alembic revision SHALL ensure `environment_events.environment_id` and `environment_copy_journal.environment_id` reference the current `environments` table rather than a removed staging table such as `environments_v7`. It SHALL preserve all child and parent rows, indexes, constraints, and identifiers, remain retry-safe through the existing migration transaction/lock, and create fresh catalogues with the correct references directly. If the approved base already contains this revision, implementation SHALL retain it and add the missing behavioral regression coverage rather than create a duplicate version.
 
-#### Scenario: V7 catalogue migrates with child rows intact
+#### Scenario: Legacy catalogue migrates with child rows intact
 
-- **WHEN** a v7 catalogue containing environments, events, and copy-journal rows is opened at the current schema version
-- **THEN** all rows remain, both foreign keys target `environments`, and `user_version` advances to the current sequential value
+- **WHEN** a legacy catalogue containing environments, events, and copy-journal rows is opened and upgraded to the current Alembic head
+- **THEN** all rows remain, both foreign keys target `environments`, and Alembic records the current revision exactly once
 
 #### Scenario: New event proves repaired reference
 

@@ -15,6 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
+from odoo_instance_sdk.commands.monitor_context import resolve_monitor_project_id
 from odoo_instance_sdk.commands.output import (
     OutputMode,
     emit_json_envelope,
@@ -26,7 +27,6 @@ from odoo_instance_sdk.commands.output import (
     sanitize_diagnostic,
 )
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
-from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import (
     CheckoutProcessBlock,
     ClusterSnapshot,
@@ -34,34 +34,7 @@ from odoo_instance_sdk.models import (
     ProcessInventory,
     SharedResourcesBlock,
 )
-
-if TYPE_CHECKING:
-    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
-
-
-def _monitor_class() -> type[EnvironmentMonitor]:
-    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
-
-    return EnvironmentMonitor
-
-
-def _resolve_monitor_project_id(ctx: CliContext, all_projects: bool) -> str | None:
-    if all_projects:
-        return None
-    from odoo_instance_sdk.commands.context import resolve_project_path
-    from odoo_instance_sdk.exceptions import ProjectContextError
-    from odoo_instance_sdk.internal.git_worktree import (
-        rev_parse_git_common_dir,
-        rev_parse_toplevel,
-    )
-
-    try:
-        project_path = resolve_project_path(ctx)
-    except ProjectContextError:
-        return None
-    repo_root = rev_parse_toplevel(project_path)
-    git_common = rev_parse_git_common_dir(repo_root)
-    return f"project_{repo_key(repo_root, git_common)}"
+from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
 
 def _validate_watch_options(output_mode: OutputMode, *, watch: bool, interval: float) -> None:
@@ -112,8 +85,8 @@ def ps_command(
     output_mode = resolve_output_mode(output_format, json_output)
     _validate_watch_options(output_mode, watch=watch, interval=interval)
     try:
-        project_id = _resolve_monitor_project_id(ctx, all_projects)
-        monitor = _monitor_class()()
+        project_id = resolve_monitor_project_id(ctx, all_projects)
+        monitor = EnvironmentMonitor()
     except Exception as exc:
         fail(output_mode, "ps", str(exc), dry_run=False)
 
@@ -152,11 +125,12 @@ def _run_ps_live(
     interval: float,
 ) -> None:
     last_renderable: Group | None = None
+    console = Console()
     with Live(None, transient=True) as live:
         while True:
             try:
                 inventory = monitor.processes(project_id=project_id)
-                last_renderable = _render_ps_rich(inventory, width=Console().width)
+                last_renderable = _render_ps_rich(inventory, width=console.width)
                 live.update(last_renderable, refresh=True)
             except KeyboardInterrupt:
                 raise

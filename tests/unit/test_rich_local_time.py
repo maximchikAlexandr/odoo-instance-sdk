@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.backup import _rich_detail, _rich_table
+from odoo_instance_sdk.commands.cli_parts import registration
 from odoo_instance_sdk.commands.output import OutputDocument
 from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.cli_format import rich_local_time
@@ -137,22 +138,29 @@ def _seed_catalog(tmp_path: Path) -> Path:
     backup_id = "00000000-0000-0000-0000-000000000007"
     catalog = BackupCatalog(db_path=db_path)
     catalog.start_download(backup_id, "http://localhost:8069", "demo", "zip", True, backup_path)
-    catalog.success_download(backup_id, backup_path.name, backup_path.stat().st_size, "")
+    catalog.success_download(
+        backup_id,
+        backup_path.name,
+        backup_path.stat().st_size,
+        "",
+        downloaded_at=datetime(2026, 9, 16, 22, 30, 17, 123456, tzinfo=UTC),
+    )
     catalog.close()
     return db_path
 
 
 def test_json_output_keeps_iso_precision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = _seed_catalog(tmp_path)
-    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda **_kwargs: db_path)
+    monkeypatch.setattr(registration, "_cli_catalog_path", lambda **_kwargs: db_path)
 
     json_result = CliRunner().invoke(cli, ["backup", "list", "--all-projects", "--format", "json"])
     assert json_result.exit_code == 0
     raw = json.loads(json_result.stdout)["result"]["backups"][0]["catalogue_time"]
     parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     assert "T" in str(raw)
-    assert str(raw).count(":") >= 2
-    assert parsed.second == 0 or parsed.second >= 0
+    assert str(raw) == "2026-09-16T22:30:17.123456Z"
+    assert parsed.second == 17
+    assert parsed.microsecond == 123456
 
     toon_result = CliRunner().invoke(cli, ["backup", "list", "--all-projects", "--format", "toon"])
     assert toon_result.exit_code == 0

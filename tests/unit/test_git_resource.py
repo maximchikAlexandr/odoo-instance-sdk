@@ -18,7 +18,7 @@ from odoo_instance_sdk.exceptions import (
     PlanValidationError,
 )
 from odoo_instance_sdk.internal.executables import OptionalExecutable
-from odoo_instance_sdk.internal.proc.executor import ProcessResult
+from odoo_instance_sdk.internal.proc import ProcessResult
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.git import GitResource
 from odoo_instance_sdk.resources.instance import OdooInstance

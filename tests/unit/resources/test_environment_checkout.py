@@ -45,12 +45,12 @@ from odoo_instance_sdk.models import (
     NoBackup,
 )
 from odoo_instance_sdk.resources.environment import (
-    _CHECKOUT_WORKTREE_TIMEOUT,
     DevelopmentEnvironment,
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
     EnvironmentState,
 )
+from odoo_instance_sdk.resources.environment.checkout_planning import _CHECKOUT_WORKTREE_TIMEOUT
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
@@ -910,7 +910,7 @@ class TestCheckoutShared:
             encoding="utf-8",
         )
 
-        from odoo_instance_sdk.internal.proc import executor as executor_module
+        from odoo_instance_sdk.internal.proc import run as executor_module
 
         original_pump = executor_module._run_pump
 
@@ -1822,7 +1822,7 @@ class TestOwnedRuntimePreflight:
         fake_python: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         snapshot = env_client.environments._build_checkout_snapshot(

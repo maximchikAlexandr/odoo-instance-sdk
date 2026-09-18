@@ -728,43 +728,68 @@ odcli env list --all-projects [--format rich|json|toon]
 odcli env list --watch [--interval SECONDS]
 ```
 
-The command SHALL invoke `EnvironmentMonitor.snapshot()` exactly once per one-shot rendering and once per live refresh, receiving one complete typed inventory. It SHALL NOT instantiate `OdooClient` to read backups/environments, query `BackupCatalog`, run Git/Docker/filesystem reconciliation, probe ports, regroup catalog rows into an alternative model, or perform any other collection after the snapshot returns. The renderer MAY group and sort the returned typed objects for presentation.
+The command SHALL project one frozen `CheckoutInventory` model for Rich, JSON, and TOON. It SHALL invoke `EnvironmentMonitor.snapshot()` exactly once per one-shot rendering and once per live refresh as the canonical source, then build `CheckoutInventory` from that snapshot plus Git facts of the main checkout. It SHALL NOT instantiate `OdooClient` to read backups/environments, query `BackupCatalog`, run Git/Docker/filesystem reconciliation, probe ports, regroup catalog rows into an alternative model, or perform any other collection after the snapshot returns.
 
-Rich output SHALL group by project: one project header and cluster summary followed by a Rich `Table` containing the environment rows for that project. It SHALL preserve the information represented by these columns: `NAME`, `BRANCH`, `STATE`, `RUNTIME`, `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `GIT_AHEAD`, `GIT_DIFF`, `SIZE`, `DB_MODE`, `DATABASE`, `PORT`, and `ARTIFACTS`; responsive Rich layout MAY combine labels visually but SHALL NOT omit values. Rich color/ANSI SHALL be enabled only when supported by the output terminal.
+The main checkout of each selected project SHALL appear as the first typed row of its group with `kind = main | environment`, a stable `project_id`, and a nullable `environment_id`. The main checkout SHALL NOT be modelled as a synthetic environment. The base row SHALL contain only working identity and state: kind/name and project; branch, short SHA, and canonical worktree path; commits ahead of the base branch plus added and deleted lines; a compact Odoo status `running | stopped | unavailable` without PID or metrics; and the bound database/DB mode when applicable.
 
-`--all-projects` and project-context behavior SHALL remain unchanged. `--all` SHALL request `include_removed=True` only for Rich output so the existing observable contract remains: Rich includes removed rows, while JSON/TOON wrap the default non-removed `Snapshot`. JSON and TOON SHALL use `command="env.list"` and the same monitor snapshot contract as `GET /api/v1/snapshot`; TOON differs only in serialization.
+Rich SHALL NOT show `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, or detailed process/artifact columns; those values live in `odcli ps`. Rich SHALL remain a readable `Table` with headers and checkout rows on both normal and compact terminal widths and SHALL NOT replace the table with `branch=... state=...` blocks. The same table contract SHALL hold under `--watch`. Rich color/ANSI SHALL be enabled only when supported by the output terminal.
 
-Cluster, runtime/PID/resources, Git activity, storage, port observation, and artifact/backup availability SHALL all come from the returned snapshot. A project containing only removed rows MAY appear only when `include_removed=True`; its `environment_count` SHALL count the rows included in that result.
+`--all-projects` and project-context behavior SHALL remain unchanged. `--all` SHALL request `include_removed=True` only for Rich output so the existing observable contract remains: Rich includes removed rows, while JSON/TOON wrap the default non-removed `CheckoutInventory`. JSON and TOON SHALL use `command="env.list"` and project the same frozen `CheckoutInventory` as Rich; TOON differs only in serialization. The raw `EnvironmentMonitor.snapshot()` SHALL remain the canonical source for `odcli ps`, the Python SDK, FastAPI, and the dashboard. A separate monitor or collector SHALL NOT be added.
+
+#### Scenario: Main checkout is the first row
+
+- **WHEN** `odcli env list` runs inside a project with one environment
+- **THEN** the first row of that project's group is the main checkout with `kind=main` and no synthetic environment is created
+
+#### Scenario: Rich drops process columns
+
+- **WHEN** `odcli env list` renders a Rich table
+- **THEN** the columns `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, and `SIZE` are absent
+
+#### Scenario: One frozen model across formats
+
+- **WHEN** `odcli env list --format json` and `odcli env list --format toon` run
+- **THEN** both wrap the same `CheckoutInventory` model, not three different field sets
+
+#### Scenario: --all human includes removed, JSON does not
+
+- **WHEN** `odcli env list --all` prints human table and `odcli env list --format json --all` emits JSON
+- **THEN** human table includes `STATE=removed` rows; JSON `CheckoutInventory` rows contain only non-removed checkouts
+
+#### Scenario: Stopped checkout stays visible
+
+- **WHEN** `odcli env list` runs and the main checkout's Odoo is stopped
+- **THEN** the main checkout row remains visible with `running | stopped | unavailable` status and no PID
+
+#### Scenario: Watch uses one snapshot per sample
+
+- **WHEN** `odcli env list --watch` refreshes
+- **THEN** it calls `EnvironmentMonitor.snapshot()` once and builds `CheckoutInventory` from that single sample without a second collector
 
 #### Scenario: Grouped by project with cluster header
 
 - **WHEN** `env list` runs with two projects
-- **THEN** output has two `Project <name>` headers each followed by a `PostgreSQL ...` cluster summary line, then that project's environment rows
+- **THEN** output has two `Project <name>` headers each followed by a `PostgreSQL ...` cluster summary line, then that project's checkout rows
 
 #### Scenario: JSON parity with monitor snapshot
 
-- **WHEN** `odcli env list --json --all-projects` runs
-- **THEN** `result`/`data` payload uses the same `projects[].cluster` and `environments[].runtime` contract as `EnvironmentMonitor.snapshot()` and `GET /api/v1/snapshot`
-
-#### Scenario: --all human includes removed, JSON does not
-
-- **WHEN** `odcli env list --all` prints human table and `odcli env list --json --all` emits JSON
-- **THEN** human table includes `STATE=removed` rows; JSON `result.environments` contains only non-removed snapshot rows
+- **WHEN** `odcli env list --format json --all-projects` runs
+- **THEN** `result`/`data` payload is the frozen `CheckoutInventory` built from the same `EnvironmentMonitor.snapshot()` and `GET /api/v1/snapshot` remains the raw snapshot for `odcli ps`
 
 #### Scenario: Grouped Rich table uses one result
 
 - **WHEN** Rich `env list` runs with two projects
-- **THEN** output has two project sections and all displayed metrics/reconciliation fields originate from one `EnvironmentMonitor.snapshot()` result
+- **THEN** output has two project sections and all displayed fields originate from one `CheckoutInventory` built from one `EnvironmentMonitor.snapshot()` result
 
 #### Scenario: JSON and TOON parity with monitor snapshot
 
 - **WHEN** `odcli env list --format json --all-projects` and `--format toon --all-projects` render the same sample
-- **THEN** decoded `result`/`data` equal the JSON-safe `EnvironmentMonitor.snapshot()` object including cluster, runtime, observation, and artifacts
+- **THEN** decoded `result`/`data` equal the JSON-safe `CheckoutInventory` object with main checkout and environment rows, cluster summaries, and Git facts
 
 #### Scenario: --all compatibility
 
 - **WHEN** `odcli env list --all` renders Rich and `odcli env list --all --format json` or `--format toon` renders a machine document
-- **THEN** Rich includes `lifecycle_state="removed"` rows while both machine documents contain only non-removed rows
+- **THEN** Rich includes `lifecycle_state="removed"` rows while both machine documents contain only non-removed `CheckoutInventory` rows
 
 #### Scenario: CLI does not recollect inventory
 

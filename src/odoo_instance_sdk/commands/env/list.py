@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -10,18 +9,15 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
+from odoo_instance_sdk.client import OdooClient  # noqa: I001 -- keep context/provenance aliases grouped at this CLI seam; remove when Ruff supports grouped aliases.
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
-)
-from odoo_instance_sdk.commands.context import (
+    resolve_environment,
+    resolve_project_path,
     project_provenance as _project_provenance,
 )
 from odoo_instance_sdk.commands.env.checkout import env_group
-from odoo_instance_sdk.commands.env.deps import (
-    _client_class,
-    _client_config_class,
-)
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
@@ -36,28 +32,11 @@ from odoo_instance_sdk.commands.output import (
     sanitize_terminal_text,
     success_document,
 )
+from odoo_instance_sdk.config import OdooClientConfig
 from odoo_instance_sdk.models.backup import DevelopmentEnvironment
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, JsonValue
-
-
-def _resolve_project_path(ctx: CliContext) -> Path:
-    import odoo_instance_sdk.commands.env as _env_module
-
-    return _env_module.resolve_project_path(ctx)
-
-
-def _resolve_environment(
-    client: OdooClient,
-    selector: str | None = None,
-    *,
-    cwd: Path | None = None,
-) -> DevelopmentEnvironment:
-    import odoo_instance_sdk.commands.env as _env_module
-
-    return _env_module.resolve_environment(client, selector, cwd=cwd)
 
 
 def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
@@ -91,7 +70,7 @@ def env_remove(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
-    client = _client_class()(config=_client_config_class()(executable="odoo"))
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
     if not environments or len(environments) == 1:
         selector: str | None = environments[0] if environments else None
         env_obj = _resolve_single_env(
@@ -166,11 +145,11 @@ def _resolve_single_env(
                 usage=True,
             )
         try:
-            return _resolve_environment(client, None)
+            return resolve_environment(client, None)
         except Exception as e:
             fail(output_mode, "env.remove", str(e), dry_run=dry_run)
     try:
-        _resolve_project_path(ctx)
+        resolve_project_path(ctx)
         return client.environments.get(selector)
     except Exception as e:
         fail(output_mode, "env.remove", str(e), dry_run=dry_run)
@@ -312,7 +291,7 @@ def env_sync(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
-    client = _client_class()(config=_client_config_class()(executable="odoo"))
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
     if environment is None:
         if ctx.env is not None:
             fail(
@@ -323,11 +302,11 @@ def env_sync(
                 usage=True,
             )
         try:
-            environment = str(_resolve_environment(client, None).id)
+            environment = str(resolve_environment(client, None).id)
         except Exception as e:
             fail(output_mode, "env.sync", str(e), dry_run=dry_run)
     try:
-        _resolve_project_path(ctx)
+        resolve_project_path(ctx)
         command = client.environments.sync_python_command(
             environment,
             upgrade=upgrade,

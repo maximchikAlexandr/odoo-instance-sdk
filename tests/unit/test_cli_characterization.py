@@ -485,6 +485,8 @@ def test_discovered_public_methods() -> None:
         EnvironmentResource: (
             "checkout",
             "checkout_command",
+            "checkout_inventory",
+            "checkout_inventory_command",
             "checkout_with_plan",
             "get",
             "list",
@@ -967,12 +969,10 @@ def test_outside_project_all_projects_listing_does_not_require_context(
         clusters=(),
     )
     client = MagicMock()
-    with (
-        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
-        patch(
-            "odoo_instance_sdk.commands.env.EnvironmentMonitor.checkout_inventory",
-            return_value=empty_inventory,
-        ) as checkout_inventory,
+    client.environments.checkout_inventory.return_value = empty_inventory
+    with patch(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        return_value=client,
     ):
         result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
@@ -982,4 +982,7 @@ def test_outside_project_all_projects_listing_does_not_require_context(
         "project_source": "null",
         "environment_source": "null",
     }
-    checkout_inventory.assert_called_once_with(project_id=None, include_removed=False)
+    client.environments.checkout_inventory.assert_called_once_with(
+        project_id=None,
+        include_removed=False,
+    )

@@ -1,15 +1,13 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001 -- keep PostgreSQL restore lifecycle aliases grouped; remove when Ruff supports grouped aliases.
 
-# ruff: noqa: F821
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
 import msgspec
 
-import odoo_instance_sdk.resources.postgres as _postgres_shim
 from odoo_instance_sdk.exceptions import (
     LockConflictError,
     PostgresClusterError,
@@ -24,19 +22,21 @@ from odoo_instance_sdk.internal.postgres_compose import (
     compose_stop,
     compose_up,
     compose_volume_name,
+    docker_available,
     ensure_docker_or_raise,
     inspect_container_identity,
     inspect_volume_identity,
 )
 from odoo_instance_sdk.models import ClusterResourceSnapshot, PostgresClusterState
-from odoo_instance_sdk.resources.postgres.lifecycle import _DEFAULT_STOP_TIMEOUT
 from odoo_instance_sdk.resources.postgres.lifecycle import (
+    _DEFAULT_STOP_TIMEOUT,
     _RESOURCE_SNAPSHOT_TIMEOUT as _RESOURCE_SNAPSHOT_TIMEOUT,
 )
 from odoo_instance_sdk.storage.backup_catalog import PostgresClusterClaim
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, ExecutionPlan, JsonValue
+    from odoo_instance_sdk.internal.postgres_compose import ComposeRunner
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
@@ -44,8 +44,57 @@ if TYPE_CHECKING:
         RunContext,
     )
 
+T = TypeVar("T")
+
 
 class _RestoreMixin:
+    if TYPE_CHECKING:
+        _project_id: str
+        _mode: Literal["external", "compose"]
+        _endpoint_host: str
+        _endpoint_port: int
+        _image: str | None
+        _user: str | None
+        _compose_runner: ComposeRunner
+
+        @property
+        def owned(self) -> bool: ...
+        @property
+        def endpoint(self) -> str: ...
+        @property
+        def compose_project_name(self) -> str: ...
+
+        def _compose_file(self) -> Path: ...
+        def _cluster_claim(self) -> PostgresClusterClaim | None: ...
+        def _ensure_pending_cluster_claim(self) -> PostgresClusterClaim: ...
+        def _activate_cluster_claim(self, claim: PostgresClusterClaim) -> None: ...
+        def _status_compose(
+            self,
+            *,
+            timeout: float | None = None,
+            health_step_id: str | None = None,
+            ps_step_id: str | None = None,
+        ) -> PostgresClusterState: ...
+        def _ensure_artifacts(
+            self,
+            image: str,
+            *,
+            timeout: float | None = None,
+            temporary_path: Path | None = None,
+            step_id: str | None = None,
+            cluster_id: str | None = None,
+            validate: bool = True,
+            publish: bool = True,
+        ) -> None: ...
+        def _approved_image_digest(self) -> str: ...
+        def _require_trusted_image(
+            self,
+            timeout: float,
+            *,
+            pull_step_id: str | None = None,
+            inspect_step_id: str | None = None,
+        ) -> str: ...
+
     def _ensure_running_compose(  # noqa: C901
         self,
         timeout: float,
@@ -441,7 +490,7 @@ class _RestoreMixin:
                     value["diagnostic"] = diagnostic
                 return value
 
-            if not self._compose_runner.requires_docker or _postgres_shim.docker_available():
+            if not self._compose_runner.requires_docker or docker_available():
                 try:
                     planning_result = process_executor.execute(planning_step)
                 except ProcessExecutionError as error:

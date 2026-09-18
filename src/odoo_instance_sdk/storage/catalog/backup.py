@@ -1,4 +1,4 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001 -- keep backup catalog helper aliases grouped; remove when Ruff supports grouped aliases.
 
 import base64
 import binascii
@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -24,59 +24,43 @@ from odoo_instance_sdk.models import (
     BackupValidationStatus,
     EnvironmentState,
 )
-from odoo_instance_sdk.storage.catalog import helpers as _helpers
 from odoo_instance_sdk.storage.catalog.helpers import (
     _READ_ONLY_PROJECT_SCOPE as _READ_ONLY_PROJECT_SCOPE,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     BackupEnvironmentLink as BackupEnvironmentLink,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     BackupProjection as BackupProjection,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     BackupProjectionPage as BackupProjectionPage,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     BackupRestoreLink as BackupRestoreLink,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     CatalogValue as CatalogValue,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     CopyJournalStage as CopyJournalStage,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     MonitorCatalogSnapshot as MonitorCatalogSnapshot,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     PostgresClusterClaim as PostgresClusterClaim,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     _row_to_backup as _row_to_backup,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     _row_to_cluster_claim as _row_to_cluster_claim,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     _row_to_event as _row_to_event,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     _translate_sqlite_error as _translate_sqlite_error,
-)
-from odoo_instance_sdk.storage.catalog.helpers import (
     normalize_db_host as normalize_db_host,
 )
 from odoo_instance_sdk.storage.catalog_migrate import (
     ensure_catalog_migrated,
 )
 
-globals().update(
-    {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
-)
-
 
 class _BackupMixin:
+    if TYPE_CHECKING:
+        _conn: sqlite3.Connection
+        db_path: Path
+        _read_only: bool
+
+        def _add_event(
+            self,
+            backup_id: str,
+            event_type: str,
+            path: str | None = None,
+            validator: str | None = None,
+            exit_code: int | None = None,
+            message: str | None = None,
+        ) -> None: ...
+
     def __post_init__(self) -> None:
         try:
             from odoo_instance_sdk.internal.paths import _user_root

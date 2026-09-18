@@ -34,30 +34,34 @@ from odoo_instance_sdk.execution import Command, ExecutionPlan, ProcessStep
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
+    ProcessResult,
     ProcessResultLike,
     RecordingExecutor,
     RunContext,
     active_context,
 )
-from odoo_instance_sdk.internal.proc.executor import ProcessResult
 from odoo_instance_sdk.models import PostgresClusterState
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
     EnvironmentDatabaseMode,
     EnvironmentResource,
     EnvironmentState,
+)
+from odoo_instance_sdk.resources.environment.checkout_artifacts import (
     _capture_checkout_stage,
-    _CheckoutPlanningState,
-    _ExpressionApi,
-    _find_odoo_requirements,
     _pgadmin_command_steps,
     _planning_result,
-    _PlanningOutcome,
-    _process_stderr,
-    _rebase_requirement_paths,
     _restore_audit_backup,
     _validate_checkout_stage,
     _validate_owned_artifact,
+)
+from odoo_instance_sdk.resources.environment.checkout_planning import (
+    _CheckoutPlanningState,
+    _ExpressionApi,
+    _find_odoo_requirements,
+    _PlanningOutcome,
+    _process_stderr,
+    _rebase_requirement_paths,
 )
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 
@@ -320,7 +324,7 @@ def test_pgadmin_linux_command_reserves_acl_steps_before_lifecycle(
     )
     selector = _environment()
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.environment._pgadmin_cluster_snapshot",
+        "odoo_instance_sdk.resources.environment.checkout_artifacts._pgadmin_cluster_snapshot",
         lambda selected: cluster,
     )
     monkeypatch.setattr(pgadmin_files, "_linux", lambda: True)
@@ -839,7 +843,10 @@ def test_open_pgadmin_real_cluster_uses_one_captured_docker_ledger(  # noqa: C90
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.pgadmin_files.shutil.which", lambda _: "/bin/tool"
     )
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup.docker_available",
+        lambda: True,
+    )
     monkeypatch.setattr(
         EnvironmentResource, "_configured_pgadmin_instance", lambda _self, _env: instance
     )

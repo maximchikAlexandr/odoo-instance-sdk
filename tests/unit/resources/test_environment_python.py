@@ -21,8 +21,8 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
     EnvironmentState,
-    _dependency_evidence,
 )
+from odoo_instance_sdk.resources.environment.checkout_planning import _dependency_evidence
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
@@ -63,7 +63,7 @@ def _patch_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
             0.0,
         )
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
     return calls
 
 
@@ -217,7 +217,7 @@ class TestCreateVenv:
         lock.write_text("requests==2.32.5\n", encoding="utf-8")
         digest = hashlib.sha256(lock.read_bytes()).hexdigest()
         calls = _patch_subprocess(monkeypatch)
-        from odoo_instance_sdk.internal.proc import executor as executor_module
+        from odoo_instance_sdk.internal.proc import run as executor_module
 
         original_pump = executor_module._run_pump
 
@@ -402,7 +402,7 @@ class TestSyncUpgradePreserve:
                 return 1, b"", b"compile failed", 0.0
             return 0, b"", b"", 0.0
 
-        monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fail_compile)
+        monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fail_compile)
         env_client.environments.sync_python(str(env.id))
         row = catalog.get_environment(str(env.id))
         assert row is not None
@@ -425,7 +425,7 @@ class TestSyncUpgradePreserve:
         before = row["applied_settings_json"]
 
         _patch_subprocess(monkeypatch)
-        from odoo_instance_sdk.internal.proc import executor as executor_module
+        from odoo_instance_sdk.internal.proc import run as executor_module
 
         original_pump = executor_module._run_pump
 
@@ -569,7 +569,7 @@ class TestFailedCompileKeepsLock:
             )
             return completed.returncode, completed.stdout.encode(), completed.stderr.encode(), 0.0
 
-        monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
+        monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
         result = env_client.environments.sync_python(str(env.id))
         assert lock_file.read_text() == original
         assert result.state == EnvironmentState.READY
@@ -618,7 +618,7 @@ class TestFlockSerialization:
             )
             return completed.returncode, completed.stdout.encode(), completed.stderr.encode(), 0.0
 
-        monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._run_pump", fake_pump)
+        monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._run_pump", fake_pump)
         from odoo_instance_sdk.internal.locks import python_env_lock_path
 
         lock_path = python_env_lock_path(env.python_environment_path)

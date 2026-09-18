@@ -1,6 +1,6 @@
 """Focused tests for real-Odoo log, cache, and workflow contracts."""
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001 -- keep real-Odoo CI helper aliases grouped; remove when Ruff supports grouped aliases.
 
 import re
 import shutil
@@ -10,8 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts import real_odoo_bootstrap as bootstrap
-from scripts import real_odoo_ci as ci
+from scripts import (
+    real_odoo_bootstrap as bootstrap,
+    real_odoo_ci as ci,
+)
 from tests.integration.real_odoo import cleanup as real_odoo_cleanup
 from tests.integration.real_odoo.cleanup import ResourceLedger
 
@@ -450,7 +452,7 @@ def test_project_restore_accepts_matching_environment_runtime_port(
     from types import SimpleNamespace
     from typing import Any, cast
 
-    from odoo_instance_sdk.resources import instance as instance_module
+    from odoo_instance_sdk.resources.instance import auxiliary_restore as instance_auxiliary
 
     runtime = {
         "owner_kind": "environment",
@@ -472,9 +474,11 @@ def test_project_restore_accepts_matching_environment_runtime_port(
         status=lambda: "running",
         create_time=lambda: 10.0,
     )
-    monkeypatch.setattr("odoo_instance_sdk.resources.instance.psutil.Process", lambda _pid: process)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.psutil.Process", lambda _pid: process
+    )
 
-    assert instance_module._project_runtime_owns_port(
+    assert instance_auxiliary._project_runtime_owns_port(
         cast("Any", instance), cast("Any", SimpleNamespace(http_port=12345))
     )
 

@@ -306,6 +306,21 @@ class ModuleResource:
             visit(name)
         return ModuleInstallOrder(modules=tuple(ordered))
 
+    def install_order_command(self, modules: str | Iterable[str]) -> Command[ModuleInstallOrder]:
+        """Capture one immutable install-order plan for preview and execution."""
+        names = (modules,) if isinstance(modules, str) else tuple(modules)
+        from odoo_instance_sdk.commands.output import action_command
+
+        return cast(
+            "Command[ModuleInstallOrder]",
+            action_command(
+                "module.install_order",
+                lambda: self.install_order(names),
+                description="Plan stable module dependency install order",
+                mutating=False,
+            ),
+        )
+
     def update_command(
         self,
         modules: Sequence[str],

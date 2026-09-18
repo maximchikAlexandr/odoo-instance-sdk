@@ -153,3 +153,35 @@ def test_lazy_exports_preserve_order_identity_import_syntax_and_errors() -> None
 
     with pytest.raises(AttributeError, match="not_declared"):
         getattr(sdk, "not_declared")
+
+
+def test_cli_lazy_export_boundary_resolves_only_closed_entries(tmp_path: Path) -> None:
+    result = _fresh_process(
+        """
+import importlib
+import sys
+
+module = importlib.import_module('odoo_instance_sdk.cli')
+assert all(isinstance(path, str) for path in module._LAZY_EXPORTS.values())
+assert module._LAZY_EXPORTS['build_launch_profile'] == 'odoo_instance_sdk.internal.vscode_generate'
+assert 'odoo_instance_sdk.internal.vscode_generate' not in sys.modules
+assert 'odoo_instance_sdk.internal.automation' not in sys.modules
+
+resolved = getattr(module, 'build_launch_profile')
+assert resolved is getattr(module, 'build_launch_profile')
+assert 'odoo_instance_sdk.internal.vscode_generate' in sys.modules
+assert 'odoo_instance_sdk.internal.automation' not in sys.modules
+
+try:
+    getattr(module, 'not_declared')
+except AttributeError:
+    pass
+else:
+    raise AssertionError('undeclared lazy export was resolved')
+print('ok')
+""",
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"

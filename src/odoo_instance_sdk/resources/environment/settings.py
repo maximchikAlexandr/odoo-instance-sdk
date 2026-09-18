@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import shutil
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -47,31 +46,80 @@ from odoo_instance_sdk.models import (
     PgAdminOpenResult,
     PostgresClusterState,
 )
+from odoo_instance_sdk.models.backup import DevelopmentEnvironment
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.environment.checkout_artifacts import (
+    _owned_python_executable,
+    _pgadmin_captured_cluster_state,
+    _pgadmin_cluster_snapshot,
+    _pgadmin_command_steps,
+    _row_to_backup,
+    _skip_planned_pgadmin_database_probe,
+    _sync_applied_settings,
+)
+from odoo_instance_sdk.resources.environment.checkout_planning import (
+    _PGADMIN_LIFECYCLE_TIMEOUT,
+    EnvironmentDatabaseMode,
+    EnvironmentSelector,
+    EnvironmentState,
+    T,
+    _CheckoutPlan,
+    _find_odoo_requirements,
+    _load_project,
+    _PgAdminCommandInputs,
+    _process_stderr,
+    _rebase_requirement_paths,
+)
 from odoo_instance_sdk.storage.backup_catalog import CopyJournalStage
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
     from odoo_instance_sdk.internal.pgadmin import _PgAdminReconciliationCarrier
     from odoo_instance_sdk.internal.proc import (
+        PreparedAction,
+        PreparedStep,
         ProcessExecutor,
         ProcessResult,
         RunContext,
         Step,
     )
+    from odoo_instance_sdk.models import CheckoutInventory
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
-from odoo_instance_sdk.models.backup import DevelopmentEnvironment
-from odoo_instance_sdk.resources.environment import helpers as _helpers
-
-globals().update(
-    {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
-)
-
 
 class _SettingsMixin:
+    if TYPE_CHECKING:
+        _client: OdooClient
+
+        def _resolve_selector(
+            self, selector: str, *, include_removed: bool = False
+        ) -> DevelopmentEnvironment: ...
+
+        def _get_env_row(self, cat: BackupCatalog, env_id: uuid.UUID) -> DevelopmentEnvironment: ...
+
+        def _action_command(
+            self,
+            step_id: str,
+            description: str,
+            callback: Callable[[], T],
+            *,
+            executor: ProcessExecutor | None,
+            mutating: bool,
+            steps: Sequence[PreparedStep | PreparedAction] = (),
+            optional_steps: Sequence[str] = (),
+        ) -> Command[T]: ...
+
+        def list_command(
+            self,
+            *,
+            project: ProjectConfig | Path | None = None,
+            include_removed: bool = False,
+            executor: ProcessExecutor | None = None,
+        ) -> Command[list[DevelopmentEnvironment]]: ...
+
     def _do_copy_restore(
         self,
         *,
@@ -879,6 +927,32 @@ class _SettingsMixin:
             raise PgAdminUnavailableError() from None
         if not exists:
             raise PgAdminDatabaseNotFoundError()
+
+    def checkout_inventory_command(
+        self,
+        *,
+        project_id: str | None = None,
+        include_removed: bool = False,
+    ) -> Command[CheckoutInventory]:
+        """Delegate checkout inventory projection to the environment monitor."""
+        from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
+
+        return EnvironmentMonitor().checkout_inventory_command(
+            project_id=project_id,
+            include_removed=include_removed,
+        )
+
+    def checkout_inventory(
+        self,
+        *,
+        project_id: str | None = None,
+        include_removed: bool = False,
+    ) -> CheckoutInventory:
+        """Project one checkout inventory from a single monitor snapshot."""
+        return self.checkout_inventory_command(
+            project_id=project_id,
+            include_removed=include_removed,
+        ).run()
 
     def list(
         self,

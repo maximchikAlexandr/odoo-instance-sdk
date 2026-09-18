@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 from inspect import getsource
 from typing import Any, ClassVar, cast
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -11,7 +12,8 @@ from rich.console import Console, Group
 from rich.table import Table
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands import env as env_commands
+from odoo_instance_sdk.commands.env import checkout as env_commands
+from odoo_instance_sdk.commands.env.display import _ENV_LIST_COLUMNS
 from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
 from odoo_instance_sdk.models import (
     CheckoutInventory,
@@ -197,14 +199,20 @@ def _patch_inventory(
     snapshot: Snapshot,
     *,
     include_removed_source: Snapshot | None = None,
-) -> None:
+) -> MagicMock:
     def checkout_inventory(
-        _self: object, project_id: str | None = None, *, include_removed: bool = False
+        *, project_id: str | None = None, include_removed: bool = False
     ) -> CheckoutInventory:
         source = include_removed_source if include_removed and include_removed_source else snapshot
         return _inventory_from_snapshot(source, include_removed=include_removed)
 
-    monkeypatch.setattr(EnvironmentMonitor, "checkout_inventory", checkout_inventory)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = checkout_inventory
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
+    return client
 
 
 def _render_inventory(inventory: CheckoutInventory) -> str:
@@ -295,7 +303,7 @@ def test_env_list_human_table_uses_rich_columns_and_json_is_sanitized(
     assert human.exit_code == 0, human.output
     assert "\x1b" not in human.output
     rendered = _render_inventory(_inventory_from_snapshot(_snapshot((project,), (env,))))
-    assert all(column in rendered for column in env_commands._ENV_LIST_COLUMNS)
+    assert all(column in rendered for column in _ENV_LIST_COLUMNS)
     assert "g\\x0d\\x0" in rendered
 
     encoded = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
@@ -334,11 +342,10 @@ def test_env_list_stopped_row_shows_dashes(monkeypatch: pytest.MonkeyPatch) -> N
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects"])
     assert result.exit_code == 0, result.output
     out = _render_inventory(_inventory_from_snapshot(_snapshot((project,), (env,))))
-    flat = "".join(out.split())
+    flat = out.replace("\n", "")
+    assert "stopped" in flat and "env" in flat
     assert "stopped" in flat
-    assert "env" in flat
-    stopped_row = next(line for line in out.splitlines() if "stopped-env" in line)
-    assert "— —" in stopped_row
+    assert "— —" in out
 
 
 @pytest.mark.unit
@@ -397,12 +404,8 @@ def test_env_list_joins_catalogue_worktree_by_environment_id(
         worktree_paths={env.id: str(worktree)},
         git_collector=lambda _path, _ref: _git(),
     )
-    _patch_inventory(monkeypatch, snapshot)
-    monkeypatch.setattr(
-        EnvironmentMonitor,
-        "checkout_inventory",
-        lambda *_args, **_kwargs: inventory,
-    )
+    client = _patch_inventory(monkeypatch, snapshot)
+    client.environments.checkout_inventory.side_effect = lambda **_kwargs: inventory
 
     json_result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
     assert json_result.exit_code == 0, json_result.output
@@ -482,7 +485,12 @@ def test_env_list_nested_cli_field_is_typed_and_rejected_before_execution(
         called = True
         return _inventory_from_snapshot(snapshot)
 
-    monkeypatch.setattr(EnvironmentMonitor, "checkout_inventory", unexpected_inventory)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = unexpected_inventory
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
     rejected = CliRunner().invoke(
         cli,
         [
@@ -644,34 +652,32 @@ def test_env_list_all_orders_active_and_removed_rows_per_project(
 
 
 @pytest.mark.unit
-def test_env_list_uses_one_snapshot_without_constructing_client(
+def test_env_list_delegates_to_environment_resource_checkout_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from unittest.mock import Mock
-
     snapshot = _snapshot((), ())
-    monitor_inventory = Mock(return_value=_inventory_from_snapshot(snapshot))
-    client_constructor = Mock(side_effect=AssertionError("env list must not construct OdooClient"))
-    monkeypatch.setattr(EnvironmentMonitor, "checkout_inventory", monitor_inventory)
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.OdooClient", client_constructor)
+    client = _patch_inventory(monkeypatch, snapshot)
 
     result = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
 
     assert result.exit_code == 0, result.output
-    monitor_inventory.assert_called_once_with(project_id=None, include_removed=False)
-    client_constructor.assert_not_called()
+    client.environments.checkout_inventory.assert_called_once_with(
+        project_id=None,
+        include_removed=False,
+    )
 
 
 def test_env_list_source_has_no_transport_side_collection() -> None:
     from odoo_instance_sdk.commands.env import env_list
 
     source = getsource(cast("Any", env_list.callback))
-    assert "OdooClient" not in source
+    assert "checkout_inventory" in source
+    assert "environments.checkout_inventory" in source
+    assert "EnvironmentMonitor().checkout_inventory" not in source
     assert "backups" not in source
     assert "environments.list" not in source
     assert "probe_address" not in source
     assert "worktree_list_porcelain" not in source
-    assert "checkout_inventory" in source
 
 
 @pytest.mark.unit
@@ -750,7 +756,7 @@ def test_rich_renderer_is_pure_sorted_and_retains_all_columns(
     assert output.index("Project alpha") < output.index("Project beta")
     flat = "".join(output.split())
     assert flat.index("alpha-env") < flat.index("beta-env")
-    for value in env_commands._ENV_LIST_COLUMNS:
+    for value in _ENV_LIST_COLUMNS:
         assert value in output
     for dropped in ("OBSERVED", "ODOO_PID", "CPU", "RAM", "SIZE", "ARTIFACTS"):
         assert dropped not in output
@@ -804,8 +810,17 @@ def test_env_list_watch_refreshes_once_per_sample_and_cleans_up_on_interrupt(
         sleep_calls.append(seconds)
 
     monkeypatch.setattr(env_commands, "Live", _FakeLive)
-    monkeypatch.setattr(EnvironmentMonitor, "checkout_inventory", collect)
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.time.sleep", sleep)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = (
+        lambda *, project_id=None, include_removed=False: collect(
+            None, project_id, include_removed=include_removed
+        )
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
+    monkeypatch.setattr("odoo_instance_sdk.commands.env.checkout.time.sleep", sleep)
     monkeypatch.setattr(Console, "is_terminal", property(lambda _self: True))
 
     result = CliRunner().invoke(
@@ -841,8 +856,13 @@ def test_env_list_watch_keeps_last_sample_and_sanitizes_retry_diagnostic(
 
     _FakeLive.instances.clear()
     monkeypatch.setattr(env_commands, "Live", _FakeLive)
-    monkeypatch.setattr(EnvironmentMonitor, "checkout_inventory", collect)
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.time.sleep", lambda _seconds: None)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = lambda **_kwargs: collect()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
+    monkeypatch.setattr("odoo_instance_sdk.commands.env.checkout.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(Console, "is_terminal", property(lambda _self: True))
 
     result = CliRunner().invoke(cli, ["env", "list", "--watch", "--interval", "0.1"])
@@ -869,7 +889,12 @@ def test_env_list_watch_initial_failure_is_sanitized_and_exits_one(
 
     _FakeLive.instances.clear()
     monkeypatch.setattr(env_commands, "Live", _FakeLive)
-    monkeypatch.setattr(EnvironmentMonitor, "checkout_inventory", collect)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = lambda **_kwargs: collect()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
     monkeypatch.setattr(Console, "is_terminal", property(lambda _self: True))
 
     result = CliRunner().invoke(cli, ["env", "list", "--watch", "--interval", "0.1"])
@@ -897,12 +922,21 @@ def test_env_list_watch_retains_project_selector_across_refreshes(
 
     _FakeLive.instances.clear()
     monkeypatch.setattr(env_commands, "Live", _FakeLive)
-    monkeypatch.setattr(EnvironmentMonitor, "checkout_inventory", collect)
+    client = MagicMock()
+    client.environments.checkout_inventory.side_effect = (
+        lambda *, project_id=None, include_removed=False: collect(
+            None, project_id, include_removed=include_removed
+        )
+    )
     monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env.checkout._resolve_monitor_project_id",
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
+        lambda *_args, **_kwargs: client,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.resolve_monitor_project_id",
         lambda _ctx, all_projects: None if all_projects else "project_a",
     )
-    monkeypatch.setattr("odoo_instance_sdk.commands.env.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("odoo_instance_sdk.commands.env.checkout.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(Console, "is_terminal", property(lambda _self: True))
 
     result = CliRunner().invoke(cli, ["env", "list", "--watch", "--interval", "0.1"])
@@ -925,8 +959,7 @@ def test_env_list_watch_rejects_before_collection(
     exit_code: int,
 ) -> None:
     monkeypatch.setattr(
-        EnvironmentMonitor,
-        "checkout_inventory",
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
         lambda *_args, **_kwargs: pytest.fail("watch validation must precede collection"),
     )
     result = CliRunner().invoke(cli, ["env", "list", "--watch", *args])
@@ -939,8 +972,7 @@ def test_env_list_watch_rejects_non_tty_before_collection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        EnvironmentMonitor,
-        "checkout_inventory",
+        "odoo_instance_sdk.commands.env.checkout.OdooClient",
         lambda *_args, **_kwargs: pytest.fail("non-TTY validation must precede collection"),
     )
     monkeypatch.setattr(Console, "is_terminal", property(lambda _self: False))

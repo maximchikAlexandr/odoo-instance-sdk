@@ -19,8 +19,7 @@ import msgspec
 import pytest
 
 from odoo_instance_sdk.execution import ProcessStep
-from odoo_instance_sdk.internal import database_replacement
-from odoo_instance_sdk.internal.database_replacement import build_copy_replacement_command
+from odoo_instance_sdk.internal.dbreplace.validation import build_copy_replacement_command
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
@@ -478,7 +477,9 @@ def test_replacement_incomplete_compensation_persists_sanitized_cleanup_context(
         return result
 
     executor.result_factory = failed_restore
-    original_rename = database_replacement._rename
+    from odoo_instance_sdk.internal.dbreplace import validation
+
+    original_rename = getattr(validation, "_rename")
 
     def fail_database_compensation(
         context: RunContext[None], step_id: str, *, message: str
@@ -488,7 +489,7 @@ def test_replacement_incomplete_compensation_persists_sanitized_cleanup_context(
         original_rename(context, step_id, message=message)
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.database_replacement._rename", fail_database_compensation
+        "odoo_instance_sdk.internal.dbreplace.validation._rename", fail_database_compensation
     )
     command = build_copy_replacement_command(client, environment, backup_id, executor=executor)
 

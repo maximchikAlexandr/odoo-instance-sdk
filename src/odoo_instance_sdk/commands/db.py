@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from rich.console import Console
+from rich.console import Console  # noqa: I001 -- keep database output formatter aliases grouped; remove when Ruff supports grouped aliases.
 from rich.table import Table
 
 from odoo_instance_sdk.commands.context import (
@@ -44,8 +44,7 @@ from odoo_instance_sdk.commands.output import (
     run_rich_bounded,
 )
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
-from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
-from odoo_instance_sdk.internal.cli_format import rich_cell
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes, rich_cell
 from odoo_instance_sdk.internal.pg.inventory import DatabaseInventoryResult
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
@@ -361,7 +360,7 @@ def db_restore(  # noqa: C901
                 ),
             )
         else:
-            from odoo_instance_sdk.internal.database_preparation import _CatalogueRestoreSource
+            from odoo_instance_sdk.internal.dbprep.source import _CatalogueRestoreSource
 
             project_path = resolve_project_path(ctx)
             command = cast(
@@ -398,10 +397,10 @@ def db_restore(  # noqa: C901
         )
 
     def interrupted(error: KeyboardInterrupt) -> None:
-        from odoo_instance_sdk.internal.database_preparation import (
+        from odoo_instance_sdk.internal.dbprep.source import (
             DatabasePreparationFailureContext,
         )
-        from odoo_instance_sdk.internal.database_replacement import CopyReplacementFailureContext
+        from odoo_instance_sdk.internal.dbreplace.planning import CopyReplacementFailureContext
 
         context = getattr(error, "failure_context", None)
         safe_context: dict[str, JsonValue] = (

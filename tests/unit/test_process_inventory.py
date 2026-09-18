@@ -323,6 +323,37 @@ def test_macos_docker_backend_pid_is_vm_scoped(monkeypatch: pytest.MonkeyPatch) 
     assert group.memory_bytes is None
 
 
+def test_host_pid_verification_does_not_drop_postgres_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sys.platform", "linux")
+
+    def pid_exists(pid: int) -> bool:
+        return pid == 801
+
+    monkeypatch.setattr("psutil.pid_exists", pid_exists)
+    cluster = _healthy_cluster()
+    env = _environment(env_id="env-1", database="demo")
+    snapshot = _snapshot((_project(cluster=cluster),), (env,))
+    sessions = (
+        BackendSession(pid=800, state="active", application_name="odoo-1"),
+        BackendSession(pid=801, state="idle", application_name="odoo-2"),
+        BackendSession(pid=802, state="idle", application_name="odoo-3"),
+    )
+    runner = _backend_runner_unique(sessions)
+
+    def credentials(database: str) -> DatabaseCredentials | None:
+        return DatabaseCredentials(database=database, user="odoo", password="x")
+
+    inventory = build_process_inventory(
+        snapshot, backend_runner=runner, credential_resolver=credentials
+    )
+    group = inventory.environments[0].backend_groups[0]
+    assert group.connection_count == 3
+    assert group.host_pids == (801,)
+    assert group.unavailability_reason is None
+
+
 def test_linux_host_visible_pid_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.platform", "linux")
     cluster = _healthy_cluster()

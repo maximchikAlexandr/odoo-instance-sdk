@@ -1,12 +1,11 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001 -- keep database backup lifecycle aliases grouped; remove when Ruff supports grouped aliases.
 
-# ruff: noqa: F821
 import contextlib
 import os
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import httpx
 
@@ -34,13 +33,13 @@ from odoo_instance_sdk.models import (
 )
 from odoo_instance_sdk.resources.database.lifecycle import (
     _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
-)
-from odoo_instance_sdk.resources.database.lifecycle import _stream_response_to_file
-from odoo_instance_sdk.resources.database.lifecycle import (
+    _stream_response_to_file,
     _trustworthy_content_length as _trustworthy_content_length,
 )
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
     from odoo_instance_sdk.execution import Command
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
@@ -48,9 +47,27 @@ if TYPE_CHECKING:
         ProcessExecutor,
         RunContext,
     )
+    from odoo_instance_sdk.resources.instance import OdooInstance
+
+T = TypeVar("T")
 
 
 class _BackupMixin:
+    if TYPE_CHECKING:
+        base_url: str
+        master_password: str | None
+        _instance: OdooInstance
+
+        def _url(self, path: str) -> str: ...
+        def _require_password(self) -> str: ...
+        def _assert_local(self) -> None: ...
+        @property
+        def _cluster(self) -> tuple[str | None, int] | None: ...
+        def _http(self, timeout: float | None = None) -> AbstractContextManager[httpx.Client]: ...
+        def _exists_impl(self, name: str, *, psql_step_id: str | None = None) -> bool: ...
+        def _psql_probe_for(self, name: str, step_id: str) -> PreparedStep | None: ...
+        def exists(self, name: str) -> bool: ...
+
     def _download_backup_part(
         self,
         database_name: str,
