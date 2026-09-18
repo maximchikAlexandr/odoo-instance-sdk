@@ -1,4 +1,3 @@
-# ruff: noqa: F821
 """The single boundary for SDK-owned child-process effects."""
 
 from __future__ import annotations
@@ -6,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from odoo_instance_sdk.internal.proc.run import SubprocessExecutor, prepared_step
+from odoo_instance_sdk.internal.proc.run import ProcessHandle, SubprocessExecutor, prepared_step
 
 
 def spawn(

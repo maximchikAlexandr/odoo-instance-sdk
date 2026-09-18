@@ -32,35 +32,35 @@ classification is bounded and whose contract requires `--dry-run`:
 | CLI leaf | canonical classification |
 | --- | --- |
 | `init` | mutating-or-spawning |
+| `stop` | mutating-or-spawning |
 | `env create` | mutating-or-spawning |
-| `env path` | bounded-read-only |
 | `env rm` | mutating-or-spawning |
 | `env sync` | mutating-or-spawning |
 | `backup rm` | mutating-or-spawning |
 | `db refresh` | mutating-or-spawning |
-| `db ls` | bounded-read-only |
+| `db restore` | mutating-or-spawning |
 | `db rm` | guarded mutating-or-spawning |
 | `db reset-admin-password` | mutating-or-spawning |
-| `resource ls` | bounded-read-only |
-| `resource doctor` | bounded-read-only |
-| `ps` | bounded-read-only |
+| `db init-monitoring` | mutating-or-spawning |
 | `eval` | process-previewable-read-only |
 | `exec` | mutating-or-spawning |
 | `test` | process-previewable-read-only |
 | `module ls` | process-previewable-read-only |
 | `module update` | mutating-or-spawning |
 | `module test` | mutating-or-spawning |
-| `git commit` | mutating-or-spawning |
-| `git check` | bounded-read-only |
-| `git absorb` | mutating-or-spawning |
-| `git sync` | mutating-or-spawning |
+| `module install-order` | process-previewable-read-only |
 | `translations export` | mutating-or-spawning |
 | `deps verify` | process-previewable-read-only |
 | `vscode generate` | mutating-or-spawning |
 | `postgres approve-image` | mutating-or-spawning |
-| `postgres ps` | process-previewable-read-only |
 | `postgres up` | mutating-or-spawning |
 | `postgres stop` | mutating-or-spawning |
+| `git commit` | mutating-or-spawning |
+| `git absorb` | mutating-or-spawning |
+| `git sync` | mutating-or-spawning |
+| `psql` | native-passthrough |
+| `run` | native-passthrough |
+| `shell` | native-passthrough |
 
 PostgreSQL database diagnostics (`db locks`, `db stats`, and `db bloat`) are
 bounded read-only typed documents and use the same resolver, captured
@@ -84,13 +84,16 @@ revalidation, optional target-session termination, drop, and absence-verificatio
 steps. Dry-run performs only the planning inspection and never mutates the
 cluster or catalogue. `backup rm`, `db rm`, and `env rm` additionally accept
 variadic multi-target arguments: each target is resolved and previewed
-independently, and execution aborts on the first guarded failure without
-silently skipping a target.
+independently. Planning/preflight failures abort before mutation; once
+execution starts, a guarded failure is recorded for that target and the
+remaining prepared targets continue. The aggregate result exits non-zero when
+any target fails and does not claim to roll back earlier targets.
 
-`ps` is a bounded read-only leaf backed by the public
-`EnvironmentMonitor.processes_command()` SDK primitive. It projects one
-process and resource inventory from a single canonical snapshot and supports
-Rich, JSON, and TOON output.
+`ps` and `postgres ps` are bounded read-only leaves. Root `ps` is backed by
+the public `EnvironmentMonitor.processes_command()` SDK primitive; `postgres ps`
+is backed by `PostgresCluster.status_command()`. Both project typed read-only
+inventory without `--dry-run` and support Rich, JSON, and TOON output where
+applicable.
 
 The complete shipped CLI also contains `doctor` and `env ls` as bounded
 read only leaves, plus `resource ls`, `resource doctor`, `run`, `shell`,
@@ -180,7 +183,7 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py:484-485` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:421-422` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
 - `src/odoo_instance_sdk/commands/backup.py:342` — shared Rich validation
@@ -195,7 +198,7 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:392` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance/identity.py:413` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:457` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
@@ -213,13 +216,11 @@ protocol—not to add an exception.
 `MODULE_LOCAL_SUBPROCESS_PATCHES` records the remaining legacy test patch
 locations while the production launch inventory is empty:
 
-- `tests/unit/internal/test_pgadmin_files.py:421,480`
-- `tests/unit/internal/test_postgres_size.py:28,55,78,109`
-- `tests/unit/internal/test_postgres_transport.py:25,72,89,110,132,175`
-- `tests/unit/resources/test_cli_automation.py:607`
-- `tests/unit/resources/test_database_resource.py:395,421,448,473,518,539,558,573,585,599,617`
-- `tests/unit/resources/test_environment_python.py:42,233,271`
-- `tests/unit/test_monitor_cache_and_docker.py:128`
+- `tests/unit/resources/test_database_resource.py:638`
+- `tests/unit/test_monitor_cache_and_docker.py:129`
+- `tests/unit/test_cluster_resources.py:190`
+- `tests/unit/test_real_odoo_ci_components.py:38,107,149`
+- `tests/unit/test_real_odoo_foundation.py:325,348,367`
 
 These are not production launches or public behavior exceptions. Their removal
 condition is migration of each fixture to the shared recording executor; the

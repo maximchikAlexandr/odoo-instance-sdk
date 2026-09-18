@@ -269,7 +269,6 @@ def _collect_one_attribution(
             unavailability_reason="vm_scoped_pid" if sessions else None,
         )
     verified_pids: list[int] = []
-    verified_sessions: list[BackendSession] = []
     stale = False
     for session in sessions:
         pid, verified_session, reason = _verify_host_pid(
@@ -277,12 +276,11 @@ def _collect_one_attribution(
         )
         if reason is None and verified_session is not None:
             verified_pids.append(pid)
-            verified_sessions.append(verified_session)
         elif reason == "stale_pid":
             stale = True
     return _BackendAttributionResult(
         database=request.database,
-        sessions=tuple(verified_sessions) if verified_sessions else sessions,
+        sessions=sessions,
         pid_scope=PidScope.HOST,
         host_pids=tuple(verified_pids),
         sample_time=datetime.now(UTC),

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import configparser
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,13 +11,14 @@ from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.applied_settings import (
     AppliedSettingsError,
 )
-from odoo_instance_sdk.internal.doctor.manifest_1 import (
+from odoo_instance_sdk.internal.doctor.manifest import (
     STATUS_INFO,
     STATUS_OK,
     STATUS_WARN,
     CheckResult,
     DoctorRemediation,
     DoctorReport,
+    _EnvironmentDrift,
 )
 from odoo_instance_sdk.internal.git_worktree import (
     worktree_list_porcelain,
@@ -33,16 +33,16 @@ if TYPE_CHECKING:
 def _project_environment_drift(
     env: DevelopmentEnvironment, applied_settings_json: str | None
 ) -> _EnvironmentDrift:
-    from odoo_instance_sdk.internal.doctor import manifest_1 as _manifest_1
-    from odoo_instance_sdk.internal.doctor import manifest_2 as _manifest_2
+    from odoo_instance_sdk.internal.doctor import manifest as _manifest
+    from odoo_instance_sdk.internal.doctor import manifest_drift as _manifest_drift
 
     try:
-        evidence = _manifest_1._current_drift_components(env)
+        evidence = _manifest._current_drift_components(env)
     except (AppliedSettingsError, ConfigError, OSError, UnicodeError):
-        evidence = _manifest_1._CurrentDriftEvidence(components={}, reasons={})
-    stored = _manifest_2._stored_drift_components(applied_settings_json)
+        evidence = _manifest._CurrentDriftEvidence(components={}, reasons={})
+    stored = _manifest_drift._stored_drift_components(applied_settings_json)
     components = tuple(
-        _manifest_2._drift_component(
+        _manifest_drift._drift_component(
             name,
             evidence.components.get(name),
             stored.get(name) if stored else None,
@@ -50,11 +50,11 @@ def _project_environment_drift(
         )
         for name in ("python", "dependencies", "odoo_config", "addons", "git_provenance")
     )
-    return _manifest_1._EnvironmentDrift(
+    return _manifest._EnvironmentDrift(
         environment_id=str(env.id),
         environment_name=env.name,
         components=components,
-        git_context=_manifest_2._git_context(Path(env.worktree_path), env.base_ref),
+        git_context=_manifest_drift._git_context(Path(env.worktree_path), env.base_ref),
     )
 
 

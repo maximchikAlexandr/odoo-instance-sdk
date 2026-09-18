@@ -8,7 +8,7 @@ import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -24,7 +24,6 @@ from odoo_instance_sdk.models import (
     BackupValidationStatus,
     EnvironmentState,
 )
-from odoo_instance_sdk.storage.catalog import helpers as _helpers
 from odoo_instance_sdk.storage.catalog.helpers import (
     _READ_ONLY_PROJECT_SCOPE as _READ_ONLY_PROJECT_SCOPE,
 )
@@ -71,12 +70,23 @@ from odoo_instance_sdk.storage.catalog_migrate import (
     ensure_catalog_migrated,
 )
 
-globals().update(
-    {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
-)
-
 
 class _BackupMixin:
+    if TYPE_CHECKING:
+        _conn: sqlite3.Connection
+        db_path: Path
+        _read_only: bool
+
+        def _add_event(
+            self,
+            backup_id: str,
+            event_type: str,
+            path: str | None = None,
+            validator: str | None = None,
+            exit_code: int | None = None,
+            message: str | None = None,
+        ) -> None: ...
+
     def __post_init__(self) -> None:
         try:
             from odoo_instance_sdk.internal.paths import _user_root

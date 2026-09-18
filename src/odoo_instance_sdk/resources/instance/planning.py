@@ -1,16 +1,27 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
+import contextlib
 import sys
+from collections.abc import Sequence
+from contextlib import AbstractContextManager
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-import odoo_instance_sdk.resources.instance as _instance_shim
+from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
     ProcessHandle,
+    SubprocessExecutor,
+    terminate,
+    terminate_pid,
 )
-from odoo_instance_sdk.internal.server import cleanup_secret_config
+from odoo_instance_sdk.internal.process_env import captured_child_environment
+from odoo_instance_sdk.internal.server import (
+    _write_secret_config,
+    cleanup_secret_config,
+    get_process_status,
+)
 from odoo_instance_sdk.models import (
     DetachedLaunchResult,
     OdooProcess,
@@ -19,9 +30,30 @@ from odoo_instance_sdk.models import (
     StartConfig,
     StopEnvironmentResult,
 )
-from odoo_instance_sdk.resources.instance import helpers as _helpers
+from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+    _assert_http_port_free,
+    _child_secret_values,
+    _command_plan,
+    _http_port_observation,
+    _runtime_owner,
+    _snapshot_start_inputs,
+    resolve_runtime_argv_extra,
+)
+from odoo_instance_sdk.resources.instance.runtime import (
+    T,
+    _RuntimeBinding,
+    _RuntimeCatalog,
+    _RuntimeIdentity,
+    _verify_process_exit,
+)
 
-terminate = _instance_shim.terminate
+if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.config import InstanceConfig
+    from odoo_instance_sdk.execution import (
+        Command,
+    )
+    from odoo_instance_sdk.internal.proc import RunContext
 
 
 def _raise_if_exited(exited: bool) -> None:
@@ -32,18 +64,38 @@ def _raise_if_exited(exited: bool) -> None:
         )
 
 
-if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import (
-        Command,
-    )
-    from odoo_instance_sdk.internal.proc import RunContext
-
-globals().update(
-    {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
-)
-
-
 class _PlanningMixin:
+    if TYPE_CHECKING:
+        config: InstanceConfig
+        _client: OdooClient
+        _environment_id: str | None
+        _runtime_binding: _RuntimeBinding | None
+
+        def _artifact_operation(self, *, exclusive: bool) -> AbstractContextManager[None]: ...
+        def _artifact_lock(self) -> AbstractContextManager[None]: ...
+        def _read_runtime_identity(self) -> _RuntimeIdentity | None: ...
+        @staticmethod
+        def _validate_runtime_identity(identity: _RuntimeIdentity) -> None: ...
+        def _clear_runtime_identity(self) -> None: ...
+        def _dependency_manifest(
+            self,
+        ) -> tuple[tuple[PreparedStep | PreparedAction, ...], Path | None]: ...
+        def _ensure_dependencies_ready(
+            self,
+            context: RunContext[T] | None = None,
+            *,
+            dependency_steps: Sequence[PreparedStep | PreparedAction] = (),
+            temporary_path: Path | None = None,
+        ) -> None: ...
+        def _executable_prefix(self) -> tuple[str, ...]: ...
+        def _persist_runtime_identity(
+            self,
+            root_pid: int,
+            config: StartConfig,
+            cwd: str | Path | None,
+            context: RunContext[T] | None = None,
+        ) -> None: ...
+
     def _assert_runtime_identity_unchanged(
         self,
         planned: _RuntimeIdentity | None,
@@ -141,7 +193,7 @@ class _PlanningMixin:
                         }
                     self._validate_runtime_identity(identity)
                     context.action(action_ids[2])
-                    _instance_shim.terminate_pid(
+                    terminate_pid(
                         identity.root_pid,
                         process_group_id=identity.process_group_id,
                         timeout=timeout,
@@ -221,7 +273,6 @@ class _PlanningMixin:
             # DEVNULL at the proc boundary if a non-logfile Odoo ever blocks.
             inherit_stdio=False,
         )
-        from odoo_instance_sdk.internal.proc import PreparedStep as _PreparedStep
 
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
         prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (*dependency_steps, step)
@@ -230,14 +281,14 @@ class _PlanningMixin:
         ) and resolved_cwd is not None:
             target = str(resolved_cwd)
             prepared_steps += (
-                _PreparedStep(
+                PreparedStep(
                     step_id="instance.foreground.git.branch",
                     argv=("git", "-C", target, "rev-parse", "--abbrev-ref", "HEAD"),
                     cwd=target,
                     timeout=10.0,
                     read_only=True,
                 ),
-                _PreparedStep(
+                PreparedStep(
                     step_id="instance.foreground.git.commit",
                     argv=("git", "-C", target, "rev-parse", "HEAD"),
                     cwd=target,
@@ -261,11 +312,11 @@ class _PlanningMixin:
             )
             for step_id in action_ids
         )
-        process_executor = _instance_shim.SubprocessExecutor()
+        process_executor = SubprocessExecutor()
         logfile_path = str((self.config.default_cwd or Path.cwd()) / raw_logfile.strip())
 
         def execute(context: RunContext[DetachedLaunchResult]) -> DetachedLaunchResult:
-            if type(process_executor) is _instance_shim.SubprocessExecutor:
+            if type(process_executor) is SubprocessExecutor:
                 _assert_http_port_free(config)
             context.action(action_ids[0])
             context.complete_action(action_ids[0])
@@ -282,7 +333,7 @@ class _PlanningMixin:
             with self._artifact_lock():
                 secret_created = False
                 if secret_path is not None:
-                    _instance_shim._write_secret_config(snapshot, secret_path)
+                    _write_secret_config(snapshot, secret_path)
                     secret_created = True
                 handle: ProcessHandle | None = None
                 try:
@@ -315,7 +366,7 @@ class _PlanningMixin:
                 except BaseException:
                     if handle is not None:
                         with contextlib.suppress(BaseException):
-                            _instance_shim.terminate(
+                            terminate(
                                 handle,
                                 process_group_id=handle.process_group_id,
                                 timeout=5.0,
@@ -324,7 +375,7 @@ class _PlanningMixin:
                     raise
                 finally:
                     if secret_created:
-                        _instance_shim.cleanup_secret_config(secret_path)
+                        cleanup_secret_config(secret_path)
 
         from odoo_instance_sdk.execution import Command
 
@@ -400,7 +451,7 @@ class _PlanningMixin:
             else:
                 context.action("instance.stop.signal")
                 try:
-                    _instance_shim.terminate(
+                    terminate(
                         ProcessHandle(
                             process=owned,
                             argv=(),
@@ -424,12 +475,12 @@ class _PlanningMixin:
             _command_plan(frozen_steps),
             execute,
             frozen_steps,
-            executor=_instance_shim.SubprocessExecutor(),
+            executor=SubprocessExecutor(),
         )
 
     def status(self, proc: OdooProcess) -> ProcessStatus:
         self._client.get_process(proc.id)
-        return _instance_shim.get_process_status(self._client.get_handle(proc.id))
+        return get_process_status(self._client.get_handle(proc.id))
 
     def wait_ready(
         self,

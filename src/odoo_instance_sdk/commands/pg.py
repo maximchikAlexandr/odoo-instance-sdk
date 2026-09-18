@@ -62,10 +62,7 @@ def _postgres_cluster(ctx: CliContext) -> PostgresCluster:
     resolve_project_path = cast(
         "Callable[[CliContext], str | Path]", getattr(postgres_cli, "resolve_project_path")
     )
-    return cast(
-        "PostgresCluster",
-        PostgresCluster.from_project(resolve_project_path(ctx)),
-    )
+    return PostgresCluster.from_project(resolve_project_path(ctx))
 
 
 def _cluster_rich(document: OutputDocument) -> str:

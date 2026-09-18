@@ -157,7 +157,7 @@ def test_disposable_database_drop_success_and_forced_session(  # noqa: C901
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_project_postgres_dir",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup._paths.get_project_postgres_dir",
         lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
     )
     cluster = PostgresCluster.from_project(tmp_path)
@@ -167,7 +167,7 @@ def test_disposable_database_drop_success_and_forced_session(  # noqa: C901
     waiter: subprocess.Popen[str] | None = None
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.get_catalog_path",
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.backup._paths.get_catalog_path",
         lambda **_kwargs: catalog.db_path,
     )
     try:

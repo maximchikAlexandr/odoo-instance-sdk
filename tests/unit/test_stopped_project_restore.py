@@ -59,7 +59,8 @@ def test_auxiliary_restore_session_captures_bounded_runtime_and_cleans_owned_pro
     executor = RecordingExecutor(handles={session.start_step.step_id: handle})
     cast("Any", instance._client.unregister_process).return_value = (None, None)
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
+        "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+        lambda _config: None,
     )
     wait_ready = MagicMock(return_value=MagicMock(ok=True))
     monkeypatch.setattr(OdooInstance, "wait_ready", wait_ready)
@@ -95,7 +96,7 @@ def test_foreign_listener_is_rejected_before_auxiliary_spawn(
     session = auxiliary_restore_session(instance)
     executor = RecordingExecutor(handles={})
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance._assert_http_port_free",
+        "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
         MagicMock(side_effect=InstanceConfigurationError("port-conflict: ownership unknown")),
     )
 
@@ -121,7 +122,7 @@ def test_recorded_running_project_runtime_is_reused_without_spawn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from odoo_instance_sdk.internal.proc import RunContext
-    from odoo_instance_sdk.resources.instance import _RuntimeBinding
+    from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
 
     instance = _instance(tmp_path)
     instance._runtime_binding = _RuntimeBinding(
@@ -136,7 +137,9 @@ def test_recorded_running_project_runtime_is_reused_without_spawn(
     process.is_running.return_value = True
     process.status.return_value = "running"
     process.create_time.return_value = 123.5
-    monkeypatch.setattr("odoo_instance_sdk.resources.instance.psutil.Process", lambda _pid: process)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity.psutil.Process", lambda _pid: process
+    )
     snapshot = MagicMock()
     snapshot.project_runtimes = (
         {
@@ -185,13 +188,16 @@ def test_auxiliary_readiness_failure_has_exact_recovery_guidance(
     owned.pid = 456
     cast("Any", instance._client.unregister_process).return_value = (owned, "secret.conf")
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
+        "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+        lambda _config: None,
     )
     monkeypatch.setattr(
         OdooInstance, "wait_ready", MagicMock(side_effect=RuntimeError("health failed"))
     )
     terminate = MagicMock()
-    monkeypatch.setattr("odoo_instance_sdk.resources.instance.terminate", terminate)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.auxiliary_restore.terminate", terminate
+    )
 
     from odoo_instance_sdk.internal.proc import RunContext
 
@@ -222,7 +228,8 @@ def test_auxiliary_spawn_failure_has_exact_recovery_guidance(
     session = auxiliary_restore_session(instance)
     executor = RecordingExecutor(handles={})
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
+        "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+        lambda _config: None,
     )
 
     from odoo_instance_sdk.internal.proc import RunContext
@@ -258,7 +265,8 @@ def test_stopped_manager_is_started_before_first_database_request(
     executor = RecordingExecutor(handles={session.start_step.step_id: handle})
     cast("Any", instance._client.unregister_process).return_value = (None, None)
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
+        "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+        lambda _config: None,
     )
     monkeypatch.setattr(
         OdooInstance,
@@ -326,7 +334,7 @@ def test_foreign_listener_is_rejected_before_database_request(
 
     monkeypatch.setattr(DatabaseResource, "_http", fake_http)
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance._assert_http_port_free",
+        "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
         MagicMock(side_effect=InstanceConfigurationError("port-conflict: ownership unknown")),
     )
 
@@ -374,7 +382,8 @@ def test_cleanup_removes_secret_when_owned_termination_fails(
     executor = RecordingExecutor(handles={session.start_step.step_id: handle})
     cast("Any", instance._client.unregister_process).return_value = (owned, "secret.conf")
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
+        "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+        lambda _config: None,
     )
     monkeypatch.setattr(
         OdooInstance,
@@ -384,9 +393,11 @@ def test_cleanup_removes_secret_when_owned_termination_fails(
         ),
     )
     cleanup = MagicMock()
-    monkeypatch.setattr("odoo_instance_sdk.resources.instance.cleanup_secret_config", cleanup)
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.terminate",
+        "odoo_instance_sdk.resources.instance.auxiliary_restore.cleanup_secret_config", cleanup
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.auxiliary_restore.terminate",
         MagicMock(side_effect=RuntimeError("termination failed")),
     )
 

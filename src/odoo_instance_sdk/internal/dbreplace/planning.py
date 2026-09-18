@@ -14,10 +14,8 @@ from typing import TYPE_CHECKING, cast
 import msgspec
 
 from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError
-from odoo_instance_sdk.internal.database_preparation import (
-    _capture_restore_inputs,
-)
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
+from odoo_instance_sdk.internal.dbprep.materialize import _capture_restore_inputs
 from odoo_instance_sdk.internal.odoo_config import parse_db_names, parse_odoo_config
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 from odoo_instance_sdk.internal.proc import (
@@ -414,7 +412,7 @@ def _validate_plan(  # noqa: C901
     reset_process_step: PreparedStep | None = None
     if reset_admin_password:
         from odoo_instance_sdk.resources.database import _RESET_ADMIN_PASSWORD_SCRIPT
-        from odoo_instance_sdk.resources.instance import _build_shell_script_step
+        from odoo_instance_sdk.resources.instance.auxiliary_restore import _build_shell_script_step
 
         start_config = instance.config.start_config
         if start_config is None:

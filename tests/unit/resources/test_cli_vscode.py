@@ -67,7 +67,7 @@ def _isolate_vscode_port_probe(monkeypatch: pytest.MonkeyPatch) -> None:
         return requested if requested is not None else 18071
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.environment.find_free_port", deterministic_port
+        "odoo_instance_sdk.internal.port_allocation.find_free_port", deterministic_port
     )
 
 
@@ -115,25 +115,31 @@ class TestVscodeGenerateProfile:
         assert "--database" in args
         assert "project_db" in args
 
-    def test_default_run_args_appear_in_profile_exactly_once(self, tmp_path: Path) -> None:
-        view = self._project_view(tmp_path, default_run_args=("--dev=qweb,xml",))
+    @pytest.mark.parametrize(
+        ("default_run_args_line", "expected_count"),
+        [
+            ('default_run_args = ["--dev=qweb,xml"]\n', 1),
+            ("", 0),
+        ],
+    )
+    def test_default_run_args_through_public_vscode_generate_cli(
+        self,
+        project_manifest: Path,
+        default_run_args_line: str,
+        expected_count: int,
+    ) -> None:
+        manifest_path = project_manifest / ".odcli" / "project.toml"
+        manifest_path.write_text(manifest_path.read_text() + default_run_args_line)
 
-        profile = build_launch_profile(view)
+        result = CliRunner().invoke(
+            cli,
+            ["--project", str(project_manifest), "vscode", "generate", "--format", "json"],
+        )
 
-        args = cast("list[object]", profile["args"])
-        assert args.count("--dev=qweb,xml") == 1
-
-    def test_empty_default_run_args_adds_no_extra_arguments(self, tmp_path: Path) -> None:
-        view = self._project_view(tmp_path, default_run_args=())
-
-        profile = build_launch_profile(view)
-
-        args = cast("list[object]", profile["args"])
-        baseline_view = self._project_view(tmp_path, default_run_args=())
-        baseline_profile = build_launch_profile(baseline_view)
-        baseline_args = cast("list[object]", baseline_profile["args"])
-        assert args == baseline_args
-        assert "--dev" not in args
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        args = payload["result"]["profile"]["args"]
+        assert args.count("--dev=qweb,xml") == expected_count
 
     def test_disallowed_managed_override_in_default_run_args_raises(self, tmp_path: Path) -> None:
         from odoo_instance_sdk.exceptions import InstanceConfigurationError
@@ -170,7 +176,8 @@ class TestVscodeGenerateProfile:
         with (
             patch("odoo_instance_sdk.cli.cli_context.ready_instance", return_value=resolved),
             patch(
-                "odoo_instance_sdk.cli.build_launch_profile", wraps=build_launch_profile
+                "odoo_instance_sdk.commands.cli_parts.callbacks.build_launch_profile",
+                wraps=build_launch_profile,
             ) as build,
         ):
             result = CliRunner().invoke(cli, ["vscode", "generate", "--format", mode])

@@ -2,17 +2,60 @@
 
 from __future__ import annotations
 
+import importlib
 import re
 from collections.abc import Iterable, Sequence
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 E2EDisposition = Literal["critical", "focused", "smoke", "not-applicable"]
 E2E_DISPOSITIONS = frozenset({"critical", "focused", "smoke", "not-applicable"})
 _EVIDENCE_ID = re.compile(r"E2E-(?:SM|CP|FC|REC|SEC)-\d{2}\Z")
 
+_CLASS_MODULES: Final[dict[str, str]] = {
+    "OdooInstance": "odoo_instance_sdk.resources.instance",
+    "EnvironmentResource": "odoo_instance_sdk.resources.environment",
+    "EnvironmentMonitor": "odoo_instance_sdk.resources.monitor",
+    "BackupResource": "odoo_instance_sdk.resources.backup",
+    "DatabaseResource": "odoo_instance_sdk.resources.database",
+    "ModuleResource": "odoo_instance_sdk.resources.module",
+    "PostgresCluster": "odoo_instance_sdk.resources.postgres",
+    "GitResource": "odoo_instance_sdk.resources.git",
+}
+
+_FUNCTION_MODULES: Final[tuple[str, ...]] = (
+    "odoo_instance_sdk.cli",
+    "odoo_instance_sdk.project_init",
+    "odoo_instance_sdk.internal.automation",
+    "odoo_instance_sdk.resources.testing",
+    "odoo_instance_sdk.resources.deps",
+    "odoo_instance_sdk.internal.doctor",
+)
+
 
 class ContractError(ValueError):
     """Raised when a test contract is incomplete or inconsistent."""
+
+
+def _resolve_sdk_primitive(reference: str) -> object:
+    """Resolve one recorded SDK primitive to an importable public callable."""
+    ref = reference.strip()
+    if not ref:
+        raise ContractError("empty sdk_primitive")
+    if "." in ref:
+        class_name, attr = ref.rsplit(".", 1)
+        module_path = _CLASS_MODULES.get(class_name)
+        if module_path is None:
+            raise ContractError(f"unknown sdk_primitive class {class_name!r} in {ref!r}")
+        module = importlib.import_module(module_path)
+        obj = getattr(module, class_name, None)
+        if obj is None or not hasattr(obj, attr):
+            raise ContractError(f"sdk_primitive {ref!r} is not importable")
+        return getattr(obj, attr)
+    for module_path in _FUNCTION_MODULES:
+        module = importlib.import_module(module_path)
+        if hasattr(module, ref):
+            return getattr(module, ref)
+    raise ContractError(f"sdk_primitive {ref!r} is not an importable public name")
 
 
 def _validate_sdk_boundary(case: Any) -> None:
@@ -22,8 +65,8 @@ def _validate_sdk_boundary(case: Any) -> None:
         raise ContractError(
             f"leaf {' '.join(case.path)} requires exactly one of sdk_primitive or cli_only_reason"
         )
-    if has_sdk and not str(case.sdk_primitive).strip():
-        raise ContractError(f"empty sdk_primitive for {' '.join(case.path)}")
+    if has_sdk:
+        _resolve_sdk_primitive(str(case.sdk_primitive))
     if has_cli_only and not str(case.cli_only_reason).strip():
         raise ContractError(f"empty cli_only_reason for {' '.join(case.path)}")
 

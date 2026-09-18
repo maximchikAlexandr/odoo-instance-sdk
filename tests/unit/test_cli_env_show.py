@@ -8,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands import env as env_commands
+from odoo_instance_sdk.commands.env import checkout as env_commands
 from odoo_instance_sdk.models import ProjectSummary, RuntimeState
 from tests.unit.test_cli_env_list_grouping import (
     _env,
@@ -46,7 +46,10 @@ def test_env_show_explicit_uses_one_snapshot_and_preserves_unavailable_metrics(
             calls += 1
             return snapshot
 
-    monkeypatch.setattr(env_commands, "_monitor_class", lambda: FakeMonitor)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.EnvironmentMonitor",
+        FakeMonitor,
+    )
     monkeypatch.setattr(
         env_commands,
         "_catalog_worktree_paths",
@@ -85,7 +88,10 @@ def test_env_show_without_selector_resolves_registered_cwd(
         def snapshot(self) -> object:
             return snapshot
 
-    monkeypatch.setattr(env_commands, "_monitor_class", lambda: FakeMonitor)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.env.checkout.EnvironmentMonitor",
+        FakeMonitor,
+    )
     monkeypatch.setattr(
         env_commands,
         "_catalog_worktree_paths",

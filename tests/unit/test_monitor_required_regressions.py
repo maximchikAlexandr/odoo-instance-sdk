@@ -57,7 +57,7 @@ def test_projects_sort_by_id_even_when_paths_sort_inversely(
     catalog.close()
     patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.repo_key",
+        "odoo_instance_sdk.resources.monitor.collection_parts.collect.repo_key",
         lambda root, _common: "aaa" if Path(root).name == "z-path" else "zzz",
     )
 

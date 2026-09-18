@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import sqlite3
 from collections.abc import Mapping
-from typing import cast
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
@@ -14,20 +14,29 @@ from odoo_instance_sdk.internal.applied_settings import (
     decode_applied_settings,
 )
 from odoo_instance_sdk.internal.sanitize import sanitize_event_message, sanitize_last_error
-from odoo_instance_sdk.storage.catalog import helpers as _helpers
 from odoo_instance_sdk.storage.catalog.helpers import (
     CatalogValue as CatalogValue,
 )
 from odoo_instance_sdk.storage.catalog.helpers import (
+    CopyJournalStage as CopyJournalStage,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
+    MonitorCatalogSnapshot as MonitorCatalogSnapshot,
+)
+from odoo_instance_sdk.storage.catalog.helpers import (
     _translate_sqlite_error as _translate_sqlite_error,
 )
-
-globals().update(
-    {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
+from odoo_instance_sdk.storage.catalog.helpers import (
+    normalize_db_host as normalize_db_host,
 )
 
 
 class _EnvironmentMixin:
+    if TYPE_CHECKING:
+        _conn: sqlite3.Connection
+        db_path: Path
+        _read_only: bool
+
     @_translate_sqlite_error
     def create_environment(self, env: Mapping[str, CatalogValue]) -> None:
         applied_settings = env.get("applied_settings_json", LEGACY_UNKNOWN_APPLIED_SETTINGS_JSON)
