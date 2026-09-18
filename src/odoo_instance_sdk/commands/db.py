@@ -361,7 +361,7 @@ def db_restore(  # noqa: C901
                 ),
             )
         else:
-            from odoo_instance_sdk.internal.database_preparation import _CatalogueRestoreSource
+            from odoo_instance_sdk.internal.dbprep.source import _CatalogueRestoreSource
 
             project_path = resolve_project_path(ctx)
             command = cast(
@@ -398,10 +398,10 @@ def db_restore(  # noqa: C901
         )
 
     def interrupted(error: KeyboardInterrupt) -> None:
-        from odoo_instance_sdk.internal.database_preparation import (
+        from odoo_instance_sdk.internal.dbprep.source import (
             DatabasePreparationFailureContext,
         )
-        from odoo_instance_sdk.internal.database_replacement import CopyReplacementFailureContext
+        from odoo_instance_sdk.internal.dbreplace.planning import CopyReplacementFailureContext
 
         context = getattr(error, "failure_context", None)
         safe_context: dict[str, JsonValue] = (

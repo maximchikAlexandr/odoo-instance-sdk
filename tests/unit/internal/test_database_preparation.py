@@ -213,8 +213,8 @@ def test_selected_native_dump_uses_pg_restore_process_boundary(
 def test_selected_native_dump_uses_verified_snapshot_after_source_path_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation
     from odoo_instance_sdk.internal.backup_validation import DumpValidationResult
+    from odoo_instance_sdk.internal.dbprep import source as database_preparation
 
     dump_path = tmp_path / "production.dump"
     replacement_path = tmp_path / "replacement.dump"
@@ -505,7 +505,7 @@ def test_validate_zip_rejects_insufficient_available_space(
 def test_selected_dump_stream_counter_cleans_up_lying_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation
+    from odoo_instance_sdk.internal.dbprep import source as database_preparation
 
     archive_path = tmp_path / "lying.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
@@ -553,7 +553,7 @@ def test_selected_dump_stream_counter_cleans_up_lying_metadata(
 def test_selected_filestore_stream_counter_removes_partial_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.internal import database_preparation
+    from odoo_instance_sdk.internal.dbprep import source as database_preparation
 
     archive_path = tmp_path / "lying-filestore.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:

@@ -13,6 +13,7 @@ from rich.table import Table
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.env import checkout as env_commands
+from odoo_instance_sdk.commands.env.display import _ENV_LIST_COLUMNS
 from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
 from odoo_instance_sdk.models import (
     CheckoutInventory,
@@ -302,7 +303,7 @@ def test_env_list_human_table_uses_rich_columns_and_json_is_sanitized(
     assert human.exit_code == 0, human.output
     assert "\x1b" not in human.output
     rendered = _render_inventory(_inventory_from_snapshot(_snapshot((project,), (env,))))
-    assert all(column in rendered for column in env_commands._ENV_LIST_COLUMNS)
+    assert all(column in rendered for column in _ENV_LIST_COLUMNS)
     assert "g\\x0d\\x0" in rendered
 
     encoded = CliRunner().invoke(cli, ["env", "list", "--all-projects", "--format", "json"])
@@ -755,7 +756,7 @@ def test_rich_renderer_is_pure_sorted_and_retains_all_columns(
     assert output.index("Project alpha") < output.index("Project beta")
     flat = "".join(output.split())
     assert flat.index("alpha-env") < flat.index("beta-env")
-    for value in env_commands._ENV_LIST_COLUMNS:
+    for value in _ENV_LIST_COLUMNS:
         assert value in output
     for dropped in ("OBSERVED", "ODOO_PID", "CPU", "RAM", "SIZE", "ARTIFACTS"):
         assert dropped not in output

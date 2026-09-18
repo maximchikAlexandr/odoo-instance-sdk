@@ -18,7 +18,7 @@ from odoo_instance_sdk.exceptions import (
     StalePlanError,
 )
 from odoo_instance_sdk.internal import paths as _paths
-from odoo_instance_sdk.internal.database_preparation import (
+from odoo_instance_sdk.internal.dbprep.source import (
     classify_freshness,
     compare_provenance,
 )
@@ -358,7 +358,7 @@ class _CheckoutMixin:
         target_database: str | None = None,
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
-        from odoo_instance_sdk.internal.database_preparation import (
+        from odoo_instance_sdk.internal.dbprep.materialize import (
             DatabasePreparationCoordinator,
         )
 
@@ -391,7 +391,7 @@ class _CheckoutMixin:
         reset_admin_password: bool = False,
         executor: ProcessExecutor | None = None,
     ) -> Command[CopyReplacementResult]:
-        from odoo_instance_sdk.internal.database_replacement import build_copy_replacement_command
+        from odoo_instance_sdk.internal.dbreplace.validation import build_copy_replacement_command
 
         return build_copy_replacement_command(
             self._client,

@@ -183,7 +183,7 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:423-424` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:421-422` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
 - `src/odoo_instance_sdk/commands/backup.py:342` — shared Rich validation

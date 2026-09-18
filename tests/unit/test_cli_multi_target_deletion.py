@@ -88,9 +88,9 @@ def _invoke_backup(
     db_path: Path,
     args: list[str],
 ) -> Result:
-    from odoo_instance_sdk.commands.backup import configure_catalog_path_provider
+    from odoo_instance_sdk.commands import backup as backup_commands
 
-    configure_catalog_path_provider(lambda: db_path)
+    monkeypatch.setattr(backup_commands._catalog_path_provider, "provider", lambda: db_path)
     return CliRunner().invoke(cli, args)
 
 

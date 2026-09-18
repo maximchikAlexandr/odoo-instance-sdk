@@ -1822,7 +1822,7 @@ class TestOwnedRuntimePreflight:
         fake_python: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         options = EnvironmentCheckoutOptions(python=str(fake_python), source_database="comerta")
         snapshot = env_client.environments._build_checkout_snapshot(

@@ -414,7 +414,7 @@ def test_sdk_init_command_rejects_secret_target_before_cluster_password_read(
 
     from odoo_instance_sdk.exceptions import InstanceConfigurationError
     from odoo_instance_sdk.project import ProjectConfig
-    from odoo_instance_sdk.project_init import init_project_command
+    from odoo_instance_sdk.project_init import init_project, init_project_command
 
     config = ProjectConfig.load(tmp_path)
     with pytest.raises(InstanceConfigurationError, match=r"tracked|symlink"):
@@ -424,6 +424,45 @@ def test_sdk_init_command_rejects_secret_target_before_cluster_password_read(
         assert generated.read_bytes() == original
     else:
         assert outside.read_bytes() == b"outside-secret\n"
+
+    if target_kind == "tracked":
+        with pytest.raises(InstanceConfigurationError, match="tracked"):
+            init_project(tmp_path, config, postgres_allocated=False)
+        assert generated.read_bytes() == original
+
+
+def test_sdk_init_rejects_group_writable_secret_parent_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "sdk-data"
+    data_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_data_root", lambda **_kwargs: data_root
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    args = [
+        *_base_args(tmp_path),
+        "--postgres",
+        "compose",
+        "--postgres-image",
+        "pgvector/pgvector:pg16",
+        "--postgres-port",
+        "5468",
+    ]
+    first = CliRunner().invoke(cli, args)
+    assert first.exit_code == 0, first.output
+    generated = tmp_path / ".odcli" / "odoo.conf"
+    original = generated.read_bytes()
+    generated.parent.chmod(0o777)
+
+    from odoo_instance_sdk.exceptions import InstanceConfigurationError
+    from odoo_instance_sdk.project import ProjectConfig
+    from odoo_instance_sdk.project_init import init_project
+
+    config = ProjectConfig.load(tmp_path)
+    with pytest.raises(InstanceConfigurationError, match="ownership or permissions"):
+        init_project(tmp_path, config, postgres_allocated=False)
+    assert generated.read_bytes() == original
 
 
 def test_reinit_repairs_stale_generated_config_without_manifest_changes(

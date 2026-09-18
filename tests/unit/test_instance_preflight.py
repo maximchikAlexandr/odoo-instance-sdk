@@ -175,7 +175,7 @@ def test_start_readiness_failure_precedes_secret_write_and_spawn() -> None:
             "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
             return_value=executor,
         ),
-        patch("odoo_instance_sdk.resources.instance._write_secret_config") as write_secret,
+        patch("odoo_instance_sdk.resources.instance.identity._write_secret_config") as write_secret,
         pytest.raises(PostgresClusterUnreachableError, match="not ready"),
     ):
         instance.start(StartConfig(http_port=_free_loopback_port(), db_password="private"))
@@ -202,7 +202,8 @@ def test_foreground_spawn_failure_preserves_typed_error_and_cleans_secret(
             raise ProcessSpawnError(step.argv, "spawn denied", duration=0.0)
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance.tempfile.gettempdir", lambda: str(tmp_path)
+        "odoo_instance_sdk.resources.instance.auxiliary_restore.tempfile.gettempdir",
+        lambda: str(tmp_path),
     )
     executor = FailingExecutor()
     instance = _make_instance()

@@ -8,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands import env as env_commands
+from odoo_instance_sdk.commands.env import checkout as env_commands
 from odoo_instance_sdk.models import ProjectSummary, RuntimeState
 from tests.unit.test_cli_env_list_grouping import (
     _env,

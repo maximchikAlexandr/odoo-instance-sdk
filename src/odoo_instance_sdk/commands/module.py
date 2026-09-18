@@ -250,7 +250,10 @@ def _checked_module_update_payload(
         if conflict is not None:
             raise conflict
         raise _module_update_failure(value)
-    return _module_update_payload(plan, value, dry_run=False)
+    payload = _module_update_payload(plan, value, dry_run=False)
+    if plan.modules and not payload["updated"]:
+        raise RuntimeError("module update did not confirm any requested module")
+    return payload
 
 
 def module_group() -> None:

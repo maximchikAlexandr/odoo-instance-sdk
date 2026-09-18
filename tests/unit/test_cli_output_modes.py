@@ -2914,7 +2914,7 @@ def test_rich_dry_run_uses_real_command_builders(
         run_odoo_tests_command,
     )
     from odoo_instance_sdk.internal.proc import RecordingExecutor
-    from odoo_instance_sdk.models import OdooTestSpec, StartConfig
+    from odoo_instance_sdk.models import ModuleUpdatePlan, OdooTestSpec, StartConfig
     from odoo_instance_sdk.resources.environment import EnvironmentResource
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
@@ -2949,7 +2949,9 @@ def test_rich_dry_run_uses_real_command_builders(
             instance._environment_id = "environment"
         command = instance.run_foreground_command(args=("--stop-after-init",))
     elif branch == "module.update":
-        command = instance.modules.update_command(("sale",))
+        command = instance.modules.update_command(
+            ("sale",), selection=ModuleUpdatePlan(modules=("sale",))
+        )
     elif branch == "translations.export":
         command = export_translations_command(
             instance, ("sale",), ("en_US",), worktree_root=tmp_path
@@ -3311,6 +3313,9 @@ def test_project_module_update_keeps_confirmation_and_output_contract(
         odoo_bin=Path(sys.executable),
     )
     modules = MagicMock()
+    from odoo_instance_sdk.models import ModuleUpdatePlan
+
+    modules.plan_update.return_value = ModuleUpdatePlan(modules=("sale",))
     instance = SimpleNamespace(
         config=SimpleNamespace(
             start_config=StartConfig(db_name="project_db"),
@@ -3357,18 +3362,15 @@ def test_project_module_update_incomplete_result_is_a_failure_document(tmp_path:
         odoo_bin=Path(sys.executable),
     )
     incomplete = _command_result(0, {"result": {"updated": []}})
+    from odoo_instance_sdk.models import ModuleUpdatePlan
 
-    def shell_script(_source: str, **kwargs: Any) -> Command[CommandResult]:
-        converter = kwargs["result_converter"]
-
-        def run(_context: object) -> CommandResult:
-            return converter(incomplete) if converter is not None else incomplete
-
-        return Command.create(ExecutionPlan(), run)
+    modules = MagicMock()
+    modules.plan_update.return_value = ModuleUpdatePlan(modules=("sale",))
+    modules.update_command.return_value = _matrix_command(incomplete)
 
     instance = SimpleNamespace(
         config=SimpleNamespace(start_config=StartConfig(db_name="project_db")),
-        _shell_script_command=shell_script,
+        modules=modules,
     )
     resolved = ResolvedContext(
         client=cast("Any", object()),

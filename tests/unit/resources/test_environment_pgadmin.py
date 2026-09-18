@@ -324,7 +324,7 @@ def test_pgadmin_linux_command_reserves_acl_steps_before_lifecycle(
     )
     selector = _environment()
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.environment._pgadmin_cluster_snapshot",
+        "odoo_instance_sdk.resources.environment.checkout_artifacts._pgadmin_cluster_snapshot",
         lambda selected: cluster,
     )
     monkeypatch.setattr(pgadmin_files, "_linux", lambda: True)

@@ -134,7 +134,6 @@ def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
         RecordingExecutor,
         active_context,
     )
-    from odoo_instance_sdk.resources import postgres as postgres_module
 
     compose_file = tmp_path / "compose.yaml"
     compose_file.write_text("services: {}\n")
@@ -192,7 +191,6 @@ def test_postgres_resource_snapshot_command_uses_one_exact_compose_manifest(
         "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda _project_id: tmp_path,
     )
-    monkeypatch.setattr(postgres_module, "docker_available", lambda: True)
     monkeypatch.setattr(cluster_resources_module, "docker_available", lambda: True)
     runner = SubprocessComposeRunner()
     cluster = PostgresCluster(

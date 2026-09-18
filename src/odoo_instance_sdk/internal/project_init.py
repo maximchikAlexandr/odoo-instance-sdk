@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
-from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
+from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
 from odoo_instance_sdk.internal.generated_config import (
     generate_config,
     project_generated_config_path,
@@ -75,13 +75,7 @@ def write_project_generated_config(project_path: Path, config: ProjectConfig) ->
     """Bind a Compose project config to its existing private cluster secret."""
     root = project_path.resolve()
     destination = project_generated_config_path(root)
-    from odoo_instance_sdk.internal.proc import active_context
-
-    validate_generated_config_target(
-        destination,
-        project_root=root,
-        check_tracking=active_context() is None,
-    )
+    validate_generated_config_target(destination, project_root=root)
     source_path = _resolve_source_config_path(root, config.source_config)
     if config.source_config is not None and source_path is None:
         raise InstanceConfigurationError("local source config is missing")
@@ -111,11 +105,10 @@ def write_project_generated_config(project_path: Path, config: ProjectConfig) ->
     )
 
 
-def validate_generated_config_target(  # noqa: C901
+def validate_generated_config_target(
     path: Path,
     *,
     project_root: Path | None = None,
-    check_tracking: bool = True,
 ) -> None:
     """Reject unsafe targets before any generated-config or secret write."""
     root = (project_root or path.parent.parent).resolve()
@@ -126,16 +119,18 @@ def validate_generated_config_target(  # noqa: C901
         )
     relative = path.relative_to(root)
     current = root
+    try:
+        root_stat = current.lstat()
+    except FileNotFoundError as exc:
+        raise InstanceConfigurationError(f"project root is missing: {root}") from exc
+    _require_owned_directory(current, root_stat)
     for component in relative.parts[:-1]:
         current /= component
         try:
             parent = current.lstat()
         except FileNotFoundError:
             break
-        if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
-            raise InstanceConfigurationError(
-                f"generated config parent must be a project-owned directory: {current}"
-            )
+        _require_owned_directory(current, parent)
     try:
         target = path.lstat()
     except FileNotFoundError:
@@ -148,18 +143,28 @@ def validate_generated_config_target(  # noqa: C901
         raise InstanceConfigurationError(
             f"generated config is not owned by the current user: {path}"
         )
-    if check_tracking:
-        from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
+    from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
 
-        try:
-            if is_tracked_path(path):
-                raise InstanceConfigurationError(
-                    "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf"
-                )
-        except GitError as exc:
+    try:
+        if is_tracked_path(path):
             raise InstanceConfigurationError(
-                "unable to verify project-owned runtime config tracking; refusing secret write"
-            ) from exc
+                "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf"
+            )
+    except GitError as exc:
+        raise InstanceConfigurationError(
+            "unable to verify project-owned runtime config tracking; refusing secret write"
+        ) from exc
+
+
+def _require_owned_directory(path: Path, metadata: os.stat_result) -> None:
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise InstanceConfigurationError(
+            f"generated config parent must be a project-owned directory: {path}"
+        )
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o022:
+        raise InstanceConfigurationError(
+            f"generated config parent has unsafe ownership or permissions: {path}"
+        )
 
 
 def generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> bool:
