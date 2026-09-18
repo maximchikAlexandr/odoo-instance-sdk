@@ -37,29 +37,29 @@
 
 ## 5. Split oversized production Python files (item 5)
 
-- [ ] 5.1 Confirm responsibilities, callers, and public imports for each of the thirteen listed files.
-- [ ] 5.2 Prepare the target module tree in this `design.md` (already done) and proceed with behaviour-preserving slices.
-- [ ] 5.3 Split `models.py` by domain with public re-exports preserved.
-- [ ] 5.4 Split `resources/environment.py`, `storage/backup_catalog.py` (after Alembic), `resources/instance.py`, `internal/database_preparation.py`, `cli.py`, `commands/env.py`, `resources/monitor.py`, `resources/database.py`, `resources/postgres.py`, `internal/doctor.py`, `internal/database_replacement.py`, and `internal/proc/executor.py` along confirmed boundaries.
-- [ ] 5.5 Add a CI line-limit check rejecting manually maintained production Python files over 1000 physical lines with generated/vendor exclusion and no existing-file allowlist.
-- [ ] 5.6 Run focused tests, architecture contract tests, Ruff, and mypy after each slice.
+- [x] 5.1 Confirm responsibilities, callers, and public imports for each of the thirteen listed files.
+- [x] 5.2 Prepare the target module tree in this `design.md` (already done) and proceed with behaviour-preserving slices.
+- [x] 5.3 Split `models.py` by domain with public re-exports preserved.
+- [x] 5.4 Split `resources/environment.py`, `storage/backup_catalog.py` (after Alembic), `resources/instance.py`, `internal/database_preparation.py`, `cli.py`, `commands/env.py`, `resources/monitor.py`, `resources/database.py`, `resources/postgres.py`, `internal/doctor.py`, `internal/database_replacement.py`, and `internal/proc/executor.py` along confirmed boundaries.
+- [x] 5.5 Add a CI line-limit check rejecting manually maintained production Python files over 1000 physical lines with generated/vendor exclusion and no existing-file allowlist.
+- [x] 5.6 Run focused tests, architecture contract tests, Ruff, and mypy after each slice.
 
 ## 6. CLI through public typed SDK primitives (item 6)
 
-- [ ] 6.1 Extend `PublicLeafCase` with `sdk_primitive` and `cli_only_reason` fields; update every existing entry and add `ps` so the inventory stays the single source of truth.
-- [ ] 6.2 Add public frozen input/result types and `*_command()` siblings for `backup inspect`, `db ls`, the shared test runner, `deps verify`, persisted `stop`, and COPY database replacement.
-- [ ] 6.3 Align `test` and `module test` on one SDK test primitive.
-- [ ] 6.4 Add a contract test rejecting a leaf without `sdk_primitive` or `cli_only_reason` and an architecture gate rejecting parallel domain execution in Click callbacks.
-- [ ] 6.5 Update `docs/python-sdk.md`, README, and execution-boundary from the actual public API.
+- [x] 6.1 Extend `PublicLeafCase` with `sdk_primitive` and `cli_only_reason` fields; update every existing entry and add `ps` so the inventory stays the single source of truth.
+- [x] 6.2 Add public frozen input/result types and `*_command()` siblings for `backup inspect`, `db ls`, the shared test runner, `deps verify`, persisted `stop`, and COPY database replacement.
+- [x] 6.3 Align `test` and `module test` on one SDK test primitive.
+- [x] 6.4 Add a contract test rejecting a leaf without `sdk_primitive` or `cli_only_reason` and an architecture gate rejecting parallel domain execution in Click callbacks.
+- [x] 6.5 Update `docs/python-sdk.md`, README, and execution-boundary from the actual public API.
 
 ## 7. SDK-first rule and documentation drift (item 7)
 
-- [ ] 7.1 Add the SDK-first rule to `AGENTS.md` and the OpenSpec contract.
-- [ ] 7.2 Unify context-resolution order across README, docs, and code: explicit `--env` → exact registered worktree → explicit `--project`/nearest manifest → error.
-- [ ] 7.3 Remove the removed `--json` alias wording from `docs/execution-boundary.md`, README, and characterization contracts; `--format json` is the only JSON selector and `--json` is a Click usage error.
-- [ ] 7.4 Add CI, MIT, and Python 3.12+ badges to README.
-- [ ] 7.5 Add the `pytest.mark.parametrize` rule for repeated input/output/error matrices to `AGENTS.md`/`CONTRIBUTING.md`.
-- [ ] 7.6 Sync delta specs and archive completed OpenSpec changes of this slice; leave unrelated/incomplete changes intact.
+- [x] 7.1 Add the SDK-first rule to `AGENTS.md` and the OpenSpec contract.
+- [x] 7.2 Unify context-resolution order across README, docs, and code: explicit `--env` → exact registered worktree → explicit `--project`/nearest manifest → error.
+- [x] 7.3 Remove the removed `--json` alias wording from `docs/execution-boundary.md`, README, and characterization contracts; `--format json` is the only JSON selector and `--json` is a Click usage error.
+- [x] 7.4 Add CI, MIT, and Python 3.12+ badges to README.
+- [x] 7.5 Add the `pytest.mark.parametrize` rule for repeated input/output/error matrices to `AGENTS.md`/`CONTRIBUTING.md`.
+- [x] 7.6 Sync delta specs and archive completed OpenSpec changes of this slice; leave unrelated/incomplete changes intact.
 
 ## 8. `run` uses canonical `~/.odcli` worktree path (item 8)
 

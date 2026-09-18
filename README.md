@@ -1,5 +1,9 @@
 # odoo-instance-sdk
 
+[![CI](https://github.com/maximchikAlexandr/odoo-instance-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/maximchikAlexandr/odoo-instance-sdk/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+
 `odoo-instance-sdk` gives Odoo 19 developers one typed Python API and one
 CLI, `odcli`, for repeatable local environments. It manages Git worktrees,
 Python environments, Odoo processes, databases, an optional SDK-owned
@@ -56,8 +60,9 @@ odcli --env PROJ-123 logs
 odcli env ls
 ```
 
-`odcli run` resolves an explicit `--env` first, then an exact registered
-worktree, then the initialized project containing the current directory. A
+`odcli run` resolves context in this order: an explicit `--env`, then an exact
+registered worktree, then an explicit `--project` or the nearest initialized
+project manifest upward from the current directory. A
 project run reads Python, `odoo-bin`, source config, working directory, port,
 database, and default run arguments from `.odcli/project.toml`; it does not
 create an environment or add the main checkout to `odcli env ls`.
@@ -471,6 +476,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db restore` — Restore one exact retained backup into a selected database target.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
 - `odcli db rm` — Safely remove one exact local cluster database after guarded checks.
+- `odcli ps` — Show process and resource inventory from one monitor snapshot.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
 <!-- cli-command-inventory:end -->
 
@@ -530,9 +536,12 @@ and order. The CLI equivalent requires the literal `--` delimiter; its
 `--dry-run` preview does not record use or execute the command.
 
 See [Python SDK examples](docs/python-sdk.md) for runnable examples covering
-database backup/restore, processes, environments, PostgreSQL, monitoring, and
-inspect-then-run command siblings. The complete boundary inventory and
-allowlist rationale are in [docs/execution-boundary.md](docs/execution-boundary.md).
+database backup/restore, catalogue inspect, database inventory, dependency
+verification, shared test execution, persisted environment stop, COPY database
+replacement, environments, PostgreSQL, monitoring, and inspect-then-run
+command siblings. `PUBLIC_LEAF_CASES` records the SDK primitive or CLI-only
+reason for every leaf; the complete boundary inventory and allowlist rationale
+are in [docs/execution-boundary.md](docs/execution-boundary.md).
 
 ## Monitor and local API
 

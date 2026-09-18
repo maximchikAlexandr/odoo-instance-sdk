@@ -43,7 +43,7 @@ def test_foreground_sigint_terminates_child_group_and_restores_handler(
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.server._build_cli_args", lambda _config: ["-c", child]
     )
-    monkeypatch.setattr("odoo_instance_sdk.internal.proc.executor._CLEANUP_TIMEOUT", 0.2)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.run._CLEANUP_TIMEOUT", 0.2)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         http_port = int(sock.getsockname()[1])

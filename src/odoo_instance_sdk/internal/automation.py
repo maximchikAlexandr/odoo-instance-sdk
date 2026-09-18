@@ -15,7 +15,15 @@ from odoo_instance_sdk.exceptions import ConfigError, StalePlanError
 from odoo_instance_sdk.internal.address import AddressState, probe_address
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.server import parse_payload
-from odoo_instance_sdk.models import CommandResult, OdooTestResult, OdooTestSpec
+from odoo_instance_sdk.models import (
+    CommandResult,
+    DepsDistributionDetail,
+    DepsMissingImport,
+    DepsVerifyResult,
+    OdooTestResult,
+    OdooTestSpec,
+    TestCommandSnapshot,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
@@ -38,21 +46,6 @@ class ShellOutcome:
     stdout: str
     stderr: str
     payload: dict[str, JsonValue] | None
-
-
-@dataclass(frozen=True, slots=True)
-class TestCommandSnapshot:
-    """Immutable selection/provenance facts captured before test execution."""
-
-    worktree: Path | None
-    git_head: str | None
-    git_base: str | None
-    changed_files: tuple[str, ...]
-    modules: tuple[str, ...]
-    database_names: tuple[str, ...]
-    database_identity: tuple[str | None, int | None, str | None]
-    interface: str
-    port: int
 
 
 def _test_command_preflight(  # noqa: C901
@@ -830,19 +823,6 @@ def _finalize_export(
     )
 
 
-@dataclass(slots=True)
-class DepsVerifyResult:
-    distributions: list[dict[str, JsonValue]] = field(default_factory=list)
-    missing_imports: list[dict[str, str]] = field(default_factory=list)
-    pip_check_ok: bool = True
-    pip_check_output: str = ""
-
-    @property
-    def ok(self) -> bool:
-        """Return the single dependency-verification success predicate."""
-        return self.pip_check_ok and not self.missing_imports
-
-
 def verify_deps(
     *,
     recorded_python: Path | str,
@@ -903,20 +883,26 @@ def verify_deps_command(
         )
 
     def run(context: RunContext[DepsVerifyResult]) -> DepsVerifyResult:
-        result = DepsVerifyResult()
         check = cast("ProcessResult", context.process(steps[0].step_id))
         stdout = check.stdout if isinstance(check.stdout, str) else ""
         stderr = check.stderr if isinstance(check.stderr, str) else ""
-        result.pip_check_output = (stdout + stderr).strip()
-        result.pip_check_ok = check.returncode == 0
-        for raw_line in result.pip_check_output.splitlines():
-            if raw_line.strip():
-                result.distributions.append({"detail": raw_line.strip()})
-        for index, (module_name, import_name) in enumerate(imports):
-            probe = cast("ProcessResult", context.process(f"deps.verify.import.{index}"))
-            if probe.returncode != 0:
-                result.missing_imports.append({"module": module_name, "import": import_name})
-        return result
+        pip_check_output = (stdout + stderr).strip()
+        distributions = tuple(
+            DepsDistributionDetail(detail=raw_line.strip())
+            for raw_line in pip_check_output.splitlines()
+            if raw_line.strip()
+        )
+        missing_imports = tuple(
+            DepsMissingImport(module=module_name, import_name=import_name)
+            for index, (module_name, import_name) in enumerate(imports)
+            if cast("ProcessResult", context.process(f"deps.verify.import.{index}")).returncode != 0
+        )
+        return DepsVerifyResult(
+            distributions=distributions,
+            missing_imports=missing_imports,
+            pip_check_ok=check.returncode == 0,
+            pip_check_output=pip_check_output,
+        )
 
     plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
     return Command.create(plan, run, tuple(steps), executor=executor or SubprocessExecutor())

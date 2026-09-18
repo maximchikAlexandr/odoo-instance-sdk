@@ -14,7 +14,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from odoo_instance_sdk.internal.proc import executor as process_executor
+from odoo_instance_sdk.internal.proc import run as process_executor
 from tests.fixtures.architecture_inventory import (
     DIRECT_OUTPUT_WRITES,
     DIRECT_SUBPROCESS_LAUNCHES,
@@ -443,8 +443,10 @@ def test_runtime_dependency_inventory_is_exact_and_bounded() -> None:
         "rich>=15,<16",
         "python-toon==0.1.3",
         "expression>=5,<6",
+        "alembic>=1.13,<2",
+        "sqlalchemy>=2,<3",
     ]
-    assert len(project["dependencies"]) == 10
+    assert len(project["dependencies"]) == 12
     assert project["optional-dependencies"] == {
         "dashboard": [
             "fastapi>=0.141,<1.0",

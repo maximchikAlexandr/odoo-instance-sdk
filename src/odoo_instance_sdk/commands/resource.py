@@ -259,7 +259,6 @@ def _build_resource_plan(  # noqa: C901
 ) -> _ResourcePlan:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
-    from odoo_instance_sdk.internal.pg.inventory import build_database_inventory_command
     from odoo_instance_sdk.project import ProjectConfig
     from odoo_instance_sdk.resources.postgres import PostgresCluster, _resolve_project_id
 
@@ -334,10 +333,8 @@ def _build_resource_plan(  # noqa: C901
     plan.database_reason = file_reason
     if instance is not None and cluster is not None:
         try:
-            database_command = build_database_inventory_command(
-                instance,
+            database_command = instance.databases.list_inventory_command(
                 project_root,
-                catalog=catalog,
                 executor=process_executor,
             )
             plan.observations += database_command.plan.observations
