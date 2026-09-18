@@ -153,27 +153,6 @@ Logs SHALL be written to the existing `logfile` of the bound `odoo.conf`. When n
 - **WHEN** `odcli run` runs without `-d`
 - **THEN** signals, exit code, stdio, and cleanup match the existing foreground contract
 
-### Requirement: SDK-first CLI leaf contract
-
-Every entry in the canonical `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an `sdk_primitive` referencing the public typed SDK call the CLI delegates to, or a `cli_only_reason` with a concrete transport/presentation reason why the operation stays CLI-only. A generic formulation such as "convenient for CLI" SHALL NOT be accepted. A new CLI leaf SHALL NOT pass contract tests without one of these two values.
-
-CLI callbacks SHALL NOT build a self-contained domain read/mutation/spawn operation through `internal.*` when a public typed SDK primitive applies. The SDK SHALL own typed inputs/results, `Command`, immutable plans, revalidation, process/actions, cleanup, and failure semantics. Convenience methods SHALL delegate to the corresponding `*_command()` sibling and SHALL NOT rebuild the snapshot. The public SDK SHALL NOT export Click context, Rich renderables, CLI envelopes, or private executor callbacks.
-
-#### Scenario: Every leaf has a primitive or reason
-
-- **WHEN** the `PUBLIC_LEAF_CASES` contract test runs
-- **THEN** every entry has either a non-empty `sdk_primitive` or a concrete `cli_only_reason`
-
-#### Scenario: New leaf without primitive or reason is rejected
-
-- **WHEN** a new CLI leaf is added without `sdk_primitive` or `cli_only_reason`
-- **THEN** the contract test fails
-
-#### Scenario: CLI-only reason is concrete
-
-- **WHEN** a `cli_only_reason` is inspected
-- **THEN** it names a specific transport or presentation boundary, not a general convenience statement
-
 ## MODIFIED Requirements
 
 ### Requirement: Click entry point

@@ -239,16 +239,16 @@ Selector не выбирается по recency и не выбирается п�
 
 ### Requirement: Catalog current-runtime record (schema v8 → v9)
 
-Catalog MUST хранить одну current runtime-запись на environment в таблице `environment_runtime` (schema migration v8 → v9, `CURRENT_SCHEMA_VERSION = 9`).
+Catalog MUST хранить одну current runtime-запись на environment в таблице `environment_runtime`. The first Alembic revision SHALL create this table as part of the complete current schema. Sequential `PRAGMA user_version` v8→v9 and `CURRENT_SCHEMA_VERSION = 9` SHALL NOT remain as a production migration ledger.
 
-`BackupCatalog` MUST предоставлять read-only `list_environments_with_runtimes()` returning each environment and its current runtime from one SQLite read snapshot using two SELECTs in that transaction, plus `get_environment_runtime()` and `list_environment_runtimes()` for their explicit read-only callers, and write `upsert_environment_runtime(...)` / `clear_environment_runtime(environment_id)` (только из `run_foreground`).
+`BackupCatalog` MUST предоставлять read-only `list_environments_with_runtimes()` returning each environment and its current runtime from one SQLite read snapshot using two SELECTs in that transaction, plus `get_environment_runtime()` and `list_environment_runtimes()` for their explicit read-only callers, and write `upsert_environment_runtime(...)` / `clear_environment_runtime(environment_id)` (только из `run_foreground` and the detached launch command that persists runtime identity).
 
 Collector (`EnvironmentMonitor`) reads runtime rows read-only. PID safety: collector считает process живым только при `psutil.Process(pid).create_time() == recorded_create_time` и `psutil.pid_exists(pid)`; mismatch → `runtime.state="stopped"`.
 
 #### Scenario: Migration adds runtime table
 
-- **WHEN** catalog at schema v8 is opened
-- **THEN** `environment_runtime` table is created by the applicable Alembic revision, existing environments have no runtime row
+- **WHEN** a fresh catalogue is created or a known alpha catalogue is stamped
+- **THEN** `environment_runtime` table exists, environments without a live process have no runtime row, and no `PRAGMA user_version` step runs
 
 #### Scenario: Upsert is one-row-per-environment
 
@@ -659,7 +659,7 @@ Rich SHALL NOT show `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, or detailed pr
 
 `--all` — include `removed` environments (по умолчанию скрыты).
 
-`CheckoutInventory` SHALL be built from one canonical `EnvironmentMonitor.snapshot()` per sample plus Git facts of the main checkout. The CLI path SHALL be `odcli env list` → `EnvironmentResource.checkout_inventory_command()` → monitor projection. `EnvironmentResource.checkout_inventory_command()` SHALL delegate to the monitor without duplicating snapshot logic. A separate monitor or collector SHALL NOT be added. The raw `EnvironmentMonitor.snapshot()` SHALL remain the canonical source for `odcli ps`, the Python SDK, FastAPI, and the dashboard.
+`CheckoutInventory` SHALL be built from one canonical `EnvironmentMonitor.snapshot()` per sample plus Git facts of the main checkout. A separate monitor or collector SHALL NOT be added. The raw `EnvironmentMonitor.snapshot()` SHALL remain the canonical source for `odcli ps`, the Python SDK, FastAPI, and the dashboard.
 
 #### Scenario: Default hides removed
 
@@ -751,7 +751,7 @@ Safety rules:
 - `removed` ставится только после подтверждения отсутствия всех owned artifacts;
 - final empty environment directory удаляется, SQLite rows остаются.
 
-Bulk prune, автоматическое удаление по возрасту и `--force` для грязных worktrees не входят в scope.
+Bulk prune, автоматическое удаление по возрасту и `--force` для грязных worktrees не входят в scope. A generic bulk SDK, parallel deletion, or new orchestration hierarchy SHALL NOT be added.
 
 #### Scenario: Dirty worktree blocks remove
 
@@ -787,6 +787,21 @@ Bulk prune, автоматическое удаление по возрасту 
 
 - **WHEN** `env remove` частично fails (e.g. worktree remove error)
 - **THEN** state `cleanup_failed`, повторный `remove` продолжает с оставшихся artifacts
+
+#### Scenario: Multiple UUIDs resolved independently
+
+- **WHEN** `env remove UUID1 UUID2` runs with UUIDs from different projects
+- **THEN** each target's repository and cluster context is resolved separately
+
+#### Scenario: No arguments preserves cwd semantics
+
+- **WHEN** `env remove` runs from inside an exact registered worktree
+- **THEN** it resolves exactly that environment
+
+#### Scenario: Planning preflight aborts before mutation
+
+- **WHEN** one target in a multi-target call is unknown
+- **THEN** the command aborts with no changes and a sanitized error
 
 ### Requirement: Checkout dry-run
 
@@ -1089,4 +1104,20 @@ New global environment worktrees SHALL live below the unified `~/.odcli/` root w
 #### Scenario: Create environment after migration
 - **WHEN** checkout provisions a new environment
 - **THEN** every SDK-owned global artifact is rooted below the canonical user root
+
+### Requirement: CheckoutInventory with main checkout row
+
+`EnvironmentResource` SHALL expose a `CheckoutInventory` projection that includes the main checkout of each selected project as the first typed row with `kind = main | environment`, a stable `project_id`, and a nullable `environment_id`. The main checkout SHALL NOT be modelled as a synthetic environment. The base row SHALL contain working identity and state: kind/name and project; branch, short SHA, and canonical worktree path; commits ahead of the base branch plus added and deleted lines; compact Odoo status `running | stopped | unavailable` without PID or metrics; and bound database/DB mode when applicable.
+
+`CheckoutInventory` SHALL be built from one canonical `EnvironmentMonitor.snapshot()` per sample plus Git facts of the main checkout. A separate monitor or collector SHALL NOT be added. The raw `EnvironmentMonitor.snapshot()` SHALL remain the canonical source for `odcli ps`, the Python SDK, FastAPI, and the dashboard.
+
+#### Scenario: Main checkout is the first row
+
+- **WHEN** `CheckoutInventory` is built for a project with one environment
+- **THEN** the first row has `kind=main` and no synthetic environment is created
+
+#### Scenario: Stopped checkout stays visible
+
+- **WHEN** the main checkout's Odoo is stopped
+- **THEN** the main checkout row remains visible with status `stopped` and no PID
 
