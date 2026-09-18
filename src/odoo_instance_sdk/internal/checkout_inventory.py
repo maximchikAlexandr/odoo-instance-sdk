@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from odoo_instance_sdk.models import (
     CheckoutClusterSummary,
@@ -49,6 +49,7 @@ _ENVIRONMENT_FACTS_TIMEOUT_SECONDS = 2.0
 type EnvironmentFactsProviderId = str
 
 
+@runtime_checkable
 class EnvironmentFactsProvider(Protocol):
     """One read-only environment-facts provider.
 
@@ -199,18 +200,10 @@ def _discover_providers() -> tuple[EnvironmentFactsProvider, ...]:
         except Exception:
             continue
         provider = loaded() if callable(loaded) and not isinstance(loaded, type) else loaded
-        if not _is_valid_provider(provider):
+        if not isinstance(provider, EnvironmentFactsProvider):
             continue
-        discovered.append(cast("EnvironmentFactsProvider", provider))
+        discovered.append(provider)
     return tuple(discovered)
-
-
-def _is_valid_provider(candidate: object) -> bool:
-    return (
-        hasattr(candidate, "provider_id")
-        and isinstance(getattr(candidate, "provider_id", None), str)
-        and callable(getattr(candidate, "collect", None))
-    )
 
 
 def _collect_facts(

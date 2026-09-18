@@ -44,12 +44,14 @@ from odoo_instance_sdk.models import (
     BackupEvent,
     BackupEventType,
     BackupFormat,
+    BackupInspectResult,
     BackupState,
     BackupValidationStatus,
 )
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.resources.backup import BackupResource
     from odoo_instance_sdk.storage.backup_catalog import (
         BackupCatalog,
@@ -414,19 +416,24 @@ def backup_show(backup_id: str, output_format: str | None, json_output: bool) ->
     catalog: BackupCatalog | None = None
     try:
         catalog = _catalog()
-        projection = catalog._resolve_backup_projection(backup_id)
-        emit(
-            success_document(
-                command="backup.show", result=model_to_dict(_backup_payload(projection))
+        _client, resource = _backup_resource(catalog)
+        status, _result = run_or_preview(
+            lambda: resource.inspect_command(backup_id),
+            command_name="backup.show",
+            mode=mode,
+            dry_run=False,
+            result=cast(
+                "Callable[[BackupInspectResult | None], dict[str, JsonValue]]", model_to_dict
             ),
-            mode,
             rich=_rich_detail,
         )
     except Exception as exc:
         fail(mode, "backup.show", exc, dry_run=False)
+        return
     finally:
         if catalog is not None:
             catalog.close()
+    raise click.exceptions.Exit(status)
 
 
 @backup_group.command("validate", help="Validate one retained backup by its complete UUID.")
