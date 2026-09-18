@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 def _invoke(env_client: OdooClient, args: list[str]) -> Result:
     with (
         patch("odoo_instance_sdk.commands.context.OdooClient", return_value=env_client),
-        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=env_client),
+        patch("odoo_instance_sdk.client.OdooClient", return_value=env_client),
     ):
         return CliRunner().invoke(cli, args, catch_exceptions=False)
 

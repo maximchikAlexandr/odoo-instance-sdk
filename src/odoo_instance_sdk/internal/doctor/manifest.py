@@ -31,7 +31,7 @@ from odoo_instance_sdk.internal.generated_config import _rebase_path
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.models import DevelopmentEnvironment, PostgresClusterState, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.resources.environment import (
+from odoo_instance_sdk.resources.environment.checkout_planning import (
     _APPLIED_CONFIG_BINDINGS,
     _configured_addons,
     _dependency_evidence,
@@ -839,7 +839,7 @@ def _current_drift_components(
         managed_config=artifact_config,
         addons=artifact_addons,
     )
-    from odoo_instance_sdk.internal.doctor.manifest_2 import _live_git_component
+    from odoo_instance_sdk.internal.doctor.manifest_drift import _live_git_component
 
     components: dict[str, JsonValue] = {
         "python": python_component,

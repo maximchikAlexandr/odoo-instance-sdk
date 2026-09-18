@@ -574,7 +574,10 @@ def test_ensure_running_compose_invalid_config_raises(
     cluster = PostgresCluster.from_project(root, compose_runner=fake)
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: 1000.0)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.restore.time.monotonic",
+        lambda: 1000.0,
+    )
     with pytest.raises(PostgresComposeInvalidError):
         cluster.ensure_running(timeout=1.0)
     assert not cluster._compose_file().is_file()
@@ -605,7 +608,10 @@ def test_ensure_running_validates_config_before_image_resolution(
     fake.calls.clear()
     fake.reject_image = True
     monkeypatch.setattr("odoo_instance_sdk.resources.postgres.docker_available", lambda: True)
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: 1000.0)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.restore.time.monotonic",
+        lambda: 1000.0,
+    )
 
     with pytest.raises(PostgresComposeInvalidError):
         cluster.ensure_running(timeout=1.0)
@@ -766,7 +772,10 @@ def test_lifecycle_command_budgets_decrease_with_controlled_monotonic_clock(
     cluster.approve_image("docker.io/library/postgres@sha256:" + "a" * 64)
     fake.timeouts.clear()
     tick = iter(0.01 * number for number in range(1, 200))
-    monkeypatch.setattr("odoo_instance_sdk.resources.postgres.time.monotonic", lambda: next(tick))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.backup_restore_parts.restore.time.monotonic",
+        lambda: next(tick),
+    )
     cluster.ensure_running(timeout=2.0)
     budgets = [timeout for timeout in fake.timeouts if timeout is not None]
     assert budgets == sorted(budgets, reverse=True)

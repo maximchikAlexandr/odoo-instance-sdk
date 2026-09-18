@@ -112,7 +112,7 @@ def _seed_environment(
 @pytest.fixture(autouse=True)
 def _deterministic_port(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.environment.find_free_port",
+        "odoo_instance_sdk.internal.port_allocation.find_free_port",
         lambda _kind, _catalog, *, requested=None, **_kwargs: requested or 18071,
     )
 

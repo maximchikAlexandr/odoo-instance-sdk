@@ -16,14 +16,12 @@ from odoo_instance_sdk.internal.git_worktree import (
 from odoo_instance_sdk.internal.git_worktree import (
     worktree_is_dirty,
 )
-from odoo_instance_sdk.resources.environment import (
-    _git_ticket,
-)
+from odoo_instance_sdk.resources.environment.checkout_planning import _git_ticket
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
 
-from odoo_instance_sdk.internal.doctor.manifest_1 import _DriftComponent
+from odoo_instance_sdk.internal.doctor.manifest import _DriftComponent
 
 _REMEDIATION = {
     "python": "run odcli env sync",

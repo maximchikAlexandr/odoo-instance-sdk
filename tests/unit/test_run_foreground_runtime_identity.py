@@ -210,7 +210,9 @@ def test_persist_called_with_expected_fields(
         command_prefix=(sys.executable, "-c", "import sys; sys.exit(0)"),
         http_port=http_port,
     )
-    monkeypatch.setattr("odoo_instance_sdk.resources.instance._process_create_time", lambda _: 1.0)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.identity._process_create_time", lambda _: 1.0
+    )
 
     exit_code = inst.run_foreground(args=("--stop-after-init",))
 
@@ -320,12 +322,15 @@ def test_foreground_keyboard_interrupt_cleans_up_the_owned_process_group(
     executor = RecordingExecutor(handles={"instance.foreground": handle})
 
     with (
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
+            return_value=executor,
+        ),
         patch(
             "odoo_instance_sdk.internal.server.wait_foreground_process",
             side_effect=KeyboardInterrupt,
         ),
-        patch("odoo_instance_sdk.resources.instance.terminate") as terminate,
+        patch("odoo_instance_sdk.resources.instance.identity.terminate") as terminate,
         pytest.raises(KeyboardInterrupt),
     ):
         inst.run_foreground(args=("--dev=reload",))
@@ -388,12 +393,16 @@ def test_foreground_artifact_lock_wraps_secret_write_spawn_wait_and_cleanup(
 
     with (
         patch.object(OdooInstance, "_artifact_lock", artifact_lock),
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
         patch(
-            "odoo_instance_sdk.resources.instance._write_secret_config", side_effect=write_secret
+            "odoo_instance_sdk.resources.instance.identity.SubprocessExecutor",
+            return_value=executor,
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.cleanup_secret_config",
+            "odoo_instance_sdk.resources.instance.identity._write_secret_config",
+            side_effect=write_secret,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.cleanup_secret_config",
             side_effect=cleanup_secret,
         ),
         patch(
@@ -444,7 +453,7 @@ def test_core_psutil_persists_exact_identity(
     )
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.instance._process_create_time", lambda _: 123.0
+        "odoo_instance_sdk.resources.instance.identity._process_create_time", lambda _: 123.0
     )
     assert inst.run_foreground() == 0
     assert fake.upsert_calls[0][1]["create_time"] == 123.0
@@ -546,7 +555,7 @@ def test_persist_failure_preserves_original_error_when_cleanup_fails(
     )
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.terminate",
+            "odoo_instance_sdk.resources.instance.planning.terminate",
             side_effect=OSError("cleanup failed"),
         ),
         pytest.raises(RuntimeError, match="catalog down"),

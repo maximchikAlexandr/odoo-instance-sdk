@@ -408,7 +408,7 @@ def translations_export(
     try:
         runtime_context = cli_context.ready_instance(ctx)
         status, _results = run_or_preview(
-            lambda: _translation_command_builder()(
+            lambda: export_translations_command(
                 runtime_context.instance,
                 tuple(modules),
                 tuple(languages),

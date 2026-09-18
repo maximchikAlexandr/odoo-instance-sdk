@@ -183,8 +183,13 @@ def test_detached_launch_persists_identity_and_returns_promptly(
     )
     executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
     with (
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
-        patch("odoo_instance_sdk.resources.instance._process_create_time", return_value=1.0),
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+        ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
         result = inst.run_detached()
@@ -218,8 +223,13 @@ def test_detached_immediate_exit_returns_error_and_no_stale_record(
     )
     executor = RecordingExecutor(handles={"instance.detached": _dead_handle()})
     with (
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
-        patch("odoo_instance_sdk.resources.instance._process_create_time", return_value=1.0),
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+        ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
         pytest.raises(InstanceConfigurationError, match="exited immediately"),
     ):
@@ -275,7 +285,10 @@ def test_detached_dry_run_does_not_spawn(env_id: str, http_port: int, tmp_path: 
     )
     executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
     with (
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
         command = inst.run_detached_command()
@@ -358,8 +371,13 @@ def test_detached_stop_targets_persisted_runtime(
     )
     executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
     with (
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
-        patch("odoo_instance_sdk.resources.instance._process_create_time", return_value=1.0),
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+        ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
         inst.run_detached()
@@ -404,8 +422,13 @@ def test_cli_run_detach_returns_typed_result(env_id: str, http_port: int, tmp_pa
     )
     executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
     with (
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
-        patch("odoo_instance_sdk.resources.instance._process_create_time", return_value=1.0),
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity._process_create_time", return_value=1.0
+        ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
         result = _cli_invoke(inst, ["run", "-d", "--format", "json"])
@@ -437,7 +460,10 @@ def test_cli_run_detach_dry_run_emits_plan_without_spawning(
     )
     executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
     with (
-        patch("odoo_instance_sdk.resources.instance.SubprocessExecutor", return_value=executor),
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
     ):
         result = _cli_invoke(inst, ["run", "-d", "--dry-run", "--format", "json"])

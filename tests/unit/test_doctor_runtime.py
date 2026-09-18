@@ -355,7 +355,24 @@ def test_cli_doctor_uses_effective_owner_from_ready_instance(
 ) -> None:
     ready_calls: list[object] = []
     doctor_calls: list[dict[str, object]] = []
-    resolved = SimpleNamespace(client=SimpleNamespace(), project_root=tmp_path)
+    if owner_kind == "environment":
+        output_provenance = {
+            "project_source": "worktree" if selection_source == "worktree" else "null",
+            "environment_source": "cwd" if selection_source == "worktree" else "explicit",
+        }
+    else:
+        output_provenance = {
+            "project_source": selection_source,
+            "environment_source": "null",
+        }
+    resolved = SimpleNamespace(
+        client=SimpleNamespace(),
+        project_root=tmp_path,
+        provenance=selection_source,
+        source=SimpleNamespace(),
+        materialization_error=None,
+        output_provenance=output_provenance,
+    )
 
     def ready_instance(context: object) -> object:
         ready_calls.append(context)
@@ -389,7 +406,7 @@ def test_cli_doctor_uses_effective_owner_from_ready_instance(
         )
 
     monkeypatch.setattr(cli_module.cli_context, "_ready_instance_for_doctor", ready_instance)
-    monkeypatch.setattr(cli_module, "_run_doctor", lambda: run_selected)
+    monkeypatch.setattr("odoo_instance_sdk.internal.doctor.run_doctor", run_selected)
 
     result = CliRunner().invoke(cli_module.cli, [*args, "--format", "json"])
 

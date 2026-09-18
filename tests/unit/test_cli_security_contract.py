@@ -172,7 +172,7 @@ def test_env_list_is_read_only_through_public_resources() -> None:
         schema_version=3, generated_at=datetime.now(UTC), projects=(), environments=()
     )
     with (
-        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.client.OdooClient", return_value=client),
         patch(
             "odoo_instance_sdk.commands.env.EnvironmentMonitor.snapshot",
             return_value=empty_snapshot,

@@ -1,12 +1,15 @@
-"""Split package; public imports preserved via re-exports."""
+"""Database replacement package."""
 
 from __future__ import annotations
 
-import importlib
+from odoo_instance_sdk.internal.dbreplace.planning import (
+    CopyReplacementFailureContext,
+    _rename,
+)
+from odoo_instance_sdk.internal.dbreplace.validation import build_copy_replacement_command
 
-for _module_name in ("planning", "validation"):
-    _module = importlib.import_module(f"odoo_instance_sdk.internal.dbreplace.{_module_name}")
-    for _key, _value in _module.__dict__.items():
-        if _key.startswith("__"):
-            continue
-        globals()[_key] = _value
+__all__ = [
+    "CopyReplacementFailureContext",
+    "_rename",
+    "build_copy_replacement_command",
+]

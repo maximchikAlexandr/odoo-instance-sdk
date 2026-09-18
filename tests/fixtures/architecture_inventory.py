@@ -18,15 +18,15 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py", 484),
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py", 485),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 423),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 424),
         ("src/odoo_instance_sdk/commands/backup.py", 342),
         ("src/odoo_instance_sdk/commands/output.py", 236),
         ("src/odoo_instance_sdk/commands/output.py", 381),
         ("src/odoo_instance_sdk/commands/output.py", 383),
         ("src/odoo_instance_sdk/commands/output.py", 390),
         ("src/odoo_instance_sdk/commands/output.py", 392),
-        ("src/odoo_instance_sdk/resources/instance/identity.py", 413),
+        ("src/odoo_instance_sdk/resources/instance/identity.py", 457),
     }
 )
 
@@ -38,17 +38,17 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 390): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/commands/output.py", 392): "shared diagnostic boundary",
     (
-        "src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py",
-        484,
+        "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
+        423,
     ): "documented logs JSONL transport",
     (
-        "src/odoo_instance_sdk/commands/cli_parts/callbacks_a.py",
-        485,
+        "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
+        424,
     ): "documented logs JSONL transport",
     ("src/odoo_instance_sdk/commands/backup.py", 342): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
-        413,
+        457,
     ): "lifecycle cleanup diagnostic transport",
 }
 
@@ -56,14 +56,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # Keep only deliberate, line-specific exceptions in this checked inventory so
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
-    "src/odoo_instance_sdk/cli.py": frozenset({58}),
-    "src/odoo_instance_sdk/commands/cli_parts/__init__.py": frozenset({9}),
-    "src/odoo_instance_sdk/commands/env/__init__.py": frozenset({88}),
-    "src/odoo_instance_sdk/commands/test.py": frozenset({78}),
-    "src/odoo_instance_sdk/internal/pg/__init__.py": frozenset({12}),
-    "src/odoo_instance_sdk/resources/monitor/__init__.py": frozenset({60}),
-}
+EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
 
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(

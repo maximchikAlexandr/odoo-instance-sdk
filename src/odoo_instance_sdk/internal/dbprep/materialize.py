@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import contextlib
 import types
 import uuid
@@ -18,88 +17,97 @@ from odoo_instance_sdk.exceptions import (
     MasterPasswordRequiredError,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     DatabasePreparationFailureContext as DatabasePreparationFailureContext,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     RestorePreflight as RestorePreflight,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
+    SelectedBackupRestorePayload as SelectedBackupRestorePayload,
+)
+from odoo_instance_sdk.internal.dbprep.source import (
+    T as T,
+)
+from odoo_instance_sdk.internal.dbprep.source import (
     _CatalogueRestoreSource as _CatalogueRestoreSource,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _CoalescedRestore as _CoalescedRestore,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _consume_action_if_planned as _consume_action_if_planned,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _load_project as _load_project,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _planned_project_identity as _planned_project_identity,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _reload_project as _reload_project,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _remote_password as _remote_password,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _RemoteRestoreSource as _RemoteRestoreSource,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _resolve_source_config as _resolve_source_config,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
+    _RestoreSource as _RestoreSource,
+)
+from odoo_instance_sdk.internal.dbprep.source import (
     _skip_preparation_branch as _skip_preparation_branch,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _target_config_path as _target_config_path,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     _wait_for_preparation_lock as _wait_for_preparation_lock,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     build_selected_backup_restore_steps as build_selected_backup_restore_steps,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     canonical_project_identity as canonical_project_identity,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     classify_freshness as classify_freshness,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     generate_target_database as generate_target_database,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     preparation_lock as preparation_lock,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     reserve_target_database as reserve_target_database,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     resolve_runtime_binding as resolve_runtime_binding,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     resolve_test_source as resolve_test_source,
 )
-from odoo_instance_sdk.internal.dbprep.source_2 import (
+from odoo_instance_sdk.internal.dbprep.source_binding import (
     _annotate_retained_failure as _annotate_retained_failure,
 )
-from odoo_instance_sdk.internal.dbprep.source_2 import (
+from odoo_instance_sdk.internal.dbprep.source_binding import (
     _catalogue_backup_preflight as _catalogue_backup_preflight,
 )
-from odoo_instance_sdk.internal.dbprep.source_2 import (
+from odoo_instance_sdk.internal.dbprep.source_binding import (
     _coerce_restore_source as _coerce_restore_source,
 )
-from odoo_instance_sdk.internal.dbprep.source_2 import (
+from odoo_instance_sdk.internal.dbprep.source_binding import (
     _latest_default_backup as _latest_default_backup,
 )
-from odoo_instance_sdk.internal.dbprep.source_2 import (
+from odoo_instance_sdk.internal.dbprep.source_binding import (
     _manifest_after_preparation as _manifest_after_preparation,
 )
-from odoo_instance_sdk.internal.dbprep.source_2 import (
+from odoo_instance_sdk.internal.dbprep.source_binding import (
     build_target_instance as build_target_instance,
 )
 from odoo_instance_sdk.internal.locks import (
@@ -510,7 +518,7 @@ def preflight_restore(
     options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
     restore_source: _RestoreSource | uuid.UUID | str | None = None,
 ) -> RestorePreflight:
-    with _dbprep_shim()._restore_preflight(
+    with _restore_preflight(
         client, project, options=options, wait_for_lock=False, restore_source=restore_source
     ) as preflight:
         return preflight
@@ -684,7 +692,7 @@ def _preparation_process_steps(
         )
 
     if options.reset_admin_password:
-        from odoo_instance_sdk.resources.instance import _build_shell_script_step
+        from odoo_instance_sdk.resources.instance.auxiliary_restore import _build_shell_script_step
 
         runtime = resolve_runtime_binding(initial, root)
         start_config = StartConfig.from_odoo_config(source_config)

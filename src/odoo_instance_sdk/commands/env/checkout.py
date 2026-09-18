@@ -19,13 +19,10 @@ from rich.console import Console, Group
 from rich.table import Table
 from rich.text import Text
 
+from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
-)
-from odoo_instance_sdk.commands.env.deps import (
-    _client_class,
-    _client_config_class,
 )
 from odoo_instance_sdk.commands.env.display import (
     _ENV_LIST_COMPACT_COLUMNS,
@@ -38,6 +35,7 @@ from odoo_instance_sdk.commands.env.display import (
     _provider_columns,
     _rich_checkout_compact_rows,
 )
+from odoo_instance_sdk.commands.monitor_context import resolve_monitor_project_id
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
@@ -54,10 +52,10 @@ from odoo_instance_sdk.commands.output import (
     sanitize_terminal_text,
     success_document,
 )
-from odoo_instance_sdk.exceptions import BackupCatalogError, ProjectContextError, StalePlanError
+from odoo_instance_sdk.config import OdooClientConfig
+from odoo_instance_sdk.exceptions import BackupCatalogError, StalePlanError
 from odoo_instance_sdk.internal.locks import exclusive_lock, provisioning_lock_path
 from odoo_instance_sdk.internal.paths import get_catalog_path
-from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models.backup import (
     DevelopmentEnvironment,
     EnvironmentCheckoutPlan,
@@ -74,12 +72,15 @@ from odoo_instance_sdk.models.monitor import (
     Snapshot,
 )
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.environment import (
+    EnvironmentCheckoutOptions,
+    EnvironmentResource,
+)
+from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command, JsonValue
-    from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
-    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor, SnapshotSelection
+    from odoo_instance_sdk.resources.monitor import SnapshotSelection
 
 
 def select_snapshot_environment(
@@ -401,7 +402,7 @@ def env_checkout(
         )
 
         project_path = _env_commands.resolve_project_path(cli_ctx)
-        client = _client_class()(config=_client_config_class()(executable="odoo"))
+        client = OdooClient(config=OdooClientConfig(executable="odoo"))
         options = EnvironmentCheckoutOptions(
             base_ref=base_ref,
             config_path=Path(config_path) if config_path else None,
@@ -533,10 +534,9 @@ def env_list(
     output_mode = resolve_output_mode(output_format, json_output)
     _validate_watch_options(output_mode, watch=watch, interval=interval)
     try:
-        import odoo_instance_sdk.commands.env as _env_commands
-
-        project_id = _resolve_monitor_project_id(ctx, all_projects)
-        monitor = _env_commands._monitor_class()()
+        project_id = resolve_monitor_project_id(ctx, all_projects)
+        client = OdooClient(config=OdooClientConfig(executable="odoo"))
+        environments = client.environments
     except Exception as e:
         fail(output_mode, "env.list", str(e), dry_run=False)
 
@@ -548,7 +548,7 @@ def env_list(
     if watch:
         try:
             _run_env_list_live(
-                monitor,
+                environments,
                 project_id=project_id,
                 include_removed=include_removed,
                 interval=interval,
@@ -557,7 +557,7 @@ def env_list(
             raise click.exceptions.Exit(130) from exc
         return
     try:
-        inventory = monitor.checkout_inventory(
+        inventory = environments.checkout_inventory(
             project_id=project_id,
             include_removed=include_removed if not machine_output else False,
         )
@@ -604,7 +604,7 @@ def env_show(
     try:
         import odoo_instance_sdk.commands.env as _env_commands
 
-        monitor = _env_commands._monitor_class()()
+        monitor = EnvironmentMonitor()
         snapshot = monitor.snapshot()
         paths: dict[str, str] = (
             _env_commands._catalog_worktree_paths(monitor, include_removed=True)
@@ -688,7 +688,7 @@ def _validate_watch_options(output_mode: OutputMode, *, watch: bool, interval: f
 
 
 def _run_env_list_live(
-    monitor: EnvironmentMonitor,
+    environments: EnvironmentResource,
     *,
     project_id: str | None,
     include_removed: bool,
@@ -701,7 +701,7 @@ def _run_env_list_live(
     with _env_commands.Live(None, transient=True) as live:
         while True:
             try:
-                inventory = monitor.checkout_inventory(
+                inventory = environments.checkout_inventory(
                     project_id=project_id,
                     include_removed=include_removed,
                 )
@@ -722,23 +722,6 @@ def _run_env_list_live(
                     refresh=True,
                 )
             time.sleep(interval)
-
-
-def _resolve_monitor_project_id(ctx: CliContext, all_projects: bool) -> str | None:
-    if all_projects:
-        return None
-    # Outside a project, ``env list`` is the cross-project listing; this keeps
-    # the command useful from a neutral working directory.
-    import odoo_instance_sdk.commands.env as _env_commands
-
-    try:
-        project_path = _env_commands.resolve_project_path(ctx)
-    except ProjectContextError:
-        return None
-
-    repo_root = _env_commands.rev_parse_toplevel(project_path)
-    git_common = _env_commands.rev_parse_git_common_dir(repo_root)
-    return f"project_{repo_key(repo_root, git_common)}"
 
 
 def _catalog_worktree_paths(
@@ -845,7 +828,7 @@ def env_path(
 
     import odoo_instance_sdk.commands.env as _env_commands
 
-    client = _client_class()(config=_client_config_class()(executable="odoo"))
+    client = OdooClient(config=OdooClientConfig(executable="odoo"))
     try:
         env_obj = _env_commands.resolve_environment(client, environment, cwd=Path.cwd())
         worktree_path = _validated_env_path(env_obj)

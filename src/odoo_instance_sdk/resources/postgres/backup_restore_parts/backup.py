@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import json
 import os
 import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
 import odoo_instance_sdk.resources.postgres as _postgres_shim
 from odoo_instance_sdk.exceptions import (
@@ -45,7 +44,9 @@ from odoo_instance_sdk.resources.postgres.lifecycle import (
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, PostgresClusterClaim
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command, PlanObservation
+    from collections.abc import Callable, Sequence
+
+    from odoo_instance_sdk.execution import Command, ExecutionPlan, PlanObservation
     from odoo_instance_sdk.internal.pg.server import ServerSummary
     from odoo_instance_sdk.internal.proc import (
         DeadlineProcessExecutor,
@@ -55,9 +56,58 @@ if TYPE_CHECKING:
         RunContext,
     )
     from odoo_instance_sdk.models import ServerUnavailabilityReason
+    from odoo_instance_sdk.resources.postgres.backup_restore_parts import PostgresCluster
+
+T = TypeVar("T")
 
 
 class _BackupMixin:
+    if TYPE_CHECKING:
+        _repository_root: Path
+        _project_id: str
+        _mode: Literal["external", "compose"]
+        _endpoint_host: str
+        _endpoint_port: int
+        _image: str | None
+        _user: str | None
+        _compose_runner: ComposeRunner
+
+        def __init__(
+            self,
+            *,
+            _repository_root: Path,
+            _project_id: str,
+            _mode: Literal["external", "compose"],
+            _endpoint_host: str,
+            _endpoint_port: int,
+            _image: str | None = None,
+            _user: str | None = None,
+            _compose_runner: ComposeRunner = ...,
+        ) -> None: ...
+
+        def _ensure_running_compose(
+            self,
+            timeout: float,
+            *,
+            temporary_path: Path | None = None,
+            step_ids: Mapping[str, str] | None = None,
+        ) -> None: ...
+        def _make_command(
+            self,
+            plan: ExecutionPlan,
+            callback: Callable[[RunContext[T]], T],
+            steps: Sequence[PreparedStep | PreparedAction],
+            *,
+            executor: ProcessExecutor,
+        ) -> Command[T]: ...
+        def _account_legacy_steps(
+            self, context: RunContext[T], steps: Sequence[PreparedStep | PreparedAction]
+        ) -> None: ...
+        @staticmethod
+        def _account_optional_steps(
+            context: RunContext[T], steps: Sequence[PreparedStep | PreparedAction]
+        ) -> None: ...
+
     @classmethod
     def from_project(
         cls,
@@ -96,24 +146,30 @@ class _BackupMixin:
             port = postgres.port
             image = postgres.image
             user = postgres.user or "odoo"
-            return cls(
-                _repository_root=repository_root,
-                _project_id=project_id,
-                _mode=mode,
-                _endpoint_host=host,
-                _endpoint_port=port,
-                _image=image,
-                _user=user,
-                _compose_runner=compose_runner or SubprocessComposeRunner(),
+            return cast(
+                "PostgresCluster",
+                cls(
+                    _repository_root=repository_root,
+                    _project_id=project_id,
+                    _mode=mode,
+                    _endpoint_host=host,
+                    _endpoint_port=port,
+                    _image=image,
+                    _user=user,
+                    _compose_runner=compose_runner or SubprocessComposeRunner(),
+                ),
             )
         host, port = _resolve_endpoint_external(cfg.source_config)
-        return cls(
-            _repository_root=repository_root,
-            _project_id=project_id,
-            _mode="external",
-            _endpoint_host=host,
-            _endpoint_port=port,
-            _compose_runner=compose_runner or SubprocessComposeRunner(),
+        return cast(
+            "PostgresCluster",
+            cls(
+                _repository_root=repository_root,
+                _project_id=project_id,
+                _mode="external",
+                _endpoint_host=host,
+                _endpoint_port=port,
+                _compose_runner=compose_runner or SubprocessComposeRunner(),
+            ),
         )
 
     @property

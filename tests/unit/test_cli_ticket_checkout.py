@@ -439,7 +439,7 @@ def test_cli_ticket_checkout_emits_one_shared_envelope_for_both_spellings(
         argv.extend(["--format", mode])
 
     with (
-        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.client.OdooClient", return_value=client),
         patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
         patch(
             "odoo_instance_sdk.commands.env._build_ticket_checkout_command",

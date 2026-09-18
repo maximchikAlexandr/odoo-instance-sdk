@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import click
@@ -24,7 +23,6 @@ from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
-    action_command,
     fail,
     model_to_dict,
     output_options,
@@ -47,107 +45,32 @@ from odoo_instance_sdk.commands.resource import (
 from odoo_instance_sdk.commands.resource import (
     resource_group,
 )
-from odoo_instance_sdk.commands.test import (
-    resolve_module_test_selection,  # noqa: F401 - extracted module callback seam
-    test_command,
-)
+from odoo_instance_sdk.commands.test import test_command
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     VscodeImportError,
 )
-from odoo_instance_sdk.internal.database_preparation import _planned_project_identity
-from odoo_instance_sdk.internal.generated_config import (
-    generate_config,
-    project_generated_config_path,
-    render_config,
-)
+from odoo_instance_sdk.internal.generated_config import project_generated_config_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
-from odoo_instance_sdk.internal.project_manifest import manifest_path, write_manifest
-from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
+from odoo_instance_sdk.internal.project_init import (
+    manifest_dict as _manifest_dict,
+)
+from odoo_instance_sdk.internal.project_init import (
+    validate_generated_config_target as _validate_generated_config_target,
+)
+from odoo_instance_sdk.internal.project_manifest import manifest_path
 from odoo_instance_sdk.internal.server import parse_payload
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
 from odoo_instance_sdk.models import (
     CommandResult,
-    PostgresClusterState,
     StartConfig,
 )
 from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
 
 if TYPE_CHECKING:
-    from collections.abc import Callable as TypeCallback
-
-    from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.commands.context import ResolvedContext
     from odoo_instance_sdk.execution import Command, JsonValue
-    from odoo_instance_sdk.internal.doctor import DoctorReport
-    from odoo_instance_sdk.models import ClusterSnapshot
     from odoo_instance_sdk.resources.postgres import PostgresCluster
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-
-    type CliLazyExport = (
-        type[OdooClient | PostgresCluster | DoctorReport]
-        | TypeCallback[[OdooClient, Path | None], DoctorReport]
-        | TypeCallback[[PostgresCluster, PostgresClusterState], ClusterSnapshot]
-        | TypeCallback[[ClusterSnapshot], int]
-        | TypeCallback[[ClusterSnapshot], None]
-    )
-
-    class _DoctorRunner(Protocol):
-        def __call__(
-            self,
-            client: OdooClient,
-            project_path: Path | None,
-            *,
-            resolved_context: ResolvedContext | None = None,
-        ) -> DoctorReport: ...
-
-
-def __getattr__(name: str) -> CliLazyExport:
-    """Resolve operation-only imports when a command callback actually needs them."""
-    if name == "OdooClient":
-        from odoo_instance_sdk.client import OdooClient
-
-        globals()[name] = OdooClient
-        return OdooClient
-    if name in {"DoctorReport", "run_doctor"}:
-        from odoo_instance_sdk.internal import doctor
-
-        value = getattr(doctor, name)
-        globals()[name] = value
-        return cast("CliLazyExport", value)
-    if name in {
-        "cluster_snapshot",
-        "emit_postgres_result",
-        "print_status",
-        "run_postgres_command",
-        "status_exit_code",
-    }:
-        from odoo_instance_sdk.internal import postgres_cli
-
-        value = getattr(postgres_cli, name)
-        globals()[name] = value
-        return cast("CliLazyExport", value)
-    if name == "PostgresCluster":
-        from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-        globals()[name] = PostgresCluster
-        return PostgresCluster
-    if name in {
-        "export_translations_command",
-        "list_modules_command",
-        "update_modules_command",
-    }:
-        from odoo_instance_sdk.internal import automation
-
-        value = getattr(automation, name)
-        globals()[name] = value
-        return cast("CliLazyExport", value)
-    if name == "module_tests_command":
-        from odoo_instance_sdk.resources.testing import module_tests_command
-
-        globals()[name] = module_tests_command
-        return cast("CliLazyExport", module_tests_command)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class _ShellCommandFailure(RuntimeError):
@@ -338,17 +261,6 @@ def _rich_shell_projection(document: OutputDocument) -> str:
     return "\n".join(lines)
 
 
-def _client_class() -> type[OdooClient]:
-    return cast("type[OdooClient]", getattr(sys.modules[__name__], "OdooClient"))
-
-
-def _run_doctor() -> _DoctorRunner:
-    return cast(
-        "_DoctorRunner",
-        getattr(sys.modules[__name__], "run_doctor"),
-    )
-
-
 def _postgres_cluster(ctx: CliContext) -> PostgresCluster:
     """Compatibility wrapper for callers of the pre-module PostgreSQL seam."""
     from odoo_instance_sdk.commands.pg import _postgres_cluster as resolve_cluster
@@ -424,9 +336,9 @@ _original_get_command = cli.get_command
 def _ensure_callbacks_loaded() -> None:
     if _callbacks_loaded:
         return
-    import odoo_instance_sdk.commands.cli_parts.callbacks_a as _callbacks_a
+    import odoo_instance_sdk.commands.cli_parts.callbacks as _callbacks
 
-    del _callbacks_a
+    del _callbacks
     globals()["_callbacks_loaded"] = True
 
 
@@ -479,9 +391,8 @@ cli.add_command(_LazyGitGroup(), name="git")
 
 
 def _cli_catalog_path(*, ensure_exists: bool = True) -> Path:
-    import odoo_instance_sdk.cli as _cli_shim
+    from odoo_instance_sdk.internal.paths import get_catalog_path
 
-    get_catalog_path = cast("Callable[..., Path]", _cli_shim.get_catalog_path)
     return get_catalog_path(ensure_exists=ensure_exists)
 
 
@@ -617,7 +528,7 @@ def init(
             return
         _merge_vscode(option_state, vscode_cfg, provenance)
 
-    from odoo_instance_sdk.commands.cli_parts.callbacks_a import _resolve_odoo_bin
+    from odoo_instance_sdk.commands.cli_parts.callbacks import _resolve_odoo_bin
 
     _resolve_odoo_bin(option_state, no_input, output_mode, dry_run, provenance)
 
@@ -655,24 +566,18 @@ def init(
         except InstanceConfigurationError as exc:
             fail(output_mode, "init", str(exc), dry_run=dry_run)
 
-    from odoo_instance_sdk.commands.cli_parts.callbacks_a import (
-        _handle_existing_manifest,
-        _manifest_dict,
-    )
+    from odoo_instance_sdk.commands.cli_parts.callbacks import _handle_existing_manifest
 
     existing = manifest_path(resolved_project)
     if existing.is_file() and _handle_existing_manifest(
         existing, resolved_project, config, no_input, yes, output_mode, dry_run=dry_run
     ):
         return
+    from odoo_instance_sdk.project_init import init_project_command
+
     status, _ = run_or_preview(
-        lambda: action_command(
-            "init",
-            lambda: _write_initialized_project(
-                resolved_project, config, postgres_allocated=postgres_allocated
-            ),
-            description="Write project manifest",
-            mutating=True,
+        lambda: init_project_command(
+            resolved_project, config, postgres_allocated=postgres_allocated
         ),
         command_name="init",
         mode=output_mode,
@@ -690,145 +595,6 @@ def init(
         ),
     )
     sys.exit(status)
-
-
-def _write_initialized_project(
-    project_path: Path, config: ProjectConfig, *, postgres_allocated: bool
-) -> dict[str, JsonValue]:
-    """Write init artifacts, then register the canonical project transactionally."""
-    from odoo_instance_sdk.commands.cli_parts.callbacks_a import _manifest_dict
-
-    write_manifest(project_path, config)
-    if config.postgres is not None and config.postgres.mode == "compose":
-        _write_project_generated_config(project_path, config)
-    _register_initialized_project(project_path)
-    return _manifest_dict(config, postgres_allocated=postgres_allocated)
-
-
-def _write_project_generated_config(project_path: Path, config: ProjectConfig) -> None:
-    """Bind a Compose project config to its existing private cluster secret."""
-    root = project_path.resolve()
-    source = config.source_config
-    source_path = (
-        (root / source).resolve() if source is not None and not source.is_absolute() else source
-    )
-    if source_path is None:
-        candidate = root / "odoo.conf"
-        source_path = candidate if candidate.is_file() else None
-    elif not source_path.is_file():
-        raise InstanceConfigurationError("local source config is missing")
-
-    from odoo_instance_sdk.internal.postgres_compose import ensure_password_file
-    from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-    cluster = PostgresCluster.from_project(root)
-    password = ensure_password_file(cluster.password_file)
-    source_start = (
-        StartConfig.from_odoo_config(source_path) if source_path is not None else StartConfig()
-    )
-    postgres = config.postgres
-    assert postgres is not None
-    generate_config(
-        source_path,
-        project_generated_config_path(root),
-        repo_root=root,
-        worktree=root,
-        http_interface=source_start.http_interface,
-        http_port=resolve_project_http_port(config.preferred_http_port, source_start.http_port),
-        db_name=config.default_source_database or source_start.db_name or "",
-        db_host=cluster.endpoint_host,
-        db_port=cluster.endpoint_port,
-        db_user=postgres.user or "odoo",
-        db_password=password,
-    )
-
-
-def _validate_generated_config_target(path: Path) -> None:
-    """Reject unsafe targets before any generated-config or secret write."""
-    try:
-        target = path.lstat()
-    except FileNotFoundError:
-        return
-    if path.is_symlink() or not path.is_file():
-        raise InstanceConfigurationError(
-            f"generated config target must be a regular file, not a symlink or directory: {path}"
-        )
-    if target.st_uid != os.getuid():
-        raise InstanceConfigurationError(
-            f"generated config is not owned by the current user: {path}"
-        )
-    from odoo_instance_sdk.internal.git_worktree import GitError, is_tracked_path
-
-    try:
-        if is_tracked_path(path):
-            raise InstanceConfigurationError(
-                "project-owned runtime config is tracked; refusing secret write: .odcli/odoo.conf"
-            )
-    except GitError as exc:
-        raise InstanceConfigurationError(
-            "unable to verify project-owned runtime config tracking; refusing secret write"
-        ) from exc
-
-
-def _generated_config_needs_repair(project_path: Path, config: ProjectConfig) -> bool:
-    """Compare generated bytes to current inputs without creating anything."""
-    if config.postgres is None or config.postgres.mode != "compose":
-        return False
-    destination = project_generated_config_path(project_path)
-    try:
-        if destination.is_symlink() or not destination.is_file():
-            return True
-        if destination.stat().st_mode & 0o777 != 0o600:
-            return True
-        from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-        cluster = PostgresCluster.from_project(project_path)
-        if not cluster.password_file.is_file():
-            return True
-        password = cluster.password_file.read_text(encoding="utf-8").strip()
-        source = config.source_config
-        source_path = (
-            (project_path / source).resolve()
-            if source is not None and not source.is_absolute()
-            else source
-        )
-        if source_path is None:
-            candidate = project_path / "odoo.conf"
-            source_path = candidate if candidate.is_file() else None
-        if source_path is not None and not source_path.is_file():
-            return True
-        source_start = (
-            StartConfig.from_odoo_config(source_path) if source_path is not None else StartConfig()
-        )
-        expected = render_config(
-            source_path,
-            destination,
-            repo_root=project_path,
-            worktree=project_path,
-            http_interface=source_start.http_interface,
-            http_port=resolve_project_http_port(config.preferred_http_port, source_start.http_port),
-            db_name=config.default_source_database or source_start.db_name or "",
-            db_host=cluster.endpoint_host,
-            db_port=cluster.endpoint_port,
-            db_user=config.postgres.user or "odoo",
-            db_password=password,
-        )
-        return destination.read_text(encoding="utf-8") != expected
-    except (OSError, UnicodeError, InstanceConfigurationError, ValueError):
-        return True
-
-
-def _register_initialized_project(project_path: Path) -> None:
-    """Idempotently register a project after its valid manifest is available."""
-    root, common, identity = _planned_project_identity(project_path)
-    project_id = f"project_{identity}"
-    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-
-    catalog = BackupCatalog(db_path=_cli_catalog_path())
-    try:
-        catalog._register_project(project_id, root, common)
-    finally:
-        catalog.close()
 
 
 def _resolve_postgres_state(

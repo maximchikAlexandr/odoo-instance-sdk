@@ -11,12 +11,14 @@ from typing import TYPE_CHECKING, cast
 from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.database_preparation import (
-    _assert_verified_snapshot_unchanged,
-    _materialize_verified_snapshot,
     _preparation_process_steps,
     capture_selected_backup_restore,
     materialize_selected_backup_dump,
     materialize_selected_backup_filestore,
+)
+from odoo_instance_sdk.internal.dbprep.source import (
+    _assert_verified_snapshot_unchanged,
+    _materialize_verified_snapshot,
 )
 from odoo_instance_sdk.internal.dbreplace.planning import (
     _CLEANUP_ROLLBACK,

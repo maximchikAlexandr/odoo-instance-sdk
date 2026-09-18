@@ -34,7 +34,9 @@ from odoo_instance_sdk.commands.test import (
 )
 from odoo_instance_sdk.internal.automation import (
     ModuleRecord,
+    list_modules_command,
     module_records_from_result,
+    run_odoo_tests_command,
 )
 from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.test_selection import _ChangedSelectionError
@@ -47,7 +49,6 @@ from odoo_instance_sdk.models import (
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.test_selection import _TestSelection
-    from odoo_instance_sdk.models import OdooTestResult
 
 
 class _ModuleRecordResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -300,11 +301,12 @@ def module_where(
     output_mode = resolve_output_mode(output_format, json_output)
     try:
         instance = cli_context.ready_instance(ctx).instance
-        value = instance.modules.info(module)
+        module_path = instance.modules.where(module)
+        module_info = instance.modules.info(module)
         payload: dict[str, JsonValue] = {
-            "name": value.name,
-            "path": str(value.path),
-            "manifest_path": str(value.manifest_path),
+            "name": module_info.name,
+            "path": str(module_path),
+            "manifest_path": str(module_info.manifest_path),
         }
         emit(
             success_document(command="module.where", result=payload),
@@ -331,7 +333,7 @@ def module_deps(
     output_mode = resolve_output_mode(output_format, json_output)
     try:
         instance = cli_context.ready_instance(ctx).instance
-        value = instance.modules.deps(module)
+        value = instance.modules.dependencies(module)
         emit(
             success_document(command="module.deps", result={"module": model_to_dict(value)}),
             output_mode,
@@ -389,10 +391,9 @@ def module_list(
     try:
         runtime_context = cli_context.ready_instance(ctx)
         status, _records = run_or_preview(
-            lambda: cast(
-                "Callable[..., Command[CommandResult]]",
-                getattr(sys.modules["odoo_instance_sdk.cli"], "list_modules_command"),
-            )(runtime_context.instance, names=tuple(modules), state=state),
+            lambda: list_modules_command(
+                runtime_context.instance, names=tuple(modules), state=state
+            ),
             command_name="module.list",
             mode=output_mode,
             dry_run=dry_run,
@@ -474,11 +475,8 @@ def module_update(  # noqa: C901
             selected_modules = tuple(modules)
             selection = ModuleUpdatePlan(modules=selected_modules)
 
-        from odoo_instance_sdk.resources.module import ModuleResource
-
-        resource = getattr(instance, "modules", None)
-        if not changed and isinstance(resource, ModuleResource):
-            selection = resource.plan_update(selection.modules, selection=selection)
+        if not changed:
+            selection = instance.modules.plan_update(selection.modules, selection=selection)
             if selection.not_installed and not dry_run:
                 fail(
                     output_mode,
@@ -488,15 +486,7 @@ def module_update(  # noqa: C901
                 )
 
         def build_command() -> Command[CommandResult]:
-            resource = getattr(instance, "modules", None)
-            if isinstance(resource, ModuleResource):
-                return resource.update_command(selection.modules, selection=selection)
-            # Keep the extracted callback seam usable for lightweight test and
-            # compatibility instances that predate OdooInstance.modules.
-            return cast(
-                "Callable[..., Command[CommandResult]]",
-                getattr(sys.modules["odoo_instance_sdk.cli"], "update_modules_command"),
-            )(instance, selection.modules)
+            return instance.modules.update_command(selection.modules, selection=selection)
 
         status, _outcome = run_or_preview(
             build_command,
@@ -591,10 +581,7 @@ def module_test(
             allow_empty=allow_empty,
         )
         status, outcome = run_or_preview(
-            lambda: cast(
-                "Callable[..., Command[tuple[OdooTestResult, str | None]]]",
-                getattr(sys.modules["odoo_instance_sdk.cli"], "module_tests_command"),
-            )(
+            lambda: run_odoo_tests_command(
                 runtime_context.instance,
                 spec,
                 http_interface=runtime.http_interface,

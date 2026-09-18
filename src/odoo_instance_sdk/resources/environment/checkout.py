@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-# ruff: noqa: F821
 import importlib
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
 
-import odoo_instance_sdk.resources.environment as _environment_shim
 from odoo_instance_sdk.exceptions import (
     ConfigError,
     EnvironmentConflictError,
@@ -24,6 +22,7 @@ from odoo_instance_sdk.internal.database_preparation import (
     classify_freshness,
     compare_provenance,
 )
+from odoo_instance_sdk.internal.dependency_sync import revalidate_hash_lock
 from odoo_instance_sdk.internal.generated_config import generate_config
 from odoo_instance_sdk.internal.locks import (
     exclusive_lock,
@@ -33,6 +32,7 @@ from odoo_instance_sdk.internal.locks import (
 from odoo_instance_sdk.internal.odoo_config import (
     parse_odoo_config,
 )
+from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
@@ -46,10 +46,39 @@ from odoo_instance_sdk.models import (
     EnvironmentCheckoutResult,
 )
 from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.resources.environment.checkout_artifacts import (
+    _capture_checkout_stage,
+    _checkout_applied_settings,
+    _checkout_steps,
+    _normalize_checkout_stage,
+    _planning_error_outcome,
+    _planning_result,
+    _restore_audit_backup,
+    _row_to_env,
+    _validate_checkout_stage,
+)
+from odoo_instance_sdk.resources.environment.checkout_planning import (
+    EnvironmentCheckoutOptions,
+    EnvironmentDatabaseMode,
+    EnvironmentState,
+    _checkout_public_plan,
+    _CheckoutPlan,
+    _CheckoutPlanningState,
+    _CheckoutSnapshot,
+    _encode_runtime_json,
+    _ExpressionApi,
+    _ExpressionResult,
+    _PlanningOutcome,
+    _process_stderr,
+    _PythonMode,
+    _resolve_checkout_dependency_inputs,
+    _resolve_checkout_hash_lock,
+)
 
 if TYPE_CHECKING:
+    from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
-    from odoo_instance_sdk.internal.database_preparation import _RestoreSource
+    from odoo_instance_sdk.internal.dbprep.source import _RestoreSource
     from odoo_instance_sdk.internal.proc import (
         ProcessExecutor,
         ProcessResult,
@@ -57,14 +86,86 @@ if TYPE_CHECKING:
     )
     from odoo_instance_sdk.models.backup import DevelopmentEnvironment
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
-from odoo_instance_sdk.resources.environment import helpers as _helpers
-
-globals().update(
-    {name: value for name, value in _helpers.__dict__.items() if not name.startswith("__")}
-)
 
 
 class _CheckoutMixin:
+    if TYPE_CHECKING:
+        _client: OdooClient
+
+        def _verify_tools(self) -> None: ...
+
+        def _resolve_source_config(
+            self,
+            options: EnvironmentCheckoutOptions,
+            project: ProjectConfig,
+            repo_root: Path,
+        ) -> Path | None: ...
+
+        def _resolve_python_mode(
+            self,
+            options: EnvironmentCheckoutOptions,
+            project: ProjectConfig,
+            repo_root: Path,
+        ) -> _PythonMode: ...
+
+        def _resolve_dbs(
+            self,
+            options: EnvironmentCheckoutOptions,
+            project: ProjectConfig,
+            cfg: dict[str, str],
+            db_mode: str,
+            branch: str,
+            repo_root: Path,
+        ) -> tuple[str | None, str | None]: ...
+
+        def _allocate_port(
+            self,
+            requested: int | None,
+            project: ProjectConfig,
+            catalog: BackupCatalog | None,
+            http_interface: str,
+            exclude_project: Path | None = None,
+        ) -> int: ...
+
+        def _resolve_odoo_bin(
+            self,
+            options: EnvironmentCheckoutOptions,
+            project: ProjectConfig,
+            repo_root: Path,
+        ) -> str: ...
+
+        def _resolve_runtime_cwd(
+            self, project: ProjectConfig, repo_root: Path, worktree: Path
+        ) -> str: ...
+
+        def _preflight_copy_checkout(self, plan: _CheckoutPlan) -> None: ...
+
+        def _do_copy_restore(
+            self,
+            *,
+            context: RunContext[DevelopmentEnvironment],
+            cat: BackupCatalog,
+            env_id: uuid.UUID,
+            source_config: Path | None,
+            cfg_dict: Mapping[str, str],
+            source_db: str,
+            target_db: str,
+            repo_root: Path,
+        ) -> uuid.UUID: ...
+
+        def _cleanup_on_failure(
+            self,
+            *,
+            cat: BackupCatalog,
+            env_id: uuid.UUID,
+            repo_root: Path,
+            created_paths: list[Path],
+            env_root: Path,
+            backup_id: uuid.UUID | None,
+            error: BaseException,
+            context: RunContext[DevelopmentEnvironment],
+        ) -> None: ...
+
     def _prepare_checkout(
         self,
         project: ProjectConfig | Path,
@@ -661,7 +762,7 @@ class _CheckoutMixin:
                 details={"branch": plan.branch, "existing_id": existing["id"]},
             )
         try:
-            _environment_shim.find_free_port(
+            find_free_port(
                 "http",
                 cat,
                 requested=plan.http_port,
@@ -768,9 +869,7 @@ class _CheckoutMixin:
                                 f"{_process_stderr(compile_result)}"
                             )
                     else:
-                        _environment_shim.revalidate_hash_lock(
-                            plan.hash_lock, plan.options.hash_lock_sha256
-                        )
+                        revalidate_hash_lock(plan.hash_lock, plan.options.hash_lock_sha256)
                     install_result = cast(
                         "ProcessResult", context.process("checkout.dependencies.install")
                     )

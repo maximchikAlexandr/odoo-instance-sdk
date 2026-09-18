@@ -21,8 +21,8 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
     EnvironmentState,
-    _dependency_evidence,
 )
+from odoo_instance_sdk.resources.environment.checkout_planning import _dependency_evidence
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient

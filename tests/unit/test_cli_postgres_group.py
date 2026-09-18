@@ -5,7 +5,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import TypeVar
 
 import pytest
 from click.testing import CliRunner
@@ -107,13 +107,10 @@ def _patch_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
 
         runner = compose_runner or FakeComposeRunner()
         cfg = _PC.load(Path(project_path))
-        return cast(
-            "PostgresCluster",
-            pg_mod.PostgresCluster._from_config(
-                cfg,
-                repository_root=Path(project_path).resolve(),
-                compose_runner=runner,
-            ),
+        return pg_mod.PostgresCluster._from_config(
+            cfg,
+            repository_root=Path(project_path).resolve(),
+            compose_runner=runner,
         )
 
     monkeypatch.setattr(PostgresCluster, "from_project", staticmethod(fake_from_project))

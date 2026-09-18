@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 def _invoke(runner: CliRunner, client: OdooClient, args: list[str]) -> Result:
-    with patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client):
+    with patch("odoo_instance_sdk.client.OdooClient", return_value=client):
         return runner.invoke(cli, args)
 
 
@@ -39,10 +39,6 @@ def _inject_monitor_process_provider(
         original_init(self, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(EnvironmentMonitor, "__init__", init)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.env._monitor_class",
-        lambda: lambda: EnvironmentMonitor(catalog_path=env_client.get_catalog().db_path),
-    )
 
 
 def test_nested_worktree_infers_remove_selector(

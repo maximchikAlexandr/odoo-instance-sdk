@@ -135,7 +135,7 @@ def test_successful_validation_runs_before_atomic_publication(
         )
 
     executor.result_factory = result_factory
-    monkeypatch.setattr("odoo_instance_sdk.resources.instance.SubprocessExecutor", lambda: executor)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
 
     command = export_translations_command(
         _instance(tmp_path), ("sale",), ("fr_FR",), worktree_root=tmp_path
@@ -184,7 +184,7 @@ def test_failed_validation_preserves_existing_destination(
         )
 
     executor.result_factory = result_factory
-    monkeypatch.setattr("odoo_instance_sdk.resources.instance.SubprocessExecutor", lambda: executor)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
 
     with pytest.raises(ConfigError, match="msgfmt validation failed"):
         export_translations_command(
@@ -201,7 +201,7 @@ def test_available_tool_dry_run_does_not_export_validate_or_publish(
     tool.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setattr(shutil, "which", lambda name: str(tool) if name == "msgfmt" else None)
     executor = RecordingExecutor()
-    monkeypatch.setattr("odoo_instance_sdk.resources.instance.SubprocessExecutor", lambda: executor)
+    monkeypatch.setattr("odoo_instance_sdk.internal.proc.SubprocessExecutor", lambda: executor)
 
     command = export_translations_command(
         _instance(tmp_path), ("sale",), ("fr_FR",), worktree_root=tmp_path

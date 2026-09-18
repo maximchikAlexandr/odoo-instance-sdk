@@ -13,7 +13,7 @@ from odoo_instance_sdk.exceptions import (
     ConfigError,
     EnvironmentConflictError,
 )
-from odoo_instance_sdk.internal.dbprep.source_1 import (
+from odoo_instance_sdk.internal.dbprep.source import (
     DatabasePreparationFailureContext,
     ProjectRuntimeBinding,
     _CatalogueRestoreSource,

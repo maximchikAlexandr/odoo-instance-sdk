@@ -78,6 +78,7 @@ def test_split_package_zones_cover_implementation_modules() -> None:
         "cli": (
             "odoo_instance_sdk/commands/env/list.py",
             "odoo_instance_sdk/commands/context.py",
+            "odoo_instance_sdk/commands/cli_parts/callbacks.py",
         ),
         "process": ("odoo_instance_sdk/resources/instance/planning.py",),
         "environment": (

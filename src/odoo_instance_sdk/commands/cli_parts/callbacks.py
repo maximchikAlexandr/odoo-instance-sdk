@@ -4,7 +4,7 @@ import sys
 from collections.abc import Hashable, Mapping
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import click
@@ -14,15 +14,12 @@ from click.shell_completion import CompletionItem
 from rich.console import Console
 from rich.table import Table
 
+from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.cli_parts.registration import (
-    _generated_config_needs_repair,
     _OptionState,
-    _register_initialized_project,
     _run_shell_command,
     _RunCommand,
     _ShellCommandFailure,
-    _validate_generated_config_target,
-    _write_project_generated_config,
     cli,
 )
 from odoo_instance_sdk.commands.context import CliContext, ResolvedContext, pass_cli_context
@@ -49,67 +46,44 @@ from odoo_instance_sdk.commands.output import (
 from odoo_instance_sdk.commands.pg import (
     postgres_group as _postgres_group,
 )
-from odoo_instance_sdk.commands.test import (
-    resolve_module_test_selection,  # noqa: F401 - extracted module callback seam
-)
 from odoo_instance_sdk.commands.translations import register_translation_commands
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     LogfileAccessError,
 )
 from odoo_instance_sdk.internal.automation import (
-    export_translations_command,  # noqa: F401 - extracted translation callback seam
-    list_modules_command,  # noqa: F401 - extracted module callback seam
-    update_modules_command,  # noqa: F401 - extracted module callback seam
+    eval_expression_command,
+    exec_script_command,
 )
 from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.generated_config import (
     project_generated_config_path,
 )
+from odoo_instance_sdk.internal.project_init import (
+    generated_config_needs_repair,
+    manifest_dict,
+    register_initialized_project,
+    validate_generated_config_target,
+    write_project_generated_config,
+)
 from odoo_instance_sdk.internal.vscode_generate import (
+    build_launch_profile,
     launch_json,
     write_launch_json,
 )
 from odoo_instance_sdk.models import (
     DepsVerifyResult,
-    PostgresClusterState,
 )
 from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.resources.testing import module_tests_command  # noqa: F401
+from odoo_instance_sdk.resources.deps import verify_deps_command
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.internal.doctor import DoctorReport
 
 
 def _ready_instance(ctx: CliContext) -> ResolvedContext:
-    import odoo_instance_sdk.cli as _cli_shim
-
-    return cast("ResolvedContext", _cli_shim.cli_context.ready_instance(ctx))
-
-
-if TYPE_CHECKING:
-    from collections.abc import Callable as TypeCallback
-
-    from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.commands.context import ResolvedContext
-    from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.internal.doctor import DoctorReport
-    from odoo_instance_sdk.models import ClusterSnapshot
-    from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-    type CliLazyExport = (
-        type[OdooClient | PostgresCluster | DoctorReport]
-        | TypeCallback[[OdooClient, Path | None], DoctorReport]
-        | TypeCallback[[PostgresCluster, PostgresClusterState], ClusterSnapshot]
-        | TypeCallback[[ClusterSnapshot], int]
-        | TypeCallback[[ClusterSnapshot], None]
-    )
-
-    class _DoctorRunner(Protocol):
-        def __call__(
-            self,
-            client: OdooClient,
-            project_path: Path | None,
-            *,
-            resolved_context: ResolvedContext | None = None,
-        ) -> DoctorReport: ...
+    return cli_context.ready_instance(ctx)
 
 
 def _handle_existing_manifest(  # noqa: C901
@@ -128,13 +102,13 @@ def _handle_existing_manifest(  # noqa: C901
         fail(output_mode, "init", f"Existing manifest unreadable: {e}", dry_run=dry_run)
     # Comparison excludes ``postgres_allocated`` (dry-run-only flag); both
     # sides default to False here.
-    if _manifest_dict(existing_cfg) == _manifest_dict(config):
+    if manifest_dict(existing_cfg) == manifest_dict(config):
         target = project_generated_config_path(resolved_project)
-        repair = _generated_config_needs_repair(resolved_project, existing_cfg)
+        repair = generated_config_needs_repair(resolved_project, existing_cfg)
         if repair:
             if dry_run:
                 result: JsonObject = {
-                    **_manifest_dict(config),
+                    **manifest_dict(config),
                     "generated_config": cast("JsonValue", {"path": str(target), "repair": True}),
                 }
                 if output_mode is not OutputMode.RICH:
@@ -150,17 +124,17 @@ def _handle_existing_manifest(  # noqa: C901
                     rich_print(f"Dry run — generated config needs repair: {target}")
                 return True
             try:
-                _validate_generated_config_target(target)
+                validate_generated_config_target(target)
             except InstanceConfigurationError as exc:
                 fail(output_mode, "init", str(exc), dry_run=dry_run)
-            _write_project_generated_config(resolved_project, existing_cfg)
-            _register_initialized_project(resolved_project)
+            write_project_generated_config(resolved_project, existing_cfg)
+            register_initialized_project(resolved_project)
             if output_mode is not OutputMode.RICH:
                 emit_json_envelope(
                     ok=True,
                     command="init",
                     result={
-                        **_manifest_dict(config),
+                        **manifest_dict(config),
                         "generated_config": {"path": str(target), "repaired": True},
                     },
                     provenance={},
@@ -170,12 +144,12 @@ def _handle_existing_manifest(  # noqa: C901
                 rich_print(f"Repaired generated config: {target}; manifest unchanged.")
             return True
         if not dry_run:
-            _register_initialized_project(resolved_project)
+            register_initialized_project(resolved_project)
         if output_mode is not OutputMode.RICH:
             emit_json_envelope(
                 ok=True,
                 command="init",
-                result=_manifest_dict(config),
+                result=manifest_dict(config),
                 provenance={},
                 dry_run=True,
                 mode=output_mode,
@@ -200,43 +174,6 @@ def _handle_existing_manifest(  # noqa: C901
     return False
 
 
-def _manifest_dict(
-    config: ProjectConfig, *, postgres_allocated: bool = False
-) -> dict[str, JsonValue]:
-    postgres: dict[str, JsonValue] | None = None
-    if config.postgres is not None:
-        postgres = {
-            "mode": config.postgres.mode,
-            "image": config.postgres.image,
-            "port": config.postgres.port,
-            "user": config.postgres.user,
-            "allocated_port": postgres_allocated,
-        }
-    test_instance: dict[str, JsonValue] | None = None
-    if config.test_instance is not None:
-        test_instance = {
-            "base_url": config.test_instance.base_url,
-            "database": config.test_instance.database,
-            "git_branch": config.test_instance.git_branch,
-        }
-    return {
-        "odoo_bin": str(config.odoo_bin) if config.odoo_bin else None,
-        "python": str(config.python) if config.python else None,
-        "source_config": str(config.source_config) if config.source_config else None,
-        "default_source_database": config.default_source_database,
-        "default_base_ref": config.default_base_ref,
-        "ticket_link_enabled": config.ticket_link_enabled is True,
-        "ticket_base_url": config.ticket_base_url,
-        "refresh_after_hours": config.refresh_after_hours,
-        "test_instance": test_instance,
-        "preferred_http_port": config.preferred_http_port,
-        "requirements": list(config.requirements),
-        "default_run_args": list(config.default_run_args),
-        "runtime_cwd": str(config.runtime_cwd) if config.runtime_cwd else None,
-        "postgres": postgres,
-    }
-
-
 @cli.command(help="Diagnose project, runtime, and PostgreSQL.")
 @output_options
 @pass_cli_context
@@ -244,10 +181,10 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     try:
-        import odoo_instance_sdk.cli as _cli_shim
+        resolved = cli_context._ready_instance_for_doctor(ctx)
+        from odoo_instance_sdk.internal.doctor import run_doctor
 
-        resolved = _cli_shim.cli_context._ready_instance_for_doctor(ctx)
-        report = _cli_shim._run_doctor()(
+        report = run_doctor(
             resolved.client,
             resolved.project_root,
             resolved_context=resolved,
@@ -547,15 +484,11 @@ def eval_cmd(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        import odoo_instance_sdk.cli as _cli_shim
-
         runtime_context = _ready_instance(ctx)
         instance = runtime_context.instance
         status = _run_shell_command(
             command_name="eval",
-            build_command=lambda: _cli_shim.eval_expression_command(
-                instance, expression, commit=commit
-            ),
+            build_command=lambda: eval_expression_command(instance, expression, commit=commit),
             mode=output_mode,
             dry_run=dry_run,
             project_result=lambda _value, payload: {**payload, "returncode": 0},
@@ -600,13 +533,11 @@ def exec_cmd(
         except OSError as e:
             fail(output_mode, "exec", f"cannot read script: {e}", dry_run=dry_run)
     try:
-        import odoo_instance_sdk.cli as _cli_shim
-
         runtime_context = _ready_instance(ctx)
         instance = runtime_context.instance
         status = _run_shell_command(
             command_name="exec",
-            build_command=lambda: _cli_shim.exec_script_command(
+            build_command=lambda: exec_script_command(
                 instance, source, argv=tuple(script_args), commit=commit
             ),
             mode=output_mode,
@@ -657,10 +588,8 @@ def deps_verify(
         )
         deferred_runtime = getattr(runtime_context.instance.config, "deferred_runtime", None)
         uv_executable = getattr(deferred_runtime, "uv_executable", "uv")
-        import odoo_instance_sdk.cli as _cli_shim
-
         status, _result = run_or_preview(
-            lambda: _cli_shim.verify_deps_command(
+            lambda: verify_deps_command(
                 recorded_python=recorded_python,
                 worktree_root=runtime_context.worktree_path(),
                 uv_executable=uv_executable,
@@ -772,13 +701,11 @@ def vscode_generate(
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     try:
-        import odoo_instance_sdk.cli as _cli_shim
-
         runtime_context = _ready_instance(ctx)
         runtime = runtime_context.runtime
 
         def operation() -> dict[str, JsonValue]:
-            profile = _cli_shim.build_launch_profile(runtime)
+            profile = build_launch_profile(runtime)
             if write_file:
                 project_path = runtime.repository_root
                 written = write_launch_json(project_path, launch_json(profile))

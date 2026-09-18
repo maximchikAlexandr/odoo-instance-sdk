@@ -45,12 +45,12 @@ from odoo_instance_sdk.models import (
     NoBackup,
 )
 from odoo_instance_sdk.resources.environment import (
-    _CHECKOUT_WORKTREE_TIMEOUT,
     DevelopmentEnvironment,
     EnvironmentCheckoutOptions,
     EnvironmentDatabaseMode,
     EnvironmentState,
 )
+from odoo_instance_sdk.resources.environment.checkout_planning import _CHECKOUT_WORKTREE_TIMEOUT
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
