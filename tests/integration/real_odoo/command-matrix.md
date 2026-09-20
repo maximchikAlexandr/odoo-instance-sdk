@@ -54,6 +54,7 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `git check` | bounded-read-only | no | not-applicable | upstream Git policy inspection is covered by unit contracts |
 | `git absorb` | mutating-or-spawning | yes | not-applicable | upstream Git mutation is outside the disposable Odoo fixture |
 | `git sync` | mutating-or-spawning | yes | not-applicable | upstream remote Git publication is intentionally outside E2E |
+| `ps` | bounded-read-only | no | critical | E2E-CP-12: single-snapshot process/resource inventory |
 
 ## Scenario coverage
 

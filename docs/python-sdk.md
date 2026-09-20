@@ -69,12 +69,16 @@ port, and logfile option families; ordinary Odoo flags such as repeated
 
 The same pattern applies to `instance.start_command()`,
 `run_foreground_command()`, `shell_command()`,
-`run_shell_script_command()`, and `stop_command()`; to
-`client.environments.checkout_command()`, `sync_python_command()`, and
-`snapshot_command()`; and to PostgreSQL, database, backup, preparation,
-environment-removal, and pgAdmin command siblings. Convenience methods such
-as `instance.run()` and `monitor.snapshot()` delegate once to their sibling,
-so preview and execution cannot silently rebuild different argv or inputs.
+`run_shell_script_command()`, `stop_command()`, and
+`stop_environment_command()`; to `client.environments.checkout_command()`,
+`sync_python_command()`, `refresh_database_command()`,
+`replace_copy_database_command()`, and `snapshot_command()`; to
+`client.backups.inspect_command()`, `DatabaseResource.list_inventory_command()`,
+`run_odoo_tests_command()`, and `verify_deps_command()`; and to PostgreSQL,
+database, backup, preparation, environment-removal, and pgAdmin command
+siblings. Convenience methods such as `instance.run()`, `monitor.processes()`,
+and `client.backups.inspect()` delegate once to their sibling, so preview and
+execution cannot silently rebuild different argv or inputs.
 
 Plans redact passwords, secret-file contents and sensitive paths while
 preserving argument boundaries and multiline stdin/source previews. Planning
@@ -103,6 +107,34 @@ database = instance.databases.current()
 backup = instance.databases.backup(database.name, destination=Path("./backups"))
 validation = client.backups.validate(backup)
 print(backup.path, validation.status)
+```
+
+Inspect one catalogue UUID, list the project-cluster inventory, and verify
+dependencies through the same public command boundary:
+
+```python
+from odoo_instance_sdk import OdooClient, OdooClientConfig, OdooTestSpec
+from odoo_instance_sdk.resources.deps import verify_deps_command
+from odoo_instance_sdk.resources.testing import run_odoo_tests_command
+
+client = OdooClient(config=OdooClientConfig(executable="odoo-bin"))
+instance = client.instance.from_config("./odoo.conf")
+
+inspect = client.backups.inspect_command("00000000-0000-0000-0000-000000000001")
+inventory = instance.databases.list_inventory_command(".", tracked=True)
+deps = verify_deps_command(
+    recorded_python=instance.config.python_executable,
+    worktree_root=Path("."),
+)
+tests = run_odoo_tests_command(
+    instance,
+    OdooTestSpec(modules=("sale",), test_tags="/sale"),
+)
+
+print(inspect.plan)
+print(inventory.plan)
+print(deps.plan)
+print(tests.plan)
 ```
 
 Restore and drop are intentionally restricted to local instances:
@@ -295,6 +327,76 @@ fresh command, so probes and ledgers are never reused across ticks.
 The Python monitor returns typed models. The local HTTP interface exposes the
 same snapshot contract at `/api/v1/snapshot`; see the README for its security
 and deployment boundaries.
+
+## Process and checkout inventory
+
+`EnvironmentMonitor.processes_command()` projects one `ProcessInventory` from
+a single canonical snapshot: runtime processes, CPU/memory metrics, and
+resource totals. `processes()` is the convenience sibling that delegates once
+to `processes_command()` and runs it:
+
+```python
+from odoo_instance_sdk import EnvironmentMonitor, ProcessInventory
+
+monitor = EnvironmentMonitor()
+command = monitor.processes_command()
+print(command.plan)  # redacted single-snapshot plan
+inventory: ProcessInventory = command.run()
+print(inventory)
+```
+
+`EnvironmentMonitor.checkout_inventory_command()` projects one
+`CheckoutInventory` from a single snapshot: the registered environments
+grouped by project, with their worktree, branch, and runtime state.
+`checkout_inventory()` delegates to it:
+
+```python
+from odoo_instance_sdk import CheckoutInventory
+
+command = monitor.checkout_inventory_command()
+print(command.plan)
+checkouts: CheckoutInventory = command.run()
+for project in checkouts.projects:
+    print(project.id, [env.name for env in project.environments])
+```
+
+Both are bounded read-only leaves (the CLI `odcli ps` spelling uses
+`processes_command()`) and never spawn a child or mutate state.
+
+## Detached Odoo launch
+
+`instance.run_detached_command()` captures one detached Odoo launch plan and
+returns a `Command[DetachedLaunchResult]`. The preview is redacted and never
+spawns; `.run()` launches Odoo in the background and returns once it is alive
+with its pid, endpoint, and log path:
+
+```python
+from odoo_instance_sdk import OdooClient, OdooClientConfig
+
+client = OdooClient(config=OdooClientConfig(executable="odoo-bin"))
+instance = client.instance.from_config("./odoo.conf")
+
+command = instance.run_detached_command(args=("--dev=reload",))
+print(command.plan)  # redacted detached argv
+result = command.run()  # DetachedLaunchResult: pid, endpoint, log_path
+print(result.pid, result.endpoint, result.log_path)
+```
+
+`instance.run_detached()` is the convenience sibling that delegates once to
+`run_detached_command()` and runs it. The CLI spelling is `odcli run -d`.
+
+## Backup project ownership
+
+`BackupCatalog.relink_backup_project(backup_id, project_id)` rebinds a
+retained backup record to the canonical project id after a project-owned
+remote download. It is a catalogue-only mutation and does not move files:
+
+```python
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+
+catalog = BackupCatalog.default()
+catalog.relink_backup_project("00000000-0000-0000-0000-000000000001", "my-project")
+```
 
 See [execution-boundary.md](execution-boundary.md) for the canonical CLI leaf
 inventory, native-stream exceptions, and the checked process/output/type

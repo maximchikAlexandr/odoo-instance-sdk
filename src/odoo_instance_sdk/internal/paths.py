@@ -1,9 +1,53 @@
 from __future__ import annotations
 
 import os
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
+from odoo_instance_sdk.internal.repo_key import repo_key
+
 _USER_ROOT_NAME = ".odcli"
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentArtifactPaths:
+    """Canonical on-disk locations for one registered environment."""
+
+    env_root: Path
+    worktree_path: Path
+    generated_config_path: Path
+    dependency_lock_path: Path
+    python_environment_path: Path
+
+
+def resolve_environment_artifact_paths(
+    *,
+    environment_id: str | uuid.UUID,
+    repository_root: str | Path,
+    git_common_dir: str | Path,
+    python_environment_owned: bool,
+    python_environment_path: str | Path,
+) -> EnvironmentArtifactPaths:
+    """Return canonical environment artifact paths below the global ``~/.odcli`` root."""
+    repo_root = Path(repository_root).resolve()
+    env_root = (
+        get_environments_root(ensure_exists=False)
+        / repo_key(repo_root, Path(git_common_dir))
+        / str(environment_id)
+    )
+    python_path = (
+        env_root / "venv"
+        if python_environment_owned
+        else Path(python_environment_path).expanduser()
+    )
+    return EnvironmentArtifactPaths(
+        env_root=env_root,
+        worktree_path=env_root / "worktree",
+        generated_config_path=env_root / "odoo.conf",
+        dependency_lock_path=env_root / "requirements.lock",
+        python_environment_path=python_path,
+    )
 
 
 def _user_root(*, ensure_exists: bool = True) -> Path:

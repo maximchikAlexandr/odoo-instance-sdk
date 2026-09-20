@@ -67,13 +67,19 @@ def _isolate_vscode_port_probe(monkeypatch: pytest.MonkeyPatch) -> None:
         return requested if requested is not None else 18071
 
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.environment.find_free_port", deterministic_port
+        "odoo_instance_sdk.internal.port_allocation.find_free_port", deterministic_port
     )
 
 
 class TestVscodeGenerateProfile:
-    def test_project_view_builds_profile_without_environment(self, tmp_path: Path) -> None:
-        view = RuntimeView(
+    def _project_view(
+        self,
+        tmp_path: Path,
+        *,
+        default_run_args: tuple[str, ...] = (),
+        db_name: str = "project_db",
+    ) -> RuntimeView:
+        return RuntimeView(
             owner_kind="project",
             project_id="demo-project",
             environment_id=None,
@@ -84,16 +90,20 @@ class TestVscodeGenerateProfile:
                 http_port=18069,
                 http_interface="127.0.0.1",
                 config_path=str(tmp_path / "odoo.conf"),
-                db_name="project_db",
+                db_name=db_name,
             ),
             command_prefix=(sys.executable, str(tmp_path / "odoo-bin")),
             python_path=Path(sys.executable),
-            database="project_db",
+            database=db_name,
             http_interface="127.0.0.1",
             http_port=18069,
             base_ref="main",
             base_provenance="project",
+            default_run_args=default_run_args,
         )
+
+    def test_project_view_builds_profile_without_environment(self, tmp_path: Path) -> None:
+        view = self._project_view(tmp_path)
 
         profile = build_launch_profile(view)
 
@@ -104,6 +114,40 @@ class TestVscodeGenerateProfile:
         args = cast("list[object]", profile["args"])
         assert "--database" in args
         assert "project_db" in args
+
+    @pytest.mark.parametrize(
+        ("default_run_args_line", "expected_count"),
+        [
+            ('default_run_args = ["--dev=qweb,xml"]\n', 1),
+            ("", 0),
+        ],
+    )
+    def test_default_run_args_through_public_vscode_generate_cli(
+        self,
+        project_manifest: Path,
+        default_run_args_line: str,
+        expected_count: int,
+    ) -> None:
+        manifest_path = project_manifest / ".odcli" / "project.toml"
+        manifest_path.write_text(manifest_path.read_text() + default_run_args_line)
+
+        result = CliRunner().invoke(
+            cli,
+            ["--project", str(project_manifest), "vscode", "generate", "--format", "json"],
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        args = payload["result"]["profile"]["args"]
+        assert args.count("--dev=qweb,xml") == expected_count
+
+    def test_disallowed_managed_override_in_default_run_args_raises(self, tmp_path: Path) -> None:
+        from odoo_instance_sdk.exceptions import InstanceConfigurationError
+
+        view = self._project_view(tmp_path, default_run_args=("--database=forced",))
+
+        with pytest.raises(InstanceConfigurationError):
+            build_launch_profile(view)
 
     @pytest.mark.parametrize("mode", ["rich", "json", "toon"])
     def test_project_cli_uses_runtime_view_for_each_output_mode(
@@ -132,7 +176,8 @@ class TestVscodeGenerateProfile:
         with (
             patch("odoo_instance_sdk.cli.cli_context.ready_instance", return_value=resolved),
             patch(
-                "odoo_instance_sdk.cli.build_launch_profile", wraps=build_launch_profile
+                "odoo_instance_sdk.commands.cli_parts.callbacks.build_launch_profile",
+                wraps=build_launch_profile,
             ) as build,
         ):
             result = CliRunner().invoke(cli, ["vscode", "generate", "--format", mode])
@@ -167,7 +212,7 @@ class TestVscodeGenerateProfile:
         assert "Name" in result.output
         assert f"Odoo {env.name}" in result.output
         assert "Program" in result.output
-        assert str(fake_python.parent / "odoo-bin") in result.output
+        assert "odoo-bin" in result.output
         for secret in ("admin_passwd", "db_password", "master_pwd"):
             assert secret not in result.output
         assert (project_manifest / ".vscode" / "launch.json").exists() is False

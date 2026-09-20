@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import msgspec
 import pytest
 from click.testing import CliRunner
 from rich.console import Console
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands import env as env_commands
-from odoo_instance_sdk.models import ProjectSummary, Snapshot
+from odoo_instance_sdk.commands.env import checkout as env_commands
 from tests.unit.test_cli_backup import BACKUP_ID, _seed_backup
-from tests.unit.test_cli_env_list_grouping import _env, _healthy_cluster, _snapshot
+from tests.unit.test_cli_env_list_grouping import (
+    _env,
+    _healthy_cluster,
+    _snapshot,
+)
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.models import ProjectSummary
 
 
 @pytest.mark.unit
@@ -29,14 +35,14 @@ def test_env_list_rich_keeps_primary_fields_readable_at_supported_widths(width: 
 
     assert output.strip()
     assert "environment-with-a-long-name" in output or "environment-with" in output
-    assert "feature/" in output
-    assert "ready" in output
+    assert "feat/x" in output
+    assert "running" in output
     assert "comerta" in output
     assert "↑2" in output
     assert "+10 -3" in output
-    assert "worktree,registered,config,python,lock" in output
+    assert "OBSERVED" not in output
+    assert "ODOO_PID" not in output
     assert "GIT_AHEA" not in output
-    assert "ARTIFACT\nS" not in output
     assert all(len(line) <= width for line in output.splitlines())
 
 
@@ -48,8 +54,15 @@ def test_env_list_rich_shortens_home_only_in_presentation() -> None:
     output = _render(snapshot, width=120, worktree_path=absolute)
 
     assert "~/projects/environment" in output
-    machine = env_commands._cli_snapshot(snapshot, {environment.id: absolute})
-    assert msgspec.to_builtins(machine)["environments"][0]["worktree_path"] == absolute
+    from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+
+    inventory = build_checkout_inventory(
+        snapshot,
+        worktree_paths={environment.id: absolute},
+        git_collector=lambda _path, _ref: environment.git,
+    )
+    env_row = next(row for row in inventory.rows if row.kind == "environment")
+    assert env_row.worktree_path == absolute
 
 
 @pytest.mark.unit
@@ -96,7 +109,9 @@ def test_backup_validate_rich_leaf_is_width_safe(
         valid_zip=valid_zip,
         database_name=database_name,
     )
-    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", lambda **_kwargs: db_path)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: db_path
+    )
     if expected_status == "unavailable":
         monkeypatch.setattr(shutil, "which", lambda _name: None)
 
@@ -111,23 +126,27 @@ def test_backup_validate_rich_leaf_is_width_safe(
     assert all(len(line) <= width for line in (result.stdout + result.stderr).splitlines())
 
 
-def _render(snapshot: Snapshot, *, width: int, worktree_path: str) -> str:
-    console = Console(record=True, color_system=None, width=width)
-    console.print(
-        env_commands._render_env_list_rich(
-            snapshot,
-            {"11111111-1111-1111-1111-111111111111": worktree_path},
-            width=width,
-        )
+def _render(snapshot: object, *, width: int, worktree_path: str) -> str:
+    from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+
+    inventory = build_checkout_inventory(
+        snapshot,  # type: ignore[arg-type]
+        worktree_paths={"11111111-1111-1111-1111-111111111111": worktree_path},
+        git_collector=lambda _path, _ref: _env().git,
     )
+    console = Console(record=True, color_system=None, width=width)
+    console.print(env_commands._render_env_list_rich(inventory, width=width))
     return console.export_text()
 
 
 def _project() -> ProjectSummary:
+    from odoo_instance_sdk.models import ProjectSummary
+
     return ProjectSummary(
         id="project_comerta_abc12345",
         name="comerta",
         display_hint="comerta_abc12345",
+        repository_root="/repo/comerta",
         environment_count=1,
         cluster=_healthy_cluster(),
         runtime=None,

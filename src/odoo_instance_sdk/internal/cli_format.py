@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from odoo_instance_sdk.internal.sanitize import sanitize_terminal_text
@@ -79,3 +80,17 @@ def rich_cell(value: JsonValue, *, style: str | None = None) -> Text:
     from rich.text import Text
 
     return Text(sanitize_terminal_text(str(value)), style=style or "")
+
+
+def rich_local_time(value: str | datetime) -> str:
+    """Format an absolute timestamp for Rich display in the local timezone.
+
+    Aware UTC values and naive SQLite UTC ``datetime('now')`` values are both
+    converted to the local timezone via ``datetime.astimezone()`` and rendered
+    as ``YYYY-MM-DD HH:MM``. Duration fields do not pass through this helper.
+    """
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone().strftime("%Y-%m-%d %H:%M")

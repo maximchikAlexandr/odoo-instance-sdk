@@ -166,7 +166,7 @@ def test_monitor_reads_backup_metadata_before_catalog_close_and_reconciles_artif
     catalog.close()
     patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.worktree_list_porcelain",
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.worktree_list_porcelain",
         lambda _: [
             WorktreeInfo(
                 worktree=str(worktree), head="abc", branch="main", locked=False, prunable=False
@@ -255,7 +255,8 @@ def test_port_observation_maps_bounded_address_states(
         ),
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.probe_address", lambda *_: address_state
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.probe_address",
+        lambda *_: address_state,
     )
 
     env = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3").snapshot().environments[0]
@@ -321,11 +322,11 @@ def test_artifact_failures_are_isolated_and_port_observation_is_bounded(
         ),
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.probe_address",
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.probe_address",
         lambda *_: AddressState.OCCUPIED,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.worktree_list_porcelain",
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.worktree_list_porcelain",
         lambda _: (_ for _ in ()).throw(OSError("git unavailable")),
     )
 
@@ -352,7 +353,7 @@ def test_removed_runtime_never_calls_health_or_port_probe(
         lambda *_: (_ for _ in ()).throw(AssertionError("removed runtime must not be collected")),
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.probe_address",
+        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.probe_address",
         lambda *_: (_ for _ in ()).throw(AssertionError("removed port must not be probed")),
     )
 

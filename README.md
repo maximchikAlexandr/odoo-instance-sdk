@@ -1,5 +1,9 @@
 # odoo-instance-sdk
 
+[![CI](https://github.com/maximchikAlexandr/odoo-instance-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/maximchikAlexandr/odoo-instance-sdk/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+
 `odoo-instance-sdk` gives Odoo 19 developers one typed Python API and one
 CLI, `odcli`, for repeatable local environments. It manages Git worktrees,
 Python environments, Odoo processes, databases, an optional SDK-owned
@@ -56,8 +60,9 @@ odcli --env PROJ-123 logs
 odcli env ls
 ```
 
-`odcli run` resolves an explicit `--env` first, then an exact registered
-worktree, then the initialized project containing the current directory. A
+`odcli run` resolves context in this order: an explicit `--env`, then an exact
+registered worktree, then an explicit `--project` or the nearest initialized
+project manifest upward from the current directory. A
 project run reads Python, `odoo-bin`, source config, working directory, port,
 database, and default run arguments from `.odcli/project.toml`; it does not
 create an environment or add the main checkout to `odcli env ls`.
@@ -106,7 +111,9 @@ for the complete eligibility table and the intentionally narrow exceptions.
 
 Rich previews show the exact sanitized captured commands in execution order;
 identified progress lines use the captured step ID, operation, target, elapsed
-time, and process exit status. For example:
+time, and process exit status. Absolute timestamps in Rich output are rendered
+in the invoking user's local timezone; JSON and TOON retain the original
+UTC/ISO-8601 values. For example:
 
 ```bash
 odcli env create PROJ-123 --dry-run
@@ -254,6 +261,19 @@ prompt.
 `--force-connections` terminates sessions belonging only to the exact target.
 Remote instances, configured defaults, and template databases remain refused.
 
+`backup rm`, `db rm`, and `env rm` accept variadic multi-target arguments.
+Each target is resolved and previewed independently before any mutation; a
+dry-run lists every target's plan. Any guarded failure during resolution or
+preflight aborts before mutation; once execution starts, prepared targets are
+attempted in order, failures are reported in the ordered aggregate result, and
+the command exits nonzero without silently skipping targets or claiming rollback:
+
+```bash
+odcli db rm feature_a feature_b --dry-run
+odcli backup rm UUID1 UUID2 UUID3 --yes
+odcli env rm PROJ-123 PROJ-456 --dry-run
+```
+
 ### Prepare a project database
 
 Database refresh can use a pinned remote test instance while keeping its
@@ -317,12 +337,13 @@ visible with sanitized paths and recommendations. `resource ls` and
 
 Global SDK state lives below `~/.odcli/`: configuration, the SQLite catalogue,
 environments, projects, backups, locks, and pgAdmin data share this root. The
-first catalogue-backed operation runs one locked, journaled migration from
-legacy platformdirs locations. A conflicting destination or interrupted stage
-keeps the source data and journal so the next invocation can report the exact
-problem and retry safely; sources are removed only after verification. The
-repository-local `.odcli/` project manifest and generated config are not part
-of this migration.
+catalogue schema is managed by Alembic migrations; the first
+catalogue-backed operation runs one locked, journaled migration from legacy
+platformdirs locations and stamps the schema revision. A conflicting
+destination or interrupted stage keeps the source data and journal so the next
+invocation can report the exact problem and retry safely; sources are removed
+only after verification. The repository-local `.odcli/` project manifest and
+generated config are not part of this migration.
 
 Global storage paths and machine-readable output retain absolute paths. Human
 Rich tables may shorten paths beneath `HOME`, but `odcli env path` always emits
@@ -398,6 +419,17 @@ launch. `logs
 documented native transports because they are intentionally unbounded or
 interactive rather than finite plan documents.
 
+`run -d` / `--detach` launches Odoo in the background through the same
+inspect-then-run boundary, then returns once the process is alive with its
+pid, endpoint, and log path. It is a bounded leaf: `--dry-run` captures the
+detached plan without spawning, and the SDK sibling is
+`instance.run_detached_command()` returning a typed `DetachedLaunchResult`:
+
+```bash
+odcli --env feature/customer-credit run -d --dry-run
+odcli --env feature/customer-credit run -d -- --dev=reload
+```
+
 The literal `--` delimiter is required for every non-empty native Odoo argv;
 the tokens after it are preserved in order and repeated values are allowed.
 The SDK rejects managed runtime overrides before capture, including config and
@@ -471,6 +503,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db restore` — Restore one exact retained backup into a selected database target.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
 - `odcli db rm` — Safely remove one exact local cluster database after guarded checks.
+- `odcli ps` — Show process and resource inventory from one monitor snapshot.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
 <!-- cli-command-inventory:end -->
 
@@ -530,9 +563,20 @@ and order. The CLI equivalent requires the literal `--` delimiter; its
 `--dry-run` preview does not record use or execute the command.
 
 See [Python SDK examples](docs/python-sdk.md) for runnable examples covering
-database backup/restore, processes, environments, PostgreSQL, monitoring, and
-inspect-then-run command siblings. The complete boundary inventory and
-allowlist rationale are in [docs/execution-boundary.md](docs/execution-boundary.md).
+database backup/restore, catalogue inspect, database inventory, dependency
+verification, shared test execution, persisted environment stop, COPY database
+replacement, environments, PostgreSQL, monitoring, and inspect-then-run
+command siblings. `PUBLIC_LEAF_CASES` records the SDK primitive or CLI-only
+reason for every leaf; the complete boundary inventory and allowlist rationale
+are in [docs/execution-boundary.md](docs/execution-boundary.md).
+
+The SDK-first rule governs that boundary: every CLI leaf records either a
+public `sdk_primitive` or a concrete `cli_only_reason` for transport-only
+leaves such as `run`, `shell`, `logs --follow`, and `monitor`. CLI callbacks
+must not build self-contained domain read/mutation/spawn operations through
+`internal.*` when a public typed SDK primitive applies; convenience methods
+delegate to the corresponding `*_command()` sibling and do not rebuild argv,
+cwd, environment, or actions.
 
 ## Monitor and local API
 

@@ -18,15 +18,15 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/cli.py", 1256),
-        ("src/odoo_instance_sdk/cli.py", 1257),
-        ("src/odoo_instance_sdk/commands/backup.py", 293),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 421),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 422),
+        ("src/odoo_instance_sdk/commands/backup.py", 345),
         ("src/odoo_instance_sdk/commands/output.py", 236),
         ("src/odoo_instance_sdk/commands/output.py", 381),
         ("src/odoo_instance_sdk/commands/output.py", 383),
         ("src/odoo_instance_sdk/commands/output.py", 390),
         ("src/odoo_instance_sdk/commands/output.py", 392),
-        ("src/odoo_instance_sdk/resources/instance.py", 1200),
+        ("src/odoo_instance_sdk/resources/instance/identity.py", 457),
     }
 )
 
@@ -37,10 +37,19 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 383): "shared TOON output boundary",
     ("src/odoo_instance_sdk/commands/output.py", 390): "shared diagnostic boundary",
     ("src/odoo_instance_sdk/commands/output.py", 392): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/cli.py", 1256): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/cli.py", 1257): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/commands/backup.py", 293): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/resources/instance.py", 1200): "lifecycle cleanup diagnostic transport",
+    (
+        "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
+        421,
+    ): "documented logs JSONL transport",
+    (
+        "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
+        422,
+    ): "documented logs JSONL transport",
+    ("src/odoo_instance_sdk/commands/backup.py", 345): "shared Rich output boundary",
+    (
+        "src/odoo_instance_sdk/resources/instance/identity.py",
+        457,
+    ): "lifecycle cleanup diagnostic transport",
 }
 
 
@@ -52,12 +61,12 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("tests/unit/resources/test_database_resource.py", 637),
-        ("tests/unit/test_monitor_cache_and_docker.py", 129),
-        ("tests/unit/test_cluster_resources.py", 190),
-        ("tests/unit/test_real_odoo_ci_components.py", 38),
-        ("tests/unit/test_real_odoo_ci_components.py", 107),
-        ("tests/unit/test_real_odoo_ci_components.py", 149),
+        ("tests/unit/resources/test_database_resource.py", 643),
+        ("tests/unit/test_monitor_cache_and_docker.py", 119),
+        ("tests/unit/test_cluster_resources.py", 188),
+        ("tests/unit/test_real_odoo_ci_components.py", 40),
+        ("tests/unit/test_real_odoo_ci_components.py", 109),
+        ("tests/unit/test_real_odoo_ci_components.py", 151),
         ("tests/unit/test_real_odoo_foundation.py", 325),
         ("tests/unit/test_real_odoo_foundation.py", 348),
         ("tests/unit/test_real_odoo_foundation.py", 367),

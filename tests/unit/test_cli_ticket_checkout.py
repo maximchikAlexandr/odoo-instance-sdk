@@ -10,7 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
-from odoo_instance_sdk.commands import env
+from odoo_instance_sdk.commands.env import checkout as env
 from odoo_instance_sdk.exceptions import StalePlanError
 from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
 from odoo_instance_sdk.internal import git_worktree
@@ -439,10 +439,12 @@ def test_cli_ticket_checkout_emits_one_shared_envelope_for_both_spellings(
         argv.extend(["--format", mode])
 
     with (
-        patch("odoo_instance_sdk.commands.env.OdooClient", return_value=client),
-        patch("odoo_instance_sdk.commands.env.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.commands.env.checkout.OdooClient", return_value=client),
         patch(
-            "odoo_instance_sdk.commands.env._build_ticket_checkout_command",
+            "odoo_instance_sdk.commands.env.checkout.resolve_project_path", return_value=tmp_path
+        ),
+        patch(
+            "odoo_instance_sdk.commands.env.checkout._build_ticket_checkout_command",
             return_value=(command, allocation),
         ),
     ):

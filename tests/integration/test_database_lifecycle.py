@@ -83,7 +83,8 @@ class TestRestore:
         client.instance.from_project.return_value = auxiliary
         client.unregister_process.return_value = (None, None)
         monkeypatch.setattr(
-            "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
+            "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+            lambda _config: None,
         )
         monkeypatch.setattr(
             OdooInstance,
@@ -354,14 +355,15 @@ class TestRestore:
             from odoo_instance_sdk.exceptions import InstanceConfigurationError
 
             monkeypatch.setattr(
-                "odoo_instance_sdk.resources.instance._assert_http_port_free",
+                "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
                 MagicMock(
                     side_effect=InstanceConfigurationError("port-conflict: ownership unknown")
                 ),
             )
         else:
             monkeypatch.setattr(
-                "odoo_instance_sdk.resources.instance._assert_http_port_free", lambda _config: None
+                "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+                lambda _config: None,
             )
         monkeypatch.setattr(
             OdooInstance,

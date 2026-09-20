@@ -2,17 +2,73 @@
 
 from __future__ import annotations
 
+import importlib
 import re
 from collections.abc import Iterable, Sequence
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 E2EDisposition = Literal["critical", "focused", "smoke", "not-applicable"]
 E2E_DISPOSITIONS = frozenset({"critical", "focused", "smoke", "not-applicable"})
 _EVIDENCE_ID = re.compile(r"E2E-(?:SM|CP|FC|REC|SEC)-\d{2}\Z")
 
+_CLASS_MODULES: Final[dict[str, str]] = {
+    "OdooInstance": "odoo_instance_sdk.resources.instance",
+    "EnvironmentResource": "odoo_instance_sdk.resources.environment",
+    "EnvironmentMonitor": "odoo_instance_sdk.resources.monitor",
+    "BackupResource": "odoo_instance_sdk.resources.backup",
+    "DatabaseResource": "odoo_instance_sdk.resources.database",
+    "ModuleResource": "odoo_instance_sdk.resources.module",
+    "PostgresCluster": "odoo_instance_sdk.resources.postgres",
+    "GitResource": "odoo_instance_sdk.resources.git",
+}
+
+_FUNCTION_MODULES: Final[tuple[str, ...]] = (
+    "odoo_instance_sdk.cli",
+    "odoo_instance_sdk.project_init",
+    "odoo_instance_sdk.internal.automation",
+    "odoo_instance_sdk.resources.testing",
+    "odoo_instance_sdk.resources.deps",
+    "odoo_instance_sdk.internal.doctor",
+)
+
 
 class ContractError(ValueError):
     """Raised when a test contract is incomplete or inconsistent."""
+
+
+def _resolve_sdk_primitive(reference: str) -> object:
+    """Resolve one recorded SDK primitive to an importable public callable."""
+    ref = reference.strip()
+    if not ref:
+        raise ContractError("empty sdk_primitive")
+    if "." in ref:
+        class_name, attr = ref.rsplit(".", 1)
+        module_path = _CLASS_MODULES.get(class_name)
+        if module_path is None:
+            raise ContractError(f"unknown sdk_primitive class {class_name!r} in {ref!r}")
+        module = importlib.import_module(module_path)
+        obj = getattr(module, class_name, None)
+        if obj is None or not hasattr(obj, attr):
+            raise ContractError(f"sdk_primitive {ref!r} is not importable")
+        return getattr(obj, attr)
+    for module_path in _FUNCTION_MODULES:
+        module = importlib.import_module(module_path)
+        if hasattr(module, ref):
+            return getattr(module, ref)
+    raise ContractError(f"sdk_primitive {ref!r} is not an importable public name")
+
+
+def _validate_sdk_boundary(case: Any) -> None:
+    has_sdk = bool(getattr(case, "sdk_primitive", None))
+    has_cli_only = bool(getattr(case, "cli_only_reason", None))
+    if has_sdk == has_cli_only:
+        raise ContractError(
+            f"leaf {' '.join(case.path)} requires exactly one of sdk_primitive or cli_only_reason"
+        )
+    if has_sdk:
+        _resolve_sdk_primitive(str(case.sdk_primitive))
+    if has_cli_only and not str(case.cli_only_reason).strip():
+        raise ContractError(f"empty cli_only_reason for {' '.join(case.path)}")
 
 
 def validate_leaf_metadata(
@@ -31,6 +87,7 @@ def validate_leaf_metadata(
         raise ContractError(f"leaf inventory drift: missing={missing!r}, extra={extra!r}")
 
     for case in rows:
+        _validate_sdk_boundary(case)
         if case.e2e_disposition not in E2E_DISPOSITIONS:
             raise ContractError(f"missing E2E disposition for {' '.join(case.path)}")
         if not case.e2e_evidence and case.e2e_disposition != "not-applicable":
@@ -57,7 +114,7 @@ def matrix_row(case: Any) -> str:
 _MATRIX_PREFIX = "# Public CLI traceability matrix\n\n"
 CANONICAL_INVENTORY_BASE = "af9e1b3e8d127145b9488f11ec79519f9442db46"
 ORIGINAL_AUDIT_BASE = "0ff164636617c03a51277055af45cef009277368"
-CANONICAL_LEAF_COUNT = 50
+CANONICAL_LEAF_COUNT = 51
 _MATRIX_PROVENANCE = (
     "This is a reviewed projection of "
     "`tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at "

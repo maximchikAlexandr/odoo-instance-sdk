@@ -1007,10 +1007,13 @@ class TestDepsVerify:
             )
 
         monkeypatch.setattr(
-            "odoo_instance_sdk.internal.proc.executor.SubprocessExecutor.execute", fake_execute
+            "odoo_instance_sdk.internal.proc.run.SubprocessExecutor.execute", fake_execute
         )
         result = verify_deps(recorded_python=fake_py, worktree_root=worktree, uv_executable="uv")
-        assert {"module": "myaddon", "import": "requests"} in result.missing_imports
+        assert any(
+            item.module == "myaddon" and item.import_name == "requests"
+            for item in result.missing_imports
+        )
 
     @pytest.mark.parametrize(
         ("pip_check_ok", "missing_imports", "expected"),
@@ -1027,11 +1030,14 @@ class TestDepsVerify:
         missing_imports: list[dict[str, str]],
         expected: bool,
     ) -> None:
-        from odoo_instance_sdk.internal.automation import DepsVerifyResult
+        from odoo_instance_sdk.models import DepsMissingImport, DepsVerifyResult
 
         result = DepsVerifyResult(
             pip_check_ok=pip_check_ok,
-            missing_imports=missing_imports,
+            missing_imports=tuple(
+                DepsMissingImport(module=str(item["module"]), import_name=str(item["import"]))
+                for item in missing_imports
+            ),
         )
         assert result.ok is expected
 
@@ -1301,7 +1307,7 @@ class TestCliEval:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         def deterministic_port(*_args: object, **_kwargs: object) -> int:
             return 18085
@@ -1346,7 +1352,7 @@ class TestCliEval:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18086)
         opts = EnvironmentCheckoutOptions(
@@ -1418,7 +1424,7 @@ class TestCliEval:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18087)
         opts = EnvironmentCheckoutOptions(
@@ -1466,7 +1472,7 @@ class TestCliEval:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18088)
         opts = EnvironmentCheckoutOptions(
@@ -1727,7 +1733,7 @@ class TestCliExecStdin:
     ) -> None:
         from click.testing import CliRunner
 
-        from odoo_instance_sdk.resources import environment as environment_module
+        from odoo_instance_sdk.resources.environment import checkout as environment_module
 
         monkeypatch.setattr(environment_module, "find_free_port", lambda *_args, **_kwargs: 18089)
         opts = EnvironmentCheckoutOptions(
@@ -1843,8 +1849,8 @@ class TestNoNewPublicResources:
     "relative_path",
     [
         "src/odoo_instance_sdk/internal/automation.py",
-        "src/odoo_instance_sdk/internal/database_preparation.py",
-        "src/odoo_instance_sdk/resources/database.py",
+        "src/odoo_instance_sdk/internal/dbprep/materialize.py",
+        "src/odoo_instance_sdk/resources/database/backup_restore_parts/backup.py",
     ],
 )
 def test_scripted_consumers_share_instance_shell_wrapper_seam(relative_path: str) -> None:

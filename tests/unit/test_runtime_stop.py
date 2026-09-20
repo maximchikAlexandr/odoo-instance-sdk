@@ -16,10 +16,11 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.config import InstanceConfig
-from odoo_instance_sdk.internal.proc.executor import terminate_pid
-from odoo_instance_sdk.internal.server import _build_cli_args
+from odoo_instance_sdk.execution import JsonValue
+from odoo_instance_sdk.internal.proc import terminate_pid
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.resources.instance.runtime import _runtime_expectations
 
 
 class _Catalog:
@@ -69,10 +70,12 @@ def _instance(
     odoo_bin.write_text("")
     env_row: dict[str, object] = {
         "id": environment_id,
+        "repository_root": str(tmp_path),
+        "git_common_dir": str(tmp_path / ".git"),
         "runtime_json": json.dumps({"odoo_bin": str(odoo_bin), "runtime_cwd": str(runtime_cwd)}),
         "generated_config_path": str(config_path),
         "python_environment_path": sys.executable,
-        "python_environment_owned": False,
+        "python_environment_owned": 0,
     }
     runtime_row: dict[str, object] | None = (
         {"root_pid": 4242, "create_time": 12.5} if runtime else None
@@ -100,21 +103,16 @@ def _live_process(
     extra_args: tuple[str, ...] = (),
 ) -> SimpleNamespace:
     catalog = instance._client.get_catalog()
-    env_row = cast("Mapping[str, object]", catalog.get_environment(str(instance._environment_id)))
-    config = StartConfig.from_odoo_config(str(env_row["generated_config_path"]))
-    runtime = json.loads(str(env_row["runtime_json"]))
-    argv = (
-        str(env_row["python_environment_path"]),
-        str(runtime["odoo_bin"]),
-        *_build_cli_args(config),
-        *instance.config.default_run_args,
-        *extra_args,
+    env_row = cast(
+        "Mapping[str, JsonValue]", catalog.get_environment(str(instance._environment_id))
     )
+    expected_executable, expected_argv, expected_cwd, _config_path = _runtime_expectations(env_row)
+    argv = (*expected_argv, *instance.config.default_run_args, *extra_args)
     live = SimpleNamespace(
         create_time=lambda: 12.5,
-        exe=lambda: argv[0],
+        exe=lambda: expected_executable,
         cmdline=lambda: list(argv),
-        cwd=lambda: runtime["runtime_cwd"],
+        cwd=lambda: expected_cwd,
     )
     if mismatch == "argv":
         live.cmdline = lambda: [*argv, "--config", "/wrong"]
@@ -133,23 +131,26 @@ def test_stop_owned_runtime_revalidates_then_terminates_and_clears(
     calls: list[tuple[int, int | None, float]] = []
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
         patch(
-            "odoo_instance_sdk.resources.instance.terminate_pid",
+            "odoo_instance_sdk.resources.instance.planning.terminate_pid",
             side_effect=lambda pid, *, process_group_id, timeout: calls.append(
                 (pid, process_group_id, timeout)
             ),
         ),
-        patch("odoo_instance_sdk.resources.instance.is_process_alive", return_value=False),
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime.is_process_alive",
+            return_value=False,
+        ),
         patch(
             "odoo_instance_sdk.internal.address.probe_address",
             side_effect=AssertionError("stop must not inspect port state"),
         ),
     ):
-        result = instance._stop_environment_command(timeout=3.0).run()
+        result = instance.stop_environment_command(timeout=3.0).run()
 
     assert result == {"status": "stopped", "environment_id": environment_id}
     assert calls == [(4242, 4242, 3.0)]
@@ -162,17 +163,17 @@ def test_stop_mismatch_fails_closed_and_retains_runtime(tmp_path: Path, mismatch
     instance, catalog, _ = _instance(tmp_path)
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance, mismatch=mismatch),
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.os.getpgid",
+            "odoo_instance_sdk.resources.instance.identity.os.getpgid",
             return_value=99 if mismatch == "process_group" else 4242,
         ),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
         pytest.raises(RuntimeError, match="runtime identity mismatch"),
     ):
-        instance._stop_environment_command().run()
+        instance.stop_environment_command().run()
     terminate.assert_not_called()
     assert catalog.runtime_row is not None
     assert catalog.clear_calls == []
@@ -183,13 +184,13 @@ def test_stop_inaccessible_identity_fails_closed_and_retains_runtime(tmp_path: P
     instance, catalog, _ = _instance(tmp_path)
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             side_effect=psutil.AccessDenied(4242),
         ),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
         pytest.raises(RuntimeError, match="identity is inaccessible"),
     ):
-        instance._stop_environment_command().run()
+        instance.stop_environment_command().run()
     terminate.assert_not_called()
     assert catalog.runtime_row is not None
     assert catalog.clear_calls == []
@@ -199,19 +200,19 @@ def test_stop_inaccessible_identity_fails_closed_and_retains_runtime(tmp_path: P
 def test_stop_win32_identity_mismatch_fails_closed_without_taskkill(tmp_path: Path) -> None:
     instance, catalog, _ = _instance(tmp_path)
     with (
-        patch("odoo_instance_sdk.resources.instance.sys.platform", "win32"),
+        patch("odoo_instance_sdk.resources.instance.identity.sys.platform", "win32"),
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance, mismatch="create_time"),
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.os.getpgid",
+            "odoo_instance_sdk.resources.instance.identity.os.getpgid",
             side_effect=AssertionError("Windows must not require POSIX pgid"),
         ),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
         pytest.raises(RuntimeError, match="runtime identity mismatch"),
     ):
-        instance._stop_environment_command().run()
+        instance.stop_environment_command().run()
     terminate.assert_not_called()
     assert catalog.runtime_row is not None
     assert catalog.clear_calls == []
@@ -221,19 +222,19 @@ def test_stop_win32_identity_mismatch_fails_closed_without_taskkill(tmp_path: Pa
 def test_stop_win32_inaccessible_identity_fails_closed_without_taskkill(tmp_path: Path) -> None:
     instance, catalog, _ = _instance(tmp_path)
     with (
-        patch("odoo_instance_sdk.resources.instance.sys.platform", "win32"),
+        patch("odoo_instance_sdk.resources.instance.identity.sys.platform", "win32"),
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             side_effect=psutil.AccessDenied(4242),
         ),
         patch(
-            "odoo_instance_sdk.resources.instance.os.getpgid",
+            "odoo_instance_sdk.resources.instance.identity.os.getpgid",
             side_effect=AssertionError("Windows must not require POSIX pgid"),
         ),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
         pytest.raises(RuntimeError, match="identity is inaccessible"),
     ):
-        instance._stop_environment_command().run()
+        instance.stop_environment_command().run()
     terminate.assert_not_called()
     assert catalog.runtime_row is not None
     assert catalog.clear_calls == []
@@ -244,13 +245,13 @@ def test_stop_rejects_runtime_record_changed_after_planning(tmp_path: Path) -> N
     instance, catalog, _ = _instance(tmp_path)
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
     ):
-        command = instance._stop_environment_command()
+        command = instance.stop_environment_command()
         assert catalog.runtime_row is not None
         catalog.runtime_row["create_time"] = 99.0
         with pytest.raises(RuntimeError, match="changed after planning"):
@@ -265,13 +266,13 @@ def test_stop_rejects_environment_evidence_changed_after_planning(tmp_path: Path
     instance, catalog, _ = _instance(tmp_path)
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
     ):
-        command = instance._stop_environment_command()
+        command = instance.stop_environment_command()
         catalog.env_row["runtime_json"] = json.dumps(
             {
                 "odoo_bin": str(
@@ -295,13 +296,13 @@ def test_stop_rejects_live_evidence_changed_after_planning(tmp_path: Path) -> No
     instance, catalog, _ = _instance(tmp_path)
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             side_effect=[_live_process(instance), _live_process(instance, mismatch="create_time")],
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", side_effect=[4242, 4242]),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", side_effect=[4242, 4242]),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
     ):
-        command = instance._stop_environment_command()
+        command = instance.stop_environment_command()
         with pytest.raises(RuntimeError, match="changed after planning"):
             command.run()
     terminate.assert_not_called()
@@ -314,14 +315,17 @@ def test_stop_allows_safe_default_launch_args(tmp_path: Path) -> None:
     instance, catalog, environment_id = _instance(tmp_path, default_run_args=("--dev",))
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
-        patch("odoo_instance_sdk.resources.instance.is_process_alive", return_value=False),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime.is_process_alive",
+            return_value=False,
+        ),
     ):
-        result = instance._stop_environment_command().run()
+        result = instance.stop_environment_command().run()
     assert result == {"status": "stopped", "environment_id": environment_id}
     terminate.assert_called_once_with(4242, process_group_id=4242, timeout=10.0)
     assert catalog.clear_calls == [(environment_id, 4242, 12.5)]
@@ -330,8 +334,8 @@ def test_stop_allows_safe_default_launch_args(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_stop_no_row_is_idempotent(tmp_path: Path) -> None:
     instance, catalog, environment_id = _instance(tmp_path, runtime=False)
-    with patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate:
-        result = instance._stop_environment_command().run()
+    with patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate:
+        result = instance.stop_environment_command().run()
     assert result == {"status": "already_stopped", "environment_id": environment_id}
     terminate.assert_not_called()
     assert catalog.clear_calls == []
@@ -341,16 +345,16 @@ def test_stop_no_row_is_idempotent(tmp_path: Path) -> None:
 def test_terminate_pid_uses_bounded_term_then_kill_escalation() -> None:
     alive = iter((True, True, True, False, False))
     with (
-        patch("odoo_instance_sdk.internal.proc.executor.os.killpg") as killpg,
+        patch("odoo_instance_sdk.internal.proc.terminate.os.killpg") as killpg,
         patch(
-            "odoo_instance_sdk.internal.proc.executor.is_process_alive",
+            "odoo_instance_sdk.internal.proc.terminate.is_process_alive",
             side_effect=lambda _pid: next(alive),
         ),
         patch(
-            "odoo_instance_sdk.internal.proc.executor.time.monotonic",
+            "odoo_instance_sdk.internal.proc.terminate.time.monotonic",
             side_effect=(0, 100, 100, 100, 100),
         ),
-        patch("odoo_instance_sdk.internal.proc.executor.time.sleep"),
+        patch("odoo_instance_sdk.internal.proc.terminate.time.sleep"),
     ):
         terminate_pid(4242, process_group_id=4242, timeout=5.0)
     assert [call.args[1] for call in killpg.call_args_list] == [
@@ -363,17 +367,17 @@ def test_terminate_pid_uses_bounded_term_then_kill_escalation() -> None:
 def test_terminate_pid_win32_escalates_taskkill_and_verifies_exit() -> None:
     alive = iter((True, True, False))
     with (
-        patch("odoo_instance_sdk.internal.proc.executor.sys.platform", "win32"),
-        patch("odoo_instance_sdk.internal.proc.executor.SubprocessExecutor.execute") as execute,
+        patch("odoo_instance_sdk.internal.proc.run.sys.platform", "win32"),
+        patch("odoo_instance_sdk.internal.proc.terminate.SubprocessExecutor.execute") as execute,
         patch(
-            "odoo_instance_sdk.internal.proc.executor.is_process_alive",
+            "odoo_instance_sdk.internal.proc.terminate.is_process_alive",
             side_effect=lambda _pid: next(alive),
         ),
         patch(
-            "odoo_instance_sdk.internal.proc.executor.time.monotonic",
+            "odoo_instance_sdk.internal.proc.terminate.time.monotonic",
             side_effect=(0.0, 100.0),
         ),
-        patch("odoo_instance_sdk.internal.proc.executor.time.sleep"),
+        patch("odoo_instance_sdk.internal.proc.terminate.time.sleep"),
     ):
         terminate_pid(4242, timeout=5.0)
 
@@ -389,13 +393,13 @@ def test_stop_vanished_process_clears_matching_row(tmp_path: Path) -> None:
     instance, catalog, environment_id = _instance(tmp_path)
     with (
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             side_effect=[_live_process(instance), psutil.NoSuchProcess(4242)],
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
     ):
-        result = instance._stop_environment_command().run()
+        result = instance.stop_environment_command().run()
     assert result == {"status": "already_stopped", "environment_id": environment_id}
     terminate.assert_not_called()
     assert catalog.clear_calls == [(environment_id, 4242, 12.5)]
@@ -426,13 +430,16 @@ def test_stop_cli_output_parity_and_root_selector_without_signal_for_dry_run(
     with (
         patch("odoo_instance_sdk.commands.context.ready_instance", return_value=context),
         patch("odoo_instance_sdk.cli.cli_context.ready_instance", return_value=context),
-        patch("odoo_instance_sdk.resources.instance.terminate_pid") as terminate,
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
         patch(
-            "odoo_instance_sdk.resources.instance.psutil.Process",
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
             return_value=_live_process(instance),
         ),
-        patch("odoo_instance_sdk.resources.instance.os.getpgid", return_value=4242),
-        patch("odoo_instance_sdk.resources.instance.is_process_alive", return_value=False),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime.is_process_alive",
+            return_value=False,
+        ),
     ):
         result = CliRunner().invoke(cli, argv)
     assert result.exit_code == 0, result.output

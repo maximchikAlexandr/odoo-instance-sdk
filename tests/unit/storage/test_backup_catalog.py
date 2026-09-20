@@ -14,7 +14,8 @@ from odoo_instance_sdk.exceptions import (
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import Backup, BackupFormat, BackupState, BackupValidationStatus
-from odoo_instance_sdk.storage.backup_catalog import CURRENT_SCHEMA_VERSION, BackupCatalog
+from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.catalog_migrate import CATALOG_REVISION, catalog_revision
 from tests.unit.monitor_support import make_env, runtime_kwargs
 
 
@@ -636,26 +637,18 @@ def test_verify_identity_rejects_branch_mismatch(tmp_path: Path) -> None:
     catalog.close()
 
 
-def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
+def test_empty_catalog_file_gets_fresh_schema(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA user_version = 0")
-    conn.close()
+    sqlite3.connect(str(db)).close()
 
     catalog = BackupCatalog(db_path=db)
     tables = {
-        r[0]
-        for r in catalog._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+        row[0] for row in catalog._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
     assert "restores" in tables
     assert "database_events" in tables
+    assert catalog_revision(catalog._conn) == CATALOG_REVISION
 
-    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == CURRENT_SCHEMA_VERSION
-
-    # Existing backups table still works
     path = _create_backup_file(tmp_path, "migrated.zip")
     bid = _u("migration")
     catalog.start_download(bid, "http://localhost:8069", "db", "zip", True, path)
@@ -664,86 +657,14 @@ def test_v0_empty_catalog_migration(tmp_path: Path) -> None:
     catalog.close()
 
 
-def test_schema_creation_v0_migration_with_existing_data(tmp_path: Path) -> None:
-    """v0 → v16 migration MUST preserve existing backups and events."""
-    db = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db))
-    conn.execute("PRAGMA user_version = 0")
-    conn.executescript("""
-        CREATE TABLE backups (
-            id TEXT PRIMARY KEY,
-            source_base_url TEXT NOT NULL,
-            database_name TEXT NOT NULL,
-            format TEXT NOT NULL,
-            filestore_requested INTEGER NOT NULL,
-            path TEXT,
-            filename TEXT,
-            size_bytes INTEGER,
-            sha256 TEXT,
-            state TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            downloaded_at TEXT,
-            failed_at TEXT,
-            deleted_at TEXT,
-            error_type TEXT,
-            error_message TEXT
-        );
-        CREATE TABLE backup_events (
-            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-            backup_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            occurred_at TEXT NOT NULL,
-            path TEXT,
-            validator TEXT,
-            exit_code INTEGER,
-            message TEXT
-        );
-    """)
-    pre_backup_id = _u("pre-existing")
-    conn.execute(
-        "INSERT INTO backups (id, source_base_url, database_name, format, "
-        "filestore_requested, state, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (pre_backup_id, "http://old:8069", "olddb", "zip", 1, "available", "2020-01-01"),
-    )
-    conn.execute(
-        "INSERT INTO backup_events (backup_id, event_type, occurred_at) VALUES (?, ?, ?)",
-        (pre_backup_id, "download_started", "2020-01-01"),
-    )
-    conn.commit()
-    conn.close()
-
-    catalog = BackupCatalog(db_path=db)
-
-    backup_row = catalog._conn.execute(
-        "SELECT * FROM backups WHERE id=?", (pre_backup_id,)
-    ).fetchone()
-    assert backup_row is not None
-    assert backup_row["database_name"] == "olddb"
-    assert backup_row["state"] == "available"
-
-    event_row = catalog._conn.execute(
-        "SELECT * FROM backup_events WHERE backup_id=? ORDER BY sequence",
-        (pre_backup_id,),
-    ).fetchone()
-    assert event_row is not None
-    assert event_row["event_type"] == "download_started"
-
-    version = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == CURRENT_SCHEMA_VERSION
-
-    catalog.close()
-
-
-def test_schema_creation_v2_reopen(tmp_path: Path) -> None:
+def test_schema_creation_reopen_is_idempotent(tmp_path: Path) -> None:
     db = tmp_path / "test.db"
     catalog = BackupCatalog(db_path=db)
-    version1 = catalog._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version1 == CURRENT_SCHEMA_VERSION
+    assert catalog_revision(catalog._conn) == CATALOG_REVISION
     catalog.close()
 
     catalog2 = BackupCatalog(db_path=db)
-    version2 = catalog2._conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version2 == CURRENT_SCHEMA_VERSION
+    assert catalog_revision(catalog2._conn) == CATALOG_REVISION
     tables = {
         r[0]
         for r in catalog2._conn.execute(

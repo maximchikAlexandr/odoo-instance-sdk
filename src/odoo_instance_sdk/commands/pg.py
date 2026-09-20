@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from odoo_instance_sdk.commands.context import (
+from odoo_instance_sdk.commands.context import (  # noqa: I001 -- keep PostgreSQL CLI context aliases grouped; remove when Ruff supports grouped aliases.
     CliContext,
     environment_provenance,
     pass_cli_context,
@@ -36,8 +36,7 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     run_or_preview,
 )
-from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
-from odoo_instance_sdk.internal.cli_format import rich_cell
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes, rich_cell
 from odoo_instance_sdk.models import (
     LocksResult,
     PostgresBloatResult,
@@ -520,11 +519,12 @@ def _approval_rich(document: OutputDocument, digest: str) -> str:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
     table = Table("Field", "Value", title="PostgreSQL image approval")
+    table.columns[1].overflow = "fold"
     table.add_row("Image", rich_cell(result.get("image", "—")))
     table.add_row("Digest", rich_cell(digest))
     table.add_row("Status", "approved")
     output = StringIO()
-    console = Console(file=output, color_system=None, width=120)
+    console = Console(file=output, color_system=None, width=9999)
     console.print(table)
     return output.getvalue().rstrip()
 

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from rich.console import Console
+from rich.console import Console  # noqa: I001 -- keep resource formatter aliases grouped; remove when Ruff supports grouped aliases.
 from rich.table import Table
 
 from odoo_instance_sdk.commands.context import (
@@ -43,8 +43,7 @@ from odoo_instance_sdk.commands.output import (
     resolve_output_mode,
     success_document,
 )
-from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
-from odoo_instance_sdk.internal.cli_format import rich_cell
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes, rich_cell
 from odoo_instance_sdk.internal.paths import get_backups_dir, get_catalog_path, get_data_root
 from odoo_instance_sdk.internal.resource_inventory import (
     FileResourceSource,
@@ -259,9 +258,9 @@ def _build_resource_plan(  # noqa: C901
 ) -> _ResourcePlan:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
-    from odoo_instance_sdk.internal.pg.inventory import build_database_inventory_command
     from odoo_instance_sdk.project import ProjectConfig
-    from odoo_instance_sdk.resources.postgres import PostgresCluster, _resolve_project_id
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.resources.postgres.lifecycle import _resolve_project_id
 
     catalog: BackupCatalog | None = None
     path = _catalog_path()
@@ -334,10 +333,8 @@ def _build_resource_plan(  # noqa: C901
     plan.database_reason = file_reason
     if instance is not None and cluster is not None:
         try:
-            database_command = build_database_inventory_command(
-                instance,
+            database_command = instance.databases.list_inventory_command(
                 project_root,
-                catalog=catalog,
                 executor=process_executor,
             )
             plan.observations += database_command.plan.observations
@@ -492,8 +489,17 @@ def _rich_list(document: OutputDocument) -> str:
     if not isinstance(resources, list):
         return "No resources"
     table = Table(
-        "Identity", "Type", "Name", "Ownership", "Measured bytes", "Complete", "Reclaimable"
+        "Identity",
+        "Type",
+        "Name",
+        "Ownership",
+        "Measured bytes",
+        "Complete",
+        "Reclaimable",
     )
+    name_column = table.columns[2]
+    name_column.overflow = "ignore"
+    name_column.no_wrap = True
     for resource in resources:
         if not isinstance(resource, dict):
             continue
@@ -512,7 +518,7 @@ def _rich_list(document: OutputDocument) -> str:
             rich_cell(str(resource.get("reclaimable", False)).lower()),
         )
     output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
+    console = Console(file=output, color_system=None, width=9999)
     console.print(table)
     return output.getvalue().rstrip()
 

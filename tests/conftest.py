@@ -298,7 +298,6 @@ def isolated_cli_catalogue(  # noqa: C901
     monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_root))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root))
-    monkeypatch.setattr("odoo_instance_sdk.cli.get_catalog_path", catalog_path_for)
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_data_root", data_root_path)
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_environments_root",

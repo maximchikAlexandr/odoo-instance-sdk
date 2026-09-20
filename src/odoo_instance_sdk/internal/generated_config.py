@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import configparser
 import contextlib
+import errno
 import io
 import os
-import tempfile
+import stat
+import uuid
 from pathlib import Path
 
 
@@ -113,13 +115,51 @@ def generate_config(
         db_password=db_password,
     )
     dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(dest.parent), prefix=dest.name + ".", suffix=".tmp")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW
+    parent_fd = os.open(dest.parent, directory_flags)
+    tmp_name: str | None = None
+    fd: int | None = None
     try:
-        with open(fd, "w", encoding="utf-8") as f:
+        parent_stat = os.fstat(parent_fd)
+        if (
+            not stat.S_ISDIR(parent_stat.st_mode)
+            or parent_stat.st_uid != os.getuid()
+            or parent_stat.st_mode & 0o022
+        ):
+            raise OSError(  # noqa: TRY301
+                errno.EPERM, f"unsafe generated-config parent: {dest.parent}"
+            )
+        try:
+            existing = os.stat(dest.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)
+        ):
+            raise OSError(  # noqa: TRY301
+                errno.ELOOP, f"refusing non-regular generated config: {dest}"
+            )
+        tmp_name = f".{dest.name}.{uuid.uuid4().hex}.tmp"
+        fd = os.open(
+            tmp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None
             f.write(content)
-        os.chmod(tmp_path, 0o600)
-        os.replace(tmp_path, str(dest))
+            f.flush()
+            os.fchmod(f.fileno(), 0o600)
+        os.replace(tmp_name, dest.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        tmp_name = None
     except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if tmp_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name, dir_fd=parent_fd)
         raise
+    finally:
+        os.close(parent_fd)
