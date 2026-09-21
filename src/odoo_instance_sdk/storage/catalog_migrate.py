@@ -67,11 +67,24 @@ def _backup_catalog(db_path: Path) -> Path:
     return backup_path
 
 
-def _table_columns(conn: sqlite3.Connection, table: str) -> tuple[tuple[str, str, int, int], ...]:
+def _table_columns(conn: sqlite3.Connection, table: str) -> tuple[tuple[str, str, int], ...]:
     return tuple(
-        (str(row[1]), str(row[2]), int(row[3]), int(row[5]))
+        (str(row[1]), str(row[2]), int(bool(row[3]) or bool(row[5])))
         for row in conn.execute(f"PRAGMA table_info({table})")
     )
+
+
+def _identity_keys(conn: sqlite3.Connection, table: str) -> frozenset[tuple[str, ...]]:
+    columns = tuple(conn.execute(f"PRAGMA table_info({table})"))
+    primary_key = tuple(
+        str(row[1]) for row in sorted(columns, key=lambda row: int(row[5])) if int(row[5])
+    )
+    keys = {primary_key} if primary_key else set()
+    for row in conn.execute(f"PRAGMA index_list({table})"):
+        if str(row[3]) != "u":
+            continue
+        keys.add(tuple(str(column[2]) for column in conn.execute(f"PRAGMA index_info({row[1]!s})")))
+    return frozenset(keys)
 
 
 def _foreign_keys(conn: sqlite3.Connection, table: str) -> tuple[tuple[str, str, str], ...]:
@@ -94,13 +107,16 @@ def _index_names(conn: sqlite3.Connection) -> frozenset[str]:
 def _schema_fingerprint(
     conn: sqlite3.Connection,
 ) -> tuple[
-    tuple[tuple[str, tuple[tuple[str, str, int, int], ...]], ...],
+    tuple[
+        tuple[str, tuple[tuple[str, str, int], ...], frozenset[tuple[str, ...]]],
+        ...,
+    ],
     frozenset[str],
     tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...],
     bool,
 ]:
     tables = tuple(
-        (table, _table_columns(conn, table))
+        (table, _table_columns(conn, table), _identity_keys(conn, table))
         for table in sorted(CATALOG_TABLES)
         if conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -123,7 +139,10 @@ def _schema_fingerprint(
 
 
 def _reference_fingerprint() -> tuple[
-    tuple[tuple[str, tuple[tuple[str, str, int, int], ...]], ...],
+    tuple[
+        tuple[str, tuple[tuple[str, str, int], ...], frozenset[tuple[str, ...]]],
+        ...,
+    ],
     frozenset[str],
     tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...],
     bool,
@@ -147,6 +166,35 @@ def verify_schema_equivalence(conn: sqlite3.Connection) -> None:
     expected = _reference_fingerprint()
     if actual != expected:
         raise BackupCatalogError("catalog schema is not equivalent to the first Alembic revision")
+
+
+def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
+    """Restore the index lost by the historical v16 table rebuild."""
+    user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if user_version != 16:
+        return
+    actual_tables, actual_indexes, actual_foreign_keys, actual_view = _schema_fingerprint(conn)
+    expected_tables, expected_indexes, expected_foreign_keys, expected_view = (
+        _reference_fingerprint()
+    )
+    if (
+        actual_tables != expected_tables
+        or actual_foreign_keys != expected_foreign_keys
+        or actual_view != expected_view
+        or actual_indexes - expected_indexes
+        or expected_indexes - actual_indexes != {"environments_one_active_branch"}
+    ):
+        return
+    try:
+        with conn:
+            conn.execute(
+                "CREATE UNIQUE INDEX environments_one_active_branch "
+                "ON environments(git_common_dir, branch) WHERE state <> 'removed'"
+            )
+    except sqlite3.IntegrityError as exc:
+        raise BackupCatalogError(
+            "catalog has multiple active environments for the same branch"
+        ) from exc
 
 
 def _assert_single_head() -> str:
@@ -175,6 +223,7 @@ def ensure_catalog_migrated(db_path: Path) -> None:
             command.upgrade(config, "head")
             return
         _backup_catalog(db_path)
+        _repair_known_v16_catalog(conn)
         verify_schema_equivalence(conn)
     finally:
         conn.close()

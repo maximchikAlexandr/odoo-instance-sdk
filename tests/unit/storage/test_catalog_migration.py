@@ -18,6 +18,8 @@ from odoo_instance_sdk.storage.catalog_schema import CATALOG_INDEXES, CATALOG_TA
 from tests.unit.monitor_support import make_env
 from tests.unit.storage.catalog_alpha_fixture import write_alpha_catalog
 
+V16_CATALOG_FIXTURE = Path(__file__).parents[2] / "fixtures" / "catalog_v16.sql"
+
 
 def _assert_current_revision(conn: sqlite3.Connection) -> None:
     assert catalog_revision(conn) == CATALOG_REVISION
@@ -70,6 +72,73 @@ def test_alpha_catalogue_is_backed_up_stamped_and_preserves_rows(tmp_path: Path)
     )
     assert catalog.get_environment(environment_id) is not None
     catalog.close()
+
+
+def test_real_v16_catalogue_is_repaired_stamped_and_preserves_rows(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(V16_CATALOG_FIXTURE.read_text())
+    before = {
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in CATALOG_TABLES
+    }
+    conn.close()
+
+    catalog = BackupCatalog(db_path=db)
+
+    _assert_current_revision(catalog._conn)
+    after = {
+        table: catalog._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in CATALOG_TABLES
+    }
+    assert after == before
+    assert catalog.get_by_id("backup-v16") is not None
+    assert catalog.get_environment("environment-v16") is not None
+    assert catalog._conn.execute(
+        "SELECT 1 FROM runtime WHERE owner_kind = 'environment' AND owner_id = 'environment-v16'"
+    ).fetchone()
+    indexes = {
+        row[0]
+        for row in catalog._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    assert "environments_one_active_branch" in indexes
+    catalog.close()
+
+
+def test_real_v16_catalogue_rejects_duplicate_active_branch(tmp_path: Path) -> None:
+    db = tmp_path / "catalog.sqlite3"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(V16_CATALOG_FIXTURE.read_text())
+    conn.execute(
+        """INSERT INTO environments
+           SELECT 'environment-v16-duplicate', 'duplicate', repository_root, git_common_dir,
+                  branch, base_ref, '/worktree-duplicate', '/worktree-duplicate/odoo.conf',
+                  python_environment_path, python_environment_owned, dependency_lock_path,
+                  db_mode, source_db_name, 'alpha_copy_duplicate', backup_id, runtime_json,
+                  state, created_at, last_used_at, removed_at, last_error, applied_settings_json
+           FROM environments WHERE id = 'environment-v16'"""
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(
+        BackupCatalogError,
+        match="multiple active environments for the same branch",
+    ):
+        BackupCatalog(db_path=db)
+
+    conn = sqlite3.connect(str(db))
+    assert catalog_revision(conn) is None
+    assert (
+        conn.execute(
+            "SELECT count(*) FROM sqlite_master "
+            "WHERE type='index' AND name='environments_one_active_branch'"
+        ).fetchone()[0]
+        == 0
+    )
+    conn.close()
 
 
 def test_reopen_stamped_catalog_is_idempotent(tmp_path: Path) -> None:
