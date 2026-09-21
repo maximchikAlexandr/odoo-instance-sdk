@@ -412,6 +412,7 @@ def _auxiliary_start_step(instance: OdooInstance) -> tuple[PreparedStep, StartCo
         mutating=True,
         long_running=True,
         start_new_session=True,
+        inherit_stdio=True,
     )
     return step, snapshot, secret_path
 
