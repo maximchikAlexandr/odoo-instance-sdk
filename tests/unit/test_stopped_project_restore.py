@@ -80,7 +80,7 @@ def test_auxiliary_restore_session_captures_bounded_runtime_and_cleans_owned_pro
     command.run()
 
     assert session.start_step.long_running is True
-    assert session.start_step.inherit_stdio is False
+    assert session.start_step.inherit_stdio is True
     assert "--database=__odcli_restore__" not in session.start_step.argv
     assert "--db-filter=^$" not in session.start_step.argv
     assert executor.spawned == [session.start_step]

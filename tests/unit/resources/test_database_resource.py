@@ -1040,7 +1040,7 @@ class TestBackupProvenance:
         assert len(list(tmp_path.glob("*.zip"))) == 1
         assert list(tmp_path.glob("*.part")) == []
 
-    @pytest.mark.parametrize(("timeout", "expected"), [(None, 600.0), (12.5, 12.5)])
+    @pytest.mark.parametrize(("timeout", "expected"), [(None, 1800.0), (12.5, 12.5)])
     def test_backup_uses_long_default_timeout_and_honors_override(
         self,
         instance: OdooInstance,
@@ -1493,6 +1493,7 @@ class TestRestore:
             instance.databases.restore(backup, "newdb")
 
         timeout = mock_client_cls.call_args.kwargs["timeout"]
+        assert client.config.backup_timeout_seconds == 1800.0
         assert timeout.connect == client.config.backup_timeout_seconds
         assert timeout.read == client.config.backup_timeout_seconds
 
