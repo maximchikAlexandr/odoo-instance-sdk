@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 class OdooClientConfig:
     executable: str
     http_timeout_seconds: float = 30.0
-    backup_timeout_seconds: float = 600.0
+    backup_timeout_seconds: float = 1800.0
     backups_directory: Path | None = None
     ticket_link_enabled: bool | None = None
     ticket_base_url: str | None = None
