@@ -464,6 +464,35 @@ class RunContext(Generic[T]):
         self._results[requested.step_id] = result
         return result
 
+    def process_declared(self, requested: PreparedStep) -> ProcessResultLike:
+        """Run a post-confirmation process declared as a logical action.
+
+        Some commands can only freeze a process argv after an earlier declared
+        phase returns a value (for example, resolving a mutable revision).  The
+        public plan keeps that phase as an action, while this method preserves
+        the shared executor and observer boundary for its typed runtime step.
+        """
+        declared = self._steps.get(requested.step_id)
+        if (
+            not isinstance(declared, PreparedAction)
+            or requested.step_id not in self._started_actions
+        ):
+            raise UnplannedStepError(requested.step_id, reason="process is not an active action")
+        if requested.step_id in self._results:
+            raise DuplicateStepError(requested.step_id)
+        observer = (
+            _StreamingStepObserver(self._observer, requested)
+            if self._observer is not None
+            else None
+        )
+        result = self._executor.execute(
+            requested,
+            observer=observer,
+            observe_output=self._observe_output,
+        )
+        self._results[requested.step_id] = result
+        return result
+
     def process_prepared_with_deadline(
         self, requested: PreparedStep, deadline: ExecutionDeadline
     ) -> ProcessResultLike:

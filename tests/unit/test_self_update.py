@@ -338,6 +338,12 @@ def test_update_command_matrix(
         if str(command_kwargs.get("ref", "")).lower() != _SHA_OLD:
             expected_steps.insert(0, "update.resolve")
         assert [step.step_id for step in executor.executed] == expected_steps
+        install = next(
+            (step for step in executor.executed if step.step_id == "update.install"), None
+        )
+        assert command_kwargs.get("ref") != "main" or (
+            install is not None and _SHA_B in install.argv
+        )
 
 
 def test_read_uv_tool_direct_url_uses_pep610_metadata(
@@ -444,10 +450,9 @@ def test_dry_run_command_has_frozen_process_steps(
     _patch_provenance(monkeypatch, _provenance(executable=executable))
     command = update_command(ref="main", dry_run=True)
     process_steps = [step for step in command.plan.steps if isinstance(step, ProcessStep)]
-    assert len(process_steps) == 2
-    assert process_steps[0].argv[0] == "uv"
-    assert "update" in process_steps[1].argv
-    assert process_steps[1].argv[-2:] == ("--format", "json")
+    assert len(process_steps) == 1
+    assert "update" in process_steps[0].argv
+    assert process_steps[0].argv[-2:] == ("--format", "json")
 
 
 def test_update_lock_conflict_propagates(

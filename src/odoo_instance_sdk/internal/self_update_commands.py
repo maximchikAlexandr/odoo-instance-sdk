@@ -232,33 +232,6 @@ def _skip_planned_steps(context: RunContext[UpdateResult], *step_ids: str) -> No
             context.skip(step_id)
 
 
-def resolve_update_target_sha(
-    ref: str,
-    *,
-    executor: ProcessExecutor | None,
-) -> str:
-    """Resolve a mutable ref from the declared post-confirmation phase."""
-    if _is_full_sha(ref):
-        return ref.lower()
-    step = PreparedStep(
-        step_id="update.resolve",
-        argv=_install_argv(ref, dry_run=True),
-        read_only=True,
-    )
-    result = cast("ProcessResult", (executor or SubprocessExecutor()).execute(step))
-    if result.returncode != 0:
-        stderr = result.stderr if isinstance(result.stderr, str) else ""
-        detail = stderr.strip() or "uv could not resolve the requested revision"
-        raise UnsupportedInstallError(detail, manual_argv=_MANUAL_INSTALL_ARGV)
-    target_sha = _extract_target_sha(ref, _process_output_text(result))
-    if target_sha is None:
-        raise UnsupportedInstallError(
-            "could not parse target SHA from uv output (sha_unparsed)",
-            manual_argv=_MANUAL_INSTALL_ARGV,
-        )
-    return target_sha
-
-
 def _journal_resume_phase(journal: dict[str, JsonValue] | None) -> str | None:
     if journal is None:
         return None
@@ -319,7 +292,6 @@ class _UpdateSession:
     provenance: InstalledProvenance
     executor: ProcessExecutor
     allow_downgrade: bool
-    install_step: PreparedStep
     maintenance_step: PreparedStep
     context: RunContext[UpdateResult]
     journal_path: Path = field(init=False)
@@ -360,7 +332,25 @@ class _UpdateSession:
             self.ref = self.ref.lower()
             return
         self.context.action("update.resolve")
-        self.ref = resolve_update_target_sha(self.ref, executor=self.executor)
+        resolve_step = PreparedStep(
+            step_id="update.resolve",
+            argv=_install_argv(self.ref, dry_run=True),
+            read_only=True,
+        )
+        result = cast("ProcessResult", self.context.process_declared(resolve_step))
+        if result.returncode != 0:
+            stderr = result.stderr if isinstance(result.stderr, str) else ""
+            raise UnsupportedInstallError(
+                stderr.strip() or "uv could not resolve the requested revision",
+                manual_argv=_MANUAL_INSTALL_ARGV,
+            )
+        target_sha = _extract_target_sha(self.ref, _process_output_text(result))
+        if target_sha is None:
+            raise UnsupportedInstallError(
+                "could not parse target SHA from uv output (sha_unparsed)",
+                manual_argv=_MANUAL_INSTALL_ARGV,
+            )
+        self.ref = target_sha
         self.context.complete_action("update.resolve")
 
     def preflight(self) -> str | None:
@@ -410,7 +400,13 @@ class _UpdateSession:
 
     def install(self) -> None:
         started = self._start("install")
-        result = cast("ProcessResult", self.context.process_prepared(self.install_step))
+        self.context.action("update.install")
+        install_step = PreparedStep(
+            step_id="update.install",
+            argv=_install_argv(self.ref),
+            mutating=True,
+        )
+        result = cast("ProcessResult", self.context.process_declared(install_step))
         self._finish("install", started)
         if result.returncode != 0 and not _install_reached_target(
             ref=self.ref,
@@ -420,6 +416,7 @@ class _UpdateSession:
             _clear_journal(self.journal_path)
             _clear_snapshot(self.snapshot_dir)
             raise UpdateError(f"uv tool install failed with exit {result.returncode}")
+        self.context.complete_action("update.install")
         _write_journal(
             self.journal_path,
             {
@@ -642,7 +639,6 @@ def _build_mutating_command(
     executor: ProcessExecutor | None,
     allow_downgrade: bool,
 ) -> Command[UpdateResult]:
-    install_step = PreparedStep(step_id="update.install", argv=_install_argv(ref), mutating=True)
     executable = provenance.uv_tool_bin_path
     if executable is None:
         raise UnsupportedInstallError(
@@ -686,7 +682,12 @@ def _build_mutating_command(
             description="Snapshot affected metadata for rollback",
             mutating=True,
         ),
-        install_step,
+        PreparedAction(
+            step_id="update.install",
+            action="install",
+            description="Install the resolved immutable revision",
+            mutating=True,
+        ),
         maintenance_step,
         PreparedAction(
             step_id="update.verify",
@@ -709,7 +710,6 @@ def _build_mutating_command(
             provenance=provenance,
             executor=active_executor,
             allow_downgrade=allow_downgrade,
-            install_step=install_step,
             maintenance_step=maintenance_step,
             context=context,
         ).run()
