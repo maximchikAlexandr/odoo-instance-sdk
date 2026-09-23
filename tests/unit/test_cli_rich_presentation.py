@@ -122,6 +122,9 @@ def test_env_list_rich_compact_keeps_provider_facts_in_details_only() -> None:
 
 @pytest.mark.unit
 def test_cli_composition_promotes_short_aliases_without_leaf_edits() -> None:
+    loaded = CliRunner().invoke(cli, ["module", "--help"])
+    assert loaded.exit_code == 0, loaded.output
+
     aliases = (
         ("env", "create", "checkout"),
         ("env", "ls", "list"),
