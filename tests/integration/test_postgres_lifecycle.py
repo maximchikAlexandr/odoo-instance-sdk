@@ -19,7 +19,10 @@ import pytest
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.internal.postgres_compose import docker_ready
 from odoo_instance_sdk.resources.postgres import PostgresCluster
-from tests.integration.postgres_cleanup import cleanup_postgres_project
+from tests.integration.postgres_cleanup import (
+    cleanup_postgres_project,
+    patch_compose_init_for_integration,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -49,6 +52,7 @@ def test_init_up_preflight_stop_preserves_volume(
         "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
     )
+    patch_compose_init_for_integration(monkeypatch)
     # init a git repo so repo_key is stable.
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=tmp_path, check=True)
@@ -62,6 +66,7 @@ def test_init_up_preflight_stop_preserves_volume(
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--python",

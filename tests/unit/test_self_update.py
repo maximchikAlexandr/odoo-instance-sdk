@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import msgspec
 import pytest
@@ -16,7 +17,7 @@ from odoo_instance_sdk.exceptions import (
     UpdateIncompleteError,
 )
 from odoo_instance_sdk.execution import ProcessStep
-from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.self_update import (
     InstalledProvenance,
     assert_update_not_blocking,
@@ -120,7 +121,7 @@ def user_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _process_result(
-    step,
+    step: PreparedStep,
     *,
     returncode: int = 0,
     stdout: str = "",
@@ -142,20 +143,22 @@ def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
         if step.step_id == "update.resolve.check":
             return _process_result(
                 step,
-                returncode=int(effects.get("install_rc", 0)),
+                returncode=cast("int", effects.get("install_rc", 0)),
                 stdout=str(effects.get("uv_stdout", f"install {_SHA_B}")),
                 stderr=str(effects.get("uv_stderr", "")),
             )
         if step.step_id == "update.install":
-            return _process_result(step, returncode=int(effects.get("install_rc", 0)))
+            return _process_result(step, returncode=cast("int", effects.get("install_rc", 0)))
         if step.step_id == "update.migrate":
             return _process_result(
                 step,
-                returncode=int(effects.get("maintenance_rc", 0)),
-                stdout=_MAINTENANCE_JSON if effects.get("maintenance_rc", 0) == 0 else "",
+                returncode=cast("int", effects.get("maintenance_rc", 0)),
+                stdout=_MAINTENANCE_JSON
+                if cast("int", effects.get("maintenance_rc", 0)) == 0
+                else "",
             )
         if step.step_id == "update.recovery":
-            return _process_result(step, returncode=int(effects.get("rollback_rc", 0)))
+            return _process_result(step, returncode=cast("int", effects.get("rollback_rc", 0)))
         return _process_result(step)
 
     return RecordingExecutor(result_factory=factory)
@@ -264,7 +267,7 @@ def test_update_command_matrix(
     monkeypatch: pytest.MonkeyPatch,
     user_root: Path,
     tmp_path: Path,
-    command_kwargs: dict[str, object],
+    command_kwargs: dict[str, str | bool],
     effects: dict[str, object],
     expected_outcome: str | None,
     expected_errors: tuple[type[Exception], ...],
@@ -301,13 +304,13 @@ def test_update_command_matrix(
     if expected_errors:
         with pytest.raises(expected_errors):
             command = update_command(
-                **cast("dict[str, object]", command_kwargs),
+                **cast("Any", command_kwargs),
                 executor=executor,
             )
             command.run()
         return
 
-    command = update_command(**cast("dict[str, object]", command_kwargs), executor=executor)
+    command = update_command(**cast("Any", command_kwargs), executor=executor)
 
     result = command.run()
     assert result.outcome == expected_outcome
@@ -350,6 +353,7 @@ def test_read_uv_tool_direct_url_uses_pep610_metadata(
     (tmp_path / ".odcli").mkdir()
     provenance = read_uv_tool_direct_url()
     assert provenance.commit_id == _SHA_A
+    assert provenance.source_repo is not None
     assert provenance.source_repo.endswith("odoo-instance-sdk.git")
 
 
@@ -423,11 +427,11 @@ def test_update_lock_conflict_propagates(
     )
 
     @contextlib.contextmanager
-    def _conflict(_path: Path):
+    def _conflict(_path: Path) -> Iterator[int]:
         raise LockConflictError(str(_path), mode="exclusive")
         yield 0
 
-    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.exclusive_lock", _conflict)
+    monkeypatch.setattr("odoo_instance_sdk.internal.self_update_commands.exclusive_lock", _conflict)
     with pytest.raises(LockConflictError):
         update_command(ref="main", executor=RecordingExecutor()).run()
 

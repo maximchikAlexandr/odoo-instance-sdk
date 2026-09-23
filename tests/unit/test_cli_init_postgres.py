@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
+from odoo_instance_sdk.internal.proc import PreparedStep, RunContext
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 from odoo_instance_sdk.resources.postgres import PostgresCluster
@@ -30,20 +31,43 @@ def _stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     def _skip_bootstrap_tmp(
-        context: object,
-        spawn_step: object,
-        probe_step: object,
-        ready_step: object,
+        context: RunContext[object],
+        spawn_step: PreparedStep,
+        probe_step: PreparedStep,
+        ready_step: PreparedStep,
     ) -> bool:
         context.skip(spawn_step.step_id)
         context.skip(probe_step.step_id)
         context.skip(ready_step.step_id)
         return True
 
+    def _bootstrap_sql_step_stub(
+        *,
+        db_host: str,
+        db_port: int,
+        db_user: str,
+        db_password: str,
+        step_id: str,
+    ) -> PreparedStep:
+        return PreparedStep(
+            step_id=step_id,
+            argv=("true",),
+            timeout=30.0,
+            read_only=True,
+        )
+
     monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", _noop_ensure_running)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap._bootstrap_sql_step",
+        _bootstrap_sql_step_stub,
+    )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
         _skip_bootstrap_tmp,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap.ensure_project_bootstrap_tmp",
+        lambda _instance, _context: None,
     )
 
 

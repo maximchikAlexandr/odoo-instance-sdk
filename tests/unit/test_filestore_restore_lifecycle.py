@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -187,7 +188,7 @@ def test_db_rm_deletes_proven_filestore_after_self_contained_restore(
     def build_drop_command(*args: object, **kwargs: object) -> object:
         patched = dict(kwargs)
         patched["executor"] = _executor()
-        return real_drop_command(*args, **patched)
+        return real_drop_command(*cast("Any", args), **cast("Any", patched))
 
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.pg.drop.build_database_drop_command",

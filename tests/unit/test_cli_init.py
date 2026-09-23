@@ -20,6 +20,7 @@ def test_init_catalogue_access_is_worker_local_and_not_production(
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--python",
@@ -76,6 +77,7 @@ def test_worker_local_catalogues_do_not_cross_contaminate_monitor_projects(
 def test_no_input_missing_odoo_bin_fails(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["init", "--no-input", "--project", str(tmp_path)])
+    ("--allow-partial",)
     assert result.exit_code == 1
     assert "--odoo-bin" in result.output
 
@@ -87,6 +89,7 @@ def test_no_input_full_specified_writes(tmp_path: Path) -> None:
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--python",
@@ -111,6 +114,7 @@ def test_init_preserves_existing_root_gitignore(tmp_path: Path) -> None:
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--python",
@@ -134,6 +138,7 @@ def test_dry_run_json_returns_manifest_no_write(tmp_path: Path) -> None:
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--python",
@@ -158,6 +163,7 @@ def test_idempotent_identical_is_noop(tmp_path: Path) -> None:
     args = [
         "init",
         "--no-input",
+        "--allow-partial",
         "--odoo-bin",
         "/opt/odoo/odoo-bin",
         "--python",
@@ -182,6 +188,7 @@ def test_non_identical_no_input_errors(tmp_path: Path) -> None:
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--project",
@@ -193,6 +200,7 @@ def test_non_identical_no_input_errors(tmp_path: Path) -> None:
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/other/odoo-bin",
             "--project",
@@ -210,6 +218,7 @@ def test_non_identical_no_input_yes_replaces_manifest_atomically(tmp_path: Path)
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--python",
@@ -227,6 +236,7 @@ def test_non_identical_no_input_yes_replaces_manifest_atomically(tmp_path: Path)
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--yes",
             "--odoo-bin",
             "/opt/other/odoo-bin",
@@ -251,6 +261,7 @@ def test_yes_dry_run_does_not_write_existing_manifest_or_ignore(tmp_path: Path) 
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--python",
@@ -272,6 +283,7 @@ def test_yes_dry_run_does_not_write_existing_manifest_or_ignore(tmp_path: Path) 
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--yes",
             "--dry-run",
             "--odoo-bin",
@@ -297,7 +309,7 @@ def test_wizard_prompts_for_missing_odoo_bin(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["init", "--project", str(tmp_path)],
+        ["init", "--allow-partial", "--project", str(tmp_path)],
         input="/opt/odoo/odoo-bin\n",
     )
     assert result.exit_code == 0
@@ -311,6 +323,7 @@ def test_wizard_all_specified_no_prompts(tmp_path: Path) -> None:
         cli,
         [
             "init",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--python",
@@ -332,6 +345,7 @@ def test_non_identical_tty_prompt_overwrite(tmp_path: Path) -> None:
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/odoo/odoo-bin",
             "--project",
@@ -342,6 +356,7 @@ def test_non_identical_tty_prompt_overwrite(tmp_path: Path) -> None:
         cli,
         [
             "init",
+            "--allow-partial",
             "--odoo-bin",
             "/opt/other/odoo-bin",
             "--project",
@@ -362,6 +377,7 @@ def test_from_vscode_import(tmp_path: Path) -> None:
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--from-vscode",
             str(fixture),
             "--launch-name",
@@ -386,6 +402,7 @@ def test_dry_run_manifest_sanitizes_cli_and_vscode_controls(source: str, tmp_pat
         args = [
             "init",
             "--no-input",
+            "--allow-partial",
             "--dry-run",
             "--format",
             "json",
@@ -419,6 +436,7 @@ def test_dry_run_manifest_sanitizes_cli_and_vscode_controls(source: str, tmp_pat
         args = [
             "init",
             "--no-input",
+            "--allow-partial",
             "--dry-run",
             "--format",
             "json",

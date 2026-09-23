@@ -1849,7 +1849,7 @@ class TestNoNewPublicResources:
     "relative_path",
     [
         "src/odoo_instance_sdk/internal/automation.py",
-        "src/odoo_instance_sdk/internal/dbprep/materialize.py",
+        "src/odoo_instance_sdk/internal/dbprep/materialize_steps.py",
         "src/odoo_instance_sdk/resources/database/backup_restore_parts/backup.py",
     ],
 )

@@ -150,18 +150,27 @@ def init_project_command(  # noqa: C901
         )
         context.complete_action("init")
         if compose_steps:
+            from odoo_instance_sdk.exceptions import PostgresClusterError
             from odoo_instance_sdk.resources.postgres import PostgresCluster
 
             cluster = PostgresCluster.from_project(project_path)
             temporary_path = None
             if cluster.mode == "compose":
-                temporary_path = (
-                    cluster.compose_file.parent / f".compose-{uuid.uuid4().hex}.yaml.tmp"
-                )
-            dependency_steps = cluster._ensure_running_steps(60.0, temporary_path=temporary_path)
+                if not context.planned("postgres.ensure.config"):
+                    raise PostgresClusterError(
+                        "compose init plan is missing postgres.ensure.config"
+                    )
+                config_step = context.prepared("postgres.ensure.config")
+                try:
+                    config_index = len(config_step.argv) - 1 - config_step.argv[::-1].index("-f")
+                    temporary_path = Path(config_step.argv[config_index + 1])
+                except (ValueError, IndexError) as exc:
+                    raise PostgresClusterError(
+                        "captured postgres ensure config step has no temporary compose path"
+                    ) from exc
             step_ids = {
                 step.step_id: step.step_id
-                for step in dependency_steps
+                for step in compose_steps
                 if isinstance(step, PreparedStep)
             }
             cluster._ensure_running_impl(
@@ -169,7 +178,7 @@ def init_project_command(  # noqa: C901
                 temporary_path=temporary_path,
                 step_ids=step_ids,
             )
-            cluster._account_optional_steps(context, dependency_steps)
+            cluster._account_optional_steps(context, compose_steps)
         if bootstrap_steps:
             from odoo_instance_sdk.internal.dbprep.bootstrap import run_bootstrap_tmp
 

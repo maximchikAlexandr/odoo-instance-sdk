@@ -155,7 +155,15 @@ class PublicLeafCase:
 _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("init",),
-        ("init", "--no-input", "--odoo-bin", "/opt/odoo/odoo-bin", "--dry-run", "--project"),
+        (
+            "init",
+            "--no-input",
+            "--allow-partial",
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--dry-run",
+            "--project",
+        ),
         "mutating-or-spawning",
         True,
         sdk_primitive="init_project_command",
@@ -1277,6 +1285,13 @@ def _patch_leaf_external(  # noqa: C901
             error=RuntimeError("isolated external operation failed") if failing else None,
         )
         monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.admin_password.resolve_admin_password_secret",
+            lambda **_kwargs: ("matrix-admin-secret", "environment"),
+        )
+        monkeypatch.setattr(
             "odoo_instance_sdk.commands.db.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), _matrix_environment(), instance),
         )
@@ -1733,7 +1748,7 @@ def _patch_leaf_external(  # noqa: C901
             argv=(str(odcli_path), "update", "--format", "json"),
             mutating=True,
         )
-        plan = ExecutionPlan(
+        update_plan = ExecutionPlan(
             steps=(
                 ActionStep(
                     step_id="update.inspect",
@@ -1785,7 +1800,7 @@ def _patch_leaf_external(  # noqa: C901
                     snapshot_state="absent",
                     journal_state="absent",
                 ),
-                public_plan=plan,
+                public_plan=update_plan,
             )
 
         monkeypatch.setattr(
@@ -3345,6 +3360,7 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                 args = [
                     "init",
                     "--no-input",
+                    "--allow-partial",
                     "--dry-run",
                     "--odoo-bin",
                     "/opt/odoo/odoo-bin",
@@ -3375,6 +3391,7 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                 args = [
                     "init",
                     "--no-input",
+                    "--allow-partial",
                     "--dry-run",
                     "--from-vscode",
                     str(launch),

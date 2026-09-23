@@ -28,7 +28,10 @@ from odoo_instance_sdk.internal.postgres_compose import docker_ready
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
-from tests.integration.postgres_cleanup import cleanup_postgres_project
+from tests.integration.postgres_cleanup import (
+    cleanup_postgres_project,
+    patch_compose_init_for_integration,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -101,6 +104,7 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
         "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
     )
+    patch_compose_init_for_integration(monkeypatch)
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "config", "user.email", "integration@example.test"], cwd=tmp_path, check=True
@@ -126,6 +130,7 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             sys.executable,
             "--python",

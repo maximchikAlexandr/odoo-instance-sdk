@@ -797,5 +797,7 @@ def test_old_isolated_environment_without_logfile_uses_fallback(
     assert StartConfig.from_odoo_config(cfg_path).logfile is None
 
     inst = env_client.instance.from_environment(env)
-    resolved = resolve_effective_logfile(inst.config.start_config, inst.config.default_cwd)
+    start_config = inst.config.start_config
+    assert start_config is not None
+    resolved = resolve_effective_logfile(start_config, inst.config.default_cwd)
     assert resolved == (cfg_path.parent / "odoo.log").resolve()

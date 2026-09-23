@@ -4,10 +4,12 @@ from __future__ import annotations  # noqa: I001 -- keep the compatibility prepa
 
 from odoo_instance_sdk.internal.dbprep.materialize import (
     DatabasePreparationCoordinator as DatabasePreparationCoordinator,
-    _preparation_process_steps as _preparation_process_steps,
     preflight_restore as preflight_restore,
     prepare_download as prepare_download,
     prepare_restore as prepare_restore,
+)
+from odoo_instance_sdk.internal.dbprep.materialize_steps import (
+    _preparation_process_steps as _preparation_process_steps,
 )
 from odoo_instance_sdk.internal.dbprep.source import (
     DatabasePreparationFailureContext as DatabasePreparationFailureContext,

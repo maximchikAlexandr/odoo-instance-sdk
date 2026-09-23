@@ -186,28 +186,33 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:427-428` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/cli_parts/registration.py:487` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:473` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/backup.py:348` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/output.py:236` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:247` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:381` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:416` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:383` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:418` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:390` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:425` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:392` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:427` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance/identity.py:491` — lifecycle cleanup
+- `src/odoo_instance_sdk/internal/self_update.py:729-731` — maintenance child
+  JSON stdout transport; remove when maintenance output gains a replacement
+  centralized emitter.
+- `src/odoo_instance_sdk/resources/instance/identity.py:494` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
 ### Production type annotations
 
-`EXPLICIT_IMPRECISE_ANNOTATIONS` is empty. The AST gate rejects direct,
+`EXPLICIT_IMPRECISE_ANNOTATIONS` records deliberate third-party adapter seams
+in `bug_report.py`, `internal/bug_report.py`, `internal/dbprep/bootstrap.py`,
+`internal/transport/*`, and `project_init.py`. The AST gate rejects direct,
 qualified, and quoted `Any`/bare `object`, empty marker Protocols,
 opaque-named aliases, and broad `Callable[..., ...]`; every finding includes
 `file:line`. The removal condition for a future finding is to narrow it at the

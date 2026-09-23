@@ -5,6 +5,7 @@ import os
 import stat
 import threading
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +40,7 @@ from odoo_instance_sdk.internal.bug_report import (
 from odoo_instance_sdk.internal.locks import exclusive_lock
 from odoo_instance_sdk.internal.paths import get_config_root
 from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
+from odoo_instance_sdk.models import BugReportInitResult
 
 
 def _filled_report(title: str = "Stop does not stop foreground run", kind: str = "bug") -> str:
@@ -95,8 +97,12 @@ Must preserve the execution boundary in internal/proc and avoid Expression in li
 """
 
 
-def _init_draft(title: str = "Stop does not stop foreground run", *, kind: str = "bug"):
-    command = bug_report_init_command(title=title, kind=kind)  # type: ignore[arg-type]
+def _init_draft(
+    title: str = "Stop does not stop foreground run",
+    *,
+    kind: str = "bug",
+) -> BugReportInitResult:
+    command = bug_report_init_command(title=title, kind=cast("Any", kind))
     return command.run()
 
 
@@ -587,7 +593,7 @@ def test_local_write_failure_recovers_via_recheck() -> None:
         calls["count"] += 1
         if calls["count"] == 1:
             raise OSError("disk full")
-        return real_persist(*args, **kwargs)
+        return real_persist(*cast("Any", args), **cast("Any", kwargs))
 
     with patch("odoo_instance_sdk.bug_report._persist_issue_outcome", side_effect=flaky_persist):
         result = bug_report_submit_command(draft.report_id, executor=executor).run()

@@ -15,8 +15,8 @@ from rich.console import Console
 from rich.table import Table
 
 from odoo_instance_sdk.commands import context as cli_context
+from odoo_instance_sdk.commands.cli_parts.init_registration import _OptionState
 from odoo_instance_sdk.commands.cli_parts.registration import (
-    _OptionState,
     _run_shell_command,
     _RunCommand,
     _ShellCommandFailure,

@@ -4,7 +4,7 @@ import contextlib
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,8 +26,14 @@ from odoo_instance_sdk.internal.project_init import (
     project_owned_data_dir,
     verify_project_owned_data_dir,
 )
-from odoo_instance_sdk.models import StartConfig
-from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
+from odoo_instance_sdk.models import DatabaseRefreshOptions, StartConfig
+from odoo_instance_sdk.project import (
+    PostgresProjectConfig,
+    ProjectConfig,
+)
+from odoo_instance_sdk.project import (
+    TestInstanceProjectConfig as RemoteTestInstanceConfig,
+)
 from odoo_instance_sdk.project_init import init_project, init_project_command
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
@@ -74,13 +80,13 @@ def stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _test_instance(**kwargs: object):
-    from odoo_instance_sdk.project import TestInstanceProjectConfig
-
-    return TestInstanceProjectConfig(**kwargs)
+def _test_instance(**kwargs: object) -> RemoteTestInstanceConfig:
+    return RemoteTestInstanceConfig(**cast("Any", kwargs))
 
 
-def _base_args(tmp_path: Path, *, json_output: bool = False) -> list[str]:
+def _base_args(
+    tmp_path: Path, *, json_output: bool = False, allow_partial: bool = False
+) -> list[str]:
     args = [
         "init",
         "--no-input",
@@ -91,6 +97,8 @@ def _base_args(tmp_path: Path, *, json_output: bool = False) -> list[str]:
         "--project",
         str(tmp_path),
     ]
+    if allow_partial:
+        args.insert(2, "--allow-partial")
     if json_output:
         args.extend(["--format", "json"])
     return args
@@ -124,7 +132,10 @@ def _ready_probe_result(step: object) -> ProcessResult:
         stderr="",
         duration=0.0,
         cwd=getattr(step, "cwd", None),
-        environment=getattr(step, "environment", None),
+        environment=cast(
+            "tuple[tuple[str, str], ...]",
+            getattr(step, "environment", ()),
+        ),
     )
 
 
@@ -136,7 +147,10 @@ def _failed_probe_result(step: object) -> ProcessResult:
         stderr="",
         duration=0.0,
         cwd=getattr(step, "cwd", None),
-        environment=getattr(step, "environment", None),
+        environment=cast(
+            "tuple[tuple[str, str], ...]",
+            getattr(step, "environment", ()),
+        ),
     )
 
 
@@ -514,7 +528,10 @@ def test_bootstrap_tmp_command_records_odoo_argv(tmp_path: Path) -> None:
             stderr="",
             duration=0.0,
             cwd=getattr(step, "cwd", None),
-            environment=getattr(step, "environment", None),
+            environment=cast(
+                "tuple[tuple[str, str], ...]",
+                getattr(step, "environment", ()),
+            ),
         )
 
     executor = RecordingExecutor(result_factory=bootstrap_results)
@@ -578,7 +595,10 @@ def test_bootstrap_invalid_tmp_raises_init_bootstrap_failed(tmp_path: Path) -> N
             stderr="",
             duration=0.0,
             cwd=getattr(step, "cwd", None),
-            environment=getattr(step, "environment", None),
+            environment=cast(
+                "tuple[tuple[str, str], ...]",
+                getattr(step, "environment", ()),
+            ),
         )
 
     executor = RecordingExecutor(result_factory=invalid_bootstrap_results)
@@ -699,7 +719,6 @@ def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
     from odoo_instance_sdk.config import InstanceConfig
     from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
     from odoo_instance_sdk.internal.project_manifest import write_manifest
-    from odoo_instance_sdk.project import TestInstanceProjectConfig
 
     source = tmp_path / "odoo.conf"
     source.write_text(
@@ -723,7 +742,7 @@ def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
         source_config=source,
         default_source_database="old",
         postgres=PostgresProjectConfig(mode="compose", image="postgres:16", port=5468, user="odoo"),
-        test_instance=TestInstanceProjectConfig(
+        test_instance=RemoteTestInstanceConfig(
             base_url="https://example.test",
             database=remote_database,
             git_branch=f"main-{odoo_version}",
@@ -828,12 +847,17 @@ def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
 
     monkeypatch.setattr(DatabaseResource, "_http", fake_http)
 
-    def command_factory(project_path: Path, *, options: object, **kwargs: object) -> object:
+    def command_factory(
+        project_path: Path,
+        *,
+        options: DatabaseRefreshOptions,
+        **kwargs: object,
+    ) -> object:
         return DatabasePreparationCoordinator(client).refresh_database_command(
             project_path,
             options=options,
             executor=executor,
-            admin_password=kwargs.get("admin_password"),
+            admin_password=cast("str | None", kwargs.get("admin_password")),
         )
 
     client.environments.refresh_database_command.side_effect = command_factory

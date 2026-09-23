@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -45,7 +46,7 @@ def test_stream_converts_read_errors_to_transport_errors() -> None:
     raw = MagicMock()
     raw.status_code = 200
 
-    def broken_iter(**_: object):
+    def broken_iter(**_: object) -> Iterator[bytes]:
         yield b"partial"
         import httpx
 

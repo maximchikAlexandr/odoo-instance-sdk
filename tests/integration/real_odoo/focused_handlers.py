@@ -231,10 +231,12 @@ def _db_drop(state: _State) -> tuple[Result, dict[str, Any]]:
     shutil.copy2(state.source_backup.path, backup_path)
     project_source = ProjectConfig.load(state.project).test_instance
     assert project_source is not None
+    database = project_source.database
+    assert database is not None
     seed_backup(
         Path(state.environment["ODCLI_E2E_CATALOG"]),
         backup_path,
-        database=project_source.database,
+        database=database,
         source_base_url=project_source.base_url,
     )
     restored = _invoke(

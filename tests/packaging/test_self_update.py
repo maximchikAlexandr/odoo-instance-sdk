@@ -181,11 +181,15 @@ def test_uv_tool_full_update_from_old_revision(tmp_path: Path) -> None:
         cwd=_REPO,
         text=True,
     ).strip()
-    old_sha = subprocess.check_output(
-        ["git", "rev-parse", "HEAD~1"],
-        cwd=_REPO,
-        text=True,
-    ).strip()
+    try:
+        old_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD~1"],
+            cwd=_REPO,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except subprocess.CalledProcessError:
+        pytest.skip("no parent revision available for update E2E")
     if old_sha == head:
         pytest.skip("no parent revision available for update E2E")
     install_old = _install_uv_tool_vcs(env, _REPO, old_sha)

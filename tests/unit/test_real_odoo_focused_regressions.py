@@ -66,12 +66,21 @@ def test_focused_plan_comparison_ignores_only_execution_local_values(
         compose_runner=None,
         project_id="project_probe",
     )
-    build = (
-        instance.shell_command
-        if operation == "shell"
-        else instance.databases.reset_admin_password_command
-    )
-    first, second = [json.loads(msgspec.json.encode(build().plan)) for _ in range(2)]
+    if operation == "shell":
+        plans = [json.loads(msgspec.json.encode(instance.shell_command().plan)) for _ in range(2)]
+    else:
+        plans = [
+            json.loads(
+                msgspec.json.encode(
+                    instance.databases.reset_admin_password_command(
+                        admin_password="focused-secret",
+                        provenance="environment",
+                    ).plan
+                )
+            )
+            for _ in range(2)
+        ]
+    first, second = plans
     assert first["fingerprint"] != second["fingerprint"]
     assert _stable_plan(first) == _stable_plan(second)
     second["steps"][0]["argv"][-1] = "different-image"

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
-from odoo_instance_sdk.internal.dbprep.materialize import (
+from odoo_instance_sdk.internal.dbprep.materialize_steps import (
     _preparation_process_steps,
 )
 from odoo_instance_sdk.internal.dbprep.source import (

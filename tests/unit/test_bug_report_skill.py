@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -67,7 +68,10 @@ def test_three_refusals_skill_scenario_blocks_publish() -> None:
     with pytest.raises(BugReportReviewLimitError) as error:
         bug_report_submit_command(draft.report_id, executor=RecordingExecutor()).run()
     assert error.value.details["report_id"] == draft.report_id
-    assert "need clearer reproduction" in error.value.details["unresolved_questions"]
+    assert "need clearer reproduction" in cast(
+        "list[str]",
+        error.value.details["unresolved_questions"],
+    )
 
 
 def test_unavailable_reviewer_does_not_count_as_approval() -> None:

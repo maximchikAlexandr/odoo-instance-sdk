@@ -20,17 +20,17 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 427),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 428),
-        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 493),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 473),
         ("src/odoo_instance_sdk/commands/backup.py", 348),
         ("src/odoo_instance_sdk/commands/output.py", 247),
         ("src/odoo_instance_sdk/commands/output.py", 416),
         ("src/odoo_instance_sdk/commands/output.py", 418),
         ("src/odoo_instance_sdk/commands/output.py", 425),
         ("src/odoo_instance_sdk/commands/output.py", 427),
-        ("src/odoo_instance_sdk/internal/self_update.py", 735),
-        ("src/odoo_instance_sdk/internal/self_update.py", 736),
-        ("src/odoo_instance_sdk/internal/self_update.py", 737),
-        ("src/odoo_instance_sdk/resources/instance/identity.py", 491),
+        ("src/odoo_instance_sdk/internal/self_update.py", 729),
+        ("src/odoo_instance_sdk/internal/self_update.py", 730),
+        ("src/odoo_instance_sdk/internal/self_update.py", 731),
+        ("src/odoo_instance_sdk/resources/instance/identity.py", 494),
     }
 )
 
@@ -51,24 +51,24 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
-        493,
+        473,
     ): "documented --version metadata flag transport",
     ("src/odoo_instance_sdk/commands/backup.py", 348): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        735,
+        729,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        736,
+        730,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        737,
+        731,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
-        491,
+        494,
     ): "lifecycle cleanup diagnostic transport",
 }
 
@@ -77,12 +77,16 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
 EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
+    "src/odoo_instance_sdk/bug_report.py": frozenset({135, 242, 306, 308, 358, 361, 435, 437}),
+    "src/odoo_instance_sdk/internal/bug_report.py": frozenset({187, 201, 346}),
+    "src/odoo_instance_sdk/internal/dbprep/bootstrap.py": frozenset({205}),
     "src/odoo_instance_sdk/internal/transport/base.py": frozenset(
         {23, 67, 81, 85, 86, 87, 92, 97, 159, 161}
     ),
     "src/odoo_instance_sdk/internal/transport/odoo.py": frozenset(
         {28, 38, 53, 112, 116, 117, 118, 120, 133, 138, 140, 179, 185}
     ),
+    "src/odoo_instance_sdk/project_init.py": frozenset({31, 38, 278, 285}),
 }
 
 

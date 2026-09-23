@@ -398,7 +398,7 @@ class TestInstancePrefix:
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
-            staticmethod(lambda _path: MagicMock()),
+            staticmethod(lambda _path: MagicMock(owned=False)),
         )
         executor = RecordingExecutor(handles={"instance.foreground": _recording_handle()})
 
@@ -475,6 +475,10 @@ class TestInstancePrefix:
         events: list[str] = []
 
         class StoppedCluster:
+            @property
+            def owned(self) -> bool:
+                return False
+
             def ensure_running(self, timeout: float = 60.0) -> None:
                 events.append("healthy")
 

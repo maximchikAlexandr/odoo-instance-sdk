@@ -456,6 +456,8 @@ sentence; use the entry's `--help` for exact options.
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
+- `odcli bug-report init` — Create a local bug-report draft from explicit metadata.
+- `odcli bug-report submit` — Validate and publish one local bug-report draft.
 - `odcli env show` — Show one environment's selected runtime and ownership metadata.
 - `odcli resource ls` — List retained local resources without lifecycle mutation.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.
@@ -505,6 +507,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db rm` — Safely remove one exact local cluster database after guarded checks.
 - `odcli ps` — Show process and resource inventory from one monitor snapshot.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
+- `odcli update` — Self-upgrade an OdCLI uv-tool install.
 <!-- cli-command-inventory:end -->
 
 Executable help is the source of truth for flags and retained aliases:
