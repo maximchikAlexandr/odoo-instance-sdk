@@ -123,7 +123,16 @@ def test_responsive_external_manager_is_reused_without_ownership(
 ) -> None:
     instance = _instance(tmp_path)
     session = auxiliary_restore_session(instance)
-    monkeypatch.setattr(type(session), "_reuse_responsive_runtime", lambda _self: True)
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"result": ["restored"]}
+    http = MagicMock()
+    http.post.return_value = response
+
+    @contextlib.contextmanager
+    def fake_httpx_client(*_args: object, **_kwargs: object) -> Any:
+        yield http
+
+    monkeypatch.setattr("httpx.Client", fake_httpx_client)
     executor = RecordingExecutor(handles={})
 
     from odoo_instance_sdk.internal.proc import RunContext
@@ -142,8 +151,52 @@ def test_responsive_external_manager_is_reused_without_ownership(
 
     assert session.using_existing_runtime is True
     assert executor.spawned == []
+    http.post.assert_called_once_with(
+        "http://127.0.0.1:0/web/database/list",
+        json={"jsonrpc": "2.0", "method": "call", "params": {}},
+    )
     cast("Any", instance._client.register_process).assert_not_called()
     cast("Any", instance._client.unregister_process).assert_not_called()
+
+
+def test_invalid_database_list_response_does_not_reuse_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = _instance(tmp_path)
+    session = auxiliary_restore_session(instance)
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"result": {"unexpected": "shape"}}
+    http = MagicMock()
+    http.post.return_value = response
+
+    @contextlib.contextmanager
+    def fake_httpx_client(*_args: object, **_kwargs: object) -> Any:
+        yield http
+
+    monkeypatch.setattr("httpx.Client", fake_httpx_client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+        MagicMock(side_effect=InstanceConfigurationError("port-conflict")),
+    )
+    executor = RecordingExecutor(handles={})
+
+    from odoo_instance_sdk.internal.proc import RunContext
+
+    def callback(context: RunContext[PrivateJsonValue]) -> None:
+        session.ensure_started(context)
+
+    command = Command.create(
+        ExecutionPlan(steps=tuple(step.public_projection() for step in session_steps(session))),
+        callback,
+        session_steps(session),
+        executor=executor,
+    )
+
+    with pytest.raises(InstanceConfigurationError, match="port-conflict"):
+        command.run()
+    http.post.assert_called_once()
+    assert session.using_existing_runtime is False
+    assert executor.spawned == []
 
 
 def test_recorded_running_project_runtime_is_reused_without_spawn(

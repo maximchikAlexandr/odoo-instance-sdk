@@ -6,7 +6,7 @@ import textwrap
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -29,6 +29,7 @@ from odoo_instance_sdk.internal.applied_settings import (
 from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
+    ProcessHandle,
     ProcessResult,
     ProcessTimeoutError,
     RecordingExecutor,
@@ -43,6 +44,7 @@ from odoo_instance_sdk.models import (
     Database,
     DatabasePreparationAction,
     NoBackup,
+    StartConfig,
 )
 from odoo_instance_sdk.resources.environment import (
     DevelopmentEnvironment,
@@ -51,6 +53,7 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentState,
 )
 from odoo_instance_sdk.resources.environment.checkout_planning import _CHECKOUT_WORKTREE_TIMEOUT
+from odoo_instance_sdk.resources.instance import OdooInstance
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
@@ -67,8 +70,8 @@ def _restore_instance_factory() -> object:
     InstanceFactory.from_config = original  # type: ignore[method-assign]
 
 
-def _copy_instance(env_client: OdooClient, *, target_exists: bool = False) -> MagicMock:
-    """Return a deterministic local-Odoo boundary double for COPY checkout tests."""
+def _copy_instance(env_client: OdooClient, *, target_exists: bool = False) -> Any:
+    """Return a real instance with only its database boundary doubled."""
     backup = Backup(
         id=uuid.uuid4(),
         source_base_url="http://127.0.0.1:8069",
@@ -82,10 +85,21 @@ def _copy_instance(env_client: OdooClient, *, target_exists: bool = False) -> Ma
         downloaded_at=datetime.now(UTC),
     )
     Path(backup.path).write_bytes(b"backup")
-    instance = MagicMock()
-    instance.config.db_host = "localhost"
-    instance.config.db_port = 5432
-    instance.config.db_user = "odoo"
+    lifecycle_client = MagicMock()
+    lifecycle_client.unregister_process.return_value = (None, None)
+    instance = OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:0",
+            start_config=StartConfig(http_port=0),
+            command_prefix=("/usr/bin/python", "/project/odoo-bin"),
+            default_cwd=Path.cwd(),
+            db_host="localhost",
+            db_port=5432,
+            db_user="odoo",
+        ),
+        _client=lifecycle_client,
+    )
+    instance.databases = MagicMock()
     instance.databases.list.return_value = (Database(name="comerta", backup=NoBackup()),)
     instance.databases.names.return_value = ("comerta",)
     instance.databases.backup.return_value = backup
@@ -991,14 +1005,40 @@ class TestCheckoutCopy:
         executable.chmod(0o755)
         monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
 
+    @pytest.fixture(autouse=True)
+    def _real_auxiliary_lifecycle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+            lambda _config: None,
+        )
+        monkeypatch.setattr(
+            OdooInstance,
+            "wait_ready",
+            lambda _self, _process, *, timeout, version_info=False, database_manager=False: None,
+        )
+
+        def spawn(_executor: object, step: PreparedStep, **_kwargs: object) -> ProcessHandle:
+            process = MagicMock()
+            process.pid = 123
+            return ProcessHandle(
+                process=process,
+                argv=step.argv,
+                process_group_id=123,
+                session_id=123,
+                inherited_stdio=step.inherit_stdio,
+                step=step,
+            )
+
+        monkeypatch.setattr("odoo_instance_sdk.internal.proc.run.SubprocessExecutor.spawn", spawn)
+
     def _checkout_copy(
         self,
         env_client: OdooClient,
         project_manifest: Path,
         fake_python: Path,
         branch: str,
-        instance: MagicMock,
-    ) -> None:
+        instance: OdooInstance,
+    ) -> OdooInstance:
         from odoo_instance_sdk.resources.instance import InstanceFactory
 
         InstanceFactory.from_config = MagicMock(return_value=instance)  # type: ignore[method-assign]
@@ -1009,6 +1049,12 @@ class TestCheckoutCopy:
             source_database="comerta",
         )
         env_client.environments.checkout(project_manifest, branch, options=opts)
+        return instance
+
+    @staticmethod
+    def _assert_auxiliary_cleanup(instance: OdooInstance) -> None:
+        cast("Any", instance._client.register_process).assert_called_once()
+        cast("Any", instance._client.unregister_process).assert_called_once()
 
     def test_copy_success_records_restored_journal(
         self, env_client: OdooClient, project_manifest: Path, fake_python: Path
@@ -1019,6 +1065,7 @@ class TestCheckoutCopy:
         self._checkout_copy(
             env_client, project_manifest, fake_python, "feat/copy-success", instance
         )
+        self._assert_auxiliary_cleanup(instance)
 
         env = env_client.environments.list(project=project_manifest)[0]
         journal = env_client.get_catalog().get_copy_journal(str(env.id))
@@ -1066,6 +1113,7 @@ class TestCheckoutCopy:
             self._checkout_copy(
                 env_client, project_manifest, fake_python, "feat/copy-existing", instance
             )
+        self._assert_auxiliary_cleanup(instance)
 
         # Target ownership is rejected before a catalog row, worktree, config,
         # venv, or provisioning lock can be created.
@@ -1085,6 +1133,7 @@ class TestCheckoutCopy:
             self._checkout_copy(
                 env_client, project_manifest, fake_python, "feat/copy-offline", instance
             )
+        self._assert_auxiliary_cleanup(instance)
 
         # Endpoint availability is also a COPY precondition, not a failed
         # partially-created environment.
@@ -1103,6 +1152,7 @@ class TestCheckoutCopy:
             self._checkout_copy(
                 env_client, project_manifest, fake_python, "feat/copy-backup-fail", instance
             )
+        self._assert_auxiliary_cleanup(instance)
 
         env = env_client.environments.list(project=project_manifest)[0]
         assert env.state is EnvironmentState.FAILED
@@ -1121,6 +1171,7 @@ class TestCheckoutCopy:
             self._checkout_copy(
                 env_client, project_manifest, fake_python, "feat/copy-restore-fail", instance
             )
+        self._assert_auxiliary_cleanup(instance)
 
         env = env_client.environments.list(project=project_manifest)[0]
         assert env.state is EnvironmentState.CLEANUP_FAILED
@@ -1130,6 +1181,21 @@ class TestCheckoutCopy:
             str(instance.databases.backup.return_value.id)
         )
         assert backup_row is not None and backup_row["state"] == "available"
+
+    def test_copy_base_exception_cleans_owned_runtime_and_preserves_primary_error(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        instance = _copy_instance(env_client)
+        instance.databases.backup.side_effect = KeyboardInterrupt("cancelled")
+        instance._client.unregister_process.side_effect = OSError("cleanup failed")
+
+        with pytest.raises(KeyboardInterrupt, match="cancelled") as raised:
+            self._checkout_copy(
+                env_client, project_manifest, fake_python, "feat/copy-cancelled", instance
+            )
+
+        self._assert_auxiliary_cleanup(instance)
+        assert any("cleanup failed" in note for note in raised.value.__notes__)
 
     def test_real_database_restore_failure_after_before_probe_preserves_evidence(
         self,
@@ -1426,6 +1492,36 @@ class TestCheckoutDryRun:
         )
         assert isinstance(prepared_worktree, PreparedStep)
         assert prepared_worktree.timeout == _CHECKOUT_WORKTREE_TIMEOUT == 300.0
+
+    def test_copy_dry_run_keeps_plan_parity_and_starts_before_catalog(
+        self, env_client: OdooClient, project_manifest: Path, fake_python: Path
+    ) -> None:
+        from odoo_instance_sdk import execution as execution_module
+        from odoo_instance_sdk.internal.proc import PreparedCommand
+
+        command = env_client.environments.checkout_command(
+            project_manifest,
+            "feat/copy-plan-parity",
+            options=EnvironmentCheckoutOptions(
+                python=str(fake_python),
+                db_mode=EnvironmentDatabaseMode.COPY,
+                source_database="comerta",
+                target_database="comerta_copy",
+            ),
+        )
+        prepared = cast("PreparedCommand[object]", execution_module._COMMANDS[id(command)])
+        public_ids = tuple(step.step_id for step in command.plan.steps)
+        private_ids = tuple(step.step_id for step in prepared.steps)
+
+        assert public_ids == private_ids
+        start_index = public_ids.index("database.restore.auxiliary.start")
+        assert public_ids[start_index : start_index + 3] == (
+            "database.restore.auxiliary.start",
+            "database.restore.auxiliary.ready",
+            "checkout.catalog",
+        )
+        assert public_ids[-1] == "database.restore.auxiliary.cleanup"
+        assert env_client.environments.list() == []
 
 
 class TestOwnedRuntimePreflight:
