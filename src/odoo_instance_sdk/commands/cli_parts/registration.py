@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
+from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -132,6 +134,57 @@ def _valid_shell_error(value: JsonValue) -> bool:
     )
 
 
+def _bounded_redacted_tail(stderr: str) -> tuple[str, bool]:
+    """Return the last ``_TIMEOUT_TAIL_BYTES`` redacted bytes of ``stderr``.
+
+    A long startup log can push the real traceback past the first-N window the
+    legacy ``sanitize_last_error`` projection used.  Taking the bounded *tail*
+    instead keeps the most recent diagnostic (the traceback) visible while a
+    leading prefix is dropped.  Redaction (secrets, env, paths, terminal
+    escapes) is applied directly without the legacy whitespace squash or the
+    2000-char re-truncation, so the trailing traceback survives.  Truncation
+    is reported explicitly so callers can surface it in the stable error
+    message.
+    """
+    from odoo_instance_sdk.internal.proc.run import _TIMEOUT_TAIL_BYTES
+    from odoo_instance_sdk.internal.sanitize import (
+        _ENV_VAR_RE,
+        _PATH_LIKE_RE,
+        _SECRET_PATTERNS,
+        sanitize_terminal_text,
+    )
+
+    encoded = stderr.encode("utf-8", errors="replace")
+    truncated = len(encoded) > _TIMEOUT_TAIL_BYTES
+    if truncated:
+        tail_bytes = encoded[-_TIMEOUT_TAIL_BYTES:]
+        tail = tail_bytes.decode("utf-8", errors="replace")
+    else:
+        tail = stderr
+    text = tail
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("<redacted>", text)
+    text = _ENV_VAR_RE.sub("<env>", text)
+    text = _PATH_LIKE_RE.sub("<path>", text)
+    text = sanitize_terminal_text(text, preserve_newlines=True)
+    return (text, truncated)
+
+
+def _traceback_summary(tail: str) -> str | None:
+    """Extract the final exception line from a bounded redacted stderr tail.
+
+    A Python traceback ends with ``ExceptionType: message``.  Surfacing that
+    single line keeps the stable error message concise (so it survives the
+    shared diagnostic bound) while still naming the exception type and root
+    cause, which is what the contract requires.  Returns ``None`` when no
+    recognizable exception line is present.
+    """
+    import re as _re
+
+    matches = _re.findall(r"(?m)^([A-Za-z_][\w.]*:[^\n]+)$", tail)
+    return matches[-1].strip() if matches else None
+
+
 def _framed_shell_error(payload: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
     """Return details only for a complete, valid framed shell failure."""
     if payload is None:
@@ -183,10 +236,15 @@ def _shell_failure(
             f"{error_type}: {error_message}",
             details=details,
         )
-    stderr = value.stderr.strip()
+    stderr_tail, truncated = _bounded_redacted_tail(value.stderr)
     message = f"shell exited {value.returncode}"
-    if stderr:
-        message += f": {stderr}"
+    summary = _traceback_summary(stderr_tail)
+    if summary:
+        message += f": {summary}"
+    elif stderr_tail:
+        message += f": {stderr_tail}"
+    if truncated:
+        message += " (stderr tail truncated to last 8192 bytes)"
     return _ShellCommandFailure(f"{command}_startup_failed", message)
 
 
@@ -386,6 +444,50 @@ def _lazy_command(*, name: str, help: str, loader: Callable[[], click.Command]) 
     return _LazyCommand(name=name, help=help, loader=loader)
 
 
+_HEX_COMMIT = re.compile(r"^[0-9a-f]+$")
+
+
+def _installed_version_with_vcs(package_name: str = "odoo-instance-sdk") -> str:
+    """Return the package version, appending the short VCS commit when present.
+
+    Reads optional PEP 610 ``direct_url.json`` via :mod:`importlib.metadata`.
+    Falls back to the package version alone when metadata is missing, malformed,
+    or has no hex ``vcs_info.commit_id`` of length >= 7. No Git, checkout, or
+    network.
+    """
+    try:
+        dist = distribution(package_name)
+    except PackageNotFoundError:
+        return "unknown"
+    version = dist.version
+    short_commit = _vcs_short_commit_from_distribution(dist)
+    return f"{version} ({short_commit})" if short_commit else version
+
+
+def _vcs_short_commit_from_distribution(dist: Distribution) -> str | None:
+    raw = dist.read_text("direct_url.json")
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    vcs_info = payload.get("vcs_info") if isinstance(payload, dict) else None
+    if not isinstance(vcs_info, dict):
+        return None
+    commit_id = vcs_info.get("commit_id")
+    if not isinstance(commit_id, str) or len(commit_id) < 7:
+        return None
+    return commit_id[:7] if _HEX_COMMIT.match(commit_id) else None
+
+
+def _version_callback(ctx: click.Context, param: click.Parameter, value: bool) -> None:
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(f"odcli, version {_installed_version_with_vcs()}", color=ctx.color)
+    ctx.exit()
+
+
 @click.rich_config(  # type: ignore[operator]
     {
         "commands_before_options": True,
@@ -415,7 +517,14 @@ def _lazy_command(*, name: str, help: str, loader: Callable[[], click.Command]) 
     }
 )
 @click.group()
-@click.version_option(package_name="odoo-instance-sdk")
+@click.option(
+    "--version",
+    is_flag=True,
+    expose_value=False,
+    is_eager=True,
+    callback=_version_callback,
+    help="Show the version and exit.",
+)
 @click.option(
     "--project",
     "project",

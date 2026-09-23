@@ -339,6 +339,44 @@ def test_drop_requires_connection_force_and_never_mutates_on_refusal(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("command_origin", "expects_stop_advice"),
+    [
+        (None, False),
+        ("db-drop", False),
+        ("env-remove", True),
+    ],
+)
+def test_drop_safety_error_is_command_aware(
+    monkeypatch: pytest.MonkeyPatch,
+    project_manifest: Path,
+    command_origin: str | None,
+    expects_stop_advice: bool,
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    sessions = [{"pid": 7, "user": "odoo", "client": "127.0.0.1", "application": "test"}]
+    instance = _instance(project_manifest)
+    executor = _executor(sessions=sessions)
+    command = build_database_drop_command(
+        instance,
+        project_manifest,
+        "feature_db",
+        executor=executor,
+        command_origin=command_origin,
+    )
+
+    with pytest.raises(DatabaseDropSafetyError) as caught:
+        command.run()
+    message = str(caught.value)
+    assert "--force-connections" in message
+    assert "missing option" not in message
+    if expects_stop_advice:
+        assert "odcli stop" in message
+    else:
+        assert "odcli stop" not in message
+
+
+@pytest.mark.unit
 def test_proven_filestore_cleanup_is_exact_and_symlink_safe(tmp_path: Path) -> None:
     data_directory = tmp_path / "odoo-data"
     target = data_directory / "filestore" / "feature_db"

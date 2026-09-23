@@ -304,6 +304,17 @@ def _process_result(context: RunContext[_ContextT], step_id: str) -> ProcessResu
     return result
 
 
+def _session_advice(*, command_origin: str | None, force_connections: bool) -> str:
+    if force_connections:
+        return "will be terminated"
+    if command_origin == "env-remove":
+        return (
+            "require --force-connections (or stop the environment with `odcli stop`) "
+            "to terminate only target sessions"
+        )
+    return "require --force-connections to terminate only target sessions"
+
+
 def _safety_preconditions(
     inspection: _DropInspection,
     *,
@@ -311,6 +322,7 @@ def _safety_preconditions(
     project_default: str | None,
     force_default: bool,
     force_connections: bool,
+    command_origin: str | None = None,
 ) -> tuple[PlanPrecondition, ...]:
     default_target = project_default == database
     return (
@@ -345,9 +357,12 @@ def _safety_preconditions(
             detail=(
                 "no active target sessions"
                 if not inspection.sessions
-                else f"{len(inspection.sessions)} active target session(s) require --force-connections"
-                if not force_connections
-                else f"{len(inspection.sessions)} active target session(s) will be terminated"
+                else (
+                    f"{len(inspection.sessions)} active target session(s) "
+                    + _session_advice(
+                        command_origin=command_origin, force_connections=force_connections
+                    )
+                )
             ),
         ),
     )
@@ -361,6 +376,7 @@ def _assert_safe(
     force_default: bool,
     force_connections: bool,
     require_no_sessions: bool = False,
+    command_origin: str | None = None,
 ) -> None:
     validate_db_name(database)
     if database in _DENIED_DATABASES:
@@ -374,7 +390,7 @@ def _assert_safe(
     if inspection.sessions and (require_no_sessions or not force_connections):
         raise DatabaseDropSafetyError(
             f"database {database!r} has {len(inspection.sessions)} active session(s); "
-            "pass --force-connections to terminate only target sessions",
+            + _session_advice(command_origin=command_origin, force_connections=False),
             inspection.sessions,
         )
 
@@ -531,6 +547,7 @@ def build_database_drop_command(  # noqa: C901
     allow_environment_rollback_database: str | None = None,
     idempotent_absent: bool = False,
     step_prefix: str = "",
+    command_origin: str | None = None,
 ) -> Command[DatabaseDropResult]:
     """Build and inspect one exact project-cluster drop command."""
     database = database_name
@@ -589,6 +606,7 @@ def build_database_drop_command(  # noqa: C901
         project_default=project_default,
         force_default=force_default,
         force_connections=force_connections,
+        command_origin=command_origin,
     )
     semantic = SemanticPlanObservation(
         kind="semantic",
@@ -750,6 +768,7 @@ def build_database_drop_command(  # noqa: C901
             project_default=current_project_default,
             force_default=force_default,
             force_connections=force_connections,
+            command_origin=command_origin,
         )
         terminated = 0
         if planned.sessions and force_connections:
@@ -762,6 +781,7 @@ def build_database_drop_command(  # noqa: C901
                 project_default=current_default(),
                 force_default=force_default,
                 force_connections=True,
+                command_origin=command_origin,
             )
             terminate_result = _process_result(context, terminate_step_id)
             if terminate_result.returncode != 0:
@@ -795,6 +815,7 @@ def build_database_drop_command(  # noqa: C901
             force_default=force_default,
             force_connections=force_connections,
             require_no_sessions=True,
+            command_origin=command_origin,
         )
         drop_result = _process_result(context, drop_step_id)
         if drop_result.returncode != 0:

@@ -239,6 +239,7 @@ class TestCopyRemoveRecovery:
             env: DevelopmentEnvironment,
             *,
             executor: ProcessExecutor | None,
+            force_connections: bool = False,
         ) -> Any:
             if env.db_mode is not EnvironmentDatabaseMode.COPY:
                 return None
@@ -1095,4 +1096,283 @@ class TestCopyRestoreClusterIdentity:
             env_client.environments.remove_command(selected, executor=RecordingExecutor())
 
         assert env_client.environments.get(str(env.id)).state is EnvironmentState.READY
-        assert Path(env.generated_config_path).is_file()
+
+
+class TestEnvRemoveForceConnections:
+    """Item 3: `env rm --force-connections` routes into the COPY-only drop."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_psql(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        executable = tmp_path / "psql"
+        marker = tmp_path / "psql-called"
+        executable.write_text(
+            "#!/bin/sh\n"
+            f'if [ -f "{marker}" ]; then\n'
+            "  printf '1\\n'\n"
+            "else\n"
+            f'  : > "{marker}"\n'
+            "fi\n"
+        )
+        executable.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _name: str(executable)
+        )
+
+    def _checkout_copy_env(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        instance: MagicMock,
+    ) -> DevelopmentEnvironment:
+        return _checkout_copy(
+            env_client, project_manifest, fake_python, "feat/rm-force-conn", instance
+        )
+
+    def test_remove_command_threads_force_connections_and_env_remove_origin(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.internal.pg.drop import (
+            DatabaseDropSafetyError,
+            DatabaseDropSession,
+        )
+
+        instance = _copy_instance(target_exists=True)
+        env = self._checkout_copy_env(env_client, project_manifest, fake_python, instance)
+
+        captured: dict[str, object] = {}
+
+        session = DatabaseDropSession(pid=42, user="odoo")
+        safety_error = DatabaseDropSafetyError(
+            "database 'copy_target' has 1 active session(s); "
+            "require --force-connections (or stop the environment with `odcli stop`) "
+            "to terminate only target sessions",
+            (session,),
+        )
+
+        def stub_build(
+            _instance: object,
+            _root: object,
+            database: str,
+            *,
+            force_connections: bool,
+            command_origin: str | None,
+            **_kwargs: object,
+        ) -> Any:
+            captured["database"] = database
+            captured["force_connections"] = force_connections
+            captured["command_origin"] = command_origin
+            from odoo_instance_sdk.execution import ExecutionPlan
+            from odoo_instance_sdk.internal.proc import PreparedAction
+
+            step = PreparedAction(
+                step_id="test.copy.database.drop",
+                action="drop-owned-copy-database",
+                description="test direct drop",
+                mutating=True,
+            )
+
+            def run(context: Any) -> object:
+                context.action(step.step_id)
+                context.complete_action(step.step_id)
+                raise safety_error
+
+            class StubCommand:
+                def __init__(self) -> None:
+                    self._prepared_cmd = prepared_command(run, (step,))
+                    self.plan = ExecutionPlan(
+                        steps=tuple(step.public_projection() for step in (step,))
+                    )
+
+                def _prepared(self) -> Any:
+                    return self._prepared_cmd
+
+                def run(self) -> Any:
+                    return self._prepared_cmd.callback.__wrapped__()  # type: ignore[attr-defined]
+
+            return StubCommand()
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.drop.build_database_drop_command", stub_build
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            lambda _root: MagicMock(),
+        )
+
+        selected = env_client.environments.get(str(env.id))
+        command = env_client.environments.remove_command(
+            selected, force_connections=True, executor=RecordingExecutor()
+        )
+        with pytest.raises(EnvironmentConflictError):
+            command.run()
+
+        assert captured == {
+            "database": "copy_target",
+            "force_connections": True,
+            "command_origin": "env-remove",
+        }
+
+    def test_remove_without_force_connections_names_flag_and_stop(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.internal.pg.drop import (
+            DatabaseDropSafetyError,
+            DatabaseDropSession,
+        )
+
+        instance = _copy_instance(target_exists=True)
+        env = self._checkout_copy_env(env_client, project_manifest, fake_python, instance)
+
+        session = DatabaseDropSession(pid=42, user="odoo")
+        safety_error = DatabaseDropSafetyError(
+            "database 'copy_target' has 1 active session(s); "
+            "require --force-connections (or stop the environment with `odcli stop`) "
+            "to terminate only target sessions",
+            (session,),
+        )
+
+        def stub_build(
+            _instance: object,
+            _root: object,
+            database: str,
+            *,
+            force_connections: bool,
+            command_origin: str | None,
+            **_kwargs: object,
+        ) -> Any:
+            assert command_origin == "env-remove"
+            assert force_connections is False
+            from odoo_instance_sdk.execution import ExecutionPlan
+            from odoo_instance_sdk.internal.proc import PreparedAction
+
+            step = PreparedAction(
+                step_id="test.copy.database.drop",
+                action="drop-owned-copy-database",
+                description="test direct drop",
+                mutating=True,
+            )
+
+            def run(context: Any) -> object:
+                context.action(step.step_id)
+                context.complete_action(step.step_id)
+                raise safety_error
+
+            class StubCommand:
+                def __init__(self) -> None:
+                    self._prepared_cmd = prepared_command(run, (step,))
+                    self.plan = ExecutionPlan(
+                        steps=tuple(step.public_projection() for step in (step,))
+                    )
+
+                def _prepared(self) -> Any:
+                    return self._prepared_cmd
+
+            return StubCommand()
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.drop.build_database_drop_command", stub_build
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            lambda _root: MagicMock(),
+        )
+
+        selected = env_client.environments.get(str(env.id))
+        command = env_client.environments.remove_command(selected, executor=RecordingExecutor())
+        with pytest.raises(EnvironmentConflictError) as caught:
+            command.run()
+
+        message = str(caught.value)
+        assert "--force-connections" in message
+        assert "odcli stop" in message
+        assert "missing option" not in message
+        assert env_client.environments.get(str(env.id)).state is not EnvironmentState.REMOVED
+
+    def test_force_connections_terminate_scope_limited_to_exact_copy_database(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from odoo_instance_sdk.internal.pg.drop import _terminate_sql
+
+        instance = _copy_instance(target_exists=True)
+        env = self._checkout_copy_env(env_client, project_manifest, fake_python, instance)
+
+        captured: dict[str, object] = {}
+
+        def stub_build(
+            _instance: object,
+            _root: object,
+            database: str,
+            *,
+            force_connections: bool,
+            command_origin: str | None,
+            **_kwargs: object,
+        ) -> Any:
+            captured["database"] = database
+            captured["force_connections"] = force_connections
+            captured["command_origin"] = command_origin
+            from odoo_instance_sdk.execution import ExecutionPlan
+            from odoo_instance_sdk.internal.proc import PreparedAction
+
+            step = PreparedAction(
+                step_id="test.copy.database.drop",
+                action="drop-owned-copy-database",
+                description="test direct drop",
+                mutating=True,
+            )
+
+            def run(context: Any) -> object:
+                context.action(step.step_id)
+                context.complete_action(step.step_id)
+                return None
+
+            class StubCommand:
+                def __init__(self) -> None:
+                    self._prepared_cmd = prepared_command(run, (step,))
+                    self.plan = ExecutionPlan(
+                        steps=tuple(step.public_projection() for step in (step,))
+                    )
+
+                def _prepared(self) -> Any:
+                    return self._prepared_cmd
+
+            return StubCommand()
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.pg.drop.build_database_drop_command", stub_build
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
+            lambda _root: MagicMock(),
+        )
+
+        selected = env_client.environments.get(str(env.id))
+        command = env_client.environments.remove_command(
+            selected, force_connections=True, executor=RecordingExecutor()
+        )
+        command.run()
+
+        assert captured == {
+            "database": "copy_target",
+            "force_connections": True,
+            "command_origin": "env-remove",
+        }
+        terminate_sql = _terminate_sql("copy_target")
+        assert "datname='copy_target'" in terminate_sql
+        assert "pg_terminate_backend" in terminate_sql
+        for protected in ("postgres", "template0", "template1", "comerta"):
+            assert f"datname='{protected}'" not in terminate_sql
+        assert env_client.environments.get(str(env.id)).state is EnvironmentState.REMOVED

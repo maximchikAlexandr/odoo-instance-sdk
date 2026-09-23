@@ -225,19 +225,18 @@ class _SnapshotMixin:
                 if project_id is None
                 else probe_results.get(f"monitor.{project_id}.docker.resources")
             )
+            # ponytail: a non-empty `docker compose ps` snapshot only confirms
+            # the container is running; it MUST NOT imply STOPPED when empty or
+            # unparseable. `stopped` follows only from `status_command()`.
             if recorded is not None and recorded.returncode == 0 and recorded.stdout:
                 try:
                     rows = json.loads(str(recorded.stdout))
                 except (TypeError, ValueError):
-                    rows = []
-                if isinstance(rows, list):
-                    state = PostgresClusterState.HEALTHY if rows else PostgresClusterState.STOPPED
+                    rows = None
+                if isinstance(rows, list) and rows:
+                    state = PostgresClusterState.HEALTHY
                     self._cluster_status_cache[name] = (now, state)
                     return state
-            if recorded is not None:
-                state = PostgresClusterState.STOPPED
-                self._cluster_status_cache[name] = (now, state)
-                return state
         state = cluster.status()
         self._cluster_status_cache[name] = (now, state)
         return state

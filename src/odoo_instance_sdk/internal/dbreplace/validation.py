@@ -6,6 +6,7 @@ import contextlib
 import shutil
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError
@@ -136,7 +137,11 @@ def build_copy_replacement_command(  # noqa: C901
     # Capture validated archive members only after the immutable identity and
     # execution probes have succeeded.  The public plan contains identities,
     # never a dump or filestore byte payload.
-    restore_payload = capture_selected_backup_restore(plan.backup)
+    start_config = getattr(plan.instance.config, "start_config", None)
+    plan_data_dir: Path | None = None
+    if start_config is not None and getattr(start_config, "data_dir", None):
+        plan_data_dir = Path(start_config.data_dir)
+    restore_payload = capture_selected_backup_restore(plan.backup, data_dir=plan_data_dir)
     if plan.restore_inputs is None:
         raise ConfigError("selected restore inputs were not captured")
     restore_steps = _preparation_process_steps(

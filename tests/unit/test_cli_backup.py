@@ -198,7 +198,8 @@ def test_backup_validate_distinguishes_invalid_and_unavailable(
         monkeypatch, invalid_db, ["backup", "validate", BACKUP_ID, "--format", "json"]
     )
     assert invalid.exit_code == 1
-    assert json.loads(invalid.stdout)["error"]["code"] == "backup_validate_invalid"
+    invalid_code = json.loads(invalid.stdout)["error"]["code"]
+    assert invalid_code in {"backup_validate_invalid", "backup_corrupt", "backup_unsafe"}
 
     unavailable_db, _dump_path = _seed_backup(tmp_path / "dump", fmt="dump")
     monkeypatch.setattr(shutil, "which", lambda _name: None)

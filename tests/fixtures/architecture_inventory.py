@@ -20,13 +20,14 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 421),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 422),
-        ("src/odoo_instance_sdk/commands/backup.py", 345),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 487),
+        ("src/odoo_instance_sdk/commands/backup.py", 348),
         ("src/odoo_instance_sdk/commands/output.py", 236),
         ("src/odoo_instance_sdk/commands/output.py", 381),
         ("src/odoo_instance_sdk/commands/output.py", 383),
         ("src/odoo_instance_sdk/commands/output.py", 390),
         ("src/odoo_instance_sdk/commands/output.py", 392),
-        ("src/odoo_instance_sdk/resources/instance/identity.py", 457),
+        ("src/odoo_instance_sdk/resources/instance/identity.py", 490),
     }
 )
 
@@ -45,10 +46,14 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
         422,
     ): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/commands/backup.py", 345): "shared Rich output boundary",
+    (
+        "src/odoo_instance_sdk/commands/cli_parts/registration.py",
+        487,
+    ): "documented --version metadata flag transport",
+    ("src/odoo_instance_sdk/commands/backup.py", 348): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
-        457,
+        490,
     ): "lifecycle cleanup diagnostic transport",
 }
 

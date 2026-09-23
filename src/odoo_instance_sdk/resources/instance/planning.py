@@ -56,11 +56,14 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.internal.proc import RunContext
 
 
-def _raise_if_exited(exited: bool) -> None:
+def _raise_if_exited(exited: bool, handle: ProcessHandle | None = None) -> None:
     if exited:
+        tails = handle.drain_tails() if handle is not None else {"stdout": "", "stderr": ""}
         raise InstanceConfigurationError(
             "detached Odoo process exited immediately after spawn; "
-            "check the bound logfile for the failure"
+            "check the bound logfile for the failure\n"
+            f"stdout_tail={tails['stdout']!r}\n"
+            f"stderr_tail={tails['stderr']!r}"
         )
 
 
@@ -343,7 +346,7 @@ class _PlanningMixin:
                     context.action(action_ids[2])
                     exited = handle.poll() is not None
                     context.complete_action(action_ids[2])
-                    _raise_if_exited(exited)
+                    _raise_if_exited(exited, handle)
                     context.action(action_ids[3])
                     if self._runtime_binding is not None or self._environment_id is not None:
                         self._persist_runtime_identity(

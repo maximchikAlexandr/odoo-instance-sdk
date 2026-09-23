@@ -14,6 +14,7 @@ import psutil
 
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
+    LockConflictError,
 )
 from odoo_instance_sdk.internal.locks import exclusive_lock, shared_lock
 from odoo_instance_sdk.internal.proc import (
@@ -374,7 +375,7 @@ class _IdentityMixin:
 
         process_executor = SubprocessExecutor()
 
-        def execute(context: RunContext[int]) -> int:
+        def execute(context: RunContext[int]) -> int:  # noqa: C901
             # The planning probe is intentionally repeated at this mutation
             # boundary.  A stale preview must never turn into a spawn.
             if type(process_executor) is SubprocessExecutor:
@@ -389,39 +390,71 @@ class _IdentityMixin:
                     dependency_step.step_id
                 ):
                     context.skip(dependency_step.step_id)
-            with self._artifact_lock():
-                secret_created = False
-                if secret_path is not None:
-                    _write_secret_config(snapshot, secret_path)
-                    secret_created = True
-                handle: ProcessHandle | None = None
-                try:
-                    handle = context.spawn(step.step_id)
-                    if self._runtime_binding is not None or self._environment_id is not None:
-                        self._persist_runtime_identity(
-                            handle.pid,
-                            snapshot,
-                            resolved_cwd,
-                            context=context,
-                        )
-                    from odoo_instance_sdk.internal.server import wait_foreground_process
-
-                    return wait_foreground_process(
-                        handle,
-                    )
-                except BaseException:
-                    if handle is not None:
-                        with contextlib.suppress(BaseException):
-                            terminate(
-                                handle,
-                                process_group_id=handle.process_group_id,
-                                timeout=5.0,
+            # The shared artifact lock is held only for the atomic spawn and
+            # runtime-identity registration, then released before waiting so a
+            # parallel ``stop`` can acquire the exclusive lock and terminate the
+            # registered runtime.  On exit the same shared lock is re-acquired
+            # for cleanup/revalidation.  See server-lifecycle spec and #74 item 1.
+            handle: ProcessHandle | None = None
+            secret_created = False
+            try:
+                with self._artifact_lock():
+                    if secret_path is not None:
+                        _write_secret_config(snapshot, secret_path)
+                        secret_created = True
+                    try:
+                        handle = context.spawn(step.step_id)
+                        if self._runtime_binding is not None or self._environment_id is not None:
+                            self._persist_runtime_identity(
+                                handle.pid,
+                                snapshot,
+                                resolved_cwd,
+                                context=context,
                             )
+                    except BaseException:
+                        if handle is not None:
+                            with contextlib.suppress(BaseException):
+                                terminate(
+                                    handle,
+                                    process_group_id=handle.process_group_id,
+                                    timeout=5.0,
+                                )
+                        raise
+                # The wait must NOT hold the shared artifact lock; a parallel
+                # ``stop`` reads the persisted runtime identity under the
+                # exclusive lock and terminates the registered runtime.
+                from odoo_instance_sdk.internal.server import wait_foreground_process
+
+                if handle is None:  # pragma: no cover - re-raised above
+                    raise RuntimeError("foreground spawn produced no handle")
+                try:
+                    return wait_foreground_process(handle)
+                except BaseException:
+                    with contextlib.suppress(BaseException):
+                        terminate(
+                            handle,
+                            process_group_id=handle.process_group_id,
+                            timeout=5.0,
+                        )
                     raise
-                finally:
-                    self._clear_runtime_identity()
-                    if secret_created:
-                        cleanup_secret_config(secret_path)
+            finally:
+                # Re-acquire the same shared artifact lock for cleanup and
+                # revalidation so the identity row is not left stale.  A
+                # parallel ``stop`` may momentarily hold the exclusive lock; the
+                # cleanup itself is best-effort, so a transient conflict is
+                # retried briefly and otherwise suppressed.
+                cleanup_deadline = time.monotonic() + 5.0
+                while True:
+                    try:
+                        with self._artifact_lock():
+                            self._clear_runtime_identity()
+                            if secret_created:
+                                cleanup_secret_config(secret_path)
+                        break
+                    except LockConflictError:
+                        if time.monotonic() >= cleanup_deadline:
+                            break
+                        time.sleep(0.05)
 
         from odoo_instance_sdk.execution import Command
 

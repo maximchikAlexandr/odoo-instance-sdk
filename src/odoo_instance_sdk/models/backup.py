@@ -251,6 +251,7 @@ class BackupEvent(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 class BackupValidationResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     valid: bool
     errors: tuple[str, ...] = ()
+    error_code: str | None = None
     db_name: str | None = None
     db_version: str | None = None
 

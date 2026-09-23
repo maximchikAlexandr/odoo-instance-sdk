@@ -516,10 +516,13 @@ class AuxiliaryRestoreSession:
                 context.fail_action(self.ready_action.step_id, error)
                 from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
 
+                tails = handle.drain_tails() if handle is not None else {"stdout": "", "stderr": ""}
                 raise DatabaseManagerUnavailableError(
                     "auxiliary database manager failed readiness; "
-                    "resolve the project runtime and retry, or run `odcli run`"
-                ) from None
+                    "resolve the project runtime and retry, or run `odcli run`\n"
+                    f"stdout_tail={tails['stdout']!r}\n"
+                    f"stderr_tail={tails['stderr']!r}"
+                ) from error
             context.complete_action(self.ready_action.step_id)
         except BaseException as error:
             self._cleanup_failed_start(handle, error)
@@ -529,7 +532,7 @@ class AuxiliaryRestoreSession:
                 raise DatabaseManagerUnavailableError(
                     "auxiliary database manager failed to start; "
                     "resolve the project runtime and retry, or run `odcli run`"
-                ) from None
+                ) from error
             raise
 
     def _skip_unconsumed_steps(self, context: RunContext[PrivateJsonValue]) -> None:

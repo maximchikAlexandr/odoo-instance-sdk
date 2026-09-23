@@ -3797,8 +3797,38 @@ def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
     assert result.output.count("schema_version") == 1
-    client.environments.remove_command.assert_called_once_with(env)
+    client.environments.remove_command.assert_called_once_with(env, force_connections=False)
     client.environments.remove.assert_not_called()
+    confirm.assert_not_called()
+
+
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"]])
+def test_machine_env_remove_with_force_connections_threads_flag(
+    args: list[str], tmp_path: object
+) -> None:
+    env = SimpleNamespace(
+        id="env-1",
+        name="demo",
+        state="removed",
+        branch="main",
+        db_mode="shared",
+        http_port=8069,
+        worktree_path="/worktree",
+    )
+    client = MagicMock()
+    client.environments.get.return_value = env
+    client.environments.remove_command.return_value = _matrix_command(None)
+    with (
+        patch("odoo_instance_sdk.commands.env.list.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.list.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.commands.env.list.click.confirm") as confirm,
+    ):
+        result = CliRunner().invoke(
+            cli, ["env", "rm", "env-1", "--yes", "--force-connections", *args]
+        )
+
+    assert result.exit_code == 0, result.output
+    client.environments.remove_command.assert_called_once_with(env, force_connections=True)
     confirm.assert_not_called()
 
 

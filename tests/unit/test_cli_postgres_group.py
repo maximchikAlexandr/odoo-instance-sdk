@@ -408,3 +408,78 @@ def test_postgres_up_failure_uses_command_specific_json_envelope(
     assert payload["ok"] is False
     assert payload["command"] == "postgres.up"
     assert payload["error"]["code"] == "postgres_up_failed"
+
+
+@pytest.mark.unit
+def test_postgres_up_successful_command_none_shows_truthful_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ensure_running_command() returning None still builds a truthful diagnostic."""
+    root = _write_project(tmp_path)
+
+    class TruthfulCluster:
+        mode = "compose"
+        owned = True
+        endpoint = "127.0.0.1:5468"
+
+        def ensure_running_command(self, *, timeout: float) -> Command[None]:
+            return _command(lambda: None)
+
+        def to_diagnostic_dict(self) -> dict[str, object]:
+            return {
+                "mode": self.mode,
+                "owned": self.owned,
+                "endpoint": self.endpoint,
+                "project_id": "truthful",
+                "image": "postgres:16",
+                "user": "odoo",
+            }
+
+    monkeypatch.setattr(
+        PostgresCluster, "from_project", staticmethod(lambda _path: TruthfulCluster())
+    )
+    result = CliRunner().invoke(cli, ["--project", str(root), "postgres", "up", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["command"] == "postgres.up"
+    data = payload["data"]
+    assert data["mode"] == "compose"
+    assert data["owned"] is True
+    assert data["endpoint"] == "127.0.0.1:5468"
+    assert data["state"] == "healthy"
+
+
+@pytest.mark.unit
+def test_postgres_up_successful_command_none_rich_shows_truthful_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rich output for a successful Command[None] shows actual state, not unknown."""
+    root = _write_project(tmp_path)
+
+    class TruthfulCluster:
+        mode = "compose"
+        owned = True
+        endpoint = "127.0.0.1:5468"
+
+        def ensure_running_command(self, *, timeout: float) -> Command[None]:
+            return _command(lambda: None)
+
+        def to_diagnostic_dict(self) -> dict[str, object]:
+            return {
+                "mode": self.mode,
+                "owned": self.owned,
+                "endpoint": self.endpoint,
+            }
+
+    monkeypatch.setattr(
+        PostgresCluster, "from_project", staticmethod(lambda _path: TruthfulCluster())
+    )
+    result = CliRunner().invoke(cli, ["--project", str(root), "postgres", "up", "--format", "rich"])
+    assert result.exit_code == 0, result.output
+    output = result.output
+    assert "compose" in output
+    assert "true" in output.lower()
+    assert "healthy" in output
+    assert "127.0.0.1:5468" in output
+    assert "unknown" not in output.lower()

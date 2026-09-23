@@ -423,13 +423,54 @@ def test_validate_zip_rejects_compression_ratio_independently(
     archive_path = tmp_path / "compression-ratio.zip"
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", '{"db_name":"remote_test"}')
-        archive.writestr("dump.sql", "x" * 4096)
+        archive.writestr("dump.sql", "select 1;\n")
+        archive.writestr("filestore/remote_test/big.bin", b"\x00" * 4096)
     monkeypatch.setattr(backup_validation, "_MAX_ZIP_COMPRESSION_RATIO", 1)
 
     result = backup_validation.validate_zip(archive_path)
 
     assert not result.valid
     assert any("compression ratio is unsafe" in error for error in result.errors)
+    assert result.error_code == backup_validation.BACKUP_UNSAFE
+
+
+def test_validate_zip_dump_sql_high_ratio_is_not_unsafe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal import backup_validation
+
+    dump = zipfile.ZipInfo("dump.sql")
+    dump.file_size = 4096
+    dump.compress_size = 1
+    dump.compress_type = zipfile.ZIP_DEFLATED
+    manifest = zipfile.ZipInfo("manifest.json")
+    manifest.file_size = 42
+    manifest.compress_size = 42
+    manifest.compress_type = zipfile.ZIP_DEFLATED
+    manifest_blob = b'{"db_name":"remote_test","version":"19.0","major_version":"19"}'
+
+    class HighRatioZip:
+        def __enter__(self) -> HighRatioZip:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def infolist(self) -> list[zipfile.ZipInfo]:
+            return [manifest, dump]
+
+        def open(self, name: str | zipfile.ZipInfo, *_args: object) -> io.BytesIO:
+            resolved = name if isinstance(name, str) else name.filename
+            if resolved == "manifest.json":
+                return io.BytesIO(manifest_blob)
+            return io.BytesIO(b"\x00" * dump.file_size)
+
+    monkeypatch.setattr(zipfile, "is_zipfile", lambda _path: True)
+    monkeypatch.setattr(zipfile, "ZipFile", lambda _path: HighRatioZip())
+    monkeypatch.setattr(backup_validation, "_MAX_ZIP_COMPRESSION_RATIO", 1)
+
+    result = backup_validation.validate_zip(tmp_path / "dump-high-ratio.zip")
+    assert result.valid is True
 
 
 def test_validate_zip_rejects_oversized_manifest_before_json_decode(
@@ -484,7 +525,7 @@ def test_validate_zip_rejects_encrypted_or_unsupported_members(
     assert any(expected in error for error in result.errors)
 
 
-def test_validate_zip_rejects_insufficient_available_space(
+def test_validate_zip_does_not_reject_on_local_free_space(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from types import SimpleNamespace
@@ -501,8 +542,7 @@ def test_validate_zip_rejects_insufficient_available_space(
         lambda _path: SimpleNamespace(free=0),
     )
     result = backup_validation.validate_zip(archive_path)
-    assert not result.valid
-    assert any("ZIP requires more space" in error for error in result.errors)
+    assert result.valid is True
 
 
 def test_selected_dump_stream_counter_cleans_up_lying_metadata(
@@ -1780,6 +1820,13 @@ def test_catalogue_source_preflight_validates_exact_published_artifact(
         assert _catalogue_backup_preflight(
             catalog, _CatalogueRestoreSource(uuid.UUID(backup_id)), project
         ).id == uuid.UUID(backup_id)
+    elif variant == "truncated":
+        from odoo_instance_sdk.exceptions import BackupCorruptError
+
+        with pytest.raises(BackupCorruptError):
+            _catalogue_backup_preflight(
+                catalog, _CatalogueRestoreSource(uuid.UUID(backup_id)), project
+            )
     else:
         with pytest.raises(ConfigError, match=r"archive|database name"):
             _catalogue_backup_preflight(

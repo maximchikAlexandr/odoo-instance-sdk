@@ -18,6 +18,7 @@ from odoo_instance_sdk.internal.proc import (
     PreparedProcess,
     PreparedStep,
     ProcessExecutionError,
+    ProcessHandle,
     ProcessResult,
     ProcessSpawnError,
     ProcessTimeoutError,
@@ -31,6 +32,7 @@ from odoo_instance_sdk.internal.proc import (
     run_captured,
     run_captured_limited,
     spawn,
+    terminate,
     wait_foreground,
 )
 from odoo_instance_sdk.internal.proc.redaction import (
@@ -1742,3 +1744,183 @@ def test_process_prepared_rejects_same_argv_with_changed_private_inputs() -> Non
     )
     assert exact.run() is result
     assert executor.executed == [step]
+
+
+_PIPE_CAPACITY = 65536
+
+
+def _noisy_child(*, stdout_bytes: int = _PIPE_CAPACITY * 3, stderr_bytes: int = 0) -> str:
+    return (
+        "import sys, time;"
+        f" sys.stdout.buffer.write(b'stdout-noise ' * ({stdout_bytes} // 12 + 1));"
+        " sys.stdout.buffer.flush();"
+        f" sys.stderr.buffer.write(b'stderr-noise ' * ({stderr_bytes} // 12 + 1));"
+        " sys.stderr.buffer.flush();"
+        " time.sleep(0.4)"
+    )
+
+
+def _drain_handle(
+    source: str,
+    *,
+    inherit_stdio: bool = False,
+    secret: str = "",
+) -> ProcessHandle:
+    step = PreparedStep(
+        step_id="auxiliary-drain",
+        argv=_python(source),
+        inherit_stdio=inherit_stdio,
+        start_new_session=True,
+        secret_values=(secret,) if secret else (),
+    )
+    return SubprocessExecutor().spawn(step)
+
+
+def test_auxiliary_pipe_drain_prevents_blockage_for_noisy_child() -> None:
+    handle = _drain_handle(_noisy_child(stdout_bytes=_PIPE_CAPACITY * 4))
+
+    deadline = time.monotonic() + 10.0
+    while handle.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    handle.terminate()
+
+    assert handle.poll() is not None
+
+
+def test_auxiliary_drain_collects_both_streams_simultaneously() -> None:
+    handle = _drain_handle(
+        "import sys, time;"
+        " sys.stdout.buffer.write(b'stdout-line\\n' * 200);"
+        " sys.stdout.buffer.flush();"
+        " sys.stderr.buffer.write(b'stderr-line\\n' * 200);"
+        " sys.stderr.buffer.flush();"
+        " time.sleep(0.3)"
+    )
+
+    deadline = time.monotonic() + 10.0
+    while handle.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    handle.terminate()
+
+    tails = handle.drain_tails()
+    assert "stdout-line" in tails["stdout"]
+    assert "stderr-line" in tails["stderr"]
+
+
+def test_auxiliary_drain_tail_is_bounded_to_timeout_tail_bytes() -> None:
+    handle = _drain_handle(
+        _noisy_child(stdout_bytes=_PIPE_CAPACITY * 4, stderr_bytes=_PIPE_CAPACITY * 4)
+    )
+
+    deadline = time.monotonic() + 10.0
+    while handle.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    handle.terminate()
+
+    tails = handle.drain_tails()
+    assert len(tails["stdout"].encode()) <= 8192
+    assert len(tails["stderr"].encode()) <= 8192
+
+
+def test_auxiliary_drain_tail_redacts_secrets() -> None:
+    secret = "drain-secret-value"
+    handle = _drain_handle(
+        f"import sys, time; sys.stdout.write('out={secret}\\n');"
+        f" sys.stderr.write('err={secret}\\n'); sys.stdout.flush(); sys.stderr.flush();"
+        " time.sleep(0.3)",
+        secret=secret,
+    )
+
+    deadline = time.monotonic() + 10.0
+    while handle.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    handle.terminate()
+
+    tails = handle.drain_tails()
+    assert secret not in tails["stdout"]
+    assert secret not in tails["stderr"]
+    assert "<redacted>" in tails["stdout"]
+    assert "<redacted>" in tails["stderr"]
+
+
+def test_auxiliary_readiness_failure_attaches_bounded_tail_and_original_error() -> None:
+    secret = "startup-secret"
+    step = PreparedStep(
+        step_id="auxiliary-readiness-failure",
+        argv=_python(
+            "import sys; sys.stderr.write('FATAL: cannot bind port startup-cause\\n');"
+            " sys.stderr.flush(); sys.exit(2)"
+        ),
+        inherit_stdio=False,
+        start_new_session=True,
+        secret_values=(secret,),
+    )
+    handle = SubprocessExecutor().spawn(step)
+    deadline = time.monotonic() + 10.0
+    while handle.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    tails = handle.drain_tails()
+    handle.terminate()
+
+    assert "startup-cause" in tails["stderr"]
+    assert len(tails["stderr"].encode()) <= 8192
+    assert secret not in tails["stderr"]
+
+
+def test_auxiliary_cleanup_terminates_readers_and_process_group() -> None:
+    handle = _drain_handle("import time; time.sleep(30)")
+
+    active_before = threading.active_count()
+    handle.terminate()
+
+    deadline = time.monotonic() + 5.0
+    while threading.active_count() > active_before and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert handle.poll() is not None
+    assert threading.active_count() <= active_before
+
+
+def test_auxiliary_interrupt_terminates_readers_and_process_group() -> None:
+    handle = _drain_handle("import time; time.sleep(30)")
+
+    active_before = threading.active_count()
+    terminate(handle, process_group_id=handle.process_group_id, timeout=5.0)
+
+    deadline = time.monotonic() + 5.0
+    while threading.active_count() > active_before and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert handle.poll() is not None
+    assert threading.active_count() <= active_before
+
+
+def test_auxiliary_drain_does_not_write_child_bytes_to_cli_stdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    handle = _drain_handle(
+        "import sys, time; sys.stdout.write('CHILD-STDOUT-MARKER\\n');"
+        " sys.stderr.write('CHILD-STDERR-MARKER\\n'); sys.stdout.flush();"
+        " sys.stderr.flush(); time.sleep(0.3)"
+    )
+
+    deadline = time.monotonic() + 10.0
+    while handle.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    handle.terminate()
+
+    captured = capsys.readouterr()
+    assert "CHILD-STDOUT-MARKER" not in captured.out
+    assert "CHILD-STDERR-MARKER" not in captured.out
+
+    tails = handle.drain_tails()
+    assert "CHILD-STDOUT-MARKER" in tails["stdout"]
+    assert "CHILD-STDERR-MARKER" in tails["stderr"]
+
+
+def test_inherited_stdio_spawn_has_no_drain() -> None:
+    handle = spawn(_python("import sys; sys.exit(0)"), inherit_stdio=True)
+    assert handle.drain is None
+    assert handle.wait() == 0
+    assert handle.drain_tails() == {"stdout": "", "stderr": ""}

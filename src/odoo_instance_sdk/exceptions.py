@@ -15,6 +15,46 @@ class OdooInstanceSdkError(Exception):
     """Base exception for all SDK errors."""
 
 
+class BackupPolicyError(OdooInstanceSdkError):
+    """Base for typed backup validation/restore preflight failures.
+
+    Each subclass carries a stable ``code`` and a secret-free ``details``
+    mapping so the CLI transports (Rich/JSON/TOON) can distinguish error
+    kinds without re-deriving them.
+    """
+
+    code: str = "backup_policy"
+
+    def __init__(self, message: str, *, details: Mapping[str, PlanJsonValue] | None = None) -> None:
+        self.details: dict[str, PlanJsonValue] = dict(details or {})
+        super().__init__(message)
+
+
+class BackupCorruptError(BackupPolicyError):
+    """Malformed ZIP or CRC failure (``backup_corrupt``)."""
+
+    code = "backup_corrupt"
+
+
+class BackupUnsafeError(BackupPolicyError):
+    """Path traversal, duplicate/encrypted/unsupported members, or a non-
+    ``dump.sql`` member whose compression ratio exceeds 100 (``backup_unsafe``)."""
+
+    code = "backup_unsafe"
+
+
+class BackupOperatorLimitError(BackupPolicyError):
+    """Archive exceeds ``backup.max_uncompressed_bytes`` (``backup_operator_limit``)."""
+
+    code = "backup_operator_limit"
+
+
+class BackupInsufficientDiskError(BackupPolicyError):
+    """Restore preflight found insufficient local disk space (``backup_insufficient_disk``)."""
+
+    code = "backup_insufficient_disk"
+
+
 class ConfigError(OdooInstanceSdkError):
     """Invalid configuration."""  # ponytail: spec-mandated, not yet raised in this slice
 

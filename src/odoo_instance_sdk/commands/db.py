@@ -450,7 +450,14 @@ def db_restore(  # noqa: C901
     except click.exceptions.Exit:
         raise
     except Exception as exc:
-        fail(output_mode, "db.restore", exc, dry_run=dry_run)
+        fail(
+            output_mode,
+            "db.restore",
+            exc,
+            dry_run=dry_run,
+            error_code=getattr(exc, "code", None),
+            details=cast("JsonObject | None", getattr(exc, "details", None)),
+        )
     raise click.exceptions.Exit(status)
 
 

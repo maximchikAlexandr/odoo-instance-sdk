@@ -1,34 +1,34 @@
 ## 1. Foreground `run` releases the artifact lock before waiting (item 1)
 
-- [ ] 1.1 Add a unit regression test that reproduces the lock conflict: foreground `run` holds the shared artifact lock during `wait_foreground_process()` and a parallel `stop` fails with `Lock conflict ... (exclusive)`; assert the fix lets `stop` acquire the exclusive lock and terminate the registered runtime.
-- [ ] 1.2 Narrow `run_foreground_command()` to enter the shared lock only for atomic spawn/runtime-identity registration and cleanup/revalidation; release the lock before `wait_foreground_process()`. Convenience `run_foreground()` only delegates. Expression SHALL NOT appear in this lock/lifecycle.
-- [ ] 1.3 Verify PID/create-time/process-group validation, stale-runtime recognition, foreground stdio, signals, and exit code are preserved.
-- [ ] 1.4 Add a live E2E test that runs real `odcli run` in one CLI session and real `odcli stop` in a second, asserts `stop` succeeds, the registered process group terminates, the HTTP port is released, and runtime identity is cleaned up.
-- [ ] 1.5 Add the scenario to the mandatory live E2E regression set so subsequent lifecycle changes cannot reintroduce the defect.
-- [ ] 1.6 Run focused tests, Ruff, and mypy.
+- [x] 1.1 Add a unit regression test that reproduces the lock conflict: foreground `run` holds the shared artifact lock during `wait_foreground_process()` and a parallel `stop` fails with `Lock conflict ... (exclusive)`; assert the fix lets `stop` acquire the exclusive lock and terminate the registered runtime.
+- [x] 1.2 Narrow `run_foreground_command()` to enter the shared lock only for atomic spawn/runtime-identity registration and cleanup/revalidation; release the lock before `wait_foreground_process()`. Convenience `run_foreground()` only delegates. Expression SHALL NOT appear in this lock/lifecycle.
+- [x] 1.3 Verify PID/create-time/process-group validation, stale-runtime recognition, foreground stdio, signals, and exit code are preserved.
+- [x] 1.4 Add a live E2E test that runs real `odcli run` in one CLI session and real `odcli stop` in a second, asserts `stop` succeeds, the registered process group terminates, the HTTP port is released, and runtime identity is cleaned up.
+- [x] 1.5 Add the scenario to the mandatory live E2E regression set so subsequent lifecycle changes cannot reintroduce the defect.
+- [x] 1.6 Run focused tests, Ruff, and mypy.
 
 ## 2. `git commit` uses already-resolved project ticket settings (item 2)
 
-- [ ] 2.1 Add a regression test that `odcli git commit ... --ticket PROJ-123 --dry-run` in an environment worktree without its own `.odcli/project.toml` still appends the configured ticket URL as the second paragraph.
-- [ ] 2.2 Pass the already-resolved project settings into the Git resource instead of re-loading `.odcli/project.toml` from the worktree root.
-- [ ] 2.3 Add tests covering different project root and worktree root combinations.
-- [ ] 2.4 Run focused tests, Ruff, and mypy.
+- [x] 2.1 Add a regression test that `odcli git commit ... --ticket PROJ-123 --dry-run` in an environment worktree without its own `.odcli/project.toml` still appends the configured ticket URL as the second paragraph.
+- [x] 2.2 Pass the already-resolved project settings into the Git resource instead of re-loading `.odcli/project.toml` from the worktree root.
+- [x] 2.3 Add tests covering different project root and worktree root combinations.
+- [x] 2.4 Run focused tests, Ruff, and mypy.
 
 ## 3. `env rm --force-connections` (item 3)
 
-- [ ] 3.1 Add `--force-connections` to `odcli env rm` and route it through `EnvironmentManager.remove_command()` into `build_database_drop_command()` with COPY-only terminate scope.
-- [ ] 3.2 Make the drop checker command-aware so `env rm` without `--force-connections` names the now-existing flag (and MAY mention `odcli stop`).
-- [ ] 3.3 Add a CLI/SDK test with one active session on the COPY database: with `--force-connections` only that database's sessions are terminated; without the flag removal stays fail-closed.
-- [ ] 3.4 Verify protected/default/shared databases and sessions of other databases are untouched.
-- [ ] 3.5 Run focused tests, Ruff, and mypy.
+- [x] 3.1 Add `--force-connections` to `odcli env rm` and route it through `EnvironmentManager.remove_command()` into `build_database_drop_command()` with COPY-only terminate scope.
+- [x] 3.2 Make the drop checker command-aware so `env rm` without `--force-connections` names the now-existing flag (and MAY mention `odcli stop`).
+- [x] 3.3 Add a CLI/SDK test with one active session on the COPY database: with `--force-connections` only that database's sessions are terminated; without the flag removal stays fail-closed.
+- [x] 3.4 Verify protected/default/shared databases and sessions of other databases are untouched.
+- [x] 3.5 Run focused tests, Ruff, and mypy.
 
 ## 4. Truthful PostgreSQL state (item 4)
 
-- [ ] 4.1 In `postgres up`, build the diagnostic result from the captured cluster even when `ensure_running_command()` returns `None`.
-- [ ] 4.2 In the monitor, stop deriving `STOPPED` from an empty or unparseable Docker resource snapshot; `stopped` follows only from a successful `PostgresCluster.status_command()`.
-- [ ] 4.3 Make `stats_failed` degrade only metrics; lifecycle state comes from `PostgresCluster.status_command()`.
-- [ ] 4.4 Add a test covering successful `Command[None]` and a running container with unavailable statistics.
-- [ ] 4.5 Run focused tests, Ruff, and mypy.
+- [x] 4.1 In `postgres up`, build the diagnostic result from the captured cluster even when `ensure_running_command()` returns `None`.
+- [x] 4.2 In the monitor, stop deriving `STOPPED` from an empty or unparseable Docker resource snapshot; `stopped` follows only from a successful `PostgresCluster.status_command()`.
+- [x] 4.3 Make `stats_failed` degrade only metrics; lifecycle state comes from `PostgresCluster.status_command()`.
+- [x] 4.4 Add a test covering successful `Command[None]` and a running container with unavailable statistics.
+- [x] 4.5 Run focused tests, Ruff, and mypy.
 
 ## 5. Self-contained `init` (item 5)
 
@@ -57,16 +57,16 @@
 
 ## 6. Large-backup validation (item 6)
 
-- [ ] 6.1 Remove the fixed 512 MiB per-member and 2 GiB total ceilings as unconditional invalidity criteria.
-- [ ] 6.2 Stream CRC/test with a 65536-byte buffer; keep `_MAX_ZIP_ENTRIES = 4096`; do not read `dump.sql` or filestore fully into memory.
-- [ ] 6.3 Before restore, sum declared uncompressed sizes with overflow-safe arithmetic and compare to `shutil.disk_usage(Path(data_dir).resolve()).free` when `data_dir` is set, else `shutil.disk_usage(get_backups_dir()).free`, minus `max(1 GiB, 10%)`; return `backup_insufficient_disk`.
-- [ ] 6.4 Add optional `backup.max_uncompressed_bytes` in `get_config_root()/user.toml` with error `backup_operator_limit`.
-- [ ] 6.5 Keep `_MAX_ZIP_COMPRESSION_RATIO = 100` from invalidating `dump.sql` alone; `backup_corrupt` for malformed ZIP/CRC; `backup_unsafe` for traversal/duplicate/encrypted/unsupported and non-`dump.sql` ratio > 100.
-- [ ] 6.6 Read `manifest["version"]` else `f"{manifest['major_version']}.0"` so Odoo 13 reports `13.0`.
-- [ ] 6.7 Keep path traversal, malformed ZIP, encrypted/unsupported/duplicate members, CRC, and `_MAX_ZIP_ENTRIES = 4096`.
-- [ ] 6.8 Add tests using `pytest.mark.parametrize` covering the 1.21 GB fixture, a >100 GB modeled via ZIP metadata/streaming fixture, insufficient disk, operator maximum, ZIP bomb/path traversal/duplicate/encrypted regressions, bounded-memory streaming, and `13.0` version reading.
-- [ ] 6.9 Make Rich/JSON/TOON distinguish corrupted archive, unsafe archive structure, operator size policy, and insufficient local resources.
-- [ ] 6.10 Run focused tests, Ruff, and mypy.
+- [x] 6.1 Remove the fixed 512 MiB per-member and 2 GiB total ceilings as unconditional invalidity criteria.
+- [x] 6.2 Stream CRC/test with a 65536-byte buffer; keep `_MAX_ZIP_ENTRIES = 4096`; do not read `dump.sql` or filestore fully into memory.
+- [x] 6.3 Before restore, sum declared uncompressed sizes with overflow-safe arithmetic and compare to `shutil.disk_usage(Path(data_dir).resolve()).free` when `data_dir` is set, else `shutil.disk_usage(get_backups_dir()).free`, minus `max(1 GiB, 10%)`; return `backup_insufficient_disk`.
+- [x] 6.4 Add optional `backup.max_uncompressed_bytes` in `get_config_root()/user.toml` with error `backup_operator_limit`.
+- [x] 6.5 Keep `_MAX_ZIP_COMPRESSION_RATIO = 100` from invalidating `dump.sql` alone; `backup_corrupt` for malformed ZIP/CRC; `backup_unsafe` for traversal/duplicate/encrypted/unsupported and non-`dump.sql` ratio > 100.
+- [x] 6.6 Read `manifest["version"]` else `f"{manifest['major_version']}.0"` so Odoo 13 reports `13.0`.
+- [x] 6.7 Keep path traversal, malformed ZIP, encrypted/unsupported/duplicate members, CRC, and `_MAX_ZIP_ENTRIES = 4096`.
+- [x] 6.8 Add tests using `pytest.mark.parametrize` covering the 1.21 GB fixture, a >100 GB modeled via ZIP metadata/streaming fixture, insufficient disk, operator maximum, ZIP bomb/path traversal/duplicate/encrypted regressions, bounded-memory streaming, and `13.0` version reading.
+- [x] 6.9 Make Rich/JSON/TOON distinguish corrupted archive, unsafe archive structure, operator size policy, and insufficient local resources.
+- [x] 6.10 Run focused tests, Ruff, and mypy.
 
 ## 7. Proven filestore `data_dir` on self-contained restore (item 7)
 
@@ -121,21 +121,21 @@
 
 ## 12. `module update` traceback preservation (item 12)
 
-- [ ] 12.1 When a valid nonce-framed payload is present, use `user_error` or `finalization_error` from the common shell wrapper with priority.
-- [ ] 12.2 When payload is missing or malformed, fall back to the last `_TIMEOUT_TAIL_BYTES = 8192` redacted bytes of `stderr`, not the first N characters.
-- [ ] 12.3 Do not emit full unlimited tracebacks; preserve existing redaction.
-- [ ] 12.4 Ensure Rich, JSON, and TOON return the same stable error code and safe details.
-- [ ] 12.5 Add a regression test covering a long startup prefix, traceback at the end, and malformed/missing payload.
-- [ ] 12.6 Run focused tests, Ruff, and mypy.
+- [x] 12.1 When a valid nonce-framed payload is present, use `user_error` or `finalization_error` from the common shell wrapper with priority.
+- [x] 12.2 When payload is missing or malformed, fall back to the last `_TIMEOUT_TAIL_BYTES = 8192` redacted bytes of `stderr`, not the first N characters.
+- [x] 12.3 Do not emit full unlimited tracebacks; preserve existing redaction.
+- [x] 12.4 Ensure Rich, JSON, and TOON return the same stable error code and safe details.
+- [x] 12.5 Add a regression test covering a long startup prefix, traceback at the end, and malformed/missing payload.
+- [x] 12.6 Run focused tests, Ruff, and mypy.
 
 ## 13. `odcli --version` VCS revision (item 13)
 
-- [ ] 13.1 Read optional PEP 610 `direct_url.json` via `importlib.metadata`.
-- [ ] 13.2 If `vcs_info.commit_id` is hex of length >= 7, append the first 7 characters.
-- [ ] 13.3 Wheel/sdist installs without `direct_url.json` keep the package version; malformed/missing metadata safely falls back.
-- [ ] 13.4 Keep the command fast; no Git call, no checkout, no network, no operation-only dependency imports.
-- [ ] 13.5 Add tests covering VCS, non-VCS, and malformed metadata.
-- [ ] 13.6 Run focused tests, Ruff, and mypy.
+- [x] 13.1 Read optional PEP 610 `direct_url.json` via `importlib.metadata`.
+- [x] 13.2 If `vcs_info.commit_id` is hex of length >= 7, append the first 7 characters.
+- [x] 13.3 Wheel/sdist installs without `direct_url.json` keep the package version; malformed/missing metadata safely falls back.
+- [x] 13.4 Keep the command fast; no Git call, no checkout, no network, no operation-only dependency imports.
+- [x] 13.5 Add tests covering VCS, non-VCS, and malformed metadata.
+- [x] 13.6 Run focused tests, Ruff, and mypy.
 
 ## 14. `odcli bug-report` and `odcli-bug-report` skill (item 14)
 

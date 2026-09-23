@@ -195,13 +195,21 @@ def _catalogue_backup_preflight(
     catalog.verify_identity(backup, verify_content=True)
 
     if backup.format == BackupFormat.ZIP:
-        from odoo_instance_sdk.internal.backup_validation import validate_zip
+        from odoo_instance_sdk.internal.backup_validation import (
+            raise_restore_preflight_errors,
+            raise_zip_validation_error,
+            validate_zip,
+        )
 
         validation = validate_zip(path)
         if not validation.valid:
-            raise ConfigError("selected backup archive is unavailable or invalid")
+            raise_zip_validation_error(validation)
+            raise ConfigError(
+                "selected backup archive is unavailable or invalid"
+            )  # pragma: no cover
         if validation.db_name != backup.database_name:
             raise ConfigError("selected backup database name does not match catalog metadata")
+        raise_restore_preflight_errors(validation.uncompressed_bytes, None)
 
     # A configured remote source is a project binding hint, never an authority
     # for ownership.  Projects without it can still restore a registered point.

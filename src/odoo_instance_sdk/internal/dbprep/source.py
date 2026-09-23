@@ -297,10 +297,17 @@ def _open_verified_zip(path: Path) -> zipfile.ZipFile:
 
 def capture_selected_backup_restore(  # noqa: C901
     backup: Backup,
+    *,
+    data_dir: Path | None = None,
 ) -> SelectedBackupRestorePayload:
     """Read and validate selected-backup inputs at the restore boundary."""
     from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
-    from odoo_instance_sdk.internal.backup_validation import validate_dump, validate_zip
+    from odoo_instance_sdk.internal.backup_validation import (
+        raise_restore_preflight_errors,
+        raise_zip_validation_error,
+        validate_dump,
+        validate_zip,
+    )
 
     path = Path(backup.path)
     file_identity, verified_sha256 = _verified_file(path, backup)
@@ -328,9 +335,11 @@ def capture_selected_backup_restore(  # noqa: C901
             raise ConfigError("selected native dump is unavailable or invalid") from exc
     zip_validation = validate_zip(path)
     if not zip_validation.valid:
-        raise ConfigError("selected backup archive is unavailable or invalid")
+        raise_zip_validation_error(zip_validation)
+        raise ConfigError("selected backup archive is unavailable or invalid")  # pragma: no cover
     if zip_validation.db_name != backup.database_name:
         raise ConfigError("selected backup database name does not match catalog metadata")
+    raise_restore_preflight_errors(zip_validation.uncompressed_bytes, data_dir)
     try:
         with _open_verified_zip(path) as archive:
             archive.getinfo("dump.sql")

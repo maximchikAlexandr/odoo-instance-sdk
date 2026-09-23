@@ -29,6 +29,7 @@ from odoo_instance_sdk.models import (
     ClusterContainer,
     ClusterMetrics,
     ClusterResourceSnapshot,
+    ClusterUnavailabilityReason,
     GitActivity,
     GitActivityState,
     GitDiff,
@@ -469,6 +470,171 @@ def test_docker_stats_error_carried(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     proj = snap.projects[0]
     assert proj.cluster is not None
     assert proj.cluster.unavailability_reason == "stats_failed"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["stats_failed", "inspect_failed", "missing"],
+)
+def test_failed_metrics_snapshot_does_not_imply_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: ClusterUnavailabilityReason
+) -> None:
+    """A running cluster with failed/empty Docker metrics keeps its real lifecycle state."""
+    catalog = _make_catalog(tmp_path)
+    e1 = str(uuid.uuid4())
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _seed_env(catalog, _make_env(e1, worktree_path=str(wt)))
+    catalog.close()
+
+    crs = ClusterResourceSnapshot(
+        container=None, metrics=None, unavailability_reason=reason, sampled_at=None
+    )
+    # The cluster is actually healthy — status_command() would say HEALTHY.
+    cluster = FakePostgresCluster(mode="compose", state=PostgresClusterState.HEALTHY, resource=crs)
+    _patch_from_project(monkeypatch, cluster)
+
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        docker_provider=FakeDockerProvider(result=crs),
+    )
+    snap = monitor.snapshot()
+
+    proj = snap.projects[0]
+    assert proj.cluster is not None
+    # Lifecycle state comes from status_command(), not the metrics snapshot.
+    assert proj.cluster.state is PostgresClusterState.HEALTHY
+    # Metrics failure degrades only metrics, not lifecycle.
+    assert proj.cluster.unavailability_reason == reason
+
+
+def test_empty_docker_probe_does_not_imply_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty or unparseable docker compose ps snapshot SHALL NOT imply STOPPED."""
+    catalog = _make_catalog(tmp_path)
+    e1 = str(uuid.uuid4())
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _seed_env(catalog, _make_env(e1, worktree_path=str(wt)))
+    catalog.close()
+
+    cluster = FakePostgresCluster(mode="compose", state=PostgresClusterState.HEALTHY)
+    _patch_from_project(monkeypatch, cluster)
+
+    from odoo_instance_sdk.internal.proc import ProcessResult
+
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
+    fake_compose_file = Path("/fake/compose.yaml")
+    # ponytail: patch cluster.compose_file to a stable key and identity to match
+    monkeypatch.setattr(type(cluster), "compose_file", fake_compose_file, raising=False)
+    monkeypatch.setattr(
+        type(cluster),
+        "to_diagnostic_dict",
+        lambda self: {"project_id": "fake_key"},
+        raising=False,
+    )
+    empty_recorded = ProcessResult(
+        argv=("docker", "compose", "ps"),
+        returncode=0,
+        stdout="",
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    state = monitor._cached_status(
+        cluster,  # type: ignore[arg-type]
+        probe_results={"monitor.project_fake_key.docker.resources": empty_recorded},
+    )
+    assert state is not PostgresClusterState.STOPPED
+    assert state is PostgresClusterState.HEALTHY
+
+
+def test_unparseable_docker_probe_does_not_imply_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unparseable docker compose ps snapshot SHALL NOT imply STOPPED."""
+    catalog = _make_catalog(tmp_path)
+    e1 = str(uuid.uuid4())
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _seed_env(catalog, _make_env(e1, worktree_path=str(wt)))
+    catalog.close()
+
+    cluster = FakePostgresCluster(mode="compose", state=PostgresClusterState.HEALTHY)
+    _patch_from_project(monkeypatch, cluster)
+
+    from odoo_instance_sdk.internal.proc import ProcessResult
+
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
+    fake_compose_file = Path("/fake/compose.yaml")
+    monkeypatch.setattr(type(cluster), "compose_file", fake_compose_file, raising=False)
+    monkeypatch.setattr(
+        type(cluster),
+        "to_diagnostic_dict",
+        lambda self: {"project_id": "fake_key"},
+        raising=False,
+    )
+    monitor._cluster_status_cache.clear()
+    bad_recorded = ProcessResult(
+        argv=("docker", "compose", "ps"),
+        returncode=0,
+        stdout="not-json{{",
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    state = monitor._cached_status(
+        cluster,  # type: ignore[arg-type]
+        probe_results={"monitor.project_fake_key.docker.resources": bad_recorded},
+    )
+    assert state is not PostgresClusterState.STOPPED
+    assert state is PostgresClusterState.HEALTHY
+
+
+def test_failed_docker_probe_does_not_imply_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed (nonzero returncode) docker compose ps snapshot SHALL NOT imply STOPPED."""
+    catalog = _make_catalog(tmp_path)
+    e1 = str(uuid.uuid4())
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _seed_env(catalog, _make_env(e1, worktree_path=str(wt)))
+    catalog.close()
+
+    cluster = FakePostgresCluster(mode="compose", state=PostgresClusterState.HEALTHY)
+    _patch_from_project(monkeypatch, cluster)
+
+    from odoo_instance_sdk.internal.proc import ProcessResult
+
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
+    fake_compose_file = Path("/fake/compose.yaml")
+    monkeypatch.setattr(type(cluster), "compose_file", fake_compose_file, raising=False)
+    monkeypatch.setattr(
+        type(cluster),
+        "to_diagnostic_dict",
+        lambda self: {"project_id": "fake_key"},
+        raising=False,
+    )
+    monitor._cluster_status_cache.clear()
+    failed_recorded = ProcessResult(
+        argv=("docker", "compose", "ps"),
+        returncode=1,
+        stdout="",
+        stderr="docker error",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    state = monitor._cached_status(
+        cluster,  # type: ignore[arg-type]
+        probe_results={"monitor.project_fake_key.docker.resources": failed_recorded},
+    )
+    assert state is not PostgresClusterState.STOPPED
+    assert state is PostgresClusterState.HEALTHY
 
 
 def test_git_divergence_carried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

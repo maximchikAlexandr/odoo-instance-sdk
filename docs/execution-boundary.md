@@ -186,7 +186,10 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:421-422` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/backup.py:345` — shared Rich validation
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:487` — documented
+  `--version` metadata flag transport; remove only if `--version` gains a
+  replacement centralized emitter.
+- `src/odoo_instance_sdk/commands/backup.py:348` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
 - `src/odoo_instance_sdk/commands/output.py:236` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
@@ -198,7 +201,7 @@ documented by `OUTPUT_WRITE_REASONS`:
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/commands/output.py:392` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance/identity.py:457` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:490` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 

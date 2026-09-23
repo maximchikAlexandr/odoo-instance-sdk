@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -375,6 +376,159 @@ def test_project_database_preparation_is_opt_in_and_disposable(tmp_path: Path) -
         assert not list(project.glob(".odcli-refresh-*.conf"))
     finally:
         os.environ.pop("ODCLI_TEST_MASTER_PASSWORD", None)
+        subprocess.run(
+            ["git", "-C", str(source_project), "worktree", "remove", "--force", str(project)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+
+def _wait_until_http_ready(
+    run: subprocess.Popen[str], http_url: str, *, timeout: float = 30.0
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if run.poll() is not None:
+            pytest.fail(
+                f"odcli run exited before HTTP readiness: {(run.stderr or sys.stderr).read()}"
+            )
+        try:
+            with urllib.request.urlopen(http_url, timeout=1):
+                return
+        except OSError:
+            time.sleep(0.2)
+    pytest.fail("odcli run did not become HTTP-ready within timeout")
+
+
+def _wait_until_port_closed(http_url: str, *, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(http_url, timeout=1):
+                pass
+        except OSError:
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def test_parallel_stop_terminates_foreground_run(tmp_path: Path) -> None:
+    """Live E2E regression for #74 item 1: a real ``odcli stop`` in a second
+    CLI session must succeed while ``odcli run`` is waiting in the foreground,
+    terminate the registered process group, release the HTTP port, and clear
+    the persisted runtime identity."""
+    if os.environ.get("ODCLI_REAL_ODOO_ENABLE") != "1":
+        pytest.skip("set ODCLI_REAL_ODOO_ENABLE=1 with ODCLI_REAL_* prerequisites")
+    source_project = Path(_required("ODCLI_REAL_PROJECT")).resolve()
+    odoo_bin = Path(_required("ODCLI_REAL_ODOO_BIN")).resolve()
+    python = Path(_required("ODCLI_REAL_PYTHON")).resolve()
+    config = Path(_required("ODCLI_REAL_CONFIG")).resolve()
+    database = _required("ODCLI_REAL_DATABASE")
+    missing = [
+        str(path) for path in (source_project, odoo_bin, python, config) if not path.exists()
+    ]
+    if missing:
+        pytest.fail(f"real Odoo lifecycle prerequisites do not exist: {', '.join(missing)}")
+
+    project = tmp_path / "project"
+    worktree = subprocess.run(
+        ["git", "-C", str(source_project), "worktree", "add", "--detach", str(project), "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if worktree.returncode:
+        pytest.fail(f"cannot create disposable project worktree: {worktree.stderr.strip()}")
+
+    runner = CliRunner()
+    env_id: str | None = None
+    run: subprocess.Popen[str] | None = None
+    try:
+        init = runner.invoke(
+            cli,
+            [
+                "init",
+                "--no-input",
+                "--project",
+                str(project),
+                "--odoo-bin",
+                str(odoo_bin),
+                "--python",
+                str(python),
+                "--config",
+                str(config),
+                "--database",
+                database,
+            ],
+        )
+        assert init.exit_code == 0, init.output
+        branch = f"odcli-real-stop-{os.getpid()}"
+        checkout = runner.invoke(
+            cli, ["--project", str(project), "env", "checkout", branch, "--db-mode", "shared"]
+        )
+        assert checkout.exit_code == 0, checkout.output
+        from odoo_instance_sdk import OdooClient, OdooClientConfig
+
+        client = OdooClient(config=OdooClientConfig(executable="odoo"))
+        env = next(env for env in client.environments.list(project=project) if env.branch == branch)
+        env_id = str(env.id)
+        http_url = f"http://{env.http_interface}:{env.http_port}/web"
+
+        run = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "odoo_instance_sdk.cli",
+                "--project",
+                str(project),
+                "--env",
+                env_id,
+                "run",
+            ],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _wait_until_http_ready(run, http_url)
+
+        # Second CLI session: stop the registered foreground runtime while the
+        # first session is still waiting.  Before #74 item 1 this failed with
+        # ``Lock conflict ... (exclusive)`` because the foreground run held the
+        # shared artifact lock for the whole wait.
+        stop = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "odoo_instance_sdk.cli",
+                "--project",
+                str(project),
+                "--env",
+                env_id,
+                "stop",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert stop.returncode == 0, stop.stderr
+
+        # The registered process group terminates and the foreground run exits.
+        assert run.wait(timeout=20) is not None
+
+        # The HTTP port is released.
+        assert _wait_until_port_closed(http_url), "HTTP port was not released after parallel stop"
+
+        # The persisted runtime identity is cleaned up.
+        assert client.get_catalog().get_environment_runtime(env_id) is None
+    finally:
+        if run is not None and run.poll() is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(os.getpgid(run.pid), signal.SIGKILL)
+            run.wait(timeout=10)
+        if env_id is not None:
+            runner.invoke(cli, ["--project", str(project), "env", "remove", env_id, "--yes"])
         subprocess.run(
             ["git", "-C", str(source_project), "worktree", "remove", "--force", str(project)],
             check=False,
