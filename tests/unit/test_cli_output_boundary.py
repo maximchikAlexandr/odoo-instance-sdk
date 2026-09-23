@@ -17,6 +17,45 @@ from odoo_instance_sdk.commands.output import (
 )
 from odoo_instance_sdk.models import PostgresClusterState
 
+_REPO_ROOT = Path(__file__).parents[2]
+_COMMANDS_ROOT = _REPO_ROOT / "src" / "odoo_instance_sdk" / "commands"
+_DOWNSTREAM_DIRECT_TABLE_SITES = frozenset(
+    {
+        ("src/odoo_instance_sdk/commands/backup.py", 195),
+        ("src/odoo_instance_sdk/commands/backup.py", 223),
+        ("src/odoo_instance_sdk/commands/backup.py", 251),
+        ("src/odoo_instance_sdk/commands/backup.py", 265),
+        ("src/odoo_instance_sdk/commands/backup.py", 279),
+        ("src/odoo_instance_sdk/commands/backup.py", 323),
+        ("src/odoo_instance_sdk/commands/backup.py", 373),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 672),
+        ("src/odoo_instance_sdk/commands/db.py", 756),
+        ("src/odoo_instance_sdk/commands/db.py", 787),
+        ("src/odoo_instance_sdk/commands/db.py", 809),
+        ("src/odoo_instance_sdk/commands/db.py", 826),
+        ("src/odoo_instance_sdk/commands/env/checkout.py", 881),
+        ("src/odoo_instance_sdk/commands/git.py", 35),
+        ("src/odoo_instance_sdk/commands/module.py", 105),
+        ("src/odoo_instance_sdk/commands/module.py", 125),
+        ("src/odoo_instance_sdk/commands/module.py", 142),
+        ("src/odoo_instance_sdk/commands/module.py", 172),
+        ("src/odoo_instance_sdk/commands/module.py", 188),
+        ("src/odoo_instance_sdk/commands/pg.py", 69),
+        ("src/odoo_instance_sdk/commands/pg.py", 172),
+        ("src/odoo_instance_sdk/commands/pg.py", 227),
+        ("src/odoo_instance_sdk/commands/pg.py", 521),
+        ("src/odoo_instance_sdk/commands/ps.py", 176),
+        ("src/odoo_instance_sdk/commands/ps.py", 204),
+        ("src/odoo_instance_sdk/commands/ps.py", 224),
+        ("src/odoo_instance_sdk/commands/ps.py", 258),
+        ("src/odoo_instance_sdk/commands/resource.py", 491),
+        ("src/odoo_instance_sdk/commands/resource.py", 535),
+        ("src/odoo_instance_sdk/commands/test.py", 195),
+        ("src/odoo_instance_sdk/commands/translations.py", 347),
+        ("src/odoo_instance_sdk/commands/translations.py", 383),
+    }
+)
+
 
 @pytest.mark.unit
 def test_bordered_table_uses_shared_geometry_and_foldable_columns() -> None:
@@ -83,23 +122,34 @@ def test_emit_owns_one_bounded_rich_emission(capsys: pytest.CaptureFixture[str])
 
 
 @pytest.mark.unit
-def test_shared_output_module_contains_the_only_direct_table_constructor() -> None:
-    source_path = Path(__file__).parents[2] / "src/odoo_instance_sdk/commands/output.py"
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    constructors = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "Table"
-    ]
+def test_production_commands_inventory_direct_table_constructors() -> None:
+    actual: set[tuple[str, int]] = set()
+    approved: set[tuple[str, int]] = set()
+    for source_path in sorted(_COMMANDS_ROOT.rglob("*.py")):
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        relative_path = source_path.relative_to(_REPO_ROOT).as_posix()
+        constructors = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Table"
+        ]
+        actual.update((relative_path, node.lineno) for node in constructors)
+        if relative_path != "src/odoo_instance_sdk/commands/output.py":
+            continue
+        helper = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "bordered_table"
+        )
+        approved.update(
+            (relative_path, node.lineno) for node in ast.walk(helper) if node in constructors
+        )
 
-    assert len(constructors) == 1
-    helper = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "bordered_table"
-    )
-    assert helper.end_lineno is not None
-    assert constructors[0].lineno >= helper.lineno
-    assert constructors[0].lineno <= helper.end_lineno
+    downstream = actual - approved
+    assert len(_DOWNSTREAM_DIRECT_TABLE_SITES) == 32
+    assert len(actual) == 33
+    assert len(approved) == 1
+    assert downstream == _DOWNSTREAM_DIRECT_TABLE_SITES
