@@ -126,4 +126,3 @@ Logs SHALL be written to the path from `resolve_effective_logfile()` in `resourc
 
 - **WHEN** the chosen fallback logfile path cannot be created or opened
 - **THEN** the command fails before spawn with a clear diagnostic and the exact path
-

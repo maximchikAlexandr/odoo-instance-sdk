@@ -525,7 +525,7 @@ def test_validate_zip_rejects_encrypted_or_unsupported_members(
     assert any(expected in error for error in result.errors)
 
 
-def test_validate_zip_does_not_reject_on_local_free_space(
+def test_validate_zip_rejects_when_restore_disk_space_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from types import SimpleNamespace
@@ -542,7 +542,8 @@ def test_validate_zip_does_not_reject_on_local_free_space(
         lambda _path: SimpleNamespace(free=0),
     )
     result = backup_validation.validate_zip(archive_path)
-    assert result.valid is True
+    assert result.valid is False
+    assert result.error_code == "backup_insufficient_disk"
 
 
 def test_selected_dump_stream_counter_cleans_up_lying_metadata(

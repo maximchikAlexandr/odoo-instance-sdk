@@ -388,7 +388,7 @@ class _IdentityMixin:
             )
             from odoo_instance_sdk.internal.dbprep.bootstrap import ensure_project_bootstrap_tmp
 
-            ensure_project_bootstrap_tmp(self, context)
+            ensure_project_bootstrap_tmp(cast("OdooInstance", self), context)
             for dependency_step in dependency_steps:
                 if context.planned(dependency_step.step_id) and not context.consumed(
                     dependency_step.step_id

@@ -346,7 +346,7 @@ def capture_selected_backup_restore(  # noqa: C901
             )
         except OSError as exc:
             raise ConfigError("selected native dump is unavailable or invalid") from exc
-    zip_validation = validate_zip(path)
+    zip_validation = validate_zip(path, data_dir=data_dir)
     if not zip_validation.valid:
         raise_zip_validation_error(zip_validation)
         raise ConfigError("selected backup archive is unavailable or invalid")  # pragma: no cover

@@ -60,6 +60,12 @@ class TestZipValidation:
 
         monkeypatch.setattr(zipfile, "is_zipfile", lambda _path: True)
         monkeypatch.setattr(zipfile, "ZipFile", lambda _path: LargeBackup())
+        disk_usage_type = type(shutil.disk_usage("."))
+        monkeypatch.setattr(
+            shutil,
+            "disk_usage",
+            lambda _path: disk_usage_type(10**12, 0, 500 * 1024**3),
+        )
 
         result = validate_zip(tmp_path / "large.zip")
 

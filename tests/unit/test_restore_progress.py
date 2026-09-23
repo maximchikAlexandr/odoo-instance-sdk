@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import time
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -67,7 +67,9 @@ def test_restore_stage_emits_started_and_completed_through_observer() -> None:
     assert [e.kind for e in events] == ["started", "completed"]
 
 
-def test_restore_stage_heartbeat_emits_progress_events_every_half_second() -> None:
+def test_restore_stage_heartbeat_emits_progress_events_without_wall_clock_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     events: list[StepEvent] = []
 
     def capture(event: StepEvent) -> None:
@@ -75,8 +77,31 @@ def test_restore_stage_heartbeat_emits_progress_events_every_half_second() -> No
 
     observer: StepObserver = capture
 
+    class ImmediateEvent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, _timeout: float | None = None) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+        def set(self) -> None:
+            return None
+
+        def is_set(self) -> bool:
+            return False
+
+    class InlineThread:
+        def __init__(self, *, target: object, **_kwargs: object) -> None:
+            self._target = target
+
+        def start(self) -> None:
+            self._target()  # type: ignore[operator]
+
+    monkeypatch.setattr(threading, "Thread", InlineThread)
+    monkeypatch.setattr(threading, "Event", ImmediateEvent)
     with restore_stage_heartbeat("db_restore", observer=observer, interval=0.05):
-        time.sleep(0.12)
+        pass
 
     kinds = [e.kind for e in events]
     assert kinds[0] == "started"

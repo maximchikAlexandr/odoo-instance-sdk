@@ -10,6 +10,7 @@ from odoo_instance_sdk.exceptions import (
     ProcessExitedBeforeReady,
     ReadinessTimeoutError,
 )
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.transport import TransportError, TransportProtocolError
 from odoo_instance_sdk.internal.transport.base import HttpClient, StreamingResponse
 from odoo_instance_sdk.internal.transport.factory import open_odoo_http_client
@@ -35,7 +36,7 @@ def _request_readiness(
     if database_manager:
         return http.post(
             url,
-            json={"jsonrpc": "2.0", "method": "call", "params": {}},
+            json=cast("JsonValue", {"jsonrpc": "2.0", "method": "call", "params": {}}),
         )
     if version_info:
         return http.post(url, json={})

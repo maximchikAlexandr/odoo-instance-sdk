@@ -28,4 +28,3 @@ A failed, empty, or unparseable Docker resource/metrics snapshot SHALL NOT turn 
 
 - **WHEN** a monitor snapshot is produced for a running cluster with failed metrics
 - **THEN** the output does not carry `stopped` alongside `stats_failed` for the same snapshot
-

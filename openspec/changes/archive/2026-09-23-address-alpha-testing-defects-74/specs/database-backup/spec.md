@@ -49,4 +49,3 @@ Remote refresh SHALL accept an optional `test_instance.database`. If it is expli
 
 - **WHEN** a name is auto-detected and the operation completes
 - **THEN** `project.toml` is unchanged and backup provenance records the name for the operation only
-

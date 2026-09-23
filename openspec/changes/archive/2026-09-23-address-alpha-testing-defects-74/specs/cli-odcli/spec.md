@@ -150,7 +150,6 @@ The command SHALL accept `-d, --detach` to launch Odoo detached. When the effect
 
 - **WHEN** the chosen fallback logfile path cannot be created or opened
 - **THEN** the command fails before spawn with `logfile_unwritable` and the exact path
-
 #### Scenario: Two isolated environments use different logfiles
 
 - **WHEN** two isolated environments of one project run detached
@@ -387,4 +386,3 @@ Logs SHALL use `resolve_effective_logfile()` from the `odcli run` requirement. A
 
 - **WHEN** the chosen fallback logfile path cannot be created or opened
 - **THEN** the command fails before spawn with `logfile_unwritable` and the exact path
-

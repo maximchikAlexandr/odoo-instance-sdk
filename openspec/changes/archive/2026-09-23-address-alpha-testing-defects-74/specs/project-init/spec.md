@@ -152,4 +152,3 @@ A full self-contained `init` with `--local-config` and Compose PostgreSQL SHALL 
 
 - **WHEN** `odcli init --dry-run` runs without `--test-database` and without `database` in the manifest
 - **THEN** `test_database` is listed as missing and `DatabaseResource.names()` is not called
-

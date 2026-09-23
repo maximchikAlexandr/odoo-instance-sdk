@@ -72,11 +72,19 @@ def _build_failure_command(result: UpdateResult) -> Command[UpdateResult]:
             description="Inspect installed OdCLI provenance",
             read_only=True,
         ),
+        PreparedAction(
+            step_id="update.resolve",
+            action="resolve",
+            description="Resolve the requested revision to an immutable commit",
+            read_only=True,
+        ),
     )
 
     def callback(context: RunContext[UpdateResult]) -> UpdateResult:
         context.action("update.inspect")
         context.complete_action("update.inspect")
+        context.action("update.resolve")
+        context.complete_action("update.resolve")
         return result
 
     plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
@@ -222,6 +230,33 @@ def _skip_planned_steps(context: RunContext[UpdateResult], *step_ids: str) -> No
             context.skip(step_id)
 
 
+def resolve_update_target_sha(
+    ref: str,
+    *,
+    executor: ProcessExecutor | None,
+) -> str:
+    """Resolve a mutable ref before any update command is constructed."""
+    if _is_full_sha(ref):
+        return ref.lower()
+    step = PreparedStep(
+        step_id="update.resolve",
+        argv=_install_argv(ref, dry_run=True),
+        read_only=True,
+    )
+    result = cast("ProcessResult", (executor or SubprocessExecutor()).execute(step))
+    if result.returncode != 0:
+        stderr = result.stderr if isinstance(result.stderr, str) else ""
+        detail = stderr.strip() or "uv could not resolve the requested revision"
+        raise UnsupportedInstallError(detail, manual_argv=_MANUAL_INSTALL_ARGV)
+    target_sha = _extract_target_sha(ref, _process_output_text(result))
+    if target_sha is None:
+        raise UnsupportedInstallError(
+            "could not parse target SHA from uv output (sha_unparsed)",
+            manual_argv=_MANUAL_INSTALL_ARGV,
+        )
+    return target_sha
+
+
 def _journal_resume_phase(journal: dict[str, JsonValue] | None) -> str | None:
     if journal is None:
         return None
@@ -288,8 +323,7 @@ def _build_mutating_command(  # noqa: C901
     maintenance_step = PreparedStep(
         step_id="update.migrate",
         argv=_maintenance_argv(executable),
-        environment_overrides=((_MAINTENANCE_ENV, "1"),),
-        environment_policy="explicit",
+        environment=((_MAINTENANCE_ENV, "1"),),
         mutating=True,
     )
     public_steps: tuple[PreparedStep | PreparedAction, ...] = (
@@ -297,6 +331,12 @@ def _build_mutating_command(  # noqa: C901
             step_id="update.inspect",
             action="inspect",
             description="Inspect installed OdCLI provenance",
+            read_only=True,
+        ),
+        PreparedAction(
+            step_id="update.resolve",
+            action="resolve",
+            description="Resolve the requested revision to an immutable commit",
             read_only=True,
         ),
         PreparedAction(
@@ -366,7 +406,7 @@ def _build_mutating_command(  # noqa: C901
             raise UpdateError("maintenance produced a non-object JSON document")
         return msgspec.convert(payload, UpdateResult)
 
-    def callback(context: RunContext[UpdateResult]) -> UpdateResult:  # noqa: C901
+    def _run_update_phases(context: RunContext[UpdateResult]) -> UpdateResult:  # noqa: C901
         active_executor = executor or SubprocessExecutor()
         durations: dict[str, float] = {}
         journal_path = _update_journal_path()
@@ -385,6 +425,9 @@ def _build_mutating_command(  # noqa: C901
         context.action("update.inspect")
         context.complete_action("update.inspect")
         _end("inspect", started)
+
+        context.action("update.resolve")
+        context.complete_action("update.resolve")
 
         started = _begin("preflight")
         context.action("update.preflight")
@@ -591,6 +634,9 @@ def _build_mutating_command(  # noqa: C901
             next_step=None,
             phase_durations=_phase_durations(durations),
         )
+
+    def callback(context: RunContext[UpdateResult]) -> UpdateResult:
+        return _run_update_phases(context)
 
     plan = ExecutionPlan(steps=tuple(step.public_projection() for step in public_steps))
     prepared = prepared_command(

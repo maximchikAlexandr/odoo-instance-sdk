@@ -66,7 +66,7 @@ from odoo_instance_sdk.models.bug_report import (
 )
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
@@ -139,7 +139,7 @@ def _metadata_dict(
     kind: BugReportKind,
     repository: str,
     labels: Sequence[str],
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     import datetime as _dt
 
     return {
@@ -239,7 +239,7 @@ def bug_report_init_command(
     )
 
 
-def _load_payload(report_id: str) -> tuple[BugReportPayload, dict[str, object], Path]:
+def _load_payload(report_id: str) -> tuple[BugReportPayload, dict[str, JsonValue], Path]:
     _validate_report_id(report_id)
     report_dir = _draft_directory(report_id)
     if not report_dir.is_dir():
@@ -305,15 +305,15 @@ def _validate_for_submit(
 
 def _record_submit_intent(
     report_dir: Path,
-    metadata: dict[str, object],
+    metadata: dict[str, JsonValue],
     *,
     repository: str,
     title: str,
     payload_sha256: str,
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     import datetime as _dt
 
-    intent = {
+    intent: dict[str, JsonValue] = {
         "recorded_at": _dt.datetime.now(_dt.UTC).isoformat(),
         "repository": repository,
         "title": title,
@@ -358,7 +358,7 @@ def _execute_recheck_step(
 def _recheck_before_create(
     context: RunContext[BugReportSubmitResult],
     *,
-    metadata: dict[str, object],
+    metadata: dict[str, JsonValue],
     recheck_view_step: PreparedStep | None,
     recheck_search_step: PreparedStep,
 ) -> tuple[tuple[str, int] | None, tuple[str, ...]]:
@@ -434,11 +434,11 @@ def _submit_result(
 
 def _persist_issue_outcome(
     report_dir: Path,
-    metadata: dict[str, object],
+    metadata: dict[str, JsonValue],
     *,
     issue_url: str,
     issue_number: int,
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     updated = {**metadata, "issue_url": issue_url, "issue_number": issue_number}
     _write_metadata(report_dir, updated)
     return updated
@@ -654,7 +654,7 @@ def bug_report_submit_command(  # noqa: C901
         prepared_steps.append(recheck_view_step)
     prepared_steps.extend((gh_step, recheck_after_step))
 
-    def callback(context: RunContext[BugReportSubmitResult]) -> BugReportSubmitResult:  # noqa: C901
+    def _submission_preflight() -> BugReportSubmitResult | None:
         if dry_run:
             return _submit_preview_result(
                 report_id,
@@ -667,31 +667,36 @@ def bug_report_submit_command(  # noqa: C901
                 report_errors=report_errors,
                 submit_blockers=submit_blockers,
             )
-
         if not report_valid:
             raise BugReportInvalidError("report.md failed validation: " + "; ".join(report_errors))
-        if not submit_ready:
-            refusals = _count_refusals(reviews)
-            if refusals >= max_review_rounds():
-                unresolved = _unresolved_review_questions(reviews)
-                raise BugReportReviewLimitError(
-                    f"three review rounds returned changes_requested for {report_id}; "
-                    f"publish is stopped at {report_dir}",
-                    details={
-                        "report_id": report_id,
-                        "draft_path": str(report_dir),
-                        "unresolved_questions": list(unresolved),
-                    },
-                )
-            if latest is not None and latest.verdict != "approved":
-                raise BugReportReviewRequiredError(
-                    f"latest review verdict is {latest.verdict}, not approved"
-                )
-            if latest is not None and latest.reviewed_payload_sha256 != payload_sha:
-                raise BugReportStaleHashError(
-                    "approved payload hash does not match current payload; request a new review"
-                )
-            raise BugReportReviewRequiredError("missing independent review")
+        if submit_ready:
+            return None
+        refusals = _count_refusals(reviews)
+        if refusals >= max_review_rounds():
+            unresolved = _unresolved_review_questions(reviews)
+            raise BugReportReviewLimitError(
+                f"three review rounds returned changes_requested for {report_id}; "
+                f"publish is stopped at {report_dir}",
+                details={
+                    "report_id": report_id,
+                    "draft_path": str(report_dir),
+                    "unresolved_questions": list(unresolved),
+                },
+            )
+        if latest is not None and latest.verdict != "approved":
+            raise BugReportReviewRequiredError(
+                f"latest review verdict is {latest.verdict}, not approved"
+            )
+        if latest is not None and latest.reviewed_payload_sha256 != payload_sha:
+            raise BugReportStaleHashError(
+                "approved payload hash does not match current payload; request a new review"
+            )
+        raise BugReportReviewRequiredError("missing independent review")
+
+    def _execute_submission(context: RunContext[BugReportSubmitResult]) -> BugReportSubmitResult:
+        preflight_result = _submission_preflight()
+        if preflight_result is not None:
+            return preflight_result
 
         with _bug_report_lock(report_id):
             current_metadata = _read_metadata(report_dir)
@@ -825,6 +830,9 @@ def bug_report_submit_command(  # noqa: C901
                 issue_number=issue_number,
                 outcome="published",
             )
+
+    def callback(context: RunContext[BugReportSubmitResult]) -> BugReportSubmitResult:
+        return _execute_submission(context)
 
     command: Command[BugReportSubmitResult] = Command.create(
         plan,

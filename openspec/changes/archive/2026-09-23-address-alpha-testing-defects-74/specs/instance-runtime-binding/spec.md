@@ -28,4 +28,3 @@
 
 - **WHEN** a parallel `stop` reads the persisted runtime identity
 - **THEN** PID/create-time/process-group validation runs as before and stale-runtime recognition is preserved
-

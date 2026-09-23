@@ -41,6 +41,68 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
+InitOption = str | int | bool | tuple[str, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _InitRequest:
+    odoo_bin: str | None
+    python: str | None
+    source_config: str | None
+    default_source_database: str | None
+    preferred_http_port: int | None
+    requirements: tuple[str, ...]
+    run_args: tuple[str, ...]
+    runtime_cwd: str | None
+    from_vscode: str | None
+    launch_name: str | None
+    postgres_mode: str
+    postgres_image: str | None
+    postgres_port: int | None
+    postgres_user: str | None
+    no_input: bool
+    yes: bool
+    dry_run: bool
+    test_url: str | None
+    test_database: str | None
+    test_branch: str | None
+    local_config: bool
+    allow_partial: bool
+    output_format: str | None
+    json_output: bool
+    project_path: str | None
+
+
+def _bind_init_request(options: dict[str, InitOption]) -> _InitRequest:
+    return _InitRequest(
+        odoo_bin=cast("str | None", options["odoo_bin"]),
+        python=cast("str | None", options["python"]),
+        source_config=cast("str | None", options["source_config"]),
+        default_source_database=cast("str | None", options["default_source_database"]),
+        preferred_http_port=cast("int | None", options["preferred_http_port"]),
+        requirements=cast("tuple[str, ...]", options["requirements"]),
+        run_args=cast("tuple[str, ...]", options["run_args"]),
+        runtime_cwd=cast("str | None", options["runtime_cwd"]),
+        from_vscode=cast("str | None", options["from_vscode"]),
+        launch_name=cast("str | None", options["launch_name"]),
+        postgres_mode=cast("str", options["postgres_mode"]),
+        postgres_image=cast("str | None", options["postgres_image"]),
+        postgres_port=cast("int | None", options["postgres_port"]),
+        postgres_user=cast("str | None", options["postgres_user"]),
+        no_input=cast("bool", options["no_input"]),
+        yes=cast("bool", options["yes"]),
+        dry_run=cast("bool", options["dry_run"]),
+        test_url=cast("str | None", options["test_url"]),
+        test_database=cast("str | None", options["test_database"]),
+        test_branch=cast("str | None", options["test_branch"]),
+        local_config=cast("bool", options["local_config"]),
+        allow_partial=cast("bool", options["allow_partial"]),
+        output_format=cast("str | None", options["output_format"]),
+        json_output=cast("bool", options["json_output"]),
+        project_path=cast("str | None", options["project_path"]),
+    )
+
+
 def register_init_command(cli: click.Group) -> None:  # noqa: C901
     """Register the ``init`` leaf on the root CLI group."""
 
@@ -140,33 +202,33 @@ def register_init_command(cli: click.Group) -> None:  # noqa: C901
         default=None,
         help="Project path.",
     )
-    def init(  # noqa: C901
-        odoo_bin: str | None,
-        python: str | None,
-        source_config: str | None,
-        default_source_database: str | None,
-        preferred_http_port: int | None,
-        requirements: tuple[str, ...],
-        run_args: tuple[str, ...],
-        runtime_cwd: str | None,
-        from_vscode: str | None,
-        launch_name: str | None,
-        postgres_mode: str,
-        postgres_image: str | None,
-        postgres_port: int | None,
-        postgres_user: str | None,
-        no_input: bool,
-        yes: bool,
-        dry_run: bool,
-        test_url: str | None,
-        test_database: str | None,
-        test_branch: str | None,
-        local_config: bool,
-        allow_partial: bool,
-        output_format: str | None,
-        json_output: bool,
-        project_path: str | None,
-    ) -> None:
+    def init(**options: InitOption) -> None:  # noqa: C901
+        request = _bind_init_request(options)
+        odoo_bin = request.odoo_bin
+        python = request.python
+        source_config = request.source_config
+        default_source_database = request.default_source_database
+        preferred_http_port = request.preferred_http_port
+        requirements = request.requirements
+        run_args = request.run_args
+        runtime_cwd = request.runtime_cwd
+        from_vscode = request.from_vscode
+        launch_name = request.launch_name
+        postgres_mode = request.postgres_mode
+        postgres_image = request.postgres_image
+        postgres_port = request.postgres_port
+        postgres_user = request.postgres_user
+        no_input = request.no_input
+        yes = request.yes
+        dry_run = request.dry_run
+        test_url = request.test_url
+        test_database = request.test_database
+        test_branch = request.test_branch
+        local_config = request.local_config
+        allow_partial = request.allow_partial
+        output_format = request.output_format
+        json_output = request.json_output
+        project_path = request.project_path
         output_mode = resolve_output_mode(output_format, json_output)
         json_output = output_mode is not OutputMode.RICH
         effective_no_input = no_input or output_mode is not OutputMode.RICH

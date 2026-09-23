@@ -22,6 +22,7 @@ from odoo_instance_sdk.models import StartConfig
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.internal.proc import ProcessExecutor, RunContext
+    from odoo_instance_sdk.resources.instance import OdooInstance
 
 _ContextT = TypeVar("_ContextT")
 
@@ -65,6 +66,7 @@ def _bootstrap_sql_step(
         mode="captured",
         step_id=step_id,
         _trusted_args=("-q", "-t", "-A", "-v", "ON_ERROR_STOP=1"),
+        _require_binary=False,
         _read_only=True,
         _mutating=False,
     )
@@ -202,7 +204,7 @@ def tmp_bootstrap_command(
     )
 
 
-def ensure_project_bootstrap_tmp(instance: object, context: RunContext[_ContextT]) -> None:
+def ensure_project_bootstrap_tmp(instance: OdooInstance, context: RunContext[_ContextT]) -> None:
     """Ensure owned Compose projects have a valid bootstrap ``tmp`` database."""
     from odoo_instance_sdk.resources.instance import OdooInstance
 

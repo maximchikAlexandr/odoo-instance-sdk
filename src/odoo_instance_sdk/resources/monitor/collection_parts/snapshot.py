@@ -215,27 +215,6 @@ class _SnapshotMixin:
         cached = self._cluster_status_cache.get(name)
         if cached is not None and now - cached[0] < _CLUSTER_STATUS_TTL:
             return cached[1]
-        if probe_results is not None:
-            diagnostic = getattr(cluster, "to_diagnostic_dict", None)
-            identity = diagnostic().get("project_id") if diagnostic is not None else None
-            project_id = f"project_{identity}" if identity else None
-            recorded = (
-                None
-                if project_id is None
-                else probe_results.get(f"monitor.{project_id}.docker.resources")
-            )
-            # ponytail: a non-empty `docker compose ps` snapshot only confirms
-            # the container is running; it MUST NOT imply STOPPED when empty or
-            # unparseable. `stopped` follows only from `status_command()`.
-            if recorded is not None and recorded.returncode == 0 and recorded.stdout:
-                try:
-                    rows = json.loads(str(recorded.stdout))
-                except (TypeError, ValueError):
-                    rows = None
-                if isinstance(rows, list) and rows:
-                    state = PostgresClusterState.HEALTHY
-                    self._cluster_status_cache[name] = (now, state)
-                    return state
         state = cluster.status()
         self._cluster_status_cache[name] = (now, state)
         return state
