@@ -12,18 +12,19 @@ if TYPE_CHECKING:
     import click
 else:
     import rich_click as click
-from rich.console import Console
-from rich.table import Table
+from rich.console import Group
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
+    bordered_table,
     emit,
     fail,
     field_schema,
     model_to_dict,
     output_options,
+    render_rich_text,
     resolve_output_mode,
     run_or_preview,
     success_document,
@@ -102,7 +103,7 @@ def _rich_module_list(document: OutputDocument) -> str:
     records = result.get("modules", [])
     if not isinstance(records, list):
         return "No modules"
-    table = Table("NAME", "STATE", "VERSION")
+    table = bordered_table("NAME", "STATE", "VERSION")
     for record in records:
         if isinstance(record, dict):
             table.add_row(
@@ -110,9 +111,9 @@ def _rich_module_list(document: OutputDocument) -> str:
                 rich_cell(record.get("state", "")),
                 rich_cell(record.get("installed_version") or record.get("latest_version") or ""),
             )
-    console = Console(record=True, color_system=None, width=180)
-    console.print(table)
-    return console.export_text().rstrip()
+    if not table.rows:
+        table.add_row("(none)", "—", "—")
+    return render_rich_text(table)
 
 
 def _rich_module_update(document: OutputDocument) -> str:
@@ -122,24 +123,21 @@ def _rich_module_update(document: OutputDocument) -> str:
     modules = result.get("modules", [])
     updated = result.get("updated", [])
     values = updated if isinstance(updated, list) and updated else modules
-    table = Table("Module", "Status", title="Module update")
+    table = bordered_table("Module", "Status", title="Module update")
     if isinstance(values, list) and values:
         status = "planned" if document.dry_run else "updated"
         for module in values:
             table.add_row(rich_cell(module), rich_cell(status))
     else:
         table.add_row("(none)", "no changes")
-    console = Console(record=True, color_system=None, width=180)
-    console.print("Updated modules:")
-    console.print(table)
-    return console.export_text().rstrip()
+    return render_rich_text(Group("Updated modules:", table))
 
 
 def _rich_module_info(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     value = document.result.get("module", {}) if isinstance(document.result, dict) else {}
-    table = Table("Field", "Value", title="Odoo module")
+    table = bordered_table("Field", "Value", title="Odoo module")
     if isinstance(value, dict):
         table.add_row("Name", rich_cell(value.get("name", "")))
         table.add_row("Path", rich_cell(value.get("path", "")))
@@ -151,31 +149,30 @@ def _rich_module_info(document: OutputDocument) -> str:
         shadowed = value.get("shadowed_paths")
         if isinstance(shadowed, list) and shadowed:
             table.add_row("Shadowed", rich_cell(", ".join(str(item) for item in shadowed)))
-    console = Console(record=True, color_system=None, width=180)
-    console.print(table)
-    return console.export_text().rstrip()
+    return render_rich_text(table)
 
 
 def _rich_module_order(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     modules = document.result.get("modules", []) if isinstance(document.result, dict) else []
-    return "Install order: " + (
-        ", ".join(str(item) for item in modules) if isinstance(modules, list) else ""
-    )
+    table = bordered_table("Order", "Module", title="Install order")
+    if isinstance(modules, list) and modules:
+        for order, module in enumerate(modules, start=1):
+            table.add_row(str(order), rich_cell(module))
+    else:
+        table.add_row("—", "(none)")
+    return render_rich_text(table)
 
 
 def _rich_module_where(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
-    table = Table("Field", "Value", title="Odoo module location")
-    table.columns[1].overflow = "fold"
+    table = bordered_table("Field", "Value", title="Odoo module location")
     for field in ("name", "path", "manifest_path"):
         table.add_row(field, rich_cell(result.get(field, "")))
-    console = Console(record=True, color_system=None, width=9999)
-    console.print(table)
-    return console.export_text().rstrip()
+    return render_rich_text(table)
 
 
 def _rich_module_deps(document: OutputDocument) -> str:
@@ -185,7 +182,7 @@ def _rich_module_deps(document: OutputDocument) -> str:
     module = value.get("module", {}) if isinstance(value, dict) else {}
     dependencies = value.get("dependencies", []) if isinstance(value, dict) else []
     module_name = module.get("name", "") if isinstance(module, dict) else ""
-    table = Table("Dependency", "Status", "Path", title=f"Dependencies of {module_name}")
+    table = bordered_table("Dependency", "Status", "Path", title=f"Dependencies of {module_name}")
     if isinstance(dependencies, list) and dependencies:
         for dependency in dependencies:
             if isinstance(dependency, dict):
@@ -196,9 +193,7 @@ def _rich_module_deps(document: OutputDocument) -> str:
                 )
     else:
         table.add_row("(none)", "none", "")
-    console = Console(record=True, color_system=None, width=180)
-    console.print(table)
-    return console.export_text().rstrip()
+    return render_rich_text(table)
 
 
 def _module_update_payload(

@@ -183,20 +183,22 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:421-422` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:450-451` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/backup.py:345` — shared Rich validation
+- `src/odoo_instance_sdk/commands/backup.py:344` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/output.py:236` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:112` — in-memory Rich serialization
+  boundary; it writes only to an in-memory buffer and never to terminal output.
+- `src/odoo_instance_sdk/commands/output.py:277` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:381` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:422` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:383` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:424` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:390` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:431` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:392` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:433` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/resources/instance/identity.py:457` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
@@ -204,12 +206,14 @@ documented by `OUTPUT_WRITE_REASONS`:
 
 ### Production type annotations
 
-`EXPLICIT_IMPRECISE_ANNOTATIONS` is empty. The AST gate rejects direct,
+`EXPLICIT_IMPRECISE_ANNOTATIONS` records the two integrated adapter helpers at
+`src/odoo_instance_sdk/commands/env/checkout.py:646` and
+`src/odoo_instance_sdk/commands/ps.py:318`. The AST gate rejects other direct,
 qualified, and quoted `Any`/bare `object`, empty marker Protocols,
 opaque-named aliases, and broad `Callable[..., ...]`; every finding includes
-`file:line`. The removal condition for a future finding is to narrow it at the
-external adapter boundary to `JsonValue`, a validated model, or a concrete
-protocol—not to add an exception.
+`file:line`. The removal condition for these entries is to narrow each helper
+at its external adapter boundary to `JsonValue`, a validated model, or a
+concrete protocol—not to add a broader exception.
 
 ### Test-only subprocess patch seams
 

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Hashable, Mapping
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -11,8 +11,6 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 from click.shell_completion import CompletionItem
-from rich.console import Console
-from rich.table import Table
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.cli_parts.registration import (
@@ -29,6 +27,7 @@ from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputMode,
     action_command,
+    bordered_table,
     command_options,
     emit,
     emit_json_envelope,
@@ -36,6 +35,7 @@ from odoo_instance_sdk.commands.output import (
     failure_document,
     model_to_dict,
     output_options,
+    render_rich_text,
     resolve_command_options,
     resolve_output_mode,
     rich_print,
@@ -79,7 +79,7 @@ from odoo_instance_sdk.resources.deps import verify_deps_command
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
-    from odoo_instance_sdk.internal.doctor import DoctorReport
+    from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
 
 
 def _ready_instance(ctx: CliContext) -> ResolvedContext:
@@ -221,44 +221,66 @@ def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> Non
 
 
 def _print_doctor(report: DoctorReport) -> None:
-    current_env: str | None = None
-    for c in report.checks:
-        if c.environment_id and c.environment_id != current_env:
-            current_env = c.environment_id
-            rich_print("")
-            rich_print(f"[{current_env}] {c.environment_name or ''}")
-        marker = {"ok": "OK", "warn": "WARN", "error": "ERROR", "info": "INFO"}.get(
-            c.status, c.status
+    grouped: dict[str, list[CheckResult]] = {}
+    group_titles: dict[str, str] = {}
+    for check in report.checks:
+        key = check.environment_id or "project"
+        grouped.setdefault(key, []).append(check)
+        group_titles[key] = (
+            f"Environment: {check.environment_name or check.environment_id}"
+            if check.environment_id
+            else "Project checks"
         )
-        rich_print(f"  {marker:<5} {c.name}: {sanitize_diagnostic(c.detail)}")
-        if c.facts:
-            configured = c.facts.get("configured")
-            available = c.facts.get("available")
-            rich_print(f"    configured={configured} available={available}")
-        for remediation in c.remediations:
-            rich_print(
-                "    remediation: "
-                f"{sanitize_diagnostic(remediation.description)} "
-                f"argv={list(remediation.argv)!r} "
-                f"mutating={remediation.mutating} "
-                f"dry_run_supported={remediation.dry_run_supported}"
+    for key, checks in grouped.items():
+        table = bordered_table("Check", "Status", "Details", title=group_titles[key])
+        for check in checks:
+            detail_parts = [sanitize_diagnostic(check.detail)]
+            if check.facts:
+                detail_parts.append(
+                    "facts="
+                    + json.dumps(check.facts, ensure_ascii=False, sort_keys=True, default=str)
+                )
+            for remediation in check.remediations:
+                detail_parts.append(
+                    "remediation="
+                    + sanitize_diagnostic(remediation.description)
+                    + f" argv={list(remediation.argv)!r}"
+                    + f" mutating={remediation.mutating}"
+                    + f" dry_run_supported={remediation.dry_run_supported}"
+                )
+            table.add_row(
+                rich_cell(check.name),
+                rich_cell(
+                    {"ok": "OK", "warn": "WARN", "error": "ERROR", "info": "INFO"}.get(
+                        check.status, check.status
+                    )
+                ),
+                rich_cell("; ".join(detail_parts)),
             )
+        rich_print(render_rich_text(table), preserve_newlines=True)
     for drift in report.drift:
-        rich_print("")
-        rich_print(f"[{drift.environment_id}] {drift.environment_name} drift")
+        table = bordered_table(
+            "Component", "Status", "Details", title=f"{drift.environment_id} drift"
+        )
         for component in drift.components:
-            marker = component.status.upper()
-            rich_print(
-                f"  {marker:<8} {component.component}: "
-                f"{sanitize_diagnostic(component.reason)} "
-                f"({sanitize_diagnostic(component.remediation)})"
+            table.add_row(
+                rich_cell(component.component),
+                rich_cell(component.status.upper()),
+                rich_cell(
+                    f"{sanitize_diagnostic(component.reason)} "
+                    f"({sanitize_diagnostic(component.remediation)})"
+                ),
             )
         context = drift.git_context
-        rich_print(
-            "  GIT      context: "
-            f"dirty={context.get('dirty')} ahead={context.get('ahead')} "
-            f"behind={context.get('behind')}"
+        table.add_row(
+            "GIT",
+            "CONTEXT",
+            rich_cell(
+                f"dirty={context.get('dirty')} ahead={context.get('ahead')} "
+                f"behind={context.get('behind')}"
+            ),
         )
+        rich_print(render_rich_text(table), preserve_newlines=True)
 
 
 @cli.command(help="Stop the selected environment's proven-owned runtime.")
@@ -399,15 +421,22 @@ def run(  # noqa: C901
 def _rich_detached_status(document: OutputDocument) -> str:
     result = document.result
     if not isinstance(result, dict):
-        return "Detached launch planned."
-    pid = result.get("pid")
-    endpoint = result.get("http_endpoint")
-    log_path = result.get("log_path")
-    return (
-        f"Odoo detached: pid={pid} endpoint={endpoint} log={log_path}"
-        if pid is not None
-        else "Detached launch planned."
-    )
+        table = bordered_table("Field", "Value", title="Detached launch")
+        table.add_row("Status", "planned")
+        return render_rich_text(table)
+    table = bordered_table("Field", "Value", title="Detached launch")
+    for field, label in (
+        ("pid", "PID"),
+        ("http_endpoint", "Endpoint"),
+        ("owner_kind", "Owner kind"),
+        ("owner_id", "Owner ID"),
+        ("log_path", "Log path"),
+    ):
+        if field in result:
+            table.add_row(label, rich_cell(result[field]))
+    if not table.rows:
+        table.add_row("Status", "planned")
+    return render_rich_text(table)
 
 
 @cli.command(help="Read or follow retained Odoo logs.")
@@ -645,19 +674,31 @@ def _deps_verify_payload(result: DepsVerifyResult) -> JsonObject:
 
 
 def _rich_deps_projection(document: OutputDocument) -> str:
-    if document.ok:
-        return "pip check: ok"
+    title = "pip check: ok" if document.ok else "pip check: issues"
+    table = bordered_table("Check", "Status", "Details", title=title)
     details = document.error.details if document.error is not None else None
-    if not isinstance(details, dict):
-        return "pip check: issues"
-    lines = ["pip check: issues"]
-    for item in cast("list[JsonValue]", details.get("distributions", [])):
-        if isinstance(item, dict) and isinstance(item.get("detail"), str):
-            lines.append(f"distribution: {item['detail']}")
-    for item in cast("list[JsonValue]", details.get("missing_imports", [])):
-        if isinstance(item, dict):
-            lines.append(f"missing import: {item.get('module')} ({item.get('import')})")
-    return "\n".join(lines)
+    if document.ok:
+        table.add_row("pip check", "OK", "no dependency issues")
+    elif not isinstance(details, dict):
+        table.add_row("pip check", "ERROR", "dependency verification failed")
+    else:
+        distributions = details.get("distributions", [])
+        if isinstance(distributions, list):
+            for item in distributions:
+                if isinstance(item, dict):
+                    table.add_row("distribution", "ERROR", rich_cell(item.get("detail", "")))
+        missing_imports = details.get("missing_imports", [])
+        if isinstance(missing_imports, list):
+            for item in missing_imports:
+                if isinstance(item, dict):
+                    table.add_row(
+                        "missing import",
+                        "ERROR",
+                        rich_cell(f"{item.get('module')} ({item.get('import')})"),
+                    )
+        if not table.rows:
+            table.add_row("pip check", "ERROR", "dependency verification failed")
+    return render_rich_text(table)
 
 
 @cli.group("vscode", help="Generate VS Code launch configuration.")
@@ -669,8 +710,7 @@ def _rich_vscode_generate(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
-    table = Table("Field", "Value", title="VS Code launch")
-    table.columns[1].overflow = "fold"
+    table = bordered_table("Field", "Value", title="VS Code launch")
     if "written" in result:
         table.add_row("Output", rich_cell(result["written"]))
     profile = result.get("profile")
@@ -679,10 +719,7 @@ def _rich_vscode_generate(document: OutputDocument) -> str:
         table.add_row("Program", rich_cell(profile.get("program", "odoo")))
     if not table.rows:
         table.add_row("Status", "ready")
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=9999)
-    console.print(table)
-    return output.getvalue().rstrip()
+    return render_rich_text(table)
 
 
 @vscode_group.command("generate", help="Generate a VS Code debugpy launch profile.")
