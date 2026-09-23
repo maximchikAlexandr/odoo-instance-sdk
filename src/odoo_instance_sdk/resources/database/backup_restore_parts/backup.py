@@ -7,8 +7,6 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
-import httpx
-
 from odoo_instance_sdk.exceptions import (
     BackupDownloadError,
     BackupNotAvailableError,
@@ -24,6 +22,7 @@ from odoo_instance_sdk.internal.files import (
 )
 from odoo_instance_sdk.internal.locks import backup_lock_path, exclusive_lock
 from odoo_instance_sdk.internal.redact import format_error
+from odoo_instance_sdk.internal.transport import TransportError, TransportStatusError
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     Backup,
@@ -47,6 +46,7 @@ if TYPE_CHECKING:
         ProcessExecutor,
         RunContext,
     )
+    from odoo_instance_sdk.internal.transport import OdooHttpClient
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 T = TypeVar("T")
@@ -63,7 +63,7 @@ class _BackupMixin:
         def _assert_local(self) -> None: ...
         @property
         def _cluster(self) -> tuple[str | None, int] | None: ...
-        def _http(self, timeout: float | None = None) -> AbstractContextManager[httpx.Client]: ...
+        def _http(self, timeout: float | None = None) -> AbstractContextManager[OdooHttpClient]: ...
         def _exists_impl(self, name: str, *, psql_step_id: str | None = None) -> bool: ...
         def _psql_probe_for(self, name: str, step_id: str) -> PreparedStep | None: ...
         def exists(self, name: str) -> bool: ...
@@ -136,13 +136,13 @@ class _BackupMixin:
                     )
                     if context is not None and context.planned("database.backup.transfer"):
                         context.complete_action("database.backup.transfer")
-            except httpx.HTTPStatusError as exc:
-                # Keep only a status-derived value. The HTTPX exception retains
-                # its request/response/stream graph, including master_pwd.
-                http_failure = f"Backup request failed with HTTP status {exc.response.status_code}"
-            except httpx.HTTPError:
-                # Do not format the exception: its request may contain the remote
-                # master password and response bodies can be unbounded.
+            except TransportStatusError as exc:
+                # Keep only a status-derived value; the transport exception
+                # carries no request/response/stream graph or master_pwd.
+                http_failure = f"Backup request failed with HTTP status {exc.status_code}"
+            except TransportError:
+                # Do not format the exception: transport failures may carry
+                # context that references the remote origin.
                 http_failure = "Backup request failed"
 
         if http_failure is not None:
@@ -445,6 +445,7 @@ class _BackupMixin:
                 auxiliary_session.ensure_started(context)
 
         http_failure: tuple[int, str] | tuple[None, str] | None = None
+        restore_http_failure: tuple[int, str] | None = None
         try:
             restore_timeout = (
                 timeout
@@ -469,16 +470,22 @@ class _BackupMixin:
                     },
                 )
                 if resp.is_error:
-                    resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            # Convert outside the except scope so the SDK error has no HTTPX
-            # cause/context/request/response/stream references.
+                    restore_http_failure = (
+                        resp.status_code,
+                        f"Database restore failed with HTTP status {resp.status_code}",
+                    )
+        except TransportStatusError as exc:
+            # Convert outside the except scope so the SDK error has no
+            # transport cause/context/request/response/stream references.
             http_failure = (
-                exc.response.status_code,
-                f"Database restore failed with HTTP status {exc.response.status_code}",
+                exc.status_code,
+                f"Database restore failed with HTTP status {exc.status_code}",
             )
-        except httpx.HTTPError:
+        except TransportError:
             http_failure = (None, "Database restore request failed")
+
+        if restore_http_failure is not None:
+            http_failure = restore_http_failure
 
         if not skip_existence_checks and not target_exists(after_step_id):
             if http_failure is not None:
@@ -560,15 +567,12 @@ class _BackupMixin:
                     "name": database_name,
                 },
             )
-            try:
-                if resp.is_error:
-                    resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
+            if resp.is_error:
                 raise DatabaseError(
-                    status_code=exc.response.status_code,
-                    message=format_error(exc.response.text),
-                    body=exc.response.content,
-                ) from exc
+                    status_code=resp.status_code,
+                    message=format_error(resp.text),
+                    body=resp.content,
+                ) from None
 
         if self.exists(database_name):
             raise DropFailedError(f"Database {database_name!r} still exists after drop")

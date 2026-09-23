@@ -906,7 +906,7 @@ class TestCopyRestoreClusterIdentity:
             patch.object(instance.databases, "names", return_value=("comerta",)),
             patch.object(instance.databases, "backup", return_value=backup),
             patch(
-                "odoo_instance_sdk.resources.database.backup_restore_parts.backup.httpx.Client",
+                "odoo_instance_sdk.internal.transport.factory.open_odoo_http_client",
                 return_value=_mock_http({"result": True}),
             ),
         ):
@@ -1066,7 +1066,7 @@ class TestCopyRestoreClusterIdentity:
             patch.object(instance.databases, "names", return_value=("comerta",)),
             patch.object(instance.databases, "backup", return_value=backup),
             patch(
-                "odoo_instance_sdk.resources.database.backup_restore_parts.backup.httpx.Client",
+                "odoo_instance_sdk.internal.transport.factory.open_odoo_http_client",
                 return_value=_mock_http({"result": True}),
             ),
         ):

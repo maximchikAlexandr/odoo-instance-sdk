@@ -1181,7 +1181,10 @@ class TestCheckoutCopy:
         http_cm = MagicMock()
         http_cm.__enter__.return_value.post.side_effect = OSError("restore transport failed")
         with (
-            patch("httpx.Client", return_value=http_cm),
+            patch(
+                "odoo_instance_sdk.internal.transport.factory.open_odoo_http_client",
+                return_value=http_cm,
+            ),
             pytest.raises(OSError, match="restore transport failed"),
         ):
             env_client.environments.checkout(

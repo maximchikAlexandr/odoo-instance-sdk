@@ -6,12 +6,13 @@ from collections.abc import Callable
 from http import HTTPStatus
 from typing import cast
 
-import httpx
-
 from odoo_instance_sdk.exceptions import (
     ProcessExitedBeforeReady,
     ReadinessTimeoutError,
 )
+from odoo_instance_sdk.internal.transport import TransportError, TransportProtocolError
+from odoo_instance_sdk.internal.transport.base import HttpClient, StreamingResponse
+from odoo_instance_sdk.internal.transport.factory import open_odoo_http_client
 from odoo_instance_sdk.internal.urls import assert_local
 from odoo_instance_sdk.models import ModuleJsonValue, ReadinessResult
 
@@ -29,8 +30,8 @@ def _readiness_status(
 
 
 def _request_readiness(
-    http: httpx.Client, url: str, *, version_info: bool, database_manager: bool
-) -> httpx.Response:
+    http: HttpClient, url: str, *, version_info: bool, database_manager: bool
+) -> StreamingResponse:
     if database_manager:
         return http.post(
             url,
@@ -61,7 +62,7 @@ def poll_health(
     else:
         health_url = f"{base_url.rstrip('/')}/web/health?db_server_status=true"
 
-    with httpx.Client(timeout=httpx.Timeout(timeout)) as http:
+    with open_odoo_http_client(base_url, timeout=timeout) as http:
         while True:
             elapsed = time.perf_counter() - start
 
@@ -95,7 +96,7 @@ def poll_health(
                             final_status=status,
                         )
                     last_status = status
-            except (httpx.HTTPError, json.JSONDecodeError):
+            except (TransportError, TransportProtocolError, json.JSONDecodeError, ValueError):
                 pass
 
             time.sleep(poll_interval)

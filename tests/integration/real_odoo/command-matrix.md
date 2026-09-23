@@ -1,6 +1,6 @@
 # Public CLI traceability matrix
 
-This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 50-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
+This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at canonical-inventory base `af9e1b3e8d127145b9488f11ec79519f9442db46`; the original full-change audit base remains `0ff164636617c03a51277055af45cef009277368`. It is not a source registry. Implementation adds the disposition and evidence fields to each existing `PublicLeafCase`; the generator SHALL emit this exact provenance, rewrite the complete 52-row table, and fail the check on any byte drift. `smoke` means covered in PR smoke and full; `critical` means the full critical path; `focused` means a full-tier case around the critical path; `not-applicable` requires the recorded reason.
 
 | Public leaf | Existing class | Dry-run | E2E disposition | Evidence / rationale |
 | --- | --- | ---: | --- | --- |
@@ -55,6 +55,9 @@ This is a reviewed projection of `tests/unit/test_cli_output_modes.py::PUBLIC_LE
 | `git absorb` | mutating-or-spawning | yes | not-applicable | upstream Git mutation is outside the disposable Odoo fixture |
 | `git sync` | mutating-or-spawning | yes | not-applicable | upstream remote Git publication is intentionally outside E2E |
 | `ps` | bounded-read-only | no | critical | E2E-CP-12: single-snapshot process/resource inventory |
+| `bug-report init` | mutating-or-spawning | yes | not-applicable | local offline draft creation is covered by focused command tests and publishes no GitHub issue |
+| `bug-report submit` | mutating-or-spawning | yes | not-applicable | publishes GitHub issues via gh and is intentionally outside the disposable Odoo lifecycle fixture |
+| `update` | mutating-or-spawning | yes | not-applicable | mutates the operator uv tool outside the disposable Odoo fixture; `update --check` is the process-previewable-read-only variant |
 
 ## Scenario coverage
 

@@ -473,3 +473,81 @@ class PostgresPortCollisionError(PostgresClusterError):
 
 class MonitorError(OdooInstanceSdkError):
     """Monitor snapshot failed (messages are redacted)."""
+
+
+class BugReportError(OdooInstanceSdkError):
+    """Base for typed bug-report draft/submit failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: Mapping[str, PlanJsonValue] | None = None,
+    ) -> None:
+        self.details: dict[str, PlanJsonValue] = dict(details or {})
+        super().__init__(message)
+
+
+class BugReportNotFoundError(BugReportError):
+    """The referenced bug-report draft directory does not exist."""
+
+    code = "bug_report_not_found"
+
+
+class BugReportInvalidError(BugReportError):
+    """The draft failed local structure/size/redaction validation."""
+
+    code = "bug_report_invalid"
+
+
+class BugReportReviewRequiredError(BugReportError):
+    """Submission is blocked by a missing or stale independent review."""
+
+    code = "bug_report_review_required"
+
+
+class BugReportReviewLimitError(BugReportError):
+    """Three review rounds returned changes_requested; publish is stopped."""
+
+    code = "bug_report_review_limit"
+
+
+class BugReportStaleHashError(BugReportError):
+    """The approved review hash does not match the current payload."""
+
+    code = "bug_report_stale_hash"
+
+
+class BugReportOutcomeUnknownError(BugReportError):
+    """The ``gh`` create outcome is uncertain after timeout/failure."""
+
+    code = "submit_outcome_unknown"
+
+
+class UpdateError(OdooInstanceSdkError):
+    """Base for typed ``odcli update`` failures."""
+
+
+class UnsupportedInstallError(UpdateError):
+    """The current install cannot be self-updated by ``odcli update``."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        manual_argv: tuple[str, ...] | None = None,
+    ) -> None:
+        self.manual_argv = manual_argv
+        super().__init__(message)
+
+
+class PreflightFailedError(UpdateError):
+    """A preflight check blocked the update before any mutation."""
+
+
+class UpdateIncompleteError(UpdateError):
+    """The update did not finish; the journal and snapshot are preserved."""
+
+
+class UpdateRolledBackError(UpdateError):
+    """The update failed and the previous revision was restored."""

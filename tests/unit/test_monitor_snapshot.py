@@ -9,9 +9,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-import httpx
 import msgspec
 import pytest
+
+from tests.fixtures.transport import (
+    OPEN_ODOO_HTTP_CLIENT,
+    make_http_client,
+    make_response,
+    http_client_context,
+)
 
 from odoo_instance_sdk.exceptions import MonitorError
 from odoo_instance_sdk.execution import Command
@@ -270,8 +276,8 @@ def test_running_odoo_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     provider = FakeProcessProvider(result=result)
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
 
-    resp = httpx.Response(200, json={"status": "pass"})
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: resp)
+    http = make_http_client(get=make_response(json_data={"status": "pass"}))
+    monkeypatch.setattr(OPEN_ODOO_HTTP_CLIENT, lambda *a, **k: http_client_context(http))
 
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider
@@ -300,8 +306,8 @@ def test_running_odoo_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     provider = FakeProcessProvider(result=result)
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
 
-    resp = httpx.Response(503, json={"status": "fail"})
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: resp)
+    http = make_http_client(get=make_response(status_code=503, json_data={"status": "fail"}))
+    monkeypatch.setattr(OPEN_ODOO_HTTP_CLIENT, lambda *a, **k: http_client_context(http))
 
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider
@@ -747,11 +753,10 @@ def test_malformed_health_response_is_not_ready_and_keeps_metrics(
     catalog.close()
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
 
-    response = httpx.Response(200, text=payload)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.httpx.get",
-        lambda *args, **kwargs: response,
-    )
+    response = make_response(text=payload)
+    response.json.side_effect = ValueError("invalid json")
+    http = make_http_client(get=response)
+    monkeypatch.setattr(OPEN_ODOO_HTTP_CLIENT, lambda *a, **k: http_client_context(http))
     provider = FakeProcessProvider(
         result=ProcessTreeResult(
             child_pids=(42,), process_count=2, cpu_percent=3.5, memory_bytes=99
@@ -1301,7 +1306,8 @@ def test_cpu_not_cached_between_snapshots(tmp_path: Path, monkeypatch: pytest.Mo
     result = ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.0, memory_bytes=1024)
     provider = FakeProcessProvider(result=result)
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: httpx.Response(200, json={"status": "pass"}))
+    http = make_http_client(get=make_response(json_data={"status": "pass"}))
+    monkeypatch.setattr(OPEN_ODOO_HTTP_CLIENT, lambda *a, **k: http_client_context(http))
 
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider

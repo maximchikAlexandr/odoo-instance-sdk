@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-import httpx
 from msgspec.structs import replace
 
 from odoo_instance_sdk.internal.address import probe_address
@@ -603,9 +602,13 @@ class _SnapshotMixin:
         )
 
     def _probe_readiness(self, http_url: str) -> RuntimeState:
+        from odoo_instance_sdk.internal.transport import TransportError
+        from odoo_instance_sdk.internal.transport.factory import open_odoo_http_client
+
         try:
-            resp = httpx.get(f"{http_url}/web/health?db_server_status=true", timeout=2.0)
-        except Exception:
+            with open_odoo_http_client(http_url, timeout=2.0) as http:
+                resp = http.get(f"{http_url}/web/health?db_server_status=true")
+        except TransportError:
             return RuntimeState.NOT_READY
         if resp.status_code == 200:
             try:

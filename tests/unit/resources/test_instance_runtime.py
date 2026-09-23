@@ -115,7 +115,7 @@ class TestFromConfigNoPassword:
         client = _make_client()
         inst = client.instance.from_config(path)
         with patch(
-            "odoo_instance_sdk.resources.database.backup_restore_parts.queries.httpx.Client"
+            "odoo_instance_sdk.internal.transport.factory.open_odoo_http_client"
         ) as mock_http_cls:
             mock_http = mock_http_cls.return_value.__enter__.return_value
             mock_http.post.return_value.json.return_value = {"result": ["db1"]}

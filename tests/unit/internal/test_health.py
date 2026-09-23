@@ -1,20 +1,13 @@
-from unittest.mock import MagicMock, patch
-
-import httpx
-
 from odoo_instance_sdk.internal.health import poll_health
+from odoo_instance_sdk.internal.transport import TransportUnavailableError
+from tests.fixtures.transport import make_http_client, make_response, patch_open_odoo_http_client
 
 
 def test_database_manager_readiness_retries_and_accepts_empty_list() -> None:
-    response = MagicMock(spec=httpx.Response)
-    response.status_code = 200
-    response.json.return_value = {"jsonrpc": "2.0", "result": []}
-    http = MagicMock(spec=httpx.Client)
-    http.post.side_effect = [httpx.ConnectError("not ready"), response]
-    context = MagicMock()
-    context.__enter__.return_value = http
+    response = make_response(json_data={"jsonrpc": "2.0", "result": []})
+    http = make_http_client(post_side_effect=[TransportUnavailableError("not ready"), response])
 
-    with patch("httpx.Client", return_value=context):
+    with patch_open_odoo_http_client(http):
         result = poll_health(
             "http://127.0.0.1:8069",
             timeout=1.0,

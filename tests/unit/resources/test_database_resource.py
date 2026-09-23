@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, PropertyMock, patch
 
-import httpx
 import pytest
 
 from odoo_instance_sdk.config import InstanceConfig
@@ -25,6 +24,11 @@ from odoo_instance_sdk.exceptions import (
     RestoreFailedError,
 )
 from odoo_instance_sdk.internal.proc import ProcessResult, ProcessTimeoutError, RecordingExecutor
+from odoo_instance_sdk.internal.transport import (
+    TransportError,
+    TransportStatusError,
+    TransportUnavailableError,
+)
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     Backup,
@@ -34,6 +38,12 @@ from odoo_instance_sdk.models import (
     NoBackup,
     RestoreResult,
 )
+from tests.fixtures.transport import (
+    OPEN_ODOO_HTTP_CLIENT,
+    make_response,
+    mock_http_for_json,
+    stream_http,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -41,32 +51,11 @@ if TYPE_CHECKING:
 
 
 def _mock_http(json_data: object) -> MagicMock:
-    mock_resp = MagicMock(spec=httpx.Response)
-    mock_resp.json.return_value = json_data
-    mock_resp.raise_for_status.return_value = None
-    mock_http = MagicMock(spec=httpx.Client)
-    mock_http.post.return_value = mock_resp
-
-    def stream(*args: object, **kwargs: object) -> MagicMock:
-        response = mock_http.post(*args, **kwargs)
-        stream_cm = MagicMock()
-        stream_cm.__enter__.return_value = response
-        return stream_cm
-
-    mock_http.stream.side_effect = stream
-    mock_cm = MagicMock()
-    mock_cm.__enter__.return_value = mock_http
-    return mock_cm
+    return mock_http_for_json(json_data)
 
 
 def _stream_http(response: MagicMock) -> tuple[MagicMock, MagicMock]:
-    http_cm = _mock_http({})
-    http = http_cm.__enter__.return_value
-    stream_cm = MagicMock()
-    stream_cm.__enter__.return_value = response
-    http.stream.side_effect = None
-    http.stream.return_value = stream_cm
-    return http_cm, http
+    return stream_http(response)
 
 
 def _patch_captured_process(monkeypatch: pytest.MonkeyPatch, fake_run: Any) -> None:
@@ -180,7 +169,7 @@ def _make_instance_with_cluster_key(
 class TestList:
     def test_uses_jsonrpc_request(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": []})
-        with patch("httpx.Client", return_value=mock_cm):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             instance.databases.list()
 
         mock_cm.__enter__.return_value.post.assert_called_once_with(
@@ -190,7 +179,7 @@ class TestList:
 
     def test_returns_database_tuple(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["db1", "db2", "db3"]})
-        with patch("httpx.Client", return_value=mock_cm):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             dbs = instance.databases.list()
         assert isinstance(dbs, tuple)
         assert all(isinstance(db, Database) for db in dbs)
@@ -199,7 +188,7 @@ class TestList:
 
     def test_returns_ordered(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["db1", "db2", "db3"]})
-        with patch("httpx.Client", return_value=mock_cm):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             dbs = instance.databases.list()
         assert [db.name for db in dbs] == ["db1", "db2", "db3"]
 
@@ -213,7 +202,7 @@ class TestList:
         mock_catalog.distinct_restored_database_names.return_value = ()
 
         with (
-            patch("httpx.Client", return_value=mock_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm),
             patch.object(inst, "_client") as mock_client,
         ):
             mock_client.get_catalog.return_value = mock_catalog
@@ -233,7 +222,7 @@ class TestList:
         mock_catalog.latest_restore.return_value = None
 
         with (
-            patch("httpx.Client", return_value=mock_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm),
             patch.object(inst, "_client") as mock_client,
         ):
             mock_client.get_catalog.return_value = mock_catalog
@@ -332,7 +321,7 @@ class TestExists:
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
         )
-        with patch("httpx.Client", return_value=_mock_http({"result": ["mydb"]})) as http:
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": ["mydb"]})) as http:
             command = inst.databases.exists_command("mydb", executor=executor)
             assert command.run() is True
         assert tuple(step.step_id for step in command.plan.process_steps) == (
@@ -344,13 +333,13 @@ class TestExists:
 
     def test_true(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["mydb", "other"]})
-        with patch("httpx.Client", return_value=mock_cm):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             result = instance.databases.exists("mydb")
         assert result is True
 
     def test_false(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["other"]})
-        with patch("httpx.Client", return_value=mock_cm):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             result = instance.databases.exists("mydb")
         assert result is False
 
@@ -428,20 +417,20 @@ class TestExists:
 class TestGetItem:
     def test_index(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["prod", "staging"]})
-        with patch("httpx.Client", return_value=mock_cm):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             db = instance.databases[0]
         assert isinstance(db, Database)
         assert db.name == "prod"
 
     def test_negative_index(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["prod", "staging"]})
-        with patch("httpx.Client", return_value=mock_cm):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             db = instance.databases[-1]
         assert db.name == "staging"
 
     def test_out_of_range(self, instance: OdooInstance) -> None:
         mock_cm = _mock_http({"result": ["prod"]})
-        with patch("httpx.Client", return_value=mock_cm), pytest.raises(IndexError):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm), pytest.raises(IndexError):
             instance.databases[5]
 
     def test_slice_raises_type_error(self, instance: OdooInstance) -> None:
@@ -472,7 +461,7 @@ class TestCurrent:
         inst = client.instance("http://localhost:8069")
         object.__setattr__(inst.config, "configured_database_names", ("prod",))
 
-        with patch("httpx.Client", return_value=mock_cm):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm):
             db = inst.databases.current()
         assert db.name == "prod"
         assert isinstance(db.backup, NoBackup)
@@ -484,7 +473,7 @@ class TestCurrent:
         mock_catalog = MagicMock()
 
         with (
-            patch("httpx.Client", return_value=mock_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm),
             patch.object(inst, "_client") as mock_client,
         ):
             mock_client.get_catalog.return_value = mock_catalog
@@ -498,7 +487,7 @@ class TestCurrent:
         inst = client.instance("http://localhost:8069")
         object.__setattr__(inst.config, "configured_database_names", ("prod",))
         with (
-            patch("httpx.Client", side_effect=httpx.HTTPError("down")),
+            patch(OPEN_ODOO_HTTP_CLIENT, side_effect=TransportError("down")),
             pytest.raises(DatabaseManagerUnavailableError),
         ):
             inst.databases.current()
@@ -521,7 +510,7 @@ class TestCurrent:
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
 
         with (
-            patch("httpx.Client", side_effect=httpx.HTTPError("down")),
+            patch(OPEN_ODOO_HTTP_CLIENT, side_effect=TransportError("down")),
             patch.object(inst, "_client") as mock_client,
         ):
             mock_client.get_catalog.return_value = mock_catalog
@@ -547,7 +536,7 @@ class TestCurrent:
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
 
         with (
-            patch("httpx.Client", side_effect=httpx.HTTPError("down")),
+            patch(OPEN_ODOO_HTTP_CLIENT, side_effect=TransportError("down")),
             patch.object(inst, "_client") as mock_client,
         ):
             mock_client.get_catalog.return_value = mock_catalog
@@ -574,7 +563,7 @@ class TestCurrent:
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
 
         with (
-            patch("httpx.Client", side_effect=httpx.HTTPError("down")),
+            patch(OPEN_ODOO_HTTP_CLIENT, side_effect=TransportError("down")),
             patch.object(inst, "_client") as mock_client,
         ):
             mock_client.get_catalog.return_value = mock_catalog
@@ -599,7 +588,7 @@ class TestCurrent:
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/psql")
 
         with (
-            patch("httpx.Client", side_effect=httpx.HTTPError("down")),
+            patch(OPEN_ODOO_HTTP_CLIENT, side_effect=TransportError("down")),
             patch.object(inst, "_client") as mock_client,
         ):
             mock_client.get_catalog.return_value = mock_catalog
@@ -613,7 +602,7 @@ class TestCurrent:
         inst = client.instance("http://localhost:8069")
         object.__setattr__(inst.config, "configured_database_names", ("prod",))
         with (
-            patch("httpx.Client", side_effect=httpx.HTTPError("down")),
+            patch(OPEN_ODOO_HTTP_CLIENT, side_effect=TransportError("down")),
             pytest.raises(DatabaseManagerUnavailableError),
         ):
             inst.databases.current()
@@ -762,12 +751,11 @@ class TestBackupProvenance:
         project_id = f"project_{repo_key(root, common)}"
         catalog = client.get_catalog()
         catalog._register_project(project_id, root, common)
-        response = MagicMock(spec=httpx.Response)
-        response.headers = {"content-disposition": 'attachment; filename="snapshot.zip"'}
-        response.iter_bytes.return_value = [b"snapshot"]
-        response.raise_for_status.return_value = None
-        http_cm = _mock_http({})
-        http_cm.__enter__.return_value.post.return_value = response
+        response = make_response(
+            headers={"content-disposition": 'attachment; filename="snapshot.zip"'},
+            iter_bytes=[b"snapshot"],
+        )
+        http_cm, _ = _stream_http(response)
         project = ProjectConfig(
             repository_root=root,
             test_instance=ConfigTestInstance(
@@ -784,7 +772,7 @@ class TestBackupProvenance:
         monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
         monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "https://example.test:443")
 
-        with patch("httpx.Client", return_value=http_cm):
+        with patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm):
             result = preparation.prepare_download(client, project)
 
         assert result.backup is not None
@@ -811,7 +799,7 @@ class TestBackupProvenance:
     ) -> None:
         from odoo_instance_sdk.internal.proc import StepEvent
 
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {"content-disposition": 'attachment; filename="demo.zip"', **headers}
         response.iter_bytes.return_value = [b"back", b"up"]
         response.raise_for_status.return_value = None
@@ -823,7 +811,7 @@ class TestBackupProvenance:
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
         ):
             backup = instance.databases.backup_command("testdb", destination=tmp_path).run(
                 observer=events.append
@@ -859,7 +847,7 @@ class TestBackupProvenance:
     def test_backup_rejects_trustworthy_length_mismatch_without_publishing(
         self, instance: OdooInstance, tmp_path: Path
     ) -> None:
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {
             "content-disposition": 'attachment; filename="demo.zip"',
             "content-length": "7",
@@ -871,7 +859,7 @@ class TestBackupProvenance:
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             pytest.raises(BackupDownloadError) as raised,
         ):
             instance.databases.backup("testdb", destination=tmp_path)
@@ -887,13 +875,13 @@ class TestBackupProvenance:
     def test_backup_stream_break_is_safe_and_cleans_partial_file(
         self, instance: OdooInstance, tmp_path: Path
     ) -> None:
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {"content-disposition": 'attachment; filename="demo.zip"'}
         response.raise_for_status.return_value = None
 
         def chunks(**_: object) -> Any:
             yield b"partial"
-            raise httpx.ReadError("stream broke")
+            raise TransportUnavailableError("stream broke")
 
         response.iter_bytes.side_effect = chunks
         http_cm, _http = _stream_http(response)
@@ -901,7 +889,7 @@ class TestBackupProvenance:
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             pytest.raises(BackupDownloadError, match="Backup request failed"),
         ):
             instance.databases.backup("testdb", destination=tmp_path)
@@ -913,7 +901,7 @@ class TestBackupProvenance:
     def test_backup_rejects_non_archive_remote_error_without_publishing(
         self, instance: OdooInstance, tmp_path: Path
     ) -> None:
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {"content-type": "text/html; charset=utf-8"}
         response.raise_for_status.return_value = None
         http_cm, _http = _stream_http(response)
@@ -921,7 +909,7 @@ class TestBackupProvenance:
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             pytest.raises(BackupDownloadError, match="not an archive"),
         ):
             instance.databases.backup("testdb", destination=tmp_path)
@@ -946,7 +934,7 @@ class TestBackupProvenance:
                 self.calls += 1
                 raise AssertionError("iterator advanced after the over-limit chunk")
 
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         chunks = Chunks()
         response.iter_bytes.return_value = chunks
 
@@ -959,7 +947,7 @@ class TestBackupProvenance:
     def test_backup_interrupt_closes_stream_and_retains_known_failed_context(
         self, instance: OdooInstance, tmp_path: Path
     ) -> None:
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {"content-disposition": 'attachment; filename="demo.zip"'}
 
         def chunks(**_: object) -> Any:
@@ -974,7 +962,7 @@ class TestBackupProvenance:
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             pytest.raises(KeyboardInterrupt) as raised,
         ):
             instance.databases.backup("testdb", destination=tmp_path)
@@ -989,7 +977,7 @@ class TestBackupProvenance:
     def test_backup_interrupt_before_publication_closes_response_and_cleans(
         self, instance: OdooInstance, tmp_path: Path
     ) -> None:
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {"content-disposition": 'attachment; filename="demo.zip"'}
         response.raise_for_status.side_effect = KeyboardInterrupt
         response.iter_bytes.return_value = []
@@ -999,7 +987,7 @@ class TestBackupProvenance:
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             pytest.raises(KeyboardInterrupt) as raised,
         ):
             instance.databases.backup("testdb", destination=tmp_path)
@@ -1014,7 +1002,7 @@ class TestBackupProvenance:
     def test_backup_interrupt_after_publication_retains_backup_and_available_state(
         self, instance: OdooInstance, tmp_path: Path
     ) -> None:
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {"content-disposition": 'attachment; filename="demo.zip"'}
         response.raise_for_status.return_value = None
         response.iter_bytes.return_value = [b"backup"]
@@ -1023,7 +1011,7 @@ class TestBackupProvenance:
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             patch(
                 "odoo_instance_sdk.resources.database.backup_restore_parts.queries.Backup",
                 side_effect=KeyboardInterrupt,
@@ -1049,23 +1037,18 @@ class TestBackupProvenance:
         expected: float,
     ) -> None:
         catalog = MagicMock()
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {}
         response.iter_bytes.return_value = [b"backup"]
-        http_cm = _mock_http({})
-        http_cm.__enter__.return_value.post.return_value = response
+        http_cm, _ = _stream_http(response)
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm) as http_client,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm) as http_client,
         ):
             instance.databases.backup("testdb", destination=tmp_path, timeout=timeout)
 
-        configured_timeout = http_client.call_args.kwargs["timeout"]
-        assert configured_timeout.connect == expected
-        assert configured_timeout.read == expected
-        assert configured_timeout.write == expected
-        assert configured_timeout.pool == expected
+        assert http_client.call_args.kwargs["timeout"] == expected
 
     def test_direct_https_backup_does_not_require_repository_origin_pin(
         self, client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1077,7 +1060,7 @@ class TestBackupProvenance:
         catalog.start_download.side_effect = lambda **kwargs: captured.update(
             path=Path(kwargs["path"])
         )
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {}
 
         def chunks(**_: object) -> Any:
@@ -1087,11 +1070,10 @@ class TestBackupProvenance:
             yield b"backup"
 
         response.iter_bytes.side_effect = chunks
-        http_cm = _mock_http({})
-        http_cm.__enter__.return_value.post.return_value = response
+        http_cm, _ = _stream_http(response)
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
         ):
             backup = instance.databases.backup("testdb", destination=tmp_path)
 
@@ -1104,20 +1086,18 @@ class TestBackupProvenance:
     ) -> None:
         remote_password = "remote-backup-password-sentinel"
         backup_body = b"backup-body-sentinel"
-        request = httpx.Request(
-            "POST",
-            "https://example.com/web/database/backup",
-            content=f"master_pwd={remote_password}".encode() + backup_body,
+        failure = TransportStatusError(
+            status_code=502,
+            message="server failure",
+            body=backup_body,
         )
-        response = httpx.Response(502, request=request, content=backup_body)
-        failure = httpx.HTTPStatusError("server failure", request=request, response=response)
         http_cm = _mock_http({})
-        http_cm.__enter__.return_value.post.side_effect = failure
+        http_cm.__enter__.return_value.stream.side_effect = failure
         catalog = MagicMock()
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             pytest.raises(BackupDownloadError) as raised,
         ):
             client.instance(
@@ -1136,16 +1116,15 @@ class TestBackupProvenance:
         events: list[str] = []
         catalog = MagicMock()
         catalog.start_download.side_effect = lambda **_: events.append("catalog")
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {}
         response.iter_bytes.return_value = [b"backup"]
         response.raise_for_status.side_effect = lambda: events.append("http")
-        http_cm = _mock_http({})
-        http_cm.__enter__.return_value.post.return_value = response
+        http_cm, _ = _stream_http(response)
 
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
         ):
             backup = instance.databases.backup(
                 "testdb", destination=tmp_path, source_git_branch="  release/19  "
@@ -1157,14 +1136,13 @@ class TestBackupProvenance:
 
     def test_omitted_branch_preserves_none(self, instance: OdooInstance, tmp_path: Path) -> None:
         catalog = MagicMock()
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {}
         response.iter_bytes.return_value = [b"backup"]
-        http_cm = _mock_http({})
-        http_cm.__enter__.return_value.post.return_value = response
+        http_cm, _ = _stream_http(response)
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
         ):
             backup = instance.databases.backup("testdb", destination=tmp_path)
         assert backup.source_git_branch is None
@@ -1177,7 +1155,7 @@ class TestBackupProvenance:
         destination = tmp_path / "backups"
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog") as get_catalog,
-            patch("httpx.Client") as http_client,
+            patch(OPEN_ODOO_HTTP_CLIENT) as http_client,
             pytest.raises(ConfigError),
         ):
             instance.databases.backup("testdb", destination=destination, source_git_branch=branch)
@@ -1189,14 +1167,13 @@ class TestBackupProvenance:
         self, instance: OdooInstance, tmp_path: Path
     ) -> None:
         catalog = MagicMock()
-        response = MagicMock(spec=httpx.Response)
+        response = make_response()
         response.headers = {}
-        response.raise_for_status.side_effect = httpx.HTTPError("download failed")
-        http_cm = _mock_http({})
-        http_cm.__enter__.return_value.post.return_value = response
+        response.raise_for_status.side_effect = TransportError("download failed")
+        http_cm, _ = _stream_http(response)
         with (
             patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             pytest.raises(BackupDownloadError),
         ):
             instance.databases.backup(
@@ -1220,7 +1197,10 @@ class TestAdminPasswordReset:
             "odoo_instance_sdk.resources.instance.OdooInstance._run_shell_script_exclusive",
             return_value=command,
         ) as run:
-            result = instance.databases.reset_admin_password()
+            result = instance.databases.reset_admin_password(
+                admin_password="reset-secret",
+                provenance="test",
+            )
 
         assert isinstance(result, AdminPasswordResetResult)
         assert result.database == "prod"
@@ -1229,7 +1209,7 @@ class TestAdminPasswordReset:
         source = run.call_args.args[0]
         assert "env.ref('base.user_admin'" in source
         assert "ensure_one()" in source
-        assert "write({'password': 'admin'})" in source
+        assert "write({'password': _odcli_admin_password})" in source
         assert run.call_args.kwargs == {"commit": True}
         assert "sentinel" not in repr(result)
 
@@ -1244,7 +1224,10 @@ class TestAdminPasswordReset:
             ) as run,
             pytest.raises(InstanceConfigurationError),
         ):
-            instance.databases.reset_admin_password()
+            instance.databases.reset_admin_password(
+                admin_password="reset-secret",
+                provenance="test",
+            )
         run.assert_not_called()
 
     def test_remote_instance_rejected_before_shell(self, instance_remote: OdooInstance) -> None:
@@ -1255,7 +1238,10 @@ class TestAdminPasswordReset:
             ) as run,
             pytest.raises(NonLocalInstanceError),
         ):
-            instance_remote.databases.reset_admin_password()
+            instance_remote.databases.reset_admin_password(
+                admin_password="reset-secret",
+                provenance="test",
+            )
         run.assert_not_called()
 
     @pytest.mark.parametrize(
@@ -1271,7 +1257,10 @@ class TestAdminPasswordReset:
             ),
             pytest.raises(DatabaseManagerUnavailableError) as raised,
         ):
-            instance.databases.reset_admin_password()
+            instance.databases.reset_admin_password(
+                admin_password="reset-secret",
+                provenance="test",
+            )
         assert sentinel not in str(raised.value)
 
 
@@ -1307,7 +1296,7 @@ def test_stream_response_rejects_oversized_declared_content_before_open(
 ) -> None:
     from odoo_instance_sdk.resources.database import _stream_response_to_file
 
-    response = MagicMock(spec=httpx.Response)
+    response = make_response()
     with pytest.raises(BackupDownloadError, match="exceeded"):
         _stream_response_to_file(
             response,
@@ -1351,7 +1340,7 @@ def test_catalog_rejects_non_string_backup_id(tmp_path: Path) -> None:
 
 def test_no_basic_auth(instance: OdooInstance) -> None:
     mock_cm = _mock_http({"result": ["db1"]})
-    with patch("httpx.Client", return_value=mock_cm) as mock_cls:
+    with patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm) as mock_cls:
         instance.databases.list()
     call_kwargs = mock_cls.call_args.kwargs
     assert "auth" not in call_kwargs
@@ -1450,7 +1439,7 @@ class TestRestore:
         mock_catalog = MagicMock()
         with (
             patch.object(inst, "_client") as mock_client,
-            patch("httpx.Client", return_value=_mock_http({"result": True})),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": True})),
             patch.object(
                 inst.databases.__class__,
                 "list",
@@ -1481,7 +1470,7 @@ class TestRestore:
         http_cm = _mock_http({"result": True})
 
         with (
-            patch("httpx.Client", return_value=http_cm) as mock_client_cls,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm) as mock_client_cls,
             patch.object(instance, "_client") as mock_client,
             patch(
                 "odoo_instance_sdk.resources.database.DatabaseResource.exists",
@@ -1494,8 +1483,7 @@ class TestRestore:
 
         timeout = mock_client_cls.call_args.kwargs["timeout"]
         assert client.config.backup_timeout_seconds == 1800.0
-        assert timeout.connect == client.config.backup_timeout_seconds
-        assert timeout.read == client.config.backup_timeout_seconds
+        assert timeout == client.config.backup_timeout_seconds
 
     def test_http_failure_is_accepted_when_postgres_confirms_restore(
         self, client: OdooClient, tmp_path: Path
@@ -1505,11 +1493,13 @@ class TestRestore:
         backup = _make_backup(path=str(backup_path))
         instance = _make_instance_with_cluster_key(client)
         http_cm = _mock_http({})
-        http_cm.__enter__.return_value.post.side_effect = httpx.ConnectError("connection closed")
+        http_cm.__enter__.return_value.post.side_effect = TransportUnavailableError(
+            "connection closed"
+        )
 
         with (
             patch.object(instance, "_client") as mock_client,
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             patch(
                 "odoo_instance_sdk.resources.database.DatabaseResource.exists",
                 side_effect=[False, True],
@@ -1530,20 +1520,18 @@ class TestRestore:
         backup_path.write_bytes(backup_body)
         backup = _make_backup(path=str(backup_path))
         instance = _make_instance_with_cluster_key(client)
-        request = httpx.Request(
-            "POST",
-            "http://127.0.0.1:8069/web/database/restore",
-            content=f"master_pwd={local_password}".encode() + backup_body,
+        failure = TransportStatusError(
+            status_code=500,
+            message="restore failure",
+            body=backup_body,
         )
-        response = httpx.Response(500, request=request, content=backup_body)
-        failure = httpx.HTTPStatusError("restore failure", request=request, response=response)
         http_cm = _mock_http({})
         http_cm.__enter__.return_value.post.side_effect = failure
         catalog = MagicMock()
 
         with (
             patch.object(instance, "_client") as mock_client,
-            patch("httpx.Client", return_value=http_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
             patch(
                 "odoo_instance_sdk.resources.database.DatabaseResource.exists", return_value=False
             ),
@@ -1569,7 +1557,7 @@ class TestRestore:
         mock_catalog = MagicMock()
 
         with (
-            patch("httpx.Client", return_value=mock_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm),
             patch.object(inst, "_client") as mock_client,
             patch("odoo_instance_sdk.resources.database.DatabaseResource.exists") as mock_exists,
         ):
@@ -1595,7 +1583,7 @@ class TestRestore:
         mock_cm = _mock_http({"result": True})
 
         with (
-            patch("httpx.Client", return_value=mock_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm),
             patch.object(instance, "_client") as mock_client,
             patch("odoo_instance_sdk.resources.database.DatabaseResource.exists") as mock_exists,
         ):
@@ -1619,7 +1607,7 @@ class TestRestore:
         mock_catalog = MagicMock()
 
         with (
-            patch("httpx.Client", return_value=mock_cm) as mock_client_cls,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm) as mock_client_cls,
             patch.object(inst, "_client") as mock_client,
             patch("odoo_instance_sdk.resources.database.DatabaseResource.exists") as mock_exists,
             pytest.raises(RestoreFailedError),
@@ -1642,7 +1630,7 @@ class TestDrop:
         mock_catalog = MagicMock()
 
         with (
-            patch("httpx.Client", return_value=mock_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm),
             patch.object(inst, "_client") as mock_client,
             patch(
                 "odoo_instance_sdk.resources.database.DatabaseResource.exists", return_value=False
@@ -1658,7 +1646,7 @@ class TestDrop:
         mock_cm = _mock_http({"result": True})
 
         with (
-            patch("httpx.Client", return_value=mock_cm),
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=mock_cm),
             patch.object(instance, "_client") as mock_client,
             patch(
                 "odoo_instance_sdk.resources.database.DatabaseResource.exists", return_value=False
@@ -1677,7 +1665,7 @@ def test_rejects_malformed_names_response(
     instance: OdooInstance, payload: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mock_cm = _mock_http(payload)
-    monkeypatch.setattr("httpx.Client", lambda **_: mock_cm)
+    monkeypatch.setattr(OPEN_ODOO_HTTP_CLIENT, lambda *_, **__: mock_cm)
     with pytest.raises(DatabaseManagerUnavailableError):
         instance.databases.names()
 
@@ -1700,7 +1688,9 @@ class TestPlannedExistsProbe:
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
         )
-        with patch("httpx.Client", return_value=_mock_http({"result": ["previous-db"]})) as http:
+        with patch(
+            OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": ["previous-db"]})
+        ) as http:
             command = inst.databases.exists_command("mydb", executor=executor)
             assert command.run() is True
 
@@ -1754,7 +1744,7 @@ class TestPlannedExistsProbe:
         )
         with (
             patch.object(inst, "_client") as mock_client,
-            patch("httpx.Client", return_value=_mock_http({"result": ["mydb"]})) as http,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": ["mydb"]})) as http,
         ):
             mock_client.get_catalog.return_value = catalog
             catalog.has_tracked_database.return_value = True
@@ -1788,7 +1778,7 @@ class TestPlannedExistsProbe:
             "odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/usr/bin/psql"
         )
         with (
-            patch("httpx.Client", return_value=_mock_http({"result": ["mydb"]})) as http,
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=_mock_http({"result": ["mydb"]})) as http,
             pytest.raises(DatabaseManagerUnavailableError, match="existence probe failed"),
         ):
             inst.databases.exists_command("mydb", executor=executor).run()
@@ -1804,20 +1794,19 @@ def test_remote_http_backup_warns_without_exposing_password(
     urls._cleartext_warned = [False]
     password = "cleartext-password-sentinel"
     catalog = MagicMock()
-    response = MagicMock(spec=httpx.Response)
+    response = make_response()
     response.headers = {}
     response.iter_bytes.return_value = [b"backup"]
-    http_cm = _mock_http({})
-    http_cm.__enter__.return_value.post.return_value = response
+    http_cm, http = _stream_http(response)
     instance = client.instance("http://example.test:8069", master_password=password)
 
     with (
         patch("odoo_instance_sdk.client.OdooClient.get_catalog", return_value=catalog),
-        patch("httpx.Client", return_value=http_cm),
+        patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
         pytest.warns(UserWarning, match="cleartext") as warnings,
     ):
         instance.databases.backup("testdb", destination=tmp_path)
 
-    request_data = http_cm.__enter__.return_value.post.call_args.kwargs["data"]
+    request_data = http.stream.call_args.kwargs["data"]
     assert request_data["master_pwd"] == password
     assert password not in str(warnings[0].message)

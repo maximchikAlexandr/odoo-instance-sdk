@@ -25,10 +25,12 @@ _CLASS_MODULES: Final[dict[str, str]] = {
 _FUNCTION_MODULES: Final[tuple[str, ...]] = (
     "odoo_instance_sdk.cli",
     "odoo_instance_sdk.project_init",
+    "odoo_instance_sdk.bug_report",
     "odoo_instance_sdk.internal.automation",
     "odoo_instance_sdk.resources.testing",
     "odoo_instance_sdk.resources.deps",
     "odoo_instance_sdk.internal.doctor",
+    "odoo_instance_sdk.internal.self_update",
 )
 
 
@@ -114,7 +116,7 @@ def matrix_row(case: Any) -> str:
 _MATRIX_PREFIX = "# Public CLI traceability matrix\n\n"
 CANONICAL_INVENTORY_BASE = "af9e1b3e8d127145b9488f11ec79519f9442db46"
 ORIGINAL_AUDIT_BASE = "0ff164636617c03a51277055af45cef009277368"
-CANONICAL_LEAF_COUNT = 51
+CANONICAL_LEAF_COUNT = 54
 _MATRIX_PROVENANCE = (
     "This is a reviewed projection of "
     "`tests/unit/test_cli_output_modes.py::PUBLIC_LEAF_CASES` at "

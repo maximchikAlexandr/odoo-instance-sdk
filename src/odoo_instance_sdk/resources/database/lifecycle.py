@@ -19,7 +19,7 @@ from odoo_instance_sdk.models import (
 )
 
 if TYPE_CHECKING:
-    import httpx
+    from odoo_instance_sdk.internal.transport import StreamingResponse
 
 
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
@@ -63,7 +63,7 @@ def _normalize_source_git_branch(value: str | None) -> str | None:
 
 
 def _stream_response_to_file(
-    resp: httpx.Response,
+    resp: StreamingResponse,
     dest: Path,
     *,
     max_bytes: int = _MAX_DOWNLOAD_BYTES,

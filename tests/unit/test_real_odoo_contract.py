@@ -32,7 +32,7 @@ def test_generated_matrix_matches_canonical_inventory() -> None:
     actual = path.read_bytes()
     check_matrix_document(str(path), PUBLIC_LEAF_CASES)
     assert actual == path.read_bytes()
-    assert actual.count(b"| `") == 51
+    assert actual.count(b"| `") == 54
 
 
 def test_new_leaf_without_metadata_fails_closed() -> None:

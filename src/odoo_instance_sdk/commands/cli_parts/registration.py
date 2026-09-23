@@ -17,6 +17,7 @@ from odoo_instance_sdk.commands.backup import (  # noqa: I001 -- keep command re
     backup_group,
     configure_catalog_path_provider,
 )
+from odoo_instance_sdk.commands.bug_report import bug_report_group
 from odoo_instance_sdk.commands.context import CliContext
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.output import (
@@ -437,6 +438,12 @@ def _load_ps_command() -> click.Command:
     return ps_command
 
 
+def _load_update_command() -> click.Command:
+    from odoo_instance_sdk.commands.update import update_command_cli
+
+    return update_command_cli
+
+
 def _load_test_command() -> click.Command:
     from odoo_instance_sdk.commands.test import test_command
 
@@ -491,6 +498,22 @@ def _version_callback(ctx: click.Context, param: click.Parameter, value: bool) -
     ctx.exit()
 
 
+class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
+    """Root CLI group that blocks normal commands during unfinished updates."""
+
+    def invoke(self, ctx: click.Context) -> None:
+        from odoo_instance_sdk.internal.self_update import (
+            assert_update_not_blocking,
+            is_maintenance_mode,
+        )
+
+        if not is_maintenance_mode():
+            subcommand = ctx.invoked_subcommand
+            if subcommand is not None and subcommand != "update":
+                assert_update_not_blocking(subcommand)
+        super().invoke(ctx)
+
+
 @click.rich_config(  # type: ignore[operator]
     {
         "commands_before_options": True,
@@ -501,7 +524,8 @@ def _version_callback(ctx: click.Context, param: click.Parameter, value: bool) -
                 {"name": "Project", "commands": ["init", "doctor"]},
                 {"name": "Runtime", "commands": ["run", "shell", "logs", "monitor"]},
                 {"name": "Data", "commands": ["env", "backup", "db", "postgres", "psql"]},
-                {"name": "Maintenance", "commands": ["resource"]},
+                {"name": "Maintenance", "commands": ["resource", "update"]},
+                {"name": "Bug reports", "commands": ["bug-report"]},
                 {
                     "name": "Development",
                     "commands": [
@@ -519,7 +543,7 @@ def _version_callback(ctx: click.Context, param: click.Parameter, value: bool) -
         },
     }
 )
-@click.group()
+@click.group(cls=_OdcliCliGroup)
 @click.option(
     "--version",
     is_flag=True,
@@ -567,6 +591,14 @@ cli.add_command(
         loader=_load_ps_command,
     ),
     name="ps",
+)
+cli.add_command(
+    _lazy_command(
+        name="update",
+        help="Self-upgrade an OdCLI uv-tool install.",
+        loader=_load_update_command,
+    ),
+    name="update",
 )
 
 _rich_command = cast("Callable[..., click.Command]", click.RichCommand)
@@ -620,6 +652,7 @@ cli.add_command(
     ),
     name="git",
 )
+cli.add_command(bug_report_group, name="bug-report")
 
 
 def _cli_catalog_path(*, ensure_exists: bool = True) -> Path:

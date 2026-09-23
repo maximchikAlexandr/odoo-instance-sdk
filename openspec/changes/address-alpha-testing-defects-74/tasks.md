@@ -139,56 +139,56 @@
 
 ## 14. `odcli bug-report` and `odcli-bug-report` skill (item 14)
 
-- [ ] 14.1 Implement `bug_report_init_command()` writing `get_user_root()/bug-reports/<REPORT_ID>/`; CLI delegates; no `cli_only_reason`.
-- [ ] 14.2 Implement submit `--dry-run` with 262144-byte `report.md` cap, default repo `maximchikAlexandr/odoo-instance-sdk`, GitHub labels `["alpha-testing"]` only, and separate `report_valid`/`submit_ready` booleans.
-- [ ] 14.3 Submit when last `reviews/N.json` (N in 1..3, written by the skill, validated by CLI) is `approved` for the payload hash; no `--skip-review`/`--force`.
-- [ ] 14.4 Invoke `gh` through `internal/proc` with argv `--body-file -` after an ActionStep recording submit intent; inherit `GH_TOKEN`; do not copy it.
-- [ ] 14.5 Lock `get_locks_dir()/bug-report-{REPORT_ID}.lock` without Expression; unknown network outcome does not blind re-POST.
-- [ ] 14.6 Config `[bug_report].repository` in `get_config_root()/user.toml`; labels always `alpha-testing`; do not infer repo from the Odoo project Git remote. `submit_outcome_unknown` on uncertain `gh`.
-- [ ] 14.7 Create `.agents/skills/odcli-bug-report/` with emergency unblock and reviewer prompt (skill-only).
-- [ ] 14.8 Make the skill runtime-agnostic and Ponytail-aware (works without Ponytail).
-- [ ] 14.9 Add tests with `pytest.mark.parametrize` covering two drafts, dry-run, early local errors, no submit without approval, stale hash, third refusal, successful submit, repeat URL, concurrent submit, timeout, multiline body, secrets, path confinement. `gh` spawn tests use the `internal/proc` recorder (or live E2E); do not add a module-local subprocess patch.
-- [ ] 14.10 Add skill scenario tests: approval first time, approval after correction, three refusals, unavailable reviewer, changed text after approval.
-- [ ] 14.11 Register leaves in `PUBLIC_LEAF_CASES` with named `sdk_primitive` and `e2e_disposition=not-applicable`.
-- [ ] 14.12 Run focused tests, Ruff, and mypy.
+- [x] 14.1 Implement `bug_report_init_command()` writing `get_user_root()/bug-reports/<REPORT_ID>/`; CLI delegates; no `cli_only_reason`.
+- [x] 14.2 Implement submit `--dry-run` with 262144-byte `report.md` cap, default repo `maximchikAlexandr/odoo-instance-sdk`, GitHub labels `["alpha-testing"]` only, and separate `report_valid`/`submit_ready` booleans.
+- [x] 14.3 Submit when last `reviews/N.json` (N in 1..3, written by the skill, validated by CLI) is `approved` for the payload hash; no `--skip-review`/`--force`.
+- [x] 14.4 Invoke `gh` through `internal/proc` with argv `--body-file -` after an ActionStep recording submit intent; inherit `GH_TOKEN`; do not copy it.
+- [x] 14.5 Lock `get_locks_dir()/bug-report-{REPORT_ID}.lock` without Expression; unknown network outcome does not blind re-POST.
+- [x] 14.6 Config `[bug_report].repository` in `get_config_root()/user.toml`; labels always `alpha-testing`; do not infer repo from the Odoo project Git remote. `submit_outcome_unknown` on uncertain `gh`.
+- [x] 14.7 Create `.agents/skills/odcli-bug-report/` with emergency unblock and reviewer prompt (skill-only).
+- [x] 14.8 Make the skill runtime-agnostic and Ponytail-aware (works without Ponytail).
+- [x] 14.9 Add tests with `pytest.mark.parametrize` covering two drafts, dry-run, early local errors, no submit without approval, stale hash, third refusal, successful submit, repeat URL, concurrent submit, timeout, multiline body, secrets, path confinement. `gh` spawn tests use the `internal/proc` recorder (or live E2E); do not add a module-local subprocess patch.
+- [x] 14.10 Add skill scenario tests: approval first time, approval after correction, three refusals, unavailable reviewer, changed text after approval.
+- [x] 14.11 Register leaves in `PUBLIC_LEAF_CASES` with named `sdk_primitive` and `e2e_disposition=not-applicable`.
+- [x] 14.12 Run focused tests, Ruff, and mypy.
 
 ## 15. Centralized HTTP and XML-RPC transport (item 15)
 
-- [ ] 15.1 Introduce a narrow internal transport layer with a minimal base HTTP client wrapping `httpx` (context manager/`close()`, connection pooling, dependency injection for tests via a concrete protocol, no cross-origin cookie/auth reuse, preserved timeout/streaming semantics). The transport layer SHALL be lazily imported; `httpx` SHALL remain absent after `import odoo_instance_sdk.cli` (startup-evidence gate preserved).
-- [ ] 15.2 Implement `OdooHttpClient` for all Odoo HTTP endpoints (health/status, database list/create/drop/backup/restore) with centralized redacted logging and typed error conversion without leaking `httpx` exceptions.
-- [ ] 15.3 Migrate `database`, `health`, and `monitor` to depend on `OdooHttpClient`; CLI SHALL NOT import it; construct/close one client per resource operation; preserve public results, error codes, and exit behaviour.
-- [ ] 15.4 Add a line-specific architecture inventory allowlist only for files under `src/odoo_instance_sdk/internal/transport/`. `OdooHttpClient` is internal, not a public SDK type.
-- [ ] 15.5 Preserve streaming, timeout, cancellation, and cleanup for backup/restore; large payloads are not buffered whole.
-- [ ] 15.6 Add an architecture test confirming `httpx` types/exceptions do not leak into public SDK/resource interfaces.
-- [ ] 15.7 Do not add retry/backoff/circuit-breaker; add a test confirming one network attempt per previously-single operation.
-- [ ] 15.8 Extract `_xmlrpc_probe` into a test-support helper; do not add production `OdooXmlRpcClient`; architecture gate: zero `ServerProxy` in `src/`.
-- [ ] 15.9 Record HTTP characterization tests before/after; XML-RPC stays on the test helper.
-- [ ] 15.10 Unit tests substitute the client/transport boundary, not global `httpx.Client`/`httpx.get`/`ServerProxy`; cover streaming/session/error cases separately.
-- [ ] 15.11 Run focused tests, Ruff, mypy, and the architecture gates.
+- [x] 15.1 Introduce a narrow internal transport layer with a minimal base HTTP client wrapping `httpx` (context manager/`close()`, connection pooling, dependency injection for tests via a concrete protocol, no cross-origin cookie/auth reuse, preserved timeout/streaming semantics). The transport layer SHALL be lazily imported; `httpx` SHALL remain absent after `import odoo_instance_sdk.cli` (startup-evidence gate preserved).
+- [x] 15.2 Implement `OdooHttpClient` for all Odoo HTTP endpoints (health/status, database list/create/drop/backup/restore) with centralized redacted logging and typed error conversion without leaking `httpx` exceptions.
+- [x] 15.3 Migrate `database`, `health`, and `monitor` to depend on `OdooHttpClient`; CLI SHALL NOT import it; construct/close one client per resource operation; preserve public results, error codes, and exit behaviour.
+- [x] 15.4 Add a line-specific architecture inventory allowlist only for files under `src/odoo_instance_sdk/internal/transport/`. `OdooHttpClient` is internal, not a public SDK type.
+- [x] 15.5 Preserve streaming, timeout, cancellation, and cleanup for backup/restore; large payloads are not buffered whole.
+- [x] 15.6 Add an architecture test confirming `httpx` types/exceptions do not leak into public SDK/resource interfaces.
+- [x] 15.7 Do not add retry/backoff/circuit-breaker; add a test confirming one network attempt per previously-single operation.
+- [x] 15.8 Extract `_xmlrpc_probe` into a test-support helper; do not add production `OdooXmlRpcClient`; architecture gate: zero `ServerProxy` in `src/`.
+- [x] 15.9 Record HTTP characterization tests before/after; XML-RPC stays on the test helper.
+- [x] 15.10 Unit tests substitute the client/transport boundary, not global `httpx.Client`/`httpx.get`/`ServerProxy`; cover streaming/session/error cases separately.
+- [x] 15.11 Run focused tests, Ruff, mypy, and the architecture gates.
 
 ## 16. `odcli update` (item 16)
 
-- [ ] 16.1 Implement `update_command()`; `--check` is `process-previewable-read-only` with the uv `--dry-run` argv from design D16 (no pip fallback); mutating `already_current` only for a 40-char SHA matching PEP 610; CLI delegates; no `cli_only_reason`; no Expression.
-- [ ] 16.2 Implement `odcli update --dry-run`: emit frozen ProcessSteps without launching `uv` or `odcli`.
-- [ ] 16.3 Implement Inspect as in-process ActionSteps (PEP 610, `sys.executable`, uv-tool layout on disk).
-- [ ] 16.4 Default `--ref` is `main`. Mutating Command ProcessStep 1 is the frozen `uv tool install --force ...@<ref>` argv (resolve+install together).
-- [ ] 16.5 Implement Preflight: Python/platform compatibility, available space, user-data schema, full migration path to target before any mutation.
-- [ ] 16.6 Implement Quiesce with `exclusive_lock` on `get_locks_dir()/odcli-update.lock`.
-- [ ] 16.7 Implement Snapshot: rollback snapshot of affected metadata (exact install requirement/ref, package revision, SQLite catalog, affected files); no large backup/filestore copy without need.
-- [ ] 16.8 Implement Install as ProcessStep 1 through `internal/proc` (`shell=False`).
-- [ ] 16.9 Implement Migrate as ProcessStep 2: `(<uv-tool-odcli>, "update", "--format", "json")` with `ODCLI_MAINTENANCE=1`; journal schema from D16; parent deserializes stdout; maintenance SHALL NOT call uv or re-enter install; unfinished journal: `update` resumes, other commands fail `update_incomplete`.
-- [ ] 16.10 Implement Verify: new executable checks `odcli --version`, expected full revision, health/doctor startup, reached schema versions, and no unfinished migration journal.
-- [ ] 16.11 Implement Commit/Cleanup: mark success only after verify; delete `get_user_root()/update/snapshot/`.
-- [ ] 16.12 Wrap existing Alembic and `internal/storage_migration.py`; no second version scheme.
-- [ ] 16.13 Rollback before first irreversible Alembic step via uv install of snapshot SHA as a frozen ProcessStep; otherwise `update_incomplete` with that same uv argv as recovery ProcessStep (`internal/proc`, `shell=False`), not an ActionStep.
-- [ ] 16.14 Implement the typed result contract: `updated`, `already_current`, `unsupported_install`, `preflight_failed`, `rolled_back`, `update_incomplete`; source repo, previous/target/final version and full SHA; executable/tool env path; executed/skipped migration IDs and final schema versions; snapshot/journal state, rollback outcome, one concrete next step; per-phase duration without secrets.
-- [ ] 16.15 Support `--yes` for non-interactive execution after preflight; `--no-input` without `--yes` exits before mutations; interactive confirmation before install/data changes.
-- [ ] 16.16 Refuse to change pipx/system/editable/unknown installations; do not infer source from cwd or Odoo project Git remote.
-- [ ] 16.17 Ensure no phase logs GitHub credentials, environment secrets, project passwords, or private config contents.
-- [ ] 16.18 Add unit/component tests with the `internal/proc` recorder (not a module-local `subprocess` patch) using `pytest.mark.parametrize` covering update/SHA already_current/unsupported/preflight failure/install failure/migration failure/rollback/interruption/concurrency/downgrade.
-- [ ] 16.19 Add a packaging E2E that installs an old fixture GitHub revision as a uv tool, updates to target, applies real test migrations, and verifies the new executable in a separate process.
-- [ ] 16.20 Register `update` with `sdk_primitive=update_command`, `--check` variant, and `e2e_disposition=not-applicable`.
-- [ ] 16.21 Run focused tests, Ruff, and mypy.
+- [x] 16.1 Implement `update_command()`; `--check` is `process-previewable-read-only` with the uv `--dry-run` argv from design D16 (no pip fallback); mutating `already_current` only for a 40-char SHA matching PEP 610; CLI delegates; no `cli_only_reason`; no Expression.
+- [x] 16.2 Implement `odcli update --dry-run`: emit frozen ProcessSteps without launching `uv` or `odcli`.
+- [x] 16.3 Implement Inspect as in-process ActionSteps (PEP 610, `sys.executable`, uv-tool layout on disk).
+- [x] 16.4 Default `--ref` is `main`. Mutating Command ProcessStep 1 is the frozen `uv tool install --force ...@<ref>` argv (resolve+install together).
+- [x] 16.5 Implement Preflight: Python/platform compatibility, available space, user-data schema, full migration path to target before any mutation.
+- [x] 16.6 Implement Quiesce with `exclusive_lock` on `get_locks_dir()/odcli-update.lock`.
+- [x] 16.7 Implement Snapshot: rollback snapshot of affected metadata (exact install requirement/ref, package revision, SQLite catalog, affected files); no large backup/filestore copy without need.
+- [x] 16.8 Implement Install as ProcessStep 1 through `internal/proc` (`shell=False`).
+- [x] 16.9 Implement Migrate as ProcessStep 2: `(<uv-tool-odcli>, "update", "--format", "json")` with `ODCLI_MAINTENANCE=1`; journal schema from D16; parent deserializes stdout; maintenance SHALL NOT call uv or re-enter install; unfinished journal: `update` resumes, other commands fail `update_incomplete`.
+- [x] 16.10 Implement Verify: new executable checks `odcli --version`, expected full revision, health/doctor startup, reached schema versions, and no unfinished migration journal.
+- [x] 16.11 Implement Commit/Cleanup: mark success only after verify; delete `get_user_root()/update/snapshot/`.
+- [x] 16.12 Wrap existing Alembic and `internal/storage_migration.py`; no second version scheme.
+- [x] 16.13 Rollback before first irreversible Alembic step via uv install of snapshot SHA as a frozen ProcessStep; otherwise `update_incomplete` with that same uv argv as recovery ProcessStep (`internal/proc`, `shell=False`), not an ActionStep.
+- [x] 16.14 Implement the typed result contract: `updated`, `already_current`, `unsupported_install`, `preflight_failed`, `rolled_back`, `update_incomplete`; source repo, previous/target/final version and full SHA; executable/tool env path; executed/skipped migration IDs and final schema versions; snapshot/journal state, rollback outcome, one concrete next step; per-phase duration without secrets.
+- [x] 16.15 Support `--yes` for non-interactive execution after preflight; `--no-input` without `--yes` exits before mutations; interactive confirmation before install/data changes.
+- [x] 16.16 Refuse to change pipx/system/editable/unknown installations; do not infer source from cwd or Odoo project Git remote.
+- [x] 16.17 Ensure no phase logs GitHub credentials, environment secrets, project passwords, or private config contents.
+- [x] 16.18 Add unit/component tests with the `internal/proc` recorder (not a module-local `subprocess` patch) using `pytest.mark.parametrize` covering update/SHA already_current/unsupported/preflight failure/install failure/migration failure/rollback/interruption/concurrency/downgrade.
+- [x] 16.19 Add a packaging E2E that installs an old fixture GitHub revision as a uv tool, updates to target, applies real test migrations, and verifies the new executable in a separate process.
+- [x] 16.20 Register `update` with `sdk_primitive=update_command`, `--check` variant, and `e2e_disposition=not-applicable`.
+- [x] 16.21 Run focused tests, Ruff, and mypy.
 
 ## 17. E/F test cleanup (item 17)
 
