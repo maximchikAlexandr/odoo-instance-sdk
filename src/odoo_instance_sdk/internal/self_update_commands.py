@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sys
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import cast
 
 import msgspec
@@ -302,18 +304,325 @@ def _attempt_rollback(
     return "restored"
 
 
-def _build_mutating_command(  # noqa: C901
+@dataclass(slots=True)
+class _UpdateSession:
+    ref: str
+    provenance: InstalledProvenance
+    executor: ProcessExecutor
+    allow_downgrade: bool
+    install_step: PreparedStep
+    maintenance_step: PreparedStep
+    context: RunContext[UpdateResult]
+    journal_path: Path = field(init=False)
+    snapshot_dir: Path = field(init=False)
+    resume_phase: str | None = field(init=False)
+    snapshot_sha: str | None = field(init=False)
+    durations: dict[str, float] = field(default_factory=dict)
+    recovery_step: PreparedStep | None = None
+    maintenance_result: ProcessResult | None = None
+    maintenance_result_model: UpdateResult | None = None
+
+    def __post_init__(self) -> None:
+        self.journal_path = _update_journal_path()
+        self.snapshot_dir = _update_snapshot_dir()
+        journal = _read_journal(self.journal_path)
+        self.resume_phase = _journal_resume_phase(journal)
+        self.snapshot_sha = _journal_snapshot_sha(journal, self.provenance)
+
+    def _start(self, phase: str) -> float:
+        return time.monotonic()
+
+    def _finish(self, phase: str, started: float) -> None:
+        self.durations[phase] = time.monotonic() - started
+
+    def inspect_and_resolve(self) -> None:
+        started = self._start("inspect")
+        self.context.action("update.inspect")
+        self.context.complete_action("update.inspect")
+        self._finish("inspect", started)
+        self.context.action("update.resolve")
+        self.context.complete_action("update.resolve")
+
+    def preflight(self) -> str | None:
+        if sys.version_info < _MIN_PYTHON:
+            return (
+                f"Python {'.'.join(str(part) for part in _MIN_PYTHON)}+ is required; "
+                f"found {sys.version_info.major}.{sys.version_info.minor}"
+            )
+        if sys.platform not in _SUPPORTED_PLATFORMS:
+            return f"unsupported platform {sys.platform!r}"
+        disk_error = _preflight_disk_check()
+        if disk_error is not None:
+            return disk_error
+        if _catalog_schema_version() == "unreadable":
+            return "catalog schema is unreadable"
+        try:
+            _validate_catalog_migration_path()
+            _validate_storage_migration_path()
+        except PreflightFailedError as exc:
+            return str(exc)
+        if (
+            not self.allow_downgrade
+            and self.provenance.commit_id is not None
+            and _is_full_sha(self.ref)
+            and int(self.ref, 16) < int(self.provenance.commit_id, 16)
+        ):
+            return "downgrade refused without --allow-downgrade"
+        return None
+
+    def snapshot(self) -> None:
+        started = self._start("snapshot")
+        self.context.action("update.snapshot")
+        _write_snapshot(self.snapshot_dir, _snapshot_metadata(self.provenance, self.ref))
+        self.snapshot_sha = self.provenance.commit_id
+        _write_journal(
+            self.journal_path,
+            {
+                "version": _JOURNAL_VERSION,
+                "phase": "snapshot",
+                "target_ref": self.ref,
+                "snapshot_sha": self.snapshot_sha,
+                "maintenance_pid": None,
+            },
+        )
+        self.context.complete_action("update.snapshot")
+        self._finish("snapshot", started)
+
+    def install(self) -> None:
+        started = self._start("install")
+        result = cast("ProcessResult", self.context.process_prepared(self.install_step))
+        self._finish("install", started)
+        if result.returncode != 0 and not _install_reached_target(
+            ref=self.ref,
+            output=_process_output_text(result),
+            previous_sha=self.provenance.commit_id,
+        ):
+            _clear_journal(self.journal_path)
+            _clear_snapshot(self.snapshot_dir)
+            raise UpdateError(f"uv tool install failed with exit {result.returncode}")
+        _write_journal(
+            self.journal_path,
+            {
+                "version": _JOURNAL_VERSION,
+                "phase": "install",
+                "target_ref": self.ref,
+                "snapshot_sha": self.snapshot_sha,
+                "maintenance_pid": None,
+            },
+        )
+
+    def migrate(self) -> UpdateResult | None:
+        started = self._start("migrate")
+        _write_journal(
+            self.journal_path,
+            {
+                "version": _JOURNAL_VERSION,
+                "phase": "migrate",
+                "target_ref": self.ref,
+                "snapshot_sha": self.snapshot_sha,
+                "maintenance_pid": None,
+            },
+        )
+        recovery_step = _recovery_step_for_snapshot(self.snapshot_sha)
+        self.recovery_step = recovery_step
+        result = cast("ProcessResult", self.context.process_prepared(self.maintenance_step))
+        self.maintenance_result = result
+        self._finish("migrate", started)
+        if result.returncode == 0:
+            return None
+        rollback = _attempt_rollback(
+            self.executor,
+            snapshot_sha=self.snapshot_sha,
+            recovery_step=recovery_step,
+        )
+        _write_journal(
+            self.journal_path,
+            {
+                "version": _JOURNAL_VERSION,
+                "phase": "migrate",
+                "target_ref": self.ref,
+                "snapshot_sha": self.snapshot_sha,
+                "maintenance_pid": None,
+                "recovery_argv": list(recovery_step.argv),
+            },
+        )
+        if rollback == "restored":
+            _clear_journal(self.journal_path)
+            _clear_snapshot(self.snapshot_dir)
+            _skip_planned_steps(self.context, "update.verify", "update.commit")
+            return _failure_result(
+                "rolled_back",
+                provenance=self.provenance,
+                rollback_outcome="restored",
+                next_step="maintenance failed; the previous revision was restored",
+                phase_durations=_phase_durations(self.durations),
+            )
+        _skip_planned_steps(self.context, "update.verify", "update.commit")
+        return _failure_result(
+            "update_incomplete",
+            provenance=self.provenance,
+            recovery_argv=recovery_step.argv,
+            rollback_outcome=rollback,
+            snapshot_state="present",
+            journal_state="present",
+            next_step=(
+                "maintenance process exited non-zero; "
+                "run the recorded recovery uv install to restore the previous revision"
+            ),
+            phase_durations=_phase_durations(self.durations),
+        )
+
+    @staticmethod
+    def _parse_maintenance_stdout(stdout: str) -> UpdateResult:
+        payload = json.loads(stdout)
+        if not isinstance(payload, dict):
+            raise UpdateError("maintenance produced a non-object JSON document")
+        return msgspec.convert(payload, UpdateResult)
+
+    def verify(self, maintenance_result: ProcessResult) -> UpdateResult | None:
+        stdout = (
+            maintenance_result.stdout
+            if isinstance(maintenance_result.stdout, str)
+            else (maintenance_result.stdout or b"").decode("utf-8", "replace")
+        )
+        started = self._start("verify")
+        self.context.action("update.verify")
+        try:
+            self.maintenance_result_model = self._parse_maintenance_stdout(stdout)
+            _verify_installed_revision(None, target_ref=self.ref)
+        except UpdateError:
+            raise
+        except (json.JSONDecodeError, msgspec.ValidationError) as exc:
+            self.context.fail_action("update.verify", exc)
+            _skip_planned_steps(self.context, "update.commit")
+            return _failure_result(
+                "update_incomplete",
+                provenance=self.provenance,
+                recovery_argv=self.recovery_step.argv if self.recovery_step else None,
+                rollback_outcome="not_attempted",
+                snapshot_state="present",
+                journal_state="present",
+                next_step=f"maintenance produced invalid JSON: {exc}",
+                phase_durations=_phase_durations(self.durations),
+            )
+        self.context.complete_action("update.verify")
+        self._finish("verify", started)
+        return None
+
+    def commit(self) -> None:
+        started = self._start("commit")
+        self.context.action("update.commit")
+        _clear_snapshot(self.snapshot_dir)
+        _clear_journal(self.journal_path)
+        self.context.complete_action("update.commit")
+        self._finish("commit", started)
+
+    def result(self) -> UpdateResult:
+        if self.maintenance_result_model is None:
+            raise UpdateError("maintenance result was not verified")
+        final_provenance = read_uv_tool_direct_url()
+        model = self.maintenance_result_model
+        return UpdateResult(
+            outcome="updated",
+            source_repo=self.provenance.source_repo,
+            previous_version=self.provenance.version,
+            target_version=final_provenance.version,
+            final_version=final_provenance.version,
+            previous_sha=self.provenance.commit_id,
+            target_sha=model.final_sha or final_provenance.commit_id,
+            final_sha=model.final_sha or final_provenance.commit_id,
+            executable_path=(
+                str(final_provenance.uv_tool_bin_path)
+                if final_provenance.uv_tool_bin_path
+                else None
+            ),
+            tool_env_path=(
+                str(final_provenance.uv_tool_env_path)
+                if final_provenance.uv_tool_env_path
+                else None
+            ),
+            executed_migration_ids=model.executed_migration_ids,
+            skipped_migration_ids=model.skipped_migration_ids,
+            final_schema_versions=model.final_schema_versions,
+            snapshot_state="cleared",
+            journal_state="cleared",
+            rollback_outcome=None,
+            next_step=None,
+            phase_durations=_phase_durations(self.durations),
+        )
+
+    def run(self) -> UpdateResult:
+        self.inspect_and_resolve()
+        started = self._start("preflight")
+        self.context.action("update.preflight")
+        preflight_error = self.preflight()
+        self.context.complete_action("update.preflight")
+        self._finish("preflight", started)
+        if preflight_error is not None:
+            _skip_planned_steps(
+                self.context,
+                "update.quiesce",
+                "update.snapshot",
+                "update.install",
+                "update.migrate",
+                "update.verify",
+                "update.commit",
+            )
+            return _failure_result(
+                "preflight_failed",
+                provenance=self.provenance,
+                next_step=preflight_error,
+                phase_durations=_phase_durations(self.durations),
+            )
+        started = self._start("quiesce")
+        self.context.action("update.quiesce")
+        try:
+            with exclusive_lock(_update_lock_path()):
+                self.context.complete_action("update.quiesce")
+                self._finish("quiesce", started)
+                if self.resume_phase not in {"migrate", "install"}:
+                    self.snapshot()
+                else:
+                    _skip_planned_steps(self.context, "update.snapshot")
+                if self.resume_phase in {"migrate", "install"}:
+                    _skip_planned_steps(self.context, "update.install")
+                else:
+                    self.install()
+                migration_failure = self.migrate()
+                if migration_failure is not None:
+                    return migration_failure
+                maintenance_result = self.maintenance_result
+                if maintenance_result is None:
+                    return _failure_result(
+                        "update_incomplete",
+                        provenance=self.provenance,
+                        rollback_outcome="not_attempted",
+                        snapshot_state="present",
+                        journal_state="present",
+                        next_step="maintenance process did not produce a result",
+                        phase_durations=_phase_durations(self.durations),
+                    )
+                verification_failure = self.verify(maintenance_result)
+                if verification_failure is not None:
+                    return verification_failure
+                self.commit()
+        except LockConflictError:
+            raise
+        except UpdateError:
+            raise
+        except Exception as exc:
+            raise UpdateError(str(exc)) from exc
+        return self.result()
+
+
+def _build_mutating_command(
     *,
     ref: str,
     provenance: InstalledProvenance,
     executor: ProcessExecutor | None,
     allow_downgrade: bool,
 ) -> Command[UpdateResult]:
-    install_step = PreparedStep(
-        step_id="update.install",
-        argv=_install_argv(ref),
-        mutating=True,
-    )
+    install_step = PreparedStep(step_id="update.install", argv=_install_argv(ref), mutating=True)
     executable = provenance.uv_tool_bin_path
     if executable is None:
         raise UnsupportedInstallError(
@@ -372,276 +681,19 @@ def _build_mutating_command(  # noqa: C901
             mutating=True,
         ),
     )
-
-    def _preflight() -> str | None:
-        if sys.version_info < _MIN_PYTHON:
-            return (
-                f"Python {'.'.join(str(part) for part in _MIN_PYTHON)}+ is required; "
-                f"found {sys.version_info.major}.{sys.version_info.minor}"
-            )
-        if sys.platform not in _SUPPORTED_PLATFORMS:
-            return f"unsupported platform {sys.platform!r}"
-        disk_error = _preflight_disk_check()
-        if disk_error is not None:
-            return disk_error
-        if _catalog_schema_version() == "unreadable":
-            return "catalog schema is unreadable"
-        try:
-            _validate_catalog_migration_path()
-            _validate_storage_migration_path()
-        except PreflightFailedError as exc:
-            return str(exc)
-        if (
-            not allow_downgrade
-            and provenance.commit_id is not None
-            and _is_full_sha(ref)
-            and int(ref.lower(), 16) < int(provenance.commit_id.lower(), 16)
-        ):
-            return "downgrade refused without --allow-downgrade"
-        return None
-
-    def _parse_maintenance_stdout(stdout: str) -> UpdateResult:
-        payload = json.loads(stdout)
-        if not isinstance(payload, dict):
-            raise UpdateError("maintenance produced a non-object JSON document")
-        return msgspec.convert(payload, UpdateResult)
-
-    def _run_update_phases(context: RunContext[UpdateResult]) -> UpdateResult:  # noqa: C901
-        active_executor = executor or SubprocessExecutor()
-        durations: dict[str, float] = {}
-        journal_path = _update_journal_path()
-        snapshot_dir = _update_snapshot_dir()
-        journal_payload = _read_journal(journal_path)
-        resume_phase = _journal_resume_phase(journal_payload)
-        snapshot_sha = _journal_snapshot_sha(journal_payload, provenance)
-
-        def _begin(phase: str) -> float:
-            return time.monotonic()
-
-        def _end(phase: str, started: float) -> None:
-            durations[phase] = time.monotonic() - started
-
-        started = _begin("inspect")
-        context.action("update.inspect")
-        context.complete_action("update.inspect")
-        _end("inspect", started)
-
-        context.action("update.resolve")
-        context.complete_action("update.resolve")
-
-        started = _begin("preflight")
-        context.action("update.preflight")
-        preflight_error = _preflight()
-        context.complete_action("update.preflight")
-        _end("preflight", started)
-        if preflight_error is not None:
-            _skip_planned_steps(
-                context,
-                "update.quiesce",
-                "update.snapshot",
-                "update.install",
-                "update.migrate",
-                "update.verify",
-                "update.commit",
-            )
-            return _failure_result(
-                "preflight_failed",
-                provenance=provenance,
-                next_step=preflight_error,
-                phase_durations=_phase_durations(durations),
-            )
-
-        started = _begin("quiesce")
-        context.action("update.quiesce")
-        try:
-            with exclusive_lock(_update_lock_path()):
-                context.complete_action("update.quiesce")
-                _end("quiesce", started)
-
-                if resume_phase not in {"migrate", "install"}:
-                    started = _begin("snapshot")
-                    context.action("update.snapshot")
-                    _write_snapshot(snapshot_dir, _snapshot_metadata(provenance, ref))
-                    snapshot_sha = provenance.commit_id
-                    _write_journal(
-                        journal_path,
-                        {
-                            "version": _JOURNAL_VERSION,
-                            "phase": "snapshot",
-                            "target_ref": ref,
-                            "snapshot_sha": snapshot_sha,
-                            "maintenance_pid": None,
-                        },
-                    )
-                    context.complete_action("update.snapshot")
-                    _end("snapshot", started)
-                else:
-                    _skip_planned_steps(context, "update.snapshot")
-
-                if resume_phase in {"migrate", "install"}:
-                    _skip_planned_steps(context, "update.install")
-                else:
-                    started = _begin("install")
-                    install_result = cast("ProcessResult", context.process_prepared(install_step))
-                    _end("install", started)
-                    if install_result.returncode != 0 and not _install_reached_target(
-                        ref=ref,
-                        output=_process_output_text(install_result),
-                        previous_sha=provenance.commit_id,
-                    ):
-                        _clear_journal(journal_path)
-                        _clear_snapshot(snapshot_dir)
-                        raise UpdateError(  # noqa: TRY301
-                            f"uv tool install failed with exit {install_result.returncode}",
-                        )
-                    _write_journal(
-                        journal_path,
-                        {
-                            "version": _JOURNAL_VERSION,
-                            "phase": "install",
-                            "target_ref": ref,
-                            "snapshot_sha": snapshot_sha,
-                            "maintenance_pid": None,
-                        },
-                    )
-
-                started = _begin("migrate")
-                _write_journal(
-                    journal_path,
-                    {
-                        "version": _JOURNAL_VERSION,
-                        "phase": "migrate",
-                        "target_ref": ref,
-                        "snapshot_sha": snapshot_sha,
-                        "maintenance_pid": None,
-                    },
-                )
-                recovery_step = _recovery_step_for_snapshot(snapshot_sha)
-                maintenance_result = cast(
-                    "ProcessResult", context.process_prepared(maintenance_step)
-                )
-                _end("migrate", started)
-                if maintenance_result.returncode != 0:
-                    rollback = _attempt_rollback(
-                        active_executor,
-                        snapshot_sha=snapshot_sha,
-                        recovery_step=recovery_step,
-                    )
-                    _write_journal(
-                        journal_path,
-                        {
-                            "version": _JOURNAL_VERSION,
-                            "phase": "migrate",
-                            "target_ref": ref,
-                            "snapshot_sha": snapshot_sha,
-                            "maintenance_pid": None,
-                            "recovery_argv": list(recovery_step.argv),
-                        },
-                    )
-                    if rollback == "restored":
-                        _clear_journal(journal_path)
-                        _clear_snapshot(snapshot_dir)
-                        _skip_planned_steps(context, "update.verify", "update.commit")
-                        return _failure_result(
-                            "rolled_back",
-                            provenance=provenance,
-                            rollback_outcome="restored",
-                            next_step="maintenance failed; the previous revision was restored",
-                            phase_durations=_phase_durations(durations),
-                        )
-                    _skip_planned_steps(context, "update.verify", "update.commit")
-                    return _failure_result(
-                        "update_incomplete",
-                        provenance=provenance,
-                        recovery_argv=recovery_step.argv,
-                        rollback_outcome=rollback,
-                        snapshot_state="present",
-                        journal_state="present",
-                        next_step=(
-                            "maintenance process exited non-zero; "
-                            "run the recorded recovery uv install to restore the previous revision"
-                        ),
-                        phase_durations=_phase_durations(durations),
-                    )
-
-                maintenance_stdout = (
-                    maintenance_result.stdout
-                    if isinstance(maintenance_result.stdout, str)
-                    else (maintenance_result.stdout or b"").decode("utf-8", "replace")
-                )
-                started = _begin("verify")
-                context.action("update.verify")
-                try:
-                    maintenance_result_model = _parse_maintenance_stdout(maintenance_stdout)
-                    _verify_installed_revision(None, target_ref=ref)
-                except UpdateError:
-                    raise
-                except (json.JSONDecodeError, msgspec.ValidationError) as exc:
-                    context.fail_action("update.verify", exc)
-                    _skip_planned_steps(context, "update.commit")
-                    return _failure_result(
-                        "update_incomplete",
-                        provenance=provenance,
-                        recovery_argv=recovery_step.argv,
-                        rollback_outcome="not_attempted",
-                        snapshot_state="present",
-                        journal_state="present",
-                        next_step=f"maintenance produced invalid JSON: {exc}",
-                        phase_durations=_phase_durations(durations),
-                    )
-                context.complete_action("update.verify")
-                _end("verify", started)
-
-                started = _begin("commit")
-                context.action("update.commit")
-                _clear_snapshot(snapshot_dir)
-                _clear_journal(journal_path)
-                context.complete_action("update.commit")
-                _end("commit", started)
-        except LockConflictError:
-            raise
-        except UpdateError:
-            raise
-        except Exception as exc:
-            raise UpdateError(str(exc)) from exc
-
-        final_provenance = read_uv_tool_direct_url()
-        return UpdateResult(
-            outcome="updated",
-            source_repo=provenance.source_repo,
-            previous_version=provenance.version,
-            target_version=final_provenance.version,
-            final_version=final_provenance.version,
-            previous_sha=provenance.commit_id,
-            target_sha=maintenance_result_model.final_sha or final_provenance.commit_id,
-            final_sha=maintenance_result_model.final_sha or final_provenance.commit_id,
-            executable_path=(
-                str(final_provenance.uv_tool_bin_path)
-                if final_provenance.uv_tool_bin_path
-                else None
-            ),
-            tool_env_path=(
-                str(final_provenance.uv_tool_env_path)
-                if final_provenance.uv_tool_env_path
-                else None
-            ),
-            executed_migration_ids=maintenance_result_model.executed_migration_ids,
-            skipped_migration_ids=maintenance_result_model.skipped_migration_ids,
-            final_schema_versions=maintenance_result_model.final_schema_versions,
-            snapshot_state="cleared",
-            journal_state="cleared",
-            rollback_outcome=None,
-            next_step=None,
-            phase_durations=_phase_durations(durations),
-        )
+    active_executor = executor or SubprocessExecutor()
 
     def callback(context: RunContext[UpdateResult]) -> UpdateResult:
-        return _run_update_phases(context)
+        return _UpdateSession(
+            ref=ref,
+            provenance=provenance,
+            executor=active_executor,
+            allow_downgrade=allow_downgrade,
+            install_step=install_step,
+            maintenance_step=maintenance_step,
+            context=context,
+        ).run()
 
     plan = ExecutionPlan(steps=tuple(step.public_projection() for step in public_steps))
-    prepared = prepared_command(
-        callback,
-        public_steps,
-        executor=executor or SubprocessExecutor(),
-    )
+    prepared = prepared_command(callback, public_steps, executor=active_executor)
     return Command.from_prepared(plan, prepared)

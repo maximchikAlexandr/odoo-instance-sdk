@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -103,7 +104,187 @@ def _bind_init_request(options: dict[str, InitOption]) -> _InitRequest:
     )
 
 
-def register_init_command(cli: click.Group) -> None:  # noqa: C901
+def _confirm_partial_callback(
+    *,
+    output_mode: OutputMode,
+    dry_run: bool,
+    effective_no_input: bool,
+    allow_partial: bool,
+) -> Callable[[list[str], dict[str, str]], None] | None:
+    if effective_no_input or allow_partial or dry_run or output_mode is not OutputMode.RICH:
+        return None
+
+    def confirm(missing: list[str], details: dict[str, str]) -> None:
+        missing_text = ", ".join(missing)
+        if not click.confirm(
+            f"Setup is incomplete ({missing_text}). Continue with partial initialization?",
+            default=False,
+        ):
+            fail(
+                output_mode,
+                "init",
+                f"init_incomplete: missing capabilities {missing} ({details})",
+                dry_run=dry_run,
+                error_code="init_incomplete",
+            )
+
+    return confirm
+
+
+def _execute_init(
+    request: _InitRequest,
+    *,
+    output_mode: OutputMode,
+    effective_no_input: bool,
+    confirm_partial: Callable[[list[str], dict[str, str]], None] | None,
+) -> None:
+    resolved_project = Path(request.project_path) if request.project_path else Path.cwd()
+    provenance: dict[str, list[str]] = {
+        "option": [],
+        "vscode": [],
+        "discovery": [],
+        "default": [],
+    }
+    option_state = _OptionState(
+        odoo_bin=Path(request.odoo_bin) if request.odoo_bin else None,
+        python=request.python,
+        source_config=Path(request.source_config) if request.source_config else None,
+        default_source_database=request.default_source_database,
+        preferred_http_port=request.preferred_http_port,
+        requirements=request.requirements,
+        default_run_args=request.run_args,
+        runtime_cwd=Path(request.runtime_cwd) if request.runtime_cwd else None,
+    )
+    _record_option_provenance(option_state, provenance)
+
+    if request.from_vscode is not None:
+        vscode_cfg = _import_vscode(
+            request.from_vscode,
+            request.launch_name,
+            request.no_input,
+            output_mode,
+            request.dry_run,
+        )
+        if vscode_cfg is None:
+            return
+        _merge_vscode(option_state, vscode_cfg, provenance)
+
+    from odoo_instance_sdk.commands.cli_parts.callbacks import _resolve_odoo_bin
+
+    _resolve_odoo_bin(
+        option_state,
+        request.no_input,
+        output_mode,
+        request.dry_run,
+        provenance,
+    )
+    postgres_cfg, postgres_allocated = _resolve_postgres_state(
+        postgres_mode=request.postgres_mode,
+        postgres_image=request.postgres_image,
+        postgres_port=request.postgres_port,
+        postgres_user=request.postgres_user,
+        source_config=option_state.source_config,
+        no_input=request.no_input,
+        output_mode=output_mode,
+        project_path=resolved_project,
+        dry_run=request.dry_run,
+    )
+    if postgres_cfg is not None:
+        provenance["option"].append("postgres")
+
+    test_instance_cfg = _resolve_test_instance(
+        resolved_project,
+        test_url=request.test_url,
+        test_database=request.test_database,
+        test_branch=request.test_branch,
+    )
+    existing_test_instance = _existing_test_instance(resolved_project)
+    if test_instance_cfg is None and existing_test_instance is not None:
+        test_instance_cfg = existing_test_instance
+
+    effective_source_config = option_state.source_config
+    if request.local_config and postgres_cfg is not None and postgres_cfg.mode == "compose":
+        effective_source_config = project_generated_config_path(resolved_project)
+        provenance["option"].append("local_config")
+
+    config = ProjectConfig(
+        repository_root=resolved_project.resolve(),
+        odoo_bin=option_state.odoo_bin,
+        python=option_state.python,
+        source_config=effective_source_config,
+        default_source_database=option_state.default_source_database,
+        preferred_http_port=option_state.preferred_http_port,
+        requirements=option_state.requirements,
+        default_run_args=option_state.default_run_args,
+        runtime_cwd=option_state.runtime_cwd,
+        postgres=postgres_cfg,
+        test_instance=test_instance_cfg,
+        ticket_link_enabled=False,
+    )
+    if config.postgres is not None and config.postgres.mode == "compose":
+        try:
+            _validate_generated_config_target(
+                project_generated_config_path(resolved_project), project_root=resolved_project
+            )
+        except InstanceConfigurationError as exc:
+            fail(output_mode, "init", str(exc), dry_run=request.dry_run)
+
+    from odoo_instance_sdk.commands.cli_parts.callbacks import _handle_existing_manifest
+
+    existing = manifest_path(resolved_project)
+    if existing.is_file() and _handle_existing_manifest(
+        existing,
+        resolved_project,
+        config,
+        request.no_input,
+        request.yes,
+        output_mode,
+        dry_run=request.dry_run,
+    ):
+        return
+    from odoo_instance_sdk.project_init import init_completeness_preview, init_project_command
+
+    status, _ = run_or_preview(
+        lambda: init_project_command(
+            resolved_project,
+            config,
+            postgres_allocated=postgres_allocated,
+            local_config=request.local_config,
+            postgres_image=request.postgres_image,
+            existing_test_instance=existing_test_instance,
+            allow_partial=request.allow_partial,
+            no_input=effective_no_input,
+            dry_run=request.dry_run,
+            confirm_partial=confirm_partial,
+        ),
+        command_name="init",
+        mode=output_mode,
+        dry_run=request.dry_run,
+        result=lambda value: cast("dict[str, JsonValue]", value),
+        provenance=cast("dict[str, JsonValue]", provenance),
+        preview=lambda command: {
+            **init_completeness_preview(
+                resolved_project,
+                config,
+                local_config=request.local_config,
+                postgres_image=request.postgres_image,
+                existing_test_instance=existing_test_instance,
+                dry_run=True,
+                remote_database_names=None,
+                postgres_allocated=postgres_allocated,
+            ),
+            "plan": model_to_dict(command.plan),
+        },
+        rich=lambda _document: (
+            f"Dry run — no files written.\n{config.to_manifest()}"
+            if request.dry_run
+            else f"Wrote {existing}"
+        ),
+    )
+    sys.exit(status)
+
+
+def register_init_command(cli: click.Group) -> None:
     """Register the ``init`` leaf on the root CLI group."""
 
     @cli.command(help="Create or update the project manifest.")
@@ -202,191 +383,21 @@ def register_init_command(cli: click.Group) -> None:  # noqa: C901
         default=None,
         help="Project path.",
     )
-    def init(**options: InitOption) -> None:  # noqa: C901
+    def init(**options: InitOption) -> None:
         request = _bind_init_request(options)
-        odoo_bin = request.odoo_bin
-        python = request.python
-        source_config = request.source_config
-        default_source_database = request.default_source_database
-        preferred_http_port = request.preferred_http_port
-        requirements = request.requirements
-        run_args = request.run_args
-        runtime_cwd = request.runtime_cwd
-        from_vscode = request.from_vscode
-        launch_name = request.launch_name
-        postgres_mode = request.postgres_mode
-        postgres_image = request.postgres_image
-        postgres_port = request.postgres_port
-        postgres_user = request.postgres_user
-        no_input = request.no_input
-        yes = request.yes
-        dry_run = request.dry_run
-        test_url = request.test_url
-        test_database = request.test_database
-        test_branch = request.test_branch
-        local_config = request.local_config
-        allow_partial = request.allow_partial
-        output_format = request.output_format
-        json_output = request.json_output
-        project_path = request.project_path
-        output_mode = resolve_output_mode(output_format, json_output)
-        json_output = output_mode is not OutputMode.RICH
-        effective_no_input = no_input or output_mode is not OutputMode.RICH
-        resolved_project = Path(project_path) if project_path is not None else Path.cwd()
-        provenance: dict[str, list[str]] = {
-            "option": [],
-            "vscode": [],
-            "discovery": [],
-            "default": [],
-        }
-
-        option_state = _OptionState(
-            odoo_bin=Path(odoo_bin) if odoo_bin else None,
-            python=python,
-            source_config=Path(source_config) if source_config else None,
-            default_source_database=default_source_database,
-            preferred_http_port=preferred_http_port,
-            requirements=tuple(requirements),
-            default_run_args=tuple(run_args),
-            runtime_cwd=Path(runtime_cwd) if runtime_cwd else None,
-        )
-        _record_option_provenance(option_state, provenance)
-
-        if from_vscode is not None:
-            vscode_cfg = _import_vscode(from_vscode, launch_name, no_input, output_mode, dry_run)
-            if vscode_cfg is None:
-                return
-            _merge_vscode(option_state, vscode_cfg, provenance)
-
-        from odoo_instance_sdk.commands.cli_parts.callbacks import _resolve_odoo_bin
-
-        _resolve_odoo_bin(option_state, no_input, output_mode, dry_run, provenance)
-
-        postgres_cfg, postgres_allocated = _resolve_postgres_state(
-            postgres_mode=postgres_mode,
-            postgres_image=postgres_image,
-            postgres_port=postgres_port,
-            postgres_user=postgres_user,
-            source_config=option_state.source_config,
-            no_input=no_input,
+        output_mode = resolve_output_mode(request.output_format, request.json_output)
+        confirm_partial = _confirm_partial_callback(
             output_mode=output_mode,
-            project_path=resolved_project,
-            dry_run=dry_run,
+            dry_run=request.dry_run,
+            effective_no_input=request.no_input or output_mode is not OutputMode.RICH,
+            allow_partial=request.allow_partial,
         )
-        if postgres_cfg is not None:
-            provenance["option"].append("postgres")
-
-        # Resolve [test_instance]: explicit options win; otherwise preserve an
-        # existing valid section on re-run so init does not silently drop it.
-        test_instance_cfg = _resolve_test_instance(
-            resolved_project,
-            test_url=test_url,
-            test_database=test_database,
-            test_branch=test_branch,
+        _execute_init(
+            request,
+            output_mode=output_mode,
+            effective_no_input=request.no_input or output_mode is not OutputMode.RICH,
+            confirm_partial=confirm_partial,
         )
-        existing_test_instance = _existing_test_instance(resolved_project)
-        if test_instance_cfg is None and existing_test_instance is not None:
-            test_instance_cfg = existing_test_instance
-
-        # --local-config selects the generated .odcli/odoo.conf as effective
-        # source_config for self-contained Compose projects.
-        effective_source_config = option_state.source_config
-        if local_config and (postgres_cfg is not None and postgres_cfg.mode == "compose"):
-            effective_source_config = project_generated_config_path(resolved_project)
-            provenance["option"].append("local_config")
-
-        config = ProjectConfig(
-            repository_root=resolved_project.resolve(),
-            odoo_bin=option_state.odoo_bin,
-            python=option_state.python,
-            source_config=effective_source_config,
-            default_source_database=option_state.default_source_database,
-            preferred_http_port=option_state.preferred_http_port,
-            requirements=option_state.requirements,
-            default_run_args=option_state.default_run_args,
-            runtime_cwd=option_state.runtime_cwd,
-            postgres=postgres_cfg,
-            test_instance=test_instance_cfg,
-            ticket_link_enabled=False,
-        )
-
-        if config.postgres is not None and config.postgres.mode == "compose":
-            try:
-                _validate_generated_config_target(
-                    project_generated_config_path(resolved_project), project_root=resolved_project
-                )
-            except InstanceConfigurationError as exc:
-                fail(output_mode, "init", str(exc), dry_run=dry_run)
-
-        from odoo_instance_sdk.commands.cli_parts.callbacks import _handle_existing_manifest
-
-        existing = manifest_path(resolved_project)
-        if existing.is_file() and _handle_existing_manifest(
-            existing, resolved_project, config, no_input, yes, output_mode, dry_run=dry_run
-        ):
-            return
-        from odoo_instance_sdk.project_init import init_completeness_preview, init_project_command
-
-        confirm_partial_callback = None
-        if (
-            not effective_no_input
-            and not allow_partial
-            and not dry_run
-            and output_mode is OutputMode.RICH
-        ):
-
-            def confirm_partial_callback(missing: list[str], details: dict[str, str]) -> None:
-                missing_text = ", ".join(missing)
-                if not click.confirm(
-                    f"Setup is incomplete ({missing_text}). Continue with partial initialization?",
-                    default=False,
-                ):
-                    fail(
-                        output_mode,
-                        "init",
-                        f"init_incomplete: missing capabilities {missing} ({details})",
-                        dry_run=dry_run,
-                        error_code="init_incomplete",
-                    )
-
-        status, _ = run_or_preview(
-            lambda: init_project_command(
-                resolved_project,
-                config,
-                postgres_allocated=postgres_allocated,
-                local_config=local_config,
-                postgres_image=postgres_image,
-                existing_test_instance=existing_test_instance,
-                allow_partial=allow_partial,
-                no_input=effective_no_input,
-                dry_run=dry_run,
-                confirm_partial=confirm_partial_callback,
-            ),
-            command_name="init",
-            mode=output_mode,
-            dry_run=dry_run,
-            result=lambda value: cast("dict[str, JsonValue]", value),
-            provenance=cast("dict[str, JsonValue]", provenance),
-            preview=lambda command: {
-                **init_completeness_preview(
-                    resolved_project,
-                    config,
-                    local_config=local_config,
-                    postgres_image=postgres_image,
-                    existing_test_instance=existing_test_instance,
-                    dry_run=True,
-                    remote_database_names=None,
-                    postgres_allocated=postgres_allocated,
-                ),
-                "plan": model_to_dict(command.plan),
-            },
-            rich=lambda _document: (
-                f"Dry run — no files written.\n{config.to_manifest()}"
-                if dry_run
-                else f"Wrote {existing}"
-            ),
-        )
-        sys.exit(status)
 
 
 def _resolve_test_instance(

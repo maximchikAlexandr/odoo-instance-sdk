@@ -498,7 +498,254 @@ def bug_report_submit_preview(report_id: str) -> BugReportSubmitResult:
     )
 
 
-def bug_report_submit_command(  # noqa: C901
+class _SubmissionExecutor:
+    def __init__(
+        self,
+        *,
+        report_id: str,
+        dry_run: bool,
+        report_dir: Path,
+        payload: BugReportPayload,
+        report_text: str,
+        reviews: Sequence[BugReportReviewEntry],
+        latest: BugReportReviewEntry | None,
+        report_valid: bool,
+        submit_ready: bool,
+        report_errors: Sequence[str],
+        submit_blockers: Sequence[str],
+        payload_sha: str,
+        labels: tuple[str, ...],
+        prepared_steps: Sequence[PreparedAction | PreparedStep],
+        submit_intent_action: PreparedAction,
+        recheck_view_step: PreparedStep | None,
+        recheck_before_step: PreparedStep,
+        gh_step: PreparedStep,
+        recheck_after_step: PreparedStep,
+    ) -> None:
+        self.report_id = report_id
+        self.dry_run = dry_run
+        self.report_dir = report_dir
+        self.payload = payload
+        self.report_text = report_text
+        self.reviews = reviews
+        self.latest = latest
+        self.report_valid = report_valid
+        self.submit_ready = submit_ready
+        self.report_errors = report_errors
+        self.submit_blockers = submit_blockers
+        self.payload_sha = payload_sha
+        self.labels = labels
+        self.prepared_steps = prepared_steps
+        self.submit_intent_action = submit_intent_action
+        self.recheck_view_step = recheck_view_step
+        self.recheck_before_step = recheck_before_step
+        self.gh_step = gh_step
+        self.recheck_after_step = recheck_after_step
+
+    def preflight(self) -> BugReportSubmitResult | None:
+        if self.dry_run:
+            return _submit_preview_result(
+                self.report_id,
+                payload=self.payload,
+                report_text=self.report_text,
+                reviews=self.reviews,
+                latest=self.latest,
+                report_valid=self.report_valid,
+                submit_ready=self.submit_ready,
+                report_errors=self.report_errors,
+                submit_blockers=self.submit_blockers,
+            )
+        if not self.report_valid:
+            raise BugReportInvalidError(
+                "report.md failed validation: " + "; ".join(self.report_errors)
+            )
+        if self.submit_ready:
+            return None
+        refusals = _count_refusals(self.reviews)
+        if refusals >= max_review_rounds():
+            raise BugReportReviewLimitError(
+                f"three review rounds returned changes_requested for {self.report_id}; "
+                f"publish is stopped at {self.report_dir}",
+                details={
+                    "report_id": self.report_id,
+                    "draft_path": str(self.report_dir),
+                    "unresolved_questions": list(_unresolved_review_questions(self.reviews)),
+                },
+            )
+        if self.latest is not None and self.latest.verdict != "approved":
+            raise BugReportReviewRequiredError(
+                f"latest review verdict is {self.latest.verdict}, not approved"
+            )
+        if self.latest is not None and self.latest.reviewed_payload_sha256 != self.payload_sha:
+            raise BugReportStaleHashError(
+                "approved payload hash does not match current payload; request a new review"
+            )
+        raise BugReportReviewRequiredError("missing independent review")
+
+    def _already_published(
+        self,
+        context: RunContext[BugReportSubmitResult],
+        metadata: dict[str, JsonValue],
+    ) -> BugReportSubmitResult:
+        issue_url = metadata["issue_url"]
+        if not isinstance(issue_url, str):
+            raise BugReportInvalidError("stored issue_url is not a string")
+        _skip_prepared_steps(context, self.prepared_steps, except_step_ids=set())
+        issue_number = metadata.get("issue_number")
+        return _submit_result(
+            self.report_id,
+            payload=self.payload,
+            payload_sha=self.payload_sha,
+            labels=self.labels,
+            latest=self.latest,
+            issue_url=issue_url,
+            issue_number=issue_number if isinstance(issue_number, int) else 0,
+            outcome="already_published",
+        )
+
+    def _recover_before_create(
+        self,
+        context: RunContext[BugReportSubmitResult],
+        metadata: dict[str, JsonValue],
+    ) -> BugReportSubmitResult | None:
+        recovered, executed_recheck = _recheck_before_create(
+            context,
+            metadata=metadata,
+            recheck_view_step=self.recheck_view_step,
+            recheck_search_step=self.recheck_before_step,
+        )
+        if recovered is None:
+            return None
+        issue_url, issue_number = recovered
+        _skip_prepared_steps(
+            context,
+            self.prepared_steps,
+            except_step_ids=set(executed_recheck),
+        )
+        _persist_issue_outcome(
+            self.report_dir,
+            metadata,
+            issue_url=issue_url,
+            issue_number=issue_number,
+        )
+        return _submit_result(
+            self.report_id,
+            payload=self.payload,
+            payload_sha=self.payload_sha,
+            labels=self.labels,
+            latest=self.latest,
+            issue_url=issue_url,
+            issue_number=issue_number,
+            outcome="published",
+        )
+
+    def _create_and_recover(
+        self,
+        context: RunContext[BugReportSubmitResult],
+        metadata: dict[str, JsonValue],
+    ) -> BugReportSubmitResult:
+        context.action(self.submit_intent_action.step_id)
+        updated_metadata = _record_submit_intent(
+            self.report_dir,
+            metadata,
+            repository=self.payload.repository,
+            title=self.payload.title,
+            payload_sha256=self.payload_sha,
+        )
+        context.complete_action(self.submit_intent_action.step_id)
+        process_result = cast("ProcessResult", context.process(self.gh_step.step_id))
+        returncode = int(process_result.returncode)
+        stdout = process_result.stdout if isinstance(process_result.stdout, str) else ""
+        stderr = process_result.stderr if isinstance(process_result.stderr, str) else ""
+        uncertain_detail = (
+            f"gh issue create exited {returncode}: {stderr.strip() or stdout.strip()}"
+            if returncode != 0
+            else f"gh issue create produced no parseable issue URL: {stdout.strip()}"
+        )
+        if returncode == 0:
+            issue = _parse_issue_url(stdout)
+            if issue is not None:
+                return self._persist_created_issue(context, updated_metadata, issue)
+        recovered = _recheck_after_uncertain_outcome(context, self.recheck_after_step)
+        if recovered is None:
+            raise BugReportOutcomeUnknownError(
+                f"{uncertain_detail}; GitHub re-check found no existing issue"
+            )
+        return self._persist_published(updated_metadata, recovered)
+
+    def _persist_created_issue(
+        self,
+        context: RunContext[BugReportSubmitResult],
+        metadata: dict[str, JsonValue],
+        issue: tuple[str, int],
+    ) -> BugReportSubmitResult:
+        issue_url, issue_number = issue
+        try:
+            _persist_issue_outcome(
+                self.report_dir,
+                metadata,
+                issue_url=issue_url,
+                issue_number=issue_number,
+            )
+        except OSError as error:
+            recovered = _recheck_after_uncertain_outcome(context, self.recheck_after_step)
+            if recovered is None:
+                raise BugReportOutcomeUnknownError(
+                    "gh issue was created but local metadata write failed "
+                    "and GitHub re-check found no issue"
+                ) from error
+            return self._persist_published(metadata, recovered)
+        context.skip(self.recheck_after_step.step_id)
+        return _submit_result(
+            self.report_id,
+            payload=self.payload,
+            payload_sha=self.payload_sha,
+            labels=self.labels,
+            latest=self.latest,
+            issue_url=issue_url,
+            issue_number=issue_number,
+            outcome="published",
+        )
+
+    def _persist_published(
+        self,
+        metadata: dict[str, JsonValue],
+        issue: tuple[str, int],
+    ) -> BugReportSubmitResult:
+        issue_url, issue_number = issue
+        _persist_issue_outcome(
+            self.report_dir,
+            metadata,
+            issue_url=issue_url,
+            issue_number=issue_number,
+        )
+        return _submit_result(
+            self.report_id,
+            payload=self.payload,
+            payload_sha=self.payload_sha,
+            labels=self.labels,
+            latest=self.latest,
+            issue_url=issue_url,
+            issue_number=issue_number,
+            outcome="published",
+        )
+
+    def run(self, context: RunContext[BugReportSubmitResult]) -> BugReportSubmitResult:
+        preflight_result = self.preflight()
+        if preflight_result is not None:
+            return preflight_result
+        with _bug_report_lock(self.report_id):
+            current_metadata = _read_metadata(self.report_dir)
+            current_issue_url = current_metadata.get("issue_url")
+            if isinstance(current_issue_url, str) and current_issue_url:
+                return self._already_published(context, current_metadata)
+            recovered = self._recover_before_create(context, current_metadata)
+            if recovered is not None:
+                return recovered
+            return self._create_and_recover(context, current_metadata)
+
+
+def bug_report_submit_command(
     report_id: str,
     *,
     dry_run: bool = False,
@@ -654,185 +901,30 @@ def bug_report_submit_command(  # noqa: C901
         prepared_steps.append(recheck_view_step)
     prepared_steps.extend((gh_step, recheck_after_step))
 
-    def _submission_preflight() -> BugReportSubmitResult | None:
-        if dry_run:
-            return _submit_preview_result(
-                report_id,
-                payload=payload,
-                report_text=report_text,
-                reviews=reviews,
-                latest=latest,
-                report_valid=report_valid,
-                submit_ready=submit_ready,
-                report_errors=report_errors,
-                submit_blockers=submit_blockers,
-            )
-        if not report_valid:
-            raise BugReportInvalidError("report.md failed validation: " + "; ".join(report_errors))
-        if submit_ready:
-            return None
-        refusals = _count_refusals(reviews)
-        if refusals >= max_review_rounds():
-            unresolved = _unresolved_review_questions(reviews)
-            raise BugReportReviewLimitError(
-                f"three review rounds returned changes_requested for {report_id}; "
-                f"publish is stopped at {report_dir}",
-                details={
-                    "report_id": report_id,
-                    "draft_path": str(report_dir),
-                    "unresolved_questions": list(unresolved),
-                },
-            )
-        if latest is not None and latest.verdict != "approved":
-            raise BugReportReviewRequiredError(
-                f"latest review verdict is {latest.verdict}, not approved"
-            )
-        if latest is not None and latest.reviewed_payload_sha256 != payload_sha:
-            raise BugReportStaleHashError(
-                "approved payload hash does not match current payload; request a new review"
-            )
-        raise BugReportReviewRequiredError("missing independent review")
-
-    def _execute_submission(context: RunContext[BugReportSubmitResult]) -> BugReportSubmitResult:
-        preflight_result = _submission_preflight()
-        if preflight_result is not None:
-            return preflight_result
-
-        with _bug_report_lock(report_id):
-            current_metadata = _read_metadata(report_dir)
-            current_issue_url = current_metadata.get("issue_url")
-            current_issue_number = current_metadata.get("issue_number")
-            if isinstance(current_issue_url, str) and current_issue_url:
-                _skip_prepared_steps(context, prepared_steps, except_step_ids=set())
-                return _submit_result(
-                    report_id,
-                    payload=payload,
-                    payload_sha=payload_sha,
-                    labels=labels,
-                    latest=latest,
-                    issue_url=current_issue_url,
-                    issue_number=int(current_issue_number)
-                    if isinstance(current_issue_number, int)
-                    else 0,
-                    outcome="already_published",
-                )
-
-            recovered, executed_recheck = _recheck_before_create(
-                context,
-                metadata=current_metadata,
-                recheck_view_step=recheck_view_step,
-                recheck_search_step=recheck_before_step,
-            )
-            if recovered is not None:
-                issue_url, issue_number = recovered
-                _skip_prepared_steps(
-                    context,
-                    prepared_steps,
-                    except_step_ids=set(executed_recheck),
-                )
-                _persist_issue_outcome(
-                    report_dir,
-                    current_metadata,
-                    issue_url=issue_url,
-                    issue_number=issue_number,
-                )
-                return _submit_result(
-                    report_id,
-                    payload=payload,
-                    payload_sha=payload_sha,
-                    labels=labels,
-                    latest=latest,
-                    issue_url=issue_url,
-                    issue_number=issue_number,
-                    outcome="published",
-                )
-
-            context.action(submit_intent_action.step_id)
-            updated_metadata = _record_submit_intent(
-                report_dir,
-                current_metadata,
-                repository=payload.repository,
-                title=payload.title,
-                payload_sha256=payload_sha,
-            )
-            context.complete_action(submit_intent_action.step_id)
-
-            process_result = cast("ProcessResult", context.process(gh_step.step_id))
-            returncode = int(process_result.returncode)
-            stdout = process_result.stdout if isinstance(process_result.stdout, str) else ""
-            stderr = process_result.stderr if isinstance(process_result.stderr, str) else ""
-
-            uncertain_detail = (
-                f"gh issue create exited {returncode}: {stderr.strip() or stdout.strip()}"
-                if returncode != 0
-                else f"gh issue create produced no parseable issue URL: {stdout.strip()}"
-            )
-            if returncode == 0:
-                issue = _parse_issue_url(stdout)
-                if issue is not None:
-                    issue_url, issue_number = issue
-                    try:
-                        _persist_issue_outcome(
-                            report_dir,
-                            updated_metadata,
-                            issue_url=issue_url,
-                            issue_number=issue_number,
-                        )
-                    except OSError as error:
-                        recovered = _recheck_after_uncertain_outcome(
-                            context,
-                            recheck_after_step,
-                        )
-                        if recovered is None:
-                            raise BugReportOutcomeUnknownError(
-                                "gh issue was created but local metadata write failed "
-                                "and GitHub re-check found no issue"
-                            ) from error
-                        issue_url, issue_number = recovered
-                        _persist_issue_outcome(
-                            report_dir,
-                            updated_metadata,
-                            issue_url=issue_url,
-                            issue_number=issue_number,
-                        )
-                    else:
-                        context.skip(recheck_after_step.step_id)
-                    return _submit_result(
-                        report_id,
-                        payload=payload,
-                        payload_sha=payload_sha,
-                        labels=labels,
-                        latest=latest,
-                        issue_url=issue_url,
-                        issue_number=issue_number,
-                        outcome="published",
-                    )
-
-            recovered = _recheck_after_uncertain_outcome(context, recheck_after_step)
-            if recovered is None:
-                raise BugReportOutcomeUnknownError(
-                    f"{uncertain_detail}; GitHub re-check found no existing issue"
-                )
-            issue_url, issue_number = recovered
-            _persist_issue_outcome(
-                report_dir,
-                updated_metadata,
-                issue_url=issue_url,
-                issue_number=issue_number,
-            )
-            return _submit_result(
-                report_id,
-                payload=payload,
-                payload_sha=payload_sha,
-                labels=labels,
-                latest=latest,
-                issue_url=issue_url,
-                issue_number=issue_number,
-                outcome="published",
-            )
+    submission = _SubmissionExecutor(
+        report_id=report_id,
+        dry_run=dry_run,
+        report_dir=report_dir,
+        payload=payload,
+        report_text=report_text,
+        reviews=reviews,
+        latest=latest,
+        report_valid=report_valid,
+        submit_ready=submit_ready,
+        report_errors=report_errors,
+        submit_blockers=submit_blockers,
+        payload_sha=payload_sha,
+        labels=labels,
+        prepared_steps=prepared_steps,
+        submit_intent_action=submit_intent_action,
+        recheck_view_step=recheck_view_step,
+        recheck_before_step=recheck_before_step,
+        gh_step=gh_step,
+        recheck_after_step=recheck_after_step,
+    )
 
     def callback(context: RunContext[BugReportSubmitResult]) -> BugReportSubmitResult:
-        return _execute_submission(context)
+        return submission.run(context)
 
     command: Command[BugReportSubmitResult] = Command.create(
         plan,
