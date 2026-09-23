@@ -57,7 +57,7 @@ def _maintenance_exit_code() -> int | None:
     "dry_run",
     is_flag=True,
     default=False,
-    help="Emit the frozen plan without launching a process.",
+    help="Resolve the target and emit the frozen non-mutating plan.",
 )
 @click.option(
     "--ref",

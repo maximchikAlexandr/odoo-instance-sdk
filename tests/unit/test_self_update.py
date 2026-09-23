@@ -448,11 +448,20 @@ def test_dry_run_command_has_frozen_process_steps(
     executable.chmod(0o755)
     _patch_distribution(monkeypatch, _FakeDist())
     _patch_provenance(monkeypatch, _provenance(executable=executable))
-    command = update_command(ref="main", dry_run=True)
+    executor = _executor_factory({"uv_stdout": f"would install {_SHA_B}\n"})
+    command = update_command(ref="main", dry_run=True, executor=executor)
     process_steps = [step for step in command.plan.steps if isinstance(step, ProcessStep)]
-    assert len(process_steps) == 1
+    assert [step.step_id for step in process_steps] == [
+        "update.resolve",
+        "update.install",
+        "update.migrate",
+    ]
     assert process_steps[0].argv[0] == "uv"
     assert "--dry-run" in process_steps[0].argv
+    install = process_steps[1]
+    assert install.argv[0] == "uv"
+    assert _SHA_B in install.argv
+    assert executor.executed[0].step_id == "update.resolve"
 
 
 def test_update_lock_conflict_propagates(

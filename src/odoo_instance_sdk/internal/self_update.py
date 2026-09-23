@@ -876,6 +876,7 @@ def update_command(
             provenance=provenance,
             executor=executor,
             allow_downgrade=allow_downgrade,
+            dry_run=dry_run,
         )
     return _build_mutating_command(
         ref=target_sha,

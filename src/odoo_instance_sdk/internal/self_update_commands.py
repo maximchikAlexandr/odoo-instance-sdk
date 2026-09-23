@@ -633,6 +633,7 @@ def _build_staged_command(
     provenance: InstalledProvenance,
     executor: ProcessExecutor | None,
     allow_downgrade: bool,
+    dry_run: bool = False,
 ) -> Command[UpdateResult]:
     """Resolve in one frozen read-only command, then build the exact mutation command."""
     resolve_step = PreparedStep(
@@ -642,8 +643,7 @@ def _build_staged_command(
     )
     active_executor = executor or SubprocessExecutor()
 
-    def callback(context: RunContext[UpdateResult]) -> UpdateResult:
-        result = cast("ProcessResult", context.process_prepared(resolve_step))
+    def target_sha_from_result(result: ProcessResult) -> str:
         if result.returncode != 0:
             stderr = result.stderr if isinstance(result.stderr, str) else ""
             raise UnsupportedInstallError(
@@ -656,6 +656,35 @@ def _build_staged_command(
                 "could not parse target SHA from uv output (sha_unparsed)",
                 manual_argv=_MANUAL_INSTALL_ARGV,
             )
+        return target_sha
+
+    if dry_run:
+        # A preview has no confirmation boundary to preserve.  Resolve the
+        # read-only ProcessStep once, then expose the immutable second plan;
+        # its install and migration argv are frozen to the observed SHA.
+        result = cast("ProcessResult", active_executor.execute(resolve_step))
+        target_sha = target_sha_from_result(result)
+        if (
+            provenance.commit_id is not None
+            and target_sha == provenance.commit_id
+            and unfinished_update_journal() is None
+        ):
+            resolved_command = _build_already_current_command(provenance)
+        else:
+            resolved_command = _build_mutating_command(
+                ref=target_sha,
+                provenance=provenance,
+                executor=executor,
+                allow_downgrade=allow_downgrade,
+            )
+        plan = ExecutionPlan(
+            steps=(resolve_step.public_projection(), *resolved_command.plan.steps),
+        )
+        return Command.create(plan, lambda _context: resolved_command.run())
+
+    def callback(context: RunContext[UpdateResult]) -> UpdateResult:
+        result = cast("ProcessResult", context.process_prepared(resolve_step))
+        target_sha = target_sha_from_result(result)
         if (
             provenance.commit_id is not None
             and target_sha == provenance.commit_id
