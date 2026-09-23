@@ -137,6 +137,7 @@ def _execute_init(
     output_mode: OutputMode,
     effective_no_input: bool,
     confirm_partial: Callable[[list[str], dict[str, str]], None] | None,
+    run_or_preview: Callable[..., tuple[int, dict[str, JsonValue] | None]],
 ) -> None:
     resolved_project = Path(request.project_path) if request.project_path else Path.cwd()
     provenance: dict[str, list[str]] = {
@@ -397,6 +398,7 @@ def register_init_command(cli: click.Group) -> None:
             output_mode=output_mode,
             effective_no_input=request.no_input or output_mode is not OutputMode.RICH,
             confirm_partial=confirm_partial,
+            run_or_preview=run_or_preview,
         )
 
 
