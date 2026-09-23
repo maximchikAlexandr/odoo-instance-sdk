@@ -5,7 +5,6 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, cast
 
@@ -13,11 +12,11 @@ import msgspec
 
 if TYPE_CHECKING:
     import click
+    from rich.table import Table
 else:
     import rich_click as click
 
 from rich.console import Console  # noqa: I001 -- keep CLI format aliases grouped; remove when Ruff supports grouped aliases.
-from rich.table import Table
 from rich.text import Text
 
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context, resolve_catalogue_scope
@@ -26,12 +25,14 @@ from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
+    bordered_table,
     emit,
     fail,
     failure_document,
     field_schema,
     model_to_dict,
     output_options,
+    render_rich_text,
     resolve_output_mode,
     rich_print,
     run_or_preview,
@@ -192,7 +193,9 @@ def _rich_table(document: OutputDocument) -> str:
     backups = result.get("backups", [])
     if not isinstance(backups, list):
         return "No backups"
-    table = Table("UUID", "Source", "Database", "State", "File", "Bytes", "Catalogue time")
+    table = bordered_table("UUID", "Source", "Database", "State", "File", "Bytes", "Catalogue time")
+    if not backups:
+        table.add_row("—", "—", "—", "—", "—", "—", "No backups")
     for item in backups:
         if not isinstance(item, dict):
             continue
@@ -210,17 +213,18 @@ def _rich_table(document: OutputDocument) -> str:
             ),
             _rich_local_time_cell(item.get("catalogue_time")),
         )
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(table)
+    output = render_rich_text(table, width=Console().width)
     next_cursor = result.get("next_cursor")
     if next_cursor:
-        console.print(rich_cell(f"Next cursor: {next_cursor}"))
-    return output.getvalue().rstrip()
+        output = (
+            f"{output}\n"
+            f"{render_rich_text(rich_cell(f'Next cursor: {next_cursor}'), width=Console().width)}"
+        )
+    return output
 
 
 def _rich_summary_table(result: JsonObject) -> Table:
-    summary = Table("Field", "Value", title="Backup")
+    summary = bordered_table("Field", "Value", title="Backup")
     for field in (
         "id",
         "source_base_url",
@@ -248,7 +252,7 @@ def _rich_summary_table(result: JsonObject) -> Table:
 
 
 def _rich_history_table(items: list[JsonValue]) -> Table:
-    history = Table("Seq", "Event", "Occurred", "Message", title="History")
+    history = bordered_table("Seq", "Event", "Occurred", "Message", title="History")
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -262,7 +266,7 @@ def _rich_history_table(items: list[JsonValue]) -> Table:
 
 
 def _rich_restore_table(items: list[JsonValue]) -> Table:
-    restore = Table("Host", "Port", "Database", "Restored", title="Restore links")
+    restore = bordered_table("Host", "Port", "Database", "Restored", title="Restore links")
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -276,7 +280,7 @@ def _rich_restore_table(items: list[JsonValue]) -> Table:
 
 
 def _rich_environment_table(items: list[JsonValue]) -> Table:
-    details = Table("Details", title="Environment links")
+    details = bordered_table("Details", title="Environment links")
     for item in items:
         details.add_row(rich_cell(item))
     return details
@@ -286,9 +290,7 @@ def _rich_detail(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(_rich_summary_table(result))
+    rendered_sections = [render_rich_text(_rich_summary_table(result), width=Console().width)]
     sections: tuple[tuple[str, str, Callable[[list[JsonValue]], Table]], ...] = (
         ("history", "History", _rich_history_table),
         ("restore_links", "Restore links", _rich_restore_table),
@@ -298,9 +300,8 @@ def _rich_detail(document: OutputDocument) -> str:
         items = result.get(field)
         if not isinstance(items, list) or not items:
             continue
-        console.print()
-        console.print(builder(items))
-    return output.getvalue().rstrip()
+        rendered_sections.append(render_rich_text(builder(items), width=Console().width))
+    return "\n\n".join(rendered_sections)
 
 
 def _rich_validation(document: OutputDocument) -> str:
@@ -320,11 +321,7 @@ def _rich_validation(document: OutputDocument) -> str:
             else "unavailable"
         )
     )
-    table = Table("Field", "Value", title="Backup validation")
-    table.columns[0].no_wrap = True
-    table.columns[1].no_wrap = True
-    table.columns[0].overflow = "ellipsis"
-    table.columns[1].overflow = "ellipsis"
+    table = bordered_table("Field", "Value", title="Backup validation")
     table.add_row("Status", rich_cell(status))
     for field in ("db_name", "db_version"):
         if result.get(field) is not None:
@@ -341,9 +338,7 @@ def _rich_validation(document: OutputDocument) -> str:
     terminal_width = Console().width
     if not document.ok:
         return _validation_error_line(result, status, document, terminal_width)
-    output = StringIO()
-    Console(file=output, color_system=None, width=terminal_width).print(table)
-    return output.getvalue().rstrip()
+    return render_rich_text(table, width=terminal_width)
 
 
 def _validation_error_line(
@@ -370,16 +365,12 @@ def _rich_delete(document: OutputDocument) -> str:
     result = document.result if isinstance(document.result, dict) else {}
     plan = result.get("plan")
     if isinstance(plan, dict):
-        table = Table("Field", "Value", title="Delete plan")
+        table = bordered_table("Field", "Value", title="Delete plan")
         table.columns[1].overflow = "fold"
         for field in ("backup_id", "path", "state", "file_present"):
             if field in plan:
                 table.add_row(field.replace("_", " ").title(), rich_cell(plan[field]))
-        output = StringIO()
-        console = Console(file=output, color_system=None, width=9999)
-        console.print("Delete plan:")
-        console.print(table)
-        return output.getvalue().rstrip()
+        return f"Delete plan:\n{render_rich_text(table, width=Console().width)}"
     backup_id = result.get("backup_id", result.get("id", "unknown"))
     return f"Deleted backup {backup_id}."
 

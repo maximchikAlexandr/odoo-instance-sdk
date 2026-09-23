@@ -8,16 +8,15 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import msgspec
 from rich.console import Console
-from rich.table import Table
 
 if TYPE_CHECKING:
     import click
+    from rich.table import Table
 else:
     import rich_click as click
 
@@ -29,10 +28,13 @@ from odoo_instance_sdk.commands.context import (  # noqa: I001 -- keep PostgreSQ
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
     OutputMode,
+    bordered_table,
     fail,
     field_schema,
     model_to_dict,
     output_options,
+    postgres_state_cells,
+    render_rich_text,
     resolve_output_mode,
     run_or_preview,
 )
@@ -64,12 +66,33 @@ def _postgres_cluster(ctx: CliContext) -> PostgresCluster:
     return PostgresCluster.from_project(resolve_project_path(ctx))
 
 
+def _postgres_state_cells(payload: dict[str, JsonValue]) -> tuple[str, str]:
+    try:
+        lifecycle = PostgresClusterState(str(payload.get("state", "unknown")))
+    except ValueError:
+        lifecycle = PostgresClusterState.UNKNOWN
+    unavailable = payload.get("unavailability_reason")
+    server_unavailable = payload.get("server_unavailability_reason")
+    return postgres_state_cells(
+        lifecycle,
+        unavailable if isinstance(unavailable, str) else None,
+        server_unavailable if isinstance(server_unavailable, str) else None,
+    )
+
+
+def _add_optional_row(table: Table, label: str, value: str | None) -> None:
+    if value:
+        table.add_row(label, rich_cell(value))
+
+
 def _cluster_rich(document: OutputDocument) -> str:
     payload = document.result if isinstance(document.result, dict) else {}
-    table = Table("Field", "Value", title="PostgreSQL cluster")
+    table = bordered_table("Field", "Value", title="PostgreSQL cluster")
     table.add_row("Mode", rich_cell(payload.get("mode", "unknown")))
     table.add_row("Owned", rich_cell(str(payload.get("owned", False)).lower()))
-    table.add_row("State", rich_cell(payload.get("state", "unknown")))
+    state, availability = _postgres_state_cells(payload)
+    table.add_row("State", rich_cell(state))
+    _add_optional_row(table, "Availability", availability)
     table.add_row("Endpoint", rich_cell(payload.get("endpoint", "—")))
     container = payload.get("container")
     if isinstance(container, dict):
@@ -101,10 +124,7 @@ def _cluster_rich(document: OutputDocument) -> str:
         )
     elif payload.get("server_unavailability_reason") is not None:
         table.add_row("Server", rich_cell(payload["server_unavailability_reason"]))
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=120)
-    console.print(table)
-    return output.getvalue().rstrip()
+    return render_rich_text(table, width=Console().width)
 
 
 def _database_instance(ctx: CliContext) -> tuple[DevelopmentEnvironment | None, OdooInstance]:
@@ -162,27 +182,22 @@ def _database_resource(
 
 def _render_rows(title: str, rows: JsonValue) -> str:
     """Render one typed row collection as a Rich table without changing data."""
-    output = StringIO()
-    console = Console(file=output, color_system=None, force_terminal=False, width=120)
-    console.print(_rows_table(title, rows))
-    return output.getvalue().rstrip()
+    return render_rich_text(_rows_table(title, rows), width=120)
 
 
 def _rows_table(title: str, rows: JsonValue) -> Table:
-    table = Table(title=title)
     if not isinstance(rows, (list, tuple)) or not rows:
-        table.add_column("value")
+        table = bordered_table("value", title=title)
         table.add_row("(none)")
     else:
         first = rows[0]
         payload = first
         if not isinstance(payload, dict):
-            table.add_column("value")
+            table = bordered_table("value", title=title)
             table.add_row(rich_cell(payload))
         else:
             columns = tuple(str(key) for key in payload)
-            for column in columns:
-                table.add_column(rich_cell(column))
+            table = bordered_table(*columns, title=title)
             for row in rows:
                 value = row
                 if isinstance(value, dict):
@@ -192,13 +207,9 @@ def _rows_table(title: str, rows: JsonValue) -> Table:
 
 def _render_row_sections(*sections: tuple[str, JsonValue]) -> str:
     """Render related result sets in one spaced Rich document."""
-    output = StringIO()
-    console = Console(file=output, color_system=None, force_terminal=False, width=120)
-    for index, (title, rows) in enumerate(sections):
-        if index:
-            console.print()
-        console.print(_rows_table(title, rows))
-    return output.getvalue().rstrip()
+    return "\n\n".join(
+        render_rich_text(_rows_table(title, rows), width=120) for title, rows in sections
+    )
 
 
 def _locks_rich(document: OutputDocument) -> str:
@@ -224,7 +235,7 @@ def _bloat_rich(document: OutputDocument) -> str:
 
 def _monitoring_rich(document: OutputDocument) -> str:
     payload = document.result if isinstance(document.result, dict) else {}
-    table = Table("Outcome", "Extensions", title="PostgreSQL monitoring")
+    table = bordered_table("Outcome", "Extensions", title="PostgreSQL monitoring")
     for field, label in (
         ("installed", "Installed"),
         ("already_present", "Already present"),
@@ -234,10 +245,7 @@ def _monitoring_rich(document: OutputDocument) -> str:
         if not isinstance(values, (list, tuple)):
             values = ()
         table.add_row(label, rich_cell(", ".join(str(value) for value in values) or "none"))
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=120)
-    console.print(table)
-    return output.getvalue().rstrip()
+    return render_rich_text(table, width=Console().width)
 
 
 def _run_database_command(
@@ -518,15 +526,11 @@ def _approval_rich(document: OutputDocument, digest: str) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
-    table = Table("Field", "Value", title="PostgreSQL image approval")
-    table.columns[1].overflow = "fold"
+    table = bordered_table("Field", "Value", title="PostgreSQL image approval")
     table.add_row("Image", rich_cell(result.get("image", "—")))
     table.add_row("Digest", rich_cell(digest))
     table.add_row("Status", "approved")
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=9999)
-    console.print(table)
-    return output.getvalue().rstrip()
+    return render_rich_text(table, width=Console().width)
 
 
 @postgres_group.command(
