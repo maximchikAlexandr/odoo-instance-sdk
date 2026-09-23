@@ -335,6 +335,15 @@ def _shared_section(shared: SharedResourcesBlock) -> list[Text | Table]:
     rows.extend(_backend_row(group) for group in shared.backend_groups)
     rows.extend(_contribution_row(item) for item in shared.external_contributions)
     parts.append(_process_table(rows or [_empty_process_row()]))
+    if shared.postgres_container is not None:
+        metrics = shared.postgres_container.metrics
+        if metrics is not None and metrics.volume_usage_bytes is not None:
+            parts.append(
+                Text(
+                    f"  storage volume={_human_bytes(metrics.volume_usage_bytes)}",
+                    style="dim",
+                )
+            )
     return parts
 
 

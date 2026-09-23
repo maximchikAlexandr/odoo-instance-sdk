@@ -7,8 +7,9 @@ from rich import box
 from rich.table import Table
 
 from odoo_instance_sdk.commands.output import render_rich_text
-from odoo_instance_sdk.commands.ps import _render_ps_rich
+from odoo_instance_sdk.commands.ps import _backend_row, _render_ps_rich
 from odoo_instance_sdk.models import (
+    BackendGroupReason,
     BackendProcessGroup,
     BackendSession,
     CheckoutProcessBlock,
@@ -27,22 +28,28 @@ from odoo_instance_sdk.models import (
 )
 
 
-def _backend(*, scope: PidScope = PidScope.HOST) -> BackendProcessGroup:
+def _backend(
+    *,
+    database: str = "demo",
+    reason: BackendGroupReason = "unique_database",
+    pid: int = 700,
+    scope: PidScope = PidScope.HOST,
+) -> BackendProcessGroup:
     return BackendProcessGroup(
-        database="demo",
+        database=database,
         sessions=(
             BackendSession(
-                pid=700,
+                pid=pid,
                 state="idle",
                 application_name="odoo",
                 user_name="odoo",
             ),
         ),
         pid_scope=scope,
-        host_pids=(700,),
+        host_pids=(pid,),
         cpu_percent=None,
         memory_bytes=None,
-        reason="unique_database",
+        reason=reason,
         unavailability_reason="vm_scoped_pid" if scope is PidScope.DOCKER_VM else None,
     )
 
@@ -131,7 +138,14 @@ def _inventory() -> ProcessInventory:
             SharedResourcesBlock(
                 project_id="project-1",
                 postgres_container=_cluster(),
-                backend_groups=(_backend(scope=PidScope.DOCKER_VM),),
+                backend_groups=(
+                    _backend(
+                        database="shared_db",
+                        reason="shared_database",
+                        pid=701,
+                        scope=PidScope.DOCKER_VM,
+                    ),
+                ),
             ),
         ),
         main_checkout=CheckoutProcessBlock(
@@ -150,6 +164,7 @@ def _inventory() -> ProcessInventory:
                 project_id="project-1",
                 name="demo",
                 odoo=_stopped_runtime(),
+                backend_groups=(_backend(scope=PidScope.DOCKER_VM),),
                 external_contributions=(_contribution(),),
             ),
         ),
@@ -207,7 +222,50 @@ def test_process_projection_keeps_type_specific_details_and_is_pure(
     assert "identity=odoo/odoo/idle" in output
     assert "availability=vm_scoped_pid" in output
     assert "identity=session-1" in output
+    assert "storage volume=16.0 KiB" in output
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.unit
+def test_process_sections_preserve_attribution_order_and_unavailable_backend_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.commands import ps as ps_command_module
+
+    collector_called = False
+
+    class ExplodingMonitor:
+        def __init__(self) -> None:
+            nonlocal collector_called
+            collector_called = True
+            raise AssertionError("rendering must not construct a monitor")
+
+    monkeypatch.setattr(ps_command_module, "EnvironmentMonitor", ExplodingMonitor)
+    rendered = _render_ps_rich(_inventory())
+    tables = [item for item in rendered.renderables if isinstance(item, Table)]
+    output = render_rich_text(rendered, width=180)
+
+    assert not collector_called
+    assert output.index("Shared resources") < output.index("Main checkout")
+    assert output.index("Main checkout") < output.index("Environment demo")
+    assert output.count("database=shared_db") == 1
+    assert output.count("attribution=shared_database") == 1
+    assert output.count("attribution=unique_database") == 1
+
+    shared_backend = _backend_row(
+        _backend(
+            database="shared_db",
+            reason="shared_database",
+            pid=701,
+            scope=PidScope.DOCKER_VM,
+        )
+    )
+    assert shared_backend[2] == "docker_vm:701"
+    assert shared_backend[4] == "—"
+    assert shared_backend[5] == "—"
+    assert "20.0%" not in shared_backend[4]
+    assert "4.0 KiB" not in shared_backend[5]
+    assert "storage volume" not in render_rich_text(tables[0], width=180)
 
 
 @pytest.mark.unit
