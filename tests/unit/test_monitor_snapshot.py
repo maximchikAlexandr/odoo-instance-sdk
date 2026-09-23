@@ -1288,8 +1288,13 @@ def test_watch_cancellation_cleans_up(tmp_path: Path, monkeypatch: pytest.Monkey
 
     async def _cancel_after_one() -> None:
         gen = cast("AsyncGenerator[Snapshot, None]", monitor.watch(interval=0.1))
-        await gen.__anext__()
+        snapshot = await gen.__anext__()
+        assert isinstance(snapshot, Snapshot)
+        assert len(snapshot.environments) == 1
+        assert snapshot.environments[0].id == e1
         await gen.aclose()
+        with pytest.raises(StopAsyncIteration):
+            await gen.__anext__()
 
     asyncio.run(_cancel_after_one())
 

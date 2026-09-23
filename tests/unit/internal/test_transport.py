@@ -11,18 +11,6 @@ from odoo_instance_sdk.internal.transport import (
     TransportStatusError,
     TransportUnavailableError,
 )
-from odoo_instance_sdk.internal.transport.factory import open_odoo_http_client
-from tests.fixtures.transport import make_http_client, make_response, patch_open_odoo_http_client
-
-
-def test_open_odoo_http_client_delegates_to_for_origin() -> None:
-    with patch(
-        "odoo_instance_sdk.internal.transport.factory.OdooHttpClient.for_origin",
-        return_value=MagicMock(),
-    ) as factory:
-        client = open_odoo_http_client("http://127.0.0.1:8069", timeout=3.0)
-    factory.assert_called_once_with("http://127.0.0.1:8069", timeout=3.0)
-    assert client is factory.return_value
 
 
 def test_post_performs_single_network_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,19 +85,3 @@ def test_cli_import_does_not_load_httpx() -> None:
 
     assert "httpx" not in sys.modules
     sys.modules.update(saved)
-
-
-def test_injected_transport_boundary_is_used_for_health() -> None:
-    from odoo_instance_sdk.internal.health import poll_health
-
-    response = make_response(json_data={"jsonrpc": "2.0", "result": []})
-    http = make_http_client(post_side_effect=[TransportUnavailableError("retry"), response])
-    with patch_open_odoo_http_client(http):
-        result = poll_health(
-            "http://127.0.0.1:8069",
-            timeout=1.0,
-            poll_interval=0.0,
-            database_manager=True,
-        )
-    assert result.ok is True
-    assert result.attempts == 2

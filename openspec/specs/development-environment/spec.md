@@ -1,7 +1,9 @@
 ## Purpose
 
 Provisioning, ownership, and cleanup of isolated development environments bound to a Git worktree, Python interpreter, generated Odoo config, and catalog audit.
+
 ## Requirements
+
 ### Requirement: `DevelopmentEnvironment` public type
 
 `DevelopmentEnvironment` MUST быть `msgspec.Struct` с `frozen=True, forbid_unknown_fields=True` и представлять provisioning record: worktree/config, reused-or-owned Python binding, port, DB ownership и cleanup audit.
@@ -374,21 +376,7 @@ Worktree branch handling MUST follow these rules:
 
 ### Requirement: Generated `odoo.conf`
 
-Исходный config MUST NEVER изменяться. Производный config MUST записываться атомарно с правами `0600` и сохранять все неизвестные options.
-
-Обязательные изменения:
-
-- элементы `addons_path` и `upgrade_path`, находящиеся внутри исходного repository root, rebased на worktree;
-- внешние пути к Odoo core/addons остаются без изменений;
-- `http_interface` по умолчанию становится `127.0.0.1`;
-- `http_port` берётся из environment registry;
-- `db_name` становится source DB в `shared` mode и target DB в `copy` mode;
-- `dbfilter` ограничивается выбранной БД;
-- DB connection settings, `admin_passwd` и `data_dir` сохраняются;
-- если source config содержит непустой `logfile`, generated config MUST переписать его в environment-owned абсолютный path рядом с generated conf (`<env-root>/odoo.log`); если `logfile` отсутствует или пуст — поведение сохраняется (ключ не добавляется);
-- CLI не добавляет собственный log capture или tee и MUST NOT создавать сам log file.
-
-Для MVP достаточно stdlib `configparser`, `pathlib`, `shutil`, `tempfile` и `os.replace`. Комментарии generated copy могут не сохраняться; неизвестные keys и values MUST сохраняться.
+For a new isolated environment, the generated `odoo.conf` SHALL include an environment-owned `logfile = <environment-root>/odoo.log` and the file SHALL be created together with the other environment artifacts. For an old or partial isolated config without `logfile`, the same fallback SHALL apply: `odoo.log` next to the effective config is chosen and created before detached spawn. A full self-contained `init` SHALL set `data_dir` to the absolute `{project_root}/.odcli/filestore` in the generated `odoo.conf`.
 
 #### Scenario: Atomic 0600 config
 
@@ -414,6 +402,21 @@ Worktree branch handling MUST follow these rules:
 
 - **WHEN** `addons_path` содержит external `/opt/odoo/addons`
 - **THEN** generated config сохраняет `/opt/odoo/addons` без изменений
+
+#### Scenario: new environment gets an owned logfile
+
+- **WHEN** a new isolated environment is created
+- **THEN** its generated `odoo.conf` contains `logfile = <environment-root>/odoo.log` and the file is created with the other artifacts
+
+#### Scenario: old environment without logfile uses fallback
+
+- **WHEN** an old isolated environment without `logfile` runs detached
+- **THEN** the same fallback chooses `odoo.log` next to its effective config and creates it before spawn
+
+#### Scenario: self-contained init records data_dir
+
+- **WHEN** a full self-contained `init` runs
+- **THEN** the generated `odoo.conf` contains `data_dir` set to the absolute `{project_root}/.odcli/filestore`
 
 ### Requirement: DB name validation for copy
 
@@ -708,50 +711,7 @@ Rich SHALL NOT show `OBSERVED`, `ODOO_PID`, `CPU`, `RAM`, `SIZE`, or detailed pr
 
 ### Requirement: `env remove`
 
-```bash
-odcli env remove <environment-id> --dry-run
-odcli env remove <environment-id> --yes
-odcli env remove <env-id-1> <env-id-2> --dry-run
-odcli env remove <env-id-1> <env-id-2> --yes
-```
-
-Перед изменениями показать план и выполнить полный preflight. Без `--yes` требуется Click confirmation.
-
-`env remove` SHALL accept variadic positional arguments (full UUIDs or selectors). For each explicit target, the persisted repository, Git common dir, worktree, and PostgreSQL cluster SHALL be resolved independently; the project/cluster of the current cwd SHALL NOT be applied to the whole set. A call without a positional argument SHALL preserve the existing cwd semantics for exactly one environment.
-
-Before the first destructive action, the command SHALL resolve all targets and perform planning preflight. An unknown, ambiguous, or duplicate target SHALL abort with no changes. After successful preflight, Rich SHALL show one confirmation listing all sanitized targets; machine modes without `--yes` SHALL change nothing and SHALL emit `confirmation_required`. Execution SHALL run single-target commands sequentially in argument order with per-target execution-time revalidation. A per-target failure SHALL continue remaining prepared targets and return per-target success/failure with a non-zero exit code.
-
-Default cleanup matrix (per target):
-
-| Artifact | `shared` | `copy` |
-|---|---:|---:|
-| Generated config | delete | delete |
-| Requirements lock | delete | delete |
-| Python venv | delete iff owned | delete iff owned |
-| Owned Git worktree | remove | remove |
-| Source DB | never | never |
-| Target DB | n/a | drop |
-| Environment backup | n/a | delete |
-| Git branch | keep | keep |
-| Audit rows | keep | keep |
-
-Safety rules:
-
-- сначала проверить, что worktree чистый; dirty worktree блокирует удаление;
-- любой занятый reserved address блокирует удаление как ownership-unknown; занятость определяется через `socket.bind((http_interface, http_port))`; HTTP health check служит только диагностикой, не доказательством ownership; responsive Odoo на address не доказывает, что он принадлежит этому environment;
-- drop target DB (copy mode only) MUST быть только для `copy` environment с совпавшими cluster identity, target DB и recorded restore/backup ownership; после drop MUST проверять postcondition `exists(target_db) is False`; если postcondition fails — `cleanup_failed` с причиной;
-- использовать `git worktree remove`, не recursive filesystem deletion;
-- generated lock удалять по recorded environment path; Python venv — только при `python_environment_owned=true` и containment внутри environment root;
-- reused project venv (`owned=false`) никогда не изменять во время remove;
-- не использовать Git force и не удалять branch;
-- shared source DB не удаляется ни при каких flags;
-- `BackupResource.delete()` используется только для recorded environment-owned backup;
-- отсутствие уже удалённого owned artifact считается идемпотентным успехом и записывается в audit;
-- частичная ошибка оставляет `cleanup_failed` с точной причиной; повторный `remove` продолжает с оставшихся owned artifacts;
-- `removed` ставится только после подтверждения отсутствия всех owned artifacts;
-- final empty environment directory удаляется, SQLite rows остаются.
-
-Bulk prune, автоматическое удаление по возрасту и `--force` для грязных worktrees не входят в scope. A generic bulk SDK, parallel deletion, or new orchestration hierarchy SHALL NOT be added.
+`EnvironmentManager.remove_command()` SHALL accept `force_connections` and route it into the existing `build_database_drop_command()` with terminate scope limited to the exact COPY database being removed. Without `force_connections`, removal SHALL stay fail-closed. The error message SHALL name `--force-connections` now that the flag exists; it MAY also name `odcli stop`. Protected/default/shared databases and sessions of other databases SHALL NOT be affected. The CLI `odcli env rm` SHALL expose `--force-connections` and follow the multi-target deletion contract.
 
 #### Scenario: Dirty worktree blocks remove
 
@@ -802,6 +762,16 @@ Bulk prune, автоматическое удаление по возрасту 
 
 - **WHEN** one target in a multi-target call is unknown
 - **THEN** the command aborts with no changes and a sanitized error
+
+#### Scenario: remove with force-connections terminates only the COPY database sessions
+
+- **WHEN** `remove_command(force_connections=True)` runs for a COPY environment
+- **THEN** only sessions of the exact COPY database are terminated and other databases' sessions are untouched
+
+#### Scenario: remove without force-connections names the existing flag
+
+- **WHEN** `remove_command()` runs against a COPY database with an active session
+- **THEN** removal is blocked and the error names `--force-connections`, not a missing option
 
 ### Requirement: Checkout dry-run
 
@@ -1120,4 +1090,3 @@ New global environment worktrees SHALL live below the unified `~/.odcli/` root w
 
 - **WHEN** the main checkout's Odoo is stopped
 - **THEN** the main checkout row remains visible with status `stopped` and no PID
-

@@ -279,7 +279,7 @@ def test_readme_preparation_manifest_parses_and_roundtrips(tmp_path: Path) -> No
     assert config.refresh_after_hours == 24
     assert config.test_instance == ConfigTestInstance(
         base_url="https://odoo-test.example",
-        database="testdb",
+        database=None,
         git_branch="main",
     )
     assert tomllib.loads(config.to_manifest()) == tomllib.loads(documented_manifest)

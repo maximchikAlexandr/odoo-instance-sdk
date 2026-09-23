@@ -58,6 +58,9 @@ classification is bounded and whose contract requires `--dry-run`:
 | `git commit` | mutating-or-spawning |
 | `git absorb` | mutating-or-spawning |
 | `git sync` | mutating-or-spawning |
+| `bug-report init` | mutating-or-spawning |
+| `bug-report submit` | mutating-or-spawning |
+| `update` | mutating-or-spawning (`update --check` is process-previewable-read-only) |
 | `psql` | native-passthrough |
 | `run` | native-passthrough |
 | `shell` | native-passthrough |
@@ -104,6 +107,22 @@ and reasons; no parallel eligibility table is permitted.
 bounded detached launch: its `--dry-run` captures the detached plan without
 spawning, and execution returns a typed `DetachedLaunchResult` once Odoo is
 alive. The SDK sibling is `instance.run_detached_command()`.
+`resolve_effective_logfile()` chooses one path for detached spawn, `logs`,
+structured results, and runtime metadata: explicit non-empty `logfile` in
+effective `odoo.conf` wins; otherwise `odoo.log` next to the effective config
+is created before spawn and passed through `--logfile` without editing the
+user's config.
+
+`bug-report init` and `bug-report submit` are bounded mutating leaves backed by
+`bug_report_init_command()` and `bug_report_submit_command()`. Submit locks
+`get_locks_dir()/bug-report-{REPORT_ID}.lock` without Expression, records submit
+intent as an ActionStep, and invokes `gh` through `internal/proc` with
+`--body-file -`.
+
+`update` is a bounded mutating leaf backed by `update_command()`. Mutating
+execution acquires `get_locks_dir()/odcli-update.lock`, snapshots affected
+metadata under `get_user_root()/update/`, and runs maintenance as a child
+`odcli update --format json` with `ODCLI_MAINTENANCE=1`.
 
 The Git workflow leaves use the same captured-plan boundary: `git commit` and
 `git absorb` require explicit confirmation for mutation, while `git check` is
@@ -219,14 +238,32 @@ opaque-named aliases, and broad `Callable[..., ...]`; every finding includes
 external adapter boundary to `JsonValue`, a validated model, or a concrete
 protocol—not to add an exception.
 
+### HTTP transport and XML-RPC boundary
+
+`DIRECT_HTTPX_USAGE` is a line-specific allowlist under
+`src/odoo_instance_sdk/internal/transport/` only. Production Odoo HTTP calls
+go through the internal `OdooHttpClient`; `httpx` types and exceptions do not
+leak into public SDK or resource interfaces. `import odoo_instance_sdk.cli`
+remains free of `httpx`. An architecture gate requires zero
+`xmlrpc.client.ServerProxy` call sites in `src/`; XML-RPC verification stays in
+`tests/fixtures/xmlrpc_probe.py` for real-Odoo acceptance only.
+
+### Self-update and bug-report locks
+
+`odcli update` acquires `get_locks_dir()/odcli-update.lock` during mutating
+execution. Unfinished migration journals cause `update` to resume and other
+commands to fail with `update_incomplete`. `bug-report submit` acquires
+`get_locks_dir()/bug-report-{REPORT_ID}.lock` so uncertain `gh` outcomes do
+not blind re-POST.
+
 ### Test-only subprocess patch seams
 
 `MODULE_LOCAL_SUBPROCESS_PATCHES` records the remaining legacy test patch
 locations while the production launch inventory is empty:
 
-- `tests/unit/resources/test_database_resource.py:638`
+- `tests/unit/resources/test_database_resource.py:632`
 - `tests/unit/test_monitor_cache_and_docker.py:119`
-- `tests/unit/test_cluster_resources.py:190`
+- `tests/unit/test_cluster_resources.py:188`
 - `tests/unit/test_real_odoo_ci_components.py:40,109,151`
 - `tests/unit/test_real_odoo_foundation.py:325,348,367`
 

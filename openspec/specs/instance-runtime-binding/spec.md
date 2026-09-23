@@ -1,7 +1,9 @@
 ## Purpose
 
 Binding an ordinary OdooInstance to a ready development environment through recorded command prefix and cwd, without a second runtime wrapper.
+
 ## Requirements
+
 ### Requirement: `InstanceConfig.command_prefix` and `default_cwd`
 
 `InstanceConfig` MUST включать новые поля:
@@ -159,7 +161,7 @@ Canonical project registration SHALL be written only after successful non-previe
 
 ### Requirement: Persisted environment runtime can be stopped safely
 
-The existing runtime and environment records SHALL be the starting point, but not sole proof, for out-of-process stop. Without a runtime migration, the stop command SHALL re-read the runtime row's environment owner and PID/create time, and SHALL separately re-read the environment row's `runtime_json` for expected `odoo_bin`/`runtime_cwd` plus its generated-config path. Before signaling, it SHALL compare the live PID create time, executable, argv, cwd and config argument with those records. POSIX stop SHALL additionally require the live SDK-created process-group identity `pgid == pid` before using the existing bounded terminate-and-kill escalation; Windows SHALL require the same available identity checks before existing process-tree termination. Successful exit SHALL be verified before the matching runtime row is cleared. The implementation SHALL add no runtime field, migration, second process registry or supervisor.
+`OdooInstance` foreground runtime identity registration and cleanup SHALL remain under the artifact lock, but the wait for the foreground process SHALL happen outside the lock so a parallel `stop` can acquire the exclusive lock, read the persisted runtime identity, and call the existing `terminate_pid()`. Expression SHALL NOT appear in lock acquire/release, registration, wait, or cleanup. PID/create-time/process-group validation and stale-runtime safety SHALL be preserved because they operate on the persisted identity, not on the lock holder.
 
 #### Scenario: Persisted identity matches
 
@@ -175,6 +177,16 @@ The existing runtime and environment records SHALL be the starting point, but no
 
 - **WHEN** planning observed a matching process but execution revalidation proves that PID absent
 - **THEN** stop returns idempotent success and clears the now-stale matching runtime row without signaling another process
+
+#### Scenario: foreground wait does not block stop
+
+- **WHEN** a foreground `run` is waiting on the foreground process
+- **THEN** the artifact lock is not held and a parallel `stop` acquires the exclusive lock and terminates the registered runtime
+
+#### Scenario: identity validation is preserved
+
+- **WHEN** a parallel `stop` reads the persisted runtime identity
+- **THEN** PID/create-time/process-group validation runs as before and stale-runtime recognition is preserved
 
 ### Requirement: Effective runtime diagnosis
 Doctor SHALL reuse the existing resolver/runtime view to report owner kind (`environment` or `project`), selection source, and effective Python, Odoo binary, config, database, and HTTP URL while distinguishing configured values from current availability. It SHALL work for initialized default checkouts, start no process, and expose no passwords or environment secrets. [Source: GH#43]

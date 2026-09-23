@@ -398,6 +398,53 @@ catalog = BackupCatalog.default()
 catalog.relink_backup_project("00000000-0000-0000-0000-000000000001", "my-project")
 ```
 
+## Bug-report drafts and GitHub submit
+
+`bug_report_init_command()` and `bug_report_submit_command()` are the public SDK
+primitives for the bug-report workflow. The CLI delegates to them; no
+`cli_only_reason` is used. `init` creates a UUID draft under
+`get_user_root()/bug-reports/<REPORT_ID>/`; `submit` validates structure,
+review approval, and payload hash before invoking `gh` through `internal/proc`.
+
+```python
+from odoo_instance_sdk.bug_report import (
+    bug_report_init_command,
+    bug_report_submit_command,
+)
+
+init = bug_report_init_command(
+    title="stop does not stop foreground run",
+    kind="bug",
+)
+print(init.plan)
+draft = init.run()
+print(draft.report_id, draft.report_md_path)
+
+submit = bug_report_submit_command(draft.report_id, dry_run=True)
+print(submit.plan)
+preview = submit.run()
+print(preview.report_valid, preview.submit_ready)
+```
+
+## Self-upgrade for uv-tool installs
+
+`update_command()` is the public SDK primitive for `odcli update`. `--check`
+and `--dry-run` are process-previewable variants; mutating execution quiesces
+with an exclusive lock, snapshots metadata, installs through `uv`, and runs
+maintenance migrations in a child `odcli` with `ODCLI_MAINTENANCE=1`.
+
+```python
+from odoo_instance_sdk.internal.self_update import update_command
+
+check = update_command(check=True, dry_run=False)
+print(check.plan)
+result = check.run()
+print(result.outcome, result.target_version)
+
+upgrade = update_command(ref="main", dry_run=True, yes=False)
+print(upgrade.plan)
+```
+
 See [execution-boundary.md](execution-boundary.md) for the canonical CLI leaf
 inventory, native-stream exceptions, and the checked process/output/type
 allowlists.

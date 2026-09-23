@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-postgres-cluster-lifecycle. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: `PostgresCluster` public abstraction
 
 `PostgresCluster` MUST быть единственной operational abstraction для project-level PostgreSQL cluster. SDK MUST NOT предоставлять `Resource`-подобный интерфейс, factory hierarchy или `client.postgres` facade.
@@ -150,13 +152,7 @@ snapshot = cluster.resource_snapshot()  # read-only container identity + metrics
 
 ### Requirement: `ensure_running()` is idempotent
 
-`PostgresCluster.ensure_running(timeout: float = 60.0) -> None` MUST:
-
-- для `external` — вызывать `status()`; если `HEALTHY` — return; иначе raise `PostgresClusterUnreachableError` (typed, redacted);
-- для `compose` — если `HEALTHY` — return; если `STOPPED`/`UNREACHABLE`/`STARTING` — `compose up --detach --wait` с timeout, затем poll `status()` до `HEALTHY` или timeout; `UNHEALTHY` → raise `PostgresClusterUnhealthyError`; timeout → `PostgresClusterTimeoutError`;
-- никогда не вызывать Docker в external mode;
-- быть retry-safe (повторный вызов после успеха — no-op);
-- не логировать и не поднимать пароль в исключениях.
+`PostgresCluster.ensure_running_command()` SHALL remain idempotent. `odcli postgres up` SHALL build its diagnostic result from the captured cluster even when `ensure_running_command()` returns `None` (success). The result SHALL show actual `mode`, `owned`, `state`, and `endpoint` in Rich/JSON/TOON, not `unknown`/`false`/`—`. A failed, empty, or unparseable Docker metrics snapshot SHALL NOT imply `STOPPED`; `stopped` SHALL follow only from a successful `PostgresCluster.status_command()`.
 
 #### Scenario: External ensure_running probes only
 
@@ -182,6 +178,16 @@ snapshot = cluster.resource_snapshot()  # read-only container identity + metrics
 
 - **WHEN** `cluster.ensure_running()` on a compose cluster that is `UNHEALTHY`
 - **THEN** raises `PostgresClusterUnhealthyError`
+
+#### Scenario: successful postgres up shows real state
+
+- **WHEN** `odcli postgres up` succeeds and `ensure_running_command()` returns `None`
+- **THEN** the diagnostic result is built from the captured cluster and shows actual `mode`, `owned`, `state`, and `endpoint`
+
+#### Scenario: failed metrics do not imply stopped
+
+- **WHEN** a running cluster has an empty or unparseable Docker metrics snapshot
+- **THEN** the cluster state comes from `PostgresCluster.status_command()`, not from the metrics snapshot
 
 ### Requirement: Compose image trust and serialized lifecycle
 
@@ -514,4 +520,3 @@ An SDK-owned Compose cluster resource snapshot SHALL expose a stable redacted vo
 
 - **WHEN** volume ownership cannot be proven exclusively from the generated Compose identity
 - **THEN** the volume is preserved and reported as non-reclaimable with unknown or shared ownership
-
