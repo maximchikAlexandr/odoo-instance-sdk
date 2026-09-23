@@ -407,7 +407,7 @@ def test_unfinished_journal_blocks_other_commands(user_root: Path) -> None:
             {
                 "version": 1,
                 "phase": "migrate",
-                "target_ref": "main",
+                "target_ref": _SHA_B,
                 "snapshot_sha": _SHA_A,
                 "maintenance_pid": None,
             }
@@ -742,7 +742,7 @@ def test_update_resumes_from_install_journal(
             {
                 "version": 1,
                 "phase": "install",
-                "target_ref": "main",
+                "target_ref": _SHA_B,
                 "snapshot_sha": _SHA_A,
                 "maintenance_pid": None,
             }
@@ -752,7 +752,7 @@ def test_update_resumes_from_install_journal(
     executor = _executor_factory({"install_rc": 0, "maintenance_rc": 0})
     result = update_command(ref="main", executor=executor).run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == ["update.resolve", "update.migrate"]
+    assert [step.step_id for step in executor.executed] == ["update.migrate"]
 
 
 def test_update_no_input_without_yes_exits_before_mutations() -> None:

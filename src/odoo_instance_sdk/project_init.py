@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,9 +27,124 @@ from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, RunContext
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
 
 
-def init_project_command(  # noqa: C901
+@dataclass(frozen=True, slots=True)
+class _ComposeFollowup:
+    cluster: PostgresCluster
+    temporary_path: Path
+    steps: tuple[PreparedStep | PreparedAction, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _BootstrapFollowup:
+    spawn_step: PreparedStep
+    probe_step: PreparedStep
+    ready_step: PreparedStep
+    verify_action: PreparedAction
+
+    @property
+    def steps(self) -> tuple[PreparedStep | PreparedAction, ...]:
+        return (self.spawn_step, self.probe_step, self.ready_step, self.verify_action)
+
+
+def _execute_remote_database_names_phase(
+    context: RunContext[dict[str, JsonValue]],
+    *,
+    remote_names_step: PreparedAction | None,
+    effective_config: ProjectConfig,
+    resolved_existing: TestInstanceProjectConfig | None,
+    remote_database_names: list[str] | None,
+) -> list[str] | None:
+    if remote_names_step is None:
+        return remote_database_names
+    context.action(remote_names_step.step_id)
+    test_instance = effective_config.test_instance or resolved_existing
+    resolved_names = (
+        fetch_remote_database_names_for_init(test_instance)
+        if test_instance is not None
+        else remote_database_names
+    )
+    context.complete_action(remote_names_step.step_id)
+    return resolved_names
+
+
+def _execute_manifest_phase(
+    context: RunContext[dict[str, JsonValue]],
+    *,
+    project_path: Path,
+    effective_config: ProjectConfig,
+    postgres_allocated: bool,
+    local_config: bool,
+    postgres_image: str | None,
+    resolved_existing: TestInstanceProjectConfig | None,
+    allow_partial: bool,
+    no_input: bool,
+    confirm_partial: Callable[[list[str], dict[str, str]], None] | None,
+    remote_database_names: list[str] | None,
+) -> dict[str, JsonValue]:
+    from odoo_instance_sdk.exceptions import InstanceConfigurationError
+
+    missing, details = evaluate_init_completeness(
+        project_root=project_path.resolve(),
+        config=effective_config,
+        local_config=local_config,
+        postgres_image=postgres_image,
+        existing_test_instance=resolved_existing,
+        dry_run=False,
+        remote_database_names=remote_database_names,
+    )
+    if missing and confirm_partial is not None:
+        confirm_partial(missing, details)
+    if missing and no_input and not allow_partial:
+        raise InstanceConfigurationError(
+            f"init_incomplete: missing capabilities {missing} ({details})"
+        )
+    context.action("init")
+    result = init_project(
+        project_path,
+        effective_config,
+        postgres_allocated=postgres_allocated,
+        local_config=local_config,
+        postgres_image=postgres_image,
+        existing_test_instance=resolved_existing,
+        allow_partial=allow_partial,
+        no_input=no_input,
+        dry_run=False,
+        remote_database_names=remote_database_names,
+        missing=missing,
+        details=details,
+    )
+    context.complete_action("init")
+    return result
+
+
+def _execute_compose_followup_phase(
+    context: RunContext[dict[str, JsonValue]], followup: _ComposeFollowup
+) -> None:
+    followup.cluster.execute_ensure_running_plan(
+        context,
+        timeout=60.0,
+        temporary_path=followup.temporary_path,
+        steps=followup.steps,
+    )
+
+
+def _execute_bootstrap_followup_phase(
+    context: RunContext[dict[str, JsonValue]], followup: _BootstrapFollowup
+) -> None:
+    from odoo_instance_sdk.internal.dbprep.bootstrap import run_bootstrap_tmp
+
+    context.action(followup.verify_action.step_id)
+    run_bootstrap_tmp(context, followup.spawn_step, followup.probe_step, followup.ready_step)
+    context.complete_action(followup.verify_action.step_id)
+    for step in followup.steps:
+        if context.planned(step.step_id) and not context.consumed(step.step_id):
+            context.skip(step.step_id)
+
+
+def init_project_command(
     project_path: Path,
     config: ProjectConfig,
     *,
@@ -85,10 +201,10 @@ def init_project_command(  # noqa: C901
             project_generated_config_path(project_path), project_root=project_path.resolve()
         )
 
-    compose_steps: tuple[PreparedStep | PreparedAction, ...] = ()
-    bootstrap_steps: tuple[PreparedStep | PreparedAction, ...] = ()
+    compose_followup: _ComposeFollowup | None = None
+    bootstrap_followup: _BootstrapFollowup | None = None
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
-        compose_steps, bootstrap_steps = _compose_followup_steps(
+        compose_followup, bootstrap_followup = _compose_followup_steps(
             project_path,
             effective_config,
             dry_run=dry_run,
@@ -103,106 +219,35 @@ def init_project_command(  # noqa: C901
     prepared_steps: tuple[PreparedAction | PreparedStep, ...] = (
         *((remote_names_step,) if remote_names_step is not None else ()),
         init_action,
-        *compose_steps,
-        *bootstrap_steps,
+        *(compose_followup.steps if compose_followup is not None else ()),
+        *(bootstrap_followup.steps if bootstrap_followup is not None else ()),
     )
 
     def run(context: RunContext[dict[str, JsonValue]]) -> dict[str, JsonValue]:
-        from odoo_instance_sdk.exceptions import InstanceConfigurationError
-        from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
-
-        resolved_remote_names = remote_database_names
-        if remote_names_step is not None:
-            context.action(remote_names_step.step_id)
-            test_instance = effective_config.test_instance or resolved_existing
-            if test_instance is not None:
-                resolved_remote_names = fetch_remote_database_names_for_init(test_instance)
-            context.complete_action(remote_names_step.step_id)
-        missing, details = evaluate_init_completeness(
-            project_root=project_path.resolve(),
-            config=effective_config,
-            local_config=local_config,
-            postgres_image=postgres_image,
-            existing_test_instance=resolved_existing,
-            dry_run=False,
-            remote_database_names=resolved_remote_names,
+        resolved_remote_names = _execute_remote_database_names_phase(
+            context,
+            remote_names_step=remote_names_step,
+            effective_config=effective_config,
+            resolved_existing=resolved_existing,
+            remote_database_names=remote_database_names,
         )
-        if missing and confirm_partial is not None:
-            confirm_partial(missing, details)
-        if missing and no_input and not allow_partial:
-            raise InstanceConfigurationError(
-                f"init_incomplete: missing capabilities {missing} ({details})"
-            )
-        context.action("init")
-        result = init_project(
-            project_path,
-            effective_config,
+        result = _execute_manifest_phase(
+            context,
+            project_path=project_path,
+            effective_config=effective_config,
             postgres_allocated=postgres_allocated,
             local_config=local_config,
             postgres_image=postgres_image,
-            existing_test_instance=resolved_existing,
+            resolved_existing=resolved_existing,
             allow_partial=allow_partial,
             no_input=no_input,
-            dry_run=False,
+            confirm_partial=confirm_partial,
             remote_database_names=resolved_remote_names,
-            missing=missing,
-            details=details,
         )
-        context.complete_action("init")
-        if compose_steps:
-            from odoo_instance_sdk.exceptions import PostgresClusterError
-            from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-            cluster = PostgresCluster.from_project(project_path)
-            temporary_path = None
-            if cluster.mode == "compose":
-                if not context.planned("postgres.ensure.config"):
-                    raise PostgresClusterError(
-                        "compose init plan is missing postgres.ensure.config"
-                    )
-                config_step = context.prepared("postgres.ensure.config")
-                try:
-                    config_index = len(config_step.argv) - 1 - config_step.argv[::-1].index("-f")
-                    temporary_path = Path(config_step.argv[config_index + 1])
-                except (ValueError, IndexError) as exc:
-                    raise PostgresClusterError(
-                        "captured postgres ensure config step has no temporary compose path"
-                    ) from exc
-            step_ids = {
-                step.step_id: step.step_id
-                for step in compose_steps
-                if isinstance(step, PreparedStep)
-            }
-            cluster._ensure_running_impl(
-                60.0,
-                temporary_path=temporary_path,
-                step_ids=step_ids,
-            )
-            cluster._account_optional_steps(context, compose_steps)
-        if bootstrap_steps:
-            from odoo_instance_sdk.internal.dbprep.bootstrap import run_bootstrap_tmp
-
-            spawn_step = next(
-                step for step in bootstrap_steps if step.step_id == "init.bootstrap.tmp"
-            )
-            probe_step = next(
-                step for step in bootstrap_steps if step.step_id == "init.bootstrap.tmp.probe"
-            )
-            ready_step = next(
-                step for step in bootstrap_steps if step.step_id == "init.bootstrap.tmp.ready"
-            )
-            verify_action = next(
-                step
-                for step in bootstrap_steps
-                if isinstance(step, PreparedAction) and step.step_id == "init.bootstrap.tmp.verify"
-            )
-            assert isinstance(spawn_step, PreparedStep)
-            assert isinstance(probe_step, PreparedStep)
-            assert isinstance(ready_step, PreparedStep)
-            context.action(verify_action.step_id)
-            run_bootstrap_tmp(context, spawn_step, probe_step, ready_step)
-            context.complete_action(verify_action.step_id)
-            PostgresCluster._account_optional_steps(context, bootstrap_steps)
+        if compose_followup is not None:
+            _execute_compose_followup_phase(context, compose_followup)
+        if bootstrap_followup is not None:
+            _execute_bootstrap_followup_phase(context, bootstrap_followup)
         return result
 
     return Command.from_prepared(
@@ -216,7 +261,7 @@ def _compose_followup_steps(
     config: ProjectConfig,
     *,
     dry_run: bool,
-) -> tuple[tuple[PreparedStep | PreparedAction, ...], tuple[PreparedStep | PreparedAction, ...]]:
+) -> tuple[_ComposeFollowup, _BootstrapFollowup]:
     """Return postgres ensure-running and bootstrap ``tmp`` steps for compose init."""
     from odoo_instance_sdk.internal.dbprep.bootstrap import bootstrap_tmp_steps
     from odoo_instance_sdk.internal.generated_config import project_generated_config_path
@@ -266,7 +311,19 @@ def _compose_followup_steps(
         db_password=password,
         default_cwd=root,
     )
-    return postgres_steps, (spawn_step, probe_step, ready_step, ready_action)
+    return (
+        _ComposeFollowup(
+            cluster=cluster,
+            temporary_path=temporary_path,
+            steps=postgres_steps,
+        ),
+        _BootstrapFollowup(
+            spawn_step=spawn_step,
+            probe_step=probe_step,
+            ready_step=ready_step,
+            verify_action=ready_action,
+        ),
+    )
 
 
 def _planned_command_prefix(root: Path, config: ProjectConfig) -> tuple[str, ...]:

@@ -4,7 +4,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     import click
@@ -13,7 +13,9 @@ else:
 
 from odoo_instance_sdk.commands.output import (
     JsonValue,
+    OutputDocument,
     OutputMode,
+    _InspectableCommand,
     fail,
     model_to_dict,
     output_options,
@@ -72,6 +74,22 @@ class _InitRequest:
     output_format: str | None
     json_output: bool
     project_path: str | None
+
+
+class _InitRunner(Protocol):
+    def __call__(
+        self,
+        build_command: Callable[[], _InspectableCommand[dict[str, JsonValue]]],
+        *,
+        command_name: str,
+        mode: OutputMode,
+        dry_run: bool,
+        result: Callable[[dict[str, JsonValue] | None], dict[str, JsonValue]] | None = None,
+        provenance: dict[str, JsonValue] | None = None,
+        rich: Callable[[OutputDocument], str] | None = None,
+        preview: Callable[[_InspectableCommand[dict[str, JsonValue]]], dict[str, JsonValue]]
+        | None = None,
+    ) -> tuple[int, dict[str, JsonValue] | None]: ...
 
 
 def _bind_init_request(options: dict[str, InitOption]) -> _InitRequest:
@@ -137,7 +155,7 @@ def _execute_init(
     output_mode: OutputMode,
     effective_no_input: bool,
     confirm_partial: Callable[[list[str], dict[str, str]], None] | None,
-    run_or_preview: Callable[..., tuple[int, dict[str, JsonValue] | None]],
+    run_or_preview: _InitRunner,
 ) -> None:
     resolved_project = Path(request.project_path) if request.project_path else Path.cwd()
     provenance: dict[str, list[str]] = {

@@ -855,22 +855,7 @@ def update_command(
         )
     if check:
         return _build_check_command(ref=ref, provenance=provenance, executor=executor)
-    if dry_run and not _is_full_sha(ref):
-        target_sha = ref
-    else:
-        try:
-            from odoo_instance_sdk.internal.self_update_commands import resolve_update_target_sha
-
-            target_sha = resolve_update_target_sha(ref, executor=executor)
-        except UnsupportedInstallError as exc:
-            return _build_failure_command(
-                _failure_result(
-                    "unsupported_install",
-                    provenance=provenance,
-                    manual_argv=exc.manual_argv,
-                    next_step=str(exc),
-                )
-            )
+    target_sha = ref.lower() if _is_full_sha(ref) else ref
     if (
         not dry_run
         and provenance.commit_id is not None

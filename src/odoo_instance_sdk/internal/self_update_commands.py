@@ -237,7 +237,7 @@ def resolve_update_target_sha(
     *,
     executor: ProcessExecutor | None,
 ) -> str:
-    """Resolve a mutable ref before any update command is constructed."""
+    """Resolve a mutable ref from the declared post-confirmation phase."""
     if _is_full_sha(ref):
         return ref.lower()
     step = PreparedStep(
@@ -264,6 +264,15 @@ def _journal_resume_phase(journal: dict[str, JsonValue] | None) -> str | None:
         return None
     phase = journal.get("phase")
     return phase if isinstance(phase, str) else None
+
+
+def _journal_target_ref(journal: dict[str, JsonValue] | None) -> str | None:
+    if journal is None:
+        return None
+    raw = journal.get("target_ref")
+    if isinstance(raw, str) and _is_full_sha(raw):
+        return raw.lower()
+    raise UpdateError("unfinished update journal has no immutable target_ref")
 
 
 def _journal_snapshot_sha(
@@ -317,6 +326,7 @@ class _UpdateSession:
     snapshot_dir: Path = field(init=False)
     resume_phase: str | None = field(init=False)
     snapshot_sha: str | None = field(init=False)
+    journal_target_ref: str | None = field(init=False)
     durations: dict[str, float] = field(default_factory=dict)
     recovery_step: PreparedStep | None = None
     maintenance_result: ProcessResult | None = None
@@ -328,6 +338,11 @@ class _UpdateSession:
         journal = _read_journal(self.journal_path)
         self.resume_phase = _journal_resume_phase(journal)
         self.snapshot_sha = _journal_snapshot_sha(journal, self.provenance)
+        self.journal_target_ref = _journal_target_ref(journal)
+        if self.journal_target_ref is not None:
+            if _is_full_sha(self.ref) and self.ref.lower() != self.journal_target_ref:
+                raise UpdateError("requested ref conflicts with the unfinished update journal")
+            self.ref = self.journal_target_ref
 
     def _start(self, phase: str) -> float:
         return time.monotonic()
@@ -340,7 +355,12 @@ class _UpdateSession:
         self.context.action("update.inspect")
         self.context.complete_action("update.inspect")
         self._finish("inspect", started)
+        if self.journal_target_ref is not None or _is_full_sha(self.ref):
+            self.context.skip("update.resolve")
+            self.ref = self.ref.lower()
+            return
         self.context.action("update.resolve")
+        self.ref = resolve_update_target_sha(self.ref, executor=self.executor)
         self.context.complete_action("update.resolve")
 
     def preflight(self) -> str | None:
