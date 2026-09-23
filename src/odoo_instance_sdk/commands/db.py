@@ -831,7 +831,7 @@ def _list_rich(document: OutputDocument) -> str:
             rich_cell(row.get("origin", "unknown")),
         )
     width = Console().width
-    cluster = render_rich_text(rich_cell(payload.get("cluster", "—")), width=width)
+    cluster = render_rich_text(rich_cell(f"Cluster: {payload.get('cluster', '—')}"), width=width)
     return f"{cluster}\n{render_rich_text(table, width=width)}"
 
 

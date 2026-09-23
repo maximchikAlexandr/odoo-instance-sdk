@@ -72,11 +72,9 @@ def _postgres_state_cells(payload: dict[str, JsonValue]) -> tuple[str, str]:
     except ValueError:
         lifecycle = PostgresClusterState.UNKNOWN
     unavailable = payload.get("unavailability_reason")
-    server_unavailable = payload.get("server_unavailability_reason")
     return postgres_state_cells(
         lifecycle,
         unavailable if isinstance(unavailable, str) else None,
-        server_unavailable if isinstance(server_unavailable, str) else None,
     )
 
 
@@ -182,10 +180,11 @@ def _database_resource(
 
 def _render_rows(title: str, rows: JsonValue) -> str:
     """Render one typed row collection as a Rich table without changing data."""
-    return render_rich_text(_rows_table(title, rows), width=120)
+    width = Console().width
+    return render_rich_text(_rows_table(title, rows, width=width), width=width)
 
 
-def _rows_table(title: str, rows: JsonValue) -> Table:
+def _rows_table(title: str, rows: JsonValue, *, width: int) -> Table:
     if not isinstance(rows, (list, tuple)) or not rows:
         table = bordered_table("value", title=title)
         table.add_row("(none)")
@@ -197,6 +196,29 @@ def _rows_table(title: str, rows: JsonValue) -> Table:
             table.add_row(rich_cell(payload))
         else:
             columns = tuple(str(key) for key in payload)
+            if width <= 80 and len(columns) > 2:
+                identity_column = next(
+                    (
+                        column
+                        for column in ("table", "index", "relation", "blocked_pid", "pid")
+                        if column in columns
+                    ),
+                    columns[0],
+                )
+                table = bordered_table("Record", "Details", title=title)
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    details = " | ".join(
+                        f"{column}={row.get(column, '—')}"
+                        for column in columns
+                        if column != identity_column
+                    )
+                    table.add_row(
+                        rich_cell(row.get(identity_column, "—")),
+                        rich_cell(details),
+                    )
+                return table
             table = bordered_table(*columns, title=title)
             for row in rows:
                 value = row
@@ -207,8 +229,10 @@ def _rows_table(title: str, rows: JsonValue) -> Table:
 
 def _render_row_sections(*sections: tuple[str, JsonValue]) -> str:
     """Render related result sets in one spaced Rich document."""
+    width = Console().width
     return "\n\n".join(
-        render_rich_text(_rows_table(title, rows), width=120) for title, rows in sections
+        render_rich_text(_rows_table(title, rows, width=width), width=width)
+        for title, rows in sections
     )
 
 

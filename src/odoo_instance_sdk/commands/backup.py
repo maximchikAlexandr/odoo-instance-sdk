@@ -336,27 +336,14 @@ def _rich_validation(document: OutputDocument) -> str:
     elif not document.ok and document.error is not None:
         table.add_row("Error", rich_cell(document.error.message))
     terminal_width = Console().width
-    if not document.ok:
-        return _validation_error_line(result, status, document, terminal_width)
     return render_rich_text(table, width=terminal_width)
 
 
-def _validation_error_line(
-    result: JsonObject,
-    status: str,
-    document: OutputDocument,
-    terminal_width: int,
-) -> str:
-    fields = [f"Backup validation: {status}"]
-    for field in ("db_name", "db_version"):
-        if result.get(field) is not None:
-            fields.append(f"{field}={result[field]}")
-    errors = result.get("errors")
-    if isinstance(errors, list) and errors:
-        fields.extend(f"error={error}" for error in errors)
-    elif document.error is not None:
-        fields.append(f"error={document.error.message}")
-    return " | ".join(fields)[:terminal_width]
+def _emit_validation_failure(document: OutputDocument, mode: OutputMode) -> None:
+    if mode is OutputMode.RICH:
+        rich_print(_rich_validation(document), preserve_newlines=True)
+    else:
+        emit(document, mode, rich=_rich_validation)
 
 
 def _rich_delete(document: OutputDocument) -> str:
@@ -503,7 +490,7 @@ def backup_validate(backup_id: str, output_format: str | None, json_output: bool
         refreshed = catalog._resolve_backup_projection(backup_id)
         validation_status = _validation_status(refreshed)
         if validation_status is BackupValidationStatus.INVALID:
-            emit(
+            _emit_validation_failure(
                 failure_document(
                     command="backup.validate",
                     dry_run=False,
@@ -512,11 +499,10 @@ def backup_validate(backup_id: str, output_format: str | None, json_output: bool
                     error_details=payload,
                 ),
                 mode,
-                rich=_rich_validation,
             )
             raise click.exceptions.Exit(1)  # noqa: TRY301
         if validation_status is BackupValidationStatus.UNAVAILABLE:
-            emit(
+            _emit_validation_failure(
                 failure_document(
                     command="backup.validate",
                     dry_run=False,
@@ -525,7 +511,6 @@ def backup_validate(backup_id: str, output_format: str | None, json_output: bool
                     error_details=payload,
                 ),
                 mode,
-                rich=_rich_validation,
             )
             raise click.exceptions.Exit(1)  # noqa: TRY301
         emit(
