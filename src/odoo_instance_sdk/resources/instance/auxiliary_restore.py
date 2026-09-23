@@ -395,6 +395,13 @@ def _auxiliary_start_step(instance: OdooInstance) -> tuple[PreparedStep, StartCo
         raise InstanceConfigurationError(
             "stopped-project restore requires a project StartConfig; run `odcli init`"
         )
+    config = copy.deepcopy(config)
+    cluster = instance._postgres_cluster
+    if cluster is not None and cluster.owned:
+        from odoo_instance_sdk.internal.dbprep.bootstrap import BOOTSTRAP_DATABASE
+
+        config.db_name = BOOTSTRAP_DATABASE
+        config.dbfilter = BOOTSTRAP_DATABASE
     snapshot, cli_args, secret_path, _ = _snapshot_start_inputs(config)
     environment_snapshot, environment_overrides = captured_child_environment(
         None, project_environment=instance.config.project_environment

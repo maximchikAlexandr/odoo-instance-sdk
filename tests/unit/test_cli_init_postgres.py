@@ -16,6 +16,37 @@ from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
+@pytest.fixture(autouse=True)
+def _stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compose init now chains postgres start and tmp bootstrap after scaffold."""
+
+    def _noop_ensure_running(
+        self: PostgresCluster,
+        timeout: float = 60.0,
+        *,
+        temporary_path: Path | None = None,
+        step_ids: object = None,
+    ) -> None:
+        return None
+
+    def _skip_bootstrap_tmp(
+        context: object,
+        spawn_step: object,
+        probe_step: object,
+        ready_step: object,
+    ) -> bool:
+        context.skip(spawn_step.step_id)
+        context.skip(probe_step.step_id)
+        context.skip(ready_step.step_id)
+        return True
+
+    monkeypatch.setattr(PostgresCluster, "_ensure_running_impl", _noop_ensure_running)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
+        _skip_bootstrap_tmp,
+    )
+
+
 def test_module_init_executes_helpers_defined_after_commands(tmp_path: Path) -> None:
     result = subprocess.run(
         [
@@ -40,6 +71,7 @@ def _base_args(tmp_path: Path) -> list[str]:
     return [
         "init",
         "--no-input",
+        "--allow-partial",
         "--odoo-bin",
         "/opt/odoo/odoo-bin",
         "--python",
@@ -64,6 +96,7 @@ def test_init_compose_with_image_writes_postgres_section(tmp_path: Path) -> None
             *_base_args(tmp_path),
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -99,6 +132,7 @@ def test_init_compose_secret_matches_cluster_after_captured_init(
             *_base_args(tmp_path),
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -120,6 +154,7 @@ def test_init_compose_allocates_free_port(tmp_path: Path) -> None:
             *_base_args(tmp_path),
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
         ],
@@ -141,6 +176,7 @@ def test_init_compose_user_defaults_from_source_config(tmp_path: Path) -> None:
             str(cfg),
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -180,6 +216,7 @@ def test_init_compose_generates_private_project_runtime_config(
             "8077",
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -236,6 +273,7 @@ def test_init_compose_user_defaults_to_odoo_without_source(
             *_base_args(tmp_path),
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -292,6 +330,7 @@ def test_init_compose_refuses_pretracked_generated_config_without_secret_write(
             *_base_args(tmp_path),
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -325,6 +364,7 @@ def test_reinit_validates_generated_target_before_noop_and_dry_run(
         *_base_args(tmp_path),
         "--postgres",
         "compose",
+        "--allow-partial",
         "--postgres-image",
         "pgvector/pgvector:pg16",
         "--postgres-port",
@@ -379,6 +419,7 @@ def test_sdk_init_command_rejects_secret_target_before_cluster_password_read(
         *_base_args(tmp_path),
         "--postgres",
         "compose",
+        "--allow-partial",
         "--postgres-image",
         "pgvector/pgvector:pg16",
         "--postgres-port",
@@ -444,6 +485,7 @@ def test_sdk_init_rejects_group_writable_secret_parent_before_mutation(
         *_base_args(tmp_path),
         "--postgres",
         "compose",
+        "--allow-partial",
         "--postgres-image",
         "pgvector/pgvector:pg16",
         "--postgres-port",
@@ -478,6 +520,7 @@ def test_reinit_repairs_stale_generated_config_without_manifest_changes(
         *_base_args(tmp_path),
         "--postgres",
         "compose",
+        "--allow-partial",
         "--postgres-image",
         "pgvector/pgvector:pg16",
         "--postgres-port",
@@ -526,6 +569,7 @@ def test_init_compose_fails_closed_when_git_is_unavailable(
             str(source),
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -590,6 +634,7 @@ def test_init_compose_fails_closed_on_rev_parse_failure_with_git_marker(
             str(source),
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -658,6 +703,7 @@ def test_init_dry_run_json_reports_postgres_plan(tmp_path: Path) -> None:
             "json",
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -673,7 +719,9 @@ def test_init_dry_run_json_reports_postgres_plan(tmp_path: Path) -> None:
     assert postgres["image"] == "pgvector/pgvector:pg16"
     assert postgres["port"] == 5468
     assert postgres["user"] == "odoo"
-    assert "password" not in json.dumps(envelope).lower()
+    serialized = json.dumps(envelope)
+    assert "dry-run-placeholder" not in serialized
+    assert postgres.get("password") is None
     assert not (tmp_path / ".odcli" / "project.toml").exists()
 
 
@@ -683,6 +731,7 @@ def test_init_idempotent_with_postgres_section(tmp_path: Path) -> None:
         *_base_args(tmp_path),
         "--postgres",
         "compose",
+        "--allow-partial",
         "--postgres-image",
         "pgvector/pgvector:pg16",
         "--postgres-port",
@@ -741,14 +790,18 @@ def test_init_retries_registration_after_catalog_failure_and_monitor_discovers_p
     assert any(project.id == project_id for project in snapshot.projects)
 
 
-def test_init_compose_does_not_start_docker(tmp_path: Path) -> None:
+def test_init_compose_starts_owned_cluster_via_command_plan(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(
         cli,
         [
             *_base_args(tmp_path),
+            "--dry-run",
+            "--format",
+            "json",
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",
@@ -756,10 +809,10 @@ def test_init_compose_does_not_start_docker(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 0
-    # init does not invoke docker compose; artifacts are created lazily at first `up`.
-    # We confirm by checking that no process spawn occurred (exit 0 without docker).
-    # Direct artifact check is environment-dependent on repo_key collisions; rely on
-    # the SDK contract: init must not write the compose directory.
+    envelope = json.loads(result.output)
+    step_ids = [step["step_id"] for step in envelope["data"]["plan"]["steps"]]
+    assert "postgres.ensure.up" in step_ids
+    assert "init.bootstrap.tmp" in step_ids
 
 
 def test_init_postgres_provenance_recorded(tmp_path: Path) -> None:
@@ -773,6 +826,7 @@ def test_init_postgres_provenance_recorded(tmp_path: Path) -> None:
             "json",
             "--postgres",
             "compose",
+            "--allow-partial",
             "--postgres-image",
             "pgvector/pgvector:pg16",
             "--postgres-port",

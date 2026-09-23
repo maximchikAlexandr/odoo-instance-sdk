@@ -32,28 +32,28 @@
 
 ## 5. Self-contained `init` (item 5)
 
-- [ ] 5.1 Add `--test-url`, `--test-database`, `--test-branch`, `--local-config`, and `--allow-partial` to `odcli init`.
-- [ ] 5.2 Fill the existing `[test_instance]` from the new options; select generated `.odcli/odoo.conf` as effective local `source_config` under `--local-config`.
-- [ ] 5.3 Create `.odcli/.env` with `ODCLI_TEST_INSTANCE_ORIGIN_PINS=<canonical origin>` (existing `test_instance_trust` grammar) and an empty `ODCLI_TEST_MASTER_PASSWORD=` under `0600`; ignore it in Git.
-- [ ] 5.4 Record `data_dir` as the absolute `{project_root}/.odcli/filestore` in generated `.odcli/odoo.conf` for self-contained Compose setups.
-- [ ] 5.5 Implement the blocking completeness check using the missing-group predicates in design D5. `--dry-run` SHALL NOT call `DatabaseResource.names()`; `test_database` is missing on dry-run when absent from flags and manifest. Execute MAY call `names()` as an HTTP ActionStep and drop `test_database` when the list has exactly one name. Interactive: Click confirm default cancel when not `no_input` and RICH. Non-RICH uses the `--no-input` path. `--no-input` fails with `init_incomplete` unless `--allow-partial`. `--dry-run` does not prompt. `getpass` is MAY, not required.
-- [ ] 5.6 Preserve an existing valid `[test_instance]` on re-run without test-instance options; explicit new options replace it atomically after validation.
-- [ ] 5.7 Keep `--dry-run` side-effect-free: no manifest/config/dotenv writes, no secret generation, no cluster mutation.
-- [ ] 5.8 Add tests covering full setup, partial setup with `--allow-partial`, `--no-input` `init_incomplete`, re-run preserving `[test_instance]`, unique remote database not listed as missing, and external PostgreSQL still requiring `--allow-partial` when test instance is missing.
-- [ ] 5.9 Add a regression test for the public CLI flow `init → fill password → db refresh --restore --dry-run` without manual TOML/config edits.
-- [ ] 5.10 Run focused tests, Ruff, and mypy.
+- [x] 5.1 Add `--test-url`, `--test-database`, `--test-branch`, `--local-config`, and `--allow-partial` to `odcli init`.
+- [x] 5.2 Fill the existing `[test_instance]` from the new options; select generated `.odcli/odoo.conf` as effective local `source_config` under `--local-config`.
+- [x] 5.3 Create `.odcli/.env` with `ODCLI_TEST_INSTANCE_ORIGIN_PINS=<canonical origin>` (existing `test_instance_trust` grammar) and an empty `ODCLI_TEST_MASTER_PASSWORD=` under `0600`; ignore it in Git.
+- [x] 5.4 Record `data_dir` as the absolute `{project_root}/.odcli/filestore` in generated `.odcli/odoo.conf` for self-contained Compose setups.
+- [x] 5.5 Implement the blocking completeness check using the missing-group predicates in design D5. `--dry-run` SHALL NOT call `DatabaseResource.names()`; `test_database` is missing on dry-run when absent from flags and manifest. Execute MAY call `names()` as an HTTP ActionStep and drop `test_database` when the list has exactly one name. Interactive: Click confirm default cancel when not `no_input` and RICH. Non-RICH uses the `--no-input` path. `--no-input` fails with `init_incomplete` unless `--allow-partial`. `--dry-run` does not prompt. `getpass` is MAY, not required.
+- [x] 5.6 Preserve an existing valid `[test_instance]` on re-run without test-instance options; explicit new options replace it atomically after validation.
+- [x] 5.7 Keep `--dry-run` side-effect-free: no manifest/config/dotenv writes, no secret generation, no cluster mutation.
+- [x] 5.8 Add tests covering full setup, partial setup with `--allow-partial`, `--no-input` `init_incomplete`, re-run preserving `[test_instance]`, unique remote database not listed as missing, and external PostgreSQL still requiring `--allow-partial` when test instance is missing.
+- [x] 5.9 Add a regression test for the public CLI flow `init → fill password → db refresh --restore --dry-run` without manual TOML/config edits.
+- [x] 5.10 Run focused tests, Ruff, and mypy.
 
 ## 5a. Bootstrap database `tmp` (item 5 GitHub comment)
 
-- [ ] 5a.1 After owned Compose cluster start, create Odoo database `tmp` as a ProcessStep on the existing `init` command via the instance runtime builder plus `--database tmp --init=base --stop-after-init` through `internal/proc`, `shell=False`. Tests use the proc recorder (or live E2E); do not add a module-local subprocess patch.
-- [ ] 5a.2 Idempotent: valid `tmp` is not recreated; invalid same-named DB fails with `init_bootstrap_failed`.
-- [ ] 5a.3 After `--stop-after-init`, confirm `base` via SQL `SELECT state FROM ir_module_module WHERE name = 'base'` on `tmp` = `installed`. Do not POST `version_info` at init.
-- [ ] 5a.4 Auxiliary restore uses `tmp` and does not add hidden `--database=__odcli_restore__` or `--db-filter=^$`.
-- [ ] 5a.5 After a successful restore, switch the project default to the restored database; `tmp` remains bootstrap.
-- [ ] 5a.6 `--dry-run` shows the `tmp` step and does not spawn; a failure does not return successful project setup.
-- [ ] 5a.7 Add a regression flow with `pytest.mark.parametrize` for Odoo 13 and Odoo 19: Compose cluster → `tmp` → stopped-project `db restore` → Database Manager `303` → PostgreSQL postcondition → default DB switch.
-- [ ] 5a.8 If an owned Compose project has no valid `tmp`, first `odcli run` runs the same ProcessStep+SQL.
-- [ ] 5a.9 Run focused tests, Ruff, and mypy.
+- [x] 5a.1 After owned Compose cluster start, create Odoo database `tmp` as a ProcessStep on the existing `init` command via the instance runtime builder plus `--database tmp --init=base --stop-after-init` through `internal/proc`, `shell=False`. Tests use the proc recorder (or live E2E); do not add a module-local subprocess patch.
+- [x] 5a.2 Idempotent: valid `tmp` is not recreated; invalid same-named DB fails with `init_bootstrap_failed`.
+- [x] 5a.3 After `--stop-after-init`, confirm `base` via SQL `SELECT state FROM ir_module_module WHERE name = 'base'` on `tmp` = `installed`. Do not POST `version_info` at init.
+- [x] 5a.4 Auxiliary restore uses `tmp` and does not add hidden `--database=__odcli_restore__` or `--db-filter=^$`.
+- [x] 5a.5 After a successful restore, switch the project default to the restored database; `tmp` remains bootstrap.
+- [x] 5a.6 `--dry-run` shows the `tmp` step and does not spawn; a failure does not return successful project setup.
+- [x] 5a.7 Add a regression flow with `pytest.mark.parametrize` for Odoo 13 and Odoo 19: Compose cluster → `tmp` → stopped-project `db restore` → Database Manager `303` → PostgreSQL postcondition → default DB switch.
+- [x] 5a.8 If an owned Compose project has no valid `tmp`, first `odcli run` runs the same ProcessStep+SQL.
+- [x] 5a.9 Run focused tests, Ruff, and mypy.
 
 ## 6. Large-backup validation (item 6)
 
@@ -70,14 +70,14 @@
 
 ## 7. Proven filestore `data_dir` on self-contained restore (item 7)
 
-- [ ] 7.1 Full self-contained `init` records `data_dir={project_root}/.odcli/filestore` (depends on 5.4).
-- [ ] 7.2 Restore writes the canonical `data_dir` into the restore binding alongside cluster/database/backup identity.
-- [ ] 7.3 Before restore, verify the owned `data_dir` is a regular directory inside allowed project storage and not a symlink.
-- [ ] 7.4 `db rm` deletes only the exact contained non-symlink filestore and returns `deleted` or `absent` with the path.
-- [ ] 7.5 External config without a provable `data_dir` stays fail-closed `unknown`; no directory is deleted by database name or platform default.
-- [ ] 7.6 `doctor` MAY emit an existing-style finding when a restore binding exists without `data_directory`; no new doctor subsystem and no auto-ownership.
-- [ ] 7.7 Add a test covering `init → restore with filestore → db rm` and absence of filestore after the command.
-- [ ] 7.8 Run focused tests, Ruff, and mypy.
+- [x] 7.1 Full self-contained `init` records `data_dir={project_root}/.odcli/filestore` (depends on 5.4).
+- [x] 7.2 Restore writes the canonical `data_dir` into the restore binding alongside cluster/database/backup identity.
+- [x] 7.3 Before restore, verify the owned `data_dir` is a regular directory inside allowed project storage and not a symlink.
+- [x] 7.4 `db rm` deletes only the exact contained non-symlink filestore and returns `deleted` or `absent` with the path.
+- [x] 7.5 External config without a provable `data_dir` stays fail-closed `unknown`; no directory is deleted by database name or platform default.
+- [x] 7.6 `doctor` MAY emit an existing-style finding when a restore binding exists without `data_directory`; no new doctor subsystem and no auto-ownership.
+- [x] 7.7 Add a test covering `init → restore with filestore → db rm` and absence of filestore after the command.
+- [x] 7.8 Run focused tests, Ruff, and mypy.
 
 ## 8. Explicit admin password reset (item 8)
 

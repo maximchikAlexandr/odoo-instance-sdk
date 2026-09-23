@@ -408,6 +408,13 @@ class _BackupMixin:
             cluster_identity, _ = provenance()
         start_config = self._instance.config.start_config
         data_directory = None if start_config is None else start_config.data_dir
+        if data_directory:
+            from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
+            from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
+
+            binding = getattr(self._instance, "_runtime_binding", None)
+            if isinstance(binding, _RuntimeBinding) and binding.owner_kind == "project":
+                verify_project_owned_data_dir(binding.repository_root, data_directory)
 
         backup_path = Path(backup.path)
         if not backup_path.is_file() or not os.access(backup_path, os.R_OK):

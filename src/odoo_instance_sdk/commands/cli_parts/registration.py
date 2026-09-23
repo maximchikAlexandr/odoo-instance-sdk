@@ -45,7 +45,6 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.generated_config import project_generated_config_path
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_init import (
-    manifest_dict as _manifest_dict,
     validate_generated_config_target as _validate_generated_config_target,
 )
 from odoo_instance_sdk.internal.project_manifest import manifest_path
@@ -55,7 +54,11 @@ from odoo_instance_sdk.models import (
     CommandResult,
     StartConfig,
 )
-from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
+from odoo_instance_sdk.project import (
+    PostgresProjectConfig,
+    ProjectConfig,
+    TestInstanceProjectConfig,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
@@ -708,11 +711,43 @@ class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]
 @click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Confirm manifest replacement.")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Do not write.")
+@click.option(
+    "--test-url",
+    "test_url",
+    default=None,
+    help="Remote test instance base URL for [test_instance].url.",
+)
+@click.option(
+    "--test-database",
+    "test_database",
+    default=None,
+    help="Remote test instance database for [test_instance].database.",
+)
+@click.option(
+    "--test-branch",
+    "test_branch",
+    default=None,
+    help="Remote test instance git branch for [test_instance].git_branch.",
+)
+@click.option(
+    "--local-config",
+    "local_config",
+    is_flag=True,
+    default=False,
+    help="Select generated .odcli/odoo.conf as the effective local source_config.",
+)
+@click.option(
+    "--allow-partial",
+    "allow_partial",
+    is_flag=True,
+    default=False,
+    help="Allow partial initialization when setup is incomplete.",
+)
 @output_options
 @click.option(
     "--project", "project_path", type=click.Path(exists=False), default=None, help="Project path."
 )
-def init(
+def init(  # noqa: C901
     odoo_bin: str | None,
     python: str | None,
     source_config: str | None,
@@ -730,12 +765,18 @@ def init(
     no_input: bool,
     yes: bool,
     dry_run: bool,
+    test_url: str | None,
+    test_database: str | None,
+    test_branch: str | None,
+    local_config: bool,
+    allow_partial: bool,
     output_format: str | None,
     json_output: bool,
     project_path: str | None,
 ) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
+    effective_no_input = no_input or output_mode is not OutputMode.RICH
     resolved_project = Path(project_path) if project_path is not None else Path.cwd()
     provenance: dict[str, list[str]] = {"option": [], "vscode": [], "discovery": [], "default": []}
 
@@ -775,17 +816,37 @@ def init(
     if postgres_cfg is not None:
         provenance["option"].append("postgres")
 
+    # Resolve [test_instance]: explicit options win; otherwise preserve an
+    # existing valid section on re-run so init does not silently drop it.
+    test_instance_cfg = _resolve_test_instance(
+        resolved_project,
+        test_url=test_url,
+        test_database=test_database,
+        test_branch=test_branch,
+    )
+    existing_test_instance = _existing_test_instance(resolved_project)
+    if test_instance_cfg is None and existing_test_instance is not None:
+        test_instance_cfg = existing_test_instance
+
+    # --local-config selects the generated .odcli/odoo.conf as effective
+    # source_config for self-contained Compose projects.
+    effective_source_config = option_state.source_config
+    if local_config and (postgres_cfg is not None and postgres_cfg.mode == "compose"):
+        effective_source_config = project_generated_config_path(resolved_project)
+        provenance["option"].append("local_config")
+
     config = ProjectConfig(
         repository_root=resolved_project.resolve(),
         odoo_bin=option_state.odoo_bin,
         python=option_state.python,
-        source_config=option_state.source_config,
+        source_config=effective_source_config,
         default_source_database=option_state.default_source_database,
         preferred_http_port=option_state.preferred_http_port,
         requirements=option_state.requirements,
         default_run_args=option_state.default_run_args,
         runtime_cwd=option_state.runtime_cwd,
         postgres=postgres_cfg,
+        test_instance=test_instance_cfg,
         ticket_link_enabled=False,
     )
 
@@ -804,11 +865,42 @@ def init(
         existing, resolved_project, config, no_input, yes, output_mode, dry_run=dry_run
     ):
         return
-    from odoo_instance_sdk.project_init import init_project_command
+    from odoo_instance_sdk.project_init import init_completeness_preview, init_project_command
+
+    confirm_partial_callback = None
+    if (
+        not effective_no_input
+        and not allow_partial
+        and not dry_run
+        and output_mode is OutputMode.RICH
+    ):
+
+        def confirm_partial_callback(missing: list[str], details: dict[str, str]) -> None:
+            missing_text = ", ".join(missing)
+            if not click.confirm(
+                f"Setup is incomplete ({missing_text}). Continue with partial initialization?",
+                default=False,
+            ):
+                fail(
+                    output_mode,
+                    "init",
+                    f"init_incomplete: missing capabilities {missing} ({details})",
+                    dry_run=dry_run,
+                    error_code="init_incomplete",
+                )
 
     status, _ = run_or_preview(
         lambda: init_project_command(
-            resolved_project, config, postgres_allocated=postgres_allocated
+            resolved_project,
+            config,
+            postgres_allocated=postgres_allocated,
+            local_config=local_config,
+            postgres_image=postgres_image,
+            existing_test_instance=existing_test_instance,
+            allow_partial=allow_partial,
+            no_input=effective_no_input,
+            dry_run=dry_run,
+            confirm_partial=confirm_partial_callback,
         ),
         command_name="init",
         mode=output_mode,
@@ -816,7 +908,16 @@ def init(
         result=lambda value: cast("dict[str, JsonValue]", value),
         provenance=cast("dict[str, JsonValue]", provenance),
         preview=lambda command: {
-            **_manifest_dict(config, postgres_allocated=postgres_allocated),
+            **init_completeness_preview(
+                resolved_project,
+                config,
+                local_config=local_config,
+                postgres_image=postgres_image,
+                existing_test_instance=existing_test_instance,
+                dry_run=True,
+                remote_database_names=None,
+                postgres_allocated=postgres_allocated,
+            ),
             "plan": model_to_dict(command.plan),
         },
         rich=lambda _document: (
@@ -826,6 +927,49 @@ def init(
         ),
     )
     sys.exit(status)
+
+
+def _resolve_test_instance(
+    project_root: Path,
+    *,
+    test_url: str | None,
+    test_database: str | None,
+    test_branch: str | None,
+) -> TestInstanceProjectConfig | None:
+    """Build a [test_instance] from explicit options.
+
+    On re-run without test-instance options, callers preserve an existing
+    valid section via ``_existing_test_instance``; this helper returns ``None``
+    when no test-instance option was supplied so the preservation path applies.
+    """
+    if test_url is None and test_database is None and test_branch is None:
+        return None
+    from odoo_instance_sdk.project import TestInstanceProjectConfig
+
+    if test_url is None:
+        existing = _existing_test_instance(project_root)
+        url = existing.base_url if existing is not None else ""
+    else:
+        url = test_url
+    if not url:
+        return None
+    return TestInstanceProjectConfig(
+        base_url=url,
+        database=test_database,
+        git_branch=test_branch,
+    )
+
+
+def _existing_test_instance(project_root: Path) -> TestInstanceProjectConfig | None:
+    """Return an existing valid [test_instance] from the manifest, if any."""
+    manifest = manifest_path(project_root)
+    if not manifest.is_file():
+        return None
+    try:
+        existing_cfg = ProjectConfig.load(project_root)
+    except Exception:
+        return None
+    return existing_cfg.test_instance
 
 
 def _resolve_postgres_state(

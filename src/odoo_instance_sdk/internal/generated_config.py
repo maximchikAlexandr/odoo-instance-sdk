@@ -47,6 +47,7 @@ def render_config(
     db_port: int | None = None,
     db_user: str | None = None,
     db_password: str | None = None,
+    data_dir: str | Path | None = None,
 ) -> str:
     src = configparser.RawConfigParser(interpolation=None)
     if source_config is not None:
@@ -83,6 +84,10 @@ def render_config(
     # logfile to <environment-root>/odoo.log, and inject one when the source
     # config had none so detached launch and `logs` share one resolved path.
     options["logfile"] = str((dest.parent / "odoo.log").resolve())
+    # Self-contained Compose projects own a project-local filestore so restore
+    # can record and `db rm` can clean a proven directory inside the project.
+    if data_dir is not None:
+        options["data_dir"] = str(Path(data_dir).resolve())
 
     output = io.StringIO()
     src.write(output)
@@ -102,6 +107,7 @@ def generate_config(
     db_port: int | None = None,
     db_user: str | None = None,
     db_password: str | None = None,
+    data_dir: str | Path | None = None,
 ) -> None:
     content = render_config(
         source_config,
@@ -115,6 +121,7 @@ def generate_config(
         db_port=db_port,
         db_user=db_user,
         db_password=db_password,
+        data_dir=data_dir,
     )
     dest.parent.mkdir(parents=True, exist_ok=True)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW

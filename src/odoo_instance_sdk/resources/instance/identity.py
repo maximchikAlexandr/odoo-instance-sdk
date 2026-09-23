@@ -386,6 +386,9 @@ class _IdentityMixin:
                 dependency_steps=dependency_steps,
                 temporary_path=dependency_temporary_path,
             )
+            from odoo_instance_sdk.internal.dbprep.bootstrap import ensure_project_bootstrap_tmp
+
+            ensure_project_bootstrap_tmp(self, context)
             for dependency_step in dependency_steps:
                 if context.planned(dependency_step.step_id) and not context.consumed(
                     dependency_step.step_id
