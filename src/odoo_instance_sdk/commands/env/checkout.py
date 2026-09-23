@@ -30,6 +30,7 @@ from odoo_instance_sdk.commands.context import (
 from odoo_instance_sdk.commands.env.display import (
     _ENV_LIST_COLUMNS,  # noqa: F401
     _ENV_LIST_COMPACT_COLUMNS,
+    _ENV_LIST_MEDIUM_COLUMNS,
     _checkout_cluster_summary_line,
     _checkout_row_values,
     _checkout_status_style,
@@ -906,22 +907,30 @@ def _render_env_list_rich(inventory: CheckoutInventory, *, width: int = 300) -> 
         )
         project_rows = rows_by_project[project_id]
         base_columns = _env_columns_for_width(width)
-        columns = (*base_columns, *provider_columns)
+        columns = (
+            base_columns
+            if base_columns == _ENV_LIST_COMPACT_COLUMNS
+            else (*base_columns, *provider_columns)
+        )
         table = bordered_table(*columns)
         for row in project_rows:
             values = _checkout_row_values(row, provider_columns)
+            if base_columns == _ENV_LIST_MEDIUM_COLUMNS:
+                values["DATABASE"] = values["DATABASE_COMPACT"]
             table.add_row(
                 *(
                     Text(
                         sanitize_terminal_text(
-                            values[column], preserve_newlines=column == "DETAILS"
+                            values[column],
+                            preserve_newlines=column == "DETAILS",
                         ),
                         style=_checkout_status_style(row),
                     )
                     if column in {"STATUS", "STATE", "BRANCH / STATUS"}
                     else Text(
                         sanitize_terminal_text(
-                            values[column], preserve_newlines=column == "DETAILS"
+                            values[column],
+                            preserve_newlines=column == "DETAILS",
                         )
                     )
                     for column in columns

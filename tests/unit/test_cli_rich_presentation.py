@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import msgspec
 import pytest
 from click.testing import CliRunner
 from rich.console import Console
@@ -52,6 +53,8 @@ def test_env_list_rich_keeps_primary_fields_readable_at_supported_widths(width: 
         else ("KIND", "NAME", "BRANCH", "STATUS", "GIT", "DB_MODE", "DATABASE", "WORKTREE")
     )
     assert all(header in output for header in expected_headers)
+    if width == 120:
+        assert "shared comerta" in output
     assert all(len(line) <= width for line in output.splitlines())
 
 
@@ -83,6 +86,38 @@ def test_env_list_rich_empty_inventory_remains_bordered() -> None:
     assert "No environments found" in output
     assert all(header in output for header in ("NAME", "STATE", "DETAILS"))
     assert "┌" in output and "└" in output
+
+
+@pytest.mark.unit
+def test_env_list_rich_compact_keeps_provider_facts_in_details_only() -> None:
+    from odoo_instance_sdk.internal.checkout_inventory import build_checkout_inventory
+    from odoo_instance_sdk.models import EnvironmentFactsSummary
+
+    environment = _env()
+    inventory = build_checkout_inventory(
+        _snapshot((_project(),), (environment,)),
+        worktree_paths={environment.id: "/worktree"},
+        git_collector=lambda _path, _ref: environment.git,
+    )
+    row = msgspec.structs.replace(
+        inventory.rows[0],
+        facts=(
+            EnvironmentFactsSummary(
+                provider="provider",
+                state="available",
+                text="provider-value",
+            ),
+        ),
+    )
+    inventory = msgspec.structs.replace(inventory, rows=(row, *inventory.rows[1:]))
+    console = Console(record=True, color_system=None, width=80)
+    console.print(env_commands._render_env_list_rich(inventory, width=80))
+    output = console.export_text()
+
+    assert "provider-value" in output
+    assert output.count("provider-value") == 1
+    assert "provider" in output
+    assert "PROVIDER" not in output
 
 
 @pytest.mark.unit
