@@ -16,7 +16,7 @@ from odoo_instance_sdk.exceptions import (
     UpdateError,
     UpdateIncompleteError,
 )
-from odoo_instance_sdk.execution import ProcessStep
+from odoo_instance_sdk.execution import Command, ProcessStep
 from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.self_update import (
     InstalledProvenance,
@@ -451,8 +451,8 @@ def test_dry_run_command_has_frozen_process_steps(
     command = update_command(ref="main", dry_run=True)
     process_steps = [step for step in command.plan.steps if isinstance(step, ProcessStep)]
     assert len(process_steps) == 1
-    assert "update" in process_steps[0].argv
-    assert process_steps[0].argv[-2:] == ("--format", "json")
+    assert process_steps[0].argv[0] == "uv"
+    assert "--dry-run" in process_steps[0].argv
 
 
 def test_update_lock_conflict_propagates(
@@ -550,6 +550,117 @@ def test_preflight_failed_reports_disk_bytes(
     assert "reserve" in message
     assert "available" in message
     assert str(reserve) in message
+
+
+def _snapshot_resume_command(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+    *,
+    installed_sha: str,
+    executor: RecordingExecutor,
+) -> Command[UpdateResult]:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    _patch_provenance(monkeypatch, _provenance(commit_id=installed_sha, executable=executable))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.shutil.disk_usage",
+        lambda _p: type("U", (), {"free": 10 * 1024**3})(),
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._catalog_schema_version",
+        lambda: "head",
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_catalog_migration_path",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._validate_storage_migration_path",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._verify_installed_revision",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def fail_snapshot(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("snapshot overwritten")
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_commands._write_snapshot", fail_snapshot
+    )
+    journal = user_root / "update" / "journal.json"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "phase": "snapshot",
+                "target_ref": _SHA_B,
+                "snapshot_sha": _SHA_A,
+                "maintenance_pid": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return update_command(ref="main", executor=executor)
+
+
+def test_snapshot_resume_installs_after_crash_before_install(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+) -> None:
+    executor = _executor_factory({"maintenance_rc": 0})
+    command = _snapshot_resume_command(
+        monkeypatch,
+        user_root,
+        tmp_path,
+        installed_sha=_SHA_A,
+        executor=executor,
+    )
+    result = command.run()
+    assert result.outcome == "updated"
+    install = next(step for step in executor.executed if step.step_id == "update.install")
+    assert _SHA_B in install.argv
+
+
+def test_snapshot_resume_skips_install_after_crash_before_journal_write(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+) -> None:
+    executor = _executor_factory({"maintenance_rc": 0})
+    command = _snapshot_resume_command(
+        monkeypatch,
+        user_root,
+        tmp_path,
+        installed_sha=_SHA_B,
+        executor=executor,
+    )
+    result = command.run()
+    assert result.outcome == "updated"
+    assert [step.step_id for step in executor.executed] == ["update.migrate"]
+
+
+def test_snapshot_resume_rejects_unexpected_installed_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+) -> None:
+    executor = _executor_factory({"maintenance_rc": 0})
+    command = _snapshot_resume_command(
+        monkeypatch,
+        user_root,
+        tmp_path,
+        installed_sha=_SHA_OLD,
+        executor=executor,
+    )
+    with pytest.raises(UpdateError, match="unexpected installed revision"):
+        command.run()
+    assert executor.executed == []
 
 
 def test_install_failure_rechecks_revision_before_failing(

@@ -841,6 +841,8 @@ def update_command(
         _build_check_command,
         _build_failure_command,
         _build_mutating_command,
+        _build_staged_command,
+        _journal_target_ref,
     )
 
     try:
@@ -855,7 +857,12 @@ def update_command(
         )
     if check:
         return _build_check_command(ref=ref, provenance=provenance, executor=executor)
-    target_sha = ref.lower() if _is_full_sha(ref) else ref
+    journal_target = _journal_target_ref(unfinished_update_journal())
+    target_sha = (
+        ref.lower()
+        if journal_target is not None and _is_full_sha(ref) and ref.lower() != journal_target
+        else journal_target or (ref.lower() if _is_full_sha(ref) else ref)
+    )
     if (
         not dry_run
         and provenance.commit_id is not None
@@ -863,6 +870,13 @@ def update_command(
         and unfinished_update_journal() is None
     ):
         return _build_already_current_command(provenance)
+    if not _is_full_sha(target_sha):
+        return _build_staged_command(
+            ref=target_sha,
+            provenance=provenance,
+            executor=executor,
+            allow_downgrade=allow_downgrade,
+        )
     return _build_mutating_command(
         ref=target_sha,
         provenance=provenance,
