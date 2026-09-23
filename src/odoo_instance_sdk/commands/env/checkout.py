@@ -11,13 +11,13 @@ import msgspec
 
 if TYPE_CHECKING:
     import click
+    from rich.table import Table
 
     from odoo_instance_sdk.internal.proc import RunContext
 else:
     import rich_click as click
 from rich.console import Console, Group
 from rich.live import Live
-from rich.table import Table
 from rich.text import Text
 
 from odoo_instance_sdk.client import OdooClient
@@ -30,26 +30,27 @@ from odoo_instance_sdk.commands.context import (
 from odoo_instance_sdk.commands.env.display import (
     _ENV_LIST_COLUMNS,  # noqa: F401
     _ENV_LIST_COMPACT_COLUMNS,
-    _ENV_LIST_MEDIUM_COLUMNS,
     _checkout_cluster_summary_line,
     _checkout_row_values,
     _checkout_status_style,
     _env_columns_for_width,
     _plan_lines,
     _provider_columns,
-    _rich_checkout_compact_rows,
 )
 from odoo_instance_sdk.commands.monitor_context import resolve_monitor_project_id
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
+    bordered_table,
     emit,
     emit_json_envelope,
     fail,
     field_schema,
     model_to_dict,
     output_options,
+    postgres_state_cells,
+    render_rich_text,
     resolve_output_mode,
     run_or_preview,
     sanitize_diagnostic,
@@ -72,6 +73,7 @@ from odoo_instance_sdk.models.backup import (
     EnvironmentCheckoutResult,
     EnvironmentDatabaseMode,
     EnvironmentState,
+    PostgresClusterState,
 )
 from odoo_instance_sdk.models.monitor import (
     CheckoutInventory,
@@ -90,7 +92,7 @@ from odoo_instance_sdk.resources.monitor.collection_parts import EnvironmentMoni
 from odoo_instance_sdk.resources.monitor.planning import SnapshotSelection
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command, JsonValue
+    from odoo_instance_sdk.execution import Command
 
 
 def select_snapshot_environment(
@@ -638,31 +640,63 @@ def _rich_env_show(document: OutputDocument) -> str:
     environment = result.get("environment")
     project = result.get("project")
     cluster = result.get("cluster")
-    lines: list[str] = []
+    table = bordered_table("Scope", "Field", "Value")
+
+    def add_row(scope: str, field: str, value: object) -> None:
+        table.add_row(
+            Text(sanitize_terminal_text(scope)),
+            Text(sanitize_terminal_text(field)),
+            Text(sanitize_terminal_text(str(value) if value not in (None, "") else "—")),
+        )
+
     if isinstance(environment, dict):
-        lines.append(
-            f"Environment {environment.get('name')} ({environment.get('id')}) "
-            f"state={environment.get('lifecycle_state')}"
-        )
-        lines.append(
-            f"  branch={environment.get('branch')} database={environment.get('database') or '—'} "
-            f"runtime={_nested_value(environment, 'runtime', 'state') or '—'}"
-        )
+        add_row("Environment", "Name", environment.get("name"))
+        add_row("Environment", "ID", environment.get("id"))
+        add_row("Environment", "State", environment.get("lifecycle_state"))
+        add_row("Environment", "Branch", environment.get("branch"))
+        add_row("Environment", "Database", environment.get("database"))
+        runtime = environment.get("runtime")
+        if isinstance(runtime, dict):
+            add_row("Runtime", "State", runtime.get("state"))
+            add_row("Runtime", "Endpoint", runtime.get("http_url"))
+            add_row("Runtime", "PID", runtime.get("root_pid"))
     if isinstance(project, dict):
-        lines.append(f"Project {project.get('name')} ({project.get('id')})")
+        add_row("Project", "Name", project.get("name"))
+        add_row("Project", "ID", project.get("id"))
+        add_row("Project", "Repository", project.get("repository_root"))
     if isinstance(cluster, dict):
-        lines.append(
-            f"PostgreSQL state={cluster.get('state')} "
-            f"metrics={'available' if cluster.get('metrics') is not None else 'unavailable'}"
+        state = str(cluster.get("state") or "unknown")
+        reasons = tuple(
+            reason
+            for reason in (
+                cluster.get("unavailability_reason"),
+                cluster.get("server_unavailability_reason"),
+            )
+            if isinstance(reason, str)
         )
+        if state in {item.value for item in PostgresClusterState}:
+            state, details = postgres_state_cells(PostgresClusterState(state), *reasons)
+        else:
+            details = ", ".join(dict.fromkeys(reasons))
+        add_row("PostgreSQL", "State", state)
+        add_row(
+            "PostgreSQL",
+            "Metrics",
+            "available" if cluster.get("metrics") is not None else "unavailable",
+        )
+        add_row("PostgreSQL", "Availability", details)
+        endpoint = cluster.get("endpoint")
+        if isinstance(endpoint, dict):
+            add_row(
+                "PostgreSQL",
+                "Endpoint",
+                f"{endpoint.get('host', '—')}:{endpoint.get('port', '—')}",
+            )
+        add_row("PostgreSQL", "Mode", cluster.get("mode"))
     else:
-        lines.append("PostgreSQL unavailable")
-    return sanitize_terminal_text("\n".join(lines), preserve_newlines=True)
-
-
-def _nested_value(value: dict[str, JsonValue], parent: str, key: str) -> JsonValue | None:
-    child = value.get(parent)
-    return child.get(key) if isinstance(child, dict) else None
+        add_row("PostgreSQL", "State", "unavailable")
+        add_row("PostgreSQL", "Metrics", "unavailable")
+    return render_rich_text(table, width=Console().width)
 
 
 def _validate_watch_options(output_mode: OutputMode, *, watch: bool, interval: float) -> None:
@@ -852,6 +886,10 @@ def _render_env_list_rich(inventory: CheckoutInventory, *, width: int = 300) -> 
     clusters = {cluster.project_id: cluster for cluster in inventory.clusters}
 
     sections: list[Text | Table] = []
+    if not rows_by_project:
+        table = bordered_table(*_ENV_LIST_COMPACT_COLUMNS)
+        table.add_row("—", "unavailable", "No environments found")
+        return Group(Text("Environment inventory", style="bold cyan"), table)
     for project_id in sorted(rows_by_project):
         project_name = project_names.get(project_id, project_id)
         sections.append(Text(sanitize_terminal_text(f"Project {project_name}"), style="bold cyan"))
@@ -869,25 +907,23 @@ def _render_env_list_rich(inventory: CheckoutInventory, *, width: int = 300) -> 
         project_rows = rows_by_project[project_id]
         base_columns = _env_columns_for_width(width)
         columns = (*base_columns, *provider_columns)
-        if base_columns in {_ENV_LIST_COMPACT_COLUMNS, _ENV_LIST_MEDIUM_COLUMNS}:
-            sections.extend(
-                _rich_checkout_compact_rows(
-                    project_rows,
-                    provider_columns=provider_columns,
-                    include_worktree=width >= 120,
-                )
-            )
-            continue
-        table = Table(show_header=True, box=None, pad_edge=False)
-        for column in columns:
-            table.add_column(column, overflow="fold", no_wrap=column == "WORKTREE")
+        table = bordered_table(*columns)
         for row in project_rows:
             values = _checkout_row_values(row, provider_columns)
             table.add_row(
                 *(
-                    Text(sanitize_terminal_text(values[column]), style=_checkout_status_style(row))
-                    if column == "STATUS"
-                    else Text(sanitize_terminal_text(values[column]))
+                    Text(
+                        sanitize_terminal_text(
+                            values[column], preserve_newlines=column == "DETAILS"
+                        ),
+                        style=_checkout_status_style(row),
+                    )
+                    if column in {"STATUS", "STATE", "BRANCH / STATUS"}
+                    else Text(
+                        sanitize_terminal_text(
+                            values[column], preserve_newlines=column == "DETAILS"
+                        )
+                    )
                     for column in columns
                 )
             )

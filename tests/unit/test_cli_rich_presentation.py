@@ -43,6 +43,15 @@ def test_env_list_rich_keeps_primary_fields_readable_at_supported_widths(width: 
     assert "OBSERVED" not in output
     assert "ODOO_PID" not in output
     assert "GIT_AHEA" not in output
+    assert "┌" in output and "┼" in output and "└" in output
+    expected_headers = (
+        ("NAME", "STATE", "DETAILS")
+        if width < 120
+        else ("NAME", "BRANCH / STATUS", "DATABASE", "GIT A/D", "WORKTREE")
+        if width < 180
+        else ("KIND", "NAME", "BRANCH", "STATUS", "GIT", "DB_MODE", "DATABASE", "WORKTREE")
+    )
+    assert all(header in output for header in expected_headers)
     assert all(len(line) <= width for line in output.splitlines())
 
 
@@ -63,6 +72,17 @@ def test_env_list_rich_shortens_home_only_in_presentation() -> None:
     )
     env_row = next(row for row in inventory.rows if row.kind == "environment")
     assert env_row.worktree_path == absolute
+
+
+@pytest.mark.unit
+def test_env_list_rich_empty_inventory_remains_bordered() -> None:
+    output = _render(
+        _snapshot((), ()), width=80, worktree_path=str(Path.home() / "projects" / "environment")
+    )
+
+    assert "No environments found" in output
+    assert all(header in output for header in ("NAME", "STATE", "DETAILS"))
+    assert "┌" in output and "└" in output
 
 
 @pytest.mark.unit

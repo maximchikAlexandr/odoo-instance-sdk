@@ -33,7 +33,6 @@ _DOWNSTREAM_DIRECT_TABLE_SITES = frozenset(
         ("src/odoo_instance_sdk/commands/db.py", 787),
         ("src/odoo_instance_sdk/commands/db.py", 809),
         ("src/odoo_instance_sdk/commands/db.py", 826),
-        ("src/odoo_instance_sdk/commands/env/checkout.py", 881),
         ("src/odoo_instance_sdk/commands/git.py", 35),
         ("src/odoo_instance_sdk/commands/module.py", 105),
         ("src/odoo_instance_sdk/commands/module.py", 125),
@@ -145,7 +144,7 @@ def test_production_commands_inventory_direct_table_constructors() -> None:
         )
 
     downstream = actual - approved
-    assert len(_DOWNSTREAM_DIRECT_TABLE_SITES) == 28
-    assert len(actual) == 29
+    assert len(_DOWNSTREAM_DIRECT_TABLE_SITES) == 27
+    assert len(actual) == 28
     assert len(approved) == 1
     assert downstream == _DOWNSTREAM_DIRECT_TABLE_SITES

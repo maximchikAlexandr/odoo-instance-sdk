@@ -6,9 +6,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rich.text import Text
-
-from odoo_instance_sdk.commands.output import sanitize_terminal_text
+from odoo_instance_sdk.commands.output import postgres_state_cells
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.models.backup import EnvironmentState, PostgresClusterState
 from odoo_instance_sdk.models.footprint import ClusterMetrics
@@ -36,11 +34,16 @@ _ENV_LIST_COLUMNS = (
 )
 _ENV_LIST_COMPACT_COLUMNS = (
     "NAME",
+    "STATE",
+    "DETAILS",
+)
+_ENV_LIST_MEDIUM_COLUMNS = (
+    "NAME",
     "BRANCH / STATUS",
     "DATABASE",
     "GIT A/D",
+    "WORKTREE",
 )
-_ENV_LIST_MEDIUM_COLUMNS = (*_ENV_LIST_COMPACT_COLUMNS, "WORKTREE")
 
 
 def _provider_columns(inventory: CheckoutInventory) -> tuple[str, ...]:
@@ -90,6 +93,26 @@ def _fact_text(row: CheckoutRow, provider_id: str) -> str:
 
 
 def _checkout_row_values(row: CheckoutRow, provider_columns: tuple[str, ...]) -> dict[str, str]:
+    values = _checkout_row_values_without_details(row, provider_columns)
+    values["DETAILS"] = _checkout_details(values, provider_columns)
+    return values
+
+
+def _checkout_details(values: dict[str, str], provider_columns: tuple[str, ...]) -> str:
+    """Keep narrow checkout facts in one wrapped, lossless cell."""
+    details = [
+        f"branch={values['BRANCH']}",
+        f"database={values['DATABASE_COMPACT']}",
+        f"git={values['GIT A/D']}",
+    ]
+    details.extend(f"{provider_id}={values[provider_id]}" for provider_id in provider_columns)
+    details.append(f"worktree={values['WORKTREE']}")
+    return "\n".join(details)
+
+
+def _checkout_row_values_without_details(
+    row: CheckoutRow, provider_columns: tuple[str, ...]
+) -> dict[str, str]:
     database = row.database or "—"
     db_mode = row.db_mode or "—"
     worktree = _display_path(row.worktree_path) if row.worktree_path else "—"
@@ -103,6 +126,7 @@ def _checkout_row_values(row: CheckoutRow, provider_columns: tuple[str, ...]) ->
         "DB_MODE": db_mode,
         "DATABASE": database,
         "WORKTREE": worktree,
+        "STATE": _checkout_status_str(row),
         "BRANCH / STATUS": f"{_git_branch(row)} / {_checkout_status_str(row)}",
         "GIT A/D": git_value,
         "DATABASE_COMPACT": f"{db_mode} {database}".strip(),
@@ -110,37 +134,6 @@ def _checkout_row_values(row: CheckoutRow, provider_columns: tuple[str, ...]) ->
     for provider_id in provider_columns:
         values[provider_id] = _fact_text(row, provider_id)
     return values
-
-
-def _rich_checkout_compact_rows(
-    rows: list[CheckoutRow],
-    *,
-    provider_columns: tuple[str, ...],
-    include_worktree: bool,
-) -> list[Text]:
-    rendered: list[Text] = []
-    for row in rows:
-        values = _checkout_row_values(row, provider_columns)
-        label = "Main checkout" if row.kind == "main" else f"Environment {row.name}"
-        lines = [
-            label,
-            f"  branch={_compact_value(values['BRANCH'], 42)} status={values['STATUS']}",
-            f"  database={_compact_value(values['DATABASE_COMPACT'], 52)} git={values['GIT A/D']}",
-        ]
-        for provider_id in provider_columns:
-            lines.append(f"  {provider_id}={_compact_value(values[provider_id], 52)}")
-        if include_worktree:
-            lines.append(f"  worktree={_compact_value(values['WORKTREE'], 64)}")
-        rendered.append(
-            Text(sanitize_terminal_text("\n".join(lines), preserve_newlines=True), style="")
-        )
-    return rendered
-
-
-def _compact_value(value: str, limit: int) -> str:
-    if len(value) <= limit:
-        return value
-    return value[: max(1, limit - 1)] + "…"
 
 
 def _display_path(path: str) -> str:
@@ -154,16 +147,13 @@ def _display_path(path: str) -> str:
 
 
 def _checkout_cluster_summary_line(cluster: CheckoutClusterSummary) -> str:
-    parts = ["  PostgreSQL", cluster.state.value]
-    if cluster.unavailability_reason and cluster.unavailability_reason not in {
-        "external_not_owned"
-    }:
-        parts.append(cluster.unavailability_reason)
+    state, details = postgres_state_cells(cluster.state, cluster.unavailability_reason)
+    parts = ["  PostgreSQL", state]
+    if details and details != "external_not_owned":
+        parts.append(details)
         return "  ".join(parts)
     if cluster.mode == "external":
         parts.append("external")
-    elif cluster.state is PostgresClusterState.STOPPED:
-        parts.append("stopped")
     return "  ".join(parts)
 
 
@@ -224,6 +214,6 @@ def _env_columns_for_width(width: int) -> tuple[str, ...]:
     """Keep semantic identity columns visible as terminal width decreases."""
     if width < 120:
         return _ENV_LIST_COMPACT_COLUMNS
-    if width < 240:
+    if width < 180:
         return _ENV_LIST_MEDIUM_COLUMNS
     return _ENV_LIST_COLUMNS
