@@ -81,43 +81,43 @@
 
 ## 8. Explicit admin password reset (item 8)
 
-- [ ] 8.1 Replace the literal `admin` value in the reset flow with one mandatory secret input.
-- [ ] 8.2 Prompt with `getpass` twice only when RICH and not `--no-input`; `--dry-run`/`json`/`toon` never prompt; `--yes` does not skip prompt; otherwise read process `ODCLI_ADMIN_PASSWORD` then `.odcli/.env`.
-- [ ] 8.3 If the secret is absent, fail with `admin_password_required` before any restore/drop mutation.
-- [ ] 8.4 Use the same mechanism for `db reset-admin-password`, restore, and COPY replacement.
-- [ ] 8.5 Verify the secret is absent from argv, shell history, manifest, catalog, plan, Rich/JSON/TOON, logs, and exception text; the result reports only the fact and provenance (`prompt` or `environment`).
-- [ ] 8.6 Add a regression flow covering Odoo 13 and Odoo 19 that logs in as `base.user_admin` via the real-Odoo XML-RPC test-support helper.
-- [ ] 8.7 Run focused tests, Ruff, and mypy.
+- [x] 8.1 Replace the literal `admin` value in the reset flow with one mandatory secret input.
+- [x] 8.2 Prompt with `getpass` twice only when RICH and not `--no-input`; `--dry-run`/`json`/`toon` never prompt; `--yes` does not skip prompt; otherwise read process `ODCLI_ADMIN_PASSWORD` then `.odcli/.env`.
+- [x] 8.3 If the secret is absent, fail with `admin_password_required` before any restore/drop mutation.
+- [x] 8.4 Use the same mechanism for `db reset-admin-password`, restore, and COPY replacement.
+- [x] 8.5 Verify the secret is absent from argv, shell history, manifest, catalog, plan, Rich/JSON/TOON, logs, and exception text; the result reports only the fact and provenance (`prompt` or `environment`).
+- [x] 8.6 Add a regression flow covering Odoo 13 and Odoo 19 that logs in as `base.user_admin` via the real-Odoo XML-RPC test-support helper.
+- [x] 8.7 Run focused tests, Ruff, and mypy.
 
 ## 9. Optional `test_instance.database` (item 9)
 
-- [ ] 9.1 Make `test_instance.database` optional in the manifest model and parser/writer.
-- [ ] 9.2 In remote-refresh preflight, when `database` is absent, obtain names via `DatabaseResource.names()`; select exactly one; zero=`remote_database_none`; many=`remote_database_ambiguous` listing names; unavailable list=`remote_database_list_unavailable`; all three fail before download.
-- [ ] 9.3 Explicit `database` has priority and works without available database list.
-- [ ] 9.4 Reflect the auto-detected name in plan/result and backup provenance; do not write it back to `project.toml`.
-- [ ] 9.5 Manifest round-trip does not add `database` when it was not set.
-- [ ] 9.6 Add tests covering explicit, one, zero, many, and unavailable-list scenarios using `pytest.mark.parametrize`.
-- [ ] 9.7 Run focused tests, Ruff, and mypy.
+- [x] 9.1 Make `test_instance.database` optional in the manifest model and parser/writer.
+- [x] 9.2 In remote-refresh preflight, when `database` is absent, obtain names via `DatabaseResource.names()`; select exactly one; zero=`remote_database_none`; many=`remote_database_ambiguous` listing names; unavailable list=`remote_database_list_unavailable`; all three fail before download.
+- [x] 9.3 Explicit `database` has priority and works without available database list.
+- [x] 9.4 Reflect the auto-detected name in plan/result and backup provenance; do not write it back to `project.toml`.
+- [x] 9.5 Manifest round-trip does not add `database` when it was not set.
+- [x] 9.6 Add tests covering explicit, one, zero, many, and unavailable-list scenarios using `pytest.mark.parametrize`.
+- [x] 9.7 Run focused tests, Ruff, and mypy.
 
 ## 10. Long-restore Rich progress (item 10)
 
-- [ ] 10.1 Reuse `StepObserver`/`StepEvent` and Rich Live with stage ids `backup_prepare`, `auxiliary_start`, `db_restore`, `db_verify`, `filestore_restore`, `admin_reset`, `default_switch`.
-- [ ] 10.2 Emit `StepEvent` every 0.5 s during blocking actions without child stdout.
-- [ ] 10.3 Show percent only when streaming dump/filestore bytes provide a total.
-- [ ] 10.4 On error, preserve the safe primary cause, last stage id, and elapsed seconds.
-- [ ] 10.5 Keep JSON/TOON single-document contract and exit code; terminal progress does not pollute machine stdout.
-- [ ] 10.6 Add a test covering a long restore without stdout and Rich indicator updates until completion.
-- [ ] 10.7 Run focused tests, Ruff, and mypy.
+- [x] 10.1 Reuse `StepObserver`/`StepEvent` and Rich Live with stage ids `backup_prepare`, `auxiliary_start`, `db_restore`, `db_verify`, `filestore_restore`, `admin_reset`, `default_switch`.
+- [x] 10.2 Emit `StepEvent` every 0.5 s during blocking actions without child stdout.
+- [x] 10.3 Show percent only when streaming dump/filestore bytes provide a total.
+- [x] 10.4 On error, preserve the safe primary cause, last stage id, and elapsed seconds.
+- [x] 10.5 Keep JSON/TOON single-document contract and exit code; terminal progress does not pollute machine stdout.
+- [x] 10.6 Add a test covering a long restore without stdout and Rich indicator updates until completion.
+- [x] 10.7 Run focused tests, Ruff, and mypy.
 
 ## 11. Auxiliary Odoo pipe drain (item 11)
 
-- [ ] 11.1 Extend the process boundary for spawned long-running handles to drain `stdout` and `stderr` concurrently and continuously.
-- [ ] 11.2 Keep the last `_TIMEOUT_TAIL_BYTES = 8192` bytes per stream after redaction; do not redirect to `DEVNULL`.
-- [ ] 11.3 Attach the bounded tail and the original error type to readiness/startup failures instead of `raise ... from None`.
-- [ ] 11.4 Terminate readers together with the owned process group on cleanup and interrupt.
-- [ ] 11.5 Add tests covering a noisy auxiliary child exceeding pipe capacity, simultaneous drain, bounded memory, readiness failure diagnostics, and cleanup/interrupt without leaked threads/handles.
-- [ ] 11.6 Verify JSON/TOON keep one final document and the diagnostic stream does not pollute stdout.
-- [ ] 11.7 Run focused tests, Ruff, and mypy.
+- [x] 11.1 Extend the process boundary for spawned long-running handles to drain `stdout` and `stderr` concurrently and continuously.
+- [x] 11.2 Keep the last `_TIMEOUT_TAIL_BYTES = 8192` bytes per stream after redaction; do not redirect to `DEVNULL`.
+- [x] 11.3 Attach the bounded tail and the original error type to readiness/startup failures instead of `raise ... from None`.
+- [x] 11.4 Terminate readers together with the owned process group on cleanup and interrupt.
+- [x] 11.5 Add tests covering a noisy auxiliary child exceeding pipe capacity, simultaneous drain, bounded memory, readiness failure diagnostics, and cleanup/interrupt without leaked threads/handles.
+- [x] 11.6 Verify JSON/TOON keep one final document and the diagnostic stream does not pollute stdout.
+- [x] 11.7 Run focused tests, Ruff, and mypy.
 
 ## 12. `module update` traceback preservation (item 12)
 
@@ -200,14 +200,14 @@
 
 ## 18. `run --detach` logfile provisioning (item 18)
 
-- [ ] 18.1 Implement `resolve_effective_logfile()` in `resources/instance/runtime.py`; inject `--logfile {path}` after the protected-option check; do not edit the user's `odoo.conf`.
-- [ ] 18.2 New isolated environments write an environment-owned `<environment-root>/odoo.log` into generated `odoo.conf` and create the file with the other artifacts.
-- [ ] 18.3 Apply the same fallback to old/partial isolated configs.
-- [ ] 18.4 Make `run --detach`, `logs`, the structured result, and runtime metadata use one resolved path.
-- [ ] 18.5 `--dry-run` shows the resolved path without creating the directory or file.
-- [ ] 18.6 Unwritable fallback fails before spawn with `logfile_unwritable` and the exact path.
-- [ ] 18.7 Add regression tests for main checkout, new isolated environment, old isolated environment, explicit path priority, and unwritable fallback; verify two isolated environments use different logfiles.
-- [ ] 18.8 Run focused tests, Ruff, and mypy.
+- [x] 18.1 Implement `resolve_effective_logfile()` in `resources/instance/runtime.py`; inject `--logfile {path}` after the protected-option check; do not edit the user's `odoo.conf`.
+- [x] 18.2 New isolated environments write an environment-owned `<environment-root>/odoo.log` into generated `odoo.conf` and create the file with the other artifacts.
+- [x] 18.3 Apply the same fallback to old/partial isolated configs.
+- [x] 18.4 Make `run --detach`, `logs`, the structured result, and runtime metadata use one resolved path.
+- [x] 18.5 `--dry-run` shows the resolved path without creating the directory or file.
+- [x] 18.6 Unwritable fallback fails before spawn with `logfile_unwritable` and the exact path.
+- [x] 18.7 Add regression tests for main checkout, new isolated environment, old isolated environment, explicit path priority, and unwritable fallback; verify two isolated environments use different logfiles.
+- [x] 18.8 Run focused tests, Ruff, and mypy.
 
 ## 19. Compatibility, documentation, and delivery gates
 

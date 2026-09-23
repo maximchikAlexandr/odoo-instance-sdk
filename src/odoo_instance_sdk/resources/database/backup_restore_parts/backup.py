@@ -32,7 +32,7 @@ from odoo_instance_sdk.models import (
     RestoreResult,
 )
 from odoo_instance_sdk.resources.database.lifecycle import (
-    _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
+    _admin_password_reset_script as _admin_password_reset_script,
     _stream_response_to_file,
     _trustworthy_content_length as _trustworthy_content_length,
 )
@@ -149,7 +149,9 @@ class _BackupMixin:
             raise BackupDownloadError(http_failure) from None
         return server_filename, size_bytes, sha256_hex
 
-    def reset_admin_password(self) -> AdminPasswordResetResult:
+    def reset_admin_password(
+        self, *, admin_password: str, provenance: str
+    ) -> AdminPasswordResetResult:
         from odoo_instance_sdk.internal.proc import active_context
 
         context = active_context()
@@ -163,9 +165,10 @@ class _BackupMixin:
                 raise InstanceConfigurationError(
                     "Administrator password reset requires exactly one configured database"
                 )
+            script = _admin_password_reset_script(admin_password)
             try:
                 result = self._instance._run_shell_script_exclusive(
-                    _RESET_ADMIN_PASSWORD_SCRIPT,
+                    script,
                     commit=True,
                 )
             except Exception:
@@ -183,11 +186,18 @@ class _BackupMixin:
                 completed=True,
                 xml_id="base.user_admin",
                 environment_id=environment_id,
+                provenance=provenance,
             )
-        return self.reset_admin_password_command().run()
+        return self.reset_admin_password_command(
+            admin_password=admin_password, provenance=provenance
+        ).run()
 
     def reset_admin_password_command(
-        self, *, executor: ProcessExecutor | None = None
+        self,
+        *,
+        admin_password: str,
+        provenance: str,
+        executor: ProcessExecutor | None = None,
     ) -> Command[AdminPasswordResetResult]:
         self._assert_local()
         configured = self._instance.config.configured_database_names
@@ -195,6 +205,7 @@ class _BackupMixin:
             raise InstanceConfigurationError(
                 "Administrator password reset requires exactly one configured database"
             )
+        script = _admin_password_reset_script(admin_password)
         # Keep the legacy diagnostic seam for synthetic instances that cannot
         # construct a shell command.  Real instances use the captured shell
         # command below, so the child argv/stdin/env remain inspectable.
@@ -202,20 +213,26 @@ class _BackupMixin:
             return self._action_command(
                 "database.reset-admin-password",
                 "Reset the Odoo administrator password",
-                self._reset_admin_password_impl,
+                lambda: self._reset_admin_password_impl(
+                    admin_password=admin_password, provenance=provenance
+                ),
                 executor=executor,
                 mutating=True,
             )
 
         return self._instance._shell_script_command(
-            _RESET_ADMIN_PASSWORD_SCRIPT,
+            script,
             commit=True,
             exclusive=True,
-            callback_override=self._reset_admin_password_impl,
+            callback_override=lambda: self._reset_admin_password_impl(
+                admin_password=admin_password, provenance=provenance
+            ),
             executor=executor,
         )
 
-    def _reset_admin_password_impl(self) -> AdminPasswordResetResult:
+    def _reset_admin_password_impl(
+        self, *, admin_password: str, provenance: str
+    ) -> AdminPasswordResetResult:
         """Reset ``base.user_admin`` on this instance's one bound database."""
         self._assert_local()
         configured = self._instance.config.configured_database_names
@@ -225,9 +242,10 @@ class _BackupMixin:
             )
 
         database = configured[0]
+        script = _admin_password_reset_script(admin_password)
         try:
             command = self._instance._run_shell_script_exclusive(
-                _RESET_ADMIN_PASSWORD_SCRIPT,
+                script,
                 commit=True,
             )
         except Exception:
@@ -246,6 +264,7 @@ class _BackupMixin:
             completed=True,
             xml_id="base.user_admin",
             environment_id=environment_id,
+            provenance=provenance,
         )
 
     def restore(
@@ -405,6 +424,7 @@ class _BackupMixin:
             )
 
         from odoo_instance_sdk.internal.proc import active_context
+        from odoo_instance_sdk.internal.restore_stages import restore_stage_heartbeat
         from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
 
         auxiliary_session = active_auxiliary_restore_session()
@@ -414,7 +434,8 @@ class _BackupMixin:
                 raise DatabaseManagerUnavailableError(
                     "auxiliary database manager has no active execution context"
                 )
-            auxiliary_session.ensure_started(context)
+            with restore_stage_heartbeat("auxiliary_start"):
+                auxiliary_session.ensure_started(context)
 
         http_failure: tuple[int, str] | tuple[None, str] | None = None
         try:
@@ -423,7 +444,11 @@ class _BackupMixin:
                 if timeout is not None
                 else self._instance._client.config.backup_timeout_seconds
             )
-            with open(backup_path, "rb") as fp, self._http(timeout=restore_timeout) as http:
+            with (
+                restore_stage_heartbeat("db_restore"),
+                open(backup_path, "rb") as fp,
+                self._http(timeout=restore_timeout) as http,
+            ):
                 resp = http.post(
                     self._url("restore"),
                     data={

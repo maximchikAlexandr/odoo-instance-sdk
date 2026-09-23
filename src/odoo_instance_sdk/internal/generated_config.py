@@ -79,8 +79,10 @@ def render_config(
     ):
         if value is not None:
             options[key] = value
-    if options.get("logfile", "").strip():
-        options["logfile"] = str((dest.parent / "odoo.log").resolve())
+    # An isolated environment always owns its logfile: rewrite any explicit
+    # logfile to <environment-root>/odoo.log, and inject one when the source
+    # config had none so detached launch and `logs` share one resolved path.
+    options["logfile"] = str((dest.parent / "odoo.log").resolve())
 
     output = io.StringIO()
     src.write(output)

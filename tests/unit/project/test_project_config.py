@@ -321,6 +321,39 @@ def test_test_instance_rejects_empty_values(tmp_path: Path, value: dict[str, str
         ProjectConfig._from_mapping({}, repository_root=tmp_path, test_instance_data=value)
 
 
+def test_test_instance_database_is_optional_and_roundtrips_without_it(tmp_path: Path) -> None:
+    cfg = ProjectConfig._from_mapping(
+        {},
+        repository_root=tmp_path,
+        test_instance_data={"base_url": "https://example.test", "git_branch": "main"},
+    )
+    assert cfg.test_instance is not None
+    assert cfg.test_instance.database is None
+    manifest = cfg.to_manifest()
+    assert "database" not in manifest
+    write_manifest(tmp_path, cfg)
+    reloaded = ProjectConfig.load(tmp_path)
+    assert reloaded.test_instance is not None
+    assert reloaded.test_instance.database is None
+    assert reloaded.to_manifest() == manifest
+
+
+def test_test_instance_database_optional_preserves_explicit_value(tmp_path: Path) -> None:
+    cfg = ProjectConfig._from_mapping(
+        {},
+        repository_root=tmp_path,
+        test_instance_data={
+            "base_url": "https://example.test",
+            "database": "mydb",
+            "git_branch": "main",
+        },
+    )
+    assert cfg.test_instance is not None
+    assert cfg.test_instance.database == "mydb"
+    manifest = cfg.to_manifest()
+    assert 'database = "mydb"' in manifest
+
+
 def test_legacy_manifest_omits_new_sections_and_is_byte_stable(tmp_path: Path) -> None:
     cfg = ProjectConfig(repository_root=tmp_path, odoo_bin=Path("/opt/odoo/odoo-bin"))
     expected = '[project]\nodoo_bin = "/opt/odoo/odoo-bin"\n'

@@ -234,7 +234,13 @@ def test_restore_replace_click_path_has_one_machine_envelope_for_both_context_sp
     )
 
     assert result.exit_code == 0, result.output
-    builder.assert_called_once_with(environment, backup_id, reset_admin_password=False)
+    builder.assert_called_once_with(
+        environment,
+        backup_id,
+        reset_admin_password=False,
+        admin_password=None,
+        admin_password_provenance="environment",
+    )
     if format_args == ["--format", "json"]:
         payload = json.loads(result.stdout)
         assert payload["dry_run"] is dry_run
@@ -305,10 +311,13 @@ def test_refresh_uses_project_context_options_and_typed_machine_result(
     )
     monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
     monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+    monkeypatch.setenv("ODCLI_ADMIN_PASSWORD", "test-secret")
 
     result = CliRunner().invoke(
         cli,
         [
+            "--project",
+            str(tmp_path),
             "db",
             "refresh",
             "--restore",
@@ -421,6 +430,7 @@ def test_rich_restore_uses_live_only_for_tty(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_reset_delegates_only_for_exact_recorded_local_binding(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     instance = MagicMock()
     instance.config.configured_database_names = ("demo_copy",)
@@ -432,15 +442,21 @@ def test_reset_delegates_only_for_exact_recorded_local_binding(
         "odoo_instance_sdk.commands.db.ready_instance",
         lambda _ctx: _resolved_context(MagicMock(), environment, instance),
     )
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+    monkeypatch.setenv("ODCLI_ADMIN_PASSWORD", "test-secret")
 
-    result = CliRunner().invoke(cli, ["db", "reset-admin-password", "--format", "json"])
+    result = CliRunner().invoke(
+        cli, ["--project", str(tmp_path), "db", "reset-admin-password", "--format", "json"]
+    )
 
     assert result.exit_code == 0, result.output
     document = json.loads(result.stdout)
     assert document["context"] == {"environment_id": "env-1"}
     assert document["result"]["database"] == "demo_copy"
     assert "password" not in document["result"]
-    instance.databases.reset_admin_password_command.assert_called_once_with()
+    instance.databases.reset_admin_password_command.assert_called_once_with(
+        admin_password="test-secret", provenance="environment"
+    )
 
     instance.config.configured_database_names = ("other",)
     rejected = CliRunner().invoke(cli, ["db", "reset-admin-password", "--format", "json"])
@@ -574,6 +590,7 @@ def test_restore_replace_execution_failure_is_one_machine_envelope(
 
 def test_restore_replace_reset_failure_preserves_replacement_context(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     failure = RuntimeError("reset failed: master_pwd=reset-secret")
     failure.failure_context = CopyReplacementFailureContext(  # type: ignore[attr-defined]
@@ -590,11 +607,15 @@ def test_restore_replace_reset_failure_preserves_replacement_context(
     monkeypatch.setattr(
         "odoo_instance_sdk.commands.db.resolve_environment", lambda *_args, **_kwargs: MagicMock()
     )
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+    monkeypatch.setenv("ODCLI_ADMIN_PASSWORD", "test-secret")
     client.environments.replace_copy_database_command.return_value = _command(error=failure)
 
     result = CliRunner().invoke(
         cli,
         [
+            "--project",
+            str(tmp_path),
             "db",
             "restore",
             "00000000-0000-0000-0000-000000000007",
@@ -746,7 +767,7 @@ def test_restore_replace_ambiguous_selector_rejects_before_builder(
 
 @pytest.mark.parametrize("mode_args", [["--format", "json"], ["--format", "toon"], []])
 def test_restore_replace_reset_option_reaches_builder_for_each_output_mode(
-    monkeypatch: pytest.MonkeyPatch, mode_args: list[str]
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode_args: list[str]
 ) -> None:
     client = MagicMock()
     environment = MagicMock()
@@ -766,10 +787,17 @@ def test_restore_replace_reset_option_reaches_builder_for_each_output_mode(
         "odoo_instance_sdk.commands.db.resolve_environment",
         lambda *_args, **_kwargs: environment,
     )
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+    monkeypatch.setenv("ODCLI_ADMIN_PASSWORD", "test-secret")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.admin_password.getpass", lambda *_a: "test-secret"
+    )
 
     result = CliRunner().invoke(
         cli,
         [
+            "--project",
+            str(tmp_path),
             "db",
             "restore",
             str(backup_id),

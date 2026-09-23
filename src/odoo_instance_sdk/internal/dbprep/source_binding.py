@@ -118,12 +118,18 @@ def _annotate_retained_failure(
     default_switch_confirmed: bool = False,
 ) -> None:
     """Attach only non-secret retained-artifact identifiers to a failure."""
+    restore_stage_id = getattr(error, "restore_stage_id", None)
+    restore_stage_elapsed = getattr(error, "restore_stage_elapsed", None)
     context = DatabasePreparationFailureContext(
         retained_backup_id=backup.id if backup is not None else None,
         retained_database=target_database,
         backup_id=backup.id if backup is not None else backup_id,
         database_confirmed=database_confirmed,
         default_switch_confirmed=default_switch_confirmed,
+        restore_stage_id=restore_stage_id if isinstance(restore_stage_id, str) else None,
+        restore_stage_elapsed=(
+            restore_stage_elapsed if isinstance(restore_stage_elapsed, (int, float)) else None
+        ),
     )
     setattr(error, "failure_context", context)
     note = retained_artifact_context(
@@ -215,6 +221,8 @@ def _catalogue_backup_preflight(
     # for ownership.  Projects without it can still restore a registered point.
     if project.test_instance is not None:
         expected = resolve_test_source(project).config
-        if expected.base_url != backup.source_base_url or expected.database != backup.database_name:
+        if expected.base_url != backup.source_base_url or (
+            expected.database is not None and expected.database != backup.database_name
+        ):
             raise ConfigError("catalogue backup is not bound to this project source")
     return backup

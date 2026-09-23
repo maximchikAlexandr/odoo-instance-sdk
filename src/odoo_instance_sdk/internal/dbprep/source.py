@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast, runtime_checkable
 
 import msgspec
 
@@ -24,6 +24,10 @@ from odoo_instance_sdk.exceptions import (
     ConfigError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
+    PlanJsonValue,
+    RemoteDatabaseAmbiguousError,
+    RemoteDatabaseListUnavailableError,
+    RemoteDatabaseNoneError,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.generated_config import project_generated_config_path
@@ -78,6 +82,13 @@ _PREPARATION_FIELDS = (
     "postgres",
     "default_source_database",
 )
+
+
+@runtime_checkable
+class DatabaseNameProvider(Protocol):
+    """Provides remote database names for optional-database resolution."""
+
+    def names(self) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +148,8 @@ class DatabasePreparationFailureContext(
     backup_id: uuid.UUID | None = None
     database_confirmed: bool | None = None
     default_switch_confirmed: bool | None = None
+    restore_stage_id: str | None = None
+    restore_stage_elapsed: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,6 +588,7 @@ class RestorePreflight:
     target_database: str
     restore_source: _RestoreSource = field(default_factory=_RemoteRestoreSource)
     catalogue_backup: Backup | None = None
+    resolved_database: str | None = None
 
 
 class _CoalescedRestore(Exception):
@@ -603,7 +617,7 @@ def resolve_test_source(
         base_url = normalize_base_url(config.base_url)
     except Exception as exc:
         raise ConfigError("invalid test_instance.base_url") from exc
-    if not config.database.strip():
+    if config.database is not None and not config.database.strip():
         raise ConfigError("test_instance.database must not be empty")
     explicit = options.source_branch
     if explicit is not None:
@@ -624,6 +638,41 @@ def resolve_test_source(
         branch=branch,
         origin=origin,
     )
+
+
+def resolve_remote_database_name(
+    configured: str | None,
+    names_provider: DatabaseNameProvider,
+) -> str:
+    """Select exactly one remote database name for the current operation.
+
+    When ``configured`` is explicitly set, it is returned without calling
+    ``names_provider`` — this preserves work with instances where listing is
+    disabled. When it is absent, names are obtained through ``names_provider``
+    (typically ``DatabaseResource.names()``); exactly one name is selected.
+    Zero names raise ``RemoteDatabaseNoneError``; multiple raise
+    ``RemoteDatabaseAmbiguousError`` listing the names; an unavailable list
+    raises ``RemoteDatabaseListUnavailableError``. All three fail before any
+    download.
+    """
+    if configured is not None:
+        return configured
+    try:
+        names = names_provider.names()
+    except Exception as exc:
+        raise RemoteDatabaseListUnavailableError(
+            "database list is unavailable on the remote instance",
+        ) from exc
+    if len(names) == 0:
+        raise RemoteDatabaseNoneError(
+            "remote instance exposes no databases; set test_instance.database"
+        )
+    if len(names) > 1:
+        raise RemoteDatabaseAmbiguousError(
+            "remote instance exposes multiple databases; set test_instance.database",
+            details={"available_databases": [cast("PlanJsonValue", n) for n in sorted(names)]},
+        )
+    return names[0]
 
 
 def normalize_ref(value: str) -> str:

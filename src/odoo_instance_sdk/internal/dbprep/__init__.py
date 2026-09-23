@@ -27,6 +27,7 @@ from odoo_instance_sdk.internal.dbprep.source import (
     preparation_lock,
     relevant_manifest_conflicts,
     reserve_target_database,
+    resolve_remote_database_name,
     resolve_runtime_binding,
     resolve_test_source,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "prepare_restore",
     "relevant_manifest_conflicts",
     "reserve_target_database",
+    "resolve_remote_database_name",
     "resolve_runtime_binding",
     "resolve_test_source",
 ]

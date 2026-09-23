@@ -72,6 +72,8 @@ class CopyReplacementFailureContext(
     target_present: bool | None = None
     rollback_present: bool | None = None
     rollback_filestore_present: bool | None = None
+    restore_stage_id: str | None = None
+    restore_stage_elapsed: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +89,8 @@ class CopyReplacementPlan:
     cluster_id: str
     data_directory: Path
     reset_admin_password: bool
+    admin_password: str | None = None
+    admin_password_provenance: str = "environment"
     reset_process_step: PreparedStep | None = None
     environment_identity: tuple[tuple[str, str | None], ...] = ()
     planning_database: tuple[bool, bool, bool] = (True, False, False)
@@ -356,6 +360,8 @@ def _validate_plan(  # noqa: C901
     backup_id: uuid.UUID,
     *,
     reset_admin_password: bool,
+    admin_password: str | None = None,
+    admin_password_provenance: str = "environment",
 ) -> CopyReplacementPlan:
     if environment.state not in {EnvironmentState.READY, EnvironmentState.CLEANUP_FAILED}:
         raise EnvironmentConflictError(
@@ -411,9 +417,14 @@ def _validate_plan(  # noqa: C901
         )
     reset_process_step: PreparedStep | None = None
     if reset_admin_password:
-        from odoo_instance_sdk.resources.database import _RESET_ADMIN_PASSWORD_SCRIPT
+        from odoo_instance_sdk.exceptions import AdminPasswordRequiredError
+        from odoo_instance_sdk.resources.database import _admin_password_reset_script
         from odoo_instance_sdk.resources.instance.auxiliary_restore import _build_shell_script_step
 
+        if not admin_password:
+            raise AdminPasswordRequiredError(
+                "administrator password is required before admin reset"
+            )
         start_config = instance.config.start_config
         if start_config is None:
             raise ConfigError("replacement admin reset has no generated start configuration")
@@ -421,7 +432,7 @@ def _validate_plan(  # noqa: C901
             start_config,
             executable_prefix=instance._executable_prefix(),
             default_cwd=instance.config.default_cwd,
-            source=_RESET_ADMIN_PASSWORD_SCRIPT,
+            source=_admin_password_reset_script(admin_password),
             commit=True,
             project_environment=instance.config.project_environment,
         )
@@ -504,6 +515,8 @@ def _validate_plan(  # noqa: C901
         cluster_id=cluster_id,
         data_directory=data_dir,
         reset_admin_password=reset_admin_password,
+        admin_password=admin_password,
+        admin_password_provenance=admin_password_provenance,
         reset_process_step=reset_process_step,
         environment_identity=environment_identity,
         generated_config_digest=_file_digest(config_path),

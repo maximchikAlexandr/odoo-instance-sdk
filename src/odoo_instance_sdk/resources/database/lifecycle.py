@@ -23,12 +23,25 @@ if TYPE_CHECKING:
 
 
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB
-_RESET_ADMIN_PASSWORD_SCRIPT = """
-user = env.ref('base.user_admin', raise_if_not_found=True)
-user.ensure_one()
-user.write({'password': 'admin'})
-result = {'xml_id': 'base.user_admin', 'updated': True}
-"""
+
+
+def _admin_password_reset_script(admin_password: str) -> str:
+    """Build the ``base.user_admin`` password reset shell script.
+
+    The secret is interpolated into the script source, which the process
+    boundary captures in ``secret_values`` and stdin (never argv); the public
+    plan projection redacts both.  The literal ``admin`` fallback is gone.
+    """
+    import json
+
+    return (
+        "import json as _json\n"
+        f"_odcli_admin_password = _json.loads({json.dumps(admin_password)!r})\n"
+        "user = env.ref('base.user_admin', raise_if_not_found=True)\n"
+        "user.ensure_one()\n"
+        "user.write({'password': _odcli_admin_password})\n"
+        "result = {'xml_id': 'base.user_admin', 'updated': True}\n"
+    )
 
 
 def _normalize_source_git_branch(value: str | None) -> str | None:

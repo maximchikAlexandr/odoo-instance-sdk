@@ -39,7 +39,7 @@ from odoo_instance_sdk.models import (
     SqlExecutionResult,
 )
 from odoo_instance_sdk.resources.database.lifecycle import (
-    _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
+    _admin_password_reset_script as _admin_password_reset_script,
     _annotate_backup_failure as _annotate_backup_failure,
     _normalize_source_git_branch as _normalize_source_git_branch,
     _trustworthy_content_length as _trustworthy_content_length,

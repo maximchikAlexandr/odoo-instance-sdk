@@ -375,7 +375,13 @@ def run(  # noqa: C901
         except SystemExit:
             raise
         except Exception as e:
-            fail(output_mode, "run", e, dry_run=dry_run)
+            fail(
+                output_mode,
+                "run",
+                e,
+                dry_run=dry_run,
+                error_code=getattr(e, "error_code", None),
+            )
         if not dry_run:
             sys.exit(status)
         return

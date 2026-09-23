@@ -65,6 +65,7 @@ from odoo_instance_sdk.resources.instance.runtime import (
     _RuntimeBinding,
     _RuntimeCatalog,
     _RuntimeIdentity,
+    resolve_effective_logfile,
 )
 
 if TYPE_CHECKING:
@@ -545,12 +546,7 @@ class _IdentityMixin:
             raise InstanceConfigurationError(
                 "No StartConfig — create instance via from_config() or from_environment()"
             )
-        raw = config.logfile
-        if raw is None or not raw.strip():
-            raise InstanceConfigurationError(
-                "logfile is absent or empty; set logfile in the bound odoo.conf"
-            )
-        path = (self.config.default_cwd or Path.cwd()) / raw.strip()
+        path = resolve_effective_logfile(config, self.config.default_cwd)
         yield from _iter_logfile(path, tail=tail, follow=follow)
 
     def shell(self, *, args: Sequence[str] = ()) -> int:

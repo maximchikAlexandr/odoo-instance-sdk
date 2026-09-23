@@ -41,10 +41,12 @@ from odoo_instance_sdk.resources.instance.auxiliary_restore import (
 )
 from odoo_instance_sdk.resources.instance.runtime import (
     T,
+    _ensure_logfile_writable,
     _RuntimeBinding,
     _RuntimeCatalog,
     _RuntimeIdentity,
     _verify_process_exit,
+    resolve_effective_logfile,
 )
 
 if TYPE_CHECKING:
@@ -247,14 +249,15 @@ class _PlanningMixin:
                 raise InstanceConfigurationError(
                     "No StartConfig — pass one explicitly or create instance via from_config()"
                 )
-        raw_logfile = config.logfile
-        if raw_logfile is None or not raw_logfile.strip():
-            raise InstanceConfigurationError(
-                "detached launch requires a logfile in the bound odoo.conf; "
-                "set logfile before running detached"
-            )
         validated_args = resolve_runtime_argv_extra(self.config.default_run_args, args)
         resolved_cwd = cwd if cwd is not None else self.config.default_cwd
+        # Resolve the effective logfile and inject ``--logfile {path}`` after
+        # the protected-option check above.  An explicit non-empty ``logfile``
+        # in the bound ``odoo.conf`` wins; otherwise ``odoo.log`` next to the
+        # effective config is chosen.  The user's ``odoo.conf`` is never edited.
+        effective_logfile = resolve_effective_logfile(
+            config, Path(resolved_cwd) if resolved_cwd is not None else None
+        )
         snapshot, cli_args, secret_path, secrets = _snapshot_start_inputs(config)
         environment_snapshot, environment_overrides = captured_child_environment(
             env, project_environment=self.config.project_environment
@@ -262,7 +265,13 @@ class _PlanningMixin:
         secrets = (*secrets, *_child_secret_values(self.config.project_environment, env))
         step = PreparedStep(
             step_id="instance.detached",
-            argv=(*self._executable_prefix(), *cli_args, *validated_args),
+            argv=(
+                *self._executable_prefix(),
+                *cli_args,
+                "--logfile",
+                str(effective_logfile),
+                *validated_args,
+            ),
             cwd=None if resolved_cwd is None else str(resolved_cwd),
             environment=environment_overrides,
             environment_snapshot=environment_snapshot,
@@ -316,11 +325,12 @@ class _PlanningMixin:
             for step_id in action_ids
         )
         process_executor = SubprocessExecutor()
-        logfile_path = str((self.config.default_cwd or Path.cwd()) / raw_logfile.strip())
+        logfile_path = str(effective_logfile)
 
         def execute(context: RunContext[DetachedLaunchResult]) -> DetachedLaunchResult:
             if type(process_executor) is SubprocessExecutor:
                 _assert_http_port_free(config)
+            _ensure_logfile_writable(effective_logfile)
             context.action(action_ids[0])
             context.complete_action(action_ids[0])
             self._ensure_dependencies_ready(

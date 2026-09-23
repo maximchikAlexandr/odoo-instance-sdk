@@ -207,6 +207,7 @@ class AdminPasswordResetResult(
     completed: bool
     xml_id: str
     environment_id: uuid.UUID | None = None
+    provenance: str = "environment"
 
 
 class EnvironmentCheckoutPlan(

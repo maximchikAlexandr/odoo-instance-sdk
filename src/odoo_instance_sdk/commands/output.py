@@ -209,6 +209,13 @@ def _failure_context(error: BaseException | None) -> JsonObject:
 def _failure_message(message: DiagnosticValue, context: JsonObject) -> str:
     rendered = sanitize_diagnostic(message)
     details: list[str] = []
+    restore_stage_id = context.get("restore_stage_id")
+    if isinstance(restore_stage_id, str) and restore_stage_id:
+        restore_stage_elapsed = context.get("restore_stage_elapsed")
+        stage_detail = f"restore stage {restore_stage_id}"
+        if isinstance(restore_stage_elapsed, (int, float)):
+            stage_detail += f" after {restore_stage_elapsed:.1f}s"
+        details.append(stage_detail)
     if context.get("retained_backup_id") is not None:
         details.append(f"retained backup {context['retained_backup_id']}")
     if context.get("retained_database") is not None:

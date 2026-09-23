@@ -12,6 +12,7 @@ from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import (
     InstanceConfigurationError,
     LogfileAccessError,
+    LogfileUnwritableError,
     NonLocalInstanceError,
 )
 from odoo_instance_sdk.internal.generated_config import project_generated_config_path
@@ -368,12 +369,36 @@ def _runtime_config_arg(argv: Sequence[str]) -> str | None:
     return None
 
 
+_CANONICAL_VALUE_OPTIONS = frozenset({"--config", "-c", "--logfile"})
+
+
 def _canonical_runtime_argv(argv: Sequence[str]) -> tuple[str, ...]:
     values = list(argv)
     for index, value in enumerate(values):
-        if index in {0, 1} or (index > 0 and values[index - 1] in {"--config", "-c"}):
+        if index in {0, 1} or (index > 0 and values[index - 1] in _CANONICAL_VALUE_OPTIONS):
             values[index] = _canonical_runtime_path(value)
     return tuple(values)
+
+
+def resolve_effective_logfile(config: StartConfig, default_cwd: Path | None) -> Path:
+    """Resolve the effective logfile path for a detached launch.
+
+    An explicit non-empty ``logfile`` in the effective ``odoo.conf`` wins; a
+    relative path is resolved against ``default_cwd`` (or the process cwd).
+    When ``logfile`` is absent or empty, the fallback is ``odoo.log`` next to
+    the effective ``odoo.conf`` (``config_path``), or ``odoo.log`` in
+    ``default_cwd`` when no config path is bound.  The user's ``odoo.conf`` is
+    never edited.
+    """
+    raw = config.logfile
+    if raw and raw.strip():
+        candidate = Path(raw.strip())
+        if not candidate.is_absolute():
+            candidate = (default_cwd or Path.cwd()) / candidate
+        return candidate.resolve(strict=False)
+    if config.config_path:
+        return (Path(config.config_path).parent / "odoo.log").resolve(strict=False)
+    return ((default_cwd or Path.cwd()) / "odoo.log").resolve(strict=False)
 
 
 def _runtime_expectations(
@@ -402,8 +427,15 @@ def _runtime_expectations(
         )
         expected_odoo_bin = _canonical_runtime_path(odoo_bin)
         start_config = StartConfig.from_odoo_config(config_path)
+        effective_logfile = resolve_effective_logfile(start_config, Path(expected_cwd))
         expected_argv = _canonical_runtime_argv(
-            (expected_executable, expected_odoo_bin, *_build_cli_args(start_config))
+            (
+                expected_executable,
+                expected_odoo_bin,
+                *_build_cli_args(start_config),
+                "--logfile",
+                str(effective_logfile),
+            )
         )
     except (KeyError, TypeError, ValueError, OSError) as exc:
         raise RuntimeError("runtime identity configuration is unreadable") from exc
@@ -506,6 +538,23 @@ def _open_logfile(path: Path) -> TextIO:
         return path.open(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise LogfileAccessError(str(path), exc.strerror or type(exc).__name__) from exc
+
+
+def _ensure_logfile_writable(path: Path) -> None:
+    """Create the parent directory and an empty logfile before a detached spawn.
+
+    Fails before spawn with ``logfile_unwritable`` and the exact path when the
+    fallback cannot be created or opened for writing.  Idempotent: an existing
+    regular file is left untouched; an existing directory or symlink is rejected.
+    """
+    if path.exists() and not path.is_file():
+        raise LogfileUnwritableError(str(path), f"{path} exists but is not a regular file")
+    try:
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+    except OSError as exc:
+        raise LogfileUnwritableError(str(path), exc.strerror or str(exc)) from exc
 
 
 def _logfile_sentinel(fd: int, cursor: int) -> bytes:

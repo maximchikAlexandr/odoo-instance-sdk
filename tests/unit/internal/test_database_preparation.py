@@ -727,6 +727,7 @@ def test_restore_uv_selector_is_not_resolved_while_planning(
     command = DatabasePreparationCoordinator(MagicMock()).refresh_database_command(
         project,
         options=DatabaseRefreshOptions(restore=True, reset_admin_password=True),
+        admin_password="test-secret",
     )
 
     uv_resolution.assert_not_called()
@@ -902,8 +903,10 @@ def _production_restore_command(
         wait_for_lock: bool = True,
         coalesce: bool = False,
         target_database: str | None = None,
+        restore_source: object = None,
+        remote_password: str | None = None,
     ) -> Iterator[RestorePreflight]:
-        del _client, _project, wait_for_lock, coalesce
+        del _client, _project, wait_for_lock, coalesce, restore_source, remote_password
         context = active_context()
         assert context is not None
         context.action("database.prepare.lock")
@@ -942,7 +945,7 @@ def _production_restore_command(
     monkeypatch.setattr(preparation, "write_manifest", write, raising=False)
     monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
     command = preparation.DatabasePreparationCoordinator(client).prepare_command(
-        project, options=options, executor=executor
+        project, options=options, executor=executor, admin_password="test-secret"
     )
     return command, executor, project, backup, write
 
@@ -1776,6 +1779,7 @@ def test_restore_admin_reset_failure_retains_target_and_removes_config(
             client,
             project,
             options=DatabaseRefreshOptions(restore=True, reset_admin_password=True),
+            admin_password="test-secret",
         )
 
     assert "retained database" in " ".join(failure.value.__notes__ or ())

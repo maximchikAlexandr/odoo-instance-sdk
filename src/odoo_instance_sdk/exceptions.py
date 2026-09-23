@@ -217,8 +217,30 @@ class LogfileAccessError(InstanceConfigurationError):
         )
 
 
+class LogfileUnwritableError(InstanceConfigurationError):
+    """The resolved fallback logfile cannot be created or opened for writing."""
+
+    error_code = "logfile_unwritable"
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"logfile_unwritable: {path} ({reason})")
+
+
 class MasterPasswordRequiredError(OdooInstanceSdkError):
     """Master password is required for this operation."""
+
+
+class AdminPasswordRequiredError(OdooInstanceSdkError):
+    """A user-supplied administrator password secret is required.
+
+    Raised before any restore/drop mutation when no secret was provided via
+    the interactive prompt, ``ODCLI_ADMIN_PASSWORD`` process environment, or
+    project ``.odcli/.env``.  The exception text never includes the secret.
+    """
+
+    code = "admin_password_required"
 
 
 class NonLocalInstanceError(OdooInstanceSdkError):
@@ -269,6 +291,38 @@ class BackupDownloadError(OdooInstanceSdkError):
 
 class DatabaseManagerUnavailableError(OdooInstanceSdkError):
     """Database manager endpoint unavailable or listing disabled."""
+
+
+class RemoteDatabaseResolutionError(OdooInstanceSdkError):
+    """Base for remote database name resolution failures.
+
+    Each subclass carries a stable ``code`` and a secret-free ``details``
+    mapping so the CLI transports can distinguish resolution failures.
+    """
+
+    code: str = "remote_database_resolution"
+
+    def __init__(self, message: str, *, details: Mapping[str, PlanJsonValue] | None = None) -> None:
+        self.details: dict[str, PlanJsonValue] = dict(details or {})
+        super().__init__(message)
+
+
+class RemoteDatabaseNoneError(RemoteDatabaseResolutionError):
+    """Instance exposes zero databases (``remote_database_none``)."""
+
+    code = "remote_database_none"
+
+
+class RemoteDatabaseAmbiguousError(RemoteDatabaseResolutionError):
+    """Instance exposes multiple databases (``remote_database_ambiguous``)."""
+
+    code = "remote_database_ambiguous"
+
+
+class RemoteDatabaseListUnavailableError(RemoteDatabaseResolutionError):
+    """Database list could not be obtained (``remote_database_list_unavailable``)."""
+
+    code = "remote_database_list_unavailable"
 
 
 class PgAdminError(OdooInstanceSdkError):

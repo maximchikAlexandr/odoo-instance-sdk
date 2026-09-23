@@ -385,11 +385,12 @@ class TestRestore:
 
         monkeypatch.setattr(DatabaseResource, "_http", fake_http)
 
-        def command_factory(project_path: Path, *, options: Any) -> Any:
+        def command_factory(project_path: Path, *, options: Any, **kwargs: Any) -> Any:
             command = DatabasePreparationCoordinator(client).refresh_database_command(
                 project_path,
                 options=options,
                 executor=executor,
+                admin_password=kwargs.get("admin_password"),
             )
             for step in command._prepared().steps:
                 if (

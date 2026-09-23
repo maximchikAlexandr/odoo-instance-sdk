@@ -53,6 +53,19 @@ from odoo_instance_sdk.models import (
 
 _RestoreResult = TypeVar("_RestoreResult")
 
+
+def _error_code(error: BaseException) -> str | None:
+    code = getattr(error, "code", None)
+    return code if isinstance(code, str) else None
+
+
+def _error_details(error: BaseException) -> JsonObject | None:
+    details = getattr(error, "details", None)
+    if isinstance(details, dict):
+        return cast("JsonObject", details)
+    return None
+
+
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.config import OdooClientConfig
@@ -182,6 +195,7 @@ def db_group() -> None:
 )
 @click.option("--source-branch", default=None, help="Source Git branch provenance.")
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
+@click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
 @output_options
 @pass_cli_context
 def db_refresh(
@@ -191,6 +205,7 @@ def db_refresh(
     reset_admin_password: bool,
     source_branch: str | None,
     dry_run: bool,
+    no_input: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
@@ -202,6 +217,15 @@ def db_refresh(
         raise click.UsageError("--show-command-output is only available with Rich output")
     if reset_admin_password and not restore:
         raise click.UsageError("--reset-admin-password requires --restore")
+    admin_password: str | None = None
+    admin_password_provenance = "environment"
+    if reset_admin_password:
+        from odoo_instance_sdk.internal.admin_password import resolve_admin_password_secret
+
+        admin_password, admin_password_provenance = resolve_admin_password_secret(
+            prompt=(output_mode is OutputMode.RICH and not no_input and not dry_run),
+            project_root=resolve_project_path(ctx) if not dry_run else None,
+        )
     try:
         project_path = resolve_project_path(ctx)
         client = _client_class()(config=_client_config_class()(executable="odoo"))
@@ -213,6 +237,8 @@ def db_refresh(
                     source_branch=source_branch,
                     reset_admin_password=reset_admin_password,
                 ),
+                admin_password=admin_password,
+                admin_password_provenance=admin_password_provenance,
             )
         )
         if restore and (project_path / ".odcli" / "project.toml").is_file():
@@ -225,7 +251,14 @@ def db_refresh(
                 auxiliary_restore_session(auxiliary_instance),
             )
     except Exception as exc:
-        fail(output_mode, "db.refresh", exc, dry_run=dry_run)
+        fail(
+            output_mode,
+            "db.refresh",
+            exc,
+            dry_run=dry_run,
+            error_code=_error_code(exc),
+            details=_error_details(exc),
+        )
 
     runner = run_or_preview
 
@@ -248,7 +281,14 @@ def db_refresh(
     try:
         status, _result = run()
     except Exception as exc:
-        fail(output_mode, "db.refresh", exc, dry_run=dry_run)
+        fail(
+            output_mode,
+            "db.refresh",
+            exc,
+            dry_run=dry_run,
+            error_code=_error_code(exc),
+            details=_error_details(exc),
+        )
     raise click.exceptions.Exit(status)
 
 
@@ -307,6 +347,7 @@ def db_list(
     help="Replace the selected stopped COPY environment in place.",
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
+@click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
 @output_options
 @pass_cli_context
 def db_restore(  # noqa: C901
@@ -317,6 +358,7 @@ def db_restore(  # noqa: C901
     yes: bool,
     replace_environment: bool,
     dry_run: bool,
+    no_input: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
@@ -345,6 +387,16 @@ def db_restore(  # noqa: C901
         )
         raise AssertionError from exc
 
+    admin_password: str | None = None
+    admin_password_provenance = "environment"
+    if reset_admin_password:
+        from odoo_instance_sdk.internal.admin_password import resolve_admin_password_secret
+
+        admin_password, admin_password_provenance = resolve_admin_password_secret(
+            prompt=(output_mode is OutputMode.RICH and not no_input and not dry_run),
+            project_root=resolve_project_path(ctx) if not dry_run else None,
+        )
+
     try:
         client = _client_class()(config=_client_config_class()(executable="odoo"))
         command: _InspectableCommand[msgspec.Struct]
@@ -357,6 +409,8 @@ def db_restore(  # noqa: C901
                     environment,
                     backup_id,
                     reset_admin_password=reset_admin_password,
+                    admin_password=admin_password,
+                    admin_password_provenance=admin_password_provenance,
                 ),
             )
         else:
@@ -373,6 +427,8 @@ def db_restore(  # noqa: C901
                     ),
                     restore_source=_CatalogueRestoreSource(backup_id),
                     target_database=target_database,
+                    admin_password=admin_password,
+                    admin_password_provenance=admin_password_provenance,
                 ),
             )
             from odoo_instance_sdk.project import ProjectConfig
@@ -465,11 +521,15 @@ def db_restore(  # noqa: C901
     "reset-admin-password", help="Reset the administrator on the ready environment database."
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
+@click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
+@click.option("--yes", is_flag=True, default=False, help="Confirm mutation (does not skip prompt).")
 @output_options
 @pass_cli_context
 def db_reset_admin_password(
     ctx: CliContext,
     dry_run: bool,
+    no_input: bool,
+    yes: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
@@ -480,7 +540,15 @@ def db_reset_admin_password(
         instance = runtime_context.instance
         environment = runtime_context.require_environment()
         _validate_recorded_database_binding(instance, environment)
-        command = instance.databases.reset_admin_password_command()
+        from odoo_instance_sdk.internal.admin_password import resolve_admin_password_secret
+
+        admin_password, provenance = resolve_admin_password_secret(
+            prompt=(output_mode is OutputMode.RICH and not no_input and not dry_run),
+            project_root=resolve_project_path(ctx),
+        )
+        command = instance.databases.reset_admin_password_command(
+            admin_password=admin_password, provenance=provenance
+        )
     except Exception as exc:
         fail(output_mode, "db.reset-admin-password", exc, dry_run=dry_run)
 
@@ -792,7 +860,7 @@ def _rich_admin_reset(document: OutputDocument) -> str:
             document.result, command=document.command, warnings=document.warnings
         )
     table = Table("Field", "Value", title="Administrator password reset")
-    for field in ("database", "completed", "xml_id", "environment_id"):
+    for field in ("database", "completed", "xml_id", "environment_id", "provenance"):
         value = payload.get(field)
         if value is not None:
             table.add_row(field.replace("_", " ").title(), rich_cell(value))
