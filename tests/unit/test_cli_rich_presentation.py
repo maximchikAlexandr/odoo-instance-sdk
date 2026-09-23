@@ -177,7 +177,13 @@ def test_backup_validate_rich_leaf_is_width_safe(
     )
 
     assert result.exit_code == (0 if expected_status == "valid" else 1), result.output
-    assert expected_status in result.stdout.lower() or expected_status in result.stderr.lower()
+    if expected_status == "valid":
+        assert expected_status in result.stdout.lower()
+    else:
+        assert result.stdout == ""
+        assert "┌" in result.stderr
+        assert "Status" in result.stderr
+        assert expected_status in result.stderr.lower()
     assert all(len(line) <= width for line in (result.stdout + result.stderr).splitlines())
 
 

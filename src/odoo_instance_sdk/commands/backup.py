@@ -341,7 +341,7 @@ def _rich_validation(document: OutputDocument) -> str:
 
 def _emit_validation_failure(document: OutputDocument, mode: OutputMode) -> None:
     if mode is OutputMode.RICH:
-        rich_print(_rich_validation(document), preserve_newlines=True)
+        Console(stderr=True).print(_rich_validation(document), markup=False, soft_wrap=True)
     else:
         emit(document, mode, rich=_rich_validation)
 
