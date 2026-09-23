@@ -152,6 +152,45 @@ class TestCreateVenv:
         assert "--python" in venv_calls[0]
         assert "3.12" in venv_calls[0]
 
+    @pytest.mark.parametrize(
+        ("create_venv", "install_operation"),
+        [(False, "install"), (True, "sync")],
+        ids=["reused", "owned"],
+    )
+    def test_checkout_compile_and_install_share_python_target(
+        self,
+        env_client: OdooClient,
+        project_manifest: Path,
+        fake_python: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        create_venv: bool,
+        install_operation: str,
+    ) -> None:
+        _add_requirements(project_manifest, fake_python)
+        calls = _patch_subprocess(monkeypatch)
+        env = env_client.environments.checkout(
+            project_manifest,
+            f"feat/checkout-python-{install_operation}",
+            options=EnvironmentCheckoutOptions(
+                python="3.12" if create_venv else str(fake_python),
+                create_venv=create_venv,
+                db_mode=EnvironmentDatabaseMode.SHARED,
+                source_database="comerta",
+            ),
+        )
+
+        dependency_calls = [call for call in calls if call[:2] == ["uv", "pip"]]
+        assert [call[2] for call in dependency_calls] == ["compile", install_operation]
+        compile_python = dependency_calls[0][dependency_calls[0].index("--python") + 1]
+        install_python = dependency_calls[1][dependency_calls[1].index("--python") + 1]
+        expected_python = (
+            str(Path(env.python_environment_path) / "bin" / "python")
+            if create_venv
+            else str(fake_python)
+        )
+        assert compile_python == expected_python
+        assert install_python == expected_python
+
     def test_hash_locked_checkout_skips_discovery_and_compile(
         self,
         env_client: OdooClient,

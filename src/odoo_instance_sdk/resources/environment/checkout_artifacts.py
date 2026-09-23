@@ -509,6 +509,9 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
     if plan.hash_lock is not None:
         install_argv = build_trusted_sync_argv(_owned_python_executable(plan.venv), plan.hash_lock)
     elif plan.dependency_inputs:
+        dependency_python = (
+            _owned_python_executable(plan.venv) if plan.python_owned else plan.python_path
+        )
         steps.append(
             PreparedStep(
                 step_id="checkout.dependencies.compile",
@@ -516,6 +519,8 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                     "uv",
                     "pip",
                     "compile",
+                    "--python",
+                    dependency_python,
                     *plan.dependency_inputs,
                     "-o",
                     str(plan.dependency_lock),
@@ -531,7 +536,7 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 "pip",
                 "sync",
                 "--python",
-                str(Path(plan.python_path) / "bin" / "python"),
+                dependency_python,
                 str(plan.dependency_lock),
             )
             if plan.python_owned
@@ -540,7 +545,7 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 "pip",
                 "install",
                 "--python",
-                plan.python_path,
+                dependency_python,
                 "-r",
                 str(plan.dependency_lock),
             )
