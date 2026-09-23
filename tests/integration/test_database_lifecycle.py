@@ -18,6 +18,19 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 
+def _force_database_manager_probe_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"result": {"not": "a database list"}}
+    httpx_client = MagicMock()
+    httpx_client.post.return_value = response
+
+    @contextlib.contextmanager
+    def fake_httpx_client(*_args: object, **_kwargs: object) -> Any:
+        yield httpx_client
+
+    monkeypatch.setattr("httpx.Client", fake_httpx_client)
+
+
 class TestRestore:
     def test_public_restore_starts_owned_manager_before_pipeline_request(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -105,6 +118,7 @@ class TestRestore:
             yield http
 
         monkeypatch.setattr(DatabaseResource, "_http", fake_http)
+        _force_database_manager_probe_failure(monkeypatch)
 
         def callback(context: Any) -> DatabasePreparationResult:
             active = active_auxiliary_restore_session()
@@ -384,6 +398,7 @@ class TestRestore:
             yield MagicMock(post=MagicMock(return_value=response))
 
         monkeypatch.setattr(DatabaseResource, "_http", fake_http)
+        _force_database_manager_probe_failure(monkeypatch)
 
         def command_factory(project_path: Path, *, options: Any) -> Any:
             command = DatabasePreparationCoordinator(client).refresh_database_command(
