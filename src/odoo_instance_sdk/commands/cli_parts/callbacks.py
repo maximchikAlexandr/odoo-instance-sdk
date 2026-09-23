@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import sys
 from collections.abc import Hashable, Mapping
 from io import StringIO
@@ -331,8 +333,22 @@ def run(  # noqa: C901
         output_mode = resolve_command_options(output_format, json_output, dry_run, command="run")
     try:
         runtime_context = _ready_instance(ctx)
+        pg_dump = shutil.which("pg_dump") if os.name != "nt" else None
+        if pg_dump is not None:
+            pg_dump = str(Path(pg_dump).resolve())
+        shim_dir = Path(__file__).resolve().parents[2] / "internal" / "pg_dump_compat"
+        pg_dump_env = (
+            {
+                "PATH": f"{shim_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                "ODCLI_REAL_PG_DUMP": pg_dump,
+            }
+            if pg_dump is not None
+            else None
+        )
         if detach:
-            detached_command = runtime_context.instance.run_detached_command(args=odoo_args)
+            detached_command = runtime_context.instance.run_detached_command(
+                args=odoo_args, env=pg_dump_env
+            )
         else:
             if not dry_run:
                 available = runtime_context.check_port_free()
@@ -352,7 +368,9 @@ def run(  # noqa: C901
                     )
                 if not available:
                     fail(output_mode, "run", f"port-conflict: {detail}", dry_run=dry_run)
-            foreground_command = runtime_context.instance.run_foreground_command(args=odoo_args)
+            foreground_command = runtime_context.instance.run_foreground_command(
+                args=odoo_args, env=pg_dump_env
+            )
     except SystemExit:
         raise
     except Exception as e:
