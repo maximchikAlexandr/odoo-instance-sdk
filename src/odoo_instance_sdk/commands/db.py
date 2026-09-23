@@ -55,10 +55,11 @@ _RestoreResult = TypeVar("_RestoreResult")
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
+    from odoo_instance_sdk.commands.output import _InspectableCommand
     from odoo_instance_sdk.config import OdooClientConfig
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
-    from odoo_instance_sdk.internal.proc import PrivateJsonValue, RunContext, StepObserver
+    from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
     from odoo_instance_sdk.resources.instance import AuxiliaryRestoreSession, OdooInstance
 
@@ -99,65 +100,15 @@ def _validate_replace_context(client: OdooClient, environment: DevelopmentEnviro
 def _attach_auxiliary_restore_runtime(
     command: _InspectableCommand[_RestoreResult],
     session: AuxiliaryRestoreSession,
+    *,
+    before_step_id: str = "database.prepare.local-restore",
 ) -> _InspectableCommand[_RestoreResult]:
-    """Add the stopped-project helper to the existing restore ledger."""
-    from odoo_instance_sdk.execution import Command, ExecutionPlan
-    from odoo_instance_sdk.internal.proc import prepared_command
-    from odoo_instance_sdk.resources.instance import (
-        AuxiliaryRestoreSession,
-        activate_auxiliary_restore_session,
-        reset_auxiliary_restore_session,
+    """Keep the CLI import boundary while delegating attachment to the instance layer."""
+    from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+        _attach_auxiliary_restore_runtime as attach,
     )
 
-    if not isinstance(command, Command) or not isinstance(session, AuxiliaryRestoreSession):
-        return command
-    prepared = command._prepared()
-    auxiliary_start_steps = (
-        session.start_step,
-        session.ready_action,
-    )
-    local_restore_index = next(
-        (
-            index
-            for index, step in enumerate(prepared.steps)
-            if step.step_id == "database.prepare.local-restore"
-        ),
-        len(prepared.steps),
-    )
-    prepared_steps = (
-        *prepared.steps[:local_restore_index],
-        *auxiliary_start_steps,
-        *prepared.steps[local_restore_index:],
-        session.cleanup_action,
-    )
-
-    def execute(context: RunContext[PrivateJsonValue]) -> _RestoreResult:
-        token = activate_auxiliary_restore_session(session)
-        try:
-            return cast("_RestoreResult", prepared.callback(context))
-        finally:
-            try:
-                session.cleanup(context)
-            finally:
-                reset_auxiliary_restore_session(token)
-
-    plan = ExecutionPlan(
-        steps=tuple(step.public_projection() for step in prepared_steps),
-        observations=command.plan.observations,
-        warnings=command.plan.warnings,
-    ).with_fingerprint()
-    return cast(
-        "_InspectableCommand[_RestoreResult]",
-        Command.from_prepared(
-            plan,
-            prepared_command(
-                execute,
-                prepared_steps,
-                executor=prepared.executor,
-                private_projection=prepared.private_projection,
-            ),
-        ),
-    )
+    return attach(command, session, before_step_id=before_step_id)
 
 
 @click.group(help="Prepare and reset project databases.")

@@ -28,8 +28,8 @@ def _instance(tmp_path: Path) -> OdooInstance:
     client = MagicMock()
     return OdooInstance(
         config=InstanceConfig(
-            base_url="http://127.0.0.1:8069",
-            start_config=StartConfig(config_path=str(config_path), http_port=8069),
+            base_url="http://127.0.0.1:0",
+            start_config=StartConfig(config_path=str(config_path), http_port=0),
             command_prefix=("/usr/bin/python", "/project/odoo-bin"),
             default_cwd=tmp_path,
         ),
@@ -118,6 +118,34 @@ def test_foreign_listener_is_rejected_before_auxiliary_spawn(
     cast("Any", instance._client.register_process).assert_not_called()
 
 
+def test_responsive_external_manager_is_reused_without_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instance = _instance(tmp_path)
+    session = auxiliary_restore_session(instance)
+    monkeypatch.setattr(type(session), "_reuse_responsive_runtime", lambda _self: True)
+    executor = RecordingExecutor(handles={})
+
+    from odoo_instance_sdk.internal.proc import RunContext
+
+    def callback(context: RunContext[PrivateJsonValue]) -> None:
+        session.ensure_started(context)
+        session.cleanup(context)
+
+    command = Command.create(
+        ExecutionPlan(steps=tuple(step.public_projection() for step in session_steps(session))),
+        callback,
+        session_steps(session),
+        executor=executor,
+    )
+    command.run()
+
+    assert session.using_existing_runtime is True
+    assert executor.spawned == []
+    cast("Any", instance._client.register_process).assert_not_called()
+    cast("Any", instance._client.unregister_process).assert_not_called()
+
+
 def test_recorded_running_project_runtime_is_reused_without_spawn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -145,12 +173,15 @@ def test_recorded_running_project_runtime_is_reused_without_spawn(
         {
             "owner_kind": "project",
             "owner_id": "project_demo",
-            "http_port": 8069,
+            "http_port": 0,
             "root_pid": 42,
             "create_time": 123.5,
         },
     )
     cast("Any", instance._client.get_catalog())._monitor_snapshot_rows.return_value = snapshot
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.health.poll_health", lambda *args, **kwargs: None
+    )
     executor = RecordingExecutor(handles={})
 
     def callback(context: RunContext[PrivateJsonValue]) -> None:
@@ -438,8 +469,9 @@ def test_restore_adapter_resets_session_when_cleanup_fails(
     )
     command = _attach_auxiliary_restore_runtime(inner, session)
 
-    with pytest.raises(RuntimeError, match="cleanup failed"):
+    with pytest.raises(RuntimeError, match="restore failed") as raised:
         command.run()
+    assert "auxiliary cleanup failed: cleanup failed" in str(raised.value.__notes__)
     assert active_auxiliary_restore_session() is None
 
 

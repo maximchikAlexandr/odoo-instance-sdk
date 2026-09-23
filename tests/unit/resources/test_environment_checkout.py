@@ -1703,7 +1703,9 @@ class TestOwnedRuntimePreflight:
         )
         prepared = cast("PreparedCommand[object]", execution_module._COMMANDS[id(command)])
 
-        assert tuple(step.step_id for step in prepared.steps)[-5:-3] == (
+        step_ids = tuple(step.step_id for step in prepared.steps)
+        probe_index = step_ids.index("database.restore.exists-before")
+        assert step_ids[probe_index : probe_index + 2] == (
             "database.restore.exists-before",
             "database.restore.exists-after",
         )
