@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, cast
@@ -55,10 +56,8 @@ def stub_psql_resolution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     psql = tmp_path / "psql"
     psql.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     psql.chmod(0o755)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable",
-        lambda: str(psql),
-    )
+    path = os.environ.get("PATH", "")
+    monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), path)))
 
 
 @pytest.fixture
