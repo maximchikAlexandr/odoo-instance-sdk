@@ -50,6 +50,18 @@ def _cleanup_magicmock_cwd_artifacts() -> object:
 
 
 @pytest.fixture
+def stub_psql_resolution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Inject a disposable native-client path for public CLI command tests."""
+    psql = tmp_path / "psql"
+    psql.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    psql.chmod(0o755)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.resolve_psql_executable",
+        lambda: str(psql),
+    )
+
+
+@pytest.fixture
 def stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Compose init chains postgres start and tmp bootstrap after scaffold."""
 
@@ -710,6 +722,7 @@ def test_first_run_triggers_bootstrap_when_no_valid_tmp(
 
 
 @pytest.mark.parametrize("odoo_version", ["13.0", "19.0"])
+@pytest.mark.usefixtures("stub_psql_resolution")
 def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -892,6 +905,7 @@ def test_self_contained_restore_regression_compose_tmp_restore_default_switch(
 
 
 @pytest.mark.usefixtures("stub_compose_init_followup")
+@pytest.mark.usefixtures("stub_psql_resolution")
 def test_init_master_env_db_refresh_dry_run_flow(tmp_path: Path) -> None:
     odoo_bin = tmp_path / "odoo-bin"
     odoo_bin.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
