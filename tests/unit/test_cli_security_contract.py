@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk import OdooClient
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.commands.cli_parts import callbacks
 from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeSource
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
@@ -267,7 +269,10 @@ def test_run_captures_then_records_use_then_executes_the_same_command() -> None:
 
     def capture(*, args: tuple[str, ...], env: dict[str, str] | None) -> Command[int]:
         assert args == ("--dev=reload", "--dev=xml")
-        assert env is None or "ODCLI_REAL_PG_DUMP" in env
+        assert env is not None
+        assert env["ODCLI_REAL_PG_DUMP"] == str(Path("/usr/bin/pg_dump").resolve())
+        shim_dir = Path(callbacks.__file__).resolve().parents[2] / "internal" / "pg_dump_compat"
+        assert env["PATH"].split(os.pathsep)[0] == str(shim_dir)
         events.append("capture")
         return command
 
@@ -285,6 +290,10 @@ def test_run_captures_then_records_use_then_executes_the_same_command() -> None:
         patch(
             "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
         ),
+        patch(
+            "odoo_instance_sdk.commands.cli_parts.callbacks.shutil.which",
+            return_value="/usr/bin/pg_dump",
+        ),
     ):
         result = CliRunner().invoke(
             cli,
@@ -294,6 +303,27 @@ def test_run_captures_then_records_use_then_executes_the_same_command() -> None:
     assert result.exit_code == 0, result.output
     assert events == ["capture", "record", "execute"]
     client.environments.record_use.assert_called_once_with(env)
+
+
+def test_run_without_pg_dump_keeps_foreground_environment_unmodified(tmp_path: Path) -> None:
+    client = MagicMock()
+    instance = MagicMock()
+    instance.run_foreground_command.return_value = _stub_command(lambda: 0)
+    project = ProjectConfig(repository_root=tmp_path)
+    with (
+        patch(
+            "odoo_instance_sdk.cli.cli_context.ready_instance",
+            return_value=_resolved_context(client, project, instance),
+        ),
+        patch(
+            "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
+        ),
+        patch("odoo_instance_sdk.commands.cli_parts.callbacks.shutil.which", return_value=None),
+    ):
+        result = CliRunner().invoke(cli, ["run", "--", "--dev=reload"])
+
+    assert result.exit_code == 0, result.output
+    instance.run_foreground_command.assert_called_once_with(args=("--dev=reload",), env=None)
 
 
 def test_ready_instance_resolves_environment_before_creating_instance() -> None:

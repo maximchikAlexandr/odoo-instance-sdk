@@ -543,7 +543,10 @@ def test_cli_run_detach_dry_run_emits_plan_without_spawning(
 
 @pytest.mark.unit
 @pytest.mark.skipif(os.name == "nt", reason="POSIX pg_dump shim")
-def test_pg_dump_shim_repairs_file_stdout_without_changing_pipe(tmp_path: Path) -> None:
+@pytest.mark.parametrize("file_args", [("--file=dump.sql",), ("--file", "dump.sql")])
+def test_pg_dump_shim_repairs_file_stdout_without_changing_pipe(
+    tmp_path: Path, file_args: tuple[str, ...]
+) -> None:
     real = tmp_path / "real-pg-dump"
     real.write_text("#!/bin/sh\nprintf ok\n", encoding="utf-8")
     real.chmod(0o755)
@@ -552,10 +555,10 @@ def test_pg_dump_shim_repairs_file_stdout_without_changing_pipe(tmp_path: Path) 
 
     with open(os.devnull) as read_only_stdout:
         broken_result = subprocess.run(
-            [str(real), "--file=dump.sql"], stdout=read_only_stdout, check=False
+            [str(real), *file_args], stdout=read_only_stdout, check=False
         )
         file_result = subprocess.run(
-            [str(shim), "--file=dump.sql"], env=environment, stdout=read_only_stdout, check=False
+            [str(shim), *file_args], env=environment, stdout=read_only_stdout, check=False
         )
     pipe_result = subprocess.run(
         [str(shim), "--format=c"], env=environment, capture_output=True, check=False
