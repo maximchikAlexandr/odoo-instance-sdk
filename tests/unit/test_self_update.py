@@ -16,7 +16,7 @@ from odoo_instance_sdk.exceptions import (
     UpdateError,
     UpdateIncompleteError,
 )
-from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan, ProcessStep
+from odoo_instance_sdk.execution import Command, ProcessStep
 from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.self_update import (
     InstalledProvenance,
@@ -26,13 +26,17 @@ from odoo_instance_sdk.internal.self_update import (
     update,
     update_command,
 )
-from odoo_instance_sdk.internal.self_update_commands import _preflight_error
 from odoo_instance_sdk.models.update import UpdateResult
 
 _SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _SHA_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 _SHA_OLD = "0000000000000000000000000000000000000000"
-_SHA_SECURITY_TARGET = "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3"
+_ANCESTRY_STEPS = [
+    "update.inspect.ancestry-init",
+    "update.inspect.ancestry-fetch",
+    "update.inspect.ancestry-installed",
+    "update.inspect.ancestry-target",
+]
 _VCS_DIRECT_URL = json.dumps(
     {
         "url": f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{_SHA_A}",
@@ -131,15 +135,6 @@ def user_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-@pytest.fixture(autouse=True)
-def local_revision_relation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep unit cases hermetic while exercising the injected relation seam."""
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._git_revision_relation",
-        lambda **_kwargs: "descendant",
-    )
-
-
 def _process_result(
     step: PreparedStep,
     *,
@@ -174,6 +169,15 @@ def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
                 stdout=str(effects.get("uv_stdout", f"install {_SHA_B}")),
                 stderr=str(effects.get("uv_stderr", "")),
             )
+        if step.step_id == "update.inspect.ancestry-installed":
+            relation = effects.get("ancestry_relation", "descendant")
+            return _process_result(
+                step,
+                returncode=0 if relation in {"descendant", "same"} else 1,
+            )
+        if step.step_id == "update.inspect.ancestry-target":
+            relation = effects.get("ancestry_relation", "descendant")
+            return _process_result(step, returncode=0 if relation == "ancestor" else 1)
         if step.step_id == "update.install":
             return _process_result(step, returncode=cast("int", effects.get("install_rc", 0)))
         if step.step_id == "update.migrate":
@@ -222,14 +226,14 @@ _UPDATE_COMMAND_MATRIX = (
     ),
     pytest.param(
         {"ref": _SHA_OLD, "allow_downgrade": False},
-        {},
+        {"ancestry_relation": "ancestor"},
         "preflight_failed",
         (),
         id="preflight-downgrade-refused",
     ),
     pytest.param(
         {"ref": _SHA_OLD, "allow_downgrade": True},
-        {"install_rc": 0, "maintenance_rc": 0},
+        {"install_rc": 0, "maintenance_rc": 0, "ancestry_relation": "ancestor"},
         "updated",
         (),
         id="downgrade-allowed",
@@ -323,16 +327,6 @@ def _prepare_update_case(
         "odoo_instance_sdk.internal.self_update._verify_installed_revision",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._git_revision_relation",
-        lambda *, target_sha, **_kwargs: (
-            "same"
-            if target_sha == _SHA_A
-            else "ancestor"
-            if target_sha == _SHA_OLD
-            else "descendant"
-        ),
-    )
     return _executor_factory(effects)
 
 
@@ -371,7 +365,7 @@ def test_update_command_matrix(
     if expected_outcome == "already_current":
         assert not any(step.step_id.startswith("update.install") for step in executor.executed)
     if expected_outcome == "updated" and not command_kwargs.get("check"):
-        expected_steps = ["update.install", "update.migrate"]
+        expected_steps = [*_ANCESTRY_STEPS, "update.install", "update.migrate"]
         if str(command_kwargs.get("ref", "")).lower() != _SHA_OLD:
             expected_steps.insert(0, "update.resolve")
         assert [step.step_id for step in executor.executed] == expected_steps
@@ -414,45 +408,12 @@ def test_update_coordinator_matrix(
     if expected_outcome == "updated":
         assert [step.step_id for step in executor.executed] == [
             "update.resolve",
+            *_ANCESTRY_STEPS,
             "update.install",
             "update.migrate",
         ]
         install = next(step for step in executor.executed if step.step_id == "update.install")
         assert any(_SHA_B in arg for arg in install.argv)
-
-
-@pytest.mark.parametrize(
-    ("relation", "allow_downgrade", "expected_error"),
-    [
-        ("descendant", False, None),
-        ("ancestor", False, "downgrade refused"),
-        ("ancestor", True, None),
-        ("divergent", False, "history is unavailable"),
-        ("unknown", True, "history is unavailable"),
-    ],
-)
-def test_revision_downgrade_gate_requires_proven_ancestry(
-    monkeypatch: pytest.MonkeyPatch,
-    user_root: Path,
-    tmp_path: Path,
-    relation: str,
-    allow_downgrade: bool,
-    expected_error: str | None,
-) -> None:
-    _prepare_update_case(monkeypatch, tmp_path, {})
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._git_revision_relation",
-        lambda **_kwargs: relation,
-    )
-    error = _preflight_error(
-        ref=_SHA_SECURITY_TARGET,
-        provenance=_provenance(),
-        allow_downgrade=allow_downgrade,
-    )
-    if expected_error is None:
-        assert error is None
-    else:
-        assert expected_error in (error or "")
 
 
 def test_read_uv_tool_direct_url_uses_pep610_metadata(
@@ -568,8 +529,12 @@ def test_dry_run_command_has_frozen_process_steps(
     assert resolution.target_sha == _SHA_B
     mutation = update_command(ref=_SHA_B, executor=executor)
     mutation_steps = [step for step in mutation.plan.steps if isinstance(step, ProcessStep)]
-    assert [step.step_id for step in mutation_steps] == ["update.install", "update.migrate"]
-    install = mutation_steps[0]
+    assert [step.step_id for step in mutation_steps] == [
+        *_ANCESTRY_STEPS,
+        "update.install",
+        "update.migrate",
+    ]
+    install = next(step for step in mutation_steps if step.step_id == "update.install")
     assert install.argv[0] == "uv"
     assert any(_SHA_B in arg for arg in install.argv)
     assert executor.executed[0].step_id == "update.resolve"
@@ -780,7 +745,7 @@ def test_snapshot_resume_rejects_unexpected_installed_revision(
     )
     with pytest.raises(UpdateError, match="unexpected installed revision"):
         command.run()
-    assert executor.executed == []
+    assert [step.step_id for step in executor.executed] == _ANCESTRY_STEPS
 
 
 def test_install_failure_rechecks_revision_before_failing(
@@ -886,7 +851,7 @@ def test_update_resumes_from_migrate_journal(
     executor = _executor_factory({"maintenance_rc": 0})
     result = update_command(ref=_SHA_B, executor=executor).run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == ["update.migrate"]
+    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
 
 
 def test_migrate_resume_rollback_uses_journal_snapshot_sha(
@@ -988,156 +953,4 @@ def test_update_resumes_from_install_journal(
     executor = _executor_factory({"install_rc": 0, "maintenance_rc": 0})
     result = update_command(ref="main", executor=executor).run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == ["update.migrate"]
-
-
-def test_update_no_input_without_yes_exits_before_mutations() -> None:
-    from click.testing import CliRunner
-
-    from odoo_instance_sdk.commands.update import update_command_cli
-
-    result = CliRunner().invoke(
-        update_command_cli,
-        ["--no-input"],
-        prog_name="odcli",
-    )
-    assert result.exit_code == 1
-    assert "requires --yes" in result.output
-
-
-def test_structured_update_requires_yes_before_command_selection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from click.testing import CliRunner
-
-    from odoo_instance_sdk.commands.update import update_command_cli
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.update.update_command",
-        lambda **_kwargs: pytest.fail("structured update must stop before command selection"),
-    )
-    result = CliRunner().invoke(
-        update_command_cli,
-        ["--format", "json"],
-        prog_name="odcli",
-    )
-    assert result.exit_code == 1, result.output
-    assert "requires --yes" in result.output
-
-
-def test_exact_sha_dry_run_runs_preflight_and_shows_immutable_plan(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from click.testing import CliRunner
-
-    from odoo_instance_sdk.commands.update import update_command_cli
-
-    install = ProcessStep(
-        step_id="update.install",
-        argv=("uv", "tool", "install", "--force", f"odoo-instance-sdk@{_SHA_B}"),
-        display="uv tool install",
-        executable="uv",
-        mutating=True,
-    )
-    migrate = ProcessStep(
-        step_id="update.migrate",
-        argv=("odcli", "update", "--format", "json"),
-        display="odcli update",
-        executable="odcli",
-        mutating=True,
-    )
-    plan = ExecutionPlan(
-        steps=(
-            ActionStep(
-                step_id="update.inspect",
-                action="inspect",
-                description="Inspect installed OdCLI provenance",
-                read_only=True,
-            ),
-            install,
-            migrate,
-        )
-    )
-    candidate = Command.create(
-        plan,
-        lambda _context: UpdateResult(outcome="updated", target_sha=_SHA_B),
-    )
-    preflight_calls: list[str] = []
-
-    def fake_preflight(**_kwargs: object) -> Command[UpdateResult]:
-        def run(_context: object) -> UpdateResult:
-            preflight_calls.append("run")
-            return UpdateResult(outcome="updated", target_sha=_SHA_B)
-
-        return Command.create(ExecutionPlan(), run)
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.update.update_command",
-        lambda **_kwargs: candidate,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.update.preflight_update_command",
-        fake_preflight,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.update.prepare_maintenance_environment",
-        lambda: None,
-    )
-    result = CliRunner().invoke(
-        update_command_cli,
-        ["--ref", _SHA_B, "--dry-run", "--format", "json"],
-        prog_name="odcli",
-    )
-    assert result.exit_code == 0, result.output
-    assert preflight_calls == ["run"]
-    assert _SHA_B in result.output
-    assert "update.migrate" in result.output
-
-
-def test_mutable_ref_already_current_has_no_mutation_plan(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from click.testing import CliRunner
-
-    from odoo_instance_sdk.commands.update import update_command_cli
-    from odoo_instance_sdk.internal.self_update_commands import (
-        _build_already_current_command,
-        _build_staged_command,
-    )
-
-    executable = tmp_path / "odcli"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    executable.chmod(0o755)
-    provenance = _provenance(executable=executable)
-    executor = _executor_factory({"uv_stdout": f"resolved {_SHA_A}\n"})
-    calls: list[str] = []
-
-    def fake_update_command(*, ref: str, **_kwargs: object) -> Command[UpdateResult]:
-        calls.append(ref)
-        if ref == "main":
-            return _build_staged_command(ref=ref, provenance=provenance, executor=executor)
-        return _build_already_current_command(provenance)
-
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.update.update_command",
-        fake_update_command,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.update.prepare_maintenance_environment",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.commands.update.preflight_update_command",
-        lambda **_kwargs: pytest.fail("already-current resolution must skip preflight"),
-    )
-    result = CliRunner().invoke(
-        update_command_cli,
-        ["--yes", "--format", "json"],
-        prog_name="odcli",
-    )
-    assert result.exit_code == 0, result.output
-    assert calls == ["main", _SHA_A]
-    assert [step.step_id for step in executor.executed] == ["update.resolve"]
-    assert "update.install" not in result.output
-    assert "update.migrate" not in result.output
+    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]

@@ -27,9 +27,9 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 418),
         ("src/odoo_instance_sdk/commands/output.py", 425),
         ("src/odoo_instance_sdk/commands/output.py", 427),
-        ("src/odoo_instance_sdk/internal/self_update.py", 802),
-        ("src/odoo_instance_sdk/internal/self_update.py", 803),
-        ("src/odoo_instance_sdk/internal/self_update.py", 804),
+        ("src/odoo_instance_sdk/internal/self_update.py", 813),
+        ("src/odoo_instance_sdk/internal/self_update.py", 814),
+        ("src/odoo_instance_sdk/internal/self_update.py", 815),
         ("src/odoo_instance_sdk/resources/instance/identity.py", 494),
     }
 )
@@ -56,15 +56,15 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/backup.py", 348): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        802,
+        813,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        803,
+        814,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        804,
+        815,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
