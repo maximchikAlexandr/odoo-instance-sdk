@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import click
 import pytest
@@ -436,7 +436,10 @@ def test_raw_stream_format_json_is_stable_on_one_captured_command(leaf: str) -> 
     method = instance.run_foreground_command if leaf == "run" else instance.shell_command
     assert method.call_count == 1
     expected_args: tuple[str, ...] | list[str] = ("--dev",) if leaf == "run" else ["--dev"]
-    assert all(call.kwargs == {"args": expected_args} for call in method.call_args_list)
+    expected_kwargs = (
+        {"args": expected_args, "env": ANY} if leaf == "run" else {"args": expected_args}
+    )
+    assert all(call.kwargs == expected_kwargs for call in method.call_args_list)
 
 
 @pytest.mark.parametrize("leaf", ["run", "shell"])
@@ -745,7 +748,7 @@ def test_run_delimiter_preserves_native_values_repetition_and_order() -> None:
         result = _passthrough_instance(instance, ["run", "--", *native_args])
 
     assert result.exit_code == 0, result.output
-    instance.run_foreground_command.assert_called_once_with(args=native_args)
+    instance.run_foreground_command.assert_called_once_with(args=native_args, env=ANY)
 
 
 @pytest.mark.parametrize("argv", [("run", "--dev=reload"), ("run", "sale")])
@@ -776,7 +779,10 @@ def test_passthrough_commands_forward_child_exit_code(command: str) -> None:
 
     assert result.exit_code == child_exit
     expected_args: tuple[str, ...] | list[str] = () if command == "run" else ["--dev"]
-    method.assert_called_once_with(args=expected_args)
+    if command == "run":
+        method.assert_called_once_with(args=expected_args, env=ANY)
+    else:
+        method.assert_called_once_with(args=expected_args)
     assert result.stdout == ""
     assert result.stderr == ""
 
@@ -814,7 +820,7 @@ def test_run_native_interrupt_maps_to_130_after_delimiter() -> None:
         result = _passthrough_instance(instance, ["run", "--", "--dev=reload"])
 
     assert result.exit_code == 130
-    instance.run_foreground_command.assert_called_once_with(args=("--dev=reload",))
+    instance.run_foreground_command.assert_called_once_with(args=("--dev=reload",), env=ANY)
 
 
 def test_run_native_exit_code_and_streams_remain_unwrapped() -> None:
@@ -834,7 +840,7 @@ def test_run_native_exit_code_and_streams_remain_unwrapped() -> None:
     assert result.exit_code == 17
     assert result.stdout == "native stdout"
     assert result.stderr == "native stderr"
-    instance.run_foreground_command.assert_called_once_with(args=("--workers=2",))
+    instance.run_foreground_command.assert_called_once_with(args=("--workers=2",), env=ANY)
 
 
 @pytest.mark.parametrize(
@@ -901,7 +907,7 @@ def test_run_dry_run_formats_use_single_shared_rich_projection(
         assert tuple(payload["result"]["steps"][0]["argv"])[-3:] == native_args
     assert executor.executed == []
     client.environments.record_use.assert_not_called()
-    instance.run_foreground_command.assert_called_once_with(args=native_args)
+    instance.run_foreground_command.assert_called_once_with(args=native_args, env=ANY)
 
 
 def test_passthrough_run_and_shell_preserve_native_streams() -> None:

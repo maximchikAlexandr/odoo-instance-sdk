@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -13,6 +15,7 @@ from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.client import OdooClient
+from odoo_instance_sdk.commands.cli_parts import callbacks
 from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeSource
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
 from odoo_instance_sdk.exceptions import InstanceConfigurationError, LogfileUnwritableError
@@ -517,6 +520,10 @@ def test_cli_run_detach_dry_run_emits_plan_without_spawning(
             return_value=executor,
         ),
         patch.object(OdooInstance, "_ensure_dependencies_ready"),
+        patch(
+            "odoo_instance_sdk.commands.cli_parts.callbacks.shutil.which",
+            return_value="/usr/bin/pg_dump",
+        ),
     ):
         result = _cli_invoke(inst, ["run", "-d", "--dry-run", "--format", "json"])
 
@@ -524,7 +531,43 @@ def test_cli_run_detach_dry_run_emits_plan_without_spawning(
     envelope = json.loads(result.stdout)
     assert envelope["dry_run"] is True
     assert envelope["result"]["steps"]
+    run_step = next(
+        step for step in envelope["result"]["steps"] if step["step_id"] == "instance.detached"
+    )
+    overrides = dict(run_step["environment_overrides"])
+    if os.name != "nt":
+        assert overrides["ODCLI_REAL_PG_DUMP"] == "<redacted>"
+        assert overrides["PATH"] == "<redacted>"
     assert executor.spawned == []
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pg_dump shim")
+@pytest.mark.parametrize("file_args", [("--file=dump.sql",), ("--file", "dump.sql")])
+def test_pg_dump_shim_repairs_file_stdout_without_changing_pipe(
+    tmp_path: Path, file_args: tuple[str, ...]
+) -> None:
+    real = tmp_path / "real-pg-dump"
+    real.write_text("#!/bin/sh\nprintf ok\n", encoding="utf-8")
+    real.chmod(0o755)
+    shim = Path(callbacks.__file__).resolve().parents[2] / "internal/pg_dump_compat/pg_dump"
+    environment = {**os.environ, "ODCLI_REAL_PG_DUMP": str(real)}
+
+    with open(os.devnull) as read_only_stdout:
+        broken_result = subprocess.run(
+            [str(real), *file_args], stdout=read_only_stdout, check=False
+        )
+        file_result = subprocess.run(
+            [str(shim), *file_args], env=environment, stdout=read_only_stdout, check=False
+        )
+    pipe_result = subprocess.run(
+        [str(shim), "--format=c"], env=environment, capture_output=True, check=False
+    )
+
+    assert broken_result.returncode != 0
+    assert file_result.returncode == 0
+    assert pipe_result.returncode == 0
+    assert pipe_result.stdout == b"ok"
 
 
 @pytest.mark.unit
@@ -546,7 +589,9 @@ def test_cli_run_dash_d_after_delimiter_is_native(
     )
     captured: dict[str, object] = {}
 
-    def capture_run_foreground(*_args: object, args: tuple[str, ...] = ()) -> Command[int]:
+    def capture_run_foreground(
+        *_args: object, args: tuple[str, ...] = (), env: dict[str, str] | None = None
+    ) -> Command[int]:
         captured["args"] = args
         return Command.create(ExecutionPlan(), lambda _c: 0, ())
 
@@ -584,7 +629,9 @@ def test_cli_run_foreground_unchanged_without_detach(
     )
     foreground_called = False
 
-    def capture_run_foreground(*_args: object, args: tuple[str, ...] = ()) -> Command[int]:
+    def capture_run_foreground(
+        *_args: object, args: tuple[str, ...] = (), env: dict[str, str] | None = None
+    ) -> Command[int]:
         nonlocal foreground_called
         foreground_called = True
         return Command.create(ExecutionPlan(), lambda _c: 0, ())

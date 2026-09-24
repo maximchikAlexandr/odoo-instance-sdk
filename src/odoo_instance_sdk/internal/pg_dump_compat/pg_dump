@@ -1,0 +1,9 @@
+#!/bin/sh
+# Odoo 13 opens /dev/null read-only for pg_dump --file. Give that call a writable stdout.
+: "${ODCLI_REAL_PG_DUMP:?missing original pg_dump path}"
+for argument do
+    case "$argument" in
+        --file|--file=*) exec 1>/dev/null; break ;;
+    esac
+done
+exec "$ODCLI_REAL_PG_DUMP" "$@"
