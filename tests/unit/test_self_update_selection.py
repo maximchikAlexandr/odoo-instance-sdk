@@ -148,7 +148,7 @@ def test_downgrade_fails_when_snapshot_state_is_not_restorable(
         lambda: None,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update._storage_migration_state",
+        "odoo_instance_sdk.internal.self_update_commands._storage_migration_state",
         lambda: "in-progress",
     )
     error = _preflight_error(

@@ -36,6 +36,7 @@ from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     ProcessExecutor,
     ProcessResult,
+    ProcessSpawnError,
     SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.proc.run import run_captured
@@ -81,14 +82,17 @@ class InstalledProvenance:
 
 
 def _git_origin_matches_supported_repo(path: Path) -> bool:
-    remote = SubprocessExecutor().execute(
-        PreparedStep(
-            step_id="update.inspect.origin",
-            argv=("git", "remote", "get-url", "origin"),
-            cwd=str(path),
-            read_only=True,
-        ),
-    )
+    try:
+        remote = SubprocessExecutor().execute(
+            PreparedStep(
+                step_id="update.inspect.origin",
+                argv=("git", "remote", "get-url", "origin"),
+                cwd=str(path),
+                read_only=True,
+            ),
+        )
+    except ProcessSpawnError:
+        return False
     stdout = remote.stdout if isinstance(remote.stdout, str) else ""
     return remote.returncode == 0 and _is_exact_supported_https_repo(stdout.strip())
 

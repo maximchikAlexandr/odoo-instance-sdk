@@ -851,7 +851,7 @@ def test_update_resumes_from_migrate_journal(
     executor = _executor_factory({"maintenance_rc": 0})
     result = update_command(ref=_SHA_B, executor=executor).run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == ["update.migrate"]
+    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
 
 
 def test_migrate_resume_rollback_uses_journal_snapshot_sha(
