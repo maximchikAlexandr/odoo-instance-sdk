@@ -98,6 +98,11 @@ class PipeDrain:
         for thread in self._threads:
             thread.join(timeout=_CLEANUP_TIMEOUT)
 
+    def join(self, timeout: float | None = _CLEANUP_TIMEOUT) -> None:
+        """Wait for readers to observe EOF without closing their streams."""
+        for thread in self._threads:
+            thread.join(timeout=timeout)
+
     def tails(self) -> dict[str, StreamTail]:
         with self._lock:
             return {

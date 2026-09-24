@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -81,13 +82,19 @@ def production_catalogue_path() -> Path:
 
 
 def _run_docker_volume_ls() -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["docker", "volume", "ls", "--format", "{{.Name}}"],
-        capture_output=True,
-        check=False,
-        timeout=60.0,
-        text=True,
-    )
+    result: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(3):
+        result = subprocess.run(
+            ["docker", "volume", "ls", "--format", "{{.Name}}"],
+            capture_output=True,
+            check=False,
+            timeout=60.0,
+            text=True,
+        )
+        if result.returncode == 0 or attempt == 2:
+            return result
+        time.sleep(2.0)
+    raise AssertionError("unreachable Docker volume probe state")
 
 
 def _run_docker_volume_inspect(name: str) -> subprocess.CompletedProcess[str]:
