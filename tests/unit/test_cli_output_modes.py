@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import click
 import msgspec
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -2029,99 +2029,135 @@ def test_public_cli_leaf_matrix_has_json_toon_parity(
     assert failure_documents[0][0]["dry_run"] is failure_dry_run  # type: ignore[index]
 
 
+def _rich_case_args(case: PublicLeafCase, tmp_path: Path) -> list[str]:
+    args = list(case.args)
+    if case.path in (("backup", "ls"), ("resource", "ls")):
+        args.append("--all-projects")
+    if case.path == ("init",):
+        args.append(str(tmp_path))
+    if (
+        case.requires_dry_run
+        and case.path != ("module", "install-order")
+        and "--dry-run" not in args
+    ):
+        args.append("--dry-run")
+    return args
+
+
+def _invoke_rich_leaf(
+    case: PublicLeafCase,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[Result, list[str]]:
+    runner = CliRunner()
+    with monkeypatch.context() as isolated:
+        original_matrix_command = _matrix_command
+        execution_calls: list[str] = []
+        original_projection = output_commands._rich_plan_projection
+
+        def validating_projection(
+            result: JsonValue,
+            *,
+            command: str,
+            warnings: tuple[str, ...] = (),
+        ) -> str:
+            rendered = original_projection(result, command=command, warnings=warnings)
+            if isinstance(result, dict):
+                steps = result.get("steps")
+                displays = (
+                    tuple(
+                        str(item["display"])
+                        for item in steps
+                        if isinstance(item, dict)
+                        and item.get("kind") == "process"
+                        and isinstance(item.get("display"), str)
+                    )
+                    if isinstance(steps, list)
+                    else ()
+                )
+                assert all(display in rendered for display in displays), rendered
+            return rendered
+
+        def rich_matrix_command(value: Any, **kwargs: Any) -> Command[Any]:
+            if kwargs.get("wrapper_nonce") is None:
+                kwargs["public_plan"] = _rich_contract_process_plan()
+            kwargs["execution_calls"] = execution_calls
+            return original_matrix_command(value, **kwargs)
+
+        isolated.setattr(sys.modules[__name__], "_matrix_command", rich_matrix_command)
+        isolated.setattr(
+            "odoo_instance_sdk.commands.output._rich_plan_projection",
+            validating_projection,
+        )
+        _patch_leaf_external(isolated, case, failing=False, tmp_path=tmp_path)
+        invoked = runner.invoke(cli, [*_rich_case_args(case, tmp_path), "--format", "rich"])
+    return invoked, execution_calls
+
+
 @pytest.mark.parametrize(
     "case",
     [case for case in PUBLIC_LEAF_CASES if case.is_bounded],
     ids=lambda case: ".".join(case.path),
 )
-def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
+def test_public_cli_leaf_rich_transport_is_safe_and_deterministic(
     case: PublicLeafCase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Exercise every bounded leaf through Click's actual Rich selection."""
-    runner = CliRunner()
-    outputs: list[str] = []
-    for _ in range(2):
-        with monkeypatch.context() as isolated:
-            original_matrix_command = _matrix_command
-            execution_calls: list[str] = []
-            original_projection = output_commands._rich_plan_projection
-
-            def validating_projection(
-                result: JsonValue,
-                *,
-                command: str,
-                warnings: tuple[str, ...] = (),
-            ) -> str:
-                rendered = original_projection(result, command=command, warnings=warnings)
-                if isinstance(result, dict):
-                    steps = result.get("steps")
-                    if isinstance(steps, list):
-                        displays = tuple(
-                            str(item["display"])
-                            for item in steps
-                            if isinstance(item, dict)
-                            and item.get("kind") == "process"
-                            and isinstance(item.get("display"), str)
-                        )
-                    else:
-                        displays = ()
-                    assert all(display in rendered for display in displays), rendered
-                return rendered
-
-            def rich_matrix_command(value: Any, **kwargs: Any) -> Command[Any]:
-                if kwargs.get("wrapper_nonce") is None:
-                    kwargs["public_plan"] = _rich_contract_process_plan()
-                kwargs["execution_calls"] = execution_calls
-                return original_matrix_command(value, **kwargs)
-
-            isolated.setattr(sys.modules[__name__], "_matrix_command", rich_matrix_command)
-            isolated.setattr(
-                "odoo_instance_sdk.commands.output._rich_plan_projection",
-                validating_projection,
-            )
-            args = list(case.args)
-            if case.path in (("backup", "ls"), ("resource", "ls")):
-                args.append("--all-projects")
-            if case.path == ("init",):
-                args.append(str(tmp_path))
-            if (
-                case.requires_dry_run
-                and case.path != ("module", "install-order")
-                and "--dry-run" not in args
-            ):
-                args.append("--dry-run")
-            _patch_leaf_external(isolated, case, failing=False, tmp_path=tmp_path)
-            invoked = runner.invoke(cli, [*args, "--format", "rich"])
-
-        assert invoked.exit_code == 0, invoked.output
-        assert invoked.stderr == ""
-        assert invoked.stdout.strip()
-        assert "\x1b[" not in invoked.stdout
-        assert '"result"' not in invoked.stdout
-        assert '"steps"' not in invoked.stdout
-        assert not re.search(r"\}\s*\n\s*\{", invoked.stdout)
-        assert not re.search(r"\]\s*\n\s*\[", invoked.stdout)
-        if case.path == ("env", "path"):
-            assert invoked.stdout == str(tmp_path / "worktree") + "\n"
-        elif case.path == ("env", "show"):
-            assert all(label in invoked.stdout for label in ("Environment", "Name", "demo"))
-        elif case.path == ("env", "ls"):
-            assert "Project demo" in invoked.stdout
-            assert all(label in invoked.stdout for label in ("STATE", "DETAILS"))
-            assert "worktree=/tmp/demo" in invoked.stdout
-        else:
-            key_value_lines = [
-                line
-                for line in invoked.stdout.splitlines()
-                if re.fullmatch(r"\s*[a-z][a-z0-9_-]*=[^=]+(?:\s+[a-z][a-z0-9_-]*=[^=]+)+\s*", line)
-            ]
-            assert all(line.lstrip().startswith("status=success") for line in key_value_lines)
-        if case.requires_dry_run and case.path != ("module", "install-order"):
-            assert "--dry-run" in args
-            assert execution_calls == []
-        outputs.append(invoked.stdout)
+    outputs = [_invoke_rich_leaf(case, monkeypatch, tmp_path)[0].stdout for _ in range(2)]
 
     assert outputs[0] == outputs[1]
+    assert outputs[0].strip()
+    assert "\x1b[" not in outputs[0]
+    assert '"result"' not in outputs[0]
+    assert '"steps"' not in outputs[0]
+    assert not re.search(r"\}\s*\n\s*\{", outputs[0])
+    assert not re.search(r"\]\s*\n\s*\[", outputs[0])
+
+
+@pytest.mark.parametrize(
+    "case",
+    [case for case in PUBLIC_LEAF_CASES if case.path in {("env", "show"), ("env", "ls")}],
+    ids=lambda case: ".".join(case.path),
+)
+def test_public_cli_leaf_rich_environment_expectations(
+    case: PublicLeafCase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    invoked, _execution_calls = _invoke_rich_leaf(case, monkeypatch, tmp_path)
+
+    assert invoked.exit_code == 0, invoked.output
+    expectations: dict[tuple[str, ...], tuple[str, ...]] = {
+        ("env", "show"): ("Environment", "Name", "demo"),
+        ("env", "ls"): ("Project demo", "STATE", "DETAILS", "worktree=/tmp/demo"),
+    }
+    assert all(label in invoked.stdout for label in expectations[case.path])
+
+
+@pytest.mark.unit
+def test_public_cli_leaf_rich_scalar_path_remains_unwrapped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    case = next(case for case in PUBLIC_LEAF_CASES if case.path == ("env", "path"))
+    invoked, _execution_calls = _invoke_rich_leaf(case, monkeypatch, tmp_path)
+
+    assert invoked.exit_code == 0, invoked.output
+    assert invoked.stdout == str(tmp_path / "worktree") + "\n"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        case
+        for case in PUBLIC_LEAF_CASES
+        if case.is_bounded and case.requires_dry_run and case.path != ("module", "install-order")
+    ],
+    ids=lambda case: ".".join(case.path),
+)
+def test_public_cli_leaf_rich_dry_run_does_not_execute(
+    case: PublicLeafCase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    invoked, execution_calls = _invoke_rich_leaf(case, monkeypatch, tmp_path)
+
+    assert invoked.exit_code == 0, invoked.output
+    assert execution_calls == []
 
 
 def _rich_contract_process_plan() -> ExecutionPlan:

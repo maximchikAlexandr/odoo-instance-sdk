@@ -27,6 +27,7 @@ from odoo_instance_sdk.commands.output import (
     postgres_state_cells,
     resolve_output_mode,
     sanitize_diagnostic,
+    sanitize_terminal_text,
 )
 from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
 from odoo_instance_sdk.models import (
@@ -183,7 +184,9 @@ _PROCESS_COLUMNS = (
 def _process_table(rows: list[tuple[str, ...]]) -> Table:
     table = bordered_table(*_PROCESS_COLUMNS)
     for row in rows:
-        table.add_row(*row)
+        table.add_row(
+            *(Text(sanitize_terminal_text(value, preserve_newlines=True)) for value in row)
+        )
     return table
 
 
@@ -315,7 +318,7 @@ def _details(*values: str | None) -> str:
     return "\n".join(present) if present else "—"
 
 
-def _detail(name: str, value: object | None) -> str | None:
+def _detail(name: str, value: str | None) -> str | None:
     return f"{name}={value}" if value is not None else None
 
 

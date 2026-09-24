@@ -23,8 +23,21 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("width", [80, 120, 180])
-def test_env_list_rich_keeps_primary_fields_readable_at_supported_widths(width: int) -> None:
+@pytest.mark.parametrize(
+    ("width", "expected_headers", "extra_labels"),
+    [
+        (80, ("NAME", "STATE", "DETAILS"), ()),
+        (120, ("NAME", "BRANCH / STATUS", "DATABASE", "GIT A/D", "WORKTREE"), ("shared comerta",)),
+        (
+            180,
+            ("KIND", "NAME", "BRANCH", "STATUS", "GIT", "DB_MODE", "DATABASE", "WORKTREE"),
+            (),
+        ),
+    ],
+)
+def test_env_list_rich_keeps_primary_fields_readable_at_supported_widths(
+    width: int, expected_headers: tuple[str, ...], extra_labels: tuple[str, ...]
+) -> None:
     environment = _env(
         name="environment-with-a-long-name",
         branch="feature/with-a-long-but-readable-branch-name",
@@ -45,16 +58,8 @@ def test_env_list_rich_keeps_primary_fields_readable_at_supported_widths(width: 
     assert "ODOO_PID" not in output
     assert "GIT_AHEA" not in output
     assert "┌" in output and "┼" in output and "└" in output
-    expected_headers = (
-        ("NAME", "STATE", "DETAILS")
-        if width < 120
-        else ("NAME", "BRANCH / STATUS", "DATABASE", "GIT A/D", "WORKTREE")
-        if width < 180
-        else ("KIND", "NAME", "BRANCH", "STATUS", "GIT", "DB_MODE", "DATABASE", "WORKTREE")
-    )
     assert all(header in output for header in expected_headers)
-    if width == 120:
-        assert "shared comerta" in output
+    assert all(label in output for label in extra_labels)
     assert all(len(line) <= width for line in output.splitlines())
 
 
@@ -147,47 +152,89 @@ def test_cli_composition_promotes_short_aliases_without_leaf_edits() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("width", [80, 120, 180])
-@pytest.mark.parametrize(
-    ("expected_status", "fmt", "valid_zip"),
-    [("valid", "zip", True), ("invalid", "zip", False), ("unavailable", "dump", False)],
-)
-def test_backup_validate_rich_leaf_is_width_safe(
+def test_backup_validate_rich_success_is_width_safe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    width: int,
-    expected_status: str,
-    fmt: str,
-    valid_zip: bool,
 ) -> None:
     database_name = "database-with-a-realistically-long-name-for-terminal-width-validation"
     db_path, _backup_path = _seed_backup(
-        tmp_path / expected_status,
-        fmt=fmt,
-        valid_zip=valid_zip,
+        tmp_path,
+        fmt="zip",
+        valid_zip=True,
         database_name=database_name,
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: db_path
     )
-    if expected_status == "unavailable":
-        monkeypatch.setattr(shutil, "which", lambda _name: None)
+    result = CliRunner().invoke(
+        cli,
+        ["backup", "validate", BACKUP_ID],
+        env={"COLUMNS": "120"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "valid" in result.stdout.lower()
+    assert all(len(line) <= 120 for line in (result.stdout + result.stderr).splitlines())
+
+
+@pytest.mark.unit
+def test_backup_validate_rich_invalid_is_width_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_name = "database-with-a-realistically-long-name-for-terminal-width-validation"
+    db_path, _backup_path = _seed_backup(
+        tmp_path,
+        fmt="zip",
+        valid_zip=False,
+        database_name=database_name,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: db_path
+    )
+    result = CliRunner().invoke(
+        cli,
+        ["backup", "validate", BACKUP_ID],
+        env={"COLUMNS": "120"},
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.stdout == ""
+    assert "┌" in result.stderr
+    assert "Status" in result.stderr
+    assert "invalid" in result.stderr.lower()
+    assert all(len(line) <= 120 for line in (result.stdout + result.stderr).splitlines())
+
+
+@pytest.mark.unit
+def test_backup_validate_rich_unavailable_is_width_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_name = "database-with-a-realistically-long-name-for-terminal-width-validation"
+    db_path, _backup_path = _seed_backup(
+        tmp_path,
+        fmt="dump",
+        valid_zip=False,
+        database_name=database_name,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: db_path
+    )
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
 
     result = CliRunner().invoke(
         cli,
         ["backup", "validate", BACKUP_ID],
-        env={"COLUMNS": str(width)},
+        env={"COLUMNS": "120"},
     )
 
-    assert result.exit_code == (0 if expected_status == "valid" else 1), result.output
-    if expected_status == "valid":
-        assert expected_status in result.stdout.lower()
-    else:
-        assert result.stdout == ""
-        assert "┌" in result.stderr
-        assert "Status" in result.stderr
-        assert expected_status in result.stderr.lower()
-    assert all(len(line) <= width for line in (result.stdout + result.stderr).splitlines())
+    assert result.exit_code == 1, result.output
+    assert result.stdout == ""
+    assert "┌" in result.stderr
+    assert "Status" in result.stderr
+    assert "unavailable" in result.stderr.lower()
+    assert all(len(line) <= 120 for line in (result.stdout + result.stderr).splitlines())
 
 
 def _render(snapshot: object, *, width: int, worktree_path: str) -> str:

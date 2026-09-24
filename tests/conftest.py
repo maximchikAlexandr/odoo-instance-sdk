@@ -11,10 +11,17 @@ import textwrap
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import platformdirs
 import pytest
+
+try:
+    import resource as _resource_module
+
+    _resource: Any = _resource_module
+except ImportError:  # pragma: no cover - Windows has no resource module.
+    _resource = None
 
 if TYPE_CHECKING:
     from odoo_instance_sdk import OdooClient
@@ -22,6 +29,23 @@ if TYPE_CHECKING:
 
 _DASHBOARD_MODULES = ("fastapi", "uvicorn")
 _DOCKER_VOLUME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_PYTEST_NOFILE_MINIMUM = 4096
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Keep the configured full suite above pytest's descriptor pressure floor."""
+    del session
+    if _resource is None:
+        return
+    soft, hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+    if soft >= _PYTEST_NOFILE_MINIMUM:
+        return
+    if hard < _PYTEST_NOFILE_MINIMUM:
+        pytest.exit(
+            f"pytest requires RLIMIT_NOFILE >= {_PYTEST_NOFILE_MINIMUM}; hard limit is {hard}",
+            returncode=2,
+        )
+    _resource.setrlimit(_resource.RLIMIT_NOFILE, (_PYTEST_NOFILE_MINIMUM, hard))
 
 
 def _dashboard_extra_available() -> bool:

@@ -226,12 +226,13 @@ def _print_doctor(report: DoctorReport) -> None:
     grouped: dict[str, list[CheckResult]] = {}
     group_titles: dict[str, str] = {}
     for check in report.checks:
-        key = check.environment_id or "project"
+        scope = _doctor_check_scope(check)
+        key = check.environment_id or scope
         grouped.setdefault(key, []).append(check)
         group_titles[key] = (
             f"Environment: {check.environment_name or check.environment_id}"
             if check.environment_id
-            else "Project checks"
+            else f"{scope.title()} checks"
         )
     for key, checks in grouped.items():
         table = bordered_table("Check", "Status", "Details", title=group_titles[key])
@@ -283,6 +284,16 @@ def _print_doctor(report: DoctorReport) -> None:
             ),
         )
         rich_print(render_rich_text(table), preserve_newlines=True)
+
+
+_GLOBAL_DOCTOR_CHECKS = frozenset({"uv", "msgfmt", "git-absorb", "catalog", "orphaned"})
+
+
+def _doctor_check_scope(check: CheckResult) -> str:
+    """Derive display scope without extending the machine doctor schema."""
+    if check.environment_id is not None:
+        return "environment"
+    return "global" if check.name in _GLOBAL_DOCTOR_CHECKS else "project"
 
 
 @cli.command(help="Stop the selected environment's proven-owned runtime.")

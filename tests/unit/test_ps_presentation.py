@@ -7,7 +7,7 @@ from rich import box
 from rich.table import Table
 
 from odoo_instance_sdk.commands.output import render_rich_text
-from odoo_instance_sdk.commands.ps import _backend_row, _render_ps_rich
+from odoo_instance_sdk.commands.ps import _backend_row, _process_table, _render_ps_rich
 from odoo_instance_sdk.models import (
     BackendGroupReason,
     BackendProcessGroup,
@@ -224,6 +224,33 @@ def test_process_projection_keeps_type_specific_details_and_is_pure(
     assert "identity=session-1" in output
     assert "storage volume=16.0 KiB" in output
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.unit
+def test_process_cells_escape_csi_and_osc_sequences() -> None:
+    unsafe = BackendProcessGroup(
+        database="demo",
+        sessions=(
+            BackendSession(
+                pid=700,
+                state="idle",
+                application_name="client\x1b[2J",
+                user_name="user\x1b]8;;https://evil.example\x07",
+            ),
+        ),
+        pid_scope=PidScope.HOST,
+        host_pids=(700,),
+        cpu_percent=None,
+        memory_bytes=None,
+        reason="unique_database",
+    )
+
+    output = render_rich_text(_process_table([_backend_row(unsafe)]), width=180)
+
+    assert "\x1b[2J" not in output
+    assert "\x1b]8;;" not in output
+    assert r"\x1b[2J" in output
+    assert r"\x1b]8;;" in output
 
 
 @pytest.mark.unit

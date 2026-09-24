@@ -93,7 +93,7 @@ from odoo_instance_sdk.resources.monitor.collection_parts import EnvironmentMoni
 from odoo_instance_sdk.resources.monitor.planning import SnapshotSelection
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.execution import Command, JsonValue
 
 
 def select_snapshot_environment(
@@ -643,7 +643,7 @@ def _rich_env_show(document: OutputDocument) -> str:
     cluster = result.get("cluster")
     table = bordered_table("Scope", "Field", "Value")
 
-    def add_row(scope: str, field: str, value: object) -> None:
+    def add_row(scope: str, field: str, value: JsonValue) -> None:
         table.add_row(
             Text(sanitize_terminal_text(scope)),
             Text(sanitize_terminal_text(field)),

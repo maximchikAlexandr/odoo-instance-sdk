@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
@@ -58,18 +60,33 @@ def _cluster_payload(cluster: ClusterSnapshot) -> JsonObject:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("state", "reason"),
+    ("state", "reason", "forbidden_state", "expected_details"),
     [
-        (PostgresClusterState.HEALTHY, "stats_failed"),
-        (PostgresClusterState.STOPPED, None),
+        (PostgresClusterState.HEALTHY, "stats_failed", "stopped", ("stats_failed",)),
+        (PostgresClusterState.STOPPED, None, "healthy", ()),
     ],
 )
 def test_frozen_postgres_state_is_consistent_across_human_views(
     state: PostgresClusterState,
     reason: str | None,
+    forbidden_state: str,
+    expected_details: tuple[str, ...],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """One frozen cluster state keeps lifecycle and availability on separate axes."""
+    views = _frozen_postgres_views(state, reason, capsys)
+
+    for name, rendered in views.items():
+        assert state.value in rendered, name
+        assert all(detail in rendered for detail in expected_details), name
+        assert f"state={forbidden_state}" not in rendered, name
+
+
+def _frozen_postgres_views(
+    state: PostgresClusterState,
+    reason: str | None,
+    capsys: pytest.CaptureFixture[str],
+) -> dict[str, str]:
     cluster = _cluster(state, reason)
     payload = _cluster_payload(cluster)
     env_list_cluster = CheckoutClusterSummary(
@@ -82,7 +99,6 @@ def test_frozen_postgres_state_is_consistent_across_human_views(
         command="env.show",
         result={"environment": {}, "project": {}, "cluster": payload},
     )
-
     views = {
         "ps": " | ".join(ps_commands._cluster_row(cluster)),
         "env list": env_display._checkout_cluster_summary_line(env_list_cluster),
@@ -104,17 +120,7 @@ def test_frozen_postgres_state_is_consistent_across_human_views(
         )
     )
     views["doctor"] = capsys.readouterr().out
-
-    for name, rendered in views.items():
-        assert state.value in rendered, name
-        if reason is not None:
-            assert reason in rendered, name
-        opposite = (
-            PostgresClusterState.STOPPED.value
-            if state is PostgresClusterState.HEALTHY
-            else PostgresClusterState.HEALTHY.value
-        )
-        assert f"state={opposite}" not in rendered, name
+    return views
 
 
 def _long_checkout_inventory() -> CheckoutInventory:
@@ -203,11 +209,21 @@ def test_representative_audited_views_remain_bounded_at_supported_widths(width: 
 
 
 @pytest.mark.unit
-def test_machine_envelopes_have_json_toon_parity_and_one_emission(
+def test_machine_envelopes_have_json_toon_parity(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     result: JsonObject = {"status": "ok", "operation_count": 1, "warnings": []}
     documents: list[object] = []
+
+    def decode_toon(value: str) -> object:
+        from toon import DecodeOptions, decode
+
+        return decode(value, DecodeOptions(indent=2, strict=True))
+
+    decoders: dict[OutputMode, Callable[[str], object]] = {
+        OutputMode.JSON: json.loads,
+        OutputMode.TOON: decode_toon,
+    }
     for mode in (OutputMode.JSON, OutputMode.TOON):
         output_commands.emit_json_envelope(
             ok=True,
@@ -218,16 +234,13 @@ def test_machine_envelopes_have_json_toon_parity_and_one_emission(
         captured = capsys.readouterr()
         assert captured.err == ""
         assert captured.out.count("schema_version") == 1
-        if mode is OutputMode.JSON:
-            import json
-
-            documents.append(json.loads(captured.out))
-        else:
-            from toon import DecodeOptions, decode
-
-            documents.append(decode(captured.out, DecodeOptions(indent=2, strict=True)))
+        documents.append(decoders[mode](captured.out))
     assert documents[0] == documents[1]
 
+
+@pytest.mark.unit
+def test_rich_emission_occurs_once(capsys: pytest.CaptureFixture[str]) -> None:
+    result: JsonObject = {"status": "ok", "operation_count": 1, "warnings": []}
     calls = 0
 
     def projection(_document: object) -> str:

@@ -154,6 +154,7 @@ def test_doctor_groups_scopes_into_tables(capsys: pytest.CaptureFixture[str]) ->
     report = DoctorReport(
         checks=[
             CheckResult("uv", "ok", "available"),
+            CheckResult("manifest", "ok", "project ready"),
             CheckResult(
                 "runtime",
                 "warn",
@@ -176,8 +177,9 @@ def test_doctor_groups_scopes_into_tables(capsys: pytest.CaptureFixture[str]) ->
     _print_doctor(report)
     output = capsys.readouterr().out
 
-    assert output.count("Check") == 2
-    assert output.count("┌") == 2
+    assert output.count("Check") == 3
+    assert output.count("┌") == 3
+    assert "Global checks" in output
     assert "Project checks" in output
     assert "Environment: Demo" in output
     assert "repair runtime" in output
