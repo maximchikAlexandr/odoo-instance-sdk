@@ -221,10 +221,12 @@ def _build_public_restore_runtime(
     monkeypatch.setattr(DatabaseResource, "_http", fake_http)
     _force_database_manager_probe_failure(monkeypatch)
 
-    def command_factory(project_path: Path, *, options: Any) -> Any:
+    def command_factory(project_path: Path, *, options: Any, **kwargs: Any) -> Any:
         command = DatabasePreparationCoordinator(client).refresh_database_command(
             project_path,
             options=options,
+            admin_password=kwargs.get("admin_password"),
+            admin_password_provenance=kwargs.get("admin_password_provenance", "environment"),
             executor=executor,
         )
         for step in command._prepared().steps:
@@ -512,6 +514,7 @@ class TestRestore:
         from click.testing import CliRunner
 
         from odoo_instance_sdk.cli import cli
+
         fixtures = _build_public_restore_fixtures(tmp_path, case, monkeypatch)
         result = CliRunner().invoke(cli, ["db", "refresh", "--restore", "--format", "json"])
         return _PublicRestoreHarness(

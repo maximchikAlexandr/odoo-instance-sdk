@@ -151,10 +151,7 @@ def test_responsive_unrecorded_manager_is_rejected_without_http_probe(
     instance = _instance(tmp_path)
     session = auxiliary_restore_session(instance)
     http_client = MagicMock()
-    monkeypatch.setattr(
-        "odoo_instance_sdk.resources.database.backup_restore_parts.queries.httpx.Client",
-        http_client,
-    )
+    monkeypatch.setattr("httpx.Client", http_client)
     port_check = MagicMock(side_effect=InstanceConfigurationError("port-conflict"))
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",

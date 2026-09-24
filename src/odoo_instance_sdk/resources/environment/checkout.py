@@ -29,12 +29,10 @@ from odoo_instance_sdk.internal.locks import (
     provisioning_lock_path,
     python_env_lock_path,
 )
-from odoo_instance_sdk.internal.odoo_config import (
-    parse_odoo_config,
-)
+from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.port_allocation import find_free_port
 from odoo_instance_sdk.internal.project_env import load_project_environment
-from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
     BackupFreshness,
@@ -588,8 +586,7 @@ class _CheckoutMixin:
         command = Command.from_prepared(snapshot.execution_plan, prepared)
         if snapshot.private.db_mode is not EnvironmentDatabaseMode.COPY:
             return command
-        source_session = self._copy_auxiliary_session(snapshot.private)
-        if source_session is None:
+        if (source_session := self._copy_auxiliary_session(snapshot.private)) is None:
             return command
         from odoo_instance_sdk.resources.instance.auxiliary_restore import (
             _attach_auxiliary_restore_runtime,
@@ -605,16 +602,12 @@ class _CheckoutMixin:
         )
 
     def _copy_auxiliary_session(self, plan: _CheckoutPlan) -> AuxiliaryRestoreSession | None:
-        """Capture the project runtime used by COPY's source Database Manager."""
         if plan.source_config is None:
             return None
-        from odoo_instance_sdk.internal.repo_key import git_common_dir
-        from odoo_instance_sdk.resources.instance import auxiliary_restore_session
+        from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
         from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
 
         instance = self._client.instance.from_config(plan.source_config)
-        from odoo_instance_sdk.resources.instance import OdooInstance
-
         if not isinstance(instance, OdooInstance) or instance.config.start_config is None:
             return None
         python_bin = str(plan.venv / "bin" / "python") if plan.python_owned else plan.python_path
@@ -626,13 +619,7 @@ class _CheckoutMixin:
             project_environment=load_project_environment(plan.repo_root),
         )
         project_id = f"project_{repo_key(plan.repo_root, Path(plan.git_common_dir))}"
-        instance._runtime_binding = _RuntimeBinding(
-            owner_kind="project",
-            owner_id=project_id,
-            project_id=project_id,
-            repository_root=plan.repo_root,
-            git_common_dir=git_common_dir(plan.repo_root),
-        )
+        instance._runtime_binding = _RuntimeBinding("project", project_id, project_id, plan.repo_root, git_common_dir(plan.repo_root))  # fmt: skip
         return auxiliary_restore_session(instance)
 
     def _run_checkout_snapshot(

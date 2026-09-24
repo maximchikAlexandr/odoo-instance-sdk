@@ -1353,14 +1353,14 @@ def test_loopback_password_request_ignores_environment_proxies(
     backup_path.write_bytes(b"backup")
     backup = _make_backup(path=str(backup_path))
     instance = _make_instance_with_cluster_key(client)
-    http_cm = _mock_http({})
+    http_client = _mock_http({}).__enter__.return_value
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
     monkeypatch.setenv("HTTPS_PROXY", "https://proxy.invalid:8443")
     monkeypatch.setenv("NO_PROXY", "")
 
     with (
         patch.object(instance, "_client") as mock_client,
-        patch("httpx.Client", return_value=http_cm) as client_cls,
+        patch("httpx.Client", return_value=http_client) as client_cls,
         patch(
             "odoo_instance_sdk.resources.database.DatabaseResource.exists",
             side_effect=[False, True],
@@ -1372,7 +1372,7 @@ def test_loopback_password_request_ignores_environment_proxies(
 
     assert client_cls.call_args is not None
     assert client_cls.call_args.kwargs["trust_env"] is False
-    request = http_cm.__enter__.return_value.post.call_args
+    request = http_client.post.call_args
     assert request is not None
     assert request.kwargs["data"]["master_pwd"] == "admin"
 

@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import click
@@ -50,8 +50,6 @@ from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     DatabaseRefreshOptions,
 )
-
-_RestoreResult = TypeVar("_RestoreResult")
 
 
 def _error_code(error: BaseException) -> str | None:
