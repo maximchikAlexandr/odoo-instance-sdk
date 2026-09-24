@@ -1171,7 +1171,6 @@ def _patch_leaf_external(  # noqa: C901
         env = _matrix_environment()
         if failing:
             instance.stop_runtime_command.side_effect = fail_operation
-            instance.stop_environment_command.side_effect = fail_operation
         else:
             command = _matrix_command(
                 {
@@ -1183,7 +1182,6 @@ def _patch_leaf_external(  # noqa: C901
                 }
             )
             instance.stop_runtime_command.return_value = command
-            instance.stop_environment_command.return_value = command
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), env, instance),

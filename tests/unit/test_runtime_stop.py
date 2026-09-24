@@ -38,9 +38,6 @@ class _Catalog:
     def get_environment(self, _environment_id: str) -> dict[str, object]:
         return self.env_row
 
-    def get_environment_runtime(self, _environment_id: str) -> dict[str, object] | None:
-        return self.runtime_row
-
     def get_runtime(self, owner_kind: str, _owner_id: str) -> dict[str, object] | None:
         return self.project_runtime_row if owner_kind == "project" else self.runtime_row
 
@@ -60,20 +57,6 @@ class _Catalog:
             self.project_runtime_row = None
         else:
             self.runtime_row = None
-        return True
-
-    def _clear_environment_runtime_if_matches(
-        self, environment_id: str, *, root_pid: int, create_time: float
-    ) -> bool:
-        self.clear_calls.append((environment_id, root_pid, create_time))
-        if self.runtime_row is None:
-            return False
-        if (
-            self.runtime_row["root_pid"] != root_pid
-            or self.runtime_row["create_time"] != create_time
-        ):
-            return False
-        self.runtime_row = None
         return True
 
 
@@ -575,6 +558,10 @@ def test_terminate_pid_uses_bounded_term_then_kill_escalation() -> None:
     with (
         patch("odoo_instance_sdk.internal.proc.terminate.os.killpg") as killpg,
         patch(
+            "odoo_instance_sdk.internal.proc.terminate._process_group_is_alive",
+            return_value=False,
+        ),
+        patch(
             "odoo_instance_sdk.internal.proc.terminate.is_process_alive",
             side_effect=lambda _pid, **_kwargs: next(alive),
         ),
@@ -589,6 +576,31 @@ def test_terminate_pid_uses_bounded_term_then_kill_escalation() -> None:
         signal.SIGTERM,
         signal.SIGKILL,
     ]
+
+
+@pytest.mark.unit
+def test_terminate_pid_kills_surviving_group_after_leader_exits() -> None:
+    alive = iter((True, False, False, False, False))
+    group_alive = iter((True, True, False, False))
+    with (
+        patch("odoo_instance_sdk.internal.proc.terminate.os.killpg") as killpg,
+        patch(
+            "odoo_instance_sdk.internal.proc.terminate.is_process_alive",
+            side_effect=lambda _pid, **_kwargs: next(alive),
+        ),
+        patch(
+            "odoo_instance_sdk.internal.proc.terminate._process_group_is_alive",
+            side_effect=lambda _group_id: next(group_alive),
+        ) as group_check,
+        patch("odoo_instance_sdk.internal.proc.terminate.time.sleep") as sleep,
+    ):
+        terminate_pid(4242, process_group_id=4242, timeout=5.0)
+    assert [call.args[1] for call in killpg.call_args_list] == [
+        signal.SIGTERM,
+        signal.SIGKILL,
+    ]
+    assert group_check.call_count == 4
+    sleep.assert_called_once_with(0.05)
 
 
 @pytest.mark.unit
