@@ -11,7 +11,8 @@ then update this page.
 
 Every eligible bounded leaf resolves inputs once and captures one immutable
 `Command` before confirmation or mutation. `--dry-run` emits its redacted
-`ExecutionPlan` and does not call `.run()`, prompt, or launch a process.
+`ExecutionPlan` and does not call `.run()`, prompt, or launch a process, except
+for the explicit `update` read-only resolve/preflight stage described below.
 The normal path confirms only after planning and runs that same command object.
 `--format json` is the only JSON selector; removed `--json` is a Click usage
 error with exit code `2`. Rich, JSON, and TOON are projections, not independent
@@ -20,8 +21,9 @@ planners.
 `update` with a mutable ref is the explicit two-stage exception: it first runs
 the captured read-only resolver command, then captures the resolved full-SHA
 mutation command. The second command is the only command shown for mutation
-preview, confirmation, and execution; `update --dry-run` may run only the
-read-only resolver phase and never runs install or migration. A user-triggered
+preview, confirmation, and execution; `update --dry-run` may run the captured
+read-only resolver and preflight phases, then shows the immutable install and
+migration steps without running either. A user-triggered
 migrate journal also resumes through this coordinator; direct maintenance is
 reserved for the explicit `ODCLI_MAINTENANCE=1` hand-off.
 

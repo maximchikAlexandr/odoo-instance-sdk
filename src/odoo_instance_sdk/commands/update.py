@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import click
@@ -15,7 +15,6 @@ else:
     import rich_click as click
 
 from odoo_instance_sdk.commands.output import (
-    JsonObject,
     OutputMode,
     emit,
     fail,
@@ -51,21 +50,6 @@ class _UpdateSelection:
     result: UpdateResult | None = None
 
 
-class _UpdateRunner(Protocol):
-    def __call__(
-        self,
-        build_command: Callable[[], Command[UpdateResult]],
-        *,
-        command_name: str,
-        mode: OutputMode,
-        dry_run: bool,
-        result: Callable[[UpdateResult | None], JsonObject] | None = None,
-        confirm: Callable[[], None] | None = None,
-        preview: Callable[[Command[UpdateResult]], JsonObject] | None = None,
-        emit_normal: bool = True,
-    ) -> tuple[int, UpdateResult | None]: ...
-
-
 def _select_update_command(
     *,
     ref: str,
@@ -84,12 +68,25 @@ def _select_update_command(
 
     candidate = update_command(ref=ref, allow_downgrade=allow_downgrade)
     if not any(step.step_id == "update.resolve" for step in candidate.plan.steps):
+        preflight = preflight_update_command(
+            ref=ref,
+            allow_downgrade=allow_downgrade,
+        ).run()
+        if preflight.outcome in _FAILURE_OUTCOMES:
+            return _UpdateSelection(command=None, result=preflight)
         return _UpdateSelection(command=candidate)
 
     resolution = candidate.run()
     if resolution.outcome in _FAILURE_OUTCOMES:
         return _UpdateSelection(command=None, result=resolution)
     target_ref = resolution.target_sha or ref
+    if resolution.outcome == "already_current":
+        return _UpdateSelection(
+            command=update_command(
+                ref=target_ref,
+                allow_downgrade=allow_downgrade,
+            )
+        )
     preflight = preflight_update_command(
         ref=target_ref,
         allow_downgrade=allow_downgrade,
@@ -111,51 +108,64 @@ def _require_update_command(selection: _UpdateSelection) -> Command[UpdateResult
     return selection.command
 
 
-def _run_selected_update(
-    *,
-    ref: str,
-    check: bool,
-    dry_run: bool,
-    allow_downgrade: bool,
-    mode: OutputMode,
-    confirm: Callable[[], None] | None,
-    runner: _UpdateRunner,
-) -> tuple[int, UpdateResult | None]:
-    selection = _select_update_command(
-        ref=ref,
-        check=check,
-        allow_downgrade=allow_downgrade,
-    )
-    if selection.result is not None:
-        fail(
-            mode,
-            "update",
-            selection.result.next_step or "update resolution failed",
-            dry_run=dry_run,
-            error_code=selection.result.outcome,
-            details=model_to_dict(selection.result),
-        )
-    command = _require_update_command(selection)
-
-    def build_command() -> Command[UpdateResult]:
-        return command
-
-    return runner(
-        build_command,
-        command_name="update",
-        mode=mode,
-        dry_run=dry_run,
-        result=lambda value: model_to_dict(value) if value else {},
-        confirm=confirm,
-        preview=lambda selected: model_to_dict(selected.plan),
-        emit_normal=False,
-    )
-
-
 def _maintenance_exit_code() -> int | None:
     if is_maintenance_mode():
         return run_maintenance()
     return None
+
+
+def _require_structured_confirmation(
+    *,
+    mode: OutputMode,
+    yes: bool,
+    dry_run: bool,
+    check: bool,
+) -> None:
+    if not yes and not dry_run and not check and mode is not OutputMode.RICH:
+        fail(
+            mode,
+            "update",
+            "structured update requires --yes to proceed",
+            dry_run=False,
+            error_code="update_not_confirmed",
+        )
+
+
+def _interactive_confirmation(
+    *,
+    mode: OutputMode,
+    yes: bool,
+    dry_run: bool,
+    check: bool,
+) -> Callable[[], None] | None:
+    if not yes and not dry_run and not check and mode is OutputMode.RICH:
+
+        def confirm() -> None:
+            click.confirm("Proceed with OdCLI update?", default=False, abort=True)
+
+        return confirm
+    return None
+
+
+def _emit_update_result(
+    *,
+    mode: OutputMode,
+    dry_run: bool,
+    result: UpdateResult | None,
+) -> None:
+    if result is None:
+        return
+    payload = model_to_dict(result)
+    if result.outcome in _FAILURE_OUTCOMES:
+        fail(
+            mode,
+            "update",
+            result.next_step or "update failed",
+            dry_run=dry_run,
+            error_code=result.outcome,
+            details=payload,
+        )
+    emit(success_document(command="update", result=payload), mode)
 
 
 @click.command("update", help="Self-upgrade an OdCLI uv-tool install.")
@@ -228,6 +238,7 @@ def update_command_cli(
     maintenance_status = _maintenance_exit_code()
     if maintenance_status is not None:
         raise click.exceptions.Exit(maintenance_status)
+    _require_structured_confirmation(mode=mode, yes=yes, dry_run=dry_run, check=check)
     if not yes and no_input and not dry_run and not check:
         fail(
             mode,
@@ -237,37 +248,42 @@ def update_command_cli(
             error_code="update_not_confirmed",
         )
 
-    confirm = None
-    if not yes and not dry_run and not check and mode is OutputMode.RICH:
-
-        def confirm() -> None:
-            click.confirm("Proceed with OdCLI update?", default=False, abort=True)
+    confirm = _interactive_confirmation(mode=mode, yes=yes, dry_run=dry_run, check=check)
 
     try:
-        status, result = _run_selected_update(
+        selection = _select_update_command(
             ref=ref,
             check=check,
-            dry_run=dry_run,
             allow_downgrade=allow_downgrade,
+        )
+        if selection.result is not None:
+            fail(
+                mode,
+                "update",
+                selection.result.next_step or "update resolution failed",
+                dry_run=dry_run,
+                error_code=selection.result.outcome,
+                details=model_to_dict(selection.result),
+            )
+        command = _require_update_command(selection)
+
+        def build_command() -> Command[UpdateResult]:
+            return command
+
+        status, result = run_or_preview(
+            build_command,
+            command_name="update",
             mode=mode,
+            dry_run=dry_run,
+            result=lambda value: model_to_dict(value) if value else {},
             confirm=confirm,
-            runner=cast("_UpdateRunner", run_or_preview),
+            preview=lambda selected: model_to_dict(selected.plan),
+            emit_normal=False,
         )
     except UpdateError as exc:
         fail(mode, "update", str(exc), dry_run=dry_run)
 
-    if result is not None:
-        payload = model_to_dict(result)
-        if result.outcome in _FAILURE_OUTCOMES:
-            fail(
-                mode,
-                "update",
-                result.next_step or "update failed",
-                dry_run=dry_run,
-                error_code=result.outcome,
-                details=payload,
-            )
-        emit(success_document(command="update", result=payload), mode)
+    _emit_update_result(mode=mode, dry_run=dry_run, result=result)
     raise click.exceptions.Exit(status)
 
 

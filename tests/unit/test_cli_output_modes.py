@@ -1807,6 +1807,15 @@ def _patch_leaf_external(  # noqa: C901
             "odoo_instance_sdk.commands.update.update_command",
             build_update_command,
         )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.update.preflight_update_command",
+            lambda **_kwargs: Command.create(
+                ExecutionPlan(),
+                lambda _context: UpdateResult(
+                    outcome="updated", snapshot_state="absent", journal_state="absent"
+                ),
+            ),
+        )
         return
 
     if path == ("psql",):
