@@ -324,7 +324,10 @@ def test_ancestry_cleanup_ledger_covers_probe_outcomes(
             command.run(observer=events.append)
     else:
         result = command.run(observer=events.append)
-        assert result.outcome == ("updated" if scenario == "success" else "preflight_failed")
+        expected_outcome = (
+            "updated" if scenario in {"success", "absent-store"} else "preflight_failed"
+        )
+        assert result.outcome == expected_outcome
 
     assert cleanup_calls
     cleanup_events = [
