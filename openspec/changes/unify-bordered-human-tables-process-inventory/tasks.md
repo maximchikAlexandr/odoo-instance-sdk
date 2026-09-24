@@ -36,9 +36,9 @@
 
 ## 6. Compatibility and delivery verification
 
-- [ ] 6.1 Add cross-command frozen-input tests proving `healthy + stats_failed` remains lifecycle `healthy` with separate details and `stopped` remains consistently `stopped` in `ps`, `env list`, `env show`, `doctor`, and `postgres status`.
-- [ ] 6.2 Add parameterized presentation coverage at 80, 120, and 180 columns for representative audited command families, including empty data, unavailable metrics, long values, and mixed process rows.
-- [ ] 6.3 Run JSON/TOON parity and output-mode tests to prove unchanged envelope v1 values, one stdout document, stderr diagnostics, exit codes, prompts, and operation counts.
-- [ ] 6.4 Run native transport tests proving foreground `run`, interactive `shell`, `psql`, `logs --follow`, raw `eval`/`exec`, and scalar `env path` remain unwrapped.
-- [ ] 6.5 Run focused CLI/process tests, Ruff, mypy, the full non-external test gate, and `make pr`; report Docker/real-Odoo prerequisite skips separately from project regressions.
-- [ ] 6.6 Review the final diff against GitHub #81 and the OpenSpec scenarios, confirm no public model/dependency/persisted-schema change or renderer framework was introduced, and retain only scoped production, test, and documentation updates.
+- [x] 6.1 Add cross-command frozen-input tests proving `healthy + stats_failed` remains lifecycle `healthy` with separate details and `stopped` remains consistently `stopped` in `ps`, `env list`, `env show`, `doctor`, and `postgres status`.
+- [x] 6.2 Add parameterized presentation coverage at 80, 120, and 180 columns for representative audited command families, including empty data, unavailable metrics, long values, and mixed process rows.
+- [x] 6.3 Run JSON/TOON parity and output-mode tests to prove unchanged envelope v1 values, one stdout document, stderr diagnostics, exit codes, prompts, and operation counts.
+- [x] 6.4 Run native transport tests proving foreground `run`, interactive `shell`, `psql`, `logs --follow`, raw `eval`/`exec`, and scalar `env path` remain unwrapped.
+- [x] 6.5 Run focused CLI/process tests, Ruff, mypy, the full non-external test gate, and `make pr`; report Docker/real-Odoo prerequisite skips separately from project regressions.
+- [x] 6.6 Review the final diff against GitHub #81 and the OpenSpec scenarios, confirm no public model/dependency/persisted-schema change or renderer framework was introduced, and retain only scoped production, test, and documentation updates.
