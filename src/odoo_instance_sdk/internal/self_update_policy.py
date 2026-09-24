@@ -20,10 +20,7 @@ from odoo_instance_sdk.internal.self_update import (
     _validate_catalog_migration_path,
     _validate_storage_migration_path,
 )
-from odoo_instance_sdk.internal.self_update_ancestry import (
-    RevisionRelation,
-    git_revision_relation,
-)
+from odoo_instance_sdk.internal.self_update_ancestry import RevisionRelation
 from odoo_instance_sdk.models.update import UpdateResult
 
 _ORIGIN_STEP_ID = "update.inspect.origin"
@@ -87,11 +84,8 @@ def revision_preflight_error(
     canonical_source_repo = _canonical_supported_source_repo(provenance.source_repo)
     if canonical_source_repo is None and not source_origin_verified:
         return "cannot verify revision ancestry; source provenance is unsupported"
-    relation = relation or git_revision_relation(
-        source_repo=canonical_source_repo or _SOURCE_REPO,
-        installed_sha=installed_sha.lower(),
-        target_sha=ref.lower(),
-    )
+    if relation is None:
+        return "cannot verify revision ancestry; target history is unavailable"
     if relation == "ancestor" and not allow_downgrade:
         return "downgrade refused without --allow-downgrade"
     if relation == "ancestor":
