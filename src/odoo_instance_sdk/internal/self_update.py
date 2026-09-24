@@ -20,7 +20,7 @@ from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from pathlib import Path
 from types import TracebackType
 from typing import Literal, cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import msgspec
 
@@ -80,6 +80,27 @@ class InstalledProvenance:
     manual_argv: tuple[str, ...] | None
 
 
+def _git_origin_matches_supported_repo(path: Path) -> bool:
+    remote = SubprocessExecutor().execute(
+        PreparedStep(
+            step_id="update.inspect.origin",
+            argv=("git", "remote", "get-url", "origin"),
+            cwd=str(path),
+            read_only=True,
+        ),
+    )
+    stdout = remote.stdout if isinstance(remote.stdout, str) else ""
+    return remote.returncode == 0 and _is_exact_supported_https_repo(stdout.strip())
+
+
+def _is_exact_supported_https_repo(source_repo: str) -> bool:
+    raw = source_repo.removeprefix("git+")
+    parsed = urlsplit(raw)
+    return parsed.scheme == "https" and raw.rstrip("/").removesuffix(
+        ".git"
+    ) == _SOURCE_REPO.removesuffix(".git")
+
+
 def _is_supported_source_repo(source_repo: str | None) -> bool:
     return _canonical_supported_source_repo(source_repo) is not None
 
@@ -90,26 +111,13 @@ def _canonical_supported_source_repo(source_repo: str | None) -> str | None:
         return None
     raw = source_repo.removeprefix("git+")
     if raw.startswith("file://"):
-        # Local paths cannot prove the official origin without spawning a Git
-        # probe during command construction; fail closed and keep provenance
-        # validation side-effect free at the public boundary.
-        return None
-    parsed = urlsplit(raw)
-    try:
-        port = parsed.port
-    except ValueError:
-        return None
-    expected_path = f"/{_REPO_SLUG}"
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "github.com"
-        or port is not None
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path.rstrip("/").removesuffix(".git") != expected_path
-    ):
+        parsed = urlsplit(raw)
+        if any((parsed.scheme != "file", parsed.netloc, parsed.query, parsed.fragment)):
+            return None
+        return (
+            _SOURCE_REPO if _git_origin_matches_supported_repo(Path(unquote(parsed.path))) else None
+        )
+    if not _is_exact_supported_https_repo(raw):
         return None
     return _SOURCE_REPO
 
@@ -563,19 +571,6 @@ def _validate_storage_migration_path() -> None:
     if state in {"absent", "complete"}:
         return
     raise PreflightFailedError(f"storage migration is not resumable: {state}")
-
-
-def _validate_downgrade_snapshot_restore() -> str | None:
-    """Prove that the pre-install snapshot can restore the current data state."""
-    storage_state = _storage_migration_state()
-    if storage_state not in {"absent", "complete"}:
-        return f"downgrade snapshot cannot restore storage state {storage_state!r}"
-    catalog = get_user_root(ensure_exists=False) / "catalog.sqlite3"
-    if catalog.is_file() and _catalog_schema_version() == "unreadable":
-        return "downgrade snapshot cannot restore an unreadable catalog"
-    # The snapshot phase copies this exact catalog before install.  An absent
-    # catalog is also a compatible empty state; any copy failure is now fatal.
-    return None
 
 
 def _preflight_disk_check() -> str | None:

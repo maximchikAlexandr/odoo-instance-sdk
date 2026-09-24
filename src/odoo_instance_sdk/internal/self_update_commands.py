@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
-from urllib.parse import unquote, urlsplit
-from uuid import uuid4
+from typing import cast
 
 import msgspec
 
@@ -57,17 +53,29 @@ from odoo_instance_sdk.internal.self_update import (
     _read_journal,
     _restore_snapshot,
     _snapshot_metadata,
+    _storage_migration_state,
     _update_journal_path,
     _update_lock_path,
     _update_snapshot_dir,
     _uv_version_string,
     _validate_catalog_migration_path,
-    _validate_downgrade_snapshot_restore,
     _validate_storage_migration_path,
     _verify_installed_revision,
     _write_journal,
     _write_snapshot,
     read_uv_tool_direct_url,
+)
+from odoo_instance_sdk.internal.self_update_ancestry import (
+    RevisionRelation,
+)
+from odoo_instance_sdk.internal.self_update_ancestry import (
+    git_revision_relation as _git_revision_relation,
+)
+from odoo_instance_sdk.internal.self_update_ancestry import (
+    revision_probe_steps as _revision_probe_steps,
+)
+from odoo_instance_sdk.internal.self_update_ancestry import (
+    run_revision_probe as _run_revision_probe,
 )
 from odoo_instance_sdk.models.update import UpdateOutcome, UpdateResult
 
@@ -266,167 +274,14 @@ def _journal_snapshot_sha(
     return provenance.commit_id
 
 
-RevisionRelation = Literal["same", "descendant", "ancestor", "divergent", "unknown"]
-
-
-def _revision_probe_steps(
-    *,
-    source_repo: str | None,
-    installed_sha: str,
-    target_sha: str,
-) -> tuple[PreparedStep, ...]:
-    """Capture the Git ancestry probe without launching it during construction."""
-    if installed_sha == target_sha:
-        return ()
-    if not source_repo:
-        return ()
-    repository = source_repo.removeprefix("git+")
-    if repository.startswith("file://"):
-        parsed = urlsplit(repository)
-        repository = unquote(parsed.path)
-    root = Path(tempfile.gettempdir()) / f"odcli-update-ancestry-{uuid4().hex}"
-    git_dir = str(root / "objects.git")
-    return (
-        PreparedStep(
-            step_id="update.inspect.ancestry-init",
-            argv=("git", "init", "--bare", git_dir),
-            mutating=True,
-            timeout=30.0,
-        ),
-        PreparedStep(
-            step_id="update.inspect.ancestry-fetch",
-            argv=(
-                "git",
-                "--git-dir",
-                git_dir,
-                "fetch",
-                "--no-tags",
-                repository,
-                installed_sha,
-                target_sha,
-            ),
-            mutating=True,
-            timeout=60.0,
-        ),
-        PreparedStep(
-            step_id="update.inspect.ancestry-installed",
-            argv=(
-                "git",
-                "--git-dir",
-                git_dir,
-                "merge-base",
-                "--is-ancestor",
-                installed_sha,
-                target_sha,
-            ),
-            read_only=True,
-            timeout=30.0,
-        ),
-        PreparedStep(
-            step_id="update.inspect.ancestry-target",
-            argv=(
-                "git",
-                "--git-dir",
-                git_dir,
-                "merge-base",
-                "--is-ancestor",
-                target_sha,
-                installed_sha,
-            ),
-            read_only=True,
-            timeout=30.0,
-        ),
-    )
-
-
-def _revision_relation_from_results(
-    *,
-    installed_sha: str,
-    target_sha: str,
-    installed_check: ProcessResult,
-    target_check: ProcessResult,
-) -> RevisionRelation:
-    if installed_sha == target_sha:
-        return "same"
-    if installed_check.returncode == 0:
-        return "descendant"
-    if installed_check.returncode != 1:
-        return "unknown"
-    if target_check.returncode == 0:
-        return "ancestor"
-    if target_check.returncode == 1:
-        return "divergent"
-    return "unknown"
-
-
-def _git_revision_relation(
-    *,
-    source_repo: str | None,
-    installed_sha: str,
-    target_sha: str,
-) -> RevisionRelation:
-    """Classify two revisions through the shared executor for direct callers/tests."""
-    steps = _revision_probe_steps(
-        source_repo=source_repo,
-        installed_sha=installed_sha,
-        target_sha=target_sha,
-    )
-    if installed_sha == target_sha:
-        return "same"
-    if not steps:
-        return "unknown"
-    executor = SubprocessExecutor()
-    root = Path(steps[0].argv[3]).parent
-    try:
-        if executor.execute(steps[0]).returncode != 0:
-            return "unknown"
-        if executor.execute(steps[1]).returncode != 0:
-            return "unknown"
-        installed_check = executor.execute(steps[2])
-        target_check = executor.execute(steps[3])
-        return _revision_relation_from_results(
-            installed_sha=installed_sha,
-            target_sha=target_sha,
-            installed_check=installed_check,
-            target_check=target_check,
-        )
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def _run_revision_probe(
-    context: RunContext[UpdateResult],
-    steps: tuple[PreparedStep, ...],
-    *,
-    installed_sha: str,
-    target_sha: str,
-) -> RevisionRelation:
-    if installed_sha == target_sha:
-        return "same"
-    if not steps:
-        return "unknown"
-    root = Path(steps[0].argv[3]).parent
-    try:
-        init_result = cast("ProcessResult", context.process_prepared(steps[0]))
-        if init_result.returncode != 0:
-            for step in steps[1:]:
-                context.skip(step.step_id)
-            return "unknown"
-        fetch_result = cast("ProcessResult", context.process_prepared(steps[1]))
-        if fetch_result.returncode != 0:
-            for step in steps[2:]:
-                context.skip(step.step_id)
-            return "unknown"
-        installed_check = cast("ProcessResult", context.process_prepared(steps[2]))
-        target_check = cast("ProcessResult", context.process_prepared(steps[3]))
-        return _revision_relation_from_results(
-            installed_sha=installed_sha,
-            target_sha=target_sha,
-            installed_check=installed_check,
-            target_check=target_check,
-        )
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+def _validate_downgrade_snapshot_restore() -> str | None:
+    """Prove that the pre-install snapshot can restore the current data state."""
+    storage_state = _storage_migration_state()
+    if storage_state not in {"absent", "complete"}:
+        return f"downgrade snapshot cannot restore storage state {storage_state!r}"
+    if _catalog_schema_version() == "unreadable":
+        return "downgrade snapshot cannot restore an unreadable catalog"
+    return None
 
 
 def _revision_preflight_error(

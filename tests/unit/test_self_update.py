@@ -727,7 +727,7 @@ def test_snapshot_resume_skips_install_after_crash_before_journal_write(
     )
     result = command.run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
+    assert [step.step_id for step in executor.executed] == ["update.migrate"]
 
 
 def test_snapshot_resume_rejects_unexpected_installed_revision(
@@ -851,7 +851,7 @@ def test_update_resumes_from_migrate_journal(
     executor = _executor_factory({"maintenance_rc": 0})
     result = update_command(ref=_SHA_B, executor=executor).run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
+    assert [step.step_id for step in executor.executed] == ["update.migrate"]
 
 
 def test_migrate_resume_rollback_uses_journal_snapshot_sha(
@@ -953,5 +953,4 @@ def test_update_resumes_from_install_journal(
     executor = _executor_factory({"install_rc": 0, "maintenance_rc": 0})
     result = update_command(ref="main", executor=executor).run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
     assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
