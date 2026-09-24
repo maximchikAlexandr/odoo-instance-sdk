@@ -10,6 +10,7 @@ for ``--dry-run``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -22,15 +23,48 @@ from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
+    bordered_table,
     emit,
     emit_json_envelope,
     failure_document,
+    render_rich_text,
     rich_print,
     sanitize_terminal_text,
     success_document,
 )
 
 _PlanT = TypeVar("_PlanT")
+
+
+def _rich_multi_target(document: OutputDocument) -> str:
+    """Render repeated target outcomes as one bounded target table."""
+    payload = document.result if document.ok else document.context
+    targets = payload.get("targets") if isinstance(payload, dict) else None
+    if not isinstance(targets, list):
+        return ""
+    table = bordered_table("Target", "Outcome", "Details", title=document.command)
+    for entry in targets:
+        if not isinstance(entry, dict):
+            continue
+        target = str(entry.get("target", "unknown"))
+        if document.dry_run:
+            outcome = "planned"
+            details = entry.get("plan", {})
+        elif entry.get("ok"):
+            outcome = "success"
+            details = entry.get("result", {})
+        else:
+            outcome = "failed"
+            details = entry.get("error", "failed")
+        rendered = (
+            json.dumps(details, ensure_ascii=False, sort_keys=True, default=str)
+            if isinstance(details, (dict, list))
+            else str(details)
+        )
+        table.add_row(target, outcome, rendered)
+    if not table.rows:
+        table.add_row("(none)", "—", "no targets")
+    return render_rich_text(table)
 
 
 class TargetError(Exception):
@@ -97,7 +131,10 @@ def run_multi_target_deletion(
                 dry_run=True,
             ),
             mode,
-            rich=rich_summary,
+            rich=lambda document: (
+                _rich_multi_target(document)
+                or (rich_summary(document) if rich_summary is not None else "")
+            ),
         )
         return
 
@@ -127,7 +164,10 @@ def run_multi_target_deletion(
                 error_message="one or more targets failed",
             ),
             mode,
-            rich=rich_summary,
+            rich=lambda document: (
+                _rich_multi_target(document)
+                or (rich_summary(document) if rich_summary is not None else "")
+            ),
         )
         raise click.exceptions.Exit(1)
 
@@ -138,7 +178,10 @@ def run_multi_target_deletion(
             provenance=provenance,
         ),
         mode,
-        rich=rich_summary,
+        rich=lambda document: (
+            _rich_multi_target(document)
+            or (rich_summary(document) if rich_summary is not None else "")
+        ),
     )
 
 

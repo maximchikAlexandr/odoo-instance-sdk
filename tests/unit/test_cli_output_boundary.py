@@ -19,22 +19,7 @@ from odoo_instance_sdk.models import PostgresClusterState
 
 _REPO_ROOT = Path(__file__).parents[2]
 _COMMANDS_ROOT = _REPO_ROOT / "src" / "odoo_instance_sdk" / "commands"
-_DOWNSTREAM_DIRECT_TABLE_SITES = frozenset(
-    {
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 672),
-        ("src/odoo_instance_sdk/commands/git.py", 35),
-        ("src/odoo_instance_sdk/commands/module.py", 105),
-        ("src/odoo_instance_sdk/commands/module.py", 125),
-        ("src/odoo_instance_sdk/commands/module.py", 142),
-        ("src/odoo_instance_sdk/commands/module.py", 172),
-        ("src/odoo_instance_sdk/commands/module.py", 188),
-        ("src/odoo_instance_sdk/commands/resource.py", 491),
-        ("src/odoo_instance_sdk/commands/resource.py", 535),
-        ("src/odoo_instance_sdk/commands/test.py", 195),
-        ("src/odoo_instance_sdk/commands/translations.py", 347),
-        ("src/odoo_instance_sdk/commands/translations.py", 383),
-    }
-)
+_DOWNSTREAM_DIRECT_TABLE_SITES: frozenset[tuple[str, int]] = frozenset()
 
 
 @pytest.mark.unit
@@ -129,7 +114,7 @@ def test_production_commands_inventory_direct_table_constructors() -> None:
         )
 
     downstream = actual - approved
-    assert len(_DOWNSTREAM_DIRECT_TABLE_SITES) == 12
-    assert len(actual) == 13
+    assert len(_DOWNSTREAM_DIRECT_TABLE_SITES) == 0
+    assert len(actual) == 1
     assert len(approved) == 1
     assert downstream == _DOWNSTREAM_DIRECT_TABLE_SITES

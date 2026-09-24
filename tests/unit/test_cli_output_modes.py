@@ -2104,10 +2104,11 @@ def test_public_cli_leaf_matrix_has_click_rich_contract(  # noqa: C901
         if case.path == ("env", "path"):
             assert invoked.stdout == str(tmp_path / "worktree") + "\n"
         elif case.path == ("env", "show"):
-            assert "Environment demo" in invoked.stdout
+            assert all(label in invoked.stdout for label in ("Environment", "Name", "demo"))
         elif case.path == ("env", "ls"):
             assert "Project demo" in invoked.stdout
-            assert "status=" in invoked.stdout
+            assert all(label in invoked.stdout for label in ("STATE", "DETAILS"))
+            assert "worktree=/tmp/demo" in invoked.stdout
         else:
             key_value_lines = [
                 line

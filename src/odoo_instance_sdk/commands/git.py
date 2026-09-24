@@ -11,16 +11,15 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from rich.console import Console
-from rich.table import Table
-
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
+    bordered_table,
     fail,
     model_to_dict,
     output_options,
+    render_rich_text,
     resolve_output_mode,
     run_or_preview,
 )
@@ -32,7 +31,7 @@ def _rich(document: OutputDocument) -> str:
     if not document.ok:
         return document.error.message if document.error is not None else "operation failed"
     value = document.result if isinstance(document.result, dict) else {}
-    table = Table("Field", "Value", title=f"Git {document.command.rsplit('.', 1)[-1]}")
+    table = bordered_table("Field", "Value", title=f"Git {document.command.rsplit('.', 1)[-1]}")
     for key, item in value.items():
         rendered = (
             json.dumps(item, ensure_ascii=False, default=str)
@@ -40,9 +39,7 @@ def _rich(document: OutputDocument) -> str:
             else str(item)
         )
         table.add_row(str(key), rendered)
-    console = Console(record=True, color_system=None, width=180)
-    console.print(table)
-    return console.export_text().rstrip()
+    return render_rich_text(table)
 
 
 def _resource(ctx: CliContext) -> GitResource:

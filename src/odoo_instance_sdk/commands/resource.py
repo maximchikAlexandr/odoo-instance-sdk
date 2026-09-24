@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -22,9 +21,6 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from rich.console import Console  # noqa: I001 -- keep resource formatter aliases grouped; remove when Ruff supports grouped aliases.
-from rich.table import Table
-
 from odoo_instance_sdk.commands.context import (
     CliContext,
     pass_cli_context,
@@ -35,15 +31,18 @@ from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
+    bordered_table,
     emit,
     fail,
     field_schema,
     model_to_dict,
     output_options,
+    render_rich_text,
     resolve_output_mode,
     success_document,
 )
-from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes, rich_cell
+from odoo_instance_sdk.internal.cli_format import human_bytes as _human_bytes
+from odoo_instance_sdk.internal.cli_format import rich_cell
 from odoo_instance_sdk.internal.paths import get_backups_dir, get_catalog_path, get_data_root
 from odoo_instance_sdk.internal.resource_inventory import (
     FileResourceSource,
@@ -488,7 +487,7 @@ def _rich_list(document: OutputDocument) -> str:
     resources = result.get("resources", [])
     if not isinstance(resources, list):
         return "No resources"
-    table = Table(
+    table = bordered_table(
         "Identity",
         "Type",
         "Name",
@@ -517,10 +516,9 @@ def _rich_list(document: OutputDocument) -> str:
             rich_cell(resource.get("completeness", "")),
             rich_cell(str(resource.get("reclaimable", False)).lower()),
         )
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=9999)
-    console.print(table)
-    return output.getvalue().rstrip()
+    if not table.rows:
+        table.add_row("(none)", "—", "—", "—", "—", "—", "—")
+    return render_rich_text(table)
 
 
 def _rich_doctor(document: OutputDocument) -> str:
@@ -528,12 +526,12 @@ def _rich_doctor(document: OutputDocument) -> str:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
     findings = result.get("findings", [])
-    if not isinstance(findings, list):
-        return "Resource findings unavailable."
-    if not findings:
-        return "No resource findings."
-    table = Table("Severity", "Code", "Identity", "Message", "Recommendation")
-    for finding in findings:
+    table = bordered_table(
+        "Severity", "Code", "Identity", "Message", "Recommendation", title="Resource findings"
+    )
+    if not isinstance(findings, list) or not findings:
+        table.add_row("—", "—", "—", "No resource findings.", "—")
+    for finding in findings if isinstance(findings, list) else []:
         if not isinstance(finding, dict):
             continue
         table.add_row(
@@ -543,9 +541,7 @@ def _rich_doctor(document: OutputDocument) -> str:
             rich_cell(finding.get("message", "")),
             rich_cell(finding.get("recommendation", "") or ""),
         )
-    console = Console(record=True, color_system=None, width=180)
-    console.print(table)
-    return console.export_text().rstrip()
+    return render_rich_text(table)
 
 
 def _run_resource(

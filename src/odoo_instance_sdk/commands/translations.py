@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import sys
 from dataclasses import dataclass
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
@@ -26,20 +25,23 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
 else:
     import rich_click as click
-from rich.console import Console  # noqa: I001 -- keep translation formatter aliases grouped; remove when Ruff supports grouped aliases.
-from rich.table import Table
+from rich.console import Group
 
 from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, pass_cli_context
 from odoo_instance_sdk.commands.output import (
     OutputDocument,
+    bordered_table,
     fail,
     output_options,
+    render_rich_text,
     resolve_output_mode,
     run_or_preview,
 )
 from odoo_instance_sdk.internal.cli_format import (
     human_bytes as _human_bytes,
+)
+from odoo_instance_sdk.internal.cli_format import (
     rich_cell,
 )
 
@@ -344,7 +346,9 @@ def _rich_translation_export(document: OutputDocument) -> str:
         return document.error.message if document.error is not None else "operation failed"
     result = document.result if isinstance(document.result, dict) else {}
     exports = result.get("exports", [])
-    table = Table("Module", "Language", "File", "Size", "Validation", title="Translation export")
+    table = bordered_table(
+        "Module", "Language", "File", "Size", "Validation", title="Translation export"
+    )
     validation_output: list[tuple[str, str, str]] = []
     if isinstance(exports, list) and exports:
         for item in exports:
@@ -376,15 +380,13 @@ def _rich_translation_export(document: OutputDocument) -> str:
             )
     else:
         table.add_row("(none)", "—", "—", "—", "—")
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(table)
+    renderables = [table]
     if validation_output:
-        details = Table("Tool", "Status", "Output", title="Translation validation")
+        details = bordered_table("Tool", "Status", "Output", title="Translation validation")
         for tool, status, diagnostic in validation_output:
             details.add_row(rich_cell(tool), rich_cell(status), rich_cell(diagnostic))
-        console.print(details)
-    return output.getvalue().rstrip()
+        renderables.append(details)
+    return render_rich_text(Group(*renderables))
 
 
 @click.group("translations", help="Export Odoo module translations.")
