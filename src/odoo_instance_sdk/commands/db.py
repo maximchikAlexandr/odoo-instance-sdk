@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import click
@@ -51,8 +51,6 @@ from odoo_instance_sdk.models import (
     DatabaseRefreshOptions,
 )
 
-_RestoreResult = TypeVar("_RestoreResult")
-
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.commands.output import _InspectableCommand
@@ -61,7 +59,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
     from odoo_instance_sdk.internal.proc import StepObserver
     from odoo_instance_sdk.models import DatabasePreparationResult, DevelopmentEnvironment
-    from odoo_instance_sdk.resources.instance import AuxiliaryRestoreSession, OdooInstance
+    from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 def _run_rich_restore(
@@ -95,20 +93,6 @@ def _validate_replace_context(client: OdooClient, environment: DevelopmentEnviro
     catalog = client.get_catalog()
     if isinstance(catalog, BackupCatalog) and catalog.get_environment_runtime(str(environment.id)):
         raise InstanceConfigurationError("replacement requires a stopped environment runtime")
-
-
-def _attach_auxiliary_restore_runtime(
-    command: _InspectableCommand[_RestoreResult],
-    session: AuxiliaryRestoreSession,
-    *,
-    before_step_id: str = "database.prepare.local-restore",
-) -> _InspectableCommand[_RestoreResult]:
-    """Keep the CLI import boundary while delegating attachment to the instance layer."""
-    from odoo_instance_sdk.resources.instance.auxiliary_restore import (
-        _attach_auxiliary_restore_runtime as attach,
-    )
-
-    return attach(command, session, before_step_id=before_step_id)
 
 
 @click.group(help="Prepare and reset project databases.")
@@ -169,6 +153,9 @@ def db_refresh(
         if restore and (project_path / ".odcli" / "project.toml").is_file():
             from odoo_instance_sdk.project import ProjectConfig
             from odoo_instance_sdk.resources.instance import auxiliary_restore_session
+            from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+                _attach_auxiliary_restore_runtime,
+            )
 
             auxiliary_instance = client.instance.from_project(ProjectConfig.load(project_path))
             command = _attach_auxiliary_restore_runtime(
@@ -328,6 +315,9 @@ def db_restore(  # noqa: C901
             )
             from odoo_instance_sdk.project import ProjectConfig
             from odoo_instance_sdk.resources.instance import auxiliary_restore_session
+            from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+                _attach_auxiliary_restore_runtime,
+            )
 
             if (project_path / ".odcli" / "project.toml").is_file():
                 auxiliary_instance = client.instance.from_project(ProjectConfig.load(project_path))

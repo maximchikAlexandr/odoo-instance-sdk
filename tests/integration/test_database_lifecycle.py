@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
@@ -29,6 +30,16 @@ def _force_database_manager_probe_failure(monkeypatch: pytest.MonkeyPatch) -> No
         yield httpx_client
 
     monkeypatch.setattr("httpx.Client", fake_httpx_client)
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicRestoreHarness:
+    result: Any
+    restore: Any
+    backup: Any
+    executor: Any
+    client: Any
+    session: Any
 
 
 class TestRestore:
@@ -260,11 +271,9 @@ class TestRestore:
         with pytest.raises(RestoreFailedError, match="was not created"):
             instance.databases.restore(backup, "testdb")
 
-    @pytest.mark.parametrize("failure", [None, "spawn", "foreign"])
-    def test_public_stopped_restore_runs_real_coordinator_and_preserves_zip_contract(
+    def _run_public_stopped_restore_case(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
-    ) -> None:
-        """The public stopped-project path must exercise coordinator postconditions."""
+    ) -> _PublicRestoreHarness:
         from click.testing import CliRunner
 
         from odoo_instance_sdk.cli import cli
@@ -445,29 +454,48 @@ class TestRestore:
 
         result = CliRunner().invoke(cli, ["db", "refresh", "--restore", "--format", "json"])
 
-        if failure is not None:
-            assert result.exit_code == 1, result.output
-            if failure == "spawn":
-                assert "odcli run" in result.stdout
-            elif failure == "foreign":
-                assert "port-conflict" in result.stdout
-            restore.assert_not_called()
-            client.unregister_process.assert_not_called()
-            return
+        return _PublicRestoreHarness(result, restore, backup, executor, client, session)
 
-        assert result.exit_code == 0, result.output
-        assert '"default_switched": true' in result.stdout
-        assert backup.format is BackupFormat.ZIP
-        assert backup.filestore_requested is True
-        restore.assert_called_once()
-        assert restore.call_args is not None
-        assert restore.call_args.args[0] is backup
-        assert restore.call_args.kwargs == {
+    def test_public_stopped_restore_success_preserves_zip_contract(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = self._run_public_stopped_restore_case(tmp_path, monkeypatch, None)
+
+        assert harness.result.exit_code == 0, harness.result.output
+        assert '"default_switched": true' in harness.result.stdout
+        assert harness.backup.format is BackupFormat.ZIP
+        assert harness.backup.filestore_requested is True
+        harness.restore.assert_called_once()
+        assert harness.restore.call_args is not None
+        assert harness.restore.call_args.args[0] is harness.backup
+        assert harness.restore.call_args.kwargs == {
             "copy": True,
             "neutralize_database": True,
         }
-        assert [step.step_id for step in executor.spawned] == [session.start_step.step_id]
-        client.unregister_process.assert_called_once()
+        assert [step.step_id for step in harness.executor.spawned] == [
+            harness.session.start_step.step_id
+        ]
+        harness.client.unregister_process.assert_called_once()
+
+    def test_public_stopped_restore_spawn_failure_is_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = self._run_public_stopped_restore_case(tmp_path, monkeypatch, "spawn")
+
+        assert harness.result.exit_code == 1, harness.result.output
+        assert "odcli run" in harness.result.stdout
+        harness.restore.assert_not_called()
+        harness.client.unregister_process.assert_not_called()
+
+    def test_public_stopped_restore_foreign_listener_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = self._run_public_stopped_restore_case(tmp_path, monkeypatch, "foreign")
+
+        assert harness.result.exit_code == 1, harness.result.output
+        assert "port-conflict" in harness.result.stdout
+        harness.restore.assert_not_called()
+        harness.client.unregister_process.assert_not_called()
 
     def test_forged_backup_rejected(
         self, instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

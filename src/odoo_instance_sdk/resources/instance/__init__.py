@@ -8,7 +8,6 @@ from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.resources.database import DatabaseResource
 from odoo_instance_sdk.resources.instance.auxiliary_restore import (
     AuxiliaryRestoreSession,
-    _attach_auxiliary_restore_runtime,
     activate_auxiliary_restore_session,
     active_auxiliary_restore_session,
     auxiliary_restore_session,
@@ -46,7 +45,6 @@ __all__ = [
     "AuxiliaryRestoreSession",
     "InstanceFactory",
     "OdooInstance",
-    "_attach_auxiliary_restore_runtime",
     "activate_auxiliary_restore_session",
     "active_auxiliary_restore_session",
     "auxiliary_restore_session",

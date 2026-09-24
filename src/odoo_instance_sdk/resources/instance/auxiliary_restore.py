@@ -46,6 +46,10 @@ from odoo_instance_sdk.resources.instance.runtime import (
     _PROTECTED_RUNTIME_OPTIONS,
     T,
     _build_cli_args,
+    _canonical_runtime_argv,
+    _canonical_runtime_path,
+    _runtime_config_arg,
+    _runtime_expectations,
     _RuntimeBinding,
     _RuntimeCatalog,
 )
@@ -56,6 +60,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import (
         Command,
         ExecutionPlan,
+        JsonValue,
         PlanObservation,
         SemanticPlanObservation,
     )
@@ -428,6 +433,12 @@ def auxiliary_restore_session(instance: OdooInstance) -> AuxiliaryRestoreSession
     return AuxiliaryRestoreSession(
         instance=instance,
         start_step=step,
+        probe_action=PreparedAction(
+            step_id="database.restore.auxiliary.probe",
+            action="verify-auxiliary-database-manager",
+            description="Verify the recorded auxiliary Database Manager identity",
+            read_only=True,
+        ),
         ready_action=PreparedAction(
             step_id="database.restore.auxiliary.ready",
             action="wait-auxiliary-database-manager",
@@ -451,6 +462,7 @@ class AuxiliaryRestoreSession:
 
     instance: OdooInstance
     start_step: PreparedStep
+    probe_action: PreparedAction
     ready_action: PreparedAction
     cleanup_action: PreparedAction
     secret_config: StartConfig | None = None
@@ -458,22 +470,44 @@ class AuxiliaryRestoreSession:
     process: OdooProcess | None = None
     using_existing_runtime: bool = False
 
-    def _reuse_responsive_runtime(self) -> bool:
-        """Return whether the configured endpoint is a usable external manager."""
-        import httpx
-
+    def _probe_recorded_runtime(
+        self, context: RunContext[_ContextResult], config: StartConfig
+    ) -> int | None:
+        if not context.planned(self.probe_action.step_id) or context.consumed(
+            self.probe_action.step_id
+        ):
+            return _recorded_runtime_pid(self.instance, config)
+        context.action(self.probe_action.step_id)
         try:
-            with httpx.Client(timeout=httpx.Timeout(0.5)) as http:
-                response = http.post(
-                    f"{self.instance.config.base_url.rstrip('/')}/web/database/list",
-                    json={"jsonrpc": "2.0", "method": "call", "params": {}},
-                )
-                if response.status_code >= 400:
-                    return False
-                data = response.json()
-        except (httpx.HTTPError, ValueError):
-            return False
-        return isinstance(data, dict) and isinstance(data.get("result"), list)
+            recorded_pid = _recorded_runtime_pid(self.instance, config)
+        except BaseException as error:
+            context.fail_action(self.probe_action.step_id, error)
+            raise
+        context.complete_action(self.probe_action.step_id)
+        return recorded_pid
+
+    def _wait_for_recorded_runtime(
+        self, context: RunContext[_ContextResult], recorded_pid: int
+    ) -> None:
+        from odoo_instance_sdk.internal.health import poll_health
+
+        context.action(self.ready_action.step_id)
+        try:
+            poll_health(
+                self.instance.config.base_url,
+                timeout=60.0,
+                alive_check=lambda: _process_alive(recorded_pid),
+                database_manager=True,
+            )
+        except BaseException as error:
+            context.fail_action(self.ready_action.step_id, error)
+            from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
+
+            raise DatabaseManagerUnavailableError(
+                "recorded auxiliary database manager failed readiness; retry after resolving "
+                "the project runtime"
+            ) from error
+        context.complete_action(self.ready_action.step_id)
 
     def _cleanup_failed_start(self, handle: ProcessHandle | None, error: BaseException) -> None:
         if self.process is not None:
@@ -513,7 +547,7 @@ class AuxiliaryRestoreSession:
             error.add_note(f"auxiliary secret cleanup failed: {cleanup_error}")
 
     def ensure_started(self, context: RunContext[_ContextResult]) -> None:
-        if self.process is not None or self.using_existing_runtime:
+        if self.process is not None:
             return
         config = self.instance.config.start_config
         if config is None:
@@ -521,28 +555,18 @@ class AuxiliaryRestoreSession:
                 "stopped-project restore has no auxiliary Odoo configuration; "
                 "run `odcli init` and retry"
             )
-        if self._reuse_responsive_runtime():
-            self.using_existing_runtime = True
-            return
-        recorded_pid = _recorded_runtime_pid(self.instance, config)
-        if recorded_pid is not None:
-            self.using_existing_runtime = True
-            from odoo_instance_sdk.internal.health import poll_health
-
-            try:
-                poll_health(
-                    self.instance.config.base_url,
-                    timeout=60.0,
-                    alive_check=lambda: _process_alive(recorded_pid),
-                    database_manager=True,
-                )
-            except BaseException as error:
+        if self.using_existing_runtime:
+            if _recorded_runtime_pid(self.instance, config) is None:
                 from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
 
                 raise DatabaseManagerUnavailableError(
-                    "recorded auxiliary database manager failed readiness; retry after resolving "
-                    "the project runtime"
-                ) from error
+                    "recorded auxiliary database manager identity is no longer proven"
+                )
+            return
+        recorded_pid = self._probe_recorded_runtime(context, config)
+        if recorded_pid is not None:
+            self.using_existing_runtime = True
+            self._wait_for_recorded_runtime(context, recorded_pid)
             return
         _assert_http_port_free(config)
         if self.secret_config is not None and self.secret_path is not None:
@@ -583,6 +607,7 @@ class AuxiliaryRestoreSession:
 
     def _skip_unconsumed_steps(self, context: RunContext[_ContextResult]) -> None:
         for step_id in (
+            self.probe_action.step_id,
             self.start_step.step_id,
             self.ready_action.step_id,
             self.cleanup_action.step_id,
@@ -665,6 +690,84 @@ def _process_alive(pid: int) -> bool:
         return False
 
 
+def _expected_runtime_identity(
+    instance: OdooInstance,
+    config: StartConfig,
+    environment: Mapping[str, JsonValue] | None,
+) -> tuple[str, tuple[str, ...], str | None, str | None]:
+    if environment is not None:
+        expected_executable, expected_argv, expected_cwd, expected_config_path = (
+            _runtime_expectations(environment)
+        )
+        return expected_executable, expected_argv, expected_cwd, expected_config_path
+    expected_argv = _canonical_runtime_argv(
+        (*instance._executable_prefix(), *_build_cli_args(config))
+    )
+    return (
+        _canonical_runtime_path(str(instance._executable_prefix()[0])),
+        expected_argv,
+        (
+            _canonical_runtime_path(str(instance.config.default_cwd))
+            if instance.config.default_cwd is not None
+            else None
+        ),
+        _canonical_runtime_path(config.config_path) if config.config_path is not None else None,
+    )
+
+
+def _runtime_process_matches(
+    instance: OdooInstance,
+    config: StartConfig,
+    process: psutil.Process,
+    environment: Mapping[str, JsonValue] | None,
+) -> bool:
+    expected_executable, expected_argv, expected_cwd, expected_config_path = (
+        _expected_runtime_identity(instance, config, environment)
+    )
+    live_argv = _canonical_runtime_argv(tuple(process.cmdline()))
+    live_config_path = _runtime_config_arg(live_argv)
+    live_cwd = _canonical_runtime_path(str(process.cwd()))
+    return (
+        _canonical_runtime_path(str(process.exe())) == expected_executable
+        and live_argv == expected_argv
+        and (expected_cwd is None or live_cwd == expected_cwd)
+        and (_canonical_runtime_path(live_config_path) if live_config_path is not None else None)
+        == expected_config_path
+    )
+
+
+def _runtime_row_matches(
+    instance: OdooInstance,
+    config: StartConfig,
+    binding: _RuntimeBinding,
+    runtime: Mapping[str, JsonValue],
+    environment: Mapping[str, JsonValue] | None,
+) -> int | None:
+    owner_kind = str(runtime["owner_kind"])
+    if owner_kind == "project" and str(runtime["owner_id"]) != binding.owner_id:
+        return None
+    if owner_kind == "environment":
+        if environment is None:
+            return None
+        if _canonical_runtime_path(str(environment["repository_root"])) != _canonical_runtime_path(
+            str(binding.repository_root)
+        ) or _canonical_runtime_path(str(environment["git_common_dir"])) != _canonical_runtime_path(
+            str(binding.git_common_dir)
+        ):
+            return None
+    if int(str(runtime["http_port"])) != config.http_port or str(runtime["http_url"]).rstrip(
+        "/"
+    ) != instance.config.base_url.rstrip("/"):
+        return None
+    root_pid = int(str(runtime["root_pid"]))
+    process = psutil.Process(root_pid)
+    if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+        return None
+    if float(process.create_time()) != float(str(runtime["create_time"])):
+        return None
+    return root_pid if _runtime_process_matches(instance, config, process, environment) else None
+
+
 def _recorded_runtime_pid(instance: OdooInstance, config: StartConfig) -> int | None:
     """Prove that an occupied project port belongs to its recorded runtime.
 
@@ -689,28 +792,24 @@ def _recorded_runtime_pid(instance: OdooInstance, config: StartConfig) -> int | 
     # The project filter already proves repository/common-dir ownership; include
     # those environment runtime rows in the same strict PID/create-time check.
     environment_runtimes = tuple(
-        runtime
-        for _environment, runtime in getattr(snapshot, "environments", ())
+        (runtime, environment)
+        for environment, runtime in getattr(snapshot, "environments", ())
         if runtime is not None
     )
-    for runtime in (*runtimes, *environment_runtimes):
+    candidates = tuple((runtime, None) for runtime in runtimes) + environment_runtimes
+    for runtime, environment in candidates:
         try:
-            if (
-                str(runtime["owner_kind"]) == "project"
-                and str(runtime["owner_id"]) != binding.owner_id
-            ):
-                continue
-            if int(str(runtime["http_port"])) != config.http_port:
-                continue
-            root_pid = int(str(runtime["root_pid"]))
-            recorded_create_time = float(str(runtime["create_time"]))
-            process = psutil.Process(root_pid)
-            if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
-                continue
-            if float(process.create_time()) == recorded_create_time:
-                return root_pid
-        except (KeyError, OSError, TypeError, ValueError, psutil.Error):
+            matched_pid = _runtime_row_matches(
+                instance,
+                config,
+                binding,
+                cast("Mapping[str, JsonValue]", runtime),
+                cast("Mapping[str, JsonValue] | None", environment),
+            )
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError, psutil.Error):
             continue
+        if matched_pid is not None:
+            return matched_pid
     return None
 
 
@@ -733,7 +832,7 @@ def _attach_auxiliary_restore_runtime(
         return command
     prepared_command_value = cast("Command[_CommandResult]", command)
     prepared = prepared_command_value._prepared()
-    auxiliary_steps = (session.start_step, session.ready_action)
+    auxiliary_steps = (session.probe_action, session.start_step, session.ready_action)
     anchor_index = next(
         (index for index, step in enumerate(prepared.steps) if step.step_id == before_step_id),
         len(prepared.steps),

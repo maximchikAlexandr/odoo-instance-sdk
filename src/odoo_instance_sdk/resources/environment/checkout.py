@@ -579,7 +579,9 @@ class _CheckoutMixin:
         source_session = self._copy_auxiliary_session(snapshot.private)
         if source_session is None:
             return command
-        from odoo_instance_sdk.resources.instance import _attach_auxiliary_restore_runtime
+        from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+            _attach_auxiliary_restore_runtime,
+        )
 
         return cast(
             "Command[DevelopmentEnvironment]",

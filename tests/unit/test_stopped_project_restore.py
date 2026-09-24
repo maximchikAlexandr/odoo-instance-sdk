@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -41,7 +42,35 @@ def session_steps(session: object) -> tuple[PreparedStep | PreparedAction, ...]:
     from odoo_instance_sdk.resources.instance import AuxiliaryRestoreSession
 
     assert isinstance(session, AuxiliaryRestoreSession)
-    return (session.start_step, session.ready_action, session.cleanup_action)
+    return (session.probe_action, session.start_step, session.ready_action, session.cleanup_action)
+
+
+def run_session(
+    session: object,
+    callback: Callable[[Any], None],
+    executor: RecordingExecutor,
+) -> None:
+    steps = session_steps(session)
+    command = Command.create(
+        ExecutionPlan(steps=tuple(step.public_projection() for step in steps)),
+        callback,
+        steps,
+        executor=executor,
+    )
+    command.run()
+
+
+def recorded_project_runtime(
+    *, owner_id: str, http_port: int, pid: int, create_time: float, http_url: str
+) -> dict[str, int | float | str]:
+    return {
+        "owner_kind": "project",
+        "owner_id": owner_id,
+        "http_port": http_port,
+        "http_url": http_url,
+        "root_pid": pid,
+        "create_time": create_time,
+    }
 
 
 def test_auxiliary_restore_session_captures_bounded_runtime_and_cleans_owned_process(
@@ -71,13 +100,7 @@ def test_auxiliary_restore_session_captures_bounded_runtime_and_cleans_owned_pro
         session.ensure_started(context)
         session.cleanup(context)
 
-    command = Command.create(
-        ExecutionPlan(steps=tuple(step.public_projection() for step in session_steps(session))),
-        callback,
-        session_steps(session),
-        executor=executor,
-    )
-    command.run()
+    run_session(session, callback, executor)
 
     assert session.start_step.long_running is True
     assert session.start_step.inherit_stdio is True
@@ -105,34 +128,22 @@ def test_foreign_listener_is_rejected_before_auxiliary_spawn(
     def callback(context: RunContext[PrivateJsonValue]) -> None:
         session.ensure_started(context)
 
-    command = Command.create(
-        ExecutionPlan(steps=tuple(step.public_projection() for step in session_steps(session))),
-        callback,
-        session_steps(session),
-        executor=executor,
-    )
-
     with pytest.raises(InstanceConfigurationError, match="port-conflict"):
-        command.run()
+        run_session(session, callback, executor)
     assert executor.spawned == []
     cast("Any", instance._client.register_process).assert_not_called()
 
 
-def test_responsive_external_manager_is_reused_without_ownership(
+def test_responsive_unrecorded_manager_is_rejected_without_http_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     instance = _instance(tmp_path)
     session = auxiliary_restore_session(instance)
-    response = MagicMock(status_code=200)
-    response.json.return_value = {"result": ["restored"]}
-    http = MagicMock()
-    http.post.return_value = response
-
-    @contextlib.contextmanager
-    def fake_httpx_client(*_args: object, **_kwargs: object) -> Any:
-        yield http
-
-    monkeypatch.setattr("httpx.Client", fake_httpx_client)
+    port_check = MagicMock(side_effect=InstanceConfigurationError("port-conflict"))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+        port_check,
+    )
     executor = RecordingExecutor(handles={})
 
     from odoo_instance_sdk.internal.proc import RunContext
@@ -147,14 +158,11 @@ def test_responsive_external_manager_is_reused_without_ownership(
         session_steps(session),
         executor=executor,
     )
-    command.run()
-
-    assert session.using_existing_runtime is True
+    with pytest.raises(InstanceConfigurationError, match="port-conflict"):
+        command.run()
+    assert session.using_existing_runtime is False
     assert executor.spawned == []
-    http.post.assert_called_once_with(
-        "http://127.0.0.1:0/web/database/list",
-        json={"jsonrpc": "2.0", "method": "call", "params": {}},
-    )
+    port_check.assert_called_once()
     cast("Any", instance._client.register_process).assert_not_called()
     cast("Any", instance._client.unregister_process).assert_not_called()
 
@@ -164,16 +172,6 @@ def test_invalid_database_list_response_does_not_reuse_runtime(
 ) -> None:
     instance = _instance(tmp_path)
     session = auxiliary_restore_session(instance)
-    response = MagicMock(status_code=200)
-    response.json.return_value = {"result": {"unexpected": "shape"}}
-    http = MagicMock()
-    http.post.return_value = response
-
-    @contextlib.contextmanager
-    def fake_httpx_client(*_args: object, **_kwargs: object) -> Any:
-        yield http
-
-    monkeypatch.setattr("httpx.Client", fake_httpx_client)
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
         MagicMock(side_effect=InstanceConfigurationError("port-conflict")),
@@ -194,7 +192,6 @@ def test_invalid_database_list_response_does_not_reuse_runtime(
 
     with pytest.raises(InstanceConfigurationError, match="port-conflict"):
         command.run()
-    http.post.assert_called_once()
     assert session.using_existing_runtime is False
     assert executor.spawned == []
 
@@ -218,19 +215,23 @@ def test_recorded_running_project_runtime_is_reused_without_spawn(
     process.is_running.return_value = True
     process.status.return_value = "running"
     process.create_time.return_value = 123.5
+    process.exe.return_value = instance._executable_prefix()[0]
+    process.cmdline.return_value = list(session.start_step.argv)
+    process.cwd.return_value = str(tmp_path)
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.instance.identity.psutil.Process", lambda _pid: process
     )
     snapshot = MagicMock()
     snapshot.project_runtimes = (
-        {
-            "owner_kind": "project",
-            "owner_id": "project_demo",
-            "http_port": 0,
-            "root_pid": 42,
-            "create_time": 123.5,
-        },
+        recorded_project_runtime(
+            owner_id="project_demo",
+            http_port=0,
+            http_url="http://127.0.0.1:0",
+            pid=42,
+            create_time=123.5,
+        ),
     )
+    snapshot.environments = ()
     cast("Any", instance._client.get_catalog())._monitor_snapshot_rows.return_value = snapshot
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.health.poll_health", lambda *args, **kwargs: None
@@ -241,13 +242,7 @@ def test_recorded_running_project_runtime_is_reused_without_spawn(
         session.ensure_started(context)
         session.cleanup(context)
 
-    command = Command.create(
-        ExecutionPlan(steps=tuple(step.public_projection() for step in session_steps(session))),
-        callback,
-        session_steps(session),
-        executor=executor,
-    )
-    command.run()
+    run_session(session, callback, executor)
 
     assert session.using_existing_runtime is True
     assert executor.spawned == []
@@ -506,9 +501,11 @@ def test_cleanup_removes_secret_when_owned_termination_fails(
 def test_restore_adapter_resets_session_when_cleanup_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from odoo_instance_sdk.commands.db import _attach_auxiliary_restore_runtime
     from odoo_instance_sdk.internal.proc import RunContext
     from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
+    from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+        _attach_auxiliary_restore_runtime,
+    )
 
     instance = _instance(tmp_path)
     session = auxiliary_restore_session(instance)
@@ -531,7 +528,9 @@ def test_restore_adapter_resets_session_when_cleanup_fails(
 def test_restore_adapter_prepares_auxiliary_before_local_restore_and_cleans_last(
     tmp_path: Path,
 ) -> None:
-    from odoo_instance_sdk.commands.db import _attach_auxiliary_restore_runtime
+    from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+        _attach_auxiliary_restore_runtime,
+    )
 
     instance = _instance(tmp_path)
     session = auxiliary_restore_session(instance)
@@ -559,6 +558,7 @@ def test_restore_adapter_prepares_auxiliary_before_local_restore_and_cleans_last
     step_ids = tuple(step.step_id for step in command.plan.steps)
     assert step_ids == (
         "database.prepare.catalogue-backup",
+        "database.restore.auxiliary.probe",
         "database.restore.auxiliary.start",
         "database.restore.auxiliary.ready",
         "database.prepare.local-restore",

@@ -1109,7 +1109,7 @@ class TestCheckoutCopy:
         )
         instance.databases.names.return_value = ("comerta", "copy_target")
 
-        with pytest.raises(Exception, match="already exists"):
+        with pytest.raises(DatabaseAlreadyExistsError, match="already exists"):
             self._checkout_copy(
                 env_client, project_manifest, fake_python, "feat/copy-existing", instance
             )
@@ -1515,7 +1515,8 @@ class TestCheckoutDryRun:
 
         assert public_ids == private_ids
         start_index = public_ids.index("database.restore.auxiliary.start")
-        assert public_ids[start_index : start_index + 3] == (
+        assert public_ids[start_index - 1 : start_index + 3] == (
+            "database.restore.auxiliary.probe",
             "database.restore.auxiliary.start",
             "database.restore.auxiliary.ready",
             "checkout.catalog",
