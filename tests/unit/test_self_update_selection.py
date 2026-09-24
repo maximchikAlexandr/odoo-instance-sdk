@@ -10,7 +10,8 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan, ProcessStep
-from odoo_instance_sdk.internal.self_update_commands import _git_revision_relation, _preflight_error
+from odoo_instance_sdk.internal.self_update_ancestry import git_revision_relation
+from odoo_instance_sdk.internal.self_update_commands import _preflight_error
 from odoo_instance_sdk.models.update import UpdateResult
 from tests.unit.test_self_update import (
     _SHA_A,
@@ -66,7 +67,7 @@ def test_git_revision_relation_uses_real_history(
     }
     installed, target = pairs[relation]
     assert (
-        _git_revision_relation(
+        git_revision_relation(
             source_repo=str(repo),
             installed_sha=installed,
             target_sha=target,
@@ -77,7 +78,7 @@ def test_git_revision_relation_uses_real_history(
 
 def test_git_revision_relation_fails_closed_without_source() -> None:
     assert (
-        _git_revision_relation(
+        git_revision_relation(
             source_repo=None,
             installed_sha="a" * 40,
             target_sha="b" * 40,
