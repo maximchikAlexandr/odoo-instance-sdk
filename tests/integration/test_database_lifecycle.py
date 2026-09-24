@@ -3,8 +3,9 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,9 +14,267 @@ from odoo_instance_sdk.models import BackupFormat
 from tests.fixtures import make_backup
 
 if TYPE_CHECKING:
+    from click.testing import Result
     from pytest_httpx import HTTPXMock
 
+    from odoo_instance_sdk.internal.proc import RecordingExecutor
+    from odoo_instance_sdk.models import Backup
+    from odoo_instance_sdk.resources.instance import AuxiliaryRestoreSession, OdooInstance
+
+
+def _force_database_manager_probe_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    response = MagicMock(status_code=200)
+    response.json.return_value = {"result": {"not": "a database list"}}
+    httpx_client = MagicMock()
+    httpx_client.post.return_value = response
+
+    @contextlib.contextmanager
+    def fake_httpx_client(*_args: object, **_kwargs: object) -> Any:
+        yield httpx_client
+
+    monkeypatch.setattr("httpx.Client", fake_httpx_client)
+
+
+_PublicRestoreCase = Literal["success", "spawn_failure", "foreign_listener"]
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicRestoreProjectFixture:
+    path: Path
+    source_config: Path
+    backup: Backup
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicRestoreClientFixture:
+    client: MagicMock
+    restore: MagicMock
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicRestoreRuntimeFixture:
+    auxiliary: OdooInstance
+    session: AuxiliaryRestoreSession
+    executor: RecordingExecutor
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicRestoreFixtures:
+    project: _PublicRestoreProjectFixture
+    client: _PublicRestoreClientFixture
+    runtime: _PublicRestoreRuntimeFixture
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicRestoreHarness:
+    result: Result
+    project: _PublicRestoreProjectFixture
+    client: _PublicRestoreClientFixture
+    runtime: _PublicRestoreRuntimeFixture
+
+
+def _build_public_restore_project(tmp_path: Path) -> _PublicRestoreProjectFixture:
+    from odoo_instance_sdk.internal.project_manifest import write_manifest
+    from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
+
+    source = tmp_path / "odoo.conf"
+    source.write_text(
+        "[options]\n"
+        "http_interface = 127.0.0.1\n"
+        "http_port = 8069\n"
+        "db_name = source\n"
+        "admin_passwd = local-secret\n"
+    )
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    odoo_bin = tmp_path / "odoo-bin"
+    odoo_bin.write_text("#!/bin/sh\n")
+    odoo_bin.chmod(0o755)
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        python=python,
+        odoo_bin=odoo_bin,
+        source_config=source,
+        default_source_database="old",
+        test_instance=TestInstanceProjectConfig(
+            base_url="https://example.test", database="remote_test"
+        ),
+    )
+    write_manifest(tmp_path, project)
+    backup_file = tmp_path / "remote.zip"
+    backup_file.write_bytes(b"zip-backup")
+    backup = make_backup(
+        source_base_url="https://example.test",
+        database_name="remote_test",
+        path=str(backup_file),
+        filename=backup_file.name,
+        size_bytes=backup_file.stat().st_size,
+        sha256=hashlib.sha256(backup_file.read_bytes()).hexdigest(),
+        format=BackupFormat.ZIP,
+        filestore_requested=True,
+        source_git_branch="develop",
+    )
+    return _PublicRestoreProjectFixture(path=tmp_path, source_config=source, backup=backup)
+
+
+def _build_public_restore_client(
+    project: _PublicRestoreProjectFixture,
+) -> tuple[_PublicRestoreClientFixture, OdooInstance]:
+    from odoo_instance_sdk.config import InstanceConfig
+    from odoo_instance_sdk.models import StartConfig
     from odoo_instance_sdk.resources.instance import OdooInstance
+
+    client = MagicMock()
+    auxiliary = OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:8069",
+            start_config=StartConfig(config_path=str(project.source_config), http_port=8069),
+            command_prefix=(str(project.path / "python"), str(project.path / "odoo-bin")),
+            default_cwd=project.path,
+        ),
+        _client=client,
+    )
+    local = OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:8069",
+            start_config=StartConfig(config_path=str(project.source_config), http_port=8069),
+        ),
+        _client=client,
+    )
+    remote = MagicMock()
+    remote.databases.backup.return_value = project.backup
+    client.instance.from_project.return_value = auxiliary
+    client.instance.from_config.return_value = local
+    client.instance.return_value = remote
+    client.unregister_process.return_value = (None, None)
+    return _PublicRestoreClientFixture(client=client, restore=MagicMock()), auxiliary
+
+
+def _build_public_restore_runtime(
+    project: _PublicRestoreProjectFixture,
+    client_fixture: _PublicRestoreClientFixture,
+    auxiliary: OdooInstance,
+    case: _PublicRestoreCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _PublicRestoreRuntimeFixture:
+    from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
+    from odoo_instance_sdk.internal.proc import (
+        PreparedStep,
+        ProcessHandle,
+        ProcessResult,
+        RecordingExecutor,
+    )
+    from odoo_instance_sdk.resources.database import DatabaseResource
+    from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
+
+    client = client_fixture.client
+    session = auxiliary_restore_session(auxiliary)
+    handle = ProcessHandle(
+        process=MagicMock(),
+        argv=(),
+        process_group_id=123,
+        session_id=123,
+        inherited_stdio=False,
+    )
+    spawn_failure = case == "spawn_failure"
+    foreign_listener = case == "foreign_listener"
+    executor = RecordingExecutor(
+        handles={} if spawn_failure else {session.start_step.step_id: handle}
+    )
+    cluster = MagicMock()
+    cluster.mode = "external"
+    cluster._ensure_running_steps.return_value = ()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.resources.postgres.PostgresCluster._from_config",
+        MagicMock(return_value=cluster),
+    )
+    if foreign_listener:
+        from odoo_instance_sdk.exceptions import InstanceConfigurationError
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+            MagicMock(side_effect=InstanceConfigurationError("port-conflict: ownership unknown")),
+        )
+    else:
+        monkeypatch.setattr(
+            "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
+            lambda _config: None,
+        )
+    monkeypatch.setattr(
+        OdooInstance,
+        "wait_ready",
+        lambda _self, _proc, *, timeout, version_info=False, database_manager=False: MagicMock(
+            ok=True
+        ),
+    )
+    monkeypatch.setattr(DatabaseResource, "restore", client_fixture.restore)
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {"result": ["source"]}
+
+    @contextlib.contextmanager
+    def fake_http(_self: DatabaseResource, timeout: float | None = None) -> Any:
+        del timeout
+        yield MagicMock(post=MagicMock(return_value=response))
+
+    monkeypatch.setattr(DatabaseResource, "_http", fake_http)
+    _force_database_manager_probe_failure(monkeypatch)
+
+    def command_factory(project_path: Path, *, options: Any) -> Any:
+        command = DatabasePreparationCoordinator(client).refresh_database_command(
+            project_path,
+            options=options,
+            executor=executor,
+        )
+        for step in command._prepared().steps:
+            if isinstance(step, PreparedStep) and step.step_id == "database.prepare.git.toplevel":
+                executor.results[step.step_id] = ProcessResult(
+                    argv=step.argv,
+                    returncode=0,
+                    stdout=str(project.path),
+                    stderr="",
+                    duration=0.0,
+                    cwd=step.cwd,
+                    environment=step.environment,
+                )
+            elif (
+                isinstance(step, PreparedStep) and step.step_id == "database.prepare.git.common-dir"
+            ):
+                executor.results[step.step_id] = ProcessResult(
+                    argv=step.argv,
+                    returncode=0,
+                    stdout=str(project.path / ".git"),
+                    stderr="",
+                    duration=0.0,
+                    cwd=step.cwd,
+                    environment=step.environment,
+                )
+        return command
+
+    client.environments.refresh_database_command.side_effect = command_factory
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: project.path
+    )
+    monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "https://example.test:443")
+    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
+    return _PublicRestoreRuntimeFixture(
+        auxiliary=auxiliary,
+        session=session,
+        executor=executor,
+    )
+
+
+def _build_public_restore_fixtures(
+    tmp_path: Path,
+    case: _PublicRestoreCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _PublicRestoreFixtures:
+    project = _build_public_restore_project(tmp_path)
+    client, auxiliary = _build_public_restore_client(project)
+    runtime = _build_public_restore_runtime(project, client, auxiliary, case, monkeypatch)
+    return _PublicRestoreFixtures(project=project, client=client, runtime=runtime)
 
 
 class TestRestore:
@@ -105,6 +364,7 @@ class TestRestore:
             yield http
 
         monkeypatch.setattr(DatabaseResource, "_http", fake_http)
+        _force_database_manager_probe_failure(monkeypatch)
 
         def callback(context: Any) -> DatabasePreparationResult:
             active = active_auxiliary_restore_session()
@@ -246,214 +506,73 @@ class TestRestore:
         with pytest.raises(RestoreFailedError, match="was not created"):
             instance.databases.restore(backup, "testdb")
 
-    @pytest.mark.parametrize("failure", [None, "spawn", "foreign"])
-    def test_public_stopped_restore_runs_real_coordinator_and_preserves_zip_contract(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
-    ) -> None:
-        """The public stopped-project path must exercise coordinator postconditions."""
+    def _run_public_stopped_restore_case(
+        self, case: _PublicRestoreCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> _PublicRestoreHarness:
         from click.testing import CliRunner
 
         from odoo_instance_sdk.cli import cli
-        from odoo_instance_sdk.config import InstanceConfig
-        from odoo_instance_sdk.internal.database_preparation import (
-            DatabasePreparationCoordinator,
-        )
-        from odoo_instance_sdk.internal.proc import (
-            PreparedStep,
-            ProcessHandle,
-            ProcessResult,
-            RecordingExecutor,
-        )
-        from odoo_instance_sdk.internal.project_manifest import write_manifest
-        from odoo_instance_sdk.models import StartConfig
-        from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
-        from odoo_instance_sdk.resources.database import DatabaseResource
-        from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
-
-        source = tmp_path / "odoo.conf"
-        source.write_text(
-            "[options]\n"
-            "http_interface = 127.0.0.1\n"
-            "http_port = 8069\n"
-            "db_name = source\n"
-            "admin_passwd = local-secret\n"
-        )
-        python = tmp_path / "python"
-        python.write_text("#!/bin/sh\n")
-        python.chmod(0o755)
-        odoo_bin = tmp_path / "odoo-bin"
-        odoo_bin.write_text("#!/bin/sh\n")
-        odoo_bin.chmod(0o755)
-        project = ProjectConfig(
-            repository_root=tmp_path,
-            python=python,
-            odoo_bin=odoo_bin,
-            source_config=source,
-            default_source_database="old",
-            test_instance=TestInstanceProjectConfig(
-                base_url="https://example.test", database="remote_test"
-            ),
-        )
-        write_manifest(tmp_path, project)
-        backup_file = tmp_path / "remote.zip"
-        backup_file.write_bytes(b"zip-backup")
-        backup = make_backup(
-            source_base_url="https://example.test",
-            database_name="remote_test",
-            path=str(backup_file),
-            filename=backup_file.name,
-            size_bytes=backup_file.stat().st_size,
-            sha256=hashlib.sha256(backup_file.read_bytes()).hexdigest(),
-            format=BackupFormat.ZIP,
-            filestore_requested=True,
-            source_git_branch="develop",
-        )
-
-        client = MagicMock()
-        auxiliary = OdooInstance(
-            config=InstanceConfig(
-                base_url="http://127.0.0.1:8069",
-                start_config=StartConfig(config_path=str(source), http_port=8069),
-                command_prefix=(str(python), str(odoo_bin)),
-                default_cwd=tmp_path,
-            ),
-            _client=client,
-        )
-        local = OdooInstance(
-            config=InstanceConfig(
-                base_url="http://127.0.0.1:8069",
-                start_config=StartConfig(config_path=str(source), http_port=8069),
-            ),
-            _client=client,
-        )
-        remote = MagicMock()
-        remote.databases.backup.return_value = backup
-        client.instance.from_project.return_value = auxiliary
-        client.instance.from_config.return_value = local
-        client.instance.return_value = remote
-        client.unregister_process.return_value = (None, None)
-
-        handle = ProcessHandle(
-            process=MagicMock(),
-            argv=(),
-            process_group_id=123,
-            session_id=123,
-            inherited_stdio=False,
-        )
-        session = auxiliary_restore_session(auxiliary)
-        executor = RecordingExecutor(
-            handles={} if failure == "spawn" else {session.start_step.step_id: handle}
-        )
-        cluster = MagicMock()
-        cluster.mode = "external"
-        cluster._ensure_running_steps.return_value = ()
-        monkeypatch.setattr(
-            "odoo_instance_sdk.resources.postgres.PostgresCluster._from_config",
-            MagicMock(return_value=cluster),
-        )
-        if failure == "foreign":
-            from odoo_instance_sdk.exceptions import InstanceConfigurationError
-
-            monkeypatch.setattr(
-                "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
-                MagicMock(
-                    side_effect=InstanceConfigurationError("port-conflict: ownership unknown")
-                ),
-            )
-        else:
-            monkeypatch.setattr(
-                "odoo_instance_sdk.resources.instance.auxiliary_restore._assert_http_port_free",
-                lambda _config: None,
-            )
-        monkeypatch.setattr(
-            OdooInstance,
-            "wait_ready",
-            lambda _self, _proc, *, timeout, version_info=False, database_manager=False: MagicMock(
-                ok=True
-            ),
-        )
-        restore = MagicMock()
-        monkeypatch.setattr(DatabaseResource, "restore", restore)
-        response = MagicMock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = {"result": ["source"]}
-
-        @contextlib.contextmanager
-        def fake_http(_self: DatabaseResource, timeout: float | None = None) -> Any:
-            del timeout
-            yield MagicMock(post=MagicMock(return_value=response))
-
-        monkeypatch.setattr(DatabaseResource, "_http", fake_http)
-
-        def command_factory(project_path: Path, *, options: Any, **kwargs: Any) -> Any:
-            command = DatabasePreparationCoordinator(client).refresh_database_command(
-                project_path,
-                options=options,
-                executor=executor,
-                admin_password=kwargs.get("admin_password"),
-            )
-            for step in command._prepared().steps:
-                if (
-                    isinstance(step, PreparedStep)
-                    and step.step_id == "database.prepare.git.toplevel"
-                ):
-                    executor.results[step.step_id] = ProcessResult(
-                        argv=step.argv,
-                        returncode=0,
-                        stdout=str(tmp_path),
-                        stderr="",
-                        duration=0.0,
-                        cwd=step.cwd,
-                        environment=step.environment,
-                    )
-                elif (
-                    isinstance(step, PreparedStep)
-                    and step.step_id == "database.prepare.git.common-dir"
-                ):
-                    executor.results[step.step_id] = ProcessResult(
-                        argv=step.argv,
-                        returncode=0,
-                        stdout=str(tmp_path / ".git"),
-                        stderr="",
-                        duration=0.0,
-                        cwd=step.cwd,
-                        environment=step.environment,
-                    )
-            return command
-
-        client.environments.refresh_database_command.side_effect = command_factory
-        monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
-        monkeypatch.setattr(
-            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
-        )
-        monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "https://example.test:443")
-        monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
-
+        fixtures = _build_public_restore_fixtures(tmp_path, case, monkeypatch)
         result = CliRunner().invoke(cli, ["db", "refresh", "--restore", "--format", "json"])
+        return _PublicRestoreHarness(
+            result=result,
+            project=fixtures.project,
+            client=fixtures.client,
+            runtime=fixtures.runtime,
+        )
 
-        if failure is not None:
-            assert result.exit_code == 1, result.output
-            if failure == "spawn":
-                assert "odcli run" in result.stdout
-            elif failure == "foreign":
-                assert "port-conflict" in result.stdout
-            restore.assert_not_called()
-            client.unregister_process.assert_not_called()
-            return
+    def test_public_stopped_restore_success_preserves_zip_contract(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = self._run_public_stopped_restore_case(
+            "success",
+            tmp_path,
+            monkeypatch,
+        )
 
-        assert result.exit_code == 0, result.output
-        assert '"default_switched": true' in result.stdout
-        assert backup.format is BackupFormat.ZIP
-        assert backup.filestore_requested is True
-        restore.assert_called_once()
-        assert restore.call_args is not None
-        assert restore.call_args.args[0] is backup
-        assert restore.call_args.kwargs == {
+        assert harness.result.exit_code == 0, harness.result.output
+        assert '"default_switched": true' in harness.result.stdout
+        assert harness.project.backup.format is BackupFormat.ZIP
+        assert harness.project.backup.filestore_requested is True
+        harness.client.restore.assert_called_once()
+        assert harness.client.restore.call_args is not None
+        assert harness.client.restore.call_args.args[0] is harness.project.backup
+        assert harness.client.restore.call_args.kwargs == {
             "copy": True,
             "neutralize_database": True,
         }
-        assert [step.step_id for step in executor.spawned] == [session.start_step.step_id]
-        client.unregister_process.assert_called_once()
+        assert [step.step_id for step in harness.runtime.executor.spawned] == [
+            harness.runtime.session.start_step.step_id
+        ]
+        harness.client.client.unregister_process.assert_called_once()
+
+    def test_public_stopped_restore_spawn_failure_is_clean(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = self._run_public_stopped_restore_case(
+            "spawn_failure",
+            tmp_path,
+            monkeypatch,
+        )
+
+        assert harness.result.exit_code == 1, harness.result.output
+        assert "odcli run" in harness.result.stdout
+        harness.client.restore.assert_not_called()
+        harness.client.client.unregister_process.assert_not_called()
+
+    def test_public_stopped_restore_foreign_listener_fails_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = self._run_public_stopped_restore_case(
+            "foreign_listener",
+            tmp_path,
+            monkeypatch,
+        )
+
+        assert harness.result.exit_code == 1, harness.result.output
+        assert "port-conflict" in harness.result.stdout
+        harness.client.restore.assert_not_called()
+        harness.client.client.unregister_process.assert_not_called()
 
     def test_forged_backup_rejected(
         self, instance: OdooInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
