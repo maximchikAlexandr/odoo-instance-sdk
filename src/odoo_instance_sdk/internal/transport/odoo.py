@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.transport.base import (
@@ -22,7 +23,7 @@ from odoo_instance_sdk.internal.transport.base import (
     _RawHttpClient,
     _RawResponse,
 )
-from odoo_instance_sdk.internal.urls import warn_if_cleartext_secret
+from odoo_instance_sdk.internal.urls import is_loopback_host, warn_if_cleartext_secret
 
 
 class _AdaptedStreamingResponse:
@@ -98,7 +99,8 @@ class OdooHttpClient(BaseHttpClient):
         base_url: str,
         timeout: float | None = None,
     ) -> None:
-        super().__init__(timeout=timeout)
+        hostname = urlsplit(base_url).hostname or ""
+        super().__init__(timeout=timeout, trust_env=not is_loopback_host(hostname))
         self._base_url = base_url
 
     @classmethod

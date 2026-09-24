@@ -464,7 +464,9 @@ class _QueriesMixin:
     def names(self) -> tuple[str, ...]:
         """Return database names without touching the local audit catalog."""
         from odoo_instance_sdk.internal.proc import active_context
-        from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
+        from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+            active_auxiliary_restore_session,
+        )
 
         session = active_auxiliary_restore_session()
         context = active_context()

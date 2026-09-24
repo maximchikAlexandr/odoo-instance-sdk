@@ -84,10 +84,20 @@ class _BackupMixin:
         with exclusive_lock(backup_lock_path(backup_id)):
             try:
                 from odoo_instance_sdk.internal.proc import active_context
+                from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+                    active_auxiliary_restore_session,
+                )
 
                 context = active_context()
                 if context is not None and context.planned("database.backup.wait"):
                     context.action("database.backup.wait")
+                auxiliary_session = active_auxiliary_restore_session()
+                if auxiliary_session is not None and context is not None:
+                    auxiliary_session.authorize_request(
+                        context,
+                        instance=self._instance,
+                        request_action=auxiliary_session.backup_request_action,
+                    )
                 with (
                     self._http(timeout=timeout) as http,
                     http.stream(
@@ -435,8 +445,8 @@ class _BackupMixin:
         from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
 
         auxiliary_session = active_auxiliary_restore_session()
+        context = active_context()
         if auxiliary_session is not None:
-            context = active_context()
             if context is None:
                 raise DatabaseManagerUnavailableError(
                     "auxiliary database manager has no active execution context"
@@ -447,6 +457,12 @@ class _BackupMixin:
         http_failure: tuple[int, str] | tuple[None, str] | None = None
         restore_http_failure: tuple[int, str] | None = None
         try:
+            if auxiliary_session is not None and context is not None:
+                auxiliary_session.authorize_request(
+                    context,
+                    instance=self._instance,
+                    request_action=auxiliary_session.restore_request_action,
+                )
             restore_timeout = (
                 timeout
                 if timeout is not None

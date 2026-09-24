@@ -1346,6 +1346,49 @@ def test_no_basic_auth(instance: OdooInstance) -> None:
     assert "auth" not in call_kwargs
 
 
+def test_loopback_password_request_ignores_environment_proxies(
+    client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backup_path = tmp_path / "test.zip"
+    backup_path.write_bytes(b"backup")
+    backup = _make_backup(path=str(backup_path))
+    instance = _make_instance_with_cluster_key(client)
+    http_cm = _mock_http({})
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "https://proxy.invalid:8443")
+    monkeypatch.setenv("NO_PROXY", "")
+
+    with (
+        patch.object(instance, "_client") as mock_client,
+        patch("httpx.Client", return_value=http_cm) as client_cls,
+        patch(
+            "odoo_instance_sdk.resources.database.DatabaseResource.exists",
+            side_effect=[False, True],
+        ),
+    ):
+        mock_client.config = client.config
+        mock_client.get_catalog.return_value = MagicMock()
+        instance.databases.restore(backup, "newdb")
+
+    assert client_cls.call_args is not None
+    assert client_cls.call_args.kwargs["trust_env"] is False
+    request = http_cm.__enter__.return_value.post.call_args
+    assert request is not None
+    assert request.kwargs["data"]["master_pwd"] == "admin"
+
+
+def test_remote_database_manager_keeps_environment_proxy_behavior(
+    client: OdooClient,
+) -> None:
+    instance = client.instance("https://example.test:8069", master_password="admin")
+    mock_cm = _mock_http({})
+    with patch("httpx.Client", return_value=mock_cm) as client_cls, instance.databases._http():
+        pass
+
+    assert client_cls.call_args is not None
+    assert client_cls.call_args.kwargs["trust_env"] is True
+
+
 def test_database_resource_repr(instance: OdooInstance) -> None:
     dr = instance.databases
     r = repr(dr)
