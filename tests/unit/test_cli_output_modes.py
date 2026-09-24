@@ -1809,8 +1809,11 @@ def _patch_leaf_external(  # noqa: C901
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.commands.update.preflight_update_command",
-            lambda **_kwargs: _matrix_command(
-                UpdateResult(outcome="updated", snapshot_state="absent", journal_state="absent")
+            lambda **_kwargs: Command.create(
+                ExecutionPlan(),
+                lambda _context: UpdateResult(
+                    outcome="updated", snapshot_state="absent", journal_state="absent"
+                ),
             ),
         )
         return

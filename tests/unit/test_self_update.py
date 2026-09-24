@@ -99,6 +99,10 @@ def _patch_provenance(
         lambda *_args, **_kwargs: provenance,
     )
     monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_commands.read_uv_tool_direct_url",
+        lambda *_args, **_kwargs: provenance,
+    )
+    monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update._assert_runtime_environment",
         lambda *_args, **_kwargs: None,
     )
