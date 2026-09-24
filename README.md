@@ -524,7 +524,10 @@ emergency unblock paths.
 read-only `uv` resolver/preflight needed to freeze the immutable target; it
 never launches install or maintenance `odcli` steps. Exact-SHA ancestry probes
 are captured Git process steps in that preflight; their ephemeral object-store
-setup is explicit and no unvalidated provenance URL reaches `git fetch`.
+setup and mutating cleanup action are explicit, local VCS origins are verified
+through the captured read-only preflight, and no unvalidated provenance URL
+reaches `git fetch`. Downgrades fail closed unless the snapshot can restore
+the complete current state.
 Mutating execution uses an exclusive lock on
 `~/.odcli/locks/odcli-update.lock`, snapshots affected metadata, installs
 through `uv tool install --force`, and runs maintenance migrations in a child

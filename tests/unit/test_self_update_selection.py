@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -17,6 +18,8 @@ from tests.unit.test_self_update import (
     _SHA_A,
     _SHA_B,
     _executor_factory,
+    _FakeDist,
+    _patch_distribution,
     _provenance,
 )
 
@@ -101,24 +104,20 @@ def test_unsupported_provenance_is_rejected_before_ancestry_fetch(
     source_repo: str,
 ) -> None:
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._preflight_disk_check",
+        "odoo_instance_sdk.internal.self_update_policy._preflight_disk_check",
         lambda: None,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._catalog_schema_version",
+        "odoo_instance_sdk.internal.self_update_policy._catalog_schema_version",
         lambda: "head",
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._validate_catalog_migration_path",
+        "odoo_instance_sdk.internal.self_update_policy._validate_catalog_migration_path",
         lambda: None,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._validate_storage_migration_path",
+        "odoo_instance_sdk.internal.self_update_policy._validate_storage_migration_path",
         lambda: None,
-    )
-    monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._git_revision_relation",
-        lambda **_kwargs: pytest.fail("unsupported provenance must fail before fetch"),
     )
     error = _preflight_error(
         ref="b" * 40,
@@ -128,28 +127,30 @@ def test_unsupported_provenance_is_rejected_before_ancestry_fetch(
     assert error == "cannot verify revision ancestry; source provenance is unsupported"
 
 
+@pytest.mark.parametrize("storage_state", ("in-progress", "complete"))
 def test_downgrade_fails_when_snapshot_state_is_not_restorable(
     monkeypatch: pytest.MonkeyPatch,
+    storage_state: str,
 ) -> None:
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._preflight_disk_check",
+        "odoo_instance_sdk.internal.self_update_policy._preflight_disk_check",
         lambda: None,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._catalog_schema_version",
+        "odoo_instance_sdk.internal.self_update_policy._catalog_schema_version",
         lambda: "head",
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._validate_catalog_migration_path",
+        "odoo_instance_sdk.internal.self_update_policy._validate_catalog_migration_path",
         lambda: None,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._validate_storage_migration_path",
+        "odoo_instance_sdk.internal.self_update_policy._validate_storage_migration_path",
         lambda: None,
     )
     monkeypatch.setattr(
-        "odoo_instance_sdk.internal.self_update_commands._storage_migration_state",
-        lambda: "in-progress",
+        "odoo_instance_sdk.internal.self_update_policy._storage_migration_state",
+        lambda: storage_state,
     )
     error = _preflight_error(
         ref="b" * 40,
@@ -157,7 +158,50 @@ def test_downgrade_fails_when_snapshot_state_is_not_restorable(
         allow_downgrade=True,
         relation="ancestor",
     )
-    assert error == "downgrade snapshot cannot restore storage state 'in-progress'"
+    assert error == f"downgrade snapshot cannot restore storage state '{storage_state}'"
+
+
+def test_public_structured_failure_redacts_provenance_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.commands.update import update_command_cli
+
+    secret = "user:password@github.com"
+    direct_url = json.dumps(
+        {
+            "url": f"https://{secret}/maximchikAlexandr/odoo-instance-sdk.git",
+            "vcs_info": {"vcs": "git", "commit_id": _SHA_A},
+        }
+    )
+    _patch_distribution(monkeypatch, _FakeDist(direct_url=direct_url))
+    result = CliRunner().invoke(
+        update_command_cli,
+        ["--check", "--format", "json"],
+        prog_name="odcli",
+    )
+    assert result.exit_code == 1, result.output
+    assert secret not in result.output
+    assert "unsupported source repository" in result.output
+
+
+def test_ancestry_cleanup_is_declared_mutating_action(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk.internal.self_update_commands import _build_mutating_command
+
+    executable = tmp_path / "odcli"
+    provenance = _provenance(executable=executable)
+    command = _build_mutating_command(
+        ref=_SHA_B,
+        provenance=provenance,
+        executor=_executor_factory({}),
+        allow_downgrade=False,
+    )
+    cleanup = next(
+        step for step in command.plan.steps if step.step_id == "update.inspect.ancestry-cleanup"
+    )
+    assert isinstance(cleanup, ActionStep)
+    assert cleanup.mutating
 
 
 def test_update_no_input_without_yes_exits_before_mutations() -> None:

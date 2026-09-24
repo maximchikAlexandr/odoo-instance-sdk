@@ -134,6 +134,7 @@ def run_revision_probe(
     *,
     installed_sha: str,
     target_sha: str,
+    cleanup_step_id: str | None = None,
 ) -> RevisionRelation:
     if installed_sha == target_sha:
         return "same"
@@ -158,7 +159,16 @@ def run_revision_probe(
             target_check=cast("ProcessResult", context.process_prepared(steps[3])),
         )
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        if cleanup_step_id is None:
+            shutil.rmtree(root, ignore_errors=True)
+        else:
+            context.action(cleanup_step_id)
+            try:
+                shutil.rmtree(root)
+            except OSError as exc:
+                context.fail_action(cleanup_step_id, exc)
+                raise
+            context.complete_action(cleanup_step_id)
 
 
 __all__ = [

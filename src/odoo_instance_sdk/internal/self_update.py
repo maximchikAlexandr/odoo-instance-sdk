@@ -36,7 +36,6 @@ from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     ProcessExecutor,
     ProcessResult,
-    ProcessSpawnError,
     SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.proc.run import run_captured
@@ -81,28 +80,34 @@ class InstalledProvenance:
     manual_argv: tuple[str, ...] | None
 
 
-def _git_origin_matches_supported_repo(path: Path) -> bool:
-    try:
-        remote = SubprocessExecutor().execute(
-            PreparedStep(
-                step_id="update.inspect.origin",
-                argv=("git", "remote", "get-url", "origin"),
-                cwd=str(path),
-                read_only=True,
-            ),
-        )
-    except ProcessSpawnError:
-        return False
-    stdout = remote.stdout if isinstance(remote.stdout, str) else ""
-    return remote.returncode == 0 and _is_exact_supported_https_repo(stdout.strip())
-
-
 def _is_exact_supported_https_repo(source_repo: str) -> bool:
     raw = source_repo.removeprefix("git+")
     parsed = urlsplit(raw)
     return parsed.scheme == "https" and raw.rstrip("/").removesuffix(
         ".git"
     ) == _SOURCE_REPO.removesuffix(".git")
+
+
+def _local_source_repo_path(source_repo: str | None) -> Path | None:
+    if not source_repo:
+        return None
+    raw = source_repo.removeprefix("git+")
+    if not raw.startswith("file://"):
+        return None
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "file"
+        or parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path
+    ):
+        return None
+    return Path(unquote(parsed.path))
+
+
+def _is_supported_source_origin(origin: str) -> bool:
+    return _is_exact_supported_https_repo(origin.strip())
 
 
 def _is_supported_source_repo(source_repo: str | None) -> bool:
@@ -115,12 +120,7 @@ def _canonical_supported_source_repo(source_repo: str | None) -> str | None:
         return None
     raw = source_repo.removeprefix("git+")
     if raw.startswith("file://"):
-        parsed = urlsplit(raw)
-        if any((parsed.scheme != "file", parsed.netloc, parsed.query, parsed.fragment)):
-            return None
-        return (
-            _SOURCE_REPO if _git_origin_matches_supported_repo(Path(unquote(parsed.path))) else None
-        )
+        return None
     if not _is_exact_supported_https_repo(raw):
         return None
     return _SOURCE_REPO
@@ -354,15 +354,15 @@ def read_uv_tool_direct_url(
             manual_argv=_MANUAL_INSTALL_ARGV,
         )
     canonical_source_repo = _canonical_supported_source_repo(source_repo)
-    if canonical_source_repo is None:
+    local_source_repo = _local_source_repo_path(source_repo)
+    if canonical_source_repo is None and local_source_repo is None:
         raise UnsupportedInstallError(
-            f"unsupported source repository {source_repo!r}; "
-            f"only {_REPO_SLUG} uv-tool installs are supported",
+            f"unsupported source repository; only {_REPO_SLUG} uv-tool installs are supported",
             manual_argv=_MANUAL_INSTALL_ARGV,
         )
     provenance = InstalledProvenance(
         version=dist.version,
-        source_repo=canonical_source_repo,
+        source_repo=canonical_source_repo or source_repo,
         commit_id=commit_id,
         requested_revision=requested_revision,
         is_uv_tool_vcs=True,

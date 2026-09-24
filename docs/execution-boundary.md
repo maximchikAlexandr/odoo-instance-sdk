@@ -25,8 +25,11 @@ preview, confirmation, and execution; `update --dry-run` may run the captured
 read-only resolver and preflight phases, then shows the immutable install and
 migration steps without running either. Exact-SHA ancestry validation is also
 represented by captured Git `ProcessStep`s. Their ephemeral object-store
-setup/fetch steps are explicitly marked as mutating, and no unvalidated
-provenance URL reaches `git fetch`. A user-triggered
+setup/fetch steps are explicitly marked as mutating, their temporary-store
+cleanup is an explicit mutating `ActionStep`, and no unvalidated provenance
+URL reaches `git fetch`. Local VCS provenance verifies its exact `origin` via
+a captured read-only preflight step before ancestry resolution. Downgrades are
+fail-closed unless the snapshot can restore the complete current state. A user-triggered
 migrate journal also resumes through this coordinator; direct maintenance is
 reserved for the explicit `ODCLI_MAINTENANCE=1` hand-off.
 

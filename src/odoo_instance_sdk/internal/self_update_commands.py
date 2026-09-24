@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,7 +12,6 @@ import msgspec
 
 from odoo_instance_sdk.exceptions import (
     LockConflictError,
-    PreflightFailedError,
     UnsupportedInstallError,
     UpdateError,
 )
@@ -33,11 +31,7 @@ from odoo_instance_sdk.internal.self_update import (
     _JOURNAL_VERSION,
     _MAINTENANCE_ENV,
     _MANUAL_INSTALL_ARGV,
-    _MIN_PYTHON,
-    _SUPPORTED_PLATFORMS,
     InstalledProvenance,
-    _canonical_supported_source_repo,
-    _catalog_schema_version,
     _clear_journal,
     _clear_snapshot,
     _dry_run_flag_unsupported,
@@ -46,20 +40,17 @@ from odoo_instance_sdk.internal.self_update import (
     _install_argv,
     _install_reached_target,
     _is_full_sha,
+    _is_supported_source_origin,
     _maintenance_argv,
     _phase_durations,
-    _preflight_disk_check,
     _process_output_text,
     _read_journal,
     _restore_snapshot,
     _snapshot_metadata,
-    _storage_migration_state,
     _update_journal_path,
     _update_lock_path,
     _update_snapshot_dir,
     _uv_version_string,
-    _validate_catalog_migration_path,
-    _validate_storage_migration_path,
     _verify_installed_revision,
     _write_journal,
     _write_snapshot,
@@ -69,15 +60,26 @@ from odoo_instance_sdk.internal.self_update_ancestry import (
     RevisionRelation,
 )
 from odoo_instance_sdk.internal.self_update_ancestry import (
-    git_revision_relation as _git_revision_relation,
-)
-from odoo_instance_sdk.internal.self_update_ancestry import (
     revision_probe_steps as _revision_probe_steps,
 )
 from odoo_instance_sdk.internal.self_update_ancestry import (
     run_revision_probe as _run_revision_probe,
 )
+from odoo_instance_sdk.internal.self_update_policy import (
+    preflight_error as _policy_preflight_error,
+)
+from odoo_instance_sdk.internal.self_update_policy import (
+    probe_source_repo as _probe_source_repo,
+)
+from odoo_instance_sdk.internal.self_update_policy import (
+    skip_revision_probe as _skip_revision_probe,
+)
+from odoo_instance_sdk.internal.self_update_policy import (
+    source_origin_step as _source_origin_step,
+)
 from odoo_instance_sdk.models.update import UpdateOutcome, UpdateResult
+
+_ANCESTRY_CLEANUP_STEP_ID = "update.inspect.ancestry-cleanup"
 
 
 def _build_failure_command(result: UpdateResult) -> Command[UpdateResult]:
@@ -274,76 +276,20 @@ def _journal_snapshot_sha(
     return provenance.commit_id
 
 
-def _validate_downgrade_snapshot_restore() -> str | None:
-    """Prove that the pre-install snapshot can restore the current data state."""
-    storage_state = _storage_migration_state()
-    if storage_state not in {"absent", "complete"}:
-        return f"downgrade snapshot cannot restore storage state {storage_state!r}"
-    if _catalog_schema_version() == "unreadable":
-        return "downgrade snapshot cannot restore an unreadable catalog"
-    return None
-
-
-def _revision_preflight_error(
-    *,
-    ref: str,
-    provenance: InstalledProvenance,
-    allow_downgrade: bool,
-    relation: RevisionRelation | None = None,
-) -> str | None:
-    if not _is_full_sha(ref):
-        return None
-    installed_sha = provenance.commit_id
-    if installed_sha is None or not _is_full_sha(installed_sha):
-        return "cannot verify revision ancestry; installed commit is unavailable"
-    canonical_source_repo = _canonical_supported_source_repo(provenance.source_repo)
-    if canonical_source_repo is None:
-        return "cannot verify revision ancestry; source provenance is unsupported"
-    relation = relation or _git_revision_relation(
-        source_repo=canonical_source_repo,
-        installed_sha=installed_sha.lower(),
-        target_sha=ref.lower(),
-    )
-    if relation == "ancestor" and not allow_downgrade:
-        return "downgrade refused without --allow-downgrade"
-    if relation == "ancestor":
-        downgrade_error = _validate_downgrade_snapshot_restore()
-        if downgrade_error is not None:
-            return downgrade_error
-    if relation not in {"same", "descendant", "ancestor"}:
-        return "cannot verify revision ancestry; target history is unavailable"
-    return None
-
-
 def _preflight_error(
     *,
     ref: str,
     provenance: InstalledProvenance,
     allow_downgrade: bool,
     relation: RevisionRelation | None = None,
+    source_origin_verified: bool = False,
 ) -> str | None:
-    if sys.version_info < _MIN_PYTHON:
-        return (
-            f"Python {'.'.join(str(part) for part in _MIN_PYTHON)}+ is required; "
-            f"found {sys.version_info.major}.{sys.version_info.minor}"
-        )
-    if sys.platform not in _SUPPORTED_PLATFORMS:
-        return f"unsupported platform {sys.platform!r}"
-    disk_error = _preflight_disk_check()
-    if disk_error is not None:
-        return disk_error
-    if _catalog_schema_version() == "unreadable":
-        return "catalog schema is unreadable"
-    try:
-        _validate_catalog_migration_path()
-        _validate_storage_migration_path()
-    except PreflightFailedError as exc:
-        return str(exc)
-    return _revision_preflight_error(
+    return _policy_preflight_error(
         ref=ref,
         provenance=provenance,
         allow_downgrade=allow_downgrade,
         relation=relation,
+        source_origin_verified=source_origin_verified,
     )
 
 
@@ -383,6 +329,8 @@ class _UpdateSession:
     install_step: PreparedStep
     maintenance_step: PreparedStep
     ancestry_steps: tuple[PreparedStep, ...]
+    source_origin_step: PreparedStep | None
+    cleanup_step_id: str | None
     context: RunContext[UpdateResult]
     journal_path: Path = field(init=False)
     snapshot_dir: Path = field(init=False)
@@ -393,6 +341,7 @@ class _UpdateSession:
     recovery_step: PreparedStep | None = None
     maintenance_result: ProcessResult | None = None
     maintenance_result_model: UpdateResult | None = None
+    source_origin_verified: bool = False
 
     def __post_init__(self) -> None:
         self.journal_path = _update_journal_path()
@@ -421,19 +370,37 @@ class _UpdateSession:
 
     def preflight(self) -> str | None:
         installed_sha = self.provenance.commit_id
+        self.source_origin_verified = self.source_origin_step is None
+        if self.source_origin_step is not None:
+            origin_result = cast(
+                "ProcessResult", self.context.process_prepared(self.source_origin_step)
+            )
+            origin_output = origin_result.stdout if isinstance(origin_result.stdout, str) else ""
+            self.source_origin_verified = (
+                origin_result.returncode == 0 and _is_supported_source_origin(origin_output)
+            )
         relation = "unknown"
-        if installed_sha is not None and _is_full_sha(self.ref) and _is_full_sha(installed_sha):
+        if (
+            self.source_origin_verified
+            and installed_sha is not None
+            and _is_full_sha(self.ref)
+            and _is_full_sha(installed_sha)
+        ):
             relation = _run_revision_probe(
                 self.context,
                 self.ancestry_steps,
                 installed_sha=installed_sha.lower(),
                 target_sha=self.ref.lower(),
+                cleanup_step_id=self.cleanup_step_id,
             )
+        elif self.ancestry_steps:
+            _skip_revision_probe(self.context, self.ancestry_steps, self.cleanup_step_id)
         return _preflight_error(
             ref=self.ref,
             provenance=self.provenance,
             allow_downgrade=self.allow_downgrade,
             relation=cast("RevisionRelation", relation),
+            source_origin_verified=self.source_origin_verified,
         )
 
     def snapshot(self) -> None:
@@ -799,7 +766,8 @@ def _build_preflight_command(
         description="Verify free space, schema, and migration path",
         read_only=True,
     )
-    canonical_source_repo = _canonical_supported_source_repo(provenance.source_repo)
+    origin_step = _source_origin_step(provenance)
+    canonical_source_repo = _probe_source_repo(provenance)
     ancestry_steps = (
         _revision_probe_steps(
             source_repo=canonical_source_repo,
@@ -812,29 +780,56 @@ def _build_preflight_command(
         and _is_full_sha(provenance.commit_id)
         else ()
     )
+    cleanup_action = (
+        PreparedAction(
+            step_id=_ANCESTRY_CLEANUP_STEP_ID,
+            action="cleanup",
+            description="Remove the temporary ancestry object store",
+            mutating=True,
+        )
+        if ancestry_steps
+        else None
+    )
     steps: tuple[PreparedAction | PreparedStep, ...] = (
         inspect_step,
         preflight_step,
+        *((origin_step,) if origin_step is not None else ()),
         *ancestry_steps,
+        *((cleanup_action,) if cleanup_action is not None else ()),
     )
 
     def callback(context: RunContext[UpdateResult]) -> UpdateResult:
         context.action(inspect_step.step_id)
         context.complete_action(inspect_step.step_id)
         context.action(preflight_step.step_id)
+        source_origin_verified = origin_step is None
+        if origin_step is not None:
+            origin_result = cast("ProcessResult", context.process_prepared(origin_step))
+            origin_output = origin_result.stdout if isinstance(origin_result.stdout, str) else ""
+            source_origin_verified = origin_result.returncode == 0 and _is_supported_source_origin(
+                origin_output
+            )
         relation = "unknown"
-        if provenance.commit_id is not None and _is_full_sha(ref):
+        if source_origin_verified and provenance.commit_id is not None and _is_full_sha(ref):
             relation = _run_revision_probe(
                 context,
                 ancestry_steps,
                 installed_sha=provenance.commit_id.lower(),
                 target_sha=ref.lower(),
+                cleanup_step_id=cleanup_action.step_id if cleanup_action else None,
+            )
+        elif ancestry_steps:
+            _skip_revision_probe(
+                context,
+                ancestry_steps,
+                cleanup_action.step_id if cleanup_action else None,
             )
         error = _preflight_error(
             ref=ref,
             provenance=provenance,
             allow_downgrade=allow_downgrade,
             relation=cast("RevisionRelation", relation),
+            source_origin_verified=source_origin_verified,
         )
         context.complete_action(preflight_step.step_id)
         if error is not None:
@@ -886,7 +881,8 @@ def _build_mutating_command(
         environment=((_MAINTENANCE_ENV, "1"),),
         mutating=True,
     )
-    canonical_source_repo = _canonical_supported_source_repo(provenance.source_repo)
+    origin_step = _source_origin_step(provenance)
+    canonical_source_repo = _probe_source_repo(provenance)
     ancestry_steps = (
         _revision_probe_steps(
             source_repo=canonical_source_repo,
@@ -895,6 +891,16 @@ def _build_mutating_command(
         )
         if canonical_source_repo and provenance.commit_id and _is_full_sha(provenance.commit_id)
         else ()
+    )
+    cleanup_action = (
+        PreparedAction(
+            step_id=_ANCESTRY_CLEANUP_STEP_ID,
+            action="cleanup",
+            description="Remove the temporary ancestry object store",
+            mutating=True,
+        )
+        if ancestry_steps
+        else None
     )
     public_steps: tuple[PreparedStep | PreparedAction, ...] = (
         PreparedAction(
@@ -909,7 +915,9 @@ def _build_mutating_command(
             description="Verify free space, schema, and migration path",
             read_only=True,
         ),
+        *((origin_step,) if origin_step is not None else ()),
         *ancestry_steps,
+        *((cleanup_action,) if cleanup_action is not None else ()),
         PreparedAction(
             step_id="update.quiesce",
             action="quiesce",
@@ -948,6 +956,8 @@ def _build_mutating_command(
             install_step=install_step,
             maintenance_step=maintenance_step,
             ancestry_steps=ancestry_steps,
+            source_origin_step=origin_step,
+            cleanup_step_id=cleanup_action.step_id if cleanup_action else None,
             context=context,
         ).run()
 
