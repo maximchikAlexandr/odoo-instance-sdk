@@ -25,9 +25,9 @@
 
 ## Решения
 
-### 1. Перенести command attachment в instance auxiliary-runtime слой
+### 1. Сохранить command attachment как module-private auxiliary-runtime seam
 
-Существующий `_attach_auxiliary_restore_runtime()` переносится из `commands/db.py` рядом с `AuxiliaryRestoreSession` и экспортируется через `resources.instance` как общий внутренний seam. Helper принимает исходный captured `Command`, session и явный step anchor, вставляет `start`/`ready` перед первой операцией, которой нужен Database Manager, а `cleanup` — последним шагом. Database CLI продолжает использовать anchor локального restore, а COPY checkout использует anchor `checkout.catalog`, потому что его preflight выполняется непосредственно перед этой каталожной action.
+На revision base `_attach_auxiliary_restore_runtime()` уже расположен рядом с `AuxiliaryRestoreSession` в `resources.instance.auxiliary_restore`. Это намеренно module-private helper: `commands/db.py` и environment checkout импортируют его напрямую из конкретного модуля, а `resources.instance.__init__` не расширяет публичную export boundary приватным symbol. Helper принимает исходный captured `Command`, session и явный step anchor, вставляет lifecycle steps перед первой операцией, которой нужен Database Manager, а `cleanup` — последним шагом. Database CLI использует anchor локального restore, а COPY checkout — anchor `checkout.catalog`, потому что его preflight выполняется непосредственно перед этой каталожной action.
 
 Альтернатива — скопировать wrapper в environment resource — отклонена: два lifecycle-адаптера быстро разойдутся по порядку шагов, context reset и error semantics. Отдельный command/plan также отклонён, поскольку dry-run перестал бы быть точной проекцией исполняемого checkout.
 
@@ -61,7 +61,7 @@ Attachment добавляет отдельные `PreparedAction` для recorde
 
 После readiness существующие `_preflight_copy_checkout()` и `_do_copy_restore()` выполняются без изменения их journal и recovery порядка. Active auxiliary session уже перехватывается существующими database list/backup/restore primitives, поэтому первый реальный запрос не может обойти readiness. PostgreSQL existence probes и rollback остаются частью исходного checkout command.
 
-Session хранит единственный зарегистрированный `OdooProcess`; cleanup получает процесс только через точный session id и использует сохранённый process group handle. При external/persisted reuse cleanup лишь помечает неиспользованные lifecycle steps skipped. Никакая ветка не ищет процесс только по порту или executable name.
+Session хранит единственный зарегистрированный `OdooProcess`; cleanup получает процесс только через точный session id и использует сохранённый process group handle. При доказанном recorded reuse cleanup лишь помечает неиспользованные lifecycle steps skipped. Никакая ветка не ищет процесс только по порту или executable name.
 
 ### 7. Не маскировать первичную ошибку ошибкой cleanup
 
@@ -75,7 +75,7 @@ Attachment helper всегда сбрасывает `ContextVar` во вложе
 - **[Listener меняется между proof и HTTP connect]** → выполнять proof непосредственно перед password-bearing request; более сильная криптографическая identity требует отдельного protocol change и не симулируется здесь.
 - **[Project runtime и source endpoint могут разойтись после planning]** → строить session только из captured snapshot/project inputs и сохранять существующую execution-time revalidation до мутации.
 - **[Дополнительные actions могут разойтись между public/private plans]** → строить обе проекции из одного набора `PreparedAction` и проверять exact ids/order в тестах.
-- **[Общий attachment helper затрагивает database restore]** → перенести поведение без изменения порядка его шагов и добавить регрессии на plan parity, context reset и error precedence.
+- **[Общий module-private attachment helper затрагивает database restore]** → сохранить прямые module imports и существующий порядок шагов; проверять plan parity, context reset и error precedence регрессиями.
 - **[Cleanup может сам завершиться ошибкой]** → всегда сбрасывать context; при уже существующей primary error прикреплять cleanup detail, а при успешной основной операции честно завершать command ошибкой.
 - **[Persisted runtime отвечает не сразу]** → ждать его через существующий bounded readiness path, не регистрировать и не завершать его; timeout остаётся явной ошибкой без signal.
 

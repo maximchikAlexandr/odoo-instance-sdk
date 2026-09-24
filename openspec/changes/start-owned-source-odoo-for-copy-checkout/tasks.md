@@ -1,6 +1,6 @@
 ## 1. Shared auxiliary lifecycle
 
-- [x] 1.1 [T01] Move the existing auxiliary-command attachment helper from `commands/db.py` into the instance auxiliary-runtime layer, preserve database restore step ordering, and update both import/export boundaries.
+- [x] 1.1 [T01] Keep the shared auxiliary-command attachment helper module-private in `resources.instance.auxiliary_restore`, use direct module imports from database restore and COPY checkout without re-exporting the private symbol through `resources.instance`, and preserve database restore step ordering.
 - [ ] 1.2 [T02] Remove response-shaped unrecorded listener reuse; reuse only a persisted compatible runtime whose exact PID/create-time/process identity owns the configured live listening socket, fail closed when socket proof is absent or unverifiable, and retain free-port-only owned startup.
 - [x] 1.3 [T03] Make the shared attachment cleanup preserve an active primary exception, report cleanup failure as attached diagnostics, reset the active session in every path, and still fail when cleanup alone fails.
 

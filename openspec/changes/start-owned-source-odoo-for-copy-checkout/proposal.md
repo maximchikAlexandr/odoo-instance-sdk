@@ -1,10 +1,10 @@
 ## Why
 
-`odcli env checkout --db-mode copy` currently calls the source Database Manager directly, so checkout fails when the configured source Odoo is stopped even though the project already contains enough runtime configuration to start it safely. COPY checkout should be self-contained while preserving strict process ownership and the existing database-copy recovery guarantees.
+At implementation review revision `46efd7d882fa122120e149896d560340cc96777b`, `odcli env checkout --db-mode copy` already uses a bounded auxiliary lifecycle to start a stopped source Odoo and clean up owned state. Review found that recorded process identity is not yet bound to the live listening socket, privileged source backup can bypass request-adjacent identity revalidation, and the port precondition is absent from the immutable plan. COPY checkout must close those trust and observability gaps without weakening its existing self-contained lifecycle or database-copy recovery guarantees.
 
 ## What Changes
 
-- Reuse the existing bounded auxiliary Database Manager lifecycle for COPY checkout instead of requiring a manually started source Odoo.
+- Harden the bounded auxiliary Database Manager lifecycle already integrated into COPY checkout.
 - Reuse only a recorded source runtime whose exact live process identity and ownership of the configured listening socket are proven; a responsive but unrecorded listener fails closed.
 - Start source Odoo only when the configured port is proven free; fail closed for an occupied, unhealthy, unowned, or unverifiable listener.
 - Revalidate the recorded process-to-listener binding immediately before every auxiliary Database Manager request that carries the master password, and send no secret when that proof fails.
@@ -20,7 +20,7 @@ None.
 
 ### Modified Capabilities
 
-- `database-restore`: Extend COPY environment checkout so its source Database Manager lifecycle is self-contained, ownership-safe, visible in the captured plan, and always cleaned up.
+- `database-restore`: Harden the existing self-contained COPY source Database Manager lifecycle so endpoint trust is socket-bound, privileged-request-safe, visible in the captured plan, and ownership-clean.
 
 ## Impact
 
