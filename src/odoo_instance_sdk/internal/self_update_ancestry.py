@@ -165,6 +165,10 @@ def run_revision_probe(
             context.action(cleanup_step_id)
             try:
                 shutil.rmtree(root)
+            except FileNotFoundError:
+                # The declared cleanup is idempotent: an injected executor or
+                # an earlier failed probe may already have removed the store.
+                pass
             except OSError as exc:
                 context.fail_action(cleanup_step_id, exc)
                 raise
