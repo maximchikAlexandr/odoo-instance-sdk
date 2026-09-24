@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     import click
@@ -15,6 +15,7 @@ else:
     import rich_click as click
 
 from odoo_instance_sdk.commands.output import (
+    JsonObject,
     OutputMode,
     emit,
     fail,
@@ -48,6 +49,21 @@ _FAILURE_OUTCOMES: frozenset[UpdateOutcome] = frozenset(
 class _UpdateSelection:
     command: Command[UpdateResult] | None
     result: UpdateResult | None = None
+
+
+class _UpdateRunner(Protocol):
+    def __call__(
+        self,
+        build_command: Callable[[], Command[UpdateResult]],
+        *,
+        command_name: str,
+        mode: OutputMode,
+        dry_run: bool,
+        result: Callable[[UpdateResult | None], JsonObject] | None = None,
+        confirm: Callable[[], None] | None = None,
+        preview: Callable[[Command[UpdateResult]], JsonObject] | None = None,
+        emit_normal: bool = True,
+    ) -> tuple[int, UpdateResult | None]: ...
 
 
 def _select_update_command(
@@ -84,6 +100,7 @@ def _select_update_command(
         command=update_command(
             ref=target_ref,
             allow_downgrade=allow_downgrade,
+            force_mutation=True,
         )
     )
 
@@ -102,6 +119,7 @@ def _run_selected_update(
     allow_downgrade: bool,
     mode: OutputMode,
     confirm: Callable[[], None] | None,
+    runner: _UpdateRunner,
 ) -> tuple[int, UpdateResult | None]:
     selection = _select_update_command(
         ref=ref,
@@ -122,7 +140,7 @@ def _run_selected_update(
     def build_command() -> Command[UpdateResult]:
         return command
 
-    return run_or_preview(
+    return runner(
         build_command,
         command_name="update",
         mode=mode,
@@ -233,6 +251,7 @@ def update_command_cli(
             allow_downgrade=allow_downgrade,
             mode=mode,
             confirm=confirm,
+            runner=cast("_UpdateRunner", run_or_preview),
         )
     except UpdateError as exc:
         fail(mode, "update", str(exc), dry_run=dry_run)

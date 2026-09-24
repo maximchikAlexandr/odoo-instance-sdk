@@ -834,6 +834,7 @@ def update_command(
     dry_run: bool = False,
     allow_downgrade: bool = False,
     executor: ProcessExecutor | None = None,
+    force_mutation: bool = False,
 ) -> Command[UpdateResult]:
     """Return the immutable ``Command[UpdateResult]`` for ``odcli update``."""
     from odoo_instance_sdk.internal.self_update_commands import (
@@ -865,6 +866,7 @@ def update_command(
     )
     if (
         not dry_run
+        and not force_mutation
         and provenance.commit_id is not None
         and target_sha == provenance.commit_id
         and unfinished_update_journal() is None
@@ -907,6 +909,7 @@ def update(
         ref=result.target_sha,
         allow_downgrade=allow_downgrade,
         executor=executor,
+        force_mutation=True,
     ).run()
 
 
