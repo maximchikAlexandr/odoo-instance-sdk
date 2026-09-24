@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
+from urllib.parse import unquote, urlsplit
+from uuid import uuid4
 
 import msgspec
 
@@ -37,6 +40,7 @@ from odoo_instance_sdk.internal.self_update import (
     _MIN_PYTHON,
     _SUPPORTED_PLATFORMS,
     InstalledProvenance,
+    _canonical_supported_source_repo,
     _catalog_schema_version,
     _clear_journal,
     _clear_snapshot,
@@ -58,6 +62,7 @@ from odoo_instance_sdk.internal.self_update import (
     _update_snapshot_dir,
     _uv_version_string,
     _validate_catalog_migration_path,
+    _validate_downgrade_snapshot_restore,
     _validate_storage_migration_path,
     _verify_installed_revision,
     _write_journal,
@@ -264,77 +269,195 @@ def _journal_snapshot_sha(
 RevisionRelation = Literal["same", "descendant", "ancestor", "divergent", "unknown"]
 
 
+def _revision_probe_steps(
+    *,
+    source_repo: str | None,
+    installed_sha: str,
+    target_sha: str,
+) -> tuple[PreparedStep, ...]:
+    """Capture the Git ancestry probe without launching it during construction."""
+    if installed_sha == target_sha:
+        return ()
+    if not source_repo:
+        return ()
+    repository = source_repo.removeprefix("git+")
+    if repository.startswith("file://"):
+        parsed = urlsplit(repository)
+        repository = unquote(parsed.path)
+    root = Path(tempfile.gettempdir()) / f"odcli-update-ancestry-{uuid4().hex}"
+    git_dir = str(root / "objects.git")
+    return (
+        PreparedStep(
+            step_id="update.inspect.ancestry-init",
+            argv=("git", "init", "--bare", git_dir),
+            mutating=True,
+            timeout=30.0,
+        ),
+        PreparedStep(
+            step_id="update.inspect.ancestry-fetch",
+            argv=(
+                "git",
+                "--git-dir",
+                git_dir,
+                "fetch",
+                "--no-tags",
+                repository,
+                installed_sha,
+                target_sha,
+            ),
+            mutating=True,
+            timeout=60.0,
+        ),
+        PreparedStep(
+            step_id="update.inspect.ancestry-installed",
+            argv=(
+                "git",
+                "--git-dir",
+                git_dir,
+                "merge-base",
+                "--is-ancestor",
+                installed_sha,
+                target_sha,
+            ),
+            read_only=True,
+            timeout=30.0,
+        ),
+        PreparedStep(
+            step_id="update.inspect.ancestry-target",
+            argv=(
+                "git",
+                "--git-dir",
+                git_dir,
+                "merge-base",
+                "--is-ancestor",
+                target_sha,
+                installed_sha,
+            ),
+            read_only=True,
+            timeout=30.0,
+        ),
+    )
+
+
+def _revision_relation_from_results(
+    *,
+    installed_sha: str,
+    target_sha: str,
+    installed_check: ProcessResult,
+    target_check: ProcessResult,
+) -> RevisionRelation:
+    if installed_sha == target_sha:
+        return "same"
+    if installed_check.returncode == 0:
+        return "descendant"
+    if installed_check.returncode != 1:
+        return "unknown"
+    if target_check.returncode == 0:
+        return "ancestor"
+    if target_check.returncode == 1:
+        return "divergent"
+    return "unknown"
+
+
 def _git_revision_relation(
     *,
     source_repo: str | None,
     installed_sha: str,
     target_sha: str,
 ) -> RevisionRelation:
-    """Classify two revisions without treating SHA bytes as a version order."""
+    """Classify two revisions through the shared executor for direct callers/tests."""
+    steps = _revision_probe_steps(
+        source_repo=source_repo,
+        installed_sha=installed_sha,
+        target_sha=target_sha,
+    )
     if installed_sha == target_sha:
         return "same"
-    if not source_repo:
+    if not steps:
         return "unknown"
-    repository = source_repo.removeprefix("git+")
-    if repository.startswith("file://"):
-        repository = repository.removeprefix("file://")
-    with tempfile.TemporaryDirectory(prefix="odcli-update-ancestry-") as checkout:
-        root = Path(checkout)
-        init = SubprocessExecutor().execute(
-            PreparedStep(
-                step_id="update.inspect.ancestry-init",
-                argv=("git", "init", "--bare", str(root / "objects.git")),
-                read_only=True,
-                timeout=30.0,
-            )
-        )
-        if init.returncode != 0:
+    executor = SubprocessExecutor()
+    root = Path(steps[0].argv[3]).parent
+    try:
+        if executor.execute(steps[0]).returncode != 0:
             return "unknown"
-        git_dir = str(root / "objects.git")
-        fetched = SubprocessExecutor().execute(
-            PreparedStep(
-                step_id="update.inspect.ancestry-fetch",
-                argv=(
-                    "git",
-                    "--git-dir",
-                    git_dir,
-                    "fetch",
-                    "--no-tags",
-                    repository,
-                    installed_sha,
-                    target_sha,
-                ),
-                read_only=True,
-                timeout=60.0,
-            )
-        )
-        if fetched.returncode != 0:
+        if executor.execute(steps[1]).returncode != 0:
             return "unknown"
+        installed_check = executor.execute(steps[2])
+        target_check = executor.execute(steps[3])
+        return _revision_relation_from_results(
+            installed_sha=installed_sha,
+            target_sha=target_sha,
+            installed_check=installed_check,
+            target_check=target_check,
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
-        def is_ancestor(ancestor: str, descendant: str) -> bool:
-            result = SubprocessExecutor().execute(
-                PreparedStep(
-                    step_id="update.inspect.ancestry-check",
-                    argv=(
-                        "git",
-                        "--git-dir",
-                        git_dir,
-                        "merge-base",
-                        "--is-ancestor",
-                        ancestor,
-                        descendant,
-                    ),
-                    read_only=True,
-                    timeout=30.0,
-                )
-            )
-            return result.returncode == 0
 
-        if is_ancestor(installed_sha, target_sha):
-            return "descendant"
-        if is_ancestor(target_sha, installed_sha):
-            return "ancestor"
-        return "divergent"
+def _run_revision_probe(
+    context: RunContext[UpdateResult],
+    steps: tuple[PreparedStep, ...],
+    *,
+    installed_sha: str,
+    target_sha: str,
+) -> RevisionRelation:
+    if installed_sha == target_sha:
+        return "same"
+    if not steps:
+        return "unknown"
+    root = Path(steps[0].argv[3]).parent
+    try:
+        init_result = cast("ProcessResult", context.process_prepared(steps[0]))
+        if init_result.returncode != 0:
+            for step in steps[1:]:
+                context.skip(step.step_id)
+            return "unknown"
+        fetch_result = cast("ProcessResult", context.process_prepared(steps[1]))
+        if fetch_result.returncode != 0:
+            for step in steps[2:]:
+                context.skip(step.step_id)
+            return "unknown"
+        installed_check = cast("ProcessResult", context.process_prepared(steps[2]))
+        target_check = cast("ProcessResult", context.process_prepared(steps[3]))
+        return _revision_relation_from_results(
+            installed_sha=installed_sha,
+            target_sha=target_sha,
+            installed_check=installed_check,
+            target_check=target_check,
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _revision_preflight_error(
+    *,
+    ref: str,
+    provenance: InstalledProvenance,
+    allow_downgrade: bool,
+    relation: RevisionRelation | None = None,
+) -> str | None:
+    if not _is_full_sha(ref):
+        return None
+    installed_sha = provenance.commit_id
+    if installed_sha is None or not _is_full_sha(installed_sha):
+        return "cannot verify revision ancestry; installed commit is unavailable"
+    canonical_source_repo = _canonical_supported_source_repo(provenance.source_repo)
+    if canonical_source_repo is None:
+        return "cannot verify revision ancestry; source provenance is unsupported"
+    relation = relation or _git_revision_relation(
+        source_repo=canonical_source_repo,
+        installed_sha=installed_sha.lower(),
+        target_sha=ref.lower(),
+    )
+    if relation == "ancestor" and not allow_downgrade:
+        return "downgrade refused without --allow-downgrade"
+    if relation == "ancestor":
+        downgrade_error = _validate_downgrade_snapshot_restore()
+        if downgrade_error is not None:
+            return downgrade_error
+    if relation not in {"same", "descendant", "ancestor"}:
+        return "cannot verify revision ancestry; target history is unavailable"
+    return None
 
 
 def _preflight_error(
@@ -342,6 +465,7 @@ def _preflight_error(
     ref: str,
     provenance: InstalledProvenance,
     allow_downgrade: bool,
+    relation: RevisionRelation | None = None,
 ) -> str | None:
     if sys.version_info < _MIN_PYTHON:
         return (
@@ -360,20 +484,12 @@ def _preflight_error(
         _validate_storage_migration_path()
     except PreflightFailedError as exc:
         return str(exc)
-    if _is_full_sha(ref):
-        installed_sha = provenance.commit_id
-        if installed_sha is None or not _is_full_sha(installed_sha):
-            return "cannot verify revision ancestry; installed commit is unavailable"
-        relation = _git_revision_relation(
-            source_repo=provenance.source_repo,
-            installed_sha=installed_sha.lower(),
-            target_sha=ref.lower(),
-        )
-        if relation == "ancestor" and not allow_downgrade:
-            return "downgrade refused without --allow-downgrade"
-        if relation not in {"same", "descendant", "ancestor"}:
-            return "cannot verify revision ancestry; target history is unavailable"
-    return None
+    return _revision_preflight_error(
+        ref=ref,
+        provenance=provenance,
+        allow_downgrade=allow_downgrade,
+        relation=relation,
+    )
 
 
 def _recovery_step_for_snapshot(snapshot_sha: str | None) -> PreparedStep:
@@ -411,6 +527,7 @@ class _UpdateSession:
     allow_downgrade: bool
     install_step: PreparedStep
     maintenance_step: PreparedStep
+    ancestry_steps: tuple[PreparedStep, ...]
     context: RunContext[UpdateResult]
     journal_path: Path = field(init=False)
     snapshot_dir: Path = field(init=False)
@@ -448,10 +565,20 @@ class _UpdateSession:
         self.ref = self.ref.lower()
 
     def preflight(self) -> str | None:
+        installed_sha = self.provenance.commit_id
+        relation = "unknown"
+        if installed_sha is not None and _is_full_sha(self.ref) and _is_full_sha(installed_sha):
+            relation = _run_revision_probe(
+                self.context,
+                self.ancestry_steps,
+                installed_sha=installed_sha.lower(),
+                target_sha=self.ref.lower(),
+            )
         return _preflight_error(
             ref=self.ref,
             provenance=self.provenance,
             allow_downgrade=self.allow_downgrade,
+            relation=cast("RevisionRelation", relation),
         )
 
     def snapshot(self) -> None:
@@ -802,6 +929,7 @@ def _build_preflight_command(
     ref: str,
     provenance: InstalledProvenance,
     allow_downgrade: bool,
+    executor: ProcessExecutor | None,
 ) -> Command[UpdateResult]:
     """Run the read-only checks before a resolved mutation plan is shown."""
     inspect_step = PreparedAction(
@@ -816,16 +944,42 @@ def _build_preflight_command(
         description="Verify free space, schema, and migration path",
         read_only=True,
     )
-    steps: tuple[PreparedAction, ...] = (inspect_step, preflight_step)
+    canonical_source_repo = _canonical_supported_source_repo(provenance.source_repo)
+    ancestry_steps = (
+        _revision_probe_steps(
+            source_repo=canonical_source_repo,
+            installed_sha=provenance.commit_id or "",
+            target_sha=ref,
+        )
+        if canonical_source_repo
+        and _is_full_sha(ref)
+        and provenance.commit_id
+        and _is_full_sha(provenance.commit_id)
+        else ()
+    )
+    steps: tuple[PreparedAction | PreparedStep, ...] = (
+        inspect_step,
+        preflight_step,
+        *ancestry_steps,
+    )
 
     def callback(context: RunContext[UpdateResult]) -> UpdateResult:
         context.action(inspect_step.step_id)
         context.complete_action(inspect_step.step_id)
         context.action(preflight_step.step_id)
+        relation = "unknown"
+        if provenance.commit_id is not None and _is_full_sha(ref):
+            relation = _run_revision_probe(
+                context,
+                ancestry_steps,
+                installed_sha=provenance.commit_id.lower(),
+                target_sha=ref.lower(),
+            )
         error = _preflight_error(
             ref=ref,
             provenance=provenance,
             allow_downgrade=allow_downgrade,
+            relation=cast("RevisionRelation", relation),
         )
         context.complete_action(preflight_step.step_id)
         if error is not None:
@@ -845,7 +999,7 @@ def _build_preflight_command(
         )
 
     plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
-    return Command.create(plan, callback, steps)
+    return Command.create(plan, callback, steps, executor=executor or SubprocessExecutor())
 
 
 def _build_mutating_command(
@@ -877,6 +1031,16 @@ def _build_mutating_command(
         environment=((_MAINTENANCE_ENV, "1"),),
         mutating=True,
     )
+    canonical_source_repo = _canonical_supported_source_repo(provenance.source_repo)
+    ancestry_steps = (
+        _revision_probe_steps(
+            source_repo=canonical_source_repo,
+            installed_sha=provenance.commit_id or "",
+            target_sha=ref,
+        )
+        if canonical_source_repo and provenance.commit_id and _is_full_sha(provenance.commit_id)
+        else ()
+    )
     public_steps: tuple[PreparedStep | PreparedAction, ...] = (
         PreparedAction(
             step_id="update.inspect",
@@ -890,6 +1054,7 @@ def _build_mutating_command(
             description="Verify free space, schema, and migration path",
             read_only=True,
         ),
+        *ancestry_steps,
         PreparedAction(
             step_id="update.quiesce",
             action="quiesce",
@@ -927,6 +1092,7 @@ def _build_mutating_command(
             allow_downgrade=allow_downgrade,
             install_step=install_step,
             maintenance_step=maintenance_step,
+            ancestry_steps=ancestry_steps,
             context=context,
         ).run()
 

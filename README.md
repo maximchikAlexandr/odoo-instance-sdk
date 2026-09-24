@@ -522,7 +522,10 @@ emergency unblock paths.
 `odcli update` safely upgrades a uv-tool install: default `--ref` is `main`,
 `--check` resolves without mutation, and `--dry-run` may launch only the
 read-only `uv` resolver/preflight needed to freeze the immutable target; it
-never launches install or maintenance `odcli` steps. Mutating execution uses an exclusive lock on
+never launches install or maintenance `odcli` steps. Exact-SHA ancestry probes
+are captured Git process steps in that preflight; their ephemeral object-store
+setup is explicit and no unvalidated provenance URL reaches `git fetch`.
+Mutating execution uses an exclusive lock on
 `~/.odcli/locks/odcli-update.lock`, snapshots affected metadata, installs
 through `uv tool install --force`, and runs maintenance migrations in a child
 `odcli update --format json` with `ODCLI_MAINTENANCE=1`. Pip, pipx, system, and

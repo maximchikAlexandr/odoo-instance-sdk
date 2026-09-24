@@ -23,7 +23,10 @@ the captured read-only resolver command, then captures the resolved full-SHA
 mutation command. The second command is the only command shown for mutation
 preview, confirmation, and execution; `update --dry-run` may run the captured
 read-only resolver and preflight phases, then shows the immutable install and
-migration steps without running either. A user-triggered
+migration steps without running either. Exact-SHA ancestry validation is also
+represented by captured Git `ProcessStep`s. Their ephemeral object-store
+setup/fetch steps are explicitly marked as mutating, and no unvalidated
+provenance URL reaches `git fetch`. A user-triggered
 migrate journal also resumes through this coordinator; direct maintenance is
 reserved for the explicit `ODCLI_MAINTENANCE=1` hand-off.
 

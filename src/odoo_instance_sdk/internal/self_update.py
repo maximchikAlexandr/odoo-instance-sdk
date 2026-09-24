@@ -8,7 +8,6 @@ a frozen ``ProcessStep`` through ``internal/proc``.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
@@ -21,7 +20,7 @@ from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from pathlib import Path
 from types import TracebackType
 from typing import Literal, cast
-from urllib.parse import unquote
+from urllib.parse import urlsplit
 
 import msgspec
 
@@ -81,38 +80,38 @@ class InstalledProvenance:
     manual_argv: tuple[str, ...] | None
 
 
-def _normalize_repo_url(url: str) -> str:
-    cleaned = url
-    if cleaned.startswith("git@"):
-        cleaned = cleaned.replace(":", "/", 1).removeprefix("git@")
-    return cleaned.rstrip("/").removesuffix(".git").lower()
-
-
-def _git_origin_matches_supported_repo(path: Path) -> bool:
-    remote = SubprocessExecutor().execute(
-        PreparedStep(
-            step_id="update.inspect.origin",
-            argv=("git", "remote", "get-url", "origin"),
-            cwd=str(path),
-            read_only=True,
-        ),
-    )
-    if remote.returncode != 0:
-        return False
-    stdout = remote.stdout if isinstance(remote.stdout, str) else ""
-    return _is_supported_source_repo(stdout.strip())
-
-
 def _is_supported_source_repo(source_repo: str | None) -> bool:
+    return _canonical_supported_source_repo(source_repo) is not None
+
+
+def _canonical_supported_source_repo(source_repo: str | None) -> str | None:
+    """Return the fixed credential-free origin for an accepted provenance URL."""
     if not source_repo:
-        return False
-    normalized = _normalize_repo_url(source_repo)
-    if normalized.endswith(f"github.com/{_REPO_SLUG.lower()}"):
-        return True
-    if source_repo.startswith("file://"):
-        local_path = Path(unquote(source_repo.removeprefix("file://")))
-        return _git_origin_matches_supported_repo(local_path)
-    return False
+        return None
+    raw = source_repo.removeprefix("git+")
+    if raw.startswith("file://"):
+        # Local paths cannot prove the official origin without spawning a Git
+        # probe during command construction; fail closed and keep provenance
+        # validation side-effect free at the public boundary.
+        return None
+    parsed = urlsplit(raw)
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    expected_path = f"/{_REPO_SLUG}"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "github.com"
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.rstrip("/").removesuffix(".git") != expected_path
+    ):
+        return None
+    return _SOURCE_REPO
 
 
 def _install_requirement(ref: str) -> str:
@@ -342,7 +341,8 @@ def read_uv_tool_direct_url(
             "odcli update supports only uv-tool VCS installs",
             manual_argv=_MANUAL_INSTALL_ARGV,
         )
-    if not _is_supported_source_repo(source_repo):
+    canonical_source_repo = _canonical_supported_source_repo(source_repo)
+    if canonical_source_repo is None:
         raise UnsupportedInstallError(
             f"unsupported source repository {source_repo!r}; "
             f"only {_REPO_SLUG} uv-tool installs are supported",
@@ -350,7 +350,7 @@ def read_uv_tool_direct_url(
         )
     provenance = InstalledProvenance(
         version=dist.version,
-        source_repo=source_repo,
+        source_repo=canonical_source_repo,
         commit_id=commit_id,
         requested_revision=requested_revision,
         is_uv_tool_vcs=True,
@@ -457,8 +457,7 @@ def _write_snapshot(snapshot_dir: Path, metadata: Mapping[str, JsonValue]) -> No
     )
     catalog = get_user_root(ensure_exists=False) / "catalog.sqlite3"
     if catalog.is_file():
-        with contextlib.suppress(OSError):
-            shutil.copy2(catalog, snapshot_dir / "catalog.sqlite3")
+        shutil.copy2(catalog, snapshot_dir / "catalog.sqlite3")
 
 
 def _restore_snapshot(snapshot_dir: Path) -> None:
@@ -564,6 +563,19 @@ def _validate_storage_migration_path() -> None:
     if state in {"absent", "complete"}:
         return
     raise PreflightFailedError(f"storage migration is not resumable: {state}")
+
+
+def _validate_downgrade_snapshot_restore() -> str | None:
+    """Prove that the pre-install snapshot can restore the current data state."""
+    storage_state = _storage_migration_state()
+    if storage_state not in {"absent", "complete"}:
+        return f"downgrade snapshot cannot restore storage state {storage_state!r}"
+    catalog = get_user_root(ensure_exists=False) / "catalog.sqlite3"
+    if catalog.is_file() and _catalog_schema_version() == "unreadable":
+        return "downgrade snapshot cannot restore an unreadable catalog"
+    # The snapshot phase copies this exact catalog before install.  An absent
+    # catalog is also a compatible empty state; any copy failure is now fatal.
+    return None
 
 
 def _preflight_disk_check() -> str | None:
@@ -917,6 +929,7 @@ def preflight_update_command(
     *,
     ref: str,
     allow_downgrade: bool = False,
+    executor: ProcessExecutor | None = None,
 ) -> Command[UpdateResult]:
     """Capture the read-only preflight stage for an immutable target."""
     from odoo_instance_sdk.internal.self_update_commands import _build_preflight_command
@@ -925,6 +938,7 @@ def preflight_update_command(
         ref=ref,
         provenance=read_uv_tool_direct_url(),
         allow_downgrade=allow_downgrade,
+        executor=executor,
     )
 
 
