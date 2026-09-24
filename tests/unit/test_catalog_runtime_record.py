@@ -199,6 +199,33 @@ def test_project_runtime_uses_exclusive_owner_and_registration(tmp_path: Path) -
     catalog.close()
 
 
+def test_conditional_runtime_clear_is_owner_neutral_and_preserves_project_registration(
+    tmp_path: Path,
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    root = tmp_path / "repo"
+    common = root / ".git"
+    common.mkdir(parents=True)
+    project_id = f"project_{repo_key(root, common)}"
+    catalog._register_project(project_id, root, common)
+    catalog._upsert_runtime("project", project_id, **_runtime_kwargs())
+
+    assert catalog._clear_runtime_if_matches(
+        "project", project_id, root_pid=12345, create_time=1700000000.0
+    )
+    assert catalog.get_runtime("project", project_id) is None
+    assert (
+        catalog._conn.execute(
+            "SELECT 1 FROM projects WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        is not None
+    )
+    assert not catalog._clear_runtime_if_matches(
+        "project", project_id, root_pid=12345, create_time=1700000000.0
+    )
+    catalog.close()
+
+
 def test_runtime_owner_validation_rejects_invalid_and_missing_owners(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
 

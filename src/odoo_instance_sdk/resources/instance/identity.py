@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import psutil
 
@@ -56,6 +56,7 @@ from odoo_instance_sdk.resources.instance.auxiliary_restore import (
 )
 from odoo_instance_sdk.resources.instance.runtime import (
     T,
+    _build_cli_args,
     _canonical_runtime_argv,
     _canonical_runtime_path,
     _iter_logfile,
@@ -835,13 +836,31 @@ class _IdentityMixin:
         with lock(self._artifact_lock_path):
             yield
 
-    def _read_runtime_identity(self) -> _RuntimeIdentity | None:
-        """Read one environment runtime identity, including a live-process snapshot."""
-        environment_id = self._environment_id
-        if environment_id is None:
-            raise InstanceConfigurationError("stop requires an environment-owned runtime")
+    def _read_runtime_identity(self) -> _RuntimeIdentity | None:  # noqa: C901
+        """Read the selected owner's persisted identity and live-process snapshot."""
+        binding = self._runtime_binding
+        owner_kind: Literal["environment", "project"]
+        if binding is not None:
+            owner_kind = binding.owner_kind
+            owner_id = binding.owner_id
+            project_id = binding.project_id
+            environment_id = binding.owner_id if owner_kind == "environment" else None
+        elif self._environment_id is not None:
+            owner_kind = "environment"
+            owner_id = self._environment_id
+            project_id = ""
+            environment_id = self._environment_id
+        else:
+            raise InstanceConfigurationError(
+                "stop requires a project- or environment-owned runtime"
+            )
         catalog = cast("_RuntimeCatalog", self._client.get_catalog())
-        runtime_row = catalog.get_environment_runtime(environment_id)
+        get_runtime = getattr(catalog, "get_runtime", None)
+        runtime_row = (
+            get_runtime(owner_kind, owner_id)
+            if callable(get_runtime)
+            else catalog.get_environment_runtime(owner_id)
+        )
         if runtime_row is None:
             return None
         try:
@@ -850,15 +869,23 @@ class _IdentityMixin:
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("runtime identity record is unreadable") from exc
 
-        env_row = catalog.get_environment(environment_id)
-        if env_row is None:
-            raise RuntimeError("environment identity record is unavailable")
-        expected_executable, expected_argv, expected_cwd, config_path = _runtime_expectations(
-            env_row
-        )
+        if owner_kind == "environment":
+            env_row = catalog.get_environment(owner_id)
+            if env_row is None:
+                raise RuntimeError("environment identity record is unavailable")
+            expected_executable, expected_argv, expected_cwd, config_path = _runtime_expectations(
+                env_row
+            )
+        else:
+            expected_executable, expected_argv, expected_cwd, config_path = (
+                self._project_runtime_expectations()
+            )
 
         def vanished_identity() -> _RuntimeIdentity:
             return _RuntimeIdentity(
+                owner_kind=owner_kind,
+                owner_id=owner_id,
+                project_id=project_id,
                 environment_id=environment_id,
                 root_pid=root_pid,
                 create_time=create_time,
@@ -901,6 +928,9 @@ class _IdentityMixin:
         ) as exc:
             raise RuntimeError("runtime identity is inaccessible") from exc
         return _RuntimeIdentity(
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            project_id=project_id,
             environment_id=environment_id,
             root_pid=root_pid,
             create_time=create_time,
@@ -918,6 +948,25 @@ class _IdentityMixin:
                 else None
             ),
             process_group_id=process_group_id,
+        )
+
+    def _project_runtime_expectations(self) -> tuple[str, tuple[str, ...], str, str]:
+        config = self.config.start_config
+        if config is None or config.config_path is None:
+            raise RuntimeError("project runtime identity configuration is unreadable")
+        executable_prefix = self._executable_prefix()
+        if not executable_prefix:
+            raise RuntimeError("project runtime identity configuration is unreadable")
+        expected_argv = (
+            *executable_prefix,
+            *_build_cli_args(config),
+            *resolve_runtime_argv_extra(self.config.default_run_args),
+        )
+        return (
+            _canonical_runtime_path(executable_prefix[0]),
+            _canonical_runtime_argv(expected_argv),
+            _canonical_runtime_path(str(self.config.default_cwd or Path.cwd())),
+            _canonical_runtime_path(config.config_path),
         )
 
     @staticmethod

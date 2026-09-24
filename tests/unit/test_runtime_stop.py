@@ -20,13 +20,14 @@ from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.proc import terminate_pid
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
-from odoo_instance_sdk.resources.instance.runtime import _runtime_expectations
+from odoo_instance_sdk.resources.instance.runtime import _runtime_expectations, _RuntimeBinding
 
 
 class _Catalog:
     def __init__(self, env_row: dict[str, object], runtime_row: dict[str, object] | None) -> None:
         self.env_row = env_row
         self.runtime_row = runtime_row
+        self.project_runtime_row: dict[str, object] | None = None
         self.clear_calls: list[tuple[str, int, float]] = []
 
     def get_environment(self, _environment_id: str) -> dict[str, object]:
@@ -34,6 +35,27 @@ class _Catalog:
 
     def get_environment_runtime(self, _environment_id: str) -> dict[str, object] | None:
         return self.runtime_row
+
+    def get_runtime(self, owner_kind: str, _owner_id: str) -> dict[str, object] | None:
+        return self.project_runtime_row if owner_kind == "project" else self.runtime_row
+
+    def _clear_runtime_if_matches(
+        self,
+        owner_kind: str,
+        owner_id: str,
+        *,
+        root_pid: int,
+        create_time: float,
+    ) -> bool:
+        row = self.project_runtime_row if owner_kind == "project" else self.runtime_row
+        self.clear_calls.append((owner_id, root_pid, create_time))
+        if row is None or row["root_pid"] != root_pid or row["create_time"] != create_time:
+            return False
+        if owner_kind == "project":
+            self.project_runtime_row = None
+        else:
+            self.runtime_row = None
+        return True
 
     def _clear_environment_runtime_if_matches(
         self, environment_id: str, *, root_pid: int, create_time: float
@@ -59,7 +81,11 @@ class _Client:
 
 
 def _instance(
-    tmp_path: Path, *, runtime: bool = True, default_run_args: tuple[str, ...] = ()
+    tmp_path: Path,
+    *,
+    runtime: bool = True,
+    default_run_args: tuple[str, ...] = (),
+    owner_kind: str = "environment",
 ) -> tuple[OdooInstance, _Catalog, str]:
     environment_id = str(uuid.uuid4())
     config_path = tmp_path / "odoo.conf"
@@ -81,6 +107,19 @@ def _instance(
         {"root_pid": 4242, "create_time": 12.5} if runtime else None
     )
     catalog = _Catalog(env_row, runtime_row)
+    owner_id = environment_id
+    binding = None
+    if owner_kind == "project":
+        owner_id = "project-test"
+        catalog.project_runtime_row = runtime_row
+        catalog.runtime_row = None
+        binding = _RuntimeBinding(
+            owner_kind="project",
+            owner_id=owner_id,
+            project_id=owner_id,
+            repository_root=tmp_path,
+            git_common_dir=tmp_path / ".git",
+        )
     client = _Client(catalog)
     instance = OdooInstance(
         config=InstanceConfig(
@@ -91,9 +130,10 @@ def _instance(
             default_run_args=default_run_args,
         ),
         _client=client,  # type: ignore[arg-type]
-        _environment_id=environment_id,
+        _environment_id=environment_id if owner_kind == "environment" else None,
+        _runtime_binding=binding,
     )
-    return instance, catalog, environment_id
+    return instance, catalog, owner_id
 
 
 def _live_process(
@@ -103,10 +143,17 @@ def _live_process(
     extra_args: tuple[str, ...] = (),
 ) -> SimpleNamespace:
     catalog = instance._client.get_catalog()
-    env_row = cast(
-        "Mapping[str, JsonValue]", catalog.get_environment(str(instance._environment_id))
-    )
-    expected_executable, expected_argv, expected_cwd, _config_path = _runtime_expectations(env_row)
+    if instance._runtime_binding is not None and instance._runtime_binding.owner_kind == "project":
+        expected_executable, expected_argv, expected_cwd, _config_path = (
+            instance._project_runtime_expectations()
+        )
+    else:
+        env_row = cast(
+            "Mapping[str, JsonValue]", catalog.get_environment(str(instance._environment_id))
+        )
+        expected_executable, expected_argv, expected_cwd, _config_path = _runtime_expectations(
+            env_row
+        )
     argv = (*expected_argv, *instance.config.default_run_args, *extra_args)
     live = SimpleNamespace(
         create_time=lambda: 12.5,
@@ -155,6 +202,59 @@ def test_stop_owned_runtime_revalidates_then_terminates_and_clears(
     assert result == {"status": "stopped", "environment_id": environment_id}
     assert calls == [(4242, 4242, 3.0)]
     assert catalog.clear_calls == [(environment_id, 4242, 12.5)]
+
+
+@pytest.mark.unit
+def test_stop_project_runtime_reuses_identity_boundary_and_preserves_owner_neutral_fields(
+    tmp_path: Path,
+) -> None:
+    instance, catalog, project_id = _instance(tmp_path, owner_kind="project")
+    calls: list[tuple[int, int | None, float]] = []
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
+            return_value=_live_process(instance),
+        ),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.terminate_pid",
+            side_effect=lambda pid, *, process_group_id, timeout: calls.append(
+                (pid, process_group_id, timeout)
+            ),
+        ),
+        patch(
+            "odoo_instance_sdk.resources.instance.runtime.is_process_alive",
+            return_value=False,
+        ),
+    ):
+        result = instance.stop_runtime_command(timeout=3.0).run()
+
+    assert result == {
+        "status": "stopped",
+        "owner_kind": "project",
+        "owner_id": project_id,
+        "project_id": project_id,
+        "environment_id": None,
+    }
+    assert calls == [(4242, 4242, 3.0)]
+    assert catalog.project_runtime_row is None
+
+
+@pytest.mark.unit
+def test_stop_project_runtime_mismatch_fails_closed_and_retains_runtime(tmp_path: Path) -> None:
+    instance, catalog, _project_id = _instance(tmp_path, owner_kind="project")
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
+            return_value=_live_process(instance, mismatch="cwd"),
+        ),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+        pytest.raises(RuntimeError, match="runtime identity mismatch"),
+    ):
+        instance.stop_runtime_command().run()
+    terminate.assert_not_called()
+    assert catalog.project_runtime_row is not None
 
 
 @pytest.mark.unit
