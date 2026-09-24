@@ -226,6 +226,56 @@ def test_conditional_runtime_clear_is_owner_neutral_and_preserves_project_regist
     catalog.close()
 
 
+@pytest.mark.parametrize("mismatch", ["owner", "root_pid", "create_time"])
+def test_conditional_runtime_clear_preserves_replacement_row_and_project_registration(
+    tmp_path: Path, mismatch: str
+) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    root = tmp_path / "repo"
+    common = root / ".git"
+    common.mkdir(parents=True)
+    project_id = f"project_{repo_key(root, common)}"
+    catalog._register_project(project_id, root, common)
+    catalog._upsert_runtime("project", project_id, **_runtime_kwargs())
+
+    replacement = _runtime_kwargs()
+    replacement["root_pid"] = 54321
+    replacement["create_time"] = 1800000000.0
+    if mismatch == "owner":
+        replacement_root = tmp_path / "replacement-repo"
+        replacement_common = replacement_root / ".git"
+        replacement_common.mkdir(parents=True)
+        replacement_id = f"project_{repo_key(replacement_root, replacement_common)}"
+        catalog._register_project(replacement_id, replacement_root, replacement_common)
+        catalog._upsert_runtime("project", replacement_id, **replacement)
+        expected_owner = replacement_id
+        expected_pid = 12345
+        expected_create_time = 1700000000.0
+    else:
+        catalog._upsert_runtime("project", project_id, **replacement)
+        expected_owner = project_id
+        expected_pid = 12345 if mismatch == "root_pid" else 54321
+        expected_create_time = 1700000000.0 if mismatch == "create_time" else 1800000000.0
+
+    assert not catalog._clear_runtime_if_matches(
+        "project",
+        expected_owner,
+        root_pid=expected_pid,
+        create_time=expected_create_time,
+    )
+    row = catalog.get_runtime("project", replacement_id if mismatch == "owner" else project_id)
+    assert row is not None
+    assert row["root_pid"] == 54321
+    assert row["create_time"] == 1800000000.0
+    assert (
+        catalog._conn.execute(
+            "SELECT 1 FROM projects WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        is not None
+    )
+    catalog.close()
+
+
 def test_runtime_owner_validation_rejects_invalid_and_missing_owners(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
 
