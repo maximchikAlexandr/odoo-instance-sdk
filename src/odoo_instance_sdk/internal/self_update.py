@@ -910,10 +910,26 @@ def update(
     ).run()
 
 
+def preflight_update_command(
+    *,
+    ref: str,
+    allow_downgrade: bool = False,
+) -> Command[UpdateResult]:
+    """Capture the read-only preflight stage for an immutable target."""
+    from odoo_instance_sdk.internal.self_update_commands import _build_preflight_command
+
+    return _build_preflight_command(
+        ref=ref,
+        provenance=read_uv_tool_direct_url(),
+        allow_downgrade=allow_downgrade,
+    )
+
+
 __all__ = [
     "InstalledProvenance",
     "assert_update_not_blocking",
     "is_maintenance_mode",
+    "preflight_update_command",
     "prepare_maintenance_environment",
     "read_uv_tool_direct_url",
     "run_maintenance",

@@ -260,6 +260,39 @@ def _journal_snapshot_sha(
     return provenance.commit_id
 
 
+def _preflight_error(
+    *,
+    ref: str,
+    provenance: InstalledProvenance,
+    allow_downgrade: bool,
+) -> str | None:
+    if sys.version_info < _MIN_PYTHON:
+        return (
+            f"Python {'.'.join(str(part) for part in _MIN_PYTHON)}+ is required; "
+            f"found {sys.version_info.major}.{sys.version_info.minor}"
+        )
+    if sys.platform not in _SUPPORTED_PLATFORMS:
+        return f"unsupported platform {sys.platform!r}"
+    disk_error = _preflight_disk_check()
+    if disk_error is not None:
+        return disk_error
+    if _catalog_schema_version() == "unreadable":
+        return "catalog schema is unreadable"
+    try:
+        _validate_catalog_migration_path()
+        _validate_storage_migration_path()
+    except PreflightFailedError as exc:
+        return str(exc)
+    if (
+        not allow_downgrade
+        and provenance.commit_id is not None
+        and _is_full_sha(ref)
+        and int(ref, 16) < int(provenance.commit_id, 16)
+    ):
+        return "downgrade refused without --allow-downgrade"
+    return None
+
+
 def _recovery_step_for_snapshot(snapshot_sha: str | None) -> PreparedStep:
     return PreparedStep(
         step_id="update.recovery",
@@ -332,31 +365,11 @@ class _UpdateSession:
         self.ref = self.ref.lower()
 
     def preflight(self) -> str | None:
-        if sys.version_info < _MIN_PYTHON:
-            return (
-                f"Python {'.'.join(str(part) for part in _MIN_PYTHON)}+ is required; "
-                f"found {sys.version_info.major}.{sys.version_info.minor}"
-            )
-        if sys.platform not in _SUPPORTED_PLATFORMS:
-            return f"unsupported platform {sys.platform!r}"
-        disk_error = _preflight_disk_check()
-        if disk_error is not None:
-            return disk_error
-        if _catalog_schema_version() == "unreadable":
-            return "catalog schema is unreadable"
-        try:
-            _validate_catalog_migration_path()
-            _validate_storage_migration_path()
-        except PreflightFailedError as exc:
-            return str(exc)
-        if (
-            not self.allow_downgrade
-            and self.provenance.commit_id is not None
-            and _is_full_sha(self.ref)
-            and int(self.ref, 16) < int(self.provenance.commit_id, 16)
-        ):
-            return "downgrade refused without --allow-downgrade"
-        return None
+        return _preflight_error(
+            ref=self.ref,
+            provenance=self.provenance,
+            allow_downgrade=self.allow_downgrade,
+        )
 
     def snapshot(self) -> None:
         started = self._start("snapshot")
@@ -699,6 +712,57 @@ def _build_staged_command(
     plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
     prepared = prepared_command(callback, steps, executor=active_executor)
     return Command.from_prepared(plan, prepared)
+
+
+def _build_preflight_command(
+    *,
+    ref: str,
+    provenance: InstalledProvenance,
+    allow_downgrade: bool,
+) -> Command[UpdateResult]:
+    """Run the read-only checks before a resolved mutation plan is shown."""
+    inspect_step = PreparedAction(
+        step_id="update.inspect",
+        action="inspect",
+        description="Inspect installed OdCLI provenance",
+        read_only=True,
+    )
+    preflight_step = PreparedAction(
+        step_id="update.preflight",
+        action="preflight",
+        description="Verify free space, schema, and migration path",
+        read_only=True,
+    )
+    steps: tuple[PreparedAction, ...] = (inspect_step, preflight_step)
+
+    def callback(context: RunContext[UpdateResult]) -> UpdateResult:
+        context.action(inspect_step.step_id)
+        context.complete_action(inspect_step.step_id)
+        context.action(preflight_step.step_id)
+        error = _preflight_error(
+            ref=ref,
+            provenance=provenance,
+            allow_downgrade=allow_downgrade,
+        )
+        context.complete_action(preflight_step.step_id)
+        if error is not None:
+            return _failure_result(
+                "preflight_failed",
+                provenance=provenance,
+                next_step=error,
+            )
+        return UpdateResult(
+            outcome="updated",
+            source_repo=provenance.source_repo,
+            previous_version=provenance.version,
+            previous_sha=provenance.commit_id,
+            target_sha=ref,
+            snapshot_state="absent",
+            journal_state="absent",
+        )
+
+    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
+    return Command.create(plan, callback, steps)
 
 
 def _build_mutating_command(

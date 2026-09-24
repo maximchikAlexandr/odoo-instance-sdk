@@ -172,34 +172,13 @@ def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
     return RecordingExecutor(result_factory=factory)
 
 
-_UPDATE_MATRIX = (
+_UPDATE_COMMAND_MATRIX = (
     pytest.param(
         {"ref": _SHA_A},
         {},
         "already_current",
         (),
         id="already-current-sha",
-    ),
-    pytest.param(
-        {"ref": "main"},
-        {"direct_url": json.dumps({"url": "https://example.com/pkg.whl"})},
-        "unsupported_install",
-        (),
-        id="unsupported-wheel",
-    ),
-    pytest.param(
-        {"ref": "main"},
-        {
-            "direct_url": json.dumps(
-                {
-                    "url": "git+https://github.com/other/odoo-instance-sdk.git@main",
-                    "vcs_info": {"commit_id": _SHA_B, "requested_revision": "main"},
-                }
-            )
-        },
-        "unsupported_install",
-        (),
-        id="unsupported-repo",
     ),
     pytest.param(
         {"ref": "main", "check": True},
@@ -236,6 +215,31 @@ _UPDATE_MATRIX = (
         (),
         id="downgrade-allowed",
     ),
+)
+
+
+_UPDATE_COORDINATOR_MATRIX = (
+    pytest.param(
+        {"ref": "main"},
+        {"direct_url": json.dumps({"url": "https://example.com/pkg.whl"})},
+        "unsupported_install",
+        (),
+        id="unsupported-wheel",
+    ),
+    pytest.param(
+        {"ref": "main"},
+        {
+            "direct_url": json.dumps(
+                {
+                    "url": "git+https://github.com/other/odoo-instance-sdk.git@main",
+                    "vcs_info": {"commit_id": _SHA_B, "requested_revision": "main"},
+                }
+            )
+        },
+        "unsupported_install",
+        (),
+        id="unsupported-repo",
+    ),
     pytest.param(
         {"ref": "main"},
         {"install_rc": 1},
@@ -267,19 +271,11 @@ _UPDATE_MATRIX = (
 )
 
 
-@pytest.mark.parametrize(
-    ("command_kwargs", "effects", "expected_outcome", "expected_errors"),
-    _UPDATE_MATRIX,
-)
-def test_update_command_matrix(  # noqa: C901
+def _prepare_update_case(
     monkeypatch: pytest.MonkeyPatch,
-    user_root: Path,
     tmp_path: Path,
-    command_kwargs: dict[str, str | bool],
     effects: dict[str, object],
-    expected_outcome: str | None,
-    expected_errors: tuple[type[Exception], ...],
-) -> None:
+) -> RecordingExecutor:
     executable = tmp_path / "odcli"
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     executable.chmod(0o755)
@@ -308,24 +304,30 @@ def test_update_command_matrix(  # noqa: C901
         "odoo_instance_sdk.internal.self_update._verify_installed_revision",
         lambda *_args, **_kwargs: None,
     )
-    executor = _executor_factory(effects)
+    return _executor_factory(effects)
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "effects", "expected_outcome", "expected_errors"),
+    _UPDATE_COMMAND_MATRIX,
+)
+def test_update_command_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+    command_kwargs: dict[str, str | bool],
+    effects: dict[str, object],
+    expected_outcome: str | None,
+    expected_errors: tuple[type[Exception], ...],
+) -> None:
+    executor = _prepare_update_case(monkeypatch, tmp_path, effects)
+    command = update_command(**cast("Any", command_kwargs), executor=executor)
     if expected_errors:
         with pytest.raises(expected_errors):
-            if (
-                command_kwargs.get("check")
-                or str(command_kwargs.get("ref", "")).lower() == _SHA_OLD
-            ):
-                update_command(**cast("Any", command_kwargs), executor=executor).run()
-            else:
-                update(**cast("Any", command_kwargs), executor=executor)
+            command.run()
         return
 
-    if command_kwargs.get("check") or str(command_kwargs.get("ref", "")).lower() == _SHA_OLD:
-        command = update_command(**cast("Any", command_kwargs), executor=executor)
-        result = command.run()
-    else:
-        command = None
-        result = update(**cast("Any", command_kwargs), executor=executor)
+    result = command.run()
     assert result.outcome == expected_outcome
     if expected_outcome == "unsupported_install":
         assert result.manual_argv is not None
@@ -350,6 +352,44 @@ def test_update_command_matrix(  # noqa: C901
         assert command_kwargs.get("ref") != "main" or (
             install is not None and any(_SHA_B in arg for arg in install.argv)
         )
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "effects", "expected_outcome", "expected_errors"),
+    _UPDATE_COORDINATOR_MATRIX,
+)
+def test_update_coordinator_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+    command_kwargs: dict[str, str | bool],
+    effects: dict[str, object],
+    expected_outcome: str | None,
+    expected_errors: tuple[type[Exception], ...],
+) -> None:
+    executor = _prepare_update_case(monkeypatch, tmp_path, effects)
+    if expected_errors:
+        with pytest.raises(expected_errors):
+            update(**cast("Any", command_kwargs), executor=executor)
+        return
+
+    result = update(**cast("Any", command_kwargs), executor=executor)
+    assert result.outcome == expected_outcome
+    if expected_outcome == "unsupported_install":
+        assert result.manual_argv is not None
+    if expected_outcome == "update_incomplete":
+        assert result.recovery_argv is not None
+        assert result.journal_state == "present"
+    if expected_outcome == "rolled_back":
+        assert result.rollback_outcome == "restored"
+    if expected_outcome == "updated":
+        assert [step.step_id for step in executor.executed] == [
+            "update.resolve",
+            "update.install",
+            "update.migrate",
+        ]
+        install = next(step for step in executor.executed if step.step_id == "update.install")
+        assert any(_SHA_B in arg for arg in install.argv)
 
 
 def test_read_uv_tool_direct_url_uses_pep610_metadata(
