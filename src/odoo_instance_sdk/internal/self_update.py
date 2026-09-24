@@ -875,8 +875,6 @@ def update_command(
             ref=target_sha,
             provenance=provenance,
             executor=executor,
-            allow_downgrade=allow_downgrade,
-            dry_run=dry_run,
         )
     return _build_mutating_command(
         ref=target_sha,
@@ -891,9 +889,25 @@ def update(
     ref: str = _DEFAULT_REF,
     check: bool = False,
     allow_downgrade: bool = False,
+    executor: ProcessExecutor | None = None,
 ) -> UpdateResult:
     """Convenience entry point that delegates to ``update_command()``."""
-    return update_command(ref=ref, check=check, allow_downgrade=allow_downgrade).run()
+    command = update_command(
+        ref=ref,
+        check=check,
+        allow_downgrade=allow_downgrade,
+        executor=executor,
+    )
+    result = command.run()
+    if check or result.outcome != "updated" or result.target_sha is None:
+        return result
+    if any(step.step_id == "update.install" for step in command.plan.steps):
+        return result
+    return update_command(
+        ref=result.target_sha,
+        allow_downgrade=allow_downgrade,
+        executor=executor,
+    ).run()
 
 
 __all__ = [

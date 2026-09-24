@@ -428,10 +428,13 @@ print(preview.report_valid, preview.submit_ready)
 
 ## Self-upgrade for uv-tool installs
 
-`update_command()` is the public SDK primitive for `odcli update`. `--check`
-and `--dry-run` are process-previewable variants; mutating execution quiesces
-with an exclusive lock, snapshots metadata, installs through `uv`, and runs
-maintenance migrations in a child `odcli` with `ODCLI_MAINTENANCE=1`.
+`update_command()` is the public SDK primitive for one immutable update stage.
+Mutable refs use a read-only resolver stage first; pass its resolved SHA to a
+second `update_command()` for the exact mutation plan. `--check` remains a
+read-only report, and the CLI `--dry-run` resolves the ref before emitting the
+second, non-mutating plan. Mutation quiesces with an exclusive lock, snapshots
+metadata, installs through `uv`, and runs maintenance migrations in a child
+`odcli` with `ODCLI_MAINTENANCE=1`.
 
 ```python
 from odoo_instance_sdk.internal.self_update import update_command
@@ -441,7 +444,9 @@ print(check.plan)
 result = check.run()
 print(result.outcome, result.target_version)
 
-upgrade = update_command(ref="main", dry_run=True, yes=False)
+resolution = update_command(ref="main")
+resolved = resolution.run()
+upgrade = update_command(ref=resolved.target_sha or "main")
 print(upgrade.plan)
 ```
 

@@ -23,6 +23,7 @@ from odoo_instance_sdk.internal.self_update import (
     assert_update_not_blocking,
     read_uv_tool_direct_url,
     unfinished_update_journal,
+    update,
     update_command,
 )
 from odoo_instance_sdk.models.update import UpdateResult
@@ -270,7 +271,7 @@ _UPDATE_MATRIX = (
     ("command_kwargs", "effects", "expected_outcome", "expected_errors"),
     _UPDATE_MATRIX,
 )
-def test_update_command_matrix(
+def test_update_command_matrix(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
     user_root: Path,
     tmp_path: Path,
@@ -310,16 +311,21 @@ def test_update_command_matrix(
     executor = _executor_factory(effects)
     if expected_errors:
         with pytest.raises(expected_errors):
-            command = update_command(
-                **cast("Any", command_kwargs),
-                executor=executor,
-            )
-            command.run()
+            if (
+                command_kwargs.get("check")
+                or str(command_kwargs.get("ref", "")).lower() == _SHA_OLD
+            ):
+                update_command(**cast("Any", command_kwargs), executor=executor).run()
+            else:
+                update(**cast("Any", command_kwargs), executor=executor)
         return
 
-    command = update_command(**cast("Any", command_kwargs), executor=executor)
-
-    result = command.run()
+    if command_kwargs.get("check") or str(command_kwargs.get("ref", "")).lower() == _SHA_OLD:
+        command = update_command(**cast("Any", command_kwargs), executor=executor)
+        result = command.run()
+    else:
+        command = None
+        result = update(**cast("Any", command_kwargs), executor=executor)
     assert result.outcome == expected_outcome
     if expected_outcome == "unsupported_install":
         assert result.manual_argv is not None
@@ -342,7 +348,7 @@ def test_update_command_matrix(
             (step for step in executor.executed if step.step_id == "update.install"), None
         )
         assert command_kwargs.get("ref") != "main" or (
-            install is not None and _SHA_B in install.argv
+            install is not None and any(_SHA_B in arg for arg in install.argv)
         )
 
 
@@ -451,16 +457,18 @@ def test_dry_run_command_has_frozen_process_steps(
     executor = _executor_factory({"uv_stdout": f"would install {_SHA_B}\n"})
     command = update_command(ref="main", dry_run=True, executor=executor)
     process_steps = [step for step in command.plan.steps if isinstance(step, ProcessStep)]
-    assert [step.step_id for step in process_steps] == [
-        "update.resolve",
-        "update.install",
-        "update.migrate",
-    ]
+    assert [step.step_id for step in process_steps] == ["update.resolve"]
+    assert executor.executed == []
     assert process_steps[0].argv[0] == "uv"
     assert "--dry-run" in process_steps[0].argv
-    install = process_steps[1]
+    resolution = command.run()
+    assert resolution.target_sha == _SHA_B
+    mutation = update_command(ref=_SHA_B, executor=executor)
+    mutation_steps = [step for step in mutation.plan.steps if isinstance(step, ProcessStep)]
+    assert [step.step_id for step in mutation_steps] == ["update.install", "update.migrate"]
+    install = mutation_steps[0]
     assert install.argv[0] == "uv"
-    assert _SHA_B in install.argv
+    assert any(_SHA_B in arg for arg in install.argv)
     assert executor.executed[0].step_id == "update.resolve"
 
 
@@ -489,7 +497,7 @@ def test_update_lock_conflict_propagates(
 
     monkeypatch.setattr("odoo_instance_sdk.internal.self_update_commands.exclusive_lock", _conflict)
     with pytest.raises(LockConflictError):
-        update_command(ref="main", executor=_executor_factory({})).run()
+        update(ref="main", executor=_executor_factory({}))
 
 
 def test_install_failure_clears_journal_and_snapshot(
@@ -518,10 +526,10 @@ def test_install_failure_clears_journal_and_snapshot(
         lambda: None,
     )
     with pytest.raises(UpdateError, match="uv tool install failed"):
-        update_command(
+        update(
             ref="main",
             executor=_executor_factory({"install_rc": 1}),
-        ).run()
+        )
     assert not (user_root / "update" / "journal.json").exists()
     assert not (user_root / "update" / "snapshot").exists()
 
@@ -552,7 +560,7 @@ def test_preflight_failed_reports_disk_bytes(
         "odoo_instance_sdk.internal.self_update._validate_storage_migration_path",
         lambda: None,
     )
-    result = update_command(ref="main", executor=_executor_factory({})).run()
+    result = update(ref="main", executor=_executor_factory({}))
     assert result.outcome == "preflight_failed"
     message = result.next_step or ""
     assert "measured" in message
@@ -633,7 +641,7 @@ def test_snapshot_resume_installs_after_crash_before_install(
     result = command.run()
     assert result.outcome == "updated"
     install = next(step for step in executor.executed if step.step_id == "update.install")
-    assert _SHA_B in install.argv
+    assert any(_SHA_B in arg for arg in install.argv)
 
 
 def test_snapshot_resume_skips_install_after_crash_before_journal_write(
@@ -724,7 +732,7 @@ def test_install_failure_rechecks_revision_before_failing(
             "uv_stdout": f"installed {_SHA_B}\n",
         }
     )
-    result = update_command(ref="main", executor=executor).run()
+    result = update(ref="main", executor=executor)
     assert result.outcome == "updated"
     assert result.final_sha == _SHA_B
 

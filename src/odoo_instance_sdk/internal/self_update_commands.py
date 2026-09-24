@@ -62,7 +62,6 @@ from odoo_instance_sdk.internal.self_update import (
     _write_journal,
     _write_snapshot,
     read_uv_tool_direct_url,
-    unfinished_update_journal,
 )
 from odoo_instance_sdk.models.update import UpdateOutcome, UpdateResult
 
@@ -632,10 +631,8 @@ def _build_staged_command(
     ref: str,
     provenance: InstalledProvenance,
     executor: ProcessExecutor | None,
-    allow_downgrade: bool,
-    dry_run: bool = False,
 ) -> Command[UpdateResult]:
-    """Resolve in one frozen read-only command, then build the exact mutation command."""
+    """Build the first, read-only stage of the mutable-ref update flow."""
     resolve_step = PreparedStep(
         step_id="update.resolve",
         argv=_install_argv(ref, dry_run=True),
@@ -658,48 +655,49 @@ def _build_staged_command(
             )
         return target_sha
 
-    if dry_run:
-        # A preview has no confirmation boundary to preserve.  Resolve the
-        # read-only ProcessStep once, then expose the immutable second plan;
-        # its install and migration argv are frozen to the observed SHA.
-        result = cast("ProcessResult", active_executor.execute(resolve_step))
-        target_sha = target_sha_from_result(result)
-        if (
-            provenance.commit_id is not None
-            and target_sha == provenance.commit_id
-            and unfinished_update_journal() is None
-        ):
-            resolved_command = _build_already_current_command(provenance)
-        else:
-            resolved_command = _build_mutating_command(
-                ref=target_sha,
-                provenance=provenance,
-                executor=executor,
-                allow_downgrade=allow_downgrade,
-            )
-        plan = ExecutionPlan(
-            steps=(resolve_step.public_projection(), *resolved_command.plan.steps),
-        )
-        return Command.create(plan, lambda _context: resolved_command.run())
-
     def callback(context: RunContext[UpdateResult]) -> UpdateResult:
+        context.action("update.inspect")
+        context.complete_action("update.inspect")
         result = cast("ProcessResult", context.process_prepared(resolve_step))
         target_sha = target_sha_from_result(result)
-        if (
-            provenance.commit_id is not None
-            and target_sha == provenance.commit_id
-            and unfinished_update_journal() is None
-        ):
-            return _build_already_current_command(provenance).run()
-        return _build_mutating_command(
-            ref=target_sha,
-            provenance=provenance,
-            executor=executor,
-            allow_downgrade=allow_downgrade,
-        ).run()
+        outcome: UpdateOutcome = (
+            "already_current"
+            if provenance.commit_id is not None and target_sha == provenance.commit_id
+            else "updated"
+        )
+        return UpdateResult(
+            outcome=outcome,
+            source_repo=provenance.source_repo,
+            previous_version=provenance.version,
+            target_version=provenance.version if outcome == "already_current" else None,
+            final_version=provenance.version if outcome == "already_current" else None,
+            previous_sha=provenance.commit_id,
+            target_sha=target_sha,
+            final_sha=provenance.commit_id if outcome == "already_current" else None,
+            executable_path=(
+                str(provenance.uv_tool_bin_path) if provenance.uv_tool_bin_path else None
+            ),
+            tool_env_path=(
+                str(provenance.uv_tool_env_path) if provenance.uv_tool_env_path else None
+            ),
+            snapshot_state="absent",
+            journal_state="absent",
+            next_step=(
+                None
+                if outcome == "already_current"
+                else "run `odcli update` to apply the resolved revision"
+            ),
+        )
 
-    plan = ExecutionPlan(steps=(resolve_step.public_projection(),))
-    prepared = prepared_command(callback, (resolve_step,), executor=active_executor)
+    inspect_step = PreparedAction(
+        step_id="update.inspect",
+        action="inspect",
+        description="Inspect installed OdCLI provenance",
+        read_only=True,
+    )
+    steps: tuple[PreparedAction | PreparedStep, ...] = (inspect_step, resolve_step)
+    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
+    prepared = prepared_command(callback, steps, executor=active_executor)
     return Command.from_prepared(plan, prepared)
 
 

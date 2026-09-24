@@ -4,10 +4,13 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     import click
+
+    from odoo_instance_sdk.commands.output import OutputDocument
+    from odoo_instance_sdk.execution import Command, JsonValue
 else:
     import rich_click as click
 
@@ -43,6 +46,23 @@ if TYPE_CHECKING:
 
 
 InitOption = str | int | bool | tuple[str, ...] | None
+
+
+class _InitRunOrPreview(Protocol):
+    def __call__(
+        self,
+        build_command: Callable[[], Command[dict[str, JsonValue]]],
+        *,
+        command_name: str,
+        mode: OutputMode,
+        dry_run: bool,
+        result: Callable[[dict[str, JsonValue] | None], dict[str, JsonValue]] | None = None,
+        provenance: dict[str, JsonValue] | None = None,
+        confirm: Callable[[], None] | None = None,
+        rich: Callable[[OutputDocument], str] | None = None,
+        preview: Callable[[Command[dict[str, JsonValue]]], dict[str, JsonValue]] | None = None,
+        emit_normal: bool = True,
+    ) -> tuple[int, dict[str, JsonValue] | None]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +157,7 @@ def _execute_init(
     output_mode: OutputMode,
     effective_no_input: bool,
     confirm_partial: Callable[[list[str], dict[str, str]], None] | None,
+    run_or_preview: _InitRunOrPreview,
 ) -> None:
     resolved_project = Path(request.project_path) if request.project_path else Path.cwd()
     provenance: dict[str, list[str]] = {
@@ -397,6 +418,7 @@ def register_init_command(cli: click.Group) -> None:
             output_mode=output_mode,
             effective_no_input=request.no_input or output_mode is not OutputMode.RICH,
             confirm_partial=confirm_partial,
+            run_or_preview=cast("_InitRunOrPreview", run_or_preview),
         )
 
 

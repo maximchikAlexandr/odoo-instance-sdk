@@ -522,6 +522,7 @@ def test_discovered_public_methods() -> None:
             "approve_image_command",
             "ensure_running",
             "ensure_running_command",
+            "execute_ensure_running_plan",
             "from_project",
             "resolve_image_digest",
             "resolve_image_digest_command",

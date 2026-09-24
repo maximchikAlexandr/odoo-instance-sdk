@@ -27,19 +27,13 @@ from odoo_instance_sdk.internal.self_update import (
     is_maintenance_mode,
     prepare_maintenance_environment,
     run_maintenance,
-    unfinished_update_journal,
     update_command,
 )
 from odoo_instance_sdk.models.update import UpdateOutcome
 
 
-def _should_resume_maintenance() -> bool:
-    journal = unfinished_update_journal()
-    return journal is not None and journal.get("phase") == "migrate"
-
-
 def _maintenance_exit_code() -> int | None:
-    if is_maintenance_mode() or _should_resume_maintenance():
+    if is_maintenance_mode():
         return run_maintenance()
     return None
 
@@ -87,7 +81,7 @@ def _maintenance_exit_code() -> int | None:
     help="Permit installing an older revision.",
 )
 @output_options
-def update_command_cli(
+def update_command_cli(  # noqa: C901
     check: bool,
     dry_run: bool,
     ref: str,
@@ -108,9 +102,9 @@ def update_command_cli(
             usage=True,
         )
     prepare_maintenance_environment()
-    # Older OdCLI releases launched the maintenance child without preserving
-    # its environment marker.  A migrate journal is the durable equivalent;
-    # resume that exact target instead of starting a nested update.
+    # Only an explicit maintenance environment is allowed to enter the child
+    # maintenance hand-off.  A user-visible migrate journal resumes through
+    # update_command(), where the coordinator owns lock and preflight checks.
     maintenance_status = _maintenance_exit_code()
     if maintenance_status is not None:
         raise click.exceptions.Exit(maintenance_status)
@@ -129,15 +123,6 @@ def update_command_cli(
         def confirm() -> None:
             click.confirm("Proceed with OdCLI update?", default=False, abort=True)
 
-    def build_command() -> Command[UpdateResult]:
-
-        return update_command(
-            ref=ref,
-            check=check,
-            dry_run=dry_run,
-            allow_downgrade=allow_downgrade,
-        )
-
     _FAILURE_OUTCOMES: frozenset[UpdateOutcome] = frozenset(
         {
             "unsupported_install",
@@ -148,6 +133,40 @@ def update_command_cli(
     )
 
     try:
+        if check:
+            command = update_command(
+                ref=ref,
+                check=True,
+                dry_run=dry_run,
+                allow_downgrade=allow_downgrade,
+            )
+        else:
+            # Mutable refs use an explicit read-only first stage.  It is
+            # captured without launching; only after it completes do we
+            # capture the exact-SHA command shown to preview/confirm.
+            candidate = update_command(ref=ref, allow_downgrade=allow_downgrade)
+            if any(step.step_id == "update.resolve" for step in candidate.plan.steps):
+                resolution = candidate.run()
+                if resolution.outcome in _FAILURE_OUTCOMES:
+                    fail(
+                        mode,
+                        "update",
+                        resolution.next_step or "update resolution failed",
+                        dry_run=dry_run,
+                        error_code=resolution.outcome,
+                        details=model_to_dict(resolution),
+                    )
+                target_ref = resolution.target_sha or ref
+                command = update_command(
+                    ref=target_ref,
+                    allow_downgrade=allow_downgrade,
+                )
+            else:
+                command = candidate
+
+        def build_command() -> Command[UpdateResult]:
+            return command
+
         status, result = run_or_preview(
             build_command,
             command_name="update",
