@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import msgspec
 
@@ -260,6 +261,82 @@ def _journal_snapshot_sha(
     return provenance.commit_id
 
 
+RevisionRelation = Literal["same", "descendant", "ancestor", "divergent", "unknown"]
+
+
+def _git_revision_relation(
+    *,
+    source_repo: str | None,
+    installed_sha: str,
+    target_sha: str,
+) -> RevisionRelation:
+    """Classify two revisions without treating SHA bytes as a version order."""
+    if installed_sha == target_sha:
+        return "same"
+    if not source_repo:
+        return "unknown"
+    repository = source_repo.removeprefix("git+")
+    if repository.startswith("file://"):
+        repository = repository.removeprefix("file://")
+    with tempfile.TemporaryDirectory(prefix="odcli-update-ancestry-") as checkout:
+        root = Path(checkout)
+        init = SubprocessExecutor().execute(
+            PreparedStep(
+                step_id="update.inspect.ancestry-init",
+                argv=("git", "init", "--bare", str(root / "objects.git")),
+                read_only=True,
+                timeout=30.0,
+            )
+        )
+        if init.returncode != 0:
+            return "unknown"
+        git_dir = str(root / "objects.git")
+        fetched = SubprocessExecutor().execute(
+            PreparedStep(
+                step_id="update.inspect.ancestry-fetch",
+                argv=(
+                    "git",
+                    "--git-dir",
+                    git_dir,
+                    "fetch",
+                    "--no-tags",
+                    repository,
+                    installed_sha,
+                    target_sha,
+                ),
+                read_only=True,
+                timeout=60.0,
+            )
+        )
+        if fetched.returncode != 0:
+            return "unknown"
+
+        def is_ancestor(ancestor: str, descendant: str) -> bool:
+            result = SubprocessExecutor().execute(
+                PreparedStep(
+                    step_id="update.inspect.ancestry-check",
+                    argv=(
+                        "git",
+                        "--git-dir",
+                        git_dir,
+                        "merge-base",
+                        "--is-ancestor",
+                        ancestor,
+                        descendant,
+                    ),
+                    read_only=True,
+                    timeout=30.0,
+                )
+            )
+            return result.returncode == 0
+
+        if is_ancestor(installed_sha, target_sha):
+            return "descendant"
+        if is_ancestor(target_sha, installed_sha):
+            return "ancestor"
+        return "divergent"
+
+
 def _preflight_error(
     *,
     ref: str,
@@ -283,13 +360,19 @@ def _preflight_error(
         _validate_storage_migration_path()
     except PreflightFailedError as exc:
         return str(exc)
-    if (
-        not allow_downgrade
-        and provenance.commit_id is not None
-        and _is_full_sha(ref)
-        and int(ref, 16) < int(provenance.commit_id, 16)
-    ):
-        return "downgrade refused without --allow-downgrade"
+    if _is_full_sha(ref):
+        installed_sha = provenance.commit_id
+        if installed_sha is None or not _is_full_sha(installed_sha):
+            return "cannot verify revision ancestry; installed commit is unavailable"
+        relation = _git_revision_relation(
+            source_repo=provenance.source_repo,
+            installed_sha=installed_sha.lower(),
+            target_sha=ref.lower(),
+        )
+        if relation == "ancestor" and not allow_downgrade:
+            return "downgrade refused without --allow-downgrade"
+        if relation not in {"same", "descendant", "ancestor"}:
+            return "cannot verify revision ancestry; target history is unavailable"
     return None
 
 

@@ -137,7 +137,9 @@ shape: add `--dry-run` to render the captured typed plan, then omit it to run
 the command. The preview contains ordered process/action steps, redacted
 arguments and stdin, planning observations, warnings, classifications, and a
 fingerprint. A preview never launches a process, prompts, or mutates the
-workspace. See [execution boundary and CLI inventory](docs/execution-boundary.md)
+workspace, except for `update`: its read-only resolver and preflight may run
+to freeze the exact target before the install/migration plan is rendered.
+Those mutation steps remain inert. See [execution boundary and CLI inventory](docs/execution-boundary.md)
 for the complete eligibility table and the intentionally narrow exceptions.
 
 Rich previews show the exact sanitized captured commands in execution order;
@@ -170,7 +172,9 @@ confirmation boundaries:
   validated physical footprint and other supported platforms use the existing
   RSS total. Rich, JSON, TOON, OpenAPI, and the dashboard read that same field.
 - Success and failure documents preserve the resolved `dry_run` value; a
-  preview never launches a child, prompts, or mutates state.
+  preview never launches a child, prompts, or mutates state, except that
+  `update` may run its read-only resolver and preflight before showing the
+  inert install/migration plan.
 - `odcli db restore BACKUP_UUID --replace` replaces only a selected stopped
   COPY environment. It preserves the exact target and environment identity,
   uses matching database/filestore provenance, supports the existing
@@ -516,8 +520,9 @@ Use the portable `odcli-bug-report` agent skill for reviewer rounds and
 emergency unblock paths.
 
 `odcli update` safely upgrades a uv-tool install: default `--ref` is `main`,
-`--check` resolves without mutation, and `--dry-run` emits frozen ProcessSteps
-without launching `uv` or `odcli`. Mutating execution uses an exclusive lock on
+`--check` resolves without mutation, and `--dry-run` may launch only the
+read-only `uv` resolver/preflight needed to freeze the immutable target; it
+never launches install or maintenance `odcli` steps. Mutating execution uses an exclusive lock on
 `~/.odcli/locks/odcli-update.lock`, snapshots affected metadata, installs
 through `uv tool install --force`, and runs maintenance migrations in a child
 `odcli update --format json` with `ODCLI_MAINTENANCE=1`. Pip, pipx, system, and
