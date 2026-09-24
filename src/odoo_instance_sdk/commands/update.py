@@ -231,7 +231,6 @@ def update_command_cli(
             dry_run=False,
             usage=True,
         )
-    _require_structured_confirmation(mode=mode, yes=yes, dry_run=dry_run, check=check)
     prepare_maintenance_environment()
     # Only an explicit maintenance environment is allowed to enter the child
     # maintenance hand-off.  A user-visible migrate journal resumes through
@@ -239,6 +238,7 @@ def update_command_cli(
     maintenance_status = _maintenance_exit_code()
     if maintenance_status is not None:
         raise click.exceptions.Exit(maintenance_status)
+    _require_structured_confirmation(mode=mode, yes=yes, dry_run=dry_run, check=check)
     if not yes and no_input and not dry_run and not check:
         fail(
             mode,

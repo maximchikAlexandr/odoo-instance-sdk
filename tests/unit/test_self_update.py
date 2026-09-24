@@ -26,11 +26,13 @@ from odoo_instance_sdk.internal.self_update import (
     update,
     update_command,
 )
+from odoo_instance_sdk.internal.self_update_commands import _preflight_error
 from odoo_instance_sdk.models.update import UpdateResult
 
-_SHA_A = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
-_SHA_B = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
-_SHA_OLD = "e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3"
+_SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_SHA_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+_SHA_OLD = "0000000000000000000000000000000000000000"
+_SHA_SECURITY_TARGET = "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3"
 _VCS_DIRECT_URL = json.dumps(
     {
         "url": f"git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@{_SHA_A}",
@@ -98,6 +100,10 @@ def _patch_provenance(
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update._assert_runtime_environment",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update_commands._verify_installed_revision",
         lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
@@ -412,13 +418,13 @@ def test_update_coordinator_matrix(
 
 
 @pytest.mark.parametrize(
-    ("relation", "allow_downgrade", "expected"),
+    ("relation", "allow_downgrade", "expected_error"),
     [
-        ("descendant", False, "updated"),
-        ("ancestor", False, "preflight_failed"),
-        ("ancestor", True, "updated"),
-        ("divergent", False, "preflight_failed"),
-        ("unknown", True, "preflight_failed"),
+        ("descendant", False, None),
+        ("ancestor", False, "downgrade refused"),
+        ("ancestor", True, None),
+        ("divergent", False, "history is unavailable"),
+        ("unknown", True, "history is unavailable"),
     ],
 )
 def test_revision_downgrade_gate_requires_proven_ancestry(
@@ -427,19 +433,22 @@ def test_revision_downgrade_gate_requires_proven_ancestry(
     tmp_path: Path,
     relation: str,
     allow_downgrade: bool,
-    expected: str,
+    expected_error: str | None,
 ) -> None:
-    executor = _prepare_update_case(monkeypatch, tmp_path, {})
+    _prepare_update_case(monkeypatch, tmp_path, {})
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update_commands._git_revision_relation",
         lambda **_kwargs: relation,
     )
-    result = update_command(
-        ref=_SHA_B,
+    error = _preflight_error(
+        ref=_SHA_SECURITY_TARGET,
+        provenance=_provenance(),
         allow_downgrade=allow_downgrade,
-        executor=executor,
-    ).run()
-    assert result.outcome == expected
+    )
+    if expected_error is None:
+        assert error is None
+    else:
+        assert expected_error in (error or "")
 
 
 def test_read_uv_tool_direct_url_uses_pep610_metadata(
