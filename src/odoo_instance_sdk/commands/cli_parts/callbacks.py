@@ -27,7 +27,6 @@ from odoo_instance_sdk.commands.cli_parts.registration import (
 from odoo_instance_sdk.commands.context import (
     CliContext,
     ResolvedContext,
-    RuntimeView,
     pass_cli_context,
 )
 from odoo_instance_sdk.commands.module import register_module_commands
@@ -80,13 +79,12 @@ from odoo_instance_sdk.internal.vscode_generate import (
 )
 from odoo_instance_sdk.models import (
     DepsVerifyResult,
-    DevelopmentEnvironment,
 )
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.deps import verify_deps_command
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.execution import Command, JsonValue
+    from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.doctor import DoctorReport
 
 
@@ -281,41 +279,25 @@ def stop(
     output_mode = resolve_output_mode(output_format, json_output)
     try:
         runtime_context = _ready_instance(ctx)
-        command: Command[dict[str, str | None]]
-        stop_context: JsonObject
-        runtime = getattr(runtime_context, "runtime", None)
-        if not (
-            isinstance(runtime, RuntimeView)
-            and isinstance(runtime.owner_kind, str)
-            and isinstance(runtime.project_id, str)
-            and isinstance(runtime_context.source, (ProjectConfig, DevelopmentEnvironment))
-        ):
-            environment = runtime_context.require_environment()
-            command = cast(
-                "Command[dict[str, str | None]]",
-                runtime_context.instance.stop_environment_command(),
-            )
-            stop_context = {
-                "owner_kind": "environment",
-                "project_id": None,
-                "environment_id": str(environment.id),
-                "environment_name": str(environment.name),
-                "worktree_path": environment.worktree_path,
-            }
-            rich_message = f"Stopped environment {environment.name} ({environment.id})"
-        else:
-            command = runtime_context.instance.stop_runtime_command()
-            stop_context = {
-                "owner_kind": runtime.owner_kind,
-                "project_id": runtime.project_id,
-                "environment_id": runtime.environment_id,
-                "environment_name": runtime.environment_name,
-                "worktree_path": str(runtime.root),
-            }
-            rich_message = (
-                f"Stopped {runtime.owner_kind} runtime "
-                f"{runtime.environment_name or runtime.project_id}"
-            )
+        runtime = runtime_context.runtime
+        command = runtime_context.instance.stop_runtime_command()
+        stop_context: JsonObject = {
+            "owner_kind": runtime.owner_kind,
+            "owner_id": runtime.owner_id,
+            "project_id": runtime.project_id,
+            "environment_id": runtime.environment_id,
+            "environment_name": runtime.environment_name,
+            "worktree_path": str(runtime.root),
+        }
+        rich_message = (
+            f"Stopped {runtime.owner_kind} runtime owner_kind={runtime.owner_kind} "
+            f"owner_id={runtime.owner_id} project_id={runtime.project_id} "
+            f"environment_id={runtime.environment_id} "
+            f"environment_name={runtime.environment_name}"
+        )
+
+        def stop_result(value: dict[str, str | None] | None) -> JsonObject:
+            return {**stop_context, **(value or {})}
     except SystemExit:
         raise
     except Exception as error:
@@ -326,7 +308,7 @@ def stop(
             command_name="stop",
             mode=output_mode,
             dry_run=dry_run,
-            result=lambda value: cast("JsonObject", value or {}),
+            result=stop_result,
             context=stop_context,
             provenance=cast("JsonObject", runtime_context.output_provenance),
             rich=lambda _document: rich_message,

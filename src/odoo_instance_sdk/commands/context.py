@@ -69,6 +69,14 @@ class RuntimeView:
     def http_url(self) -> str:
         return f"http://{self.http_interface}:{self.http_port}"
 
+    @property
+    def owner_id(self) -> str:
+        if self.owner_kind == "environment":
+            if self.environment_id is None:
+                raise RuntimeError("environment runtime has no environment id")
+            return self.environment_id
+        return self.project_id
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResolvedContext:

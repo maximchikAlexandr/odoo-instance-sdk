@@ -251,11 +251,14 @@ class _PlanningMixin:
                     terminate_pid(
                         identity.root_pid,
                         process_group_id=identity.process_group_id,
+                        expected_create_time=identity.create_time,
                         timeout=timeout,
                     )
                     context.complete_action(action_ids[2])
                     context.action(action_ids[3])
-                    _verify_process_exit(identity.root_pid)
+                    _verify_process_exit(
+                        identity.root_pid, expected_create_time=identity.create_time
+                    )
                     context.complete_action(action_ids[3])
                     context.action(action_ids[4])
                     self._clear_runtime_identity_if_matches(identity)
@@ -461,21 +464,11 @@ class _PlanningMixin:
 
     def _clear_runtime_identity_if_matches(self, identity: _RuntimeIdentity) -> None:
         catalog = cast("_RuntimeCatalog", self._client.get_catalog())
-        clear_runtime = getattr(catalog, "_clear_runtime_if_matches", None)
-        if callable(clear_runtime):
-            cleared = clear_runtime(
-                *identity.owner,
-                root_pid=identity.root_pid,
-                create_time=identity.create_time,
-            )
-        elif identity.owner_kind == "environment":
-            cleared = catalog._clear_environment_runtime_if_matches(
-                identity.owner_id,
-                root_pid=identity.root_pid,
-                create_time=identity.create_time,
-            )
-        else:
-            cleared = False
+        cleared = catalog._clear_runtime_if_matches(
+            *identity.owner,
+            root_pid=identity.root_pid,
+            create_time=identity.create_time,
+        )
         if not cleared:
             raise RuntimeError("runtime identity changed before clearing its row")
 

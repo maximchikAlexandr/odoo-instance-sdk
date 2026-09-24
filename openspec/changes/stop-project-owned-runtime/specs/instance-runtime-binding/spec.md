@@ -28,4 +28,3 @@ The existing owner-neutral runtime record and canonical owner inputs SHALL be th
 
 - **WHEN** the matching owner's PID or create time changes after validation but before cleanup
 - **THEN** conditional cleanup fails without deleting the replacement runtime row
-

@@ -855,12 +855,7 @@ class _IdentityMixin:
                 "stop requires a project- or environment-owned runtime"
             )
         catalog = cast("_RuntimeCatalog", self._client.get_catalog())
-        get_runtime = getattr(catalog, "get_runtime", None)
-        runtime_row = (
-            get_runtime(owner_kind, owner_id)
-            if callable(get_runtime)
-            else catalog.get_environment_runtime(owner_id)
-        )
+        runtime_row = catalog.get_runtime(owner_kind, owner_id)
         if runtime_row is None:
             return None
         try:

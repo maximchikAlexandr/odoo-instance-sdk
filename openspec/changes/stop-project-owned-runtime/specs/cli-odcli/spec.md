@@ -33,4 +33,3 @@ Top-level `odcli stop` SHALL resolve exactly one initialized project or register
 
 - **WHEN** the persisted owner kind, owner id, PID, create time, or canonical runtime expectations differ between planning and execution revalidation
 - **THEN** `stop` fails closed without signaling or clearing either owner's runtime row
-

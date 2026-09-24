@@ -123,12 +123,6 @@ class _RuntimeCatalog(Protocol):
 
     def get_environment(self, environment_id: str) -> Mapping[str, JsonValue] | None: ...
 
-    def get_environment_runtime(self, environment_id: str) -> Mapping[str, JsonValue] | None: ...
-
-    def _clear_environment_runtime_if_matches(
-        self, environment_id: str, *, root_pid: int, create_time: float
-    ) -> bool: ...
-
     def _clear_runtime_if_matches(
         self,
         owner_kind: str,
@@ -486,8 +480,8 @@ def _runtime_argv_matches(identity: _RuntimeIdentity) -> bool:
     )
 
 
-def _verify_process_exit(pid: int) -> None:
-    if is_process_alive(pid):
+def _verify_process_exit(pid: int, *, expected_create_time: float | None = None) -> None:
+    if is_process_alive(pid, expected_create_time=expected_create_time):
         raise RuntimeError("runtime process did not exit")
 
 

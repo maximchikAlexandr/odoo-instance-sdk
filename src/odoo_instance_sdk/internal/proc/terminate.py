@@ -10,6 +10,8 @@ import sys
 import time
 from types import FrameType
 
+import psutil
+
 from odoo_instance_sdk.internal.proc.run import (
     _CLEANUP_TIMEOUT,
     ProcessHandle,
@@ -103,64 +105,73 @@ def terminate(
         handle.wait(timeout=timeout)
 
 
-def is_process_alive(pid: int) -> bool:
+def is_process_alive(pid: int, *, expected_create_time: float | None = None) -> bool:
     """Return whether the OS still exposes a process with this PID."""
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        process = psutil.Process(pid)
+    except psutil.NoSuchProcess:
         return False
-    except PermissionError:
+    except (psutil.AccessDenied, psutil.ZombieProcess, OSError) as exc:
+        if expected_create_time is not None:
+            raise RuntimeError("process identity is inaccessible") from exc
         return True
-    # A terminated group leader can remain as a zombie until its parent
-    # reaps it.  Treating that kernel entry as alive makes bounded owned-tree
-    # cleanup report a false timeout and prevents the runtime ledger from
-    # reaching its empty postcondition.
-    if sys.platform != "win32":
-        try:
-            with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
-                state = stream.read().split()[2]
-        except (FileNotFoundError, OSError, IndexError):
-            return False
-        if state == "Z":
-            return False
-    return True
+    try:
+        if expected_create_time is not None and process.create_time() != expected_create_time:
+            raise RuntimeError("process identity changed during termination")
+        return process.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.ZombieProcess:
+        return False
+    except (psutil.AccessDenied, OSError) as exc:
+        if expected_create_time is not None:
+            raise RuntimeError("process identity is inaccessible") from exc
+        return True
+
+
+def _wait_for_pid_exit(pid: int, *, expected_create_time: float | None, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while (
+        is_process_alive(pid, expected_create_time=expected_create_time)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.05)
 
 
 def terminate_pid(
     pid: int,
     *,
     process_group_id: int | None = None,
+    expected_create_time: float | None = None,
     timeout: float = _CLEANUP_TIMEOUT,
 ) -> None:
     """Boundedly terminate an adopted process through the private proc seam."""
     if pid <= 0:
         raise ValueError("pid must be positive")
     if sys.platform == "win32":
+        if not is_process_alive(pid, expected_create_time=expected_create_time):
+            return
         args = ["/T", "/PID", str(pid)]
         taskkill = prepared_step("taskkill", args, step_id="taskkill", timeout=timeout)
         SubprocessExecutor().execute(taskkill)
-        deadline = time.monotonic() + timeout
-        while is_process_alive(pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if is_process_alive(pid):
+        _wait_for_pid_exit(pid, expected_create_time=expected_create_time, timeout=timeout)
+        if is_process_alive(pid, expected_create_time=expected_create_time):
             force = prepared_step(
                 "taskkill", (*args, "/F"), step_id="taskkill.force", timeout=timeout
             )
             SubprocessExecutor().execute(force)
     else:
         group_id = process_group_id or pid
+        if not is_process_alive(pid, expected_create_time=expected_create_time):
+            return
         with contextlib.suppress(ProcessLookupError):
             os.killpg(group_id, signal.SIGTERM)
-        deadline = time.monotonic() + timeout
-        while is_process_alive(pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if is_process_alive(pid):
+        _wait_for_pid_exit(pid, expected_create_time=expected_create_time, timeout=timeout)
+        if is_process_alive(pid, expected_create_time=expected_create_time):
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(group_id, signal.SIGKILL)
-            deadline = time.monotonic() + timeout
-            while is_process_alive(pid) and time.monotonic() < deadline:
-                time.sleep(0.05)
-    if is_process_alive(pid):
+            _wait_for_pid_exit(pid, expected_create_time=expected_create_time, timeout=timeout)
+    if is_process_alive(pid, expected_create_time=expected_create_time):
         raise TimeoutError(f"process {pid} did not exit within {timeout}s")
 
 
