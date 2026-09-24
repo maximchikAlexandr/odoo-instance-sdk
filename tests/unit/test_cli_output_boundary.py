@@ -19,7 +19,14 @@ from odoo_instance_sdk.models import PostgresClusterState
 
 _REPO_ROOT = Path(__file__).parents[2]
 _COMMANDS_ROOT = _REPO_ROOT / "src" / "odoo_instance_sdk" / "commands"
-_DOWNSTREAM_DIRECT_TABLE_SITES: frozenset[tuple[str, int]] = frozenset()
+# Upstream's bug-report adapters predate this PR's shared table guard and keep
+# their own in-memory Rich projections as a separate command surface.
+_DOWNSTREAM_DIRECT_TABLE_SITES: frozenset[tuple[str, int]] = frozenset(
+    {
+        ("src/odoo_instance_sdk/commands/bug_report.py", 49),
+        ("src/odoo_instance_sdk/commands/bug_report.py", 66),
+    }
+)
 
 
 @pytest.mark.unit
@@ -114,7 +121,6 @@ def test_production_commands_inventory_direct_table_constructors() -> None:
         )
 
     downstream = actual - approved
-    assert len(_DOWNSTREAM_DIRECT_TABLE_SITES) == 0
-    assert len(actual) == 1
+    assert actual == approved | _DOWNSTREAM_DIRECT_TABLE_SITES
     assert len(approved) == 1
     assert downstream == _DOWNSTREAM_DIRECT_TABLE_SITES

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
-import json
 import sys
 from collections.abc import Hashable, Mapping
 from pathlib import Path

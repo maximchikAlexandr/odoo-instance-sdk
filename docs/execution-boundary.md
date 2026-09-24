@@ -218,23 +218,25 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:445-446` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:485-486` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
 - `src/odoo_instance_sdk/commands/cli_parts/registration.py:473` — documented
   `--version` metadata flag transport; remove only if `--version` gains a
   replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/backup.py:348` — shared Rich validation
+- `src/odoo_instance_sdk/commands/backup.py:347` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/output.py:247` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:116` — in-memory Rich serialization
+  boundary; it writes only to an in-memory buffer and never to terminal output.
+- `src/odoo_instance_sdk/commands/output.py:288` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:416` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:457` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:418` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:459` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:425` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:466` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:427` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:468` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
 - `src/odoo_instance_sdk/internal/self_update.py:813-815` — maintenance child
   JSON stdout transport; remove when maintenance output gains a replacement
