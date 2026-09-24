@@ -232,33 +232,6 @@ def _skip_planned_steps(context: RunContext[UpdateResult], *step_ids: str) -> No
             context.skip(step_id)
 
 
-def resolve_update_target_sha(
-    ref: str,
-    *,
-    executor: ProcessExecutor | None,
-) -> str:
-    """Resolve a mutable ref from the declared post-confirmation phase."""
-    if _is_full_sha(ref):
-        return ref.lower()
-    step = PreparedStep(
-        step_id="update.resolve",
-        argv=_install_argv(ref, dry_run=True),
-        read_only=True,
-    )
-    result = cast("ProcessResult", (executor or SubprocessExecutor()).execute(step))
-    if result.returncode != 0:
-        stderr = result.stderr if isinstance(result.stderr, str) else ""
-        detail = stderr.strip() or "uv could not resolve the requested revision"
-        raise UnsupportedInstallError(detail, manual_argv=_MANUAL_INSTALL_ARGV)
-    target_sha = _extract_target_sha(ref, _process_output_text(result))
-    if target_sha is None:
-        raise UnsupportedInstallError(
-            "could not parse target SHA from uv output (sha_unparsed)",
-            manual_argv=_MANUAL_INSTALL_ARGV,
-        )
-    return target_sha
-
-
 def _journal_resume_phase(journal: dict[str, JsonValue] | None) -> str | None:
     if journal is None:
         return None
@@ -281,9 +254,43 @@ def _journal_snapshot_sha(
 ) -> str | None:
     if journal is not None:
         raw = journal.get("snapshot_sha")
-        if isinstance(raw, str) and raw:
-            return raw
+        if isinstance(raw, str) and _is_full_sha(raw):
+            return raw.lower()
+        raise UpdateError("unfinished update journal has no immutable snapshot_sha")
     return provenance.commit_id
+
+
+def _preflight_error(
+    *,
+    ref: str,
+    provenance: InstalledProvenance,
+    allow_downgrade: bool,
+) -> str | None:
+    if sys.version_info < _MIN_PYTHON:
+        return (
+            f"Python {'.'.join(str(part) for part in _MIN_PYTHON)}+ is required; "
+            f"found {sys.version_info.major}.{sys.version_info.minor}"
+        )
+    if sys.platform not in _SUPPORTED_PLATFORMS:
+        return f"unsupported platform {sys.platform!r}"
+    disk_error = _preflight_disk_check()
+    if disk_error is not None:
+        return disk_error
+    if _catalog_schema_version() == "unreadable":
+        return "catalog schema is unreadable"
+    try:
+        _validate_catalog_migration_path()
+        _validate_storage_migration_path()
+    except PreflightFailedError as exc:
+        return str(exc)
+    if (
+        not allow_downgrade
+        and provenance.commit_id is not None
+        and _is_full_sha(ref)
+        and int(ref, 16) < int(provenance.commit_id, 16)
+    ):
+        return "downgrade refused without --allow-downgrade"
+    return None
 
 
 def _recovery_step_for_snapshot(snapshot_sha: str | None) -> PreparedStep:
@@ -355,40 +362,14 @@ class _UpdateSession:
         self.context.action("update.inspect")
         self.context.complete_action("update.inspect")
         self._finish("inspect", started)
-        if self.journal_target_ref is not None or _is_full_sha(self.ref):
-            self.context.skip("update.resolve")
-            self.ref = self.ref.lower()
-            return
-        self.context.action("update.resolve")
-        self.ref = resolve_update_target_sha(self.ref, executor=self.executor)
-        self.context.complete_action("update.resolve")
+        self.ref = self.ref.lower()
 
     def preflight(self) -> str | None:
-        if sys.version_info < _MIN_PYTHON:
-            return (
-                f"Python {'.'.join(str(part) for part in _MIN_PYTHON)}+ is required; "
-                f"found {sys.version_info.major}.{sys.version_info.minor}"
-            )
-        if sys.platform not in _SUPPORTED_PLATFORMS:
-            return f"unsupported platform {sys.platform!r}"
-        disk_error = _preflight_disk_check()
-        if disk_error is not None:
-            return disk_error
-        if _catalog_schema_version() == "unreadable":
-            return "catalog schema is unreadable"
-        try:
-            _validate_catalog_migration_path()
-            _validate_storage_migration_path()
-        except PreflightFailedError as exc:
-            return str(exc)
-        if (
-            not self.allow_downgrade
-            and self.provenance.commit_id is not None
-            and _is_full_sha(self.ref)
-            and int(self.ref, 16) < int(self.provenance.commit_id, 16)
-        ):
-            return "downgrade refused without --allow-downgrade"
-        return None
+        return _preflight_error(
+            ref=self.ref,
+            provenance=self.provenance,
+            allow_downgrade=self.allow_downgrade,
+        )
 
     def snapshot(self) -> None:
         started = self._start("snapshot")
@@ -408,6 +389,36 @@ class _UpdateSession:
         self.context.complete_action("update.snapshot")
         self._finish("snapshot", started)
 
+    def _write_install_journal(self) -> None:
+        _write_journal(
+            self.journal_path,
+            {
+                "version": _JOURNAL_VERSION,
+                "phase": "install",
+                "target_ref": self.ref,
+                "snapshot_sha": self.snapshot_sha,
+                "maintenance_pid": None,
+            },
+        )
+
+    def resume_snapshot(self) -> None:
+        """Resume a snapshot-phase crash without replacing its rollback point."""
+        self.context.skip("update.snapshot")
+        snapshot_sha = self.snapshot_sha
+        target_ref = self.journal_target_ref
+        installed_sha = self.provenance.commit_id
+        if snapshot_sha is None or target_ref is None or installed_sha is None:
+            raise UpdateError("snapshot resume has incomplete immutable provenance")
+        installed_sha = installed_sha.lower()
+        if installed_sha == snapshot_sha:
+            self.install()
+            return
+        if installed_sha == target_ref:
+            self.context.skip("update.install")
+            self._write_install_journal()
+            return
+        raise UpdateError("snapshot resume found an unexpected installed revision")
+
     def install(self) -> None:
         started = self._start("install")
         result = cast("ProcessResult", self.context.process_prepared(self.install_step))
@@ -420,16 +431,7 @@ class _UpdateSession:
             _clear_journal(self.journal_path)
             _clear_snapshot(self.snapshot_dir)
             raise UpdateError(f"uv tool install failed with exit {result.returncode}")
-        _write_journal(
-            self.journal_path,
-            {
-                "version": _JOURNAL_VERSION,
-                "phase": "install",
-                "target_ref": self.ref,
-                "snapshot_sha": self.snapshot_sha,
-                "maintenance_pid": None,
-            },
-        )
+        self._write_install_journal()
 
     def migrate(self) -> UpdateResult | None:
         started = self._start("migrate")
@@ -537,6 +539,15 @@ class _UpdateSession:
         self.context.complete_action("update.commit")
         self._finish("commit", started)
 
+    def resume_or_install(self) -> None:
+        if self.resume_phase == "snapshot":
+            self.resume_snapshot()
+        elif self.resume_phase in {"migrate", "install"}:
+            _skip_planned_steps(self.context, "update.snapshot", "update.install")
+        else:
+            self.snapshot()
+            self.install()
+
     def result(self) -> UpdateResult:
         if self.maintenance_result_model is None:
             raise UpdateError("maintenance result was not verified")
@@ -600,14 +611,7 @@ class _UpdateSession:
             with exclusive_lock(_update_lock_path()):
                 self.context.complete_action("update.quiesce")
                 self._finish("quiesce", started)
-                if self.resume_phase not in {"migrate", "install"}:
-                    self.snapshot()
-                else:
-                    _skip_planned_steps(self.context, "update.snapshot")
-                if self.resume_phase in {"migrate", "install"}:
-                    _skip_planned_steps(self.context, "update.install")
-                else:
-                    self.install()
+                self.resume_or_install()
                 migration_failure = self.migrate()
                 if migration_failure is not None:
                     return migration_failure
@@ -635,6 +639,132 @@ class _UpdateSession:
         return self.result()
 
 
+def _build_staged_command(
+    *,
+    ref: str,
+    provenance: InstalledProvenance,
+    executor: ProcessExecutor | None,
+) -> Command[UpdateResult]:
+    """Build the first, read-only stage of the mutable-ref update flow."""
+    resolve_step = PreparedStep(
+        step_id="update.resolve",
+        argv=_install_argv(ref, dry_run=True),
+        read_only=True,
+    )
+    active_executor = executor or SubprocessExecutor()
+
+    def target_sha_from_result(result: ProcessResult) -> str:
+        if result.returncode != 0:
+            stderr = result.stderr if isinstance(result.stderr, str) else ""
+            raise UnsupportedInstallError(
+                stderr.strip() or "uv could not resolve the requested revision",
+                manual_argv=_MANUAL_INSTALL_ARGV,
+            )
+        target_sha = _extract_target_sha(ref, _process_output_text(result))
+        if target_sha is None:
+            raise UnsupportedInstallError(
+                "could not parse target SHA from uv output (sha_unparsed)",
+                manual_argv=_MANUAL_INSTALL_ARGV,
+            )
+        return target_sha
+
+    def callback(context: RunContext[UpdateResult]) -> UpdateResult:
+        context.action("update.inspect")
+        context.complete_action("update.inspect")
+        result = cast("ProcessResult", context.process_prepared(resolve_step))
+        target_sha = target_sha_from_result(result)
+        outcome: UpdateOutcome = (
+            "already_current"
+            if provenance.commit_id is not None and target_sha == provenance.commit_id
+            else "updated"
+        )
+        return UpdateResult(
+            outcome=outcome,
+            source_repo=provenance.source_repo,
+            previous_version=provenance.version,
+            target_version=provenance.version if outcome == "already_current" else None,
+            final_version=provenance.version if outcome == "already_current" else None,
+            previous_sha=provenance.commit_id,
+            target_sha=target_sha,
+            final_sha=provenance.commit_id if outcome == "already_current" else None,
+            executable_path=(
+                str(provenance.uv_tool_bin_path) if provenance.uv_tool_bin_path else None
+            ),
+            tool_env_path=(
+                str(provenance.uv_tool_env_path) if provenance.uv_tool_env_path else None
+            ),
+            snapshot_state="absent",
+            journal_state="absent",
+            next_step=(
+                None
+                if outcome == "already_current"
+                else "run `odcli update` to apply the resolved revision"
+            ),
+        )
+
+    inspect_step = PreparedAction(
+        step_id="update.inspect",
+        action="inspect",
+        description="Inspect installed OdCLI provenance",
+        read_only=True,
+    )
+    steps: tuple[PreparedAction | PreparedStep, ...] = (inspect_step, resolve_step)
+    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
+    prepared = prepared_command(callback, steps, executor=active_executor)
+    return Command.from_prepared(plan, prepared)
+
+
+def _build_preflight_command(
+    *,
+    ref: str,
+    provenance: InstalledProvenance,
+    allow_downgrade: bool,
+) -> Command[UpdateResult]:
+    """Run the read-only checks before a resolved mutation plan is shown."""
+    inspect_step = PreparedAction(
+        step_id="update.inspect",
+        action="inspect",
+        description="Inspect installed OdCLI provenance",
+        read_only=True,
+    )
+    preflight_step = PreparedAction(
+        step_id="update.preflight",
+        action="preflight",
+        description="Verify free space, schema, and migration path",
+        read_only=True,
+    )
+    steps: tuple[PreparedAction, ...] = (inspect_step, preflight_step)
+
+    def callback(context: RunContext[UpdateResult]) -> UpdateResult:
+        context.action(inspect_step.step_id)
+        context.complete_action(inspect_step.step_id)
+        context.action(preflight_step.step_id)
+        error = _preflight_error(
+            ref=ref,
+            provenance=provenance,
+            allow_downgrade=allow_downgrade,
+        )
+        context.complete_action(preflight_step.step_id)
+        if error is not None:
+            return _failure_result(
+                "preflight_failed",
+                provenance=provenance,
+                next_step=error,
+            )
+        return UpdateResult(
+            outcome="updated",
+            source_repo=provenance.source_repo,
+            previous_version=provenance.version,
+            previous_sha=provenance.commit_id,
+            target_sha=ref,
+            snapshot_state="absent",
+            journal_state="absent",
+        )
+
+    plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
+    return Command.create(plan, callback, steps)
+
+
 def _build_mutating_command(
     *,
     ref: str,
@@ -642,7 +772,16 @@ def _build_mutating_command(
     executor: ProcessExecutor | None,
     allow_downgrade: bool,
 ) -> Command[UpdateResult]:
-    install_step = PreparedStep(step_id="update.install", argv=_install_argv(ref), mutating=True)
+    if not _is_full_sha(ref):
+        raise UnsupportedInstallError(
+            "mutation command requires an immutable resolved revision",
+            manual_argv=_MANUAL_INSTALL_ARGV,
+        )
+    install_step = PreparedStep(
+        step_id="update.install",
+        argv=_install_argv(ref),
+        mutating=True,
+    )
     executable = provenance.uv_tool_bin_path
     if executable is None:
         raise UnsupportedInstallError(
@@ -660,12 +799,6 @@ def _build_mutating_command(
             step_id="update.inspect",
             action="inspect",
             description="Inspect installed OdCLI provenance",
-            read_only=True,
-        ),
-        PreparedAction(
-            step_id="update.resolve",
-            action="resolve",
-            description="Resolve the requested revision to an immutable commit",
             read_only=True,
         ),
         PreparedAction(

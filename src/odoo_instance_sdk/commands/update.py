@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     import click
@@ -13,6 +15,7 @@ else:
     import rich_click as click
 
 from odoo_instance_sdk.commands.output import (
+    JsonObject,
     OutputMode,
     emit,
     fail,
@@ -25,21 +28,132 @@ from odoo_instance_sdk.commands.output import (
 from odoo_instance_sdk.exceptions import UpdateError
 from odoo_instance_sdk.internal.self_update import (
     is_maintenance_mode,
+    preflight_update_command,
     prepare_maintenance_environment,
     run_maintenance,
-    unfinished_update_journal,
     update_command,
 )
 from odoo_instance_sdk.models.update import UpdateOutcome
 
+_FAILURE_OUTCOMES: frozenset[UpdateOutcome] = frozenset(
+    {
+        "unsupported_install",
+        "preflight_failed",
+        "rolled_back",
+        "update_incomplete",
+    }
+)
 
-def _should_resume_maintenance() -> bool:
-    journal = unfinished_update_journal()
-    return journal is not None and journal.get("phase") == "migrate"
+
+@dataclass(frozen=True, slots=True)
+class _UpdateSelection:
+    command: Command[UpdateResult] | None
+    result: UpdateResult | None = None
+
+
+class _UpdateRunner(Protocol):
+    def __call__(
+        self,
+        build_command: Callable[[], Command[UpdateResult]],
+        *,
+        command_name: str,
+        mode: OutputMode,
+        dry_run: bool,
+        result: Callable[[UpdateResult | None], JsonObject] | None = None,
+        confirm: Callable[[], None] | None = None,
+        preview: Callable[[Command[UpdateResult]], JsonObject] | None = None,
+        emit_normal: bool = True,
+    ) -> tuple[int, UpdateResult | None]: ...
+
+
+def _select_update_command(
+    *,
+    ref: str,
+    check: bool,
+    allow_downgrade: bool,
+) -> _UpdateSelection:
+    """Resolve, preflight, and capture the command shown by the CLI."""
+    if check:
+        return _UpdateSelection(
+            command=update_command(
+                ref=ref,
+                check=True,
+                allow_downgrade=allow_downgrade,
+            )
+        )
+
+    candidate = update_command(ref=ref, allow_downgrade=allow_downgrade)
+    if not any(step.step_id == "update.resolve" for step in candidate.plan.steps):
+        return _UpdateSelection(command=candidate)
+
+    resolution = candidate.run()
+    if resolution.outcome in _FAILURE_OUTCOMES:
+        return _UpdateSelection(command=None, result=resolution)
+    target_ref = resolution.target_sha or ref
+    preflight = preflight_update_command(
+        ref=target_ref,
+        allow_downgrade=allow_downgrade,
+    ).run()
+    if preflight.outcome in _FAILURE_OUTCOMES:
+        return _UpdateSelection(command=None, result=preflight)
+    return _UpdateSelection(
+        command=update_command(
+            ref=target_ref,
+            allow_downgrade=allow_downgrade,
+            force_mutation=True,
+        )
+    )
+
+
+def _require_update_command(selection: _UpdateSelection) -> Command[UpdateResult]:
+    if selection.command is None:
+        raise UpdateError("update command selection produced no command")
+    return selection.command
+
+
+def _run_selected_update(
+    *,
+    ref: str,
+    check: bool,
+    dry_run: bool,
+    allow_downgrade: bool,
+    mode: OutputMode,
+    confirm: Callable[[], None] | None,
+    runner: _UpdateRunner,
+) -> tuple[int, UpdateResult | None]:
+    selection = _select_update_command(
+        ref=ref,
+        check=check,
+        allow_downgrade=allow_downgrade,
+    )
+    if selection.result is not None:
+        fail(
+            mode,
+            "update",
+            selection.result.next_step or "update resolution failed",
+            dry_run=dry_run,
+            error_code=selection.result.outcome,
+            details=model_to_dict(selection.result),
+        )
+    command = _require_update_command(selection)
+
+    def build_command() -> Command[UpdateResult]:
+        return command
+
+    return runner(
+        build_command,
+        command_name="update",
+        mode=mode,
+        dry_run=dry_run,
+        result=lambda value: model_to_dict(value) if value else {},
+        confirm=confirm,
+        preview=lambda selected: model_to_dict(selected.plan),
+        emit_normal=False,
+    )
 
 
 def _maintenance_exit_code() -> int | None:
-    if is_maintenance_mode() or _should_resume_maintenance():
+    if is_maintenance_mode():
         return run_maintenance()
     return None
 
@@ -57,7 +171,7 @@ def _maintenance_exit_code() -> int | None:
     "dry_run",
     is_flag=True,
     default=False,
-    help="Emit the frozen plan without launching a process.",
+    help="Resolve the target and emit the frozen non-mutating plan.",
 )
 @click.option(
     "--ref",
@@ -108,9 +222,9 @@ def update_command_cli(
             usage=True,
         )
     prepare_maintenance_environment()
-    # Older OdCLI releases launched the maintenance child without preserving
-    # its environment marker.  A migrate journal is the durable equivalent;
-    # resume that exact target instead of starting a nested update.
+    # Only an explicit maintenance environment is allowed to enter the child
+    # maintenance hand-off.  A user-visible migrate journal resumes through
+    # update_command(), where the coordinator owns lock and preflight checks.
     maintenance_status = _maintenance_exit_code()
     if maintenance_status is not None:
         raise click.exceptions.Exit(maintenance_status)
@@ -129,34 +243,15 @@ def update_command_cli(
         def confirm() -> None:
             click.confirm("Proceed with OdCLI update?", default=False, abort=True)
 
-    def build_command() -> Command[UpdateResult]:
-
-        return update_command(
+    try:
+        status, result = _run_selected_update(
             ref=ref,
             check=check,
             dry_run=dry_run,
             allow_downgrade=allow_downgrade,
-        )
-
-    _FAILURE_OUTCOMES: frozenset[UpdateOutcome] = frozenset(
-        {
-            "unsupported_install",
-            "preflight_failed",
-            "rolled_back",
-            "update_incomplete",
-        }
-    )
-
-    try:
-        status, result = run_or_preview(
-            build_command,
-            command_name="update",
             mode=mode,
-            dry_run=dry_run,
-            result=lambda value: model_to_dict(value) if value else {},
             confirm=confirm,
-            preview=lambda command: model_to_dict(command.plan),
-            emit_normal=False,
+            runner=cast("_UpdateRunner", run_or_preview),
         )
     except UpdateError as exc:
         fail(mode, "update", str(exc), dry_run=dry_run)

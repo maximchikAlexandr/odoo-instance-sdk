@@ -17,6 +17,14 @@ The normal path confirms only after planning and runs that same command object.
 error with exit code `2`. Rich, JSON, and TOON are projections, not independent
 planners.
 
+`update` with a mutable ref is the explicit two-stage exception: it first runs
+the captured read-only resolver command, then captures the resolved full-SHA
+mutation command. The second command is the only command shown for mutation
+preview, confirmation, and execution; `update --dry-run` may run only the
+read-only resolver phase and never runs install or migration. A user-triggered
+migrate journal also resumes through this coordinator; direct maintenance is
+reserved for the explicit `ODCLI_MAINTENANCE=1` hand-off.
+
 Plans preserve ordered process/action steps, argv boundaries, sanitized
 environment policy, multiline stdin/source previews, observations, warnings,
 classification flags, and a redacted fingerprint. Private callbacks,

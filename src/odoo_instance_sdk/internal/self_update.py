@@ -834,6 +834,7 @@ def update_command(
     dry_run: bool = False,
     allow_downgrade: bool = False,
     executor: ProcessExecutor | None = None,
+    force_mutation: bool = False,
 ) -> Command[UpdateResult]:
     """Return the immutable ``Command[UpdateResult]`` for ``odcli update``."""
     from odoo_instance_sdk.internal.self_update_commands import (
@@ -841,6 +842,8 @@ def update_command(
         _build_check_command,
         _build_failure_command,
         _build_mutating_command,
+        _build_staged_command,
+        _journal_target_ref,
     )
 
     try:
@@ -855,14 +858,26 @@ def update_command(
         )
     if check:
         return _build_check_command(ref=ref, provenance=provenance, executor=executor)
-    target_sha = ref.lower() if _is_full_sha(ref) else ref
+    journal_target = _journal_target_ref(unfinished_update_journal())
+    target_sha = (
+        ref.lower()
+        if journal_target is not None and _is_full_sha(ref) and ref.lower() != journal_target
+        else journal_target or (ref.lower() if _is_full_sha(ref) else ref)
+    )
     if (
         not dry_run
+        and not force_mutation
         and provenance.commit_id is not None
         and target_sha == provenance.commit_id
         and unfinished_update_journal() is None
     ):
         return _build_already_current_command(provenance)
+    if not _is_full_sha(target_sha):
+        return _build_staged_command(
+            ref=target_sha,
+            provenance=provenance,
+            executor=executor,
+        )
     return _build_mutating_command(
         ref=target_sha,
         provenance=provenance,
@@ -876,15 +891,48 @@ def update(
     ref: str = _DEFAULT_REF,
     check: bool = False,
     allow_downgrade: bool = False,
+    executor: ProcessExecutor | None = None,
 ) -> UpdateResult:
     """Convenience entry point that delegates to ``update_command()``."""
-    return update_command(ref=ref, check=check, allow_downgrade=allow_downgrade).run()
+    command = update_command(
+        ref=ref,
+        check=check,
+        allow_downgrade=allow_downgrade,
+        executor=executor,
+    )
+    result = command.run()
+    if check or result.outcome != "updated" or result.target_sha is None:
+        return result
+    if any(step.step_id == "update.install" for step in command.plan.steps):
+        return result
+    return update_command(
+        ref=result.target_sha,
+        allow_downgrade=allow_downgrade,
+        executor=executor,
+        force_mutation=True,
+    ).run()
+
+
+def preflight_update_command(
+    *,
+    ref: str,
+    allow_downgrade: bool = False,
+) -> Command[UpdateResult]:
+    """Capture the read-only preflight stage for an immutable target."""
+    from odoo_instance_sdk.internal.self_update_commands import _build_preflight_command
+
+    return _build_preflight_command(
+        ref=ref,
+        provenance=read_uv_tool_direct_url(),
+        allow_downgrade=allow_downgrade,
+    )
 
 
 __all__ = [
     "InstalledProvenance",
     "assert_update_not_blocking",
     "is_maintenance_mode",
+    "preflight_update_command",
     "prepare_maintenance_environment",
     "read_uv_tool_direct_url",
     "run_maintenance",
