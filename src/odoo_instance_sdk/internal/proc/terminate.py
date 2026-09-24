@@ -61,6 +61,8 @@ def terminate(
     process_group_id: int | None = None,
     timeout: float = _CLEANUP_TIMEOUT,
 ) -> None:
+    if handle.drain is not None:
+        handle.drain.stop()
     if sys.platform == "win32":
         _taskkill(handle, force=False)
         try:

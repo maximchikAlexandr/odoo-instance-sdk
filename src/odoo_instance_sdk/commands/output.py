@@ -34,12 +34,16 @@ else:
     import rich_click as click
 from rich.console import Console
 from toon import encode
+from toon import encoders as toon_encoders
 
 from odoo_instance_sdk.internal.dbprep.source import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.output_rich import rich_plan_projection as _rich_plan_projection
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
 
 if TYPE_CHECKING:
+    from toon.types import Depth, JsonArray, ResolvedEncodeOptions
+    from toon.writer import LineWriter
+
     from odoo_instance_sdk.execution import JsonValue
     from odoo_instance_sdk.internal.proc import StepEvent, StepObserver
 
@@ -209,6 +213,13 @@ def _failure_context(error: BaseException | None) -> JsonObject:
 def _failure_message(message: DiagnosticValue, context: JsonObject) -> str:
     rendered = sanitize_diagnostic(message)
     details: list[str] = []
+    restore_stage_id = context.get("restore_stage_id")
+    if isinstance(restore_stage_id, str) and restore_stage_id:
+        restore_stage_elapsed = context.get("restore_stage_elapsed")
+        stage_detail = f"restore stage {restore_stage_id}"
+        if isinstance(restore_stage_elapsed, (int, float)):
+            stage_detail += f" after {restore_stage_elapsed:.1f}s"
+        details.append(stage_detail)
     if context.get("retained_backup_id") is not None:
         details.append(f"retained backup {context['retained_backup_id']}")
     if context.get("retained_database") is not None:
@@ -307,6 +318,30 @@ def _document_payload(
     )
 
 
+def _encode_toon_payload(payload: JsonObject) -> str:
+    """Encode one envelope while avoiding inline ``argv`` arrays in nested plans."""
+
+    original = toon_encoders.encode_inline_primitive_array
+
+    def _encode_inline_primitive_array(
+        arr: JsonArray,
+        options: ResolvedEncodeOptions,
+        writer: LineWriter,
+        depth: Depth,
+        key: str | None,
+    ) -> None:
+        if key == "argv" and len(arr) >= 2:
+            toon_encoders.encode_mixed_array_as_list_items(arr, options, writer, depth, key)
+            return
+        original(arr, options, writer, depth, key)
+
+    toon_encoders.encode_inline_primitive_array = _encode_inline_primitive_array
+    try:
+        return str(encode(payload))
+    finally:
+        toon_encoders.encode_inline_primitive_array = original
+
+
 def _document(
     *,
     ok: bool,
@@ -380,7 +415,7 @@ def emit(
     if mode is OutputMode.JSON:
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     elif mode is OutputMode.TOON:
-        click.echo(encode(payload))
+        click.echo(_encode_toon_payload(payload))
     elif document.ok:
         rendered = _rich_rendered(document, rich)
         if rendered:

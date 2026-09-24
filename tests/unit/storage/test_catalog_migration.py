@@ -268,12 +268,15 @@ def test_environment_methods_exist(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "document",
     [
+        17,
         "{}",
         '{"version": 99, "components": {}}',
         '{"version": 1, "components": {"python": {"status": "unknown"}, "dependencies": {"status": "unknown"}, "odoo": {"status": "known", "values": {"admin_passwd": "raw-secret"}}, "addons": {"status": "unknown"}, "git": {"status": "unknown"}}}',
     ],
 )
-def test_create_environment_rejects_unsafe_applied_settings(tmp_path: Path, document: str) -> None:
+def test_create_environment_rejects_unsafe_applied_settings(
+    tmp_path: Path, document: JsonValue
+) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     environment: dict[str, JsonValue] = {
         "id": str(uuid.uuid4()),
@@ -392,6 +395,40 @@ def test_v13_claim_and_nullable_restore_provenance_are_transactional(tmp_path: P
     assert all(row["cluster_id"] == str(active.cluster_id) for row in rows)
     assert all(row["data_directory"] == str(tmp_path / "data") for row in rows)
     catalog.close()
+
+
+def test_postgres_cluster_claim_rejects_malformed_identity(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
+    catalog._conn.execute(
+        """INSERT INTO postgres_clusters
+           (cluster_id, project_id, compose_project, volume_name, state, created_at)
+           VALUES ('not-a-uuid', 'project-a', 'odcli_pg_project-a', 'pgdata_project-a',
+                   'pending', datetime('now'))"""
+    )
+    catalog._conn.commit()
+    with pytest.raises(BackupCatalogError, match="malformed identity"):
+        catalog._get_postgres_cluster("project-a")
+    catalog.close()
+
+
+def test_postgres_cluster_claim_rejects_invalid_state() -> None:
+    from odoo_instance_sdk.storage.catalog.helpers import _row_to_cluster_claim
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE claims (cluster_id TEXT, project_id TEXT, compose_project TEXT, "
+        "volume_name TEXT, state TEXT, created_at TEXT, activated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO claims VALUES (?, 'project-a', 'odcli_pg_project-a', "
+        "'pgdata_project-a', 'broken', datetime('now'), NULL)",
+        (str(uuid.uuid4()),),
+    )
+    row = conn.execute("SELECT * FROM claims").fetchone()
+    assert row is not None
+    with pytest.raises(BackupCatalogError, match="invalid state"):
+        _row_to_cluster_claim(row)
 
 
 def test_copy_replacement_publishes_backup_and_restore_atomically(tmp_path: Path) -> None:

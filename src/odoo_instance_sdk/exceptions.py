@@ -15,6 +15,46 @@ class OdooInstanceSdkError(Exception):
     """Base exception for all SDK errors."""
 
 
+class BackupPolicyError(OdooInstanceSdkError):
+    """Base for typed backup validation/restore preflight failures.
+
+    Each subclass carries a stable ``code`` and a secret-free ``details``
+    mapping so the CLI transports (Rich/JSON/TOON) can distinguish error
+    kinds without re-deriving them.
+    """
+
+    code: str = "backup_policy"
+
+    def __init__(self, message: str, *, details: Mapping[str, PlanJsonValue] | None = None) -> None:
+        self.details: dict[str, PlanJsonValue] = dict(details or {})
+        super().__init__(message)
+
+
+class BackupCorruptError(BackupPolicyError):
+    """Malformed ZIP or CRC failure (``backup_corrupt``)."""
+
+    code = "backup_corrupt"
+
+
+class BackupUnsafeError(BackupPolicyError):
+    """Path traversal, duplicate/encrypted/unsupported members, or a non-
+    ``dump.sql`` member whose compression ratio exceeds 100 (``backup_unsafe``)."""
+
+    code = "backup_unsafe"
+
+
+class BackupOperatorLimitError(BackupPolicyError):
+    """Archive exceeds ``backup.max_uncompressed_bytes`` (``backup_operator_limit``)."""
+
+    code = "backup_operator_limit"
+
+
+class BackupInsufficientDiskError(BackupPolicyError):
+    """Restore preflight found insufficient local disk space (``backup_insufficient_disk``)."""
+
+    code = "backup_insufficient_disk"
+
+
 class ConfigError(OdooInstanceSdkError):
     """Invalid configuration."""  # ponytail: spec-mandated, not yet raised in this slice
 
@@ -177,8 +217,30 @@ class LogfileAccessError(InstanceConfigurationError):
         )
 
 
+class LogfileUnwritableError(InstanceConfigurationError):
+    """The resolved fallback logfile cannot be created or opened for writing."""
+
+    error_code = "logfile_unwritable"
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"logfile_unwritable: {path} ({reason})")
+
+
 class MasterPasswordRequiredError(OdooInstanceSdkError):
     """Master password is required for this operation."""
+
+
+class AdminPasswordRequiredError(OdooInstanceSdkError):
+    """A user-supplied administrator password secret is required.
+
+    Raised before any restore/drop mutation when no secret was provided via
+    the interactive prompt, ``ODCLI_ADMIN_PASSWORD`` process environment, or
+    project ``.odcli/.env``.  The exception text never includes the secret.
+    """
+
+    code = "admin_password_required"
 
 
 class NonLocalInstanceError(OdooInstanceSdkError):
@@ -229,6 +291,38 @@ class BackupDownloadError(OdooInstanceSdkError):
 
 class DatabaseManagerUnavailableError(OdooInstanceSdkError):
     """Database manager endpoint unavailable or listing disabled."""
+
+
+class RemoteDatabaseResolutionError(OdooInstanceSdkError):
+    """Base for remote database name resolution failures.
+
+    Each subclass carries a stable ``code`` and a secret-free ``details``
+    mapping so the CLI transports can distinguish resolution failures.
+    """
+
+    code: str = "remote_database_resolution"
+
+    def __init__(self, message: str, *, details: Mapping[str, PlanJsonValue] | None = None) -> None:
+        self.details: dict[str, PlanJsonValue] = dict(details or {})
+        super().__init__(message)
+
+
+class RemoteDatabaseNoneError(RemoteDatabaseResolutionError):
+    """Instance exposes zero databases (``remote_database_none``)."""
+
+    code = "remote_database_none"
+
+
+class RemoteDatabaseAmbiguousError(RemoteDatabaseResolutionError):
+    """Instance exposes multiple databases (``remote_database_ambiguous``)."""
+
+    code = "remote_database_ambiguous"
+
+
+class RemoteDatabaseListUnavailableError(RemoteDatabaseResolutionError):
+    """Database list could not be obtained (``remote_database_list_unavailable``)."""
+
+    code = "remote_database_list_unavailable"
 
 
 class PgAdminError(OdooInstanceSdkError):
@@ -379,3 +473,81 @@ class PostgresPortCollisionError(PostgresClusterError):
 
 class MonitorError(OdooInstanceSdkError):
     """Monitor snapshot failed (messages are redacted)."""
+
+
+class BugReportError(OdooInstanceSdkError):
+    """Base for typed bug-report draft/submit failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: Mapping[str, PlanJsonValue] | None = None,
+    ) -> None:
+        self.details: dict[str, PlanJsonValue] = dict(details or {})
+        super().__init__(message)
+
+
+class BugReportNotFoundError(BugReportError):
+    """The referenced bug-report draft directory does not exist."""
+
+    code = "bug_report_not_found"
+
+
+class BugReportInvalidError(BugReportError):
+    """The draft failed local structure/size/redaction validation."""
+
+    code = "bug_report_invalid"
+
+
+class BugReportReviewRequiredError(BugReportError):
+    """Submission is blocked by a missing or stale independent review."""
+
+    code = "bug_report_review_required"
+
+
+class BugReportReviewLimitError(BugReportError):
+    """Three review rounds returned changes_requested; publish is stopped."""
+
+    code = "bug_report_review_limit"
+
+
+class BugReportStaleHashError(BugReportError):
+    """The approved review hash does not match the current payload."""
+
+    code = "bug_report_stale_hash"
+
+
+class BugReportOutcomeUnknownError(BugReportError):
+    """The ``gh`` create outcome is uncertain after timeout/failure."""
+
+    code = "submit_outcome_unknown"
+
+
+class UpdateError(OdooInstanceSdkError):
+    """Base for typed ``odcli update`` failures."""
+
+
+class UnsupportedInstallError(UpdateError):
+    """The current install cannot be self-updated by ``odcli update``."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        manual_argv: tuple[str, ...] | None = None,
+    ) -> None:
+        self.manual_argv = manual_argv
+        super().__init__(message)
+
+
+class PreflightFailedError(UpdateError):
+    """A preflight check blocked the update before any mutation."""
+
+
+class UpdateIncompleteError(UpdateError):
+    """The update did not finish; the journal and snapshot are preserved."""
+
+
+class UpdateRolledBackError(UpdateError):
+    """The update failed and the previous revision was restored."""

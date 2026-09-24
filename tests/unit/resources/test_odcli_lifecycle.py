@@ -54,6 +54,7 @@ class TestOdcliLifecycle:
             cli,
             [
                 "init",
+                "--allow-partial",
                 "--no-input",
                 "--odoo-bin",
                 str(fake_odoo),

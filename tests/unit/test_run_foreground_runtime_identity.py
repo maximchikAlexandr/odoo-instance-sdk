@@ -4,6 +4,7 @@ import contextlib
 import os
 import signal
 import socket
+import subprocess
 import sys
 import uuid
 from collections.abc import Iterator
@@ -83,8 +84,6 @@ def _make_env(env_id: str) -> dict[str, CatalogValue]:
 
 def _init_git_worktree(path: Path) -> tuple[str, str]:
     """Init a tiny git repo with one commit; return (branch, commit_sha)."""
-    import subprocess
-
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=path, check=True)
@@ -339,10 +338,13 @@ def test_foreground_keyboard_interrupt_cleans_up_the_owned_process_group(
 
 
 @pytest.mark.unit
-def test_foreground_artifact_lock_wraps_secret_write_spawn_wait_and_cleanup(
+def test_foreground_artifact_lock_wraps_spawn_and_cleanup_around_wait(
     http_port: int,
     tmp_path: Path,
 ) -> None:
+    """The shared lock is held for spawn+registration and for cleanup, but
+    NOT during ``wait_foreground_process()`` so a parallel ``stop`` can
+    acquire the exclusive lock (see #74 item 1)."""
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
     client = _client_with_catalog(_FakeCatalog())
@@ -415,7 +417,9 @@ def test_foreground_artifact_lock_wraps_secret_write_spawn_wait_and_cleanup(
         "lock-enter",
         "secret-write",
         "spawn",
+        "lock-exit",
         "wait",
+        "lock-enter",
         "secret-cleanup",
         "lock-exit",
     ]
@@ -562,3 +566,62 @@ def test_persist_failure_preserves_original_error_when_cleanup_fails(
     ):
         inst.run_foreground()
     assert fake.clear_calls == [env_id]
+
+
+@pytest.mark.unit
+def test_parallel_stop_acquires_exclusive_lock_during_foreground_wait(
+    env_id: str, http_port: int, tmp_path: Path, real_catalog: BackupCatalog
+) -> None:
+    """Regression for #74 item 1: while ``run_foreground`` waits, a parallel
+    ``stop`` (exclusive artifact lock) must not be blocked by the foreground
+    run's shared lock.  Before the fix the shared lock was held for the whole
+    wait and ``stop`` failed with ``Lock conflict ... (exclusive)``."""
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    client = _client_with_catalog(real_catalog)
+    inst = _make_tracked_instance(
+        client=client,
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(60)"),
+        http_port=http_port,
+    )
+    # Drive the real fcntl-backed artifact lock so the regression actually
+    # exercises the shared/exclusive conflict path.
+    inst._artifact_lock_path = tmp_path / "artifact.lock"
+
+    from odoo_instance_sdk.exceptions import LockConflictError
+    from odoo_instance_sdk.internal.locks import exclusive_lock
+
+    stop_outcome: dict[str, object] = {}
+
+    def wait_and_try_parallel_stop(
+        proc: subprocess.Popen[bytes] | ProcessHandle, **_kwargs: object
+    ) -> int:
+        # At this point the foreground wait has started and the shared
+        # artifact lock MUST have been released.  Acquire the exclusive lock
+        # the same way ``stop_environment_command`` does; before the fix this
+        # raised ``LockConflictError(..., mode='exclusive')``.
+        lock_path = inst._artifact_lock_path
+        assert lock_path is not None
+        try:
+            with exclusive_lock(lock_path):
+                stop_outcome["acquired"] = True
+        except LockConflictError as exc:
+            stop_outcome["acquired"] = False
+            stop_outcome["error"] = str(exc)
+        # Terminate the registered runtime so the foreground wait returns.
+        proc.terminate()
+        return proc.wait(timeout=5)
+
+    with (
+        patch(
+            "odoo_instance_sdk.internal.server.wait_foreground_process",
+            side_effect=wait_and_try_parallel_stop,
+        ),
+    ):
+        inst.run_foreground()
+
+    assert stop_outcome.get("acquired") is True, stop_outcome
+    # The registered runtime identity is cleaned up by the foreground finally.
+    assert real_catalog.get_environment_runtime(env_id) is None

@@ -79,14 +79,45 @@ tools, and other children retain their purpose-built environments.
 
 `ODCLI_TEST_MASTER_PASSWORD` is a restore-only secret input. It is consumed
 before child creation, removed from every child environment, and never written
-to plans, logs, diagnostics, fingerprints, or structured output. A missing
-`.odcli/.env` is valid; unreadable, insecure, or malformed files fail before
-work and report only the path (and parser line where applicable).
+to plans, logs, diagnostics, fingerprints, or structured output.
+`ODCLI_ADMIN_PASSWORD` is the administrator password for
+`db reset-admin-password`, restore with `--reset-admin-password`, and COPY
+replacement. Interactive Rich mode prompts twice with hidden input; JSON, TOON,
+and `--dry-run` never prompt. Non-interactive mode reads the process environment
+first, then `.odcli/.env`. The secret never appears in argv, shell history,
+manifest, catalog, plan, Rich/JSON/TOON output, logs, or exception text; the
+result reports only the fact and provenance (`prompt` or `environment`). A
+missing `.odcli/.env` is valid; unreadable, insecure, or malformed files fail
+before work and report only the path (and parser line where applicable).
 
 With `--postgres compose`, init also writes the effective project runtime config
 to `.odcli/odoo.conf` with owner-only permissions. It is derived from the
 source config without changing its bytes, binds Odoo to the SDK-owned cluster,
 and keeps the cluster password out of the manifest and command output.
+
+Self-contained setup in one command uses the additional `init` options below.
+They fill `[test_instance]`, select generated `.odcli/odoo.conf` as the
+effective local `source_config` under `--local-config`, create `.odcli/.env`
+with `ODCLI_TEST_INSTANCE_ORIGIN_PINS` and an empty `ODCLI_TEST_MASTER_PASSWORD=`
+under `0600`, and record `data_dir` as `{project_root}/.odcli/filestore` for
+Compose-owned filestore provenance. A blocking completeness check lists missing
+groups before any write; re-running `init` without test-instance options
+preserves an existing valid `[test_instance]`. Interactive Rich mode offers
+cancel-vs-partial confirmation when setup is incomplete; `--no-input` fails with
+`init_incomplete` unless `--allow-partial` is explicit. `--dry-run` shows
+manifest/config/dotenv ActionSteps without writes, secret generation, cluster
+mutation, or prompts:
+
+```bash
+odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --postgres compose \
+  --test-url https://odoo-test.example --test-branch main --local-config --dry-run
+odcli init --odoo-bin ./odoo/odoo-bin --python 3.12 --postgres compose \
+  --test-url https://odoo-test.example --allow-partial
+```
+
+`odcli --version` appends the first seven characters of a PEP 610 VCS
+`commit_id` when the installed package was built from a Git URL; wheel/sdist
+installs without `direct_url.json` keep the package version only.
 
 Global selectors such as `--project` and `--env` belong before the subcommand.
 Exact flags are intentionally delegated to executable help, for example
@@ -106,7 +137,9 @@ shape: add `--dry-run` to render the captured typed plan, then omit it to run
 the command. The preview contains ordered process/action steps, redacted
 arguments and stdin, planning observations, warnings, classifications, and a
 fingerprint. A preview never launches a process, prompts, or mutates the
-workspace. See [execution boundary and CLI inventory](docs/execution-boundary.md)
+workspace, except for `update`: its read-only resolver and preflight may run
+to freeze the exact target before the install/migration plan is rendered.
+Those mutation steps remain inert. See [execution boundary and CLI inventory](docs/execution-boundary.md)
 for the complete eligibility table and the intentionally narrow exceptions.
 
 Rich previews show the exact sanitized captured commands in execution order;
@@ -139,7 +172,9 @@ confirmation boundaries:
   validated physical footprint and other supported platforms use the existing
   RSS total. Rich, JSON, TOON, OpenAPI, and the dashboard read that same field.
 - Success and failure documents preserve the resolved `dry_run` value; a
-  preview never launches a child, prompts, or mutates state.
+  preview never launches a child, prompts, or mutates state, except that
+  `update` may run its read-only resolver and preflight before showing the
+  inert install/migration plan.
 - `odcli db restore BACKUP_UUID --replace` replaces only a selected stopped
   COPY environment. It preserves the exact target and environment identity,
   uses matching database/filestore provenance, supports the existing
@@ -193,7 +228,11 @@ odcli vscode generate
 
 `test --changed` selects add-ons from the Git diff. Module commands provide an
 explicit module-oriented path; dependency verification, translation export,
-and VS Code generation remain separate inspectable operations.
+and VS Code generation remain separate inspectable operations. When a module
+update fails behind a long startup log, `module update` prioritizes a valid
+nonce-framed `user_error` or `finalization_error` payload and otherwise falls
+back to a bounded redacted tail of `stderr`, not the first characters. Rich,
+JSON, and TOON return the same stable error code and safe details.
 
 ### PostgreSQL trust and lifecycle
 
@@ -272,7 +311,14 @@ the command exits nonzero without silently skipping targets or claiming rollback
 odcli db rm feature_a feature_b --dry-run
 odcli backup rm UUID1 UUID2 UUID3 --yes
 odcli env rm PROJ-123 PROJ-456 --dry-run
+odcli env rm PROJ-123 --force-connections --yes
 ```
+
+`env rm --force-connections` terminates sessions on the exact COPY database
+being removed and routes through the same guarded PostgreSQL drop path as
+`db rm --force-connections`. Without the flag, COPY removal stays fail-closed
+and the error names `--force-connections`; `odcli stop` remains the
+non-terminating alternative.
 
 ### Prepare a project database
 
@@ -287,13 +333,20 @@ refresh_after_hours = 24.0
 
 [test_instance]
 base_url = "https://odoo-test.example"
-database = "testdb"
 git_branch = "main"
 ```
 
+`test_instance.database` is optional. When it is absent, remote refresh
+preflight selects exactly one remote database through the existing HTTP list;
+zero, many, or unavailable lists fail before download with distinct actionable
+errors. An explicit `database` in the manifest or on `init --test-database`
+takes priority and does not require list availability. The auto-detected name
+appears in plan/result and backup provenance but is not written back to
+`project.toml`.
+
 ```bash
 odcli --env feature/customer-credit db refresh
-odcli --env feature/customer-credit db reset-admin-password
+ODCLI_ADMIN_PASSWORD='from-secret-store' odcli --env feature/customer-credit db reset-admin-password
 ```
 
 Refresh follows the environment's configured database policy. Destructive
@@ -312,11 +365,19 @@ odcli backup rm 01234567-89ab-cdef-0123-456789abcdef --dry-run --format json
 ```
 
 Restore previews are immutable. Rich mode confirms only after all preflight
-checks; machine formats require `--yes` and never prompt. A restore switches
-the project default only after the database, postcondition, audit, and
-optional administrator reset succeed. On interruption or a later failure, the
-backup and any already-confirmed database are retained; failure documents
-include sanitized UUID/target/state context and Ctrl-C exits with `130`.
+checks; machine formats require `--yes` and never prompt. Long restores in
+Rich mode publish real stages — backup preparation, auxiliary Odoo startup,
+database restore, created-database verification, filestore restore, requested
+administrator reset, and project default switch — with elapsed time and a
+heartbeat during blocking actions without child stdout. Percent is shown only
+when streaming dump or filestore bytes provide a trustworthy total. On error,
+the safe primary cause and the last stage id are preserved. JSON and TOON keep
+the existing single-document contract; terminal progress does not pollute
+machine stdout. A restore switches the project default only after the database,
+postcondition, audit, and optional administrator reset succeed. On interruption
+or a later failure, the backup and any already-confirmed database are retained;
+failure documents include sanitized UUID/target/state context and Ctrl-C exits
+with `130`.
 
 The read-only resource projections inspect retained backups, databases,
 environments, logs, filestores, and owned volumes without reconciliation or
@@ -421,8 +482,16 @@ interactive rather than finite plan documents.
 
 `run -d` / `--detach` launches Odoo in the background through the same
 inspect-then-run boundary, then returns once the process is alive with its
-pid, endpoint, and log path. It is a bounded leaf: `--dry-run` captures the
-detached plan without spawning, and the SDK sibling is
+pid, endpoint, and log path. One shared resolver chooses the effective
+logfile: an explicit non-empty `logfile` in effective `odoo.conf` wins;
+otherwise `odoo.log` next to the effective config is created before spawn and
+passed to Odoo through `--logfile` without editing the user's config. New
+isolated environments write an environment-owned `<environment-root>/odoo.log`
+into generated `odoo.conf`. `run --detach`, `logs`, structured results, and
+runtime metadata use the same resolved path. `--dry-run` shows the path without
+creating the directory or file; an unwritable fallback fails before spawn with
+`logfile_unwritable` and the exact path. It is a bounded leaf: `--dry-run`
+captures the detached plan without spawning, and the SDK sibling is
 `instance.run_detached_command()` returning a typed `DetachedLaunchResult`:
 
 ```bash
@@ -437,6 +506,40 @@ database/credential, addons/upgrade/data-path, HTTP/gevent/longpolling bind or
 port, and logfile option families. Dry-run captures and redacts the same argv
 without recording use or starting Odoo; normal `run` forwards native stdin,
 stdout, and stderr and returns Odoo's exit code.
+
+### Bug reports and self-upgrade
+
+`odcli bug-report init` creates a local draft under
+`~/.odcli/bug-reports/<REPORT_ID>/` with `report.md`, `metadata.json`, and
+`reviews/`. It works offline from any cwd. `odcli bug-report submit` validates
+structure, size (262144-byte `report.md` cap), and secret redaction; publish
+requires the last `reviews/N.json` (`N` in 1..3) to be `approved` for the
+payload hash. There is no `--skip-review` or `--force`. `gh` is invoked through
+`internal/proc` with `--body-file -`; default labels are `alpha-testing` only.
+Use the portable `odcli-bug-report` agent skill for reviewer rounds and
+emergency unblock paths.
+
+`odcli update` safely upgrades a uv-tool install: default `--ref` is `main`,
+`--check` resolves without mutation, and `--dry-run` may launch only the
+read-only `uv` resolver/preflight needed to freeze the immutable target; it
+never launches install or maintenance `odcli` steps. Exact-SHA ancestry probes
+are captured Git process steps in that preflight; their ephemeral object-store
+setup and mutating cleanup action are explicit, local VCS origins are verified
+through the captured read-only preflight, and no unvalidated provenance URL
+reaches `git fetch`. Downgrades fail closed unless the snapshot can restore
+the complete current state.
+Mutating execution uses an exclusive lock on
+`~/.odcli/locks/odcli-update.lock`, snapshots affected metadata, installs
+through `uv tool install --force`, and runs maintenance migrations in a child
+`odcli update --format json` with `ODCLI_MAINTENANCE=1`. Pip, pipx, system, and
+editable installs are refused.
+
+```bash
+odcli bug-report init --title "stop does not stop foreground run" --kind bug --dry-run
+odcli bug-report submit 00000000-0000-0000-0000-000000000014 --dry-run
+odcli update --check
+odcli update --dry-run
+```
 
 `eval` and `exec` are finite shell-boundary operations and can use Rich, JSON,
 or TOON output.  Their successful document keeps the expression/script result
@@ -456,6 +559,8 @@ sentence; use the entry's `--help` for exact options.
 <!-- cli-command-inventory:start -->
 - `odcli init` — Create or update the project manifest from explicit inputs.
 - `odcli doctor` — Diagnose the resolved project, runtime, and PostgreSQL setup.
+- `odcli bug-report init` — Create a local bug-report draft from explicit metadata.
+- `odcli bug-report submit` — Validate and publish one local bug-report draft.
 - `odcli env show` — Show one environment's selected runtime and ownership metadata.
 - `odcli resource ls` — List retained local resources without lifecycle mutation.
 - `odcli resource doctor` — Diagnose retained local resource findings without deletion.
@@ -505,6 +610,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db rm` — Safely remove one exact local cluster database after guarded checks.
 - `odcli ps` — Show process and resource inventory from one monitor snapshot.
 - `odcli monitor` — Serve local environment snapshots in headless or dashboard mode.
+- `odcli update` — Self-upgrade an OdCLI uv-tool install.
 <!-- cli-command-inventory:end -->
 
 Executable help is the source of truth for flags and retained aliases:
@@ -576,7 +682,10 @@ leaves such as `run`, `shell`, `logs --follow`, and `monitor`. CLI callbacks
 must not build self-contained domain read/mutation/spawn operations through
 `internal.*` when a public typed SDK primitive applies; convenience methods
 delegate to the corresponding `*_command()` sibling and do not rebuild argv,
-cwd, environment, or actions.
+cwd, environment, or actions. Production Odoo HTTP calls are centralized in
+the internal `OdooHttpClient` transport layer (`internal/transport/`); it is
+not a public SDK type and `httpx` remains absent after `import odoo_instance_sdk.cli`.
+XML-RPC stays in test support only; `src/` contains zero `ServerProxy` call sites.
 
 ## Monitor and local API
 

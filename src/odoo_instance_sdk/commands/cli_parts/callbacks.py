@@ -15,8 +15,8 @@ from rich.console import Console
 from rich.table import Table
 
 from odoo_instance_sdk.commands import context as cli_context
+from odoo_instance_sdk.commands.cli_parts.init_registration import _OptionState
 from odoo_instance_sdk.commands.cli_parts.registration import (
-    _OptionState,
     _run_shell_command,
     _RunCommand,
     _ShellCommandFailure,
@@ -375,7 +375,13 @@ def run(  # noqa: C901
         except SystemExit:
             raise
         except Exception as e:
-            fail(output_mode, "run", e, dry_run=dry_run)
+            fail(
+                output_mode,
+                "run",
+                e,
+                dry_run=dry_run,
+                error_code=getattr(e, "error_code", None),
+            )
         if not dry_run:
             sys.exit(status)
         return

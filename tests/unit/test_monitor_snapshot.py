@@ -9,9 +9,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-import httpx
 import msgspec
 import pytest
+
+from tests.fixtures.transport import (
+    OPEN_ODOO_HTTP_CLIENT,
+    make_http_client,
+    make_response,
+    http_client_context,
+)
 
 from odoo_instance_sdk.exceptions import MonitorError
 from odoo_instance_sdk.execution import Command
@@ -29,6 +35,7 @@ from odoo_instance_sdk.models import (
     ClusterContainer,
     ClusterMetrics,
     ClusterResourceSnapshot,
+    ClusterUnavailabilityReason,
     GitActivity,
     GitActivityState,
     GitDiff,
@@ -269,8 +276,8 @@ def test_running_odoo_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     provider = FakeProcessProvider(result=result)
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
 
-    resp = httpx.Response(200, json={"status": "pass"})
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: resp)
+    http = make_http_client(get=make_response(json_data={"status": "pass"}))
+    monkeypatch.setattr(OPEN_ODOO_HTTP_CLIENT, lambda *a, **k: http_client_context(http))
 
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider
@@ -299,8 +306,8 @@ def test_running_odoo_not_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     provider = FakeProcessProvider(result=result)
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
 
-    resp = httpx.Response(503, json={"status": "fail"})
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: resp)
+    http = make_http_client(get=make_response(status_code=503, json_data={"status": "fail"}))
+    monkeypatch.setattr(OPEN_ODOO_HTTP_CLIENT, lambda *a, **k: http_client_context(http))
 
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider
@@ -471,6 +478,171 @@ def test_docker_stats_error_carried(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert proj.cluster.unavailability_reason == "stats_failed"
 
 
+@pytest.mark.parametrize(
+    "reason",
+    ["stats_failed", "inspect_failed", "missing"],
+)
+def test_failed_metrics_snapshot_does_not_imply_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: ClusterUnavailabilityReason
+) -> None:
+    """A running cluster with failed/empty Docker metrics keeps its real lifecycle state."""
+    catalog = _make_catalog(tmp_path)
+    e1 = str(uuid.uuid4())
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _seed_env(catalog, _make_env(e1, worktree_path=str(wt)))
+    catalog.close()
+
+    crs = ClusterResourceSnapshot(
+        container=None, metrics=None, unavailability_reason=reason, sampled_at=None
+    )
+    # The cluster is actually healthy — status_command() would say HEALTHY.
+    cluster = FakePostgresCluster(mode="compose", state=PostgresClusterState.HEALTHY, resource=crs)
+    _patch_from_project(monkeypatch, cluster)
+
+    monitor = EnvironmentMonitor(
+        catalog_path=tmp_path / "catalog.sqlite3",
+        docker_provider=FakeDockerProvider(result=crs),
+    )
+    snap = monitor.snapshot()
+
+    proj = snap.projects[0]
+    assert proj.cluster is not None
+    # Lifecycle state comes from status_command(), not the metrics snapshot.
+    assert proj.cluster.state is PostgresClusterState.HEALTHY
+    # Metrics failure degrades only metrics, not lifecycle.
+    assert proj.cluster.unavailability_reason == reason
+
+
+def test_empty_docker_probe_does_not_imply_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty or unparseable docker compose ps snapshot SHALL NOT imply STOPPED."""
+    catalog = _make_catalog(tmp_path)
+    e1 = str(uuid.uuid4())
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _seed_env(catalog, _make_env(e1, worktree_path=str(wt)))
+    catalog.close()
+
+    cluster = FakePostgresCluster(mode="compose", state=PostgresClusterState.HEALTHY)
+    _patch_from_project(monkeypatch, cluster)
+
+    from odoo_instance_sdk.internal.proc import ProcessResult
+
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
+    fake_compose_file = Path("/fake/compose.yaml")
+    # ponytail: patch cluster.compose_file to a stable key and identity to match
+    monkeypatch.setattr(type(cluster), "compose_file", fake_compose_file, raising=False)
+    monkeypatch.setattr(
+        type(cluster),
+        "to_diagnostic_dict",
+        lambda self: {"project_id": "fake_key"},
+        raising=False,
+    )
+    empty_recorded = ProcessResult(
+        argv=("docker", "compose", "ps"),
+        returncode=0,
+        stdout="",
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    state = monitor._cached_status(
+        cluster,  # type: ignore[arg-type]
+        probe_results={"monitor.project_fake_key.docker.resources": empty_recorded},
+    )
+    assert state is not PostgresClusterState.STOPPED
+    assert state is PostgresClusterState.HEALTHY
+
+
+def test_unparseable_docker_probe_does_not_imply_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unparseable docker compose ps snapshot SHALL NOT imply STOPPED."""
+    catalog = _make_catalog(tmp_path)
+    e1 = str(uuid.uuid4())
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _seed_env(catalog, _make_env(e1, worktree_path=str(wt)))
+    catalog.close()
+
+    cluster = FakePostgresCluster(mode="compose", state=PostgresClusterState.HEALTHY)
+    _patch_from_project(monkeypatch, cluster)
+
+    from odoo_instance_sdk.internal.proc import ProcessResult
+
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
+    fake_compose_file = Path("/fake/compose.yaml")
+    monkeypatch.setattr(type(cluster), "compose_file", fake_compose_file, raising=False)
+    monkeypatch.setattr(
+        type(cluster),
+        "to_diagnostic_dict",
+        lambda self: {"project_id": "fake_key"},
+        raising=False,
+    )
+    monitor._cluster_status_cache.clear()
+    bad_recorded = ProcessResult(
+        argv=("docker", "compose", "ps"),
+        returncode=0,
+        stdout="not-json{{",
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    state = monitor._cached_status(
+        cluster,  # type: ignore[arg-type]
+        probe_results={"monitor.project_fake_key.docker.resources": bad_recorded},
+    )
+    assert state is not PostgresClusterState.STOPPED
+    assert state is PostgresClusterState.HEALTHY
+
+
+def test_failed_docker_probe_does_not_imply_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed (nonzero returncode) docker compose ps snapshot SHALL NOT imply STOPPED."""
+    catalog = _make_catalog(tmp_path)
+    e1 = str(uuid.uuid4())
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _seed_env(catalog, _make_env(e1, worktree_path=str(wt)))
+    catalog.close()
+
+    cluster = FakePostgresCluster(mode="compose", state=PostgresClusterState.HEALTHY)
+    _patch_from_project(monkeypatch, cluster)
+
+    from odoo_instance_sdk.internal.proc import ProcessResult
+
+    monitor = EnvironmentMonitor(catalog_path=tmp_path / "catalog.sqlite3")
+    fake_compose_file = Path("/fake/compose.yaml")
+    monkeypatch.setattr(type(cluster), "compose_file", fake_compose_file, raising=False)
+    monkeypatch.setattr(
+        type(cluster),
+        "to_diagnostic_dict",
+        lambda self: {"project_id": "fake_key"},
+        raising=False,
+    )
+    monitor._cluster_status_cache.clear()
+    failed_recorded = ProcessResult(
+        argv=("docker", "compose", "ps"),
+        returncode=1,
+        stdout="",
+        stderr="docker error",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+    state = monitor._cached_status(
+        cluster,  # type: ignore[arg-type]
+        probe_results={"monitor.project_fake_key.docker.resources": failed_recorded},
+    )
+    assert state is not PostgresClusterState.STOPPED
+    assert state is PostgresClusterState.HEALTHY
+
+
 def test_git_divergence_carried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     catalog = _make_catalog(tmp_path)
     e1 = str(uuid.uuid4())
@@ -581,11 +753,10 @@ def test_malformed_health_response_is_not_ready_and_keeps_metrics(
     catalog.close()
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
 
-    response = httpx.Response(200, text=payload)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.resources.monitor.collection_parts.snapshot.httpx.get",
-        lambda *args, **kwargs: response,
-    )
+    response = make_response(text=payload)
+    response.json.side_effect = ValueError("invalid json")
+    http = make_http_client(get=response)
+    monkeypatch.setattr(OPEN_ODOO_HTTP_CLIENT, lambda *a, **k: http_client_context(http))
     provider = FakeProcessProvider(
         result=ProcessTreeResult(
             child_pids=(42,), process_count=2, cpu_percent=3.5, memory_bytes=99
@@ -1117,8 +1288,13 @@ def test_watch_cancellation_cleans_up(tmp_path: Path, monkeypatch: pytest.Monkey
 
     async def _cancel_after_one() -> None:
         gen = cast("AsyncGenerator[Snapshot, None]", monitor.watch(interval=0.1))
-        await gen.__anext__()
+        snapshot = await gen.__anext__()
+        assert isinstance(snapshot, Snapshot)
+        assert len(snapshot.environments) == 1
+        assert snapshot.environments[0].id == e1
         await gen.aclose()
+        with pytest.raises(StopAsyncIteration):
+            await gen.__anext__()
 
     asyncio.run(_cancel_after_one())
 
@@ -1135,7 +1311,8 @@ def test_cpu_not_cached_between_snapshots(tmp_path: Path, monkeypatch: pytest.Mo
     result = ProcessTreeResult(child_pids=(), process_count=1, cpu_percent=0.0, memory_bytes=1024)
     provider = FakeProcessProvider(result=result)
     _patch_from_project(monkeypatch, FakePostgresCluster(mode="external"))
-    monkeypatch.setattr(httpx, "get", lambda *a, **k: httpx.Response(200, json={"status": "pass"}))
+    http = make_http_client(get=make_response(json_data={"status": "pass"}))
+    monkeypatch.setattr(OPEN_ODOO_HTTP_CLIENT, lambda *a, **k: http_client_context(http))
 
     monitor = EnvironmentMonitor(
         catalog_path=tmp_path / "catalog.sqlite3", process_provider=provider

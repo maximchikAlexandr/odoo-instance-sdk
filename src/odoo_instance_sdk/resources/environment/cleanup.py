@@ -180,13 +180,14 @@ class _CleanupMixin:
             executor=executor or SubprocessExecutor(),
         )
 
-    def remove(self, selector: EnvironmentSelector) -> None:
-        return self.remove_command(selector).run()
+    def remove(self, selector: EnvironmentSelector, *, force_connections: bool = False) -> None:
+        return self.remove_command(selector, force_connections=force_connections).run()
 
     def remove_command(
         self,
         selector: EnvironmentSelector,
         *,
+        force_connections: bool = False,
         executor: ProcessExecutor | None = None,
     ) -> Command[None]:
         from odoo_instance_sdk.internal.proc import PreparedStep
@@ -220,7 +221,9 @@ class _CleanupMixin:
                     mutating=True,
                 ),
             )
-        copy_drop = self._remove_copy_database_command(env, executor=executor)
+        copy_drop = self._remove_copy_database_command(
+            env, executor=executor, force_connections=force_connections
+        )
         if copy_drop is not None:
             steps = (*steps, *copy_drop.steps)
         return self._action_command(
@@ -238,6 +241,7 @@ class _CleanupMixin:
         env: DevelopmentEnvironment,
         *,
         executor: ProcessExecutor | None,
+        force_connections: bool = False,
     ) -> PreparedCommand[None] | None:
         """Capture the guarded direct COPY database cleanup before removal starts."""
         if env.db_mode is not EnvironmentDatabaseMode.COPY or env.target_db_name is None:
@@ -267,6 +271,8 @@ class _CleanupMixin:
                 env.repository_root,
                 drop_name,
                 executor=executor,
+                force_connections=force_connections,
+                command_origin="env-remove",
                 allow_environment_id=str(env.id),
                 allow_environment_backup_id=(
                     str(env.backup_id) if env.backup_id is not None else None
@@ -294,6 +300,8 @@ class _CleanupMixin:
                     env.repository_root,
                     rollback_name,
                     executor=executor,
+                    force_connections=force_connections,
+                    command_origin="env-remove",
                     allow_environment_id=str(env.id),
                     allow_environment_backup_id=(
                         str(env.backup_id) if env.backup_id is not None else None

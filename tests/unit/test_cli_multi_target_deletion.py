@@ -559,5 +559,5 @@ def test_env_rm_single_target_backward_compat(
 
     assert result.exit_code == 0, result.output
     assert result.output.count("schema_version") == 1
-    client.environments.remove_command.assert_called_once_with(env)
+    client.environments.remove_command.assert_called_once_with(env, force_connections=False)
     confirm.assert_not_called()

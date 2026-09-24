@@ -115,7 +115,7 @@ class TestFromConfigNoPassword:
         client = _make_client()
         inst = client.instance.from_config(path)
         with patch(
-            "odoo_instance_sdk.resources.database.backup_restore_parts.queries.httpx.Client"
+            "odoo_instance_sdk.internal.transport.factory.open_odoo_http_client"
         ) as mock_http_cls:
             mock_http = mock_http_cls.return_value.__enter__.return_value
             mock_http.post.return_value.json.return_value = {"result": ["db1"]}
@@ -398,7 +398,7 @@ class TestInstancePrefix:
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
-            staticmethod(lambda _path: MagicMock()),
+            staticmethod(lambda _path: MagicMock(owned=False)),
         )
         executor = RecordingExecutor(handles={"instance.foreground": _recording_handle()})
 
@@ -475,6 +475,10 @@ class TestInstancePrefix:
         events: list[str] = []
 
         class StoppedCluster:
+            @property
+            def owned(self) -> bool:
+                return False
+
             def ensure_running(self, timeout: float = 60.0) -> None:
                 events.append("healthy")
 

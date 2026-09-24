@@ -11,11 +11,27 @@ then update this page.
 
 Every eligible bounded leaf resolves inputs once and captures one immutable
 `Command` before confirmation or mutation. `--dry-run` emits its redacted
-`ExecutionPlan` and does not call `.run()`, prompt, or launch a process.
+`ExecutionPlan` and does not call `.run()`, prompt, or launch a process, except
+for the explicit `update` read-only resolve/preflight stage described below.
 The normal path confirms only after planning and runs that same command object.
 `--format json` is the only JSON selector; removed `--json` is a Click usage
 error with exit code `2`. Rich, JSON, and TOON are projections, not independent
 planners.
+
+`update` with a mutable ref is the explicit two-stage exception: it first runs
+the captured read-only resolver command, then captures the resolved full-SHA
+mutation command. The second command is the only command shown for mutation
+preview, confirmation, and execution; `update --dry-run` may run the captured
+read-only resolver and preflight phases, then shows the immutable install and
+migration steps without running either. Exact-SHA ancestry validation is also
+represented by captured Git `ProcessStep`s. Their ephemeral object-store
+setup/fetch steps are explicitly marked as mutating, their temporary-store
+cleanup is an explicit mutating `ActionStep`, and no unvalidated provenance
+URL reaches `git fetch`. Local VCS provenance verifies its exact `origin` via
+a captured read-only preflight step before ancestry resolution. Downgrades are
+fail-closed unless the snapshot can restore the complete current state. A user-triggered
+migrate journal also resumes through this coordinator; direct maintenance is
+reserved for the explicit `ODCLI_MAINTENANCE=1` hand-off.
 
 Plans preserve ordered process/action steps, argv boundaries, sanitized
 environment policy, multiline stdin/source previews, observations, warnings,
@@ -58,6 +74,9 @@ classification is bounded and whose contract requires `--dry-run`:
 | `git commit` | mutating-or-spawning |
 | `git absorb` | mutating-or-spawning |
 | `git sync` | mutating-or-spawning |
+| `bug-report init` | mutating-or-spawning |
+| `bug-report submit` | mutating-or-spawning |
+| `update` | mutating-or-spawning (`update --check` is process-previewable-read-only) |
 | `psql` | native-passthrough |
 | `run` | native-passthrough |
 | `shell` | native-passthrough |
@@ -104,6 +123,22 @@ and reasons; no parallel eligibility table is permitted.
 bounded detached launch: its `--dry-run` captures the detached plan without
 spawning, and execution returns a typed `DetachedLaunchResult` once Odoo is
 alive. The SDK sibling is `instance.run_detached_command()`.
+`resolve_effective_logfile()` chooses one path for detached spawn, `logs`,
+structured results, and runtime metadata: explicit non-empty `logfile` in
+effective `odoo.conf` wins; otherwise `odoo.log` next to the effective config
+is created before spawn and passed through `--logfile` without editing the
+user's config.
+
+`bug-report init` and `bug-report submit` are bounded mutating leaves backed by
+`bug_report_init_command()` and `bug_report_submit_command()`. Submit locks
+`get_locks_dir()/bug-report-{REPORT_ID}.lock` without Expression, records submit
+intent as an ActionStep, and invokes `gh` through `internal/proc` with
+`--body-file -`.
+
+`update` is a bounded mutating leaf backed by `update_command()`. Mutating
+execution acquires `get_locks_dir()/odcli-update.lock`, snapshots affected
+metadata under `get_user_root()/update/`, and runs maintenance as a child
+`odcli update --format json` with `ODCLI_MAINTENANCE=1`.
 
 The Git workflow leaves use the same captured-plan boundary: `git commit` and
 `git absorb` require explicit confirmation for mutation, while `git check` is
@@ -183,42 +218,68 @@ siblings.
 The only production output allowlist is line-specific and each entry is
 documented by `OUTPUT_WRITE_REASONS`:
 
-- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:421-422` — documented
+- `src/odoo_instance_sdk/commands/cli_parts/callbacks.py:427-428` — documented
   `logs --follow` JSONL stream; remove when that stream gets an explicit bounded
   transport.
-- `src/odoo_instance_sdk/commands/backup.py:345` — shared Rich validation
+- `src/odoo_instance_sdk/commands/cli_parts/registration.py:473` — documented
+  `--version` metadata flag transport; remove only if `--version` gains a
+  replacement centralized emitter.
+- `src/odoo_instance_sdk/commands/backup.py:348` — shared Rich validation
   boundary; remove only if validation gains a replacement centralized emitter.
-- `src/odoo_instance_sdk/commands/output.py:236` — shared Rich output
+- `src/odoo_instance_sdk/commands/output.py:247` — shared Rich output
   boundary; remove only if the output library gains a replacement emitter.
-- `src/odoo_instance_sdk/commands/output.py:381` — shared JSON emitter;
+- `src/odoo_instance_sdk/commands/output.py:416` — shared JSON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:383` — shared TOON emitter;
+- `src/odoo_instance_sdk/commands/output.py:418` — shared TOON emitter;
   remove only with a replacement centralized serializer.
-- `src/odoo_instance_sdk/commands/output.py:390` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:425` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/commands/output.py:392` — shared diagnostic emitter;
+- `src/odoo_instance_sdk/commands/output.py:427` — shared diagnostic emitter;
   remove only when diagnostics have another centralized stderr adapter.
-- `src/odoo_instance_sdk/resources/instance/identity.py:457` — lifecycle cleanup
+- `src/odoo_instance_sdk/internal/self_update.py:813-815` — maintenance child
+  JSON stdout transport; remove when maintenance output gains a replacement
+  centralized emitter.
+- `src/odoo_instance_sdk/resources/instance/identity.py:494` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 
 ### Production type annotations
 
-`EXPLICIT_IMPRECISE_ANNOTATIONS` is empty. The AST gate rejects direct,
+`EXPLICIT_IMPRECISE_ANNOTATIONS` records deliberate third-party adapter seams
+in `bug_report.py`, `internal/bug_report.py`, `internal/dbprep/bootstrap.py`,
+`internal/transport/*`, and `project_init.py`. The AST gate rejects direct,
 qualified, and quoted `Any`/bare `object`, empty marker Protocols,
 opaque-named aliases, and broad `Callable[..., ...]`; every finding includes
 `file:line`. The removal condition for a future finding is to narrow it at the
 external adapter boundary to `JsonValue`, a validated model, or a concrete
 protocol—not to add an exception.
 
+### HTTP transport and XML-RPC boundary
+
+`DIRECT_HTTPX_USAGE` is a line-specific allowlist under
+`src/odoo_instance_sdk/internal/transport/` only. Production Odoo HTTP calls
+go through the internal `OdooHttpClient`; `httpx` types and exceptions do not
+leak into public SDK or resource interfaces. `import odoo_instance_sdk.cli`
+remains free of `httpx`. An architecture gate requires zero
+`xmlrpc.client.ServerProxy` call sites in `src/`; XML-RPC verification stays in
+`tests/fixtures/xmlrpc_probe.py` for real-Odoo acceptance only.
+
+### Self-update and bug-report locks
+
+`odcli update` acquires `get_locks_dir()/odcli-update.lock` during mutating
+execution. Unfinished migration journals cause `update` to resume and other
+commands to fail with `update_incomplete`. `bug-report submit` acquires
+`get_locks_dir()/bug-report-{REPORT_ID}.lock` so uncertain `gh` outcomes do
+not blind re-POST.
+
 ### Test-only subprocess patch seams
 
 `MODULE_LOCAL_SUBPROCESS_PATCHES` records the remaining legacy test patch
 locations while the production launch inventory is empty:
 
-- `tests/unit/resources/test_database_resource.py:638`
+- `tests/unit/resources/test_database_resource.py:632`
 - `tests/unit/test_monitor_cache_and_docker.py:119`
-- `tests/unit/test_cluster_resources.py:190`
+- `tests/unit/test_cluster_resources.py:188`
 - `tests/unit/test_real_odoo_ci_components.py:40,109,151`
 - `tests/unit/test_real_odoo_foundation.py:325,348,367`
 

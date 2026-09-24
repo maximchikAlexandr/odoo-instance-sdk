@@ -64,6 +64,22 @@ def _postgres_cluster(ctx: CliContext) -> PostgresCluster:
     return PostgresCluster.from_project(resolve_project_path(ctx))
 
 
+def _postgres_up_diagnostic(
+    cluster: PostgresCluster | None,
+    result: None,
+) -> dict[str, JsonValue]:
+    # ponytail: `ensure_running_command()` returns None on success. Build the
+    # diagnostic from the captured cluster even then, so the result shows
+    # actual mode/owned/state/endpoint instead of unknown/false/—.
+    if cluster is None:
+        return {}
+    diagnostic: dict[str, JsonValue] = dict(cluster.to_diagnostic_dict())
+    if result is None:
+        # ensure_running_command() succeeded → the cluster is healthy.
+        diagnostic["state"] = PostgresClusterState.HEALTHY.value
+    return diagnostic
+
+
 def _cluster_rich(document: OutputDocument) -> str:
     payload = document.result if isinstance(document.result, dict) else {}
     table = Table("Field", "Value", title="PostgreSQL cluster")
@@ -620,10 +636,7 @@ def postgres_up(
             command_name="postgres.up",
             mode=output_mode,
             dry_run=dry_run,
-            result=lambda result: cast(
-                "dict[str, JsonValue]",
-                cluster_holder["cluster"].to_diagnostic_dict() if result is not None else {},
-            ),
+            result=lambda result: _postgres_up_diagnostic(cluster_holder.get("cluster"), result),
             rich=_cluster_rich,
             progress=True,
         )

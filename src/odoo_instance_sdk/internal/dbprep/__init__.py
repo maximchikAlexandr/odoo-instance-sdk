@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from odoo_instance_sdk.internal.dbprep.materialize import (
     DatabasePreparationCoordinator,
-    _preparation_process_steps,
     preflight_restore,
     prepare_download,
     prepare_restore,
 )
+from odoo_instance_sdk.internal.dbprep.materialize_steps import _preparation_process_steps
 from odoo_instance_sdk.internal.dbprep.source import (
     DatabasePreparationFailureContext,
     ProjectRuntimeBinding,
@@ -27,6 +27,7 @@ from odoo_instance_sdk.internal.dbprep.source import (
     preparation_lock,
     relevant_manifest_conflicts,
     reserve_target_database,
+    resolve_remote_database_name,
     resolve_runtime_binding,
     resolve_test_source,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "prepare_restore",
     "relevant_manifest_conflicts",
     "reserve_target_database",
+    "resolve_remote_database_name",
     "resolve_runtime_binding",
     "resolve_test_source",
 ]

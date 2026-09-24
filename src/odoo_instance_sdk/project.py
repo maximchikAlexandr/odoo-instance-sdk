@@ -39,15 +39,22 @@ class PostgresProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class TestInstanceProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
-    """Non-secret remote test instance settings used by database preparation."""
+    """Non-secret remote test instance settings used by database preparation.
+
+    ``database`` is optional: when absent, remote-refresh preflight resolves
+    the name from the live instance via ``DatabaseResource.names()`` and never
+    writes the detected value back to ``project.toml``.
+    """
 
     base_url: str
-    database: str
+    database: str | None = None
     git_branch: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.base_url.strip() or not self.database.strip():
-            raise ConfigError("test_instance.base_url and database must not be empty")
+        if not self.base_url.strip():
+            raise ConfigError("test_instance.base_url must not be empty")
+        if self.database is not None and not self.database.strip():
+            raise ConfigError("test_instance.database must not be empty")
         if self.git_branch is not None and not self.git_branch.strip():
             raise ConfigError("test_instance.git_branch must not be empty")
         try:
@@ -248,8 +255,9 @@ def _test_instance_to_manifest(config: TestInstanceProjectConfig | None) -> str 
     lines = [
         "[test_instance]",
         f'base_url = "{_toml_str(config.base_url)}"',
-        f'database = "{_toml_str(config.database)}"',
     ]
+    if config.database is not None:
+        lines.append(f'database = "{_toml_str(config.database)}"')
     if config.git_branch is not None:
         lines.append(f'git_branch = "{_toml_str(config.git_branch)}"')
     return "\n".join(lines)
@@ -263,8 +271,10 @@ def _test_instance_from_mapping(value: JsonValue) -> TestInstanceProjectConfig |
     base_url = value.get("base_url")
     database = value.get("database")
     git_branch = value.get("git_branch")
-    if not isinstance(base_url, str) or not isinstance(database, str):
-        raise ConfigError("test_instance.base_url and database must be strings")
+    if not isinstance(base_url, str):
+        raise ConfigError("test_instance.base_url must be a string")
+    if database is not None and not isinstance(database, str):
+        raise ConfigError("test_instance.database must be a string")
     if git_branch is not None and not isinstance(git_branch, str):
         raise ConfigError("test_instance.git_branch must be a string")
     try:

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Callable, MutableMapping
-from dataclasses import dataclass
+from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -15,18 +16,16 @@ from odoo_instance_sdk.commands.backup import (  # noqa: I001 -- keep command re
     backup_group,
     configure_catalog_path_provider,
 )
+from odoo_instance_sdk.commands.bug_report import bug_report_group
 from odoo_instance_sdk.commands.context import CliContext
 from odoo_instance_sdk.commands.db import db_group
 from odoo_instance_sdk.commands.output import (
     JsonObject,
     OutputDocument,
     OutputMode,
-    fail,
-    model_to_dict,
-    output_options,
-    resolve_output_mode,
     run_or_preview,
 )
+from odoo_instance_sdk.commands.cli_parts.init_registration import register_init_command
 from odoo_instance_sdk.commands.pg import (
     postgres_group as _postgres_group,
     psql as _psql,
@@ -36,29 +35,12 @@ from odoo_instance_sdk.commands.resource import (
     configure_catalog_path_provider as configure_resource_catalog_path_provider,
     resource_group,
 )
-from odoo_instance_sdk.exceptions import (
-    InstanceConfigurationError,
-    VscodeImportError,
-)
-from odoo_instance_sdk.internal.generated_config import project_generated_config_path
-from odoo_instance_sdk.internal.port_allocation import find_free_port
-from odoo_instance_sdk.internal.project_init import (
-    manifest_dict as _manifest_dict,
-    validate_generated_config_target as _validate_generated_config_target,
-)
-from odoo_instance_sdk.internal.project_manifest import manifest_path
 from odoo_instance_sdk.internal.server import parse_payload
-from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
-from odoo_instance_sdk.models import (
-    CommandResult,
-    StartConfig,
-)
-from odoo_instance_sdk.project import PostgresProjectConfig, ProjectConfig
+from odoo_instance_sdk.models import CommandResult
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import Command, JsonValue
     from odoo_instance_sdk.resources.postgres import PostgresCluster
-    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
 type _ClickCallback = (
@@ -132,6 +114,57 @@ def _valid_shell_error(value: JsonValue) -> bool:
     )
 
 
+def _bounded_redacted_tail(stderr: str) -> tuple[str, bool]:
+    """Return the last ``_TIMEOUT_TAIL_BYTES`` redacted bytes of ``stderr``.
+
+    A long startup log can push the real traceback past the first-N window the
+    legacy ``sanitize_last_error`` projection used.  Taking the bounded *tail*
+    instead keeps the most recent diagnostic (the traceback) visible while a
+    leading prefix is dropped.  Redaction (secrets, env, paths, terminal
+    escapes) is applied directly without the legacy whitespace squash or the
+    2000-char re-truncation, so the trailing traceback survives.  Truncation
+    is reported explicitly so callers can surface it in the stable error
+    message.
+    """
+    from odoo_instance_sdk.internal.proc.run import _TIMEOUT_TAIL_BYTES
+    from odoo_instance_sdk.internal.sanitize import (
+        _ENV_VAR_RE,
+        _PATH_LIKE_RE,
+        _SECRET_PATTERNS,
+        sanitize_terminal_text,
+    )
+
+    encoded = stderr.encode("utf-8", errors="replace")
+    truncated = len(encoded) > _TIMEOUT_TAIL_BYTES
+    if truncated:
+        tail_bytes = encoded[-_TIMEOUT_TAIL_BYTES:]
+        tail = tail_bytes.decode("utf-8", errors="replace")
+    else:
+        tail = stderr
+    text = tail
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("<redacted>", text)
+    text = _ENV_VAR_RE.sub("<env>", text)
+    text = _PATH_LIKE_RE.sub("<path>", text)
+    text = sanitize_terminal_text(text, preserve_newlines=True)
+    return (text, truncated)
+
+
+def _traceback_summary(tail: str) -> str | None:
+    """Extract the final exception line from a bounded redacted stderr tail.
+
+    A Python traceback ends with ``ExceptionType: message``.  Surfacing that
+    single line keeps the stable error message concise (so it survives the
+    shared diagnostic bound) while still naming the exception type and root
+    cause, which is what the contract requires.  Returns ``None`` when no
+    recognizable exception line is present.
+    """
+    import re as _re
+
+    matches = _re.findall(r"(?m)^([A-Za-z_][\w.]*:[^\n]+)$", tail)
+    return matches[-1].strip() if matches else None
+
+
 def _framed_shell_error(payload: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
     """Return details only for a complete, valid framed shell failure."""
     if payload is None:
@@ -183,10 +216,15 @@ def _shell_failure(
             f"{error_type}: {error_message}",
             details=details,
         )
-    stderr = value.stderr.strip()
+    stderr_tail, truncated = _bounded_redacted_tail(value.stderr)
     message = f"shell exited {value.returncode}"
-    if stderr:
-        message += f": {stderr}"
+    summary = _traceback_summary(stderr_tail)
+    if summary:
+        message += f": {summary}"
+    elif stderr_tail:
+        message += f": {stderr_tail}"
+    if truncated:
+        message += " (stderr tail truncated to last 8192 bytes)"
     return _ShellCommandFailure(f"{command}_startup_failed", message)
 
 
@@ -376,6 +414,12 @@ def _load_ps_command() -> click.Command:
     return ps_command
 
 
+def _load_update_command() -> click.Command:
+    from odoo_instance_sdk.commands.update import update_command_cli
+
+    return update_command_cli
+
+
 def _load_test_command() -> click.Command:
     from odoo_instance_sdk.commands.test import test_command
 
@@ -384,6 +428,66 @@ def _load_test_command() -> click.Command:
 
 def _lazy_command(*, name: str, help: str, loader: Callable[[], click.Command]) -> click.Command:
     return _LazyCommand(name=name, help=help, loader=loader)
+
+
+_HEX_COMMIT = re.compile(r"^[0-9a-f]+$")
+
+
+def _installed_version_with_vcs(package_name: str = "odoo-instance-sdk") -> str:
+    """Return the package version, appending the short VCS commit when present.
+
+    Reads optional PEP 610 ``direct_url.json`` via :mod:`importlib.metadata`.
+    Falls back to the package version alone when metadata is missing, malformed,
+    or has no hex ``vcs_info.commit_id`` of length >= 7. No Git, checkout, or
+    network.
+    """
+    try:
+        dist = distribution(package_name)
+    except PackageNotFoundError:
+        return "unknown"
+    version = dist.version
+    short_commit = _vcs_short_commit_from_distribution(dist)
+    return f"{version} ({short_commit})" if short_commit else version
+
+
+def _vcs_short_commit_from_distribution(dist: Distribution) -> str | None:
+    raw = dist.read_text("direct_url.json")
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    vcs_info = payload.get("vcs_info") if isinstance(payload, dict) else None
+    if not isinstance(vcs_info, dict):
+        return None
+    commit_id = vcs_info.get("commit_id")
+    if not isinstance(commit_id, str) or len(commit_id) < 7:
+        return None
+    return commit_id[:7] if _HEX_COMMIT.match(commit_id) else None
+
+
+def _version_callback(ctx: click.Context, param: click.Parameter, value: bool) -> None:
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(f"odcli, version {_installed_version_with_vcs()}", color=ctx.color)
+    ctx.exit()
+
+
+class _OdcliCliGroup(click.RichGroup):  # type: ignore[misc,valid-type]
+    """Root CLI group that blocks normal commands during unfinished updates."""
+
+    def invoke(self, ctx: click.Context) -> None:
+        from odoo_instance_sdk.internal.self_update import (
+            assert_update_not_blocking,
+            is_maintenance_mode,
+        )
+
+        if not is_maintenance_mode():
+            subcommand = ctx.invoked_subcommand
+            if subcommand is not None and subcommand != "update":
+                assert_update_not_blocking(subcommand)
+        super().invoke(ctx)
 
 
 @click.rich_config(  # type: ignore[operator]
@@ -396,7 +500,8 @@ def _lazy_command(*, name: str, help: str, loader: Callable[[], click.Command]) 
                 {"name": "Project", "commands": ["init", "doctor"]},
                 {"name": "Runtime", "commands": ["run", "shell", "logs", "monitor"]},
                 {"name": "Data", "commands": ["env", "backup", "db", "postgres", "psql"]},
-                {"name": "Maintenance", "commands": ["resource"]},
+                {"name": "Maintenance", "commands": ["resource", "update"]},
+                {"name": "Bug reports", "commands": ["bug-report"]},
                 {
                     "name": "Development",
                     "commands": [
@@ -414,8 +519,15 @@ def _lazy_command(*, name: str, help: str, loader: Callable[[], click.Command]) 
         },
     }
 )
-@click.group()
-@click.version_option(package_name="odoo-instance-sdk")
+@click.group(cls=_OdcliCliGroup)
+@click.option(
+    "--version",
+    is_flag=True,
+    expose_value=False,
+    is_eager=True,
+    callback=_version_callback,
+    help="Show the version and exit.",
+)
 @click.option(
     "--project",
     "project",
@@ -455,6 +567,14 @@ cli.add_command(
         loader=_load_ps_command,
     ),
     name="ps",
+)
+cli.add_command(
+    _lazy_command(
+        name="update",
+        help="Self-upgrade an OdCLI uv-tool install.",
+        loader=_load_update_command,
+    ),
+    name="update",
 )
 
 _rich_command = cast("Callable[..., click.Command]", click.RichCommand)
@@ -508,6 +628,9 @@ cli.add_command(
     ),
     name="git",
 )
+cli.add_command(bug_report_group, name="bug-report")
+
+register_init_command(cli)
 
 
 def _cli_catalog_path(*, ensure_exists: bool = True) -> Path:
@@ -545,309 +668,3 @@ class _RunCommand(click.RichCommand):  # type: ignore[misc,valid-type]
                     "Native Odoo arguments must follow a literal `--` delimiter.", ctx
                 )
         return parsed_args
-
-
-@cli.command(help="Create or update the project manifest.")
-@click.option("--odoo-bin", "odoo_bin", type=click.Path(), default=None, help="Path to odoo-bin.")
-@click.option("--python", "python", default=None, help="Python interpreter or uv selector.")
-@click.option(
-    "--config", "source_config", type=click.Path(), default=None, help="Source odoo.conf path."
-)
-@click.option(
-    "--database", "default_source_database", default=None, help="Default source database name."
-)
-@click.option(
-    "--http-port", "preferred_http_port", type=int, default=None, help="Preferred HTTP port."
-)
-@click.option("--requirements", "requirements", multiple=True, help="Requirements files.")
-@click.option("--run-arg", "run_args", multiple=True, help="Default run args.")
-@click.option("--runtime-cwd", "runtime_cwd", type=click.Path(), default=None, help="Runtime cwd.")
-@click.option(
-    "--from-vscode",
-    "from_vscode",
-    type=click.Path(exists=False),
-    default=None,
-    help="Import from VS Code launch.json.",
-)
-@click.option("--launch-name", "launch_name", default=None, help="VS Code launch profile name.")
-@click.option(
-    "--postgres",
-    "postgres_mode",
-    type=click.Choice(["external", "compose"], case_sensitive=False),
-    default="external",
-    help="PostgreSQL cluster mode (external: reuse source cluster; compose: SDK-owned).",
-)
-@click.option(
-    "--postgres-image",
-    "postgres_image",
-    default=None,
-    help="Compose only; required with --no-input.",
-)
-@click.option(
-    "--postgres-port",
-    "postgres_port",
-    type=int,
-    default=None,
-    help="Compose only; omitted = allocate free loopback port.",
-)
-@click.option(
-    "--postgres-user",
-    "postgres_user",
-    default=None,
-    help="Compose only; default: source db_user or 'odoo'.",
-)
-@click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
-@click.option("--yes", "yes", is_flag=True, default=False, help="Confirm manifest replacement.")
-@click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Do not write.")
-@output_options
-@click.option(
-    "--project", "project_path", type=click.Path(exists=False), default=None, help="Project path."
-)
-def init(
-    odoo_bin: str | None,
-    python: str | None,
-    source_config: str | None,
-    default_source_database: str | None,
-    preferred_http_port: int | None,
-    requirements: tuple[str, ...],
-    run_args: tuple[str, ...],
-    runtime_cwd: str | None,
-    from_vscode: str | None,
-    launch_name: str | None,
-    postgres_mode: str,
-    postgres_image: str | None,
-    postgres_port: int | None,
-    postgres_user: str | None,
-    no_input: bool,
-    yes: bool,
-    dry_run: bool,
-    output_format: str | None,
-    json_output: bool,
-    project_path: str | None,
-) -> None:
-    output_mode = resolve_output_mode(output_format, json_output)
-    json_output = output_mode is not OutputMode.RICH
-    resolved_project = Path(project_path) if project_path is not None else Path.cwd()
-    provenance: dict[str, list[str]] = {"option": [], "vscode": [], "discovery": [], "default": []}
-
-    option_state = _OptionState(
-        odoo_bin=Path(odoo_bin) if odoo_bin else None,
-        python=python,
-        source_config=Path(source_config) if source_config else None,
-        default_source_database=default_source_database,
-        preferred_http_port=preferred_http_port,
-        requirements=tuple(requirements),
-        default_run_args=tuple(run_args),
-        runtime_cwd=Path(runtime_cwd) if runtime_cwd else None,
-    )
-    _record_option_provenance(option_state, provenance)
-
-    if from_vscode is not None:
-        vscode_cfg = _import_vscode(from_vscode, launch_name, no_input, output_mode, dry_run)
-        if vscode_cfg is None:
-            return
-        _merge_vscode(option_state, vscode_cfg, provenance)
-
-    from odoo_instance_sdk.commands.cli_parts.callbacks import _resolve_odoo_bin
-
-    _resolve_odoo_bin(option_state, no_input, output_mode, dry_run, provenance)
-
-    postgres_cfg, postgres_allocated = _resolve_postgres_state(
-        postgres_mode=postgres_mode,
-        postgres_image=postgres_image,
-        postgres_port=postgres_port,
-        postgres_user=postgres_user,
-        source_config=option_state.source_config,
-        no_input=no_input,
-        output_mode=output_mode,
-        project_path=resolved_project,
-        dry_run=dry_run,
-    )
-    if postgres_cfg is not None:
-        provenance["option"].append("postgres")
-
-    config = ProjectConfig(
-        repository_root=resolved_project.resolve(),
-        odoo_bin=option_state.odoo_bin,
-        python=option_state.python,
-        source_config=option_state.source_config,
-        default_source_database=option_state.default_source_database,
-        preferred_http_port=option_state.preferred_http_port,
-        requirements=option_state.requirements,
-        default_run_args=option_state.default_run_args,
-        runtime_cwd=option_state.runtime_cwd,
-        postgres=postgres_cfg,
-        ticket_link_enabled=False,
-    )
-
-    if config.postgres is not None and config.postgres.mode == "compose":
-        try:
-            _validate_generated_config_target(
-                project_generated_config_path(resolved_project), project_root=resolved_project
-            )
-        except InstanceConfigurationError as exc:
-            fail(output_mode, "init", str(exc), dry_run=dry_run)
-
-    from odoo_instance_sdk.commands.cli_parts.callbacks import _handle_existing_manifest
-
-    existing = manifest_path(resolved_project)
-    if existing.is_file() and _handle_existing_manifest(
-        existing, resolved_project, config, no_input, yes, output_mode, dry_run=dry_run
-    ):
-        return
-    from odoo_instance_sdk.project_init import init_project_command
-
-    status, _ = run_or_preview(
-        lambda: init_project_command(
-            resolved_project, config, postgres_allocated=postgres_allocated
-        ),
-        command_name="init",
-        mode=output_mode,
-        dry_run=dry_run,
-        result=lambda value: cast("dict[str, JsonValue]", value),
-        provenance=cast("dict[str, JsonValue]", provenance),
-        preview=lambda command: {
-            **_manifest_dict(config, postgres_allocated=postgres_allocated),
-            "plan": model_to_dict(command.plan),
-        },
-        rich=lambda _document: (
-            f"Dry run — no files written.\n{config.to_manifest()}"
-            if dry_run
-            else f"Wrote {existing}"
-        ),
-    )
-    sys.exit(status)
-
-
-def _resolve_postgres_state(
-    *,
-    postgres_mode: str,
-    postgres_image: str | None,
-    postgres_port: int | None,
-    postgres_user: str | None,
-    source_config: Path | None,
-    no_input: bool,
-    output_mode: OutputMode,
-    project_path: Path,
-    dry_run: bool,
-) -> tuple[PostgresProjectConfig | None, bool]:
-    mode = "compose" if postgres_mode.lower() == "compose" else "external"
-    if mode == "external":
-        return None, False
-
-    if postgres_image is None:
-        if no_input or output_mode is not OutputMode.RICH:
-            fail(
-                output_mode,
-                "init",
-                "Missing required option --postgres-image for compose mode",
-                dry_run=dry_run,
-            )
-        postgres_image = click.prompt("PostgreSQL image (e.g. pgvector/pgvector:pg16)")
-
-    allocated = False
-    if postgres_port is None:
-        postgres_port = find_free_port(
-            "postgres", _open_catalog_optional(), exclude_project=project_path
-        )
-        allocated = True
-
-    if postgres_user is None:
-        postgres_user = _default_postgres_user(source_config)
-
-    cfg = PostgresProjectConfig(
-        mode="compose",
-        image=postgres_image,
-        port=postgres_port,
-        user=postgres_user,
-    )
-    return cfg, allocated
-
-
-def _open_catalog_optional() -> BackupCatalog | None:
-    """Open the catalog read-only; return None if missing/unreadable."""
-    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
-
-    catalog_path = _cli_catalog_path()
-    if not catalog_path.is_file():
-        return None
-    try:
-        return BackupCatalog(db_path=catalog_path)
-    except Exception:
-        return None
-
-
-def _default_postgres_user(source_config: Path | None) -> str:
-    if source_config is not None and source_config.is_file():
-        try:
-            start_cfg = StartConfig.from_odoo_config(source_config)
-            if start_cfg.db_user:
-                return start_cfg.db_user
-        except Exception:
-            pass
-    return "odoo"
-
-
-@dataclass(slots=True)
-class _OptionState:
-    odoo_bin: Path | None = None
-    python: str | Path | None = None
-    source_config: Path | None = None
-    default_source_database: str | None = None
-    preferred_http_port: int | None = None
-    requirements: tuple[str, ...] = ()
-    default_run_args: tuple[str, ...] = ()
-    runtime_cwd: Path | None = None
-
-
-def _record_option_provenance(state: _OptionState, provenance: dict[str, list[str]]) -> None:
-    if state.odoo_bin is not None:
-        provenance["option"].append("odoo_bin")
-    if state.python is not None:
-        provenance["option"].append("python")
-    if state.source_config is not None:
-        provenance["option"].append("source_config")
-    if state.default_source_database is not None:
-        provenance["option"].append("default_source_database")
-    if state.preferred_http_port is not None:
-        provenance["option"].append("preferred_http_port")
-    if state.requirements:
-        provenance["option"].append("requirements")
-    if state.default_run_args:
-        provenance["option"].append("default_run_args")
-    if state.runtime_cwd is not None:
-        provenance["option"].append("runtime_cwd")
-
-
-def _import_vscode(
-    from_vscode: str,
-    launch_name: str | None,
-    no_input: bool,
-    output_mode: OutputMode,
-    dry_run: bool,
-) -> ProjectConfig | None:
-    try:
-        result = import_vscode_launch(from_vscode, launch_name=launch_name, no_input=no_input)
-    except VscodeImportError as e:
-        fail(output_mode, "init", str(e), dry_run=dry_run)
-    return result.config
-
-
-def _merge_vscode(
-    state: _OptionState, vscode_cfg: ProjectConfig, provenance: dict[str, list[str]]
-) -> None:
-    provenance["vscode"].append("imported")
-    if state.odoo_bin is None and vscode_cfg.odoo_bin is not None:
-        state.odoo_bin = vscode_cfg.odoo_bin
-    if state.python is None and vscode_cfg.python is not None:
-        state.python = vscode_cfg.python
-    if state.source_config is None and vscode_cfg.source_config is not None:
-        state.source_config = vscode_cfg.source_config
-    if state.default_source_database is None and vscode_cfg.default_source_database is not None:
-        state.default_source_database = vscode_cfg.default_source_database
-    if state.preferred_http_port is None and vscode_cfg.preferred_http_port is not None:
-        state.preferred_http_port = vscode_cfg.preferred_http_port
-    if not state.default_run_args and vscode_cfg.default_run_args:
-        state.default_run_args = vscode_cfg.default_run_args
-    if state.runtime_cwd is None and vscode_cfg.runtime_cwd is not None:
-        state.runtime_cwd = vscode_cfg.runtime_cwd

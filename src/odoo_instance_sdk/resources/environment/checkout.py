@@ -356,6 +356,8 @@ class _CheckoutMixin:
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         restore_source: _RestoreSource | uuid.UUID | str | None = None,
         target_database: str | None = None,
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
         from odoo_instance_sdk.internal.dbprep.materialize import (
@@ -367,6 +369,8 @@ class _CheckoutMixin:
             options=options,
             restore_source=restore_source,
             target_database=target_database,
+            admin_password=admin_password,
+            admin_password_provenance=admin_password_provenance,
             executor=executor,
         )
 
@@ -376,11 +380,15 @@ class _CheckoutMixin:
         backup_id: uuid.UUID,
         *,
         reset_admin_password: bool = False,
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
     ) -> CopyReplacementResult:
         return self.replace_copy_database_command(
             environment,
             backup_id,
             reset_admin_password=reset_admin_password,
+            admin_password=admin_password,
+            admin_password_provenance=admin_password_provenance,
         ).run()
 
     def replace_copy_database_command(
@@ -389,6 +397,8 @@ class _CheckoutMixin:
         backup_id: uuid.UUID,
         *,
         reset_admin_password: bool = False,
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
         executor: ProcessExecutor | None = None,
     ) -> Command[CopyReplacementResult]:
         from odoo_instance_sdk.internal.dbreplace.validation import build_copy_replacement_command
@@ -398,6 +408,8 @@ class _CheckoutMixin:
             environment,
             backup_id,
             reset_admin_password=reset_admin_password,
+            admin_password=admin_password,
+            admin_password_provenance=admin_password_provenance,
             executor=executor,
         )
 
@@ -846,6 +858,11 @@ class _CheckoutMixin:
                     db_name=db_name_for_config,
                 )
                 created_paths.append(plan.generated_config)
+                # Create the environment-owned logfile with the other artifacts
+                # so detached launch and `logs` share one resolved path.
+                env_logfile = plan.generated_config.parent / "odoo.log"
+                env_logfile.touch(exist_ok=True)
+                created_paths.append(env_logfile)
                 context.complete_action("checkout.generated_config")
 
             if plan.options.create_venv and plan.python_selector is not None:

@@ -7,8 +7,6 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
-import httpx
-
 from odoo_instance_sdk.exceptions import (
     BackupDownloadError,
     BackupNotAvailableError,
@@ -24,6 +22,7 @@ from odoo_instance_sdk.internal.files import (
 )
 from odoo_instance_sdk.internal.locks import backup_lock_path, exclusive_lock
 from odoo_instance_sdk.internal.redact import format_error
+from odoo_instance_sdk.internal.transport import TransportError, TransportStatusError
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
     Backup,
@@ -32,7 +31,7 @@ from odoo_instance_sdk.models import (
     RestoreResult,
 )
 from odoo_instance_sdk.resources.database.lifecycle import (
-    _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
+    _admin_password_reset_script as _admin_password_reset_script,
     _stream_response_to_file,
     _trustworthy_content_length as _trustworthy_content_length,
 )
@@ -47,6 +46,7 @@ if TYPE_CHECKING:
         ProcessExecutor,
         RunContext,
     )
+    from odoo_instance_sdk.internal.transport import OdooHttpClient
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 T = TypeVar("T")
@@ -63,7 +63,7 @@ class _BackupMixin:
         def _assert_local(self) -> None: ...
         @property
         def _cluster(self) -> tuple[str | None, int] | None: ...
-        def _http(self, timeout: float | None = None) -> AbstractContextManager[httpx.Client]: ...
+        def _http(self, timeout: float | None = None) -> AbstractContextManager[OdooHttpClient]: ...
         def _exists_impl(self, name: str, *, psql_step_id: str | None = None) -> bool: ...
         def _psql_probe_for(self, name: str, step_id: str) -> PreparedStep | None: ...
         def exists(self, name: str) -> bool: ...
@@ -136,20 +136,22 @@ class _BackupMixin:
                     )
                     if context is not None and context.planned("database.backup.transfer"):
                         context.complete_action("database.backup.transfer")
-            except httpx.HTTPStatusError as exc:
-                # Keep only a status-derived value. The HTTPX exception retains
-                # its request/response/stream graph, including master_pwd.
-                http_failure = f"Backup request failed with HTTP status {exc.response.status_code}"
-            except httpx.HTTPError:
-                # Do not format the exception: its request may contain the remote
-                # master password and response bodies can be unbounded.
+            except TransportStatusError as exc:
+                # Keep only a status-derived value; the transport exception
+                # carries no request/response/stream graph or master_pwd.
+                http_failure = f"Backup request failed with HTTP status {exc.status_code}"
+            except TransportError:
+                # Do not format the exception: transport failures may carry
+                # context that references the remote origin.
                 http_failure = "Backup request failed"
 
         if http_failure is not None:
             raise BackupDownloadError(http_failure) from None
         return server_filename, size_bytes, sha256_hex
 
-    def reset_admin_password(self) -> AdminPasswordResetResult:
+    def reset_admin_password(
+        self, *, admin_password: str, provenance: str
+    ) -> AdminPasswordResetResult:
         from odoo_instance_sdk.internal.proc import active_context
 
         context = active_context()
@@ -163,9 +165,10 @@ class _BackupMixin:
                 raise InstanceConfigurationError(
                     "Administrator password reset requires exactly one configured database"
                 )
+            script = _admin_password_reset_script(admin_password)
             try:
                 result = self._instance._run_shell_script_exclusive(
-                    _RESET_ADMIN_PASSWORD_SCRIPT,
+                    script,
                     commit=True,
                 )
             except Exception:
@@ -183,11 +186,18 @@ class _BackupMixin:
                 completed=True,
                 xml_id="base.user_admin",
                 environment_id=environment_id,
+                provenance=provenance,
             )
-        return self.reset_admin_password_command().run()
+        return self.reset_admin_password_command(
+            admin_password=admin_password, provenance=provenance
+        ).run()
 
     def reset_admin_password_command(
-        self, *, executor: ProcessExecutor | None = None
+        self,
+        *,
+        admin_password: str,
+        provenance: str,
+        executor: ProcessExecutor | None = None,
     ) -> Command[AdminPasswordResetResult]:
         self._assert_local()
         configured = self._instance.config.configured_database_names
@@ -195,6 +205,7 @@ class _BackupMixin:
             raise InstanceConfigurationError(
                 "Administrator password reset requires exactly one configured database"
             )
+        script = _admin_password_reset_script(admin_password)
         # Keep the legacy diagnostic seam for synthetic instances that cannot
         # construct a shell command.  Real instances use the captured shell
         # command below, so the child argv/stdin/env remain inspectable.
@@ -202,20 +213,26 @@ class _BackupMixin:
             return self._action_command(
                 "database.reset-admin-password",
                 "Reset the Odoo administrator password",
-                self._reset_admin_password_impl,
+                lambda: self._reset_admin_password_impl(
+                    admin_password=admin_password, provenance=provenance
+                ),
                 executor=executor,
                 mutating=True,
             )
 
         return self._instance._shell_script_command(
-            _RESET_ADMIN_PASSWORD_SCRIPT,
+            script,
             commit=True,
             exclusive=True,
-            callback_override=self._reset_admin_password_impl,
+            callback_override=lambda: self._reset_admin_password_impl(
+                admin_password=admin_password, provenance=provenance
+            ),
             executor=executor,
         )
 
-    def _reset_admin_password_impl(self) -> AdminPasswordResetResult:
+    def _reset_admin_password_impl(
+        self, *, admin_password: str, provenance: str
+    ) -> AdminPasswordResetResult:
         """Reset ``base.user_admin`` on this instance's one bound database."""
         self._assert_local()
         configured = self._instance.config.configured_database_names
@@ -225,9 +242,10 @@ class _BackupMixin:
             )
 
         database = configured[0]
+        script = _admin_password_reset_script(admin_password)
         try:
             command = self._instance._run_shell_script_exclusive(
-                _RESET_ADMIN_PASSWORD_SCRIPT,
+                script,
                 commit=True,
             )
         except Exception:
@@ -246,6 +264,7 @@ class _BackupMixin:
             completed=True,
             xml_id="base.user_admin",
             environment_id=environment_id,
+            provenance=provenance,
         )
 
     def restore(
@@ -389,6 +408,13 @@ class _BackupMixin:
             cluster_identity, _ = provenance()
         start_config = self._instance.config.start_config
         data_directory = None if start_config is None else start_config.data_dir
+        if data_directory:
+            from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
+            from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
+
+            binding = getattr(self._instance, "_runtime_binding", None)
+            if isinstance(binding, _RuntimeBinding) and binding.owner_kind == "project":
+                verify_project_owned_data_dir(binding.repository_root, data_directory)
 
         backup_path = Path(backup.path)
         if not backup_path.is_file() or not os.access(backup_path, os.R_OK):
@@ -405,6 +431,7 @@ class _BackupMixin:
             )
 
         from odoo_instance_sdk.internal.proc import active_context
+        from odoo_instance_sdk.internal.restore_stages import restore_stage_heartbeat
         from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
 
         auxiliary_session = active_auxiliary_restore_session()
@@ -414,16 +441,22 @@ class _BackupMixin:
                 raise DatabaseManagerUnavailableError(
                     "auxiliary database manager has no active execution context"
                 )
-            auxiliary_session.ensure_started(context)
+            with restore_stage_heartbeat("auxiliary_start"):
+                auxiliary_session.ensure_started(context)
 
         http_failure: tuple[int, str] | tuple[None, str] | None = None
+        restore_http_failure: tuple[int, str] | None = None
         try:
             restore_timeout = (
                 timeout
                 if timeout is not None
                 else self._instance._client.config.backup_timeout_seconds
             )
-            with open(backup_path, "rb") as fp, self._http(timeout=restore_timeout) as http:
+            with (
+                restore_stage_heartbeat("db_restore"),
+                open(backup_path, "rb") as fp,
+                self._http(timeout=restore_timeout) as http,
+            ):
                 resp = http.post(
                     self._url("restore"),
                     data={
@@ -437,16 +470,22 @@ class _BackupMixin:
                     },
                 )
                 if resp.is_error:
-                    resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            # Convert outside the except scope so the SDK error has no HTTPX
-            # cause/context/request/response/stream references.
+                    restore_http_failure = (
+                        resp.status_code,
+                        f"Database restore failed with HTTP status {resp.status_code}",
+                    )
+        except TransportStatusError as exc:
+            # Convert outside the except scope so the SDK error has no
+            # transport cause/context/request/response/stream references.
             http_failure = (
-                exc.response.status_code,
-                f"Database restore failed with HTTP status {exc.response.status_code}",
+                exc.status_code,
+                f"Database restore failed with HTTP status {exc.status_code}",
             )
-        except httpx.HTTPError:
+        except TransportError:
             http_failure = (None, "Database restore request failed")
+
+        if restore_http_failure is not None:
+            http_failure = restore_http_failure
 
         if not skip_existence_checks and not target_exists(after_step_id):
             if http_failure is not None:
@@ -528,15 +567,12 @@ class _BackupMixin:
                     "name": database_name,
                 },
             )
-            try:
-                if resp.is_error:
-                    resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
+            if resp.is_error:
                 raise DatabaseError(
-                    status_code=exc.response.status_code,
-                    message=format_error(exc.response.text),
-                    body=exc.response.content,
-                ) from exc
+                    status_code=resp.status_code,
+                    message=format_error(resp.text),
+                    body=resp.content,
+                ) from None
 
         if self.exists(database_name):
             raise DropFailedError(f"Database {database_name!r} still exists after drop")

@@ -6,11 +6,12 @@ import contextlib
 import shutil
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError
 from odoo_instance_sdk.execution import Command, ExecutionPlan
-from odoo_instance_sdk.internal.dbprep.materialize import (
+from odoo_instance_sdk.internal.dbprep.materialize_steps import (
     _preparation_process_steps,
 )
 from odoo_instance_sdk.internal.dbprep.source import (
@@ -91,6 +92,8 @@ def build_copy_replacement_command(  # noqa: C901
     backup_id: uuid.UUID,
     *,
     reset_admin_password: bool = False,
+    admin_password: str | None = None,
+    admin_password_provenance: str = "environment",
     executor: ProcessExecutor | None = None,
 ) -> Command[CopyReplacementResult]:
     plan = _validate_plan(
@@ -98,6 +101,8 @@ def build_copy_replacement_command(  # noqa: C901
         environment,
         backup_id,
         reset_admin_password=reset_admin_password,
+        admin_password=admin_password,
+        admin_password_provenance=admin_password_provenance,
     )
     process_executor = executor or SubprocessExecutor()
     planning_inspect = _step(
@@ -136,7 +141,11 @@ def build_copy_replacement_command(  # noqa: C901
     # Capture validated archive members only after the immutable identity and
     # execution probes have succeeded.  The public plan contains identities,
     # never a dump or filestore byte payload.
-    restore_payload = capture_selected_backup_restore(plan.backup)
+    start_config = getattr(plan.instance.config, "start_config", None)
+    plan_data_dir: Path | None = None
+    if start_config is not None and getattr(start_config, "data_dir", None):
+        plan_data_dir = Path(start_config.data_dir)
+    restore_payload = capture_selected_backup_restore(plan.backup, data_dir=plan_data_dir)
     if plan.restore_inputs is None:
         raise ConfigError("selected restore inputs were not captured")
     restore_steps = _preparation_process_steps(
@@ -259,8 +268,15 @@ def build_copy_replacement_command(  # noqa: C901
                 _revalidate(plan, cast("RunContext[None]", context), _REVALIDATE)
                 execution_payload = restore_payload
                 if not plan.cleanup_only:
-                    execution_payload = _materialize_verified_snapshot(restore_payload)
-                    _assert_verified_snapshot_unchanged(execution_payload)
+                    from odoo_instance_sdk.internal.restore_stages import (
+                        restore_stage as _restore_stage,
+                    )
+
+                    with _restore_stage("backup_prepare"):
+                        execution_payload = _materialize_verified_snapshot(restore_payload)
+                        _assert_verified_snapshot_unchanged(execution_payload)
+                else:
+                    execution_payload = restore_payload
                 if plan.cleanup_only:
                     published = True
                     restored_database = True
@@ -355,50 +371,60 @@ def build_copy_replacement_command(  # noqa: C901
                     if not plan.rollback_filestore.is_dir() or plan.filestore.exists():
                         raise ConfigError("prior filestore move verification failed")  # noqa: TRY301
                 moved_filestore = True
-                context.action(_RESTORE)
-                create_result = cast(
-                    "ProcessResult", context.process("database.replace.restore.create")
+                from odoo_instance_sdk.internal.restore_stages import (
+                    restore_stage as _restore_stage,
                 )
-                if create_result.returncode != 0:
-                    raise ConfigError("replacement target database creation failed")  # noqa: TRY301
-                restored_database = True
-                materialize_selected_backup_dump(execution_payload)
-                _assert_verified_snapshot_unchanged(execution_payload)
-                if isinstance(restore_validate, PreparedStep):
-                    validation_result = cast(
-                        "ProcessResult", context.process(restore_validate_step_id)
+
+                with _restore_stage("db_restore"):
+                    context.action(_RESTORE)
+                    create_result = cast(
+                        "ProcessResult", context.process("database.replace.restore.create")
                     )
-                    if validation_result.returncode != 0:
-                        raise ConfigError(  # noqa: TRY301
-                            "replacement PostgreSQL dump validation failed"
+                    if create_result.returncode != 0:
+                        raise ConfigError("replacement target database creation failed")  # noqa: TRY301
+                    restored_database = True
+                    materialize_selected_backup_dump(execution_payload)
+                    _assert_verified_snapshot_unchanged(execution_payload)
+                    if isinstance(restore_validate, PreparedStep):
+                        validation_result = cast(
+                            "ProcessResult", context.process(restore_validate_step_id)
                         )
-                else:
-                    context.action(restore_validate_step_id)
-                    context.complete_action(restore_validate_step_id)
-                dump_result = cast("ProcessResult", context.process(restore_process_step_id))
-                if dump_result.returncode != 0:
-                    raise ConfigError("replacement PostgreSQL restore failed")  # noqa: TRY301
-                materialize_selected_backup_filestore(plan.filestore, execution_payload)
-                _assert_verified_snapshot_unchanged(execution_payload)
-                after = cast("ProcessResult", context.process("database.restore.exists-after"))
-                if after.returncode != 0 or _stdout(after).strip().lower() not in {
-                    "t",
-                    "true",
-                    "1",
-                }:
-                    raise ConfigError("replacement database was not created")  # noqa: TRY301
-                context.action(_RESTORE_VERIFY)
-                if not plan.filestore.is_dir() or plan.filestore.is_symlink():
-                    raise ConfigError("replacement filestore was not created safely")  # noqa: TRY301
+                        if validation_result.returncode != 0:
+                            raise ConfigError(  # noqa: TRY301
+                                "replacement PostgreSQL dump validation failed"
+                            )
+                    else:
+                        context.action(restore_validate_step_id)
+                        context.complete_action(restore_validate_step_id)
+                    dump_result = cast("ProcessResult", context.process(restore_process_step_id))
+                    if dump_result.returncode != 0:
+                        raise ConfigError("replacement PostgreSQL restore failed")  # noqa: TRY301
+                with _restore_stage("filestore_restore"):
+                    materialize_selected_backup_filestore(plan.filestore, execution_payload)
+                    _assert_verified_snapshot_unchanged(execution_payload)
+                with _restore_stage("db_verify"):
+                    after = cast("ProcessResult", context.process("database.restore.exists-after"))
+                    if after.returncode != 0 or _stdout(after).strip().lower() not in {
+                        "t",
+                        "true",
+                        "1",
+                    }:
+                        raise ConfigError("replacement database was not created")  # noqa: TRY301
+                    context.action(_RESTORE_VERIFY)
+                    if not plan.filestore.is_dir() or plan.filestore.is_symlink():
+                        raise ConfigError("replacement filestore was not created safely")  # noqa: TRY301
                 if plan.reset_admin_password:
-                    context.action(_RESET)
-                    reset_result = cast("ProcessResult", context.process("instance.shell_script"))
-                    if reset_result.returncode != 0:
-                        detail = sanitize_last_error(_stdout(reset_result))
-                        raise ConfigError(  # noqa: TRY301
-                            "replacement administrator password reset failed"
-                            + (f": {detail}" if detail else "")
+                    with _restore_stage("admin_reset"):
+                        context.action(_RESET)
+                        reset_result = cast(
+                            "ProcessResult", context.process("instance.shell_script")
                         )
+                        if reset_result.returncode != 0:
+                            detail = sanitize_last_error(_stdout(reset_result))
+                            raise ConfigError(  # noqa: TRY301
+                                "replacement administrator password reset failed"
+                                + (f": {detail}" if detail else "")
+                            )
                 pre_target, pre_rollback, pre_sessions = _inspect(
                     cast("ProcessResult", context.process(_PRE_CLEANUP_VERIFY)),
                     target=plan.target_database,
@@ -412,16 +438,17 @@ def build_copy_replacement_command(  # noqa: C901
                     or plan.filestore.is_symlink()
                 ):
                     raise ConfigError("replacement postconditions failed before cleanup")  # noqa: TRY301
-                context.action(_PUBLISH)
-                catalog._finalize_environment_replacement(
-                    str(plan.environment.id),
-                    str(plan.backup.id),
-                    db_host=cluster.endpoint_host,
-                    db_port=cluster.endpoint_port,
-                    target_database=plan.target_database,
-                    cluster_id=plan.cluster_id,
-                    data_directory=str(plan.data_directory),
-                )
+                with _restore_stage("default_switch"):
+                    context.action(_PUBLISH)
+                    catalog._finalize_environment_replacement(
+                        str(plan.environment.id),
+                        str(plan.backup.id),
+                        db_host=cluster.endpoint_host,
+                        db_port=cluster.endpoint_port,
+                        target_database=plan.target_database,
+                        cluster_id=plan.cluster_id,
+                        data_directory=str(plan.data_directory),
+                    )
                 published = True
                 context.action(_CLEANUP_ROLLBACK)
                 if moved_database:
@@ -526,6 +553,8 @@ def build_copy_replacement_command(  # noqa: C901
                     if moved_database
                     else "preflight"
                 ),
+                restore_stage_id=getattr(exc, "restore_stage_id", None),
+                restore_stage_elapsed=getattr(exc, "restore_stage_elapsed", None),
             )
             if not compensated:
                 message = _durable_failure_message(failure, exc)

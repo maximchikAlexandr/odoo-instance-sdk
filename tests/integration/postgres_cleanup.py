@@ -4,6 +4,14 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from odoo_instance_sdk.exceptions import PostgresImageNotTrustedError
+from odoo_instance_sdk.internal.proc import PreparedStep, RunContext
+from odoo_instance_sdk.resources.postgres import PostgresCluster
+
+if TYPE_CHECKING:
+    from _pytest.monkeypatch import MonkeyPatch
 
 _EXPLICITLY_ABSENT_VOLUME = re.compile(
     r"^Error response from daemon: get [^:]+: no such volume$", re.IGNORECASE
@@ -112,3 +120,78 @@ def cleanup_postgres_project(
         raise primary_failure
     if cleanup_failures:
         raise BaseExceptionGroup("PostgreSQL cleanup failures", cleanup_failures)
+
+
+def patch_postgres_image_trust(monkeypatch: MonkeyPatch) -> None:
+    """Auto-approve the resolved compose image digest for integration tests."""
+    original = PostgresCluster._approved_image_digest
+
+    def _approved_image_digest(self: PostgresCluster) -> str:
+        try:
+            return original(self)
+        except PostgresImageNotTrustedError:
+            image = self._image
+            assert image is not None
+            pull = subprocess.run(
+                ["docker", "image", "pull", image],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if pull.returncode != 0:
+                raise PostgresImageNotTrustedError(
+                    f"docker image pull failed: {pull.stderr.strip() or pull.stdout.strip()}"
+                ) from None
+            inspected = subprocess.run(
+                [
+                    "docker",
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{index .RepoDigests 0}}",
+                    image,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if inspected.returncode != 0:
+                raise PostgresImageNotTrustedError(
+                    "docker image inspect failed: "
+                    f"{inspected.stderr.strip() or inspected.stdout.strip()}"
+                ) from None
+            digest = inspected.stdout.strip()
+            self._approve_image(digest)
+            return digest
+
+    monkeypatch.setattr(PostgresCluster, "_approved_image_digest", _approved_image_digest)
+
+
+def patch_compose_init_bootstrap_skip(monkeypatch: MonkeyPatch) -> None:
+    """Skip tmp bootstrap during partial compose init in integration tests."""
+
+    def _skip_bootstrap_tmp(
+        context: RunContext[object],
+        spawn_step: PreparedStep,
+        probe_step: PreparedStep,
+        ready_step: PreparedStep,
+    ) -> bool:
+        context.skip(spawn_step.step_id)
+        context.skip(probe_step.step_id)
+        context.skip(ready_step.step_id)
+        return True
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap.run_bootstrap_tmp",
+        _skip_bootstrap_tmp,
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.dbprep.bootstrap.ensure_project_bootstrap_tmp",
+        lambda _instance, _context: None,
+    )
+
+
+def patch_compose_init_for_integration(monkeypatch: MonkeyPatch) -> None:
+    """Prepare partial compose init for disposable PostgreSQL integration tests."""
+    patch_postgres_image_trust(monkeypatch)
+    patch_compose_init_bootstrap_skip(monkeypatch)

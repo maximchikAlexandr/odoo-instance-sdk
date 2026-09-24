@@ -188,10 +188,26 @@ def test_iter_logs_unreadable_path_includes_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("logfile", [None, "", "   "], ids=["absent", "empty", "whitespace"])
-def test_iter_logs_rejects_unset_logfile(tmp_path: Path, logfile: str | None) -> None:
+def test_iter_logs_unset_logfile_falls_back_next_to_config(
+    tmp_path: Path, logfile: str | None
+) -> None:
+    # Absence of logfile is no longer an error: the resolver chooses
+    # odoo.log next to the effective odoo.conf.
     inst = _instance_from_config(tmp_path, logfile=logfile)
-    with pytest.raises(InstanceConfigurationError, match="absent or empty"):
+    fallback = tmp_path / "odoo.log"
+    fallback.write_text("fallback\n")
+    assert list(inst.iter_logs(tail=1)) == ["fallback\n"]
+
+
+@pytest.mark.parametrize("logfile", [None, "", "   "], ids=["absent", "empty", "whitespace"])
+def test_iter_logs_unset_logfile_missing_fallback_includes_path(
+    tmp_path: Path, logfile: str | None
+) -> None:
+    inst = _instance_from_config(tmp_path, logfile=logfile)
+    fallback = tmp_path / "odoo.log"
+    with pytest.raises(InstanceConfigurationError, match=str(fallback)):
         list(inst.iter_logs())
+    assert not fallback.exists()
 
 
 @pytest.mark.parametrize("tail", [0, -1], ids=["zero", "negative"])

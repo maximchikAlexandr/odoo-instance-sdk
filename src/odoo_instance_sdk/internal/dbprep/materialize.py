@@ -11,10 +11,15 @@ from typing import TYPE_CHECKING
 import msgspec
 
 from odoo_instance_sdk.exceptions import (
+    AdminPasswordRequiredError,
     ConfigError,
     DatabaseAlreadyExistsError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
+)
+from odoo_instance_sdk.internal.dbprep.materialize_steps import (
+    _preparation_action_steps,
+    _preparation_process_steps,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.dbprep.source import (
@@ -39,6 +44,7 @@ from odoo_instance_sdk.internal.dbprep.source import (
     classify_freshness as classify_freshness,
     generate_target_database as generate_target_database,
     reserve_target_database as reserve_target_database,
+    resolve_remote_database_name as resolve_remote_database_name,
     resolve_runtime_binding as resolve_runtime_binding,
     resolve_test_source as resolve_test_source,
 )
@@ -74,7 +80,6 @@ from odoo_instance_sdk.models import (
     DatabasePreparationAction,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
-    StartConfig,
 )
 from odoo_instance_sdk.project import ProjectConfig
 
@@ -88,7 +93,6 @@ if TYPE_CHECKING:
         RunContext,
     )
     from odoo_instance_sdk.models import DevelopmentEnvironment
-    from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 @contextlib.contextmanager
@@ -109,6 +113,7 @@ def _restore_preflight(  # noqa: C901
     coalesce: bool = False,
     target_database: str | None = None,
     restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    remote_password: str | None = None,
 ) -> Iterator[RestorePreflight]:
     """Own the complete restore preflight and preparation-lock lifetime."""
     if not options.restore:
@@ -213,11 +218,26 @@ def _restore_preflight(  # noqa: C901
         # the exact active cluster and data root into the local instance so a
         # later public ``db.drop`` can validate the same ownership evidence.
         local._postgres_cluster = cluster
+        resolved_database: str | None = None
+        if (
+            isinstance(selected_source, _RemoteRestoreSource)
+            and source is not None
+            and source.config.database is None
+        ):
+            assert remote_password is not None
+            remote_for_resolution = client.instance(
+                source.config.base_url, master_password=remote_password
+            )
+            resolved_database = resolve_remote_database_name(None, remote_for_resolution.databases)
         if target_database is None:
             source_database = (
-                source.config.database
-                if source is not None
-                else (catalogue_backup.database_name if catalogue_backup is not None else "")
+                resolved_database
+                if resolved_database is not None
+                else (
+                    source.config.database
+                    if source is not None
+                    else (catalogue_backup.database_name if catalogue_backup is not None else "")
+                )
             )
             if not source_database:
                 raise ConfigError("catalogue backup was not resolved")
@@ -240,6 +260,7 @@ def _restore_preflight(  # noqa: C901
             runtime=runtime,
             postgres_cluster=cluster,
             target_database=target,
+            resolved_database=resolved_database,
         )
 
 
@@ -252,10 +273,15 @@ def prepare_restore(  # noqa: C901
     restore_inputs: tuple[str, Path] | None = None,
     restore_source: _RestoreSource | uuid.UUID | str | None = None,
     target_database: str | None = None,
+    admin_password: str | None = None,
+    admin_password_provenance: str = "environment",
 ) -> DatabasePreparationResult:
     """Run the full restore preparation while retaining the project lock."""
     if not options.restore:
         raise ConfigError("restore preparation requires restore=True")
+    if options.reset_admin_password and not admin_password:
+        raise AdminPasswordRequiredError("administrator password is required before admin reset")
+    resolved_admin_password: str = admin_password or ""
     _initial, root = _load_project(project)
     project_environment = load_project_environment(root)
     selected_source = _coerce_restore_source(restore_source)
@@ -281,6 +307,7 @@ def prepare_restore(  # noqa: C901
             options=options,
             coalesce=coalesce,
             target_database=restore_inputs[0] if restore_inputs is not None else None,
+            remote_password=remote_password,
         )
         if not isinstance(selected_source, _RemoteRestoreSource):
             preflight_context = _restore_preflight(
@@ -304,6 +331,12 @@ def prepare_restore(  # noqa: C901
                     remote = client.instance(
                         source.config.base_url, master_password=remote_password
                     )
+                    database_name = (
+                        preflight.resolved_database
+                        if preflight.resolved_database is not None
+                        else source.config.database
+                    )
+                    assert database_name is not None
                     _consume_action_if_planned("database.prepare.remote-backup")
                     catalog_project_id = f"project_{preflight.project_id}"
                     from odoo_instance_sdk.internal.repo_key import git_common_dir
@@ -311,37 +344,64 @@ def prepare_restore(  # noqa: C901
                     client.get_catalog()._register_project(
                         catalog_project_id, root, git_common_dir(root)
                     )
-                    backup = remote.databases.backup(
-                        source.config.database,
-                        source_git_branch=source.branch,
-                        project_id=catalog_project_id,
-                    )
+                    from odoo_instance_sdk.internal.restore_stages import restore_stage
+
+                    with restore_stage("backup_prepare"):
+                        backup = remote.databases.backup(
+                            database_name,
+                            source_git_branch=source.branch,
+                            project_id=catalog_project_id,
+                        )
+                else:
+                    from odoo_instance_sdk.internal.restore_stages import publish_stage
+
+                    publish_stage("backup_prepare", kind="completed")
                 _consume_action_if_planned("database.prepare.local-restore")
                 assert backup is not None
-                preflight.local_instance.databases.restore(
-                    backup,
-                    preflight.target_database,
-                    copy=True,
-                    neutralize_database=True,
+                from odoo_instance_sdk.internal.restore_stages import (
+                    restore_stage as _restore_stage,
                 )
+
+                with (
+                    _restore_stage("auxiliary_start"),
+                    _restore_stage("db_restore"),
+                    _restore_stage("db_verify"),
+                    _restore_stage("filestore_restore"),
+                ):
+                    preflight.local_instance.databases.restore(
+                        backup,
+                        preflight.target_database,
+                        copy=True,
+                        neutralize_database=True,
+                    )
                 database_confirmed = True
                 reset_completed = False
                 if options.reset_admin_password:
                     _consume_action_if_planned("database.prepare.odoo-reset")
-                    with build_target_instance(
-                        client,
-                        source_config=preflight.source_config,
-                        target_database=preflight.target_database,
-                        runtime=preflight.runtime,
-                        postgres_cluster=preflight.postgres_cluster,
-                        project_id=preflight.project_id,
-                        project_environment=project_environment,
-                        target_config_path=restore_inputs[1]
-                        if restore_inputs is not None
-                        else None,
-                        preferred_http_port=current.preferred_http_port,
-                    ) as target_instance:
-                        target_instance.databases.reset_admin_password()
+                    from odoo_instance_sdk.internal.restore_stages import (
+                        restore_stage as _restore_stage,
+                    )
+
+                    with (
+                        _restore_stage("admin_reset"),
+                        build_target_instance(
+                            client,
+                            source_config=preflight.source_config,
+                            target_database=preflight.target_database,
+                            runtime=preflight.runtime,
+                            postgres_cluster=preflight.postgres_cluster,
+                            project_id=preflight.project_id,
+                            project_environment=project_environment,
+                            target_config_path=restore_inputs[1]
+                            if restore_inputs is not None
+                            else None,
+                            preferred_http_port=current.preferred_http_port,
+                        ) as target_instance,
+                    ):
+                        target_instance.databases.reset_admin_password(
+                            admin_password=resolved_admin_password,
+                            provenance=admin_password_provenance,
+                        )
                     reset_completed = True
 
                 final_config = _manifest_after_preparation(root, current)
@@ -349,7 +409,12 @@ def prepare_restore(  # noqa: C901
                     final_config, default_source_database=preflight.target_database
                 )
                 _consume_action_if_planned("database.prepare.default-switch")
-                write_manifest(root, switched)
+                from odoo_instance_sdk.internal.restore_stages import (
+                    restore_stage as _restore_stage,
+                )
+
+                with _restore_stage("default_switch"):
+                    write_manifest(root, switched)
                 default_switch_confirmed = True
                 return DatabasePreparationResult(
                     mode=DatabasePreparationAction.RESTORE,
@@ -440,11 +505,12 @@ def prepare_download(
         source = resolve_test_source(current, options)
         require_test_instance_origin_approval(source.config.base_url)
         remote = client.instance(source.config.base_url, master_password=password)
+        database_name = resolve_remote_database_name(source.config.database, remote.databases)
         _consume_action_if_planned("database.prepare.remote-backup")
         catalog_project_id = f"project_{project_key}"
         client.get_catalog()._register_project(catalog_project_id, repo_root, git_common)
         backup = remote.databases.backup(
-            source.config.database,
+            database_name,
             source_git_branch=source.branch,
             project_id=catalog_project_id,
         )
@@ -464,9 +530,15 @@ def preflight_restore(
     *,
     options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
     restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    remote_password: str | None = None,
 ) -> RestorePreflight:
     with _restore_preflight(
-        client, project, options=options, wait_for_lock=False, restore_source=restore_source
+        client,
+        project,
+        options=options,
+        wait_for_lock=False,
+        restore_source=restore_source,
+        remote_password=remote_password,
     ) as preflight:
         return preflight
 
@@ -498,244 +570,12 @@ def _capture_restore_inputs(
             return None
         projection = client.get_catalog()._resolve_backup_projection(str(selected_source.backup_id))
         source_database = projection.backup.database_name
+    if source_database is None:
+        source_database = "remote"
     target = target_database or generate_target_database(source_database)
     validate_db_name(target)
     target_config = source_config.parent / f".odcli-refresh-{uuid.uuid4().hex}.conf"
     return target, target_config
-
-
-def _preparation_process_steps(
-    project: ProjectConfig | str | Path,
-    *,
-    options: DatabaseRefreshOptions,
-    restore_inputs: tuple[str, Path] | None = None,
-    selected_environment: DevelopmentEnvironment | None = None,
-    selected_instance: OdooInstance | None = None,
-    selected_restore: SelectedBackupRestorePayload | None = None,
-) -> tuple[PreparedStep | PreparedAction, ...]:
-    """Build the child-process part of a preparation command before effects.
-
-    The preparation implementation deliberately keeps catalog, filesystem,
-    HTTP, and lock work in its domain callback.  Its Git, PostgreSQL, compose,
-    and optional Odoo-shell launches, however, must be visible in the same
-    private snapshot so the active ledger can reject substitutions.
-    """
-    from odoo_instance_sdk.internal.proc import PreparedStep
-
-    if selected_environment is not None:
-        if selected_instance is None or selected_restore is None or restore_inputs is None:
-            raise ConfigError("selected restore inputs were not captured")
-        return build_selected_backup_restore_steps(
-            selected_instance,
-            target_database=restore_inputs[0],
-            dump_path=selected_restore.dump_path,
-            backup_format=selected_restore.format,
-        )
-
-    initial, root = _load_project(project)
-    steps: list[PreparedStep] = [
-        PreparedStep(
-            step_id="database.prepare.git.toplevel",
-            argv=("git", "-C", str(root), "rev-parse", "--show-toplevel"),
-            timeout=30.0,
-            read_only=True,
-            text=True,
-        ),
-        PreparedStep(
-            step_id="database.prepare.git.common-dir",
-            argv=("git", "-C", str(root), "rev-parse", "--git-common-dir"),
-            timeout=30.0,
-            read_only=True,
-            text=True,
-        ),
-    ]
-    if not options.restore:
-        return tuple(steps)
-
-    from odoo_instance_sdk.internal.pg.builder import build_psql_specification
-    from odoo_instance_sdk.resources.database import _RESET_ADMIN_PASSWORD_SCRIPT
-    from odoo_instance_sdk.resources.postgres import PostgresCluster
-
-    project_environment = load_project_environment(root)
-
-    # The real Git identity is captured by the two process steps above and
-    # resolved by the callback under the active ledger.  Planning must not
-    # launch Git or otherwise inspect mutable repository state.
-    _, _, project_id = _planned_project_identity(root)
-    cluster = PostgresCluster._from_config(
-        initial,
-        repository_root=root,
-        compose_runner=None,
-        project_id=project_id,
-    )
-    compose_temporary_path = None
-    if cluster.mode == "compose":
-        compose_temporary_path = (
-            cluster.compose_file.parent / f".compose-{uuid.uuid4().hex}.yaml.tmp"
-        )
-    steps.extend(
-        step
-        for step in cluster._ensure_running_steps(60.0, temporary_path=compose_temporary_path)
-        if isinstance(step, PreparedStep)
-    )
-
-    source_config = _resolve_source_config(initial, root)
-    parsed = parse_odoo_config(source_config)
-    db_user = parsed.get("db_user")
-    target_database = restore_inputs[0] if restore_inputs is not None else None
-    if db_user and target_database is not None:
-        db_host = parsed.get("db_host")
-        raw_port = parsed.get("db_port")
-        try:
-            db_port = int(raw_port) if raw_port else 5432
-        except ValueError:
-            db_port = 5432
-        password = parsed.get("db_password")
-        steps.extend(
-            (
-                build_psql_specification(
-                    step_id="database.restore.exists-reservation",
-                    host=db_host,
-                    port=db_port,
-                    user=db_user,
-                    password=password,
-                    database="postgres",
-                    args=(
-                        "-c",
-                        f"SELECT 1 FROM pg_database WHERE datname='{target_database.replace(chr(39), chr(39) + chr(39))}'",
-                    ),
-                    _trusted_args=("-t", "-A"),
-                    timeout=30.0,
-                ).prepared_step,
-                build_psql_specification(
-                    step_id="database.restore.exists-before",
-                    host=db_host,
-                    port=db_port,
-                    user=db_user,
-                    password=password,
-                    database="postgres",
-                    args=(
-                        "-c",
-                        f"SELECT 1 FROM pg_database WHERE datname='{target_database.replace(chr(39), chr(39) + chr(39))}'",
-                    ),
-                    _trusted_args=("-t", "-A"),
-                    timeout=30.0,
-                ).prepared_step,
-                build_psql_specification(
-                    step_id="database.restore.exists-after",
-                    host=db_host,
-                    port=db_port,
-                    user=db_user,
-                    password=password,
-                    database="postgres",
-                    args=(
-                        "-c",
-                        f"SELECT 1 FROM pg_database WHERE datname='{target_database.replace(chr(39), chr(39) + chr(39))}'",
-                    ),
-                    _trusted_args=("-t", "-A"),
-                    timeout=30.0,
-                ).prepared_step,
-            )
-        )
-
-    if options.reset_admin_password:
-        from odoo_instance_sdk.resources.instance.auxiliary_restore import _build_shell_script_step
-
-        runtime = resolve_runtime_binding(initial, root)
-        start_config = StartConfig.from_odoo_config(source_config)
-        start_config.http_port = resolve_project_http_port(
-            initial.preferred_http_port, start_config.http_port
-        )
-        if restore_inputs is None:
-            raise ConfigError("reset admin preparation inputs were not captured")
-        start_config.config_path = str(restore_inputs[1])
-        start_config.dbfilter = restore_inputs[0]
-        start_config.db_name = restore_inputs[0]
-        secret_config_path = str(restore_inputs[1]) + ".secret"
-        shell_step, _, _, _ = _build_shell_script_step(
-            start_config,
-            executable_prefix=runtime.command_prefix,
-            default_cwd=runtime.runtime_cwd,
-            source=_RESET_ADMIN_PASSWORD_SCRIPT,
-            commit=True,
-            secret_config_path=secret_config_path,
-            project_environment=project_environment,
-        )
-        steps.append(shell_step)
-    return tuple(steps)
-
-
-def _preparation_action_steps(
-    *,
-    operation: str,
-    options: DatabaseRefreshOptions,
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
-) -> tuple[PreparedAction, ...]:
-    """Return honest in-process boundaries for the preparation coordinator."""
-    from odoo_instance_sdk.internal.proc import PreparedAction
-
-    selected_source = _coerce_restore_source(restore_source)
-    action_steps = [
-        PreparedAction(
-            step_id="database.prepare.lock",
-            action="acquire-preparation-lock",
-            description="Serialize project database preparation",
-            mutating=True,
-        ),
-    ]
-    if isinstance(selected_source, _RemoteRestoreSource):
-        action_steps.append(
-            PreparedAction(
-                step_id="database.prepare.remote-backup",
-                action="download-remote-backup",
-                description="Request the selected remote database backup",
-                mutating=True,
-            )
-        )
-    else:
-        action_steps.append(
-            PreparedAction(
-                step_id="database.prepare.catalogue-backup",
-                action="inspect-catalogue-backup",
-                description="Validate the selected registered backup artifact",
-                read_only=True,
-            )
-        )
-    if options.restore:
-        action_steps.append(
-            PreparedAction(
-                step_id="database.prepare.local-restore",
-                action="restore-local-database",
-                description="Restore the captured backup into the reserved database",
-                mutating=True,
-            )
-        )
-        if options.reset_admin_password:
-            action_steps.append(
-                PreparedAction(
-                    step_id="database.prepare.odoo-reset",
-                    action="reset-odoo-admin-password",
-                    description="Reset the administrator password in the target database",
-                    mutating=True,
-                )
-            )
-        action_steps.extend(
-            (
-                PreparedAction(
-                    step_id="database.prepare.default-switch",
-                    action="switch-default-database",
-                    description="Publish the prepared database as the project default",
-                    mutating=True,
-                ),
-                PreparedAction(
-                    step_id="database.prepare.rollback",
-                    action="compensate-preparation-failure",
-                    description="Retain artifacts and record preparation compensation",
-                    read_only=True,
-                ),
-            )
-        )
-    return tuple(action_steps)
 
 
 @dataclass(slots=True)
@@ -750,6 +590,8 @@ class DatabasePreparationCoordinator:
         coalesce: bool = False,
         restore_source: _RestoreSource | uuid.UUID | str | None = None,
         target_database: str | None = None,
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
     ) -> DatabasePreparationResult:
         return self.prepare_command(
             project,
@@ -757,6 +599,8 @@ class DatabasePreparationCoordinator:
             coalesce=coalesce,
             restore_source=restore_source,
             target_database=target_database,
+            admin_password=admin_password,
+            admin_password_provenance=admin_password_provenance,
         ).run()
 
     def prepare_command(
@@ -767,6 +611,8 @@ class DatabasePreparationCoordinator:
         coalesce: bool = False,
         restore_source: _RestoreSource | uuid.UUID | str | None = None,
         target_database: str | None = None,
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
         restore_inputs = _capture_restore_inputs(
@@ -780,7 +626,12 @@ class DatabasePreparationCoordinator:
             *_preparation_action_steps(
                 operation="prepare", options=options, restore_source=restore_source
             ),
-            *_preparation_process_steps(project, options=options, restore_inputs=restore_inputs),
+            *_preparation_process_steps(
+                project,
+                options=options,
+                restore_inputs=restore_inputs,
+                admin_password=admin_password,
+            ),
         )
         return self._action_command(
             "database.prepare",
@@ -792,6 +643,8 @@ class DatabasePreparationCoordinator:
                 restore_inputs=restore_inputs,
                 restore_source=restore_source,
                 target_database=target_database,
+                admin_password=admin_password,
+                admin_password_provenance=admin_password_provenance,
             ),
             executor=executor,
             steps=steps,
@@ -817,6 +670,8 @@ class DatabasePreparationCoordinator:
         restore_inputs: tuple[str, Path] | None = None,
         restore_source: _RestoreSource | uuid.UUID | str | None = None,
         target_database: str | None = None,
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
     ) -> DatabasePreparationResult:
         if options.restore:
             return prepare_restore(
@@ -827,6 +682,8 @@ class DatabasePreparationCoordinator:
                 restore_inputs=restore_inputs,
                 restore_source=restore_source,
                 target_database=target_database,
+                admin_password=admin_password,
+                admin_password_provenance=admin_password_provenance,
             )
         return prepare_download(self.client, project, options=options, wait_for_lock=True)
 
@@ -837,12 +694,16 @@ class DatabasePreparationCoordinator:
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         restore_source: _RestoreSource | uuid.UUID | str | None = None,
         target_database: str | None = None,
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
     ) -> DatabasePreparationResult:
         return self.refresh_database_command(
             project,
             options=options,
             restore_source=restore_source,
             target_database=target_database,
+            admin_password=admin_password,
+            admin_password_provenance=admin_password_provenance,
         ).run()
 
     def refresh_database_command(
@@ -852,6 +713,8 @@ class DatabasePreparationCoordinator:
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         restore_source: _RestoreSource | uuid.UUID | str | None = None,
         target_database: str | None = None,
+        admin_password: str | None = None,
+        admin_password_provenance: str = "environment",
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
         restore_inputs = _capture_restore_inputs(
@@ -865,7 +728,12 @@ class DatabasePreparationCoordinator:
             *_preparation_action_steps(
                 operation="refresh", options=options, restore_source=restore_source
             ),
-            *_preparation_process_steps(project, options=options, restore_inputs=restore_inputs),
+            *_preparation_process_steps(
+                project,
+                options=options,
+                restore_inputs=restore_inputs,
+                admin_password=admin_password,
+            ),
         )
         return self._action_command(
             "database.refresh",
@@ -877,6 +745,8 @@ class DatabasePreparationCoordinator:
                 restore_inputs=restore_inputs,
                 restore_source=restore_source,
                 target_database=target_database,
+                admin_password=admin_password,
+                admin_password_provenance=admin_password_provenance,
             ),
             executor=executor,
             steps=steps,

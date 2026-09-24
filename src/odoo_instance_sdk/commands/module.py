@@ -238,18 +238,23 @@ def _module_update_payload(
 
 
 def _checked_module_update_payload(
-    plan: ModuleUpdatePlan, value: CommandResult | None
+    plan: ModuleUpdatePlan,
+    value: CommandResult | None,
+    *,
+    nonce: str | None = None,
 ) -> dict[str, JsonValue]:
     if value is not None and value.returncode != 0:
-        from odoo_instance_sdk.resources.module import (
-            _module_update_failure,
-            classify_module_update_error,
-        )
+        from odoo_instance_sdk.cli import _shell_failure
+        from odoo_instance_sdk.internal.server import parse_payload
+        from odoo_instance_sdk.resources.module import classify_module_update_error
 
-        conflict = classify_module_update_error(value)
-        if conflict is not None:
-            raise conflict
-        raise _module_update_failure(value)
+        payload = parse_payload(value.stdout, nonce=nonce)
+        failure = _shell_failure(value, "module.update", payload)
+        if failure.error_code.endswith("_startup_failed"):
+            conflict = classify_module_update_error(value)
+            if conflict is not None:
+                raise conflict
+        raise failure
     payload = _module_update_payload(plan, value, dry_run=False)
     if plan.modules and not payload["updated"]:
         raise RuntimeError("module update did not confirm any requested module")
@@ -488,15 +493,21 @@ def module_update(  # noqa: C901
                     dry_run=dry_run,
                 )
 
+        captured_nonce: list[str | None] = []
+
         def build_command() -> Command[CommandResult]:
-            return instance.modules.update_command(selection.modules, selection=selection)
+            command = instance.modules.update_command(selection.modules, selection=selection)
+            captured_nonce.append(command._private_wrapper_nonce())
+            return command
 
         status, _outcome = run_or_preview(
             build_command,
             command_name="module.update",
             mode=output_mode,
             dry_run=dry_run,
-            result=lambda value: _checked_module_update_payload(selection, value),
+            result=lambda value: _checked_module_update_payload(
+                selection, value, nonce=captured_nonce[-1] if captured_nonce else None
+            ),
             confirm=(
                 lambda: fail(
                     output_mode, "module.update", "module update requires --yes", dry_run=dry_run
@@ -546,6 +557,17 @@ def module_update(  # noqa: C901
                 exc,
                 dry_run=dry_run,
                 error_code="module_operation_in_progress",
+            )
+        from odoo_instance_sdk.cli import _ShellCommandFailure
+
+        if isinstance(exc, _ShellCommandFailure):
+            fail(
+                output_mode,
+                "module.update",
+                exc,
+                dry_run=dry_run,
+                error_code=exc.error_code,
+                details=exc.details,
             )
         fail(output_mode, "module.update", exc, dry_run=dry_run)
     raise click.exceptions.Exit(status)

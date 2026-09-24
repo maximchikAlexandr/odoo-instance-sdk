@@ -243,7 +243,7 @@ class TestGenerateConfig:
         assert not (dest.parent / "odoo.log").exists()
         assert _read_config(src)["logfile"] == "/tmp/shared.log"
 
-    def test_absent_logfile_preserved(self, tmp_path: Path) -> None:
+    def test_absent_logfile_gets_env_owned_path(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
         repo.mkdir()
         worktree = tmp_path / "worktree"
@@ -260,4 +260,6 @@ class TestGenerateConfig:
             http_port=8070,
             db_name="mydb",
         )
-        assert "logfile" not in _read_config(dest)
+        # An isolated environment always owns its logfile, even when the source
+        # config had none.
+        assert _read_config(dest)["logfile"] == str((dest.parent / "odoo.log").resolve())

@@ -3,7 +3,9 @@
 ## Purpose
 
 Keep the public SDK import surface lazy and lightweight while enforcing that CLI domain leaves delegate to typed public primitives recorded in `PUBLIC_LEAF_CASES`. Package roots defer heavy implementation imports until a caller resolves a declared export; architecture gates reject parallel domain execution inside Click callbacks.
+
 ## Requirements
+
 ### Requirement: Package root defers public export imports
 
 The `odoo_instance_sdk` package root SHALL declare its existing public export names without importing the modules that implement those names until a caller accesses an export. Importing the package root alone SHALL NOT load `odoo_instance_sdk.client`, `odoo_instance_sdk.resources.monitor`, or `httpx`.
@@ -35,9 +37,7 @@ The package root SHALL retain the exact existing `__all__` names. Accessing any 
 
 ### Requirement: SDK-first rule for CLI domain operations
 
-A new or changed CLI domain read, mutation, or spawn operation SHALL be built on a public typed SDK primitive. The CLI SHALL retain Click parsing, context resolution, confirmation, and Rich/JSON/TOON rendering. A CLI-only operation SHALL be allowed only with a concrete transport or presentation `cli_only_reason` recorded in the canonical `PUBLIC_LEAF_CASES`. A generic formulation SHALL NOT be accepted.
-
-The existing `PUBLIC_LEAF_CASES` SHALL remain the single inventory. A contract test SHALL reject a leaf without `sdk_primitive` or `cli_only_reason`. An architecture gate SHALL protect the boundary from new self-contained domain execution in a Click callback without introducing a separate command bus or a second manual allowlist.
+Every entry in the canonical `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an `sdk_primitive` referencing the public typed SDK call the CLI delegates to, or a `cli_only_reason` with a concrete transport/presentation reason. The new `bug-report init`, `bug-report submit`, and `update` leaves SHALL set `sdk_primitive` to `bug_report_init_command`, `bug_report_submit_command`, and `update_command` respectively. `cli_only_reason` SHALL NOT be used for those domain leaves. CLI callbacks SHALL NOT build a self-contained domain read/mutation/spawn operation through `internal.*` when a public typed SDK primitive applies. CLI callbacks SHALL NOT import `OdooHttpClient` or `internal.transport`; they SHALL call public SDK resource primitives. Only `src/odoo_instance_sdk/internal/transport/` files listed in `architecture_inventory.py` SHALL import `httpx`. `src/` SHALL NOT import `xmlrpc.client.ServerProxy`. `OdooHttpClient` SHALL NOT be a public SDK export.
 
 #### Scenario: New CLI domain operation has an SDK primitive
 
@@ -53,3 +53,13 @@ The existing `PUBLIC_LEAF_CASES` SHALL remain the single inventory. A contract t
 
 - **WHEN** a Click callback builds a self-contained domain operation through `internal.*` where a public SDK primitive applies
 - **THEN** the architecture gate fails
+
+#### Scenario: new leaves carry named primitives
+
+- **WHEN** the `PUBLIC_LEAF_CASES` contract test runs
+- **THEN** `bug-report init`, `bug-report submit`, and `update` each have the `sdk_primitive` names above
+
+#### Scenario: transport is the only httpx importer
+
+- **WHEN** the architecture gate runs on `src/`
+- **THEN** only the line-specific `internal/transport/` allowlist imports `httpx`

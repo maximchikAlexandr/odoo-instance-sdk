@@ -18,37 +18,57 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 421),
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 422),
-        ("src/odoo_instance_sdk/commands/backup.py", 345),
-        ("src/odoo_instance_sdk/commands/output.py", 236),
-        ("src/odoo_instance_sdk/commands/output.py", 381),
-        ("src/odoo_instance_sdk/commands/output.py", 383),
-        ("src/odoo_instance_sdk/commands/output.py", 390),
-        ("src/odoo_instance_sdk/commands/output.py", 392),
-        ("src/odoo_instance_sdk/resources/instance/identity.py", 457),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 427),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 428),
+        ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 473),
+        ("src/odoo_instance_sdk/commands/backup.py", 348),
+        ("src/odoo_instance_sdk/commands/output.py", 247),
+        ("src/odoo_instance_sdk/commands/output.py", 416),
+        ("src/odoo_instance_sdk/commands/output.py", 418),
+        ("src/odoo_instance_sdk/commands/output.py", 425),
+        ("src/odoo_instance_sdk/commands/output.py", 427),
+        ("src/odoo_instance_sdk/internal/self_update.py", 813),
+        ("src/odoo_instance_sdk/internal/self_update.py", 814),
+        ("src/odoo_instance_sdk/internal/self_update.py", 815),
+        ("src/odoo_instance_sdk/resources/instance/identity.py", 494),
     }
 )
 
 
 OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
-    ("src/odoo_instance_sdk/commands/output.py", 236): "shared Rich output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 381): "shared JSON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 383): "shared TOON output boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 390): "shared diagnostic boundary",
-    ("src/odoo_instance_sdk/commands/output.py", 392): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 247): "shared Rich output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 416): "shared JSON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 418): "shared TOON output boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 425): "shared diagnostic boundary",
+    ("src/odoo_instance_sdk/commands/output.py", 427): "shared diagnostic boundary",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
-        421,
+        427,
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
-        422,
+        428,
     ): "documented logs JSONL transport",
-    ("src/odoo_instance_sdk/commands/backup.py", 345): "shared Rich output boundary",
+    (
+        "src/odoo_instance_sdk/commands/cli_parts/registration.py",
+        473,
+    ): "documented --version metadata flag transport",
+    ("src/odoo_instance_sdk/commands/backup.py", 348): "shared Rich output boundary",
+    (
+        "src/odoo_instance_sdk/internal/self_update.py",
+        813,
+    ): "maintenance child JSON stdout transport",
+    (
+        "src/odoo_instance_sdk/internal/self_update.py",
+        814,
+    ): "maintenance child JSON stdout transport",
+    (
+        "src/odoo_instance_sdk/internal/self_update.py",
+        815,
+    ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
-        457,
+        494,
     ): "lifecycle cleanup diagnostic transport",
 }
 
@@ -61,7 +81,7 @@ EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("tests/unit/resources/test_database_resource.py", 643),
+        ("tests/unit/resources/test_database_resource.py", 632),
         ("tests/unit/test_monitor_cache_and_docker.py", 119),
         ("tests/unit/test_cluster_resources.py", 188),
         ("tests/unit/test_real_odoo_ci_components.py", 40),
@@ -75,3 +95,21 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
 
 
 PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {}
+
+
+DIRECT_HTTPX_USAGE: Final[frozenset[SourceLocation]] = frozenset(
+    {
+        ("src/odoo_instance_sdk/internal/transport/base.py", 202),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 205),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 229),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 231),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 76),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 78),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 154),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 156),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 157),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 208),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 211),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 213),
+    }
+)

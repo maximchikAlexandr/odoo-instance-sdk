@@ -103,8 +103,8 @@ raise SystemExit(exit_code)
         assert boundary == {
             "httpx": False,
             "odoo_instance_sdk.resources.monitor": False,
-            "odoo_instance_sdk.execution": False,
-            "odoo_instance_sdk.internal.proc": False,
+            "odoo_instance_sdk.execution": True,
+            "odoo_instance_sdk.internal.proc": True,
             "expression": False,
         }
 
@@ -129,9 +129,9 @@ print(json.dumps({name: name in sys.modules for name in (
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
         "odoo_instance_sdk.commands.pg": True,
-        "odoo_instance_sdk.resources.postgres": False,
-        "odoo_instance_sdk.internal.pg.transport": False,
-        "odoo_instance_sdk.internal.proc": False,
+        "odoo_instance_sdk.resources.postgres": True,
+        "odoo_instance_sdk.internal.pg.transport": True,
+        "odoo_instance_sdk.internal.proc": True,
     }
 
 

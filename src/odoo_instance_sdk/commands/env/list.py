@@ -58,6 +58,13 @@ def _require_machine_confirmation(output_mode: OutputMode, yes: bool) -> None:
 @click.argument("environments", nargs=-1, required=False)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show plan only.")
 @click.option("--yes", "yes", is_flag=True, default=False, help="Skip confirmation.")
+@click.option(
+    "--force-connections",
+    "force_connections",
+    is_flag=True,
+    default=False,
+    help="Terminate active sessions on the exact COPY database before dropping it.",
+)
 @output_options
 @pass_cli_context
 def env_remove(
@@ -65,6 +72,7 @@ def env_remove(
     environments: tuple[str, ...],
     dry_run: bool,
     yes: bool,
+    force_connections: bool,
     output_format: str | None,
     json_output: bool,
 ) -> None:
@@ -77,7 +85,9 @@ def env_remove(
             ctx, client, selector, output_mode=output_mode, dry_run=dry_run
         )
         try:
-            command = client.environments.remove_command(env_obj)
+            command = client.environments.remove_command(
+                env_obj, force_connections=force_connections
+            )
 
             def confirm_remove() -> None:
                 _require_machine_confirmation(output_mode, yes)
@@ -123,6 +133,7 @@ def env_remove(
         environments,
         dry_run=dry_run,
         yes=yes,
+        force_connections=force_connections,
         output_mode=output_mode,
     )
 
@@ -162,6 +173,7 @@ def _env_remove_multi(
     *,
     dry_run: bool,
     yes: bool,
+    force_connections: bool,
     output_mode: OutputMode,
 ) -> None:
     from collections.abc import Sequence
@@ -178,7 +190,7 @@ def _env_remove_multi(
 
     def build_plan(item: tuple[str, DevelopmentEnvironment]) -> dict[str, JsonValue]:
         _selector, env_obj = item
-        command = client.environments.remove_command(env_obj)
+        command = client.environments.remove_command(env_obj, force_connections=force_connections)
         return _plan_to_json(command)
 
     def execute_target(
@@ -187,7 +199,9 @@ def _env_remove_multi(
         _selector, env_obj = item
         try:
             refreshed = client.environments.get(str(env_obj.id))
-            command = client.environments.remove_command(refreshed)
+            command = client.environments.remove_command(
+                refreshed, force_connections=force_connections
+            )
             command.run()
         except Exception as exc:
             return False, {}, sanitize_last_error(str(exc))

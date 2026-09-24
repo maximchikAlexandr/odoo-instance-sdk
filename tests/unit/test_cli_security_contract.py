@@ -109,6 +109,7 @@ def test_init_json_success_has_stable_result_and_provenance(
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--dry-run",
             "--format",
             "json",

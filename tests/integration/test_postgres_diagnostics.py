@@ -1,16 +1,15 @@
 """Opt-in real-PostgreSQL coverage for the native diagnostics boundary.
 
 Run with ``pytest -m integration tests/integration/test_postgres_diagnostics.py``.
-The test is deliberately skipped only when Docker or the host ``psql`` client
-is unavailable; those diagnostics identify the environment blocker instead of
-turning an unavailable integration environment into a false pass.
+The test is deliberately skipped only when Docker is unavailable; its real
+PostgreSQL client is injected from the disposable image when the host lacks
+``psql``.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -28,7 +27,10 @@ from odoo_instance_sdk.internal.postgres_compose import docker_ready
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
-from tests.integration.postgres_cleanup import cleanup_postgres_project
+from tests.integration.postgres_cleanup import (
+    cleanup_postgres_project,
+    patch_compose_init_for_integration,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -39,14 +41,54 @@ def _free_loopback_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _require_tools() -> str:
-    ready, diagnostic = docker_ready(timeout=3.0)
+def _require_docker() -> None:
+    ready, diagnostic = docker_ready(timeout=30.0)
     if not ready:
         pytest.skip(f"docker is not ready ({diagnostic}); PostgreSQL integration is unavailable")
-    psql = shutil.which("psql")
-    if psql is None:
-        pytest.skip("psql is missing on PATH; native PostgreSQL integration is unavailable")
-    return psql
+
+
+def _install_container_psql(
+    *, tmp_path: Path, cluster: PostgresCluster, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """Inject the image's real psql client when the host does not provide one."""
+    bin_dir = tmp_path / "test-bin"
+    bin_dir.mkdir()
+    executable = bin_dir / "psql"
+    executable.write_text(
+        "#!"
+        + sys.executable
+        + "\n"
+        + "import os\n"
+        + "import sys\n"
+        + "\n"
+        + "args = []\n"
+        + "skip_value = False\n"
+        + "for argument in sys.argv[1:]:\n"
+        + "    if skip_value:\n"
+        + "        skip_value = False\n"
+        + "        continue\n"
+        + "    if argument in {'-h', '--host', '-p', '--port'}:\n"
+        + "        skip_value = True\n"
+        + "        continue\n"
+        + "    if argument.startswith('--host=') or argument.startswith('--port='):\n"
+        + "        continue\n"
+        + "    args.append(argument)\n"
+        + "command = [\n"
+        + "    'docker', 'compose', '--project-name',\n"
+        + "    os.environ['ODCLI_TEST_PG_COMPOSE_PROJECT'], '-f',\n"
+        + "    os.environ['ODCLI_TEST_PG_COMPOSE_FILE'], 'exec', '-T', 'postgres',\n"
+        + "    'sh', '-c',\n"
+        + '    "PGPASSWORD=\\"$(cat /run/secrets/postgres_password)\\" exec psql \\"$@\\"",\n'
+        + "    'psql', *args,\n"
+        + "]\n"
+        + "os.execvp(command[0], command)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("ODCLI_TEST_PG_COMPOSE_PROJECT", cluster.compose_project_name)
+    monkeypatch.setenv("ODCLI_TEST_PG_COMPOSE_FILE", str(cluster.compose_file))
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return str(executable)
 
 
 def _psql_process(
@@ -96,11 +138,12 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
     docker_visible_postgres_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    psql = _require_tools()
+    _require_docker()
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_project_postgres_dir",
         lambda project_id: docker_visible_postgres_root / str(project_id) / "postgres",
     )
+    patch_compose_init_for_integration(monkeypatch)
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "config", "user.email", "integration@example.test"], cwd=tmp_path, check=True
@@ -126,6 +169,7 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
         [
             "init",
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             sys.executable,
             "--python",
@@ -147,6 +191,7 @@ def test_real_diagnostics_blocking_stats_bloat_init_status_and_native_psql(  # n
     assert init_result.exit_code == 0, init_result.output
 
     cluster = PostgresCluster.from_project(tmp_path)
+    psql = _install_container_psql(tmp_path=tmp_path, cluster=cluster, monkeypatch=monkeypatch)
     blocker: subprocess.Popen[str] | None = None
     waiter: subprocess.Popen[str] | None = None
     compose_file = cluster.compose_file

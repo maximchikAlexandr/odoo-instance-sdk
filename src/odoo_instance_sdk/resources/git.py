@@ -190,7 +190,7 @@ def _commit_context_from_results(
         resolved_ticket = _ticket_from_branch(_registered_environment_branch(instance) or "")
     if resolved_ticket is None:
         resolved_ticket = _ticket_from_branch(branch_name)
-    settings = _project_settings(root)
+    settings = _resolved_ticket_settings(instance, root)
     if settings is not None and settings.enabled and resolved_ticket is None:
         raise PlanValidationError("ticket link is enabled but no Ticket was resolved")
     link = None
@@ -301,6 +301,24 @@ def _project_settings(root: Path) -> TicketLinkSettings | None:
     except Exception:
         return None
     return effective_ticket_settings(project)
+
+
+def _resolved_ticket_settings(
+    instance: OdooInstance, worktree_root: Path
+) -> TicketLinkSettings | None:
+    """Resolve ticket settings from the selected project manifest root.
+
+    The environment worktree is a Git artifact, not a project manifest source.
+    Prefer the already-resolved runtime binding's ``repository_root`` (the
+    selected project manifest root) so a worktree without its own
+    ``.odcli/project.toml`` still applies the configured ticket link. Fall
+    back to the worktree root only for manual instances without a binding.
+    """
+    binding = getattr(instance, "_runtime_binding", None)
+    project_root = getattr(binding, "repository_root", None)
+    if project_root is not None:
+        return _project_settings(Path(project_root))
+    return _project_settings(worktree_root)
 
 
 def _base_ref(instance: OdooInstance, requested: str | None) -> str:  # noqa: C901

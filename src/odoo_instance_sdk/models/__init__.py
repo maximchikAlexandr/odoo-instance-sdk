@@ -8,6 +8,7 @@ from odoo_instance_sdk.models._literals import (
     ServerUnavailabilityReason as ServerUnavailabilityReason,
 )
 from odoo_instance_sdk.models.backup import *  # noqa: F403
+from odoo_instance_sdk.models.bug_report import *  # noqa: F403
 from odoo_instance_sdk.models.command import *  # noqa: F403
 from odoo_instance_sdk.models.config import *  # noqa: F403
 from odoo_instance_sdk.models.database_inventory import *  # noqa: F403
@@ -20,3 +21,4 @@ from odoo_instance_sdk.models.postgres import *  # noqa: F403
 from odoo_instance_sdk.models.process_inventory import *  # noqa: F403
 from odoo_instance_sdk.models.runtime import *  # noqa: F403
 from odoo_instance_sdk.models.testing import *  # noqa: F403
+from odoo_instance_sdk.models.update import *  # noqa: F403

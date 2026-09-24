@@ -71,11 +71,19 @@ class _FakeCluster:
 
     @property
     def owned(self) -> bool:
-        return True
+        return False
 
     @property
     def endpoint(self) -> str:
         return "127.0.0.1:5468"
+
+    @property
+    def endpoint_host(self) -> str:
+        return "127.0.0.1"
+
+    @property
+    def endpoint_port(self) -> int:
+        return 5468
 
     def to_diagnostic_dict(self) -> dict[str, object]:
         return {"mode": "compose", "owned": True, "endpoint": "127.0.0.1:5468"}

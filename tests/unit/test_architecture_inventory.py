@@ -16,6 +16,7 @@ from pathlib import Path
 
 from odoo_instance_sdk.internal.proc import run as process_executor
 from tests.fixtures.architecture_inventory import (
+    DIRECT_HTTPX_USAGE,
     DIRECT_OUTPUT_WRITES,
     DIRECT_SUBPROCESS_LAUNCHES,
     EXPLICIT_IMPRECISE_ANNOTATIONS,
@@ -292,6 +293,73 @@ def _discover_public_process_methods() -> dict[str, int]:  # noqa: C901
         and "." in qualified.rsplit(":", 1)[1]
         and not qualified.rsplit(":", 1)[1].split(".")[-1].startswith("_")
     }
+
+
+def _is_httpx_reference(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Name) and node.id == "httpx") or (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "httpx"
+    )
+
+
+def _discover_direct_httpx_usage() -> set[tuple[str, int]]:
+    locations: set[tuple[str, int]] = set()
+    for path, module in _source_modules():
+        for node in ast.walk(module):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "httpx":
+                        locations.add(_location(path, node.lineno))
+            elif (
+                (isinstance(node, ast.ImportFrom) and node.module == "httpx")
+                or (isinstance(node, ast.Call) and _is_httpx_reference(node.func))
+                or (isinstance(node, ast.Attribute) and _is_httpx_reference(node))
+            ):
+                locations.add(_location(path, node.lineno))
+    return locations
+
+
+def _discover_server_proxy_in_src() -> set[tuple[str, int]]:
+    locations: set[tuple[str, int]] = set()
+    for path in sorted(_SOURCE_ROOT.rglob("*.py")):
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "xmlrpc.client.ServerProxy" in line or "ServerProxy(" in line:
+                locations.add(_location(path, line_number))
+    return locations
+
+
+def _discover_httpx_imports_outside_transport() -> set[tuple[str, int]]:
+    locations: set[tuple[str, int]] = set()
+    transport_root = _SOURCE_ROOT / "internal" / "transport"
+    for path, module in _source_modules():
+        if path.is_relative_to(transport_root):
+            continue
+        for node in ast.walk(module):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "httpx":
+                        locations.add(_location(path, node.lineno))
+            elif (
+                isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("httpx")
+            ):
+                locations.add(_location(path, node.lineno))
+    return locations
+
+
+def test_direct_httpx_usage_inventory_is_exact() -> None:
+    discovered = _discover_direct_httpx_usage()
+    assert discovered == DIRECT_HTTPX_USAGE, (
+        "httpx usage inventory changed at " + _format_locations(discovered ^ DIRECT_HTTPX_USAGE)
+    )
+
+
+def test_src_has_no_server_proxy() -> None:
+    assert not _discover_server_proxy_in_src()
+
+
+def test_httpx_types_do_not_leak_into_resource_interfaces() -> None:
+    assert not _discover_httpx_imports_outside_transport()
 
 
 def test_direct_subprocess_launch_inventory_is_exact() -> None:

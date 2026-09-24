@@ -292,6 +292,7 @@ class BackupResource:
             backup,
             BackupValidationStatus.VALID if zip_result.valid else BackupValidationStatus.INVALID,
             errors=zip_result.errors,
+            error_code=zip_result.error_code,
             db_name=zip_result.db_name,
             db_version=zip_result.db_version,
         )
@@ -386,6 +387,7 @@ class BackupResource:
         validator: str | None = None,
         exit_code: int | None = None,
         errors: tuple[str, ...] = (),
+        error_code: str | None = None,
         db_name: str | None = None,
         db_version: str | None = None,
     ) -> BackupValidationResult:
@@ -402,6 +404,7 @@ class BackupResource:
         return BackupValidationResult(
             valid=valid,
             errors=errors,
+            error_code=error_code,
             db_name=db_name,
             db_version=db_version,
         )

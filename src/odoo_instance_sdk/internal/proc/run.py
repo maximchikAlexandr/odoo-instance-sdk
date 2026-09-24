@@ -29,6 +29,7 @@ from . import (
     bounded_process_inputs,
     event_for_step,
 )
+from .drain import PipeDrain
 from .redaction import IncrementalStreamRedactor
 
 _CLEANUP_TIMEOUT = 5.0
@@ -129,6 +130,7 @@ class ProcessHandle:
     observer: StepObserver | None = None
     step: PreparedStep | None = None
     started_at: float | None = None
+    drain: PipeDrain | None = None
 
     @property
     def pid(self) -> int:
@@ -150,15 +152,26 @@ class ProcessHandle:
         return self.process.poll()
 
     def wait(self, timeout: float | None = None) -> int:
-        return self.process.wait(timeout=timeout)
+        returncode = self.process.wait(timeout=timeout)
+        if self.drain is not None:
+            self.drain.join()
+        return returncode
 
     def communicate(
         self, input: bytes | None = None, timeout: float | None = None
     ) -> tuple[bytes | None, bytes | None]:
         return self.process.communicate(input=input, timeout=timeout)
 
+    def drain_tails(self) -> dict[str, str]:
+        """Return the bounded, redacted stdout/stderr tails for diagnostics."""
+        if self.drain is None or self.step is None:
+            return {"stdout": "", "stderr": ""}
+        return self.drain.redacted_tails(secrets=_captured_error_secrets(self.step))
+
     def terminate(self) -> None:
         """Terminate this owned process through the bounded process seam."""
+        if self.drain is not None:
+            self.drain.stop()
         from .terminate import terminate as terminate_process
 
         terminate_process(self, process_group_id=self.process_group_id)
@@ -713,6 +726,10 @@ class SubprocessExecutor:
                 sensitive_indices=step.sensitive_argv_indices,
             ) from error
         group_id = process.pid if step.start_new_session and sys.platform != "win32" else None
+        drain: PipeDrain | None = None
+        if not inherited:
+            drain = PipeDrain(process.stdout, process.stderr)
+            drain.start()
         return ProcessHandle(
             process=process,
             argv=step.argv,
@@ -722,6 +739,7 @@ class SubprocessExecutor:
             observer=observer,
             step=step,
             started_at=started,
+            drain=drain,
         )
 
 

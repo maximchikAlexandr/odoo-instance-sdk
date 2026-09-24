@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-import httpx
 from msgspec.structs import replace
 
 from odoo_instance_sdk.internal.address import probe_address
@@ -216,28 +215,6 @@ class _SnapshotMixin:
         cached = self._cluster_status_cache.get(name)
         if cached is not None and now - cached[0] < _CLUSTER_STATUS_TTL:
             return cached[1]
-        if probe_results is not None:
-            diagnostic = getattr(cluster, "to_diagnostic_dict", None)
-            identity = diagnostic().get("project_id") if diagnostic is not None else None
-            project_id = f"project_{identity}" if identity else None
-            recorded = (
-                None
-                if project_id is None
-                else probe_results.get(f"monitor.{project_id}.docker.resources")
-            )
-            if recorded is not None and recorded.returncode == 0 and recorded.stdout:
-                try:
-                    rows = json.loads(str(recorded.stdout))
-                except (TypeError, ValueError):
-                    rows = []
-                if isinstance(rows, list):
-                    state = PostgresClusterState.HEALTHY if rows else PostgresClusterState.STOPPED
-                    self._cluster_status_cache[name] = (now, state)
-                    return state
-            if recorded is not None:
-                state = PostgresClusterState.STOPPED
-                self._cluster_status_cache[name] = (now, state)
-                return state
         state = cluster.status()
         self._cluster_status_cache[name] = (now, state)
         return state
@@ -604,9 +581,13 @@ class _SnapshotMixin:
         )
 
     def _probe_readiness(self, http_url: str) -> RuntimeState:
+        from odoo_instance_sdk.internal.transport import TransportError
+        from odoo_instance_sdk.internal.transport.factory import open_odoo_http_client
+
         try:
-            resp = httpx.get(f"{http_url}/web/health?db_server_status=true", timeout=2.0)
-        except Exception:
+            with open_odoo_http_client(http_url, timeout=2.0) as http:
+                resp = http.get(f"{http_url}/web/health?db_server_status=true")
+        except TransportError:
             return RuntimeState.NOT_READY
         if resp.status_code == 200:
             try:

@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import base64
 import importlib
 import json
 import os
 import shutil
 import subprocess
-import xmlrpc.client
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import msgspec
 import pytest
@@ -19,6 +17,7 @@ from click.testing import CliRunner
 from odoo_instance_sdk.cli import cli
 from scripts.real_odoo_bootstrap import PYTHON_RESOLUTION_LOCK
 from scripts.real_odoo_pins import E2E_PINS
+from tests.fixtures.xmlrpc_probe import xmlrpc_probe
 
 from .archive import ArchiveIdentity
 from .cleanup import audit_no_leaks, compose_down, write_odoo_config
@@ -276,46 +275,6 @@ def _switch_database_config(path: Path, database: str) -> None:
     path.chmod(0o600)
 
 
-def _xmlrpc_probe(base_url: str, database: str) -> tuple[str, bytes]:
-    common = xmlrpc.client.ServerProxy(f"{base_url}/xmlrpc/2/common", allow_none=True)
-    uid = common.authenticate(database, "admin", "admin", {})
-    assert isinstance(uid, int) and uid > 0
-    models = xmlrpc.client.ServerProxy(f"{base_url}/xmlrpc/2/object", allow_none=True)
-    records = cast(
-        "list[dict[str, Any]]",
-        models.execute_kw(
-            database,
-            uid,
-            "admin",
-            "odcli.e2e.probe",
-            "search_read",
-            [[("marker", "=", _PROBE_MARKER)]],
-            {"fields": ["name", "marker"], "limit": 1},
-        ),
-    )
-    assert len(records) == 1
-    assert records[0]["name"] == "Pinned Odoo 19 fixture"
-    assert records[0]["marker"] == _PROBE_MARKER
-    attachments = cast(
-        "list[dict[str, Any]]",
-        models.execute_kw(
-            database,
-            uid,
-            "admin",
-            "ir.attachment",
-            "search_read",
-            [[("name", "=", "odcli-e2e-attachment.txt"), ("res_model", "=", "odcli.e2e.probe")]],
-            {"fields": ["datas", "store_fname"], "limit": 1},
-        ),
-    )
-    assert len(attachments) == 1 and attachments[0]["store_fname"]
-    encoded = attachments[0]["datas"]
-    if isinstance(encoded, xmlrpc.client.Binary):
-        encoded = bytes(encoded.data)
-    assert isinstance(encoded, (str, bytes))
-    return str(records[0]["name"]), base64.b64decode(encoded)
-
-
 def _start_owned(instance: Any, runtime: E2ERuntime) -> Any:
     process = instance.start()
     instance.wait_ready(process, timeout=180.0)
@@ -456,6 +415,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
             "--project",
             str(project),
             "--no-input",
+            "--allow-partial",
             "--odoo-bin",
             str(odoo_bin_path),
             "--config",
@@ -832,7 +792,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     instance = client.instance.from_environment(env_obj)
     third_process = _start_owned(instance, runtime)
     wait_for_http(instance.config.base_url + "/web/health", timeout=180.0)
-    name, attachment = _xmlrpc_probe(instance.config.base_url, restored_database)
+    name, attachment = xmlrpc_probe(instance.config.base_url, restored_database)
     assert name == "Pinned Odoo 19 fixture"
     assert attachment == _ATTACHMENT
     _record(

@@ -263,6 +263,7 @@ def test_container_smoke_public_path(
         environment,
         "init",
         "--no-input",
+        "--allow-partial",
         "--odoo-bin",
         str(proxy),
         "--python",

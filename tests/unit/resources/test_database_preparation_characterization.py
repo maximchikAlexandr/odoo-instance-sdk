@@ -1,49 +1,47 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 
+from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.internal.paths import get_catalog_path
 from odoo_instance_sdk.internal.project_manifest import write_manifest
 from odoo_instance_sdk.models import BackupFormat
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentCheckoutOptions
-
-if TYPE_CHECKING:
-    from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.resources.instance import OdooInstance
+from tests.fixtures.transport import OPEN_ODOO_HTTP_CLIENT, make_response
 
 
-def test_backup_audit_row_precedes_http_request(instance: OdooInstance, tmp_path: Path) -> None:
+def test_backup_audit_row_precedes_http_request(env_client: OdooClient, tmp_path: Path) -> None:
     """The download audit is durable before the remote request begins."""
+    instance = env_client.instance("http://localhost:8069", master_password="admin")
     calls: list[str] = []
-    response = MagicMock(spec=httpx.Response)
-    response.headers = {"content-disposition": 'attachment; filename="snapshot.zip"'}
-    response.raise_for_status.return_value = None
-    response.iter_bytes.return_value = [b"snapshot"]
-
-    http = MagicMock(spec=httpx.Client)
+    response = make_response(
+        headers={"content-disposition": 'attachment; filename="snapshot.zip"'},
+        iter_bytes=[b"snapshot"],
+    )
+    http = MagicMock()
 
     def stream(*_args: object, **_kwargs: object) -> MagicMock:
         calls.append("http")
         context = MagicMock()
         context.__enter__.return_value = response
+        context.__exit__.return_value = None
         return context
 
     http.stream.side_effect = stream
     http_context = MagicMock()
     http_context.__enter__.return_value = http
+    http_context.__exit__.return_value = None
 
     catalog = MagicMock()
     catalog.start_download.side_effect = lambda **_kwargs: calls.append("audit")
 
     with (
         patch.object(instance, "_client") as client,
-        patch("httpx.Client", return_value=http_context),
+        patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_context),
     ):
         client.config.http_timeout_seconds = 10.0
         client.get_catalog.return_value = catalog

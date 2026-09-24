@@ -45,7 +45,7 @@ from odoo_instance_sdk.commands.output import (
     run_rich_bounded,
     success_document,
 )
-from odoo_instance_sdk.execution import Command, ExecutionPlan, SemanticPlanObservation
+from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan, SemanticPlanObservation
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
 from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
 from odoo_instance_sdk.internal.resource_inventory import ResourceInventory
@@ -155,7 +155,15 @@ class PublicLeafCase:
 _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
     PublicLeafCase(
         ("init",),
-        ("init", "--no-input", "--odoo-bin", "/opt/odoo/odoo-bin", "--dry-run", "--project"),
+        (
+            "init",
+            "--no-input",
+            "--allow-partial",
+            "--odoo-bin",
+            "/opt/odoo/odoo-bin",
+            "--dry-run",
+            "--project",
+        ),
         "mutating-or-spawning",
         True,
         sdk_primitive="init_project_command",
@@ -687,6 +695,45 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-12",),
         e2e_rationale="single-snapshot process/resource inventory",
+    ),
+    PublicLeafCase(
+        ("bug-report", "init"),
+        (
+            "bug-report",
+            "init",
+            "--title",
+            "stop does not stop foreground run",
+            "--kind",
+            "bug",
+            "--dry-run",
+        ),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="bug_report_init_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="local offline draft creation is covered by focused command tests and publishes no GitHub issue",
+    ),
+    PublicLeafCase(
+        ("bug-report", "submit"),
+        ("bug-report", "submit", "00000000-0000-0000-0000-000000000014", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="bug_report_submit_command",
+        e2e_disposition="not-applicable",
+        e2e_rationale="publishes GitHub issues via gh and is intentionally outside the disposable Odoo lifecycle fixture",
+    ),
+    PublicLeafCase(
+        ("update",),
+        ("update", "--dry-run"),
+        "mutating-or-spawning",
+        True,
+        sdk_primitive="update_command",
+        variants=("process-previewable-read-only",),
+        e2e_disposition="not-applicable",
+        e2e_rationale=(
+            "mutates the operator uv tool outside the disposable Odoo fixture; "
+            "`update --check` is the process-previewable-read-only variant"
+        ),
     ),
 )
 
@@ -1238,6 +1285,13 @@ def _patch_leaf_external(  # noqa: C901
             error=RuntimeError("isolated external operation failed") if failing else None,
         )
         monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.internal.admin_password.resolve_admin_password_secret",
+            lambda **_kwargs: ("matrix-admin-secret", "environment"),
+        )
+        monkeypatch.setattr(
             "odoo_instance_sdk.commands.db.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), _matrix_environment(), instance),
         )
@@ -1670,6 +1724,100 @@ def _patch_leaf_external(  # noqa: C901
         )
         return
 
+    if path == ("update",):
+        from odoo_instance_sdk.exceptions import UpdateError
+        from odoo_instance_sdk.internal.proc import PreparedStep
+        from odoo_instance_sdk.models.update import UpdateResult
+
+        odcli_path = tmp_path / "odcli"
+        odcli_path.write_text("#!/bin/sh\n", encoding="utf-8")
+        odcli_path.chmod(0o755)
+        install = PreparedStep(
+            step_id="update.install",
+            argv=(
+                "uv",
+                "tool",
+                "install",
+                "--force",
+                "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@main",
+            ),
+            mutating=True,
+        )
+        migrate = PreparedStep(
+            step_id="update.migrate",
+            argv=(str(odcli_path), "update", "--format", "json"),
+            mutating=True,
+        )
+        update_plan = ExecutionPlan(
+            steps=(
+                ActionStep(
+                    step_id="update.inspect",
+                    action="inspect",
+                    description="Inspect installed OdCLI provenance",
+                    read_only=True,
+                ),
+                ActionStep(
+                    step_id="update.preflight",
+                    action="preflight",
+                    description="Verify free space, schema, and migration path",
+                    read_only=True,
+                ),
+                ActionStep(
+                    step_id="update.quiesce",
+                    action="quiesce",
+                    description="Acquire the exclusive update lock",
+                    mutating=False,
+                ),
+                ActionStep(
+                    step_id="update.snapshot",
+                    action="snapshot",
+                    description="Snapshot affected metadata for rollback",
+                    mutating=True,
+                ),
+                install.public_projection(),
+                migrate.public_projection(),
+                ActionStep(
+                    step_id="update.verify",
+                    action="verify",
+                    description="Verify the new executable, schema, and journal",
+                    read_only=True,
+                ),
+                ActionStep(
+                    step_id="update.commit",
+                    action="commit",
+                    description="Mark success and clear the snapshot",
+                    mutating=True,
+                ),
+            ),
+        )
+
+        def build_update_command(**_kwargs: object) -> Command[UpdateResult]:
+            if failing:
+                raise UpdateError("isolated external operation failed")
+            return _matrix_command(
+                UpdateResult(
+                    outcome="updated",
+                    snapshot_state="absent",
+                    journal_state="absent",
+                ),
+                public_plan=update_plan,
+            )
+
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.update.update_command",
+            build_update_command,
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.update.preflight_update_command",
+            lambda **_kwargs: Command.create(
+                ExecutionPlan(),
+                lambda _context: UpdateResult(
+                    outcome="updated", snapshot_state="absent", journal_state="absent"
+                ),
+            ),
+        )
+        return
+
     if path == ("psql",):
         resource = MagicMock()
         resource.psql_command.return_value = _matrix_command(
@@ -1753,6 +1901,53 @@ def _patch_leaf_external(  # noqa: C901
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.internal.postgres_cli.resolve_project_path", lambda _ctx: tmp_path
+        )
+        return
+
+    if path == ("bug-report", "init"):
+        from odoo_instance_sdk.models.bug_report import BugReportInitResult
+
+        draft_dir = tmp_path / "bug-report-draft"
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.bug_report.bug_report_init_command",
+            fail_operation
+            if failing
+            else lambda **_kwargs: _matrix_command(
+                BugReportInitResult(
+                    report_id="00000000-0000-0000-0000-000000000014",
+                    directory=str(draft_dir),
+                    report_path=str(draft_dir / "report.md"),
+                    metadata_path=str(draft_dir / "metadata.json"),
+                    reviews_dir=str(draft_dir / "reviews"),
+                    kind="bug",
+                    title="matrix draft",
+                )
+            ),
+        )
+        return
+
+    if path == ("bug-report", "submit"):
+        from odoo_instance_sdk.models.bug_report import BugReportSubmitResult
+
+        preview = BugReportSubmitResult(
+            report_id="00000000-0000-0000-0000-000000000014",
+            report_valid=True,
+            submit_ready=False,
+            repository="maximchikAlexandr/odoo-instance-sdk",
+            title="matrix draft",
+            body="REPORT_ID: 00000000-0000-0000-0000-000000000014\n",
+            labels=("alpha-testing",),
+            payload_sha256="0" * 64,
+            submit_blockers=("missing independent review (round 1..3 required)",),
+            outcome="dry_run",
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.bug_report.bug_report_submit_command",
+            fail_operation if failing else lambda *_args, **_kwargs: _matrix_command(preview),
+        )
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.bug_report.bug_report_submit_preview",
+            fail_operation if failing else lambda _report_id: preview,
         )
         return
 
@@ -3174,6 +3369,7 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                 args = [
                     "init",
                     "--no-input",
+                    "--allow-partial",
                     "--dry-run",
                     "--odoo-bin",
                     "/opt/odoo/odoo-bin",
@@ -3204,6 +3400,7 @@ def test_public_success_result_sources_are_sanitized_before_json_and_toon(
                 args = [
                     "init",
                     "--no-input",
+                    "--allow-partial",
                     "--dry-run",
                     "--from-vscode",
                     str(launch),
@@ -3797,8 +3994,38 @@ def test_machine_env_remove_with_yes_calls_remove_once(args: list[str], tmp_path
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
     assert result.output.count("schema_version") == 1
-    client.environments.remove_command.assert_called_once_with(env)
+    client.environments.remove_command.assert_called_once_with(env, force_connections=False)
     client.environments.remove.assert_not_called()
+    confirm.assert_not_called()
+
+
+@pytest.mark.parametrize("args", [["--format", "json"], ["--format", "toon"]])
+def test_machine_env_remove_with_force_connections_threads_flag(
+    args: list[str], tmp_path: object
+) -> None:
+    env = SimpleNamespace(
+        id="env-1",
+        name="demo",
+        state="removed",
+        branch="main",
+        db_mode="shared",
+        http_port=8069,
+        worktree_path="/worktree",
+    )
+    client = MagicMock()
+    client.environments.get.return_value = env
+    client.environments.remove_command.return_value = _matrix_command(None)
+    with (
+        patch("odoo_instance_sdk.commands.env.list.OdooClient", return_value=client),
+        patch("odoo_instance_sdk.commands.env.list.resolve_project_path", return_value=tmp_path),
+        patch("odoo_instance_sdk.commands.env.list.click.confirm") as confirm,
+    ):
+        result = CliRunner().invoke(
+            cli, ["env", "rm", "env-1", "--yes", "--force-connections", *args]
+        )
+
+    assert result.exit_code == 0, result.output
+    client.environments.remove_command.assert_called_once_with(env, force_connections=True)
     confirm.assert_not_called()
 
 

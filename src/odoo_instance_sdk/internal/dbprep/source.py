@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast, runtime_checkable
 
 import msgspec
 
@@ -24,6 +24,10 @@ from odoo_instance_sdk.exceptions import (
     ConfigError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
+    PlanJsonValue,
+    RemoteDatabaseAmbiguousError,
+    RemoteDatabaseListUnavailableError,
+    RemoteDatabaseNoneError,
 )
 from odoo_instance_sdk.internal.db_name import validate_db_name
 from odoo_instance_sdk.internal.generated_config import project_generated_config_path
@@ -78,6 +82,13 @@ _PREPARATION_FIELDS = (
     "postgres",
     "default_source_database",
 )
+
+
+@runtime_checkable
+class DatabaseNameProvider(Protocol):
+    """Provides remote database names for optional-database resolution."""
+
+    def names(self) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +148,8 @@ class DatabasePreparationFailureContext(
     backup_id: uuid.UUID | None = None
     database_confirmed: bool | None = None
     default_switch_confirmed: bool | None = None
+    restore_stage_id: str | None = None
+    restore_stage_elapsed: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,10 +310,17 @@ def _open_verified_zip(path: Path) -> zipfile.ZipFile:
 
 def capture_selected_backup_restore(  # noqa: C901
     backup: Backup,
+    *,
+    data_dir: Path | None = None,
 ) -> SelectedBackupRestorePayload:
     """Read and validate selected-backup inputs at the restore boundary."""
     from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
-    from odoo_instance_sdk.internal.backup_validation import validate_dump, validate_zip
+    from odoo_instance_sdk.internal.backup_validation import (
+        raise_restore_preflight_errors,
+        raise_zip_validation_error,
+        validate_dump,
+        validate_zip,
+    )
 
     path = Path(backup.path)
     file_identity, verified_sha256 = _verified_file(path, backup)
@@ -326,11 +346,13 @@ def capture_selected_backup_restore(  # noqa: C901
             )
         except OSError as exc:
             raise ConfigError("selected native dump is unavailable or invalid") from exc
-    zip_validation = validate_zip(path)
+    zip_validation = validate_zip(path, data_dir=data_dir)
     if not zip_validation.valid:
-        raise ConfigError("selected backup archive is unavailable or invalid")
+        raise_zip_validation_error(zip_validation)
+        raise ConfigError("selected backup archive is unavailable or invalid")  # pragma: no cover
     if zip_validation.db_name != backup.database_name:
         raise ConfigError("selected backup database name does not match catalog metadata")
+    raise_restore_preflight_errors(zip_validation.uncompressed_bytes, data_dir)
     try:
         with _open_verified_zip(path) as archive:
             archive.getinfo("dump.sql")
@@ -566,6 +588,7 @@ class RestorePreflight:
     target_database: str
     restore_source: _RestoreSource = field(default_factory=_RemoteRestoreSource)
     catalogue_backup: Backup | None = None
+    resolved_database: str | None = None
 
 
 class _CoalescedRestore(Exception):
@@ -594,7 +617,7 @@ def resolve_test_source(
         base_url = normalize_base_url(config.base_url)
     except Exception as exc:
         raise ConfigError("invalid test_instance.base_url") from exc
-    if not config.database.strip():
+    if config.database is not None and not config.database.strip():
         raise ConfigError("test_instance.database must not be empty")
     explicit = options.source_branch
     if explicit is not None:
@@ -615,6 +638,41 @@ def resolve_test_source(
         branch=branch,
         origin=origin,
     )
+
+
+def resolve_remote_database_name(
+    configured: str | None,
+    names_provider: DatabaseNameProvider,
+) -> str:
+    """Select exactly one remote database name for the current operation.
+
+    When ``configured`` is explicitly set, it is returned without calling
+    ``names_provider`` — this preserves work with instances where listing is
+    disabled. When it is absent, names are obtained through ``names_provider``
+    (typically ``DatabaseResource.names()``); exactly one name is selected.
+    Zero names raise ``RemoteDatabaseNoneError``; multiple raise
+    ``RemoteDatabaseAmbiguousError`` listing the names; an unavailable list
+    raises ``RemoteDatabaseListUnavailableError``. All three fail before any
+    download.
+    """
+    if configured is not None:
+        return configured
+    try:
+        names = names_provider.names()
+    except Exception as exc:
+        raise RemoteDatabaseListUnavailableError(
+            "database list is unavailable on the remote instance",
+        ) from exc
+    if len(names) == 0:
+        raise RemoteDatabaseNoneError(
+            "remote instance exposes no databases; set test_instance.database"
+        )
+    if len(names) > 1:
+        raise RemoteDatabaseAmbiguousError(
+            "remote instance exposes multiple databases; set test_instance.database",
+            details={"available_databases": [cast("PlanJsonValue", n) for n in sorted(names)]},
+        )
+    return names[0]
 
 
 def normalize_ref(value: str) -> str:

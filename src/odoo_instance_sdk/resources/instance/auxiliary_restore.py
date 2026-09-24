@@ -395,6 +395,13 @@ def _auxiliary_start_step(instance: OdooInstance) -> tuple[PreparedStep, StartCo
         raise InstanceConfigurationError(
             "stopped-project restore requires a project StartConfig; run `odcli init`"
         )
+    config = copy.deepcopy(config)
+    cluster = instance._postgres_cluster
+    if cluster is not None and cluster.owned:
+        from odoo_instance_sdk.internal.dbprep.bootstrap import BOOTSTRAP_DATABASE
+
+        config.db_name = BOOTSTRAP_DATABASE
+        config.dbfilter = BOOTSTRAP_DATABASE
     snapshot, cli_args, secret_path, _ = _snapshot_start_inputs(config)
     environment_snapshot, environment_overrides = captured_child_environment(
         None, project_environment=instance.config.project_environment
@@ -516,10 +523,13 @@ class AuxiliaryRestoreSession:
                 context.fail_action(self.ready_action.step_id, error)
                 from odoo_instance_sdk.exceptions import DatabaseManagerUnavailableError
 
+                tails = handle.drain_tails() if handle is not None else {"stdout": "", "stderr": ""}
                 raise DatabaseManagerUnavailableError(
                     "auxiliary database manager failed readiness; "
-                    "resolve the project runtime and retry, or run `odcli run`"
-                ) from None
+                    "resolve the project runtime and retry, or run `odcli run`\n"
+                    f"stdout_tail={tails['stdout']!r}\n"
+                    f"stderr_tail={tails['stderr']!r}"
+                ) from error
             context.complete_action(self.ready_action.step_id)
         except BaseException as error:
             self._cleanup_failed_start(handle, error)
@@ -529,7 +539,7 @@ class AuxiliaryRestoreSession:
                 raise DatabaseManagerUnavailableError(
                     "auxiliary database manager failed to start; "
                     "resolve the project runtime and retry, or run `odcli run`"
-                ) from None
+                ) from error
             raise
 
     def _skip_unconsumed_steps(self, context: RunContext[PrivateJsonValue]) -> None:

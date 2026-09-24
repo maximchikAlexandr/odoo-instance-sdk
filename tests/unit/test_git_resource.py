@@ -22,6 +22,7 @@ from odoo_instance_sdk.internal.proc import ProcessResult
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.resources.git import GitResource
 from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
 from odoo_instance_sdk.resources.module import ModuleResource
 
 
@@ -45,6 +46,26 @@ def _instance(root: Path) -> OdooInstance:
     )
     instance = cast("OdooInstance", SimpleNamespace(config=config))
     instance.modules = ModuleResource(instance)
+    return instance
+
+
+def _bound_instance(
+    worktree: Path, project_root: Path, *, owner_kind: str = "environment"
+) -> OdooInstance:
+    config = InstanceConfig(
+        base_url="http://127.0.0.1:8069",
+        default_cwd=worktree,
+        start_config=StartConfig(addons_path=["addons"]),
+    )
+    instance = cast("OdooInstance", SimpleNamespace(config=config))
+    instance.modules = ModuleResource(instance)
+    instance._runtime_binding = _RuntimeBinding(
+        owner_kind=owner_kind,  # type: ignore[arg-type]
+        owner_id=f"{owner_kind}_test",
+        project_id="project_test",
+        repository_root=project_root,
+        git_common_dir=project_root / ".git",
+    )
     return instance
 
 
@@ -146,6 +167,81 @@ def test_commit_plan_previews_complete_configured_message(tmp_path: Path) -> Non
     assert commit_step.argv[-2:] == (
         "-m",
         f"[IMP] {tmp_path.name}: PROJ-123 change\\x0a\\x0ahttps://tracker.test/PROJ-123",
+    )
+
+
+def test_commit_in_worktree_without_manifest_uses_project_ticket_settings(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _repo(project_root)
+    _ticket_project(project_root)
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _git(worktree, "init", "-q", "-b", "feature")
+    _git(worktree, "config", "user.email", "tests@example.test")
+    _git(worktree, "config", "user.name", "tests")
+    (worktree / "change.txt").write_text("change\n", encoding="utf-8")
+    _git(worktree, "add", "change.txt")
+
+    command = GitResource(_bound_instance(worktree, project_root)).commit_command(
+        description="change", ticket="PROJ-123", tag="IMP"
+    )
+    commit_step = next(step for step in command.plan.process_steps if step.step_id == "git.commit")
+    assert commit_step.argv[-2:] == (
+        "-m",
+        "[IMP] worktree: PROJ-123 change\\x0a\\x0ahttps://tracker.test/PROJ-123",
+    )
+
+
+def test_commit_in_worktree_without_manifest_and_no_project_manifest_disables_link(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _git(worktree, "init", "-q", "-b", "feature")
+    _git(worktree, "config", "user.email", "tests@example.test")
+    _git(worktree, "config", "user.name", "tests")
+    (worktree / "change.txt").write_text("change\n", encoding="utf-8")
+    _git(worktree, "add", "change.txt")
+
+    context = GitResource(_bound_instance(worktree, project_root)).commit_context(
+        "change", ticket="PROJ-123", tag="IMP"
+    )
+    assert context.ticket_link is None
+    assert context.message == "[IMP] worktree: PROJ-123 change"
+
+
+@pytest.mark.parametrize("owner_kind", ["environment", "project"])
+def test_commit_ticket_settings_come_from_binding_repository_root(
+    tmp_path: Path, owner_kind: str
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _repo(project_root)
+    _ticket_project(project_root)
+
+    if owner_kind == "project":
+        worktree = project_root
+    else:
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        _git(worktree, "init", "-q", "-b", "feature")
+        _git(worktree, "config", "user.email", "tests@example.test")
+        _git(worktree, "config", "user.name", "tests")
+    (worktree / "change.txt").write_text("change\n", encoding="utf-8")
+    _git(worktree, "add", "change.txt")
+
+    context = GitResource(
+        _bound_instance(worktree, project_root, owner_kind=owner_kind)
+    ).commit_context("change", ticket="PROJ-123", tag="IMP")
+    assert context.ticket_link == "https://tracker.test/PROJ-123"
+    assert context.message == (
+        f"[IMP] {worktree.name}: PROJ-123 change\n\nhttps://tracker.test/PROJ-123"
     )
 
 

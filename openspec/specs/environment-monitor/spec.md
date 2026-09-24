@@ -1,7 +1,9 @@
 ## Purpose
 
 Read-only observability surface over the existing lifecycle catalog, `PostgresCluster` and Docker CLI: one `EnvironmentMonitor` collector that produces a typed immutable snapshot of all catalog projects, their environments and one nullable project PostgreSQL cluster per project, consumed by Python SDK, headless FastAPI JSON API and a React+Mantine Web UI. No control operations, no historical metrics, no second catalog.
+
 ## Requirements
+
 ### Requirement: Canonical snapshot types
 
 Public snapshot types MUST live in `models.py` as `msgspec.Struct(frozen=True, forbid_unknown_fields=True, kw_only=True)` except StrEnums. `ProcessTreeResult` MUST NOT be public. Field lists below are complete; do not add extra public fields.
@@ -665,15 +667,7 @@ Collector MUST разделять кеширование:
 
 ### Requirement: Component failure isolation
 
-Сбор snapshot MUST не падать целиком из-за одной компоненты:
-
-- Ошибка одного environment (Git/storage/psutil/DB size) → that environment stays in the snapshot with nested partials (`git.state=orphan`, `storage.complete=False`, `runtime.state=stopped`); no environment-level `error` field. Other environments continue.
-- Ошибка одного cluster (Docker inspect/stats) → affected cluster получает `unavailability_reason`, остальные продолжаются.
-- Ошибка project manifest load → `cluster=None` для этого project, environments продолжаются.
-- Catalog SQLite error → snapshot fails целиком с typed `MonitorError` (это единственная unrecoverable ошибка — без catalog нет project discovery); collector не сваливается в generic `Exception`.
-- Docker CLI missing → только affected compose clusters; не global crash (covered above).
-
-Типизированные ошибки в `exceptions.py` (наследники `OdooInstanceSdkError`): `MonitorError` (base). Component failures изолируются в snapshot (`complete=False`/`unavailability_reason`), не отдельным exception; catalog SQLite error → `MonitorError`. `MonitorExtrasMissingError` and any missing `psutil` extra install hint are not part of the public contract because `psutil` is core.
+A failed, empty, or unparseable Docker resource/metrics snapshot SHALL NOT turn a running cluster into `STOPPED`. `stopped` SHALL follow only from a successful `PostgresCluster.status_command()`. A metrics failure (`stats_failed`) SHALL degrade only metrics and SHALL keep the actual lifecycle state. One output SHALL NOT simultaneously carry a false lifecycle state and a diagnostic metrics error for the same snapshot.
 
 #### Scenario: One environment failure isolated
 
@@ -689,6 +683,16 @@ Collector MUST разделять кеширование:
 
 - **WHEN** an installation is manually corrupted by removing required core `psutil`
 - **THEN** that unsupported installation has no `metrics` extra or `MonitorExtrasMissingError` compatibility contract
+
+#### Scenario: metrics failure does not change lifecycle state
+
+- **WHEN** a running cluster's Docker metrics snapshot is empty, unparseable, or failed
+- **THEN** the lifecycle state comes from `PostgresCluster.status_command()` and `stats_failed` degrades only metrics
+
+#### Scenario: no simultaneous false state and metrics error
+
+- **WHEN** a monitor snapshot is produced for a running cluster with failed metrics
+- **THEN** the output does not carry `stopped` alongside `stats_failed` for the same snapshot
 
 ### Requirement: Snapshot redaction and no secrets
 

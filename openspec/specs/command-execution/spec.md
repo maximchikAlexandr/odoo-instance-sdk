@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change centralize-execution-dry-run-typed-output. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Public inspectable command contract
 
 Every finite public SDK operation that can launch a child process SHALL expose a sibling `<operation>_command()` returning `Command[T]`. `Command[T]` SHALL expose an immutable secret-free `.plan`, stable `.commands`, and `.run() -> T`; the existing finite convenience operation SHALL delegate to that command object and SHALL NOT reconstruct planning or execution inputs. An explicitly documented unbounded streaming coordinator MAY instead build and run a fresh finite command per iteration when no finite snapshot can describe all future launches; it SHALL NOT launch directly or reuse one stale command across iterations.
@@ -290,7 +292,7 @@ The single production process pump SHALL write the immutable `PreparedStep.stdin
 
 ### Requirement: One internal process pump serves every captured pipe path
 
-Ordinary observed/timeout capture and the existing limited-output API SHALL delegate to one common pump inside `internal/proc`. `run_captured_limited()` SHALL preserve immediate child termination when either output stream would exceed its configured byte limit. `internal/proc` SHALL NOT contain a second pipe-drain, timeout, or process-cleanup algorithm.
+The internal process pump SHALL drain `stdout` and `stderr` concurrently and continuously for every spawned long-running handle whose `inherit_stdio` is false. Each stream SHALL keep the last `_TIMEOUT_TAIL_BYTES = 8192` bytes after redaction. It SHALL attach that tail and the original error type to readiness/startup failures. Readers SHALL be terminated together with the owned process group on cleanup and interrupt. `DEVNULL` SHALL NOT be used. JSON/TOON SHALL remain one final document; drained bytes SHALL NOT be written to CLI stdout.
 
 #### Scenario: Limited output crosses its bound
 
@@ -301,6 +303,26 @@ Ordinary observed/timeout capture and the existing limited-output API SHALL dele
 
 - **WHEN** the production process architecture is inspected by its regression gate
 - **THEN** ordinary capture and limited capture are shown to use the same pipe, timeout, stdin, and cleanup implementation
+
+#### Scenario: concurrent drain prevents pipe blockage
+
+- **WHEN** a spawned long-running child writes more than the pipe capacity to `stdout` or `stderr`
+- **THEN** the concurrent drain prevents the child from blocking
+
+#### Scenario: bounded tail is attached to readiness failure
+
+- **WHEN** readiness/startup fails for a spawned long-running handle
+- **THEN** the bounded redacted tail and the original error type are attached to the failure
+
+#### Scenario: readers terminate with the process group
+
+- **WHEN** cleanup or interrupt runs
+- **THEN** the child process group and the readers are terminated with no leaked threads or handles
+
+#### Scenario: machine stdout stays a single document
+
+- **WHEN** a long-running drain runs under JSON or TOON
+- **THEN** one final document is emitted and child pipe bytes do not appear on CLI stdout
 
 ### Requirement: Logical progress corresponds to completed effects
 

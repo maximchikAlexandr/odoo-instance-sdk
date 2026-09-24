@@ -8,8 +8,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
 
-import httpx
-
 from odoo_instance_sdk.exceptions import (
     BackupCatalogError,
     BackupDownloadError,
@@ -19,6 +17,7 @@ from odoo_instance_sdk.exceptions import (
     MasterPasswordRequiredError,
     PostgresClusterNotOwnedError,
 )
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.files import (
     ensure_destination,
     make_download_filename,
@@ -26,6 +25,7 @@ from odoo_instance_sdk.internal.files import (
 from odoo_instance_sdk.internal.paths import get_backups_dir
 from odoo_instance_sdk.internal.redact import format_error
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
+from odoo_instance_sdk.internal.transport import TransportError, TransportStatusError
 from odoo_instance_sdk.internal.urls import assert_local, warn_if_cleartext_secret
 from odoo_instance_sdk.models import (
     Backup,
@@ -39,7 +39,7 @@ from odoo_instance_sdk.models import (
     SqlExecutionResult,
 )
 from odoo_instance_sdk.resources.database.lifecycle import (
-    _RESET_ADMIN_PASSWORD_SCRIPT as _RESET_ADMIN_PASSWORD_SCRIPT,
+    _admin_password_reset_script as _admin_password_reset_script,
     _annotate_backup_failure as _annotate_backup_failure,
     _normalize_source_git_branch as _normalize_source_git_branch,
     _trustworthy_content_length as _trustworthy_content_length,
@@ -57,6 +57,7 @@ if TYPE_CHECKING:
         ProcessResult,
         RunContext,
     )
+    from odoo_instance_sdk.internal.transport import OdooHttpClient
     from odoo_instance_sdk.resources.instance import OdooInstance
 
 T = TypeVar("T")
@@ -450,12 +451,14 @@ class _QueriesMixin:
         return b if b is not None else NoBackup()
 
     @contextlib.contextmanager
-    def _http(self, timeout: float | None = None) -> Iterator[httpx.Client]:
+    def _http(self, timeout: float | None = None) -> Iterator[OdooHttpClient]:
+        from odoo_instance_sdk.internal.transport.factory import open_odoo_http_client
+
         warn_if_cleartext_secret(self.base_url)
         effective = (
             timeout if timeout is not None else self._instance._client.config.http_timeout_seconds
         )
-        with httpx.Client(timeout=httpx.Timeout(effective)) as http:
+        with open_odoo_http_client(self.base_url, timeout=effective) as http:
             yield http
 
     def names(self) -> tuple[str, ...]:
@@ -475,17 +478,17 @@ class _QueriesMixin:
             with self._http() as http:
                 resp = http.post(
                     self._url("list"),
-                    json={"jsonrpc": "2.0", "method": "call", "params": {}},
+                    json=cast("JsonValue", {"jsonrpc": "2.0", "method": "call", "params": {}}),
                 )
                 resp.raise_for_status()
                 data = resp.json()
-        except httpx.HTTPStatusError as exc:
+        except TransportStatusError as exc:
             raise DatabaseError(
-                status_code=exc.response.status_code,
-                message=format_error(exc.response.text),
-                body=exc.response.content,
+                status_code=exc.status_code,
+                message=format_error(exc.message),
+                body=exc.body,
             ) from exc
-        except httpx.HTTPError as exc:
+        except TransportError as exc:
             raise DatabaseManagerUnavailableError(
                 f"Database manager unavailable on {self.base_url}: {format_error(exc)}"
             ) from exc

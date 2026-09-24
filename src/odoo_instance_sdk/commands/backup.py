@@ -52,6 +52,7 @@ from odoo_instance_sdk.models import (
     BackupFormat,
     BackupInspectResult,
     BackupState,
+    BackupValidationResult,
     BackupValidationStatus,
 )
 
@@ -316,7 +317,9 @@ def _rich_validation(document: OutputDocument) -> str:
         if document.ok
         else (
             "invalid"
-            if document.error is not None and document.error.code == "backup_validate_invalid"
+            if document.error is not None
+            and document.error.code
+            in ("backup_validate_invalid", "backup_corrupt", "backup_unsafe")
             else "unavailable"
         )
     )
@@ -512,11 +515,16 @@ def backup_validate(backup_id: str, output_format: str | None, json_output: bool
         refreshed = catalog._resolve_backup_projection(backup_id)
         validation_status = _validation_status(refreshed)
         if validation_status is BackupValidationStatus.INVALID:
+            structural_code = (
+                validation.error_code
+                if isinstance(validation, BackupValidationResult) and validation.error_code
+                else "backup_validate_invalid"
+            )
             emit(
                 failure_document(
                     command="backup.validate",
                     dry_run=False,
-                    error_code="backup_validate_invalid",
+                    error_code=structural_code,
                     error_message="Backup archive is invalid",
                     error_details=payload,
                 ),
