@@ -5,9 +5,10 @@
 ## What Changes
 
 - Reuse the existing bounded auxiliary Database Manager lifecycle for COPY checkout instead of requiring a manually started source Odoo.
-- Reuse an already responsive source Database Manager without claiming ownership or stopping its process.
-- Start source Odoo only when the endpoint is unavailable and the configured port is proven free; fail closed for an occupied, unhealthy, or unowned listener.
-- Include auxiliary start, readiness, and cleanup in the same immutable checkout command plan, while keeping dry-run non-mutating.
+- Reuse only a recorded source runtime whose exact live process identity and ownership of the configured listening socket are proven; a responsive but unrecorded listener fails closed.
+- Start source Odoo only when the configured port is proven free; fail closed for an occupied, unhealthy, unowned, or unverifiable listener.
+- Revalidate the recorded process-to-listener binding immediately before every auxiliary Database Manager request that carries the master password, and send no secret when that proof fails.
+- Include auxiliary identity, port/ownership, privileged-request revalidation, start, readiness, and cleanup actions in the same immutable checkout command plan, while keeping dry-run non-mutating.
 - Clean up only the exact auxiliary process and temporary secret configuration owned by the checkout after success, failure, timeout, or cancellation without masking the primary error.
 - Preserve the current COPY journal, target-absence checks, backup provenance, restore postconditions, and compensating cleanup behavior; leave shared database mode unchanged.
 
@@ -23,6 +24,6 @@ None.
 
 ## Impact
 
-- Affected implementation: environment checkout command composition and the existing instance auxiliary-restore attachment/session boundary.
-- Affected tests: focused auxiliary lifecycle tests, COPY checkout command/rollback tests, dry-run plan coverage, and shared-mode regression coverage.
+- Affected implementation: environment checkout command composition, the existing instance auxiliary-restore attachment/session boundary, and the Database Manager backup/restore request boundary used while an auxiliary session is active.
+- Affected tests: focused process/socket identity and secret non-disclosure tests, auxiliary lifecycle tests, COPY checkout command/rollback tests, dry-run plan coverage, and shared-mode regression coverage.
 - Public CLI syntax, persisted storage schema, dependencies, and shared database mode remain unchanged.
