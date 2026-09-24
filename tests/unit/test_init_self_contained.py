@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, cast
@@ -58,6 +59,7 @@ def stub_psql_resolution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     psql.chmod(0o755)
     path = os.environ.get("PATH", "")
     monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), path)))
+    assert shutil.which("psql") == str(psql)
 
 
 @pytest.fixture
