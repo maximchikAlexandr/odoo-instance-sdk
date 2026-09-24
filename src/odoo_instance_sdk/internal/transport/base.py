@@ -11,16 +11,55 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, BinaryIO, Protocol, cast, runtime_checkable
+
+from odoo_instance_sdk.execution import JsonValue
 
 if TYPE_CHECKING:
     from types import TracebackType
 
 _LOG = logging.getLogger("odoo_instance_sdk.transport")
 
-_UNSET: Any = object()
+
+class _Unset:
+    __slots__ = ()
+
+
+_UNSET = _Unset()
+
+FileUpload = tuple[str, BinaryIO, str]
+HttpPayload = (
+    JsonValue | bytes | Mapping[str, str] | Mapping[str, FileUpload] | Sequence[tuple[str, str]]
+)
+RequestPayload = HttpPayload | _Unset
+
+
+class _RawResponse(Protocol):
+    status_code: int
+    headers: Mapping[str, str]
+    is_error: bool
+    text: str
+    content: bytes
+
+    def json(self) -> JsonValue: ...
+
+    def raise_for_status(self) -> None: ...
+
+    def iter_bytes(self, chunk_size: int = 8192) -> Iterator[bytes]: ...
+
+
+class _RawHttpClient(Protocol):
+    def post(self, url: str, **kwargs: RequestPayload) -> _RawResponse: ...
+
+    def get(self, url: str) -> _RawResponse: ...
+
+    def stream(
+        self, method: str, url: str, **kwargs: RequestPayload
+    ) -> AbstractContextManager[_RawResponse]: ...
+
+    def close(self) -> None: ...
 
 
 class TransportError(Exception):
@@ -64,7 +103,7 @@ class StreamingResponse(Protocol):
     @property
     def content(self) -> bytes: ...
 
-    def json(self) -> Any: ...
+    def json(self) -> JsonValue: ...
 
     def raise_for_status(self) -> None: ...
 
@@ -82,9 +121,9 @@ class HttpClient(Protocol):
         self,
         url: str,
         *,
-        json: Any = _UNSET,
-        data: Any = _UNSET,
-        files: Any = _UNSET,
+        json: RequestPayload = _UNSET,
+        data: RequestPayload = _UNSET,
+        files: RequestPayload = _UNSET,
     ) -> StreamingResponse: ...
 
     def get(self, url: str) -> StreamingResponse: ...
@@ -94,7 +133,7 @@ class HttpClient(Protocol):
         method: str,
         url: str,
         *,
-        data: Any = _UNSET,
+        data: RequestPayload = _UNSET,
     ) -> AbstractContextManager[StreamingResponse]: ...
 
     def close(self) -> None: ...
@@ -156,14 +195,14 @@ class BaseHttpClient(AbstractContextManager["BaseHttpClient"]):
 
     def __init__(self, *, timeout: float | None = None) -> None:
         self._timeout = timeout
-        self._client: Any = None
+        self._client: _RawHttpClient | None = None
 
-    def _ensure_client(self) -> Any:
+    def _ensure_client(self) -> _RawHttpClient:
         if self._client is None:
             import httpx
 
             timeout = self._timeout if self._timeout is not None else 30.0
-            self._client = httpx.Client(timeout=httpx.Timeout(timeout))
+            self._client = cast("_RawHttpClient", httpx.Client(timeout=httpx.Timeout(timeout)))
         return self._client
 
     def __enter__(self) -> BaseHttpClient:

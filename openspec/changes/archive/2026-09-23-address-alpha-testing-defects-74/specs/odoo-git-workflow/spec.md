@@ -26,4 +26,3 @@ The Git resource SHALL use the already-resolved project ticket settings from the
 
 - **WHEN** the project root and the worktree root are different paths
 - **THEN** the ticket settings come from the selected project manifest and are not reloaded from the worktree root
-

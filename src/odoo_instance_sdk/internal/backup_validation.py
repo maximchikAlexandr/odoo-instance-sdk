@@ -81,13 +81,16 @@ def _is_unsafe_path(name: str) -> bool:
     return any(part in {".", ".."} for part in parts)
 
 
-def _stream_test_crc(zf: zipfile.ZipFile) -> str | None:
+def _stream_test_crc(
+    zf: zipfile.ZipFile, *, max_uncompressed_bytes: int
+) -> tuple[str | None, bool]:
     """CRC-test every member with a bounded 65536-byte streaming buffer.
 
     ``zipfile.ZipFile.testzip`` uses a 1 MiB chunk and offers no buffer knob;
     this streaming loop keeps the validation memory ceiling explicit and
     never reads ``dump.sql`` or filestore members wholly into memory.
     """
+    consumed = 0
     for info in zf.infolist():
         if info.is_dir():
             continue
@@ -97,9 +100,12 @@ def _stream_test_crc(zf: zipfile.ZipFile) -> str | None:
                     chunk = stream.read(_STREAM_BUFFER_BYTES)
                     if not chunk:
                         break
+                    consumed += len(chunk)
+                    if consumed > max_uncompressed_bytes:
+                        return None, True
         except (zipfile.BadZipFile, OSError, EOFError):
-            return info.filename
-    return None
+            return info.filename, False
+    return None, False
 
 
 def _manifest_db_version(manifest: JsonValue) -> str | None:
@@ -114,7 +120,7 @@ def _manifest_db_version(manifest: JsonValue) -> str | None:
     return None
 
 
-def validate_zip(path: Path) -> ZipValidationResult:  # noqa: C901
+def validate_zip(path: Path, *, data_dir: Path | None = None) -> ZipValidationResult:  # noqa: C901
     errors: list[str] = []
     unsafe = False
     corrupt = False
@@ -135,6 +141,7 @@ def validate_zip(path: Path) -> ZipValidationResult:  # noqa: C901
 
     entry_sizes: list[tuple[str, int]] = []
     uncompressed_bytes = 0
+    preflight_code: str | None = None
     try:
         with zipfile.ZipFile(path) as zf:
             infos = zf.infolist()
@@ -198,7 +205,37 @@ def validate_zip(path: Path) -> ZipValidationResult:  # noqa: C901
                     add_error(f"Invalid manifest.json: {e}")
 
             if not errors:
-                bad = _stream_test_crc(zf)
+                operator = enforce_operator_uncompressed_limit(uncompressed_bytes)
+                disk = preflight_restore_disk_space(
+                    uncompressed_bytes, data_dir if data_dir is not None else path.parent
+                )
+                crc_limit = disk.available_bytes - disk.reserve_bytes
+                if operator.allowed_bytes is not None:
+                    crc_limit = min(crc_limit, operator.allowed_bytes)
+                if not operator.ok:
+                    add_error("ZIP exceeds the configured operator uncompressed limit")
+                    unsafe = True
+                    preflight_code = BACKUP_OPERATOR_LIMIT
+                elif not disk.ok:
+                    add_error("ZIP exceeds the available restore disk bound")
+                    unsafe = True
+                    preflight_code = BACKUP_INSUFFICIENT_DISK
+                bad, exceeded = (
+                    _stream_test_crc(
+                        zf,
+                        max_uncompressed_bytes=max(0, crc_limit),
+                    )
+                    if preflight_code is None
+                    else (None, False)
+                )
+                if exceeded:
+                    add_error("ZIP CRC work exceeded the finite restore bound")
+                    unsafe = True
+                    preflight_code = (
+                        BACKUP_OPERATOR_LIMIT
+                        if operator.allowed_bytes is not None
+                        else BACKUP_INSUFFICIENT_DISK
+                    )
                 if bad is not None:
                     add_error(f"CRC corruption in: {bad}")
                     corrupt = True
@@ -210,6 +247,8 @@ def validate_zip(path: Path) -> ZipValidationResult:  # noqa: C901
         error_code: str | None = None
     elif corrupt:
         error_code = BACKUP_CORRUPT
+    elif preflight_code is not None:
+        error_code = preflight_code
     elif unsafe:
         error_code = BACKUP_UNSAFE
     else:
@@ -350,6 +389,16 @@ def raise_zip_validation_error(result: ZipValidationResult) -> None:
     if result.error_code == BACKUP_UNSAFE:
         raise BackupUnsafeError(
             "backup archive structure is unsafe",
+            details={"errors": list(result.errors)},
+        )
+    if result.error_code == BACKUP_OPERATOR_LIMIT:
+        raise BackupOperatorLimitError(
+            "backup exceeds operator maximum uncompressed size",
+            details={"errors": list(result.errors)},
+        )
+    if result.error_code == BACKUP_INSUFFICIENT_DISK:
+        raise BackupInsufficientDiskError(
+            "insufficient local disk space for restore",
             details={"errors": list(result.errors)},
         )
 

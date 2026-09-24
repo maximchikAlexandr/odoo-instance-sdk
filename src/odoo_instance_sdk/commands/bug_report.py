@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -53,7 +54,7 @@ def _rich_init(document: OutputDocument) -> str:
             else str(item)
         )
         table.add_row(str(key), rendered)
-    console = Console(record=True, color_system=None, width=180)
+    console = Console(record=True, color_system=None, width=180, file=StringIO())
     console.print(table)
     return console.export_text().rstrip()
 
@@ -70,7 +71,7 @@ def _rich_submit(document: OutputDocument) -> str:
             else str(item)
         )
         table.add_row(str(key), rendered)
-    console = Console(record=True, color_system=None, width=180)
+    console = Console(record=True, color_system=None, width=180, file=StringIO())
     console.print(table)
     return console.export_text().rstrip()
 

@@ -27,9 +27,9 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/commands/output.py", 418),
         ("src/odoo_instance_sdk/commands/output.py", 425),
         ("src/odoo_instance_sdk/commands/output.py", 427),
-        ("src/odoo_instance_sdk/internal/self_update.py", 729),
-        ("src/odoo_instance_sdk/internal/self_update.py", 730),
-        ("src/odoo_instance_sdk/internal/self_update.py", 731),
+        ("src/odoo_instance_sdk/internal/self_update.py", 802),
+        ("src/odoo_instance_sdk/internal/self_update.py", 803),
+        ("src/odoo_instance_sdk/internal/self_update.py", 804),
         ("src/odoo_instance_sdk/resources/instance/identity.py", 494),
     }
 )
@@ -56,15 +56,15 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/backup.py", 348): "shared Rich output boundary",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        729,
+        802,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        730,
+        803,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/internal/self_update.py",
-        731,
+        804,
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
@@ -76,18 +76,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
 # Keep only deliberate, line-specific exceptions in this checked inventory so
 # every future regression reports its exact file and line instead of being
 # hidden by a broad allowlist.
-EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {
-    "src/odoo_instance_sdk/bug_report.py": frozenset({135, 242, 306, 308, 358, 361, 435, 437}),
-    "src/odoo_instance_sdk/internal/bug_report.py": frozenset({187, 201, 346}),
-    "src/odoo_instance_sdk/internal/dbprep/bootstrap.py": frozenset({205}),
-    "src/odoo_instance_sdk/internal/transport/base.py": frozenset(
-        {23, 67, 81, 85, 86, 87, 92, 97, 159, 161}
-    ),
-    "src/odoo_instance_sdk/internal/transport/odoo.py": frozenset(
-        {28, 38, 53, 112, 116, 117, 118, 120, 133, 138, 140, 179, 185}
-    ),
-    "src/odoo_instance_sdk/project_init.py": frozenset({31, 38, 278, 285}),
-}
+EXPLICIT_IMPRECISE_ANNOTATIONS: Final[dict[str, frozenset[int]]] = {}
 
 
 MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
@@ -110,17 +99,17 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {}
 
 DIRECT_HTTPX_USAGE: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/internal/transport/base.py", 163),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 166),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 190),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 192),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 73),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 75),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 151),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 153),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 202),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 205),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 229),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 231),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 76),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 78),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 154),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 205),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 156),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 157),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 208),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 210),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 211),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 213),
     }
 )

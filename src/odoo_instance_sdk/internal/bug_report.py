@@ -18,7 +18,7 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import (
     BugReportInvalidError,
@@ -29,6 +29,9 @@ from odoo_instance_sdk.models.bug_report import (
     BugReportReviewEntry,
     BugReportVerdict,
 )
+
+if TYPE_CHECKING:
+    from odoo_instance_sdk.execution import JsonValue
 
 _DEFAULT_REPOSITORY = "maximchikAlexandr/odoo-instance-sdk"
 _ALPHA_TESTING_LABELS: tuple[str, ...] = ("alpha-testing",)
@@ -184,7 +187,7 @@ def _write_file_mode_0600(path: Path, data: bytes) -> None:
     os.chmod(path, 0o600)
 
 
-def _read_metadata(report_dir: Path) -> dict[str, object]:
+def _read_metadata(report_dir: Path) -> dict[str, JsonValue]:
     path = report_dir / "metadata.json"
     if not path.is_file():
         raise BugReportNotFoundError(f"missing metadata.json for draft {report_dir.name}")
@@ -198,7 +201,7 @@ def _read_metadata(report_dir: Path) -> dict[str, object]:
     return raw
 
 
-def _write_metadata(report_dir: Path, metadata: Mapping[str, object]) -> None:
+def _write_metadata(report_dir: Path, metadata: Mapping[str, JsonValue]) -> None:
     encoded = json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     _write_file_mode_0600(report_dir / "metadata.json", encoded.encode("utf-8"))
 
@@ -343,7 +346,7 @@ def _gh_recheck_view_argv(repository: str, issue_number: int) -> tuple[str, ...]
     )
 
 
-def _parse_issue_json_record(raw: object) -> tuple[str, int] | None:
+def _parse_issue_json_record(raw: JsonValue) -> tuple[str, int] | None:
     if not isinstance(raw, dict):
         return None
     url = raw.get("url")

@@ -883,6 +883,22 @@ class _BackupMixin:
         plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
         return self._make_command(plan, run, steps, executor=executor or SubprocessExecutor())
 
+    def execute_ensure_running_plan(
+        self,
+        context: RunContext[T],
+        *,
+        timeout: float = _DEFAULT_TIMEOUT,
+        temporary_path: Path | None = None,
+        steps: Sequence[PreparedStep | PreparedAction],
+    ) -> None:
+        """Execute a captured ensure-running bundle through the shared boundary."""
+        self._ensure_running_impl(
+            timeout,
+            temporary_path=temporary_path,
+            step_ids={step.step_id: step.step_id for step in steps},
+        )
+        self._account_optional_steps(context, steps)
+
     def _ensure_running_impl(
         self,
         timeout: float = _DEFAULT_TIMEOUT,

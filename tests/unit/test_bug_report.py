@@ -28,6 +28,7 @@ from odoo_instance_sdk.exceptions import (
     BugReportStaleHashError,
     LockConflictError,
 )
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.bug_report import (
     _DEFAULT_REPOSITORY,
     _gh_recheck_search_argv,
@@ -589,7 +590,7 @@ def test_local_write_failure_recovers_via_recheck() -> None:
     real_persist = bug_report_module._persist_issue_outcome
     calls = {"count": 0}
 
-    def flaky_persist(*args: object, **kwargs: object) -> dict[str, object]:
+    def flaky_persist(*args: object, **kwargs: object) -> dict[str, JsonValue]:
         calls["count"] += 1
         if calls["count"] == 1:
             raise OSError("disk full")

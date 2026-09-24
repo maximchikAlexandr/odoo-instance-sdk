@@ -30,4 +30,3 @@ On a non-zero return code, `module update` SHALL prioritize a valid nonce-framed
 
 - **WHEN** `module update` fails and is rendered in Rich, JSON, and TOON
 - **THEN** all three return the same stable error code and safe details
-

@@ -107,4 +107,3 @@ For a new isolated environment, the generated `odoo.conf` SHALL include an envir
 
 - **WHEN** a full self-contained `init` runs
 - **THEN** the generated `odoo.conf` contains `data_dir` set to the absolute `{project_root}/.odcli/filestore`
-

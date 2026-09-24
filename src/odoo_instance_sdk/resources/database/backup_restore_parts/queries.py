@@ -17,6 +17,7 @@ from odoo_instance_sdk.exceptions import (
     MasterPasswordRequiredError,
     PostgresClusterNotOwnedError,
 )
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.files import (
     ensure_destination,
     make_download_filename,
@@ -477,7 +478,7 @@ class _QueriesMixin:
             with self._http() as http:
                 resp = http.post(
                     self._url("list"),
-                    json={"jsonrpc": "2.0", "method": "call", "params": {}},
+                    json=cast("JsonValue", {"jsonrpc": "2.0", "method": "call", "params": {}}),
                 )
                 resp.raise_for_status()
                 data = resp.json()

@@ -199,6 +199,44 @@ def _read_direct_url_payload(dist: Distribution) -> dict[str, JsonValue] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _normalize_legacy_direct_url(provenance: InstalledProvenance) -> None:
+    """Keep the installed VCS URL readable by pre-fix update parents."""
+    if provenance.source_repo is None or provenance.commit_id is None:
+        return
+    try:
+        dist = distribution(_PACKAGE_NAME)
+    except PackageNotFoundError:
+        return
+    files = dist.files
+    if files is None:
+        return
+    for file_path in files:
+        if Path(str(file_path)).name != "direct_url.json":
+            continue
+        metadata_path = Path(str(dist.locate_file(file_path)))
+        payload = _read_direct_url_payload(dist)
+        if payload is None:
+            return
+        url = payload.get("url")
+        vcs_info = payload.get("vcs_info")
+        if (
+            not isinstance(url, str)
+            or url.startswith("git+")
+            or not isinstance(vcs_info, dict)
+            or vcs_info.get("vcs") != "git"
+        ):
+            return
+        payload["url"] = f"git+{provenance.source_repo}@{provenance.commit_id}"
+        try:
+            metadata_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise UpdateError("cannot persist legacy-compatible VCS provenance") from exc
+        return
+
+
 def _uv_tool_bin_dir() -> Path | None:
     """Return the uv tool bin directory if discoverable from PATH layout."""
     home = Path.home().expanduser()
@@ -270,7 +308,10 @@ def _parse_vcs_direct_url(
             source_repo = url.split("+", 1)[1].split("@", 1)[0]
             if "@" in url:
                 requested_revision = url.split("@", 1)[1] or None
-        elif is_vcs and url.startswith("file://"):
+        elif is_vcs:
+            # uv emits a bare repository URL alongside ``vcs_info`` for
+            # installed GitHub revisions.  Keep that PEP 610 form intact;
+            # the repository allow-list below remains authoritative.
             source_repo = url
     if isinstance(vcs_info, dict):
         raw_commit = vcs_info.get("commit_id")
@@ -621,6 +662,36 @@ def _uv_version_string() -> str:
     return first_line[0] if first_line else "unknown"
 
 
+def _ensure_maintenance_path() -> None:
+    """Recover a usable command path for legacy hermetic maintenance children."""
+    if shutil.which("uv") is not None:
+        return
+    candidates = (
+        Path.home() / ".local" / "bin",
+        Path.home() / "AppData" / "Local" / "bin",
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+        Path("/usr/bin"),
+    )
+    entries = [str(path) for path in candidates if path.is_dir()]
+    if entries:
+        entries.append(os.defpath)
+        os.environ["PATH"] = os.pathsep.join(entries)
+
+
+def prepare_maintenance_environment() -> None:
+    """Recover HOME and PATH when a legacy child launched hermetically."""
+    if not os.environ.get("HOME"):
+        # Keep the uv-tool path symlink intact; resolving it would jump to the
+        # host's shared Python and lose the isolated tool home.
+        executable = Path(sys.executable)
+        for index, parent in enumerate(executable.parents):
+            if parent.name == ".local" and index > 0:
+                os.environ["HOME"] = str(parent.parent)
+                break
+    _ensure_maintenance_path()
+
+
 def _dry_run_flag_unsupported(stderr: str) -> bool:
     lowered = stderr.lower()
     return "dry-run" in lowered or "--dry-run" in lowered or "dry_run" in lowered
@@ -696,6 +767,7 @@ def _maintenance_run() -> UpdateResult:
     _verify_installed_revision(None, target_ref=target_ref_str)
     _verify_doctor_startup()
     _verify_reached_schema_versions(final_versions)
+    _normalize_legacy_direct_url(provenance)
     expected_target = _expected_sha_for_target_ref(target_ref_str)
     return UpdateResult(
         outcome="updated",
@@ -725,6 +797,7 @@ def is_maintenance_mode() -> bool:
 
 def run_maintenance() -> int:
     """Entry point for the maintenance child; writes one JSON document."""
+    prepare_maintenance_environment()
     result = _maintenance_run()
     sys.stdout.write(json.dumps(msgspec.to_builtins(result), indent=2, sort_keys=True))
     sys.stdout.write("\n")
@@ -782,16 +855,16 @@ def update_command(
         )
     if check:
         return _build_check_command(ref=ref, provenance=provenance, executor=executor)
+    target_sha = ref.lower() if _is_full_sha(ref) else ref
     if (
         not dry_run
-        and _is_full_sha(ref)
         and provenance.commit_id is not None
-        and ref.lower() == provenance.commit_id
+        and target_sha == provenance.commit_id
         and unfinished_update_journal() is None
     ):
         return _build_already_current_command(provenance)
     return _build_mutating_command(
-        ref=ref,
+        ref=target_sha,
         provenance=provenance,
         executor=executor,
         allow_downgrade=allow_downgrade,
@@ -812,6 +885,7 @@ __all__ = [
     "InstalledProvenance",
     "assert_update_not_blocking",
     "is_maintenance_mode",
+    "prepare_maintenance_environment",
     "read_uv_tool_direct_url",
     "run_maintenance",
     "unfinished_update_journal",

@@ -10,14 +10,17 @@ subclasses so ``httpx`` never leaks to resource interfaces.  Resources catch
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any, cast
 
+from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.transport.base import (
     _UNSET,
     BaseHttpClient,
+    RequestPayload,
     StreamingResponse,
+    _RawHttpClient,
+    _RawResponse,
 )
 from odoo_instance_sdk.internal.urls import warn_if_cleartext_secret
 
@@ -25,32 +28,32 @@ from odoo_instance_sdk.internal.urls import warn_if_cleartext_secret
 class _AdaptedStreamingResponse:
     """Wrap a raw ``httpx`` response and convert stream/status errors."""
 
-    def __init__(self, raw: Any, client: OdooHttpClient, *, url: str) -> None:
+    def __init__(self, raw: _RawResponse, client: OdooHttpClient, *, url: str) -> None:
         self._raw = raw
         self._client = client
         self._url = url
 
     @property
     def status_code(self) -> int:
-        return cast("int", self._raw.status_code)
+        return self._raw.status_code
 
     @property
-    def headers(self) -> Any:
+    def headers(self) -> Mapping[str, str]:
         return self._raw.headers
 
     @property
     def is_error(self) -> bool:
-        return cast("bool", self._raw.is_error)
+        return self._raw.is_error
 
     @property
     def text(self) -> str:
-        return cast("str", self._raw.text)
+        return self._raw.text
 
     @property
     def content(self) -> bytes:
-        return cast("bytes", self._raw.content)
+        return self._raw.content
 
-    def json(self) -> Any:
+    def json(self) -> JsonValue:
         try:
             return self._raw.json()
         except BaseException as exc:
@@ -113,11 +116,11 @@ class OdooHttpClient(BaseHttpClient):
         self,
         url: str,
         *,
-        json: Any = _UNSET,
-        data: Any = _UNSET,
-        files: Any = _UNSET,
+        json: RequestPayload = _UNSET,
+        data: RequestPayload = _UNSET,
+        files: RequestPayload = _UNSET,
     ) -> StreamingResponse:
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, RequestPayload] = {}
         if json is not _UNSET:
             kwargs["json"] = json
         if data is not _UNSET:
@@ -135,9 +138,9 @@ class OdooHttpClient(BaseHttpClient):
         method: str,
         url: str,
         *,
-        data: Any = _UNSET,
+        data: RequestPayload = _UNSET,
     ) -> Iterator[StreamingResponse]:
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, RequestPayload] = {}
         if data is not _UNSET:
             kwargs["data"] = data
         client = self._ensure_client()
@@ -182,7 +185,7 @@ class OdooHttpClient(BaseHttpClient):
         url: str,
         *,
         operation: str,
-        perform: Any,
+        perform: Callable[[_RawHttpClient], _RawResponse],
     ) -> StreamingResponse:
         """Run exactly one network attempt, log, and convert ``httpx`` errors."""
         client = self._ensure_client()

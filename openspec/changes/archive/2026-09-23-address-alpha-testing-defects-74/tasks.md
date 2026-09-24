@@ -215,8 +215,8 @@
 - [x] 19.2 Update `docs/python-sdk.md` with `bug_report_init_command()`, `bug_report_submit_command()`, and `update_command()` only; do not document `OdooHttpClient` as a public type.
 - [x] 19.3 Update `docs/execution-boundary.md` as a mirror of `PUBLIC_LEAF_CASES` for the new leaves and the httpx/`src/` ServerProxy/self-update lock notes.
 - [x] 19.4 Ensure `tests/unit/test_documentation_contract.py` passes: Click leaves match README, documentation examples compile/import, shell fences pass `bash -n`, relative Markdown links resolve.
-- [x] 19.5 Run the existing `make pr` gates that apply; record skipped external prerequisites separately from regressions. Do not add a FastAPI/dashboard surface for bug-report or update.
-- [x] 19.6 Run the full `make pr` gate and `uv build`; inspect wheel/sdist contents and metadata.
+- [x] 19.5 Run the applicable local lint, type, test, compatibility, and package gates; record skipped external prerequisites separately from regressions. Do not add a FastAPI/dashboard surface for bug-report or update.
+- [ ] 19.6 Run the full `make pr` gate and `uv build`; inspect wheel/sdist contents and metadata. The full PR aggregate remains a follow-up gate; `uv build` and the non-packaging local gates are recorded in delivery-notes.md.
 - [x] 19.7 Review `git diff` for scoped changes, verify Conventional Commit messages, and ensure no unrelated feature work is included.
 - [x] 19.8 Open the implementation PR from `feat/issue-74-alpha-testing-defects-batch2` with `#74` in the title/body, link GitHub issue #74, and report local `make pr`/build results.
 - [x] 19.9 Sync delta specs and archive the completed OpenSpec change once implementation lands.

@@ -268,12 +268,15 @@ def test_environment_methods_exist(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "document",
     [
+        17,
         "{}",
         '{"version": 99, "components": {}}',
         '{"version": 1, "components": {"python": {"status": "unknown"}, "dependencies": {"status": "unknown"}, "odoo": {"status": "known", "values": {"admin_passwd": "raw-secret"}}, "addons": {"status": "unknown"}, "git": {"status": "unknown"}}}',
     ],
 )
-def test_create_environment_rejects_unsafe_applied_settings(tmp_path: Path, document: str) -> None:
+def test_create_environment_rejects_unsafe_applied_settings(
+    tmp_path: Path, document: JsonValue
+) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "catalog.sqlite3")
     environment: dict[str, JsonValue] = {
         "id": str(uuid.uuid4()),

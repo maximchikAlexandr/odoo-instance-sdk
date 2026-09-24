@@ -83,4 +83,3 @@ The architecture regression gates SHALL include: the `PUBLIC_LEAF_CASES` SDK-fir
 
 - **WHEN** the E/F test quality gate runs after `ef-inventory.md` is applied
 - **THEN** no listed E/F-grade tests remain and coverage is not below the recorded merge-base baseline
-

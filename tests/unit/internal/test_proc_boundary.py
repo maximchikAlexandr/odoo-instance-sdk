@@ -1779,10 +1779,7 @@ def _drain_handle(
 def test_auxiliary_pipe_drain_prevents_blockage_for_noisy_child() -> None:
     handle = _drain_handle(_noisy_child(stdout_bytes=_PIPE_CAPACITY * 4))
 
-    deadline = time.monotonic() + 10.0
-    while handle.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    handle.terminate()
+    handle.wait(timeout=10.0)
 
     assert handle.poll() is not None
 
@@ -1797,10 +1794,7 @@ def test_auxiliary_drain_collects_both_streams_simultaneously() -> None:
         " time.sleep(0.3)"
     )
 
-    deadline = time.monotonic() + 10.0
-    while handle.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    handle.terminate()
+    handle.wait(timeout=10.0)
 
     tails = handle.drain_tails()
     assert "stdout-line" in tails["stdout"]
@@ -1812,10 +1806,7 @@ def test_auxiliary_drain_tail_is_bounded_to_timeout_tail_bytes() -> None:
         _noisy_child(stdout_bytes=_PIPE_CAPACITY * 4, stderr_bytes=_PIPE_CAPACITY * 4)
     )
 
-    deadline = time.monotonic() + 10.0
-    while handle.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    handle.terminate()
+    handle.wait(timeout=10.0)
 
     tails = handle.drain_tails()
     assert len(tails["stdout"].encode()) <= 8192
@@ -1831,10 +1822,7 @@ def test_auxiliary_drain_tail_redacts_secrets() -> None:
         secret=secret,
     )
 
-    deadline = time.monotonic() + 10.0
-    while handle.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    handle.terminate()
+    handle.wait(timeout=10.0)
 
     tails = handle.drain_tails()
     assert secret not in tails["stdout"]
@@ -1856,10 +1844,7 @@ def test_auxiliary_readiness_failure_attaches_bounded_tail_and_original_error() 
         secret_values=(secret,),
     )
     handle = SubprocessExecutor().spawn(step)
-    deadline = time.monotonic() + 10.0
-    while handle.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-
+    handle.wait(timeout=10.0)
     tails = handle.drain_tails()
     handle.terminate()
 
@@ -1874,9 +1859,7 @@ def test_auxiliary_cleanup_terminates_readers_and_process_group() -> None:
     active_before = threading.active_count()
     handle.terminate()
 
-    deadline = time.monotonic() + 5.0
-    while threading.active_count() > active_before and time.monotonic() < deadline:
-        time.sleep(0.05)
+    handle.wait(timeout=5.0)
 
     assert handle.poll() is not None
     assert threading.active_count() <= active_before
@@ -1888,9 +1871,7 @@ def test_auxiliary_interrupt_terminates_readers_and_process_group() -> None:
     active_before = threading.active_count()
     terminate(handle, process_group_id=handle.process_group_id, timeout=5.0)
 
-    deadline = time.monotonic() + 5.0
-    while threading.active_count() > active_before and time.monotonic() < deadline:
-        time.sleep(0.05)
+    handle.wait(timeout=5.0)
 
     assert handle.poll() is not None
     assert threading.active_count() <= active_before
@@ -1905,10 +1886,7 @@ def test_auxiliary_drain_does_not_write_child_bytes_to_cli_stdout(
         " sys.stderr.flush(); time.sleep(0.3)"
     )
 
-    deadline = time.monotonic() + 10.0
-    while handle.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    handle.terminate()
+    handle.wait(timeout=10.0)
 
     captured = capsys.readouterr()
     assert "CHILD-STDOUT-MARKER" not in captured.out

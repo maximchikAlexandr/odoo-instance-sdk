@@ -28,4 +28,3 @@ Every entry in the canonical `PUBLIC_LEAF_CASES` SHALL carry exactly one of: an 
 
 - **WHEN** the architecture gate runs on `src/`
 - **THEN** only the line-specific `internal/transport/` allowlist imports `httpx`
-

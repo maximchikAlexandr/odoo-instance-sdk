@@ -33,4 +33,3 @@ The internal process pump SHALL drain `stdout` and `stderr` concurrently and con
 
 - **WHEN** a long-running drain runs under JSON or TOON
 - **THEN** one final document is emitted and child pipe bytes do not appear on CLI stdout
-

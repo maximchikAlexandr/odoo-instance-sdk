@@ -25,10 +25,23 @@ from odoo_instance_sdk.commands.output import (
 from odoo_instance_sdk.exceptions import UpdateError
 from odoo_instance_sdk.internal.self_update import (
     is_maintenance_mode,
+    prepare_maintenance_environment,
     run_maintenance,
+    unfinished_update_journal,
     update_command,
 )
 from odoo_instance_sdk.models.update import UpdateOutcome
+
+
+def _should_resume_maintenance() -> bool:
+    journal = unfinished_update_journal()
+    return journal is not None and journal.get("phase") == "migrate"
+
+
+def _maintenance_exit_code() -> int | None:
+    if is_maintenance_mode() or _should_resume_maintenance():
+        return run_maintenance()
+    return None
 
 
 @click.command("update", help="Self-upgrade an OdCLI uv-tool install.")
@@ -94,8 +107,13 @@ def update_command_cli(
             dry_run=False,
             usage=True,
         )
-    if is_maintenance_mode():
-        raise click.exceptions.Exit(run_maintenance())
+    prepare_maintenance_environment()
+    # Older OdCLI releases launched the maintenance child without preserving
+    # its environment marker.  A migrate journal is the durable equivalent;
+    # resume that exact target instead of starting a nested update.
+    maintenance_status = _maintenance_exit_code()
+    if maintenance_status is not None:
+        raise click.exceptions.Exit(maintenance_status)
     if not yes and no_input and not dry_run and not check:
         fail(
             mode,

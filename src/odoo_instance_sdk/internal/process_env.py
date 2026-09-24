@@ -6,6 +6,8 @@ import os
 from collections.abc import Mapping
 
 _REMOTE_MASTER_PASSWORD = "ODCLI_TEST_MASTER_PASSWORD"
+_ADMIN_PASSWORD = "ODCLI_ADMIN_PASSWORD"
+_SECRET_ENV_KEYS = frozenset({_REMOTE_MASTER_PASSWORD, _ADMIN_PASSWORD})
 
 
 def sanitized_child_environment(
@@ -19,7 +21,8 @@ def sanitized_child_environment(
     runtime, or cluster invocation to accidentally inherit the credential.
     """
     child = dict(os.environ if environment is None else environment)
-    child.pop(_REMOTE_MASTER_PASSWORD, None)
+    for key in _SECRET_ENV_KEYS:
+        child.pop(key, None)
     return child
 
 
@@ -42,7 +45,8 @@ def captured_child_environment(
     public_overrides.update(explicit)
     public_overrides = sanitized_child_environment(public_overrides)
     child.update(explicit)
-    child.pop(_REMOTE_MASTER_PASSWORD, None)
+    for key in _SECRET_ENV_KEYS:
+        child.pop(key, None)
     return tuple(sorted(child.items())), tuple(sorted(public_overrides.items()))
 
 

@@ -121,4 +121,3 @@ For a self-contained project, auxiliary restore SHALL use bootstrap database `tm
 
 - **WHEN** restore or `db reset-admin-password` succeeds on Odoo 13 or Odoo 19
 - **THEN** XML-RPC login as `base.user_admin` with the assigned secret succeeds
-

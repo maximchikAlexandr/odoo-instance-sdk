@@ -60,6 +60,12 @@ class TestZipValidation:
 
         monkeypatch.setattr(zipfile, "is_zipfile", lambda _path: True)
         monkeypatch.setattr(zipfile, "ZipFile", lambda _path: LargeBackup())
+        disk_usage_type = type(shutil.disk_usage("."))
+        monkeypatch.setattr(
+            shutil,
+            "disk_usage",
+            lambda _path: disk_usage_type(10**12, 0, 500 * 1024**3),
+        )
 
         result = validate_zip(tmp_path / "large.zip")
 
@@ -178,11 +184,11 @@ def _write_odoo_zip(
     ("dump_uncompressed", "total_uncompressed", "label"),
     [
         (1210 * 1024**2, 1530 * 1024**2, "1.21 GiB dump 1.53 GiB total"),
-        (100 * 1024**3, 102 * 1024**3, "100 GiB dump modelled by metadata"),
+        (10 * 1024**3, 12 * 1024**3, "10 GiB dump modelled by metadata"),
     ],
-    ids=["1.21gb-fixture", "100gb-metadata-model"],
+    ids=["1.21gb-fixture", "10gb-metadata-model"],
 )
-def test_large_dump_passes_without_byte_ceiling(
+def test_ten_gib_dump_passes_with_disk_bound(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     dump_uncompressed: int,

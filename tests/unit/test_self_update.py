@@ -140,6 +140,13 @@ def _process_result(
 
 def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
     def factory(step):
+        if step.step_id == "update.resolve":
+            return _process_result(
+                step,
+                returncode=cast("int", effects.get("resolve_rc", 0)),
+                stdout=str(effects.get("uv_stdout", f"install {_SHA_B}")),
+                stderr=str(effects.get("uv_stderr", "")),
+            )
         if step.step_id == "update.resolve.check":
             return _process_result(
                 step,
@@ -327,10 +334,10 @@ def test_update_command_matrix(
     if expected_outcome == "already_current":
         assert not any(step.step_id.startswith("update.install") for step in executor.executed)
     if expected_outcome == "updated" and not command_kwargs.get("check"):
-        assert [step.step_id for step in executor.executed] == [
-            "update.install",
-            "update.migrate",
-        ]
+        expected_steps = ["update.install", "update.migrate"]
+        if str(command_kwargs.get("ref", "")).lower() != _SHA_OLD:
+            expected_steps.insert(0, "update.resolve")
+        assert [step.step_id for step in executor.executed] == expected_steps
 
 
 def test_read_uv_tool_direct_url_uses_pep610_metadata(
@@ -357,6 +364,41 @@ def test_read_uv_tool_direct_url_uses_pep610_metadata(
     assert provenance.source_repo.endswith("odoo-instance-sdk.git")
 
 
+def test_read_uv_tool_direct_url_accepts_uv_bare_vcs_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    direct_url = json.dumps(
+        {
+            "url": "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+            "vcs_info": {
+                "vcs": "git",
+                "commit_id": _SHA_A,
+                "requested_revision": _SHA_A,
+            },
+        }
+    )
+    _patch_distribution(monkeypatch, _FakeDist(direct_url=direct_url))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update._uv_tool_executable_path",
+        lambda: executable,
+    )
+    monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.self_update.get_user_root",
+        lambda **_: tmp_path / ".odcli",
+    )
+    (tmp_path / ".odcli").mkdir()
+
+    provenance = read_uv_tool_direct_url()
+
+    assert provenance.source_repo == "https://github.com/maximchikAlexandr/odoo-instance-sdk.git"
+    assert provenance.commit_id == _SHA_A
+
+
 def test_unfinished_journal_blocks_other_commands(user_root: Path) -> None:
     journal = user_root / "update" / "journal.json"
     journal.parent.mkdir(parents=True, exist_ok=True)
@@ -365,7 +407,7 @@ def test_unfinished_journal_blocks_other_commands(user_root: Path) -> None:
             {
                 "version": 1,
                 "phase": "migrate",
-                "target_ref": "main",
+                "target_ref": _SHA_B,
                 "snapshot_sha": _SHA_A,
                 "maintenance_pid": None,
             }
@@ -433,7 +475,7 @@ def test_update_lock_conflict_propagates(
 
     monkeypatch.setattr("odoo_instance_sdk.internal.self_update_commands.exclusive_lock", _conflict)
     with pytest.raises(LockConflictError):
-        update_command(ref="main", executor=RecordingExecutor()).run()
+        update_command(ref="main", executor=_executor_factory({})).run()
 
 
 def test_install_failure_clears_journal_and_snapshot(
@@ -496,7 +538,7 @@ def test_preflight_failed_reports_disk_bytes(
         "odoo_instance_sdk.internal.self_update._validate_storage_migration_path",
         lambda: None,
     )
-    result = update_command(ref="main", executor=RecordingExecutor()).run()
+    result = update_command(ref="main", executor=_executor_factory({})).run()
     assert result.outcome == "preflight_failed"
     message = result.next_step or ""
     assert "measured" in message
@@ -700,7 +742,7 @@ def test_update_resumes_from_install_journal(
             {
                 "version": 1,
                 "phase": "install",
-                "target_ref": "main",
+                "target_ref": _SHA_B,
                 "snapshot_sha": _SHA_A,
                 "maintenance_pid": None,
             }

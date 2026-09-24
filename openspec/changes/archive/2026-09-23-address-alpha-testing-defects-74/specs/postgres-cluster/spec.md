@@ -38,4 +38,3 @@
 
 - **WHEN** a running cluster has an empty or unparseable Docker metrics snapshot
 - **THEN** the cluster state comes from `PostgresCluster.status_command()`, not from the metrics snapshot
-
