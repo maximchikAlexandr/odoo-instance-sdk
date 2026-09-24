@@ -152,7 +152,10 @@ class ProcessHandle:
         return self.process.poll()
 
     def wait(self, timeout: float | None = None) -> int:
-        return self.process.wait(timeout=timeout)
+        returncode = self.process.wait(timeout=timeout)
+        if self.drain is not None:
+            self.drain.join()
+        return returncode
 
     def communicate(
         self, input: bytes | None = None, timeout: float | None = None
