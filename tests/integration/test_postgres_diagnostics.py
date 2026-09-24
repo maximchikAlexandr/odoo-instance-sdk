@@ -42,7 +42,7 @@ def _free_loopback_port() -> int:
 
 
 def _require_docker() -> None:
-    ready, diagnostic = docker_ready(timeout=3.0)
+    ready, diagnostic = docker_ready(timeout=30.0)
     if not ready:
         pytest.skip(f"docker is not ready ({diagnostic}); PostgreSQL integration is unavailable")
 
