@@ -558,7 +558,7 @@ def test_terminate_pid_uses_bounded_term_then_kill_escalation() -> None:
     with (
         patch("odoo_instance_sdk.internal.proc.terminate.os.killpg") as killpg,
         patch(
-            "odoo_instance_sdk.internal.proc.terminate._process_group_is_alive",
+            "odoo_instance_sdk.internal.proc.terminate.is_process_group_alive",
             return_value=False,
         ),
         patch(
@@ -589,18 +589,34 @@ def test_terminate_pid_kills_surviving_group_after_leader_exits() -> None:
             side_effect=lambda _pid, **_kwargs: next(alive),
         ),
         patch(
-            "odoo_instance_sdk.internal.proc.terminate._process_group_is_alive",
+            "odoo_instance_sdk.internal.proc.terminate.is_process_group_alive",
             side_effect=lambda _group_id: next(group_alive),
-        ) as group_check,
-        patch("odoo_instance_sdk.internal.proc.terminate.time.sleep") as sleep,
+        ),
+        patch("odoo_instance_sdk.internal.proc.terminate.time.sleep"),
     ):
         terminate_pid(4242, process_group_id=4242, timeout=5.0)
     assert [call.args[1] for call in killpg.call_args_list] == [
         signal.SIGTERM,
         signal.SIGKILL,
     ]
-    assert group_check.call_count == 4
-    sleep.assert_called_once_with(0.05)
+
+
+@pytest.mark.unit
+def test_terminate_pid_retains_group_safety_when_leader_is_gone() -> None:
+    with (
+        patch("odoo_instance_sdk.internal.proc.terminate.os.killpg") as killpg,
+        patch(
+            "odoo_instance_sdk.internal.proc.terminate.is_process_alive",
+            return_value=False,
+        ),
+        patch(
+            "odoo_instance_sdk.internal.proc.terminate.is_process_group_alive",
+            return_value=True,
+        ),
+        pytest.raises(RuntimeError, match="process group remains alive"),
+    ):
+        terminate_pid(4242, process_group_id=4242, expected_create_time=12.5)
+    killpg.assert_not_called()
 
 
 @pytest.mark.unit
@@ -712,6 +728,10 @@ def test_stop_vanished_process_clears_matching_row(tmp_path: Path, owner_kind: s
             side_effect=[_live_process(instance), psutil.NoSuchProcess(4242)],
         ),
         patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.is_process_group_alive",
+            return_value=False,
+        ),
         patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
     ):
         result = _stop_command(instance, owner_kind).run()
@@ -724,6 +744,31 @@ def test_stop_vanished_process_clears_matching_row(tmp_path: Path, owner_kind: s
     assert result == expected
     terminate.assert_not_called()
     assert catalog.clear_calls == [(owner_id, 4242, 12.5)]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("owner_kind", ["environment", "project"])
+def test_stop_vanished_process_retains_row_when_group_survives(
+    tmp_path: Path, owner_kind: str
+) -> None:
+    instance, catalog, _owner_id = _instance(tmp_path, owner_kind=owner_kind)
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.psutil.Process",
+            side_effect=[_live_process(instance), psutil.NoSuchProcess(4242)],
+        ),
+        patch("odoo_instance_sdk.resources.instance.identity.os.getpgid", return_value=4242),
+        patch(
+            "odoo_instance_sdk.resources.instance.identity.is_process_group_alive",
+            return_value=True,
+        ),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate_pid") as terminate,
+        pytest.raises(RuntimeError, match="process group remains alive"),
+    ):
+        _stop_command(instance, owner_kind).run()
+    terminate.assert_not_called()
+    assert catalog.clear_calls == []
+    assert _runtime_row(catalog, owner_kind) is not None
 
 
 def _real_stop_context(

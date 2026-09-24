@@ -25,7 +25,7 @@ from . import (
 )
 
 
-def _process_group_is_alive(process_group_id: int) -> bool:
+def is_process_group_alive(process_group_id: int) -> bool:
     try:
         os.killpg(process_group_id, 0)
     except ProcessLookupError:
@@ -41,7 +41,7 @@ def _wait_for_process_group_exit(
     deadline = time.monotonic() + timeout
     while True:
         handle.poll()
-        if not _process_group_is_alive(process_group_id):
+        if not is_process_group_alive(process_group_id):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -97,7 +97,7 @@ def terminate(
             os.killpg(group_id, signal.SIGKILL)
         _wait_for_process_group_exit(handle, group_id, timeout=timeout)
     else:
-        if _process_group_is_alive(group_id):
+        if is_process_group_alive(group_id):
             with contextlib.suppress(OSError):
                 os.killpg(group_id, signal.SIGKILL)
             _wait_for_process_group_exit(handle, group_id, timeout=timeout)
@@ -140,7 +140,7 @@ def _wait_for_pid_exit(pid: int, *, expected_create_time: float | None, timeout:
 
 def _wait_for_pid_group_exit(process_group_id: int, *, timeout: float) -> None:
     deadline = time.monotonic() + timeout
-    while _process_group_is_alive(process_group_id):
+    while is_process_group_alive(process_group_id):
         if time.monotonic() >= deadline:
             return
         time.sleep(0.05)
@@ -171,19 +171,21 @@ def terminate_pid(
     else:
         group_id = process_group_id or pid
         if not is_process_alive(pid, expected_create_time=expected_create_time):
+            if sys.platform != "win32" and is_process_group_alive(group_id):
+                raise RuntimeError("process group remains alive after leader exit")
             return
         with contextlib.suppress(ProcessLookupError):
             os.killpg(group_id, signal.SIGTERM)
         _wait_for_pid_exit(pid, expected_create_time=expected_create_time, timeout=timeout)
         if is_process_alive(
             pid, expected_create_time=expected_create_time
-        ) or _process_group_is_alive(group_id):
+        ) or is_process_group_alive(group_id):
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(group_id, signal.SIGKILL)
             _wait_for_pid_exit(pid, expected_create_time=expected_create_time, timeout=timeout)
             _wait_for_pid_group_exit(group_id, timeout=timeout)
     if is_process_alive(pid, expected_create_time=expected_create_time) or (
-        sys.platform != "win32" and _process_group_is_alive(process_group_id or pid)
+        sys.platform != "win32" and is_process_group_alive(process_group_id or pid)
     ):
         raise TimeoutError(f"process {pid} did not exit within {timeout}s")
 

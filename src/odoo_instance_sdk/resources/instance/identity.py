@@ -24,6 +24,7 @@ from odoo_instance_sdk.internal.proc import (
     ProcessHandle,
     ProcessResult,
     SubprocessExecutor,
+    is_process_group_alive,
     terminate,
     wait_foreground,
 )
@@ -877,6 +878,8 @@ class _IdentityMixin:
             )
 
         def vanished_identity() -> _RuntimeIdentity:
+            if sys.platform != "win32" and is_process_group_alive(root_pid):
+                raise RuntimeError("process group remains alive after leader exit")
             return _RuntimeIdentity(
                 owner_kind=owner_kind,
                 owner_id=owner_id,
