@@ -122,6 +122,9 @@ def test_env_list_rich_compact_keeps_provider_facts_in_details_only() -> None:
 
 @pytest.mark.unit
 def test_cli_composition_promotes_short_aliases_without_leaf_edits() -> None:
+    loaded = CliRunner().invoke(cli, ["module", "--help"])
+    assert loaded.exit_code == 0, loaded.output
+
     aliases = (
         ("env", "create", "checkout"),
         ("env", "ls", "list"),
@@ -177,7 +180,13 @@ def test_backup_validate_rich_leaf_is_width_safe(
     )
 
     assert result.exit_code == (0 if expected_status == "valid" else 1), result.output
-    assert expected_status in result.stdout.lower() or expected_status in result.stderr.lower()
+    if expected_status == "valid":
+        assert expected_status in result.stdout.lower()
+    else:
+        assert result.stdout == ""
+        assert "┌" in result.stderr
+        assert "Status" in result.stderr
+        assert expected_status in result.stderr.lower()
     assert all(len(line) <= width for line in (result.stdout + result.stderr).splitlines())
 
 

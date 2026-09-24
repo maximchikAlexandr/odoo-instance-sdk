@@ -21,28 +21,13 @@ _REPO_ROOT = Path(__file__).parents[2]
 _COMMANDS_ROOT = _REPO_ROOT / "src" / "odoo_instance_sdk" / "commands"
 _DOWNSTREAM_DIRECT_TABLE_SITES = frozenset(
     {
-        ("src/odoo_instance_sdk/commands/backup.py", 195),
-        ("src/odoo_instance_sdk/commands/backup.py", 223),
-        ("src/odoo_instance_sdk/commands/backup.py", 251),
-        ("src/odoo_instance_sdk/commands/backup.py", 265),
-        ("src/odoo_instance_sdk/commands/backup.py", 279),
-        ("src/odoo_instance_sdk/commands/backup.py", 323),
-        ("src/odoo_instance_sdk/commands/backup.py", 373),
         ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 672),
-        ("src/odoo_instance_sdk/commands/db.py", 756),
-        ("src/odoo_instance_sdk/commands/db.py", 787),
-        ("src/odoo_instance_sdk/commands/db.py", 809),
-        ("src/odoo_instance_sdk/commands/db.py", 826),
         ("src/odoo_instance_sdk/commands/git.py", 35),
         ("src/odoo_instance_sdk/commands/module.py", 105),
         ("src/odoo_instance_sdk/commands/module.py", 125),
         ("src/odoo_instance_sdk/commands/module.py", 142),
         ("src/odoo_instance_sdk/commands/module.py", 172),
         ("src/odoo_instance_sdk/commands/module.py", 188),
-        ("src/odoo_instance_sdk/commands/pg.py", 69),
-        ("src/odoo_instance_sdk/commands/pg.py", 172),
-        ("src/odoo_instance_sdk/commands/pg.py", 227),
-        ("src/odoo_instance_sdk/commands/pg.py", 521),
         ("src/odoo_instance_sdk/commands/resource.py", 491),
         ("src/odoo_instance_sdk/commands/resource.py", 535),
         ("src/odoo_instance_sdk/commands/test.py", 195),
@@ -144,7 +129,7 @@ def test_production_commands_inventory_direct_table_constructors() -> None:
         )
 
     downstream = actual - approved
-    assert len(_DOWNSTREAM_DIRECT_TABLE_SITES) == 27
-    assert len(actual) == 28
+    assert len(_DOWNSTREAM_DIRECT_TABLE_SITES) == 12
+    assert len(actual) == 13
     assert len(approved) == 1
     assert downstream == _DOWNSTREAM_DIRECT_TABLE_SITES
