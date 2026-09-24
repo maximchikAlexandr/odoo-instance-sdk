@@ -452,34 +452,58 @@ def test_project_restore_accepts_matching_environment_runtime_port(
     from types import SimpleNamespace
     from typing import Any, cast
 
+    from odoo_instance_sdk.models import StartConfig
     from odoo_instance_sdk.resources.instance import auxiliary_restore as instance_auxiliary
 
     runtime = {
-        "owner_kind": "environment",
-        "owner_id": "environment-id",
+        "owner_kind": "project",
+        "owner_id": "project-id",
         "http_port": 12345,
+        "http_url": "http://127.0.0.1:12345",
         "root_pid": 4242,
         "create_time": 10.0,
     }
-    snapshot = SimpleNamespace(environments=(({}, runtime),), project_runtimes=())
+    snapshot = SimpleNamespace(environments=(), project_runtimes=(runtime,))
     catalog = SimpleNamespace(_monitor_snapshot_rows=lambda **_: snapshot)
     instance = SimpleNamespace(
         _runtime_binding=SimpleNamespace(
-            owner_kind="project", owner_id="project-id", project_id="project-id"
+            owner_kind="project",
+            owner_id="project-id",
+            project_id="project-id",
+            repository_root=Path("/project"),
+            git_common_dir=Path("/project/.git"),
         ),
         _client=SimpleNamespace(get_catalog=lambda: catalog),
+        config=SimpleNamespace(
+            base_url="http://127.0.0.1:12345",
+            default_cwd=Path("/project"),
+            start_config=StartConfig(config_path="/project/odoo.conf", http_port=12345),
+        ),
+        _executable_prefix=lambda: ("/usr/bin/python", "/project/odoo-bin"),
     )
     process = SimpleNamespace(
         is_running=lambda: True,
         status=lambda: "running",
         create_time=lambda: 10.0,
+        exe=lambda: "/usr/bin/python",
+        cmdline=lambda: [
+            "/usr/bin/python",
+            "/project/odoo-bin",
+            "--http-port",
+            "12345",
+            "--http-interface",
+            "127.0.0.1",
+            "--config",
+            "/project/odoo.conf",
+        ],
+        cwd=lambda: "/project",
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.resources.instance.identity.psutil.Process", lambda _pid: process
     )
 
     assert instance_auxiliary._project_runtime_owns_port(
-        cast("Any", instance), cast("Any", SimpleNamespace(http_port=12345))
+        cast("Any", instance), cast("Any", instance.config.start_config)
     )
 
 
