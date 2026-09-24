@@ -287,5 +287,11 @@ def test_runtime_owner_validation_rejects_invalid_and_missing_owners(tmp_path: P
         catalog._upsert_runtime("project", "project_missing", **_runtime_kwargs())
     with pytest.raises(BackupCatalogError, match="exactly environment or project"):
         catalog._clear_runtime("invalid", "owner")
+    with pytest.raises(BackupCatalogError, match="exactly environment or project"):
+        catalog.get_runtime("invalid", "owner")
+    with pytest.raises(BackupCatalogError, match="exactly environment or project"):
+        catalog._clear_runtime_if_matches(
+            "invalid", "owner", root_pid=12345, create_time=1700000000.0
+        )
 
     catalog.close()
