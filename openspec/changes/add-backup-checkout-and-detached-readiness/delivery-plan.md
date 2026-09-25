@@ -2,7 +2,7 @@
 
 - Planning issue: `MYL-271`.
 - OpenSpec change: `add-backup-checkout-and-detached-readiness`.
-- Входной planning SHA: `e0d2128443a949e148a33f7e05c3a19c99a74d55`; исходный merge-base: `cc925f6c698721568a8d98dc1ff00b429df4270d`; исследованный актуальный upstream snapshot: `origin/main` at `e35f426cf168ab7a781941772f3207689a961ec8`.
+- Rebase baseline: `origin/main` at `3d688b26b463d273e80fa46500226158d7d9fab1`; planning series replayed directly on that commit without a merge commit.
 - Authoritative optimistic, weighted и pessimistic totals хранятся только в properties корневой planning issue `Estimate min, hours`, `Estimate, hours` и `Estimate max, hours`; все три значения подтверждены read-back. `Estimate, hours` находится выше порога single-WP.
 - Оценка покрывает полный remaining scope до всех acceptance scenarios одним опытным разработчиком, знакомым с Python, Click, msgspec, SQLite/Alembic и этим репозиторием, без AI-ускорения. Unattended CI, очереди review и внешние ожидания исключены.
 - Уверенность: средняя. Все затронутые публичные входы, lifecycle/catalog/config boundaries и test matrices доступны, но COPY recovery, destructive revalidation, listener ownership на разных ОС и композиция post-success maintenance создают связанные риски.
