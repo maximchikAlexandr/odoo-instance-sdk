@@ -2,7 +2,7 @@
 
 ### Requirement: Environment-bound detached launch supports readiness waiting
 
-The public detached launch operation MUST accept opt-in readiness waiting and a finite positive timeout that defaults to 60 seconds when enabled. Supplying a readiness timeout while waiting is disabled MUST fail validation. The immutable command snapshot MUST represent readiness and failure cleanup as actions and MUST reuse the existing process boundary, persisted runtime identity, exact PID/create-time/argv/cwd/config/listener-owner proof, and health probe; auxiliary restore and detached readiness MUST share one listener-proof implementation.
+The public detached launch operation MUST accept opt-in readiness waiting and a finite positive timeout that defaults to 60 seconds when enabled. Supplying a readiness timeout while waiting is disabled MUST fail validation. The immutable command snapshot MUST represent readiness and failure cleanup as actions and MUST reuse the existing process boundary, persisted runtime identity, exact PID/create-time/argv/cwd/config/listener-owner proof, and health probe; the argv proof MUST retain the injected effective `--logfile`, and auxiliary restore and detached readiness MUST share one listener-proof implementation.
 
 #### Scenario: Detached launch becomes ready
 
