@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 import uuid
 from collections.abc import Callable, Sequence
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -16,7 +15,6 @@ else:
     import rich_click as click
 
 from rich.console import Console  # noqa: I001 -- keep database output formatter aliases grouped; remove when Ruff supports grouped aliases.
-from rich.table import Table
 
 from odoo_instance_sdk.commands.context import (
     CliContext,
@@ -32,6 +30,7 @@ from odoo_instance_sdk.commands.output import (
     OutputMode,
     _InspectableCommand,
     _rich_plan_projection,
+    bordered_table,
     emit,
     emit_json_envelope,
     fail,
@@ -39,6 +38,7 @@ from odoo_instance_sdk.commands.output import (
     field_schema,
     model_to_dict,
     output_options,
+    render_rich_text,
     resolve_output_mode,
     run_or_preview,
     run_rich_bounded,
@@ -769,7 +769,7 @@ def _rich_refresh(document: OutputDocument) -> str:
         return _rich_plan_projection(
             document.result, command=document.command, warnings=document.warnings
         )
-    table = Table("Field", "Value", title="Database refresh")
+    table = bordered_table("Field", "Value", title="Database refresh")
     for field in (
         "mode",
         "restored_database",
@@ -786,10 +786,7 @@ def _rich_refresh(document: OutputDocument) -> str:
     retained = payload.get("retained_artifacts")
     if isinstance(retained, list) and retained:
         table.add_row("Retained artifacts", rich_cell(", ".join(str(item) for item in retained)))
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(table)
-    return output.getvalue().rstrip()
+    return render_rich_text(table, width=Console().width)
 
 
 def _rich_admin_reset(document: OutputDocument) -> str:
@@ -800,15 +797,12 @@ def _rich_admin_reset(document: OutputDocument) -> str:
         return _rich_plan_projection(
             document.result, command=document.command, warnings=document.warnings
         )
-    table = Table("Field", "Value", title="Administrator password reset")
+    table = bordered_table("Field", "Value", title="Administrator password reset")
     for field in ("database", "completed", "xml_id", "environment_id", "provenance"):
         value = payload.get(field)
         if value is not None:
             table.add_row(field.replace("_", " ").title(), rich_cell(value))
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(table)
-    return output.getvalue().rstrip()
+    return render_rich_text(table, width=Console().width)
 
 
 def _restore_rich(document: OutputDocument) -> str:
@@ -822,14 +816,11 @@ def _restore_rich(document: OutputDocument) -> str:
     database = payload.get("restored_database", "")
     backup = payload.get("backup")
     backup_id = backup.get("id") if isinstance(backup, dict) else backup
-    table = Table("Field", "Value", title="Database restore")
+    table = bordered_table("Field", "Value", title="Database restore")
     table.add_row("Database", rich_cell(database))
     if backup_id:
         table.add_row("Backup", rich_cell(backup_id))
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(table)
-    return output.getvalue().rstrip()
+    return render_rich_text(table, width=Console().width)
 
 
 def _list_rich(document: OutputDocument) -> str:
@@ -837,9 +828,11 @@ def _list_rich(document: OutputDocument) -> str:
         return document.error.message if document.error is not None else "operation failed"
     payload = document.result if isinstance(document.result, dict) else {}
     rows = payload.get("databases", [])
-    if not isinstance(rows, list) or not rows:
+    if not isinstance(rows, list):
         return "No databases"
-    table = Table("Database", "Size", "Sessions", "Default", "Origin")
+    table = bordered_table("Database", "Size", "Sessions", "Default", "Origin")
+    if not rows:
+        table.add_row("—", "—", "—", "—", "No databases")
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -853,11 +846,9 @@ def _list_rich(document: OutputDocument) -> str:
             rich_cell(str(row.get("is_default", False)).lower()),
             rich_cell(row.get("origin", "unknown")),
         )
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(rich_cell(f"Cluster: {payload.get('cluster', '—')}"))
-    console.print(table)
-    return output.getvalue().rstrip()
+    width = Console().width
+    cluster = render_rich_text(rich_cell(f"Cluster: {payload.get('cluster', '—')}"), width=width)
+    return f"{cluster}\n{render_rich_text(table, width=width)}"
 
 
 def _validate_recorded_database_binding(

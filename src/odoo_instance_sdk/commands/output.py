@@ -7,6 +7,7 @@ import sys
 import time
 from collections.abc import Callable
 from enum import StrEnum
+from io import StringIO
 from typing import (
     TYPE_CHECKING,
     Generic,
@@ -19,6 +20,9 @@ from typing import (
 )
 
 import msgspec
+from rich import box
+from rich.console import Console, RenderableType
+from rich.table import Table
 
 from odoo_instance_sdk.internal.output_fields import (
     current_field_schema,
@@ -32,13 +36,13 @@ if TYPE_CHECKING:
     import click
 else:
     import rich_click as click
-from rich.console import Console
 from toon import encode
 from toon import encoders as toon_encoders
 
 from odoo_instance_sdk.internal.dbprep.source import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.output_rich import rich_plan_projection as _rich_plan_projection
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error, sanitize_terminal_text
+from odoo_instance_sdk.models.backup import PostgresClusterState
 
 if TYPE_CHECKING:
     from toon.types import Depth, JsonArray, ResolvedEncodeOptions
@@ -86,6 +90,43 @@ _RICH_COMPLETION_COMMANDS = frozenset(
 
 type JsonObject = dict[str, JsonValue]
 type DiagnosticValue = str | BaseException
+
+
+def bordered_table(*headers: str, title: str | None = None) -> Table:
+    """Build the shared bounded-table geometry without owning any row data."""
+    table = Table(
+        title=title,
+        box=box.SQUARE,
+        safe_box=True,
+        show_header=True,
+        show_edge=True,
+        show_lines=True,
+        header_style="bold",
+        pad_edge=False,
+        collapse_padding=True,
+    )
+    for header in headers:
+        table.add_column(header, overflow="fold")
+    return table
+
+
+def render_rich_text(renderable: RenderableType, *, width: int = 180) -> str:
+    """Serialize one Rich renderable in memory without writing to a terminal."""
+    output = StringIO()
+    Console(file=output, color_system=None, force_terminal=False, width=width).print(renderable)
+    return output.getvalue().rstrip()
+
+
+def postgres_state_cells(
+    state: PostgresClusterState,
+    *reasons: str | None,
+) -> tuple[str, str]:
+    """Return canonical lifecycle state and ordered, de-duplicated details."""
+    unique_reasons: list[str] = []
+    for reason in reasons:
+        if reason and reason not in unique_reasons:
+            unique_reasons.append(reason)
+    return state.value, ", ".join(unique_reasons)
 
 
 class OutputError(
@@ -885,6 +926,7 @@ __all__ = [
     "OutputMode",
     "_rich_plan_projection",
     "action_command",
+    "bordered_table",
     "build_envelope",
     "command_options",
     "emit",
@@ -894,7 +936,9 @@ __all__ = [
     "field_schema",
     "model_to_dict",
     "output_options",
+    "postgres_state_cells",
     "project_fields",
+    "render_rich_text",
     "resolve_command_options",
     "resolve_output_mode",
     "rich_print",

@@ -69,8 +69,9 @@ def test_env_show_explicit_uses_one_snapshot_and_preserves_unavailable_metrics(
 
     human = runner.invoke(cli, ["env", "show", "stopped-env"])
     assert human.exit_code == 0, human.output
-    assert "runtime=stopped" in human.output
-    assert "metrics=unavailable" in human.output
+    assert "Runtime" in human.output and "stopped" in human.output
+    assert "Metrics" in human.output and "unavailable" in human.output
+    assert "Availability" in human.output and "stats_failed" in human.output
     assert calls == 2
 
 

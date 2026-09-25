@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-
-from rich.console import Console
-from rich.table import Table
 
 if TYPE_CHECKING:
     import click
@@ -18,10 +14,12 @@ from odoo_instance_sdk.commands import context as cli_context
 from odoo_instance_sdk.commands.context import CliContext, RuntimeView, pass_cli_context
 from odoo_instance_sdk.commands.output import (
     OutputMode,
+    bordered_table,
     emit,
     fail,
     model_to_dict,
     output_options,
+    render_rich_text,
     resolve_output_mode,
     run_or_preview,
     run_rich_bounded,
@@ -192,7 +190,7 @@ def rich_test_result(result: dict[str, JsonValue]) -> str:
     module_text = ", ".join(str(item) for item in modules) if isinstance(modules, list) else "none"
     environment_id = result.get("environment_id")
     environment_name = result.get("environment_name")
-    table = Table("Field", "Value", title="Odoo test result")
+    table = bordered_table("Field", "Value", title="Odoo test result")
     table.add_row("Owner", rich_cell(f"{result['owner_kind']} ({result['project_id']})"))
     table.add_row(
         "Environment",
@@ -222,10 +220,7 @@ def rich_test_result(result: dict[str, JsonValue]) -> str:
     elif result.get("dry_run"):
         table.add_row("Mode", "dry-run")
     table.add_row("Exit code", rich_cell(result["exit_code"]))
-    output = StringIO()
-    console = Console(file=output, color_system=None, width=180)
-    console.print(table)
-    return output.getvalue().rstrip()
+    return render_rich_text(table)
 
 
 def _execute_selection(
