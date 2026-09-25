@@ -716,6 +716,60 @@ def test_record_restore_inserts_rows(tmp_path: Path) -> None:
     catalog.close()
 
 
+def test_local_archive_restore_records_source_neutral_provenance(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "local.db")
+    digest = "a" * 64
+
+    catalog.record_restore(
+        "localhost",
+        5432,
+        "local_db",
+        source_kind="local_archive",
+        source_sha256=digest,
+    )
+
+    restore = catalog._conn.execute(
+        "SELECT backup_id, source_kind, source_sha256 FROM restores WHERE database_name=?",
+        ("local_db",),
+    ).fetchone()
+    event = catalog._conn.execute(
+        "SELECT backup_id, source_kind, source_sha256 FROM database_events "
+        "WHERE database_name=? AND event_type='restored'",
+        ("local_db",),
+    ).fetchone()
+    assert restore is not None and event is not None
+    assert tuple(restore) == (None, "local_archive", digest)
+    assert tuple(event) == (None, "local_archive", digest)
+    assert catalog._conn.execute("SELECT COUNT(*) FROM backups").fetchone()[0] == 0
+    assert catalog.latest_restore("localhost", 5432, "local_db") is None
+    binding = catalog._latest_restore_binding("localhost", 5432, "local_db")
+    assert binding is not None
+    assert binding["source_kind"] == "local_archive"
+    assert binding["source_sha256"] == digest
+    catalog.close()
+
+
+def test_restore_provenance_rejects_mixed_evidence_atomically(tmp_path: Path) -> None:
+    catalog = BackupCatalog(db_path=tmp_path / "invalid-provenance.db")
+    digest = "b" * 64
+    with pytest.raises(BackupCatalogError, match="no backup_id"):
+        catalog.record_restore(
+            "localhost",
+            5432,
+            "local_db",
+            "backup-id",
+            source_kind="local_archive",
+            source_sha256=digest,
+        )
+    with pytest.raises(BackupCatalogError, match="source_sha256"):
+        catalog.record_restore("localhost", 5432, "local_db", source_kind="local_archive")
+    with pytest.raises(BackupCatalogError, match="only backup_id"):
+        catalog.record_restore("localhost", 5432, "local_db", source_kind="catalogue")
+    assert catalog._conn.execute("SELECT COUNT(*) FROM restores").fetchone()[0] == 0
+    assert catalog._conn.execute("SELECT COUNT(*) FROM database_events").fetchone()[0] == 0
+    catalog.close()
+
+
 def test_record_restore_normalizes_socket(tmp_path: Path) -> None:
     catalog = BackupCatalog(db_path=tmp_path / "test.db")
     path = _create_backup_file(tmp_path, "b.zip")
