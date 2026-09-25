@@ -5,7 +5,7 @@ import os
 import uuid
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
@@ -119,6 +119,8 @@ def _annotate_retained_failure(
     backup_id: uuid.UUID | None = None,
     database_confirmed: bool = False,
     default_switch_confirmed: bool = False,
+    source_kind: str | None = None,
+    source_sha256: str | None = None,
 ) -> None:
     """Attach only non-secret retained-artifact identifiers to a failure."""
     restore_stage_id = getattr(error, "restore_stage_id", None)
@@ -133,6 +135,11 @@ def _annotate_retained_failure(
         restore_stage_elapsed=(
             restore_stage_elapsed if isinstance(restore_stage_elapsed, (int, float)) else None
         ),
+        source_kind=cast(
+            "Literal['catalogue', 'local_archive'] | None",
+            source_kind if source_kind in {"catalogue", "local_archive"} else None,
+        ),
+        source_sha256=source_sha256 if isinstance(source_sha256, str) else None,
     )
     setattr(error, "failure_context", context)
     note = retained_artifact_context(

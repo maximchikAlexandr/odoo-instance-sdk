@@ -11,6 +11,7 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.dbprep.source import (
     SelectedBackupRestorePayload,
     _load_project,
+    _LocalArchiveRestoreSource,
     _planned_project_identity,
     _RemoteRestoreSource,
     _resolve_source_config,
@@ -224,6 +225,29 @@ def _preparation_action_steps(
                 action="download-remote-backup",
                 description="Request the selected remote database backup",
                 mutating=True,
+            )
+        )
+    elif isinstance(selected_source, _LocalArchiveRestoreSource):
+        action_steps.extend(
+            (
+                PreparedAction(
+                    step_id="database.prepare.local-archive.validate",
+                    action="validate-local-archive",
+                    description="Validate the selected caller-owned Odoo archive",
+                    read_only=True,
+                ),
+                PreparedAction(
+                    step_id="database.prepare.local-archive.snapshot",
+                    action="materialize-local-archive-snapshot",
+                    description="Materialize a private verified archive snapshot",
+                    mutating=True,
+                ),
+                PreparedAction(
+                    step_id="database.prepare.local-archive.cleanup",
+                    action="cleanup-local-archive-staging",
+                    description="Remove command-owned local archive staging artifacts",
+                    read_only=True,
+                ),
             )
         )
     else:

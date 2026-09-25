@@ -36,6 +36,7 @@ from odoo_instance_sdk.models import (
     BackupProvenanceStatus,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
+    LocalArchiveRestoreSource,
 )
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
@@ -743,6 +744,56 @@ def test_local_archive_capture_is_read_only_and_cleanup_preserves_source(
     assert not payload.dump_path.exists()
     assert not staging.exists()
     assert str(archive_path) not in repr(payload)
+
+
+def test_local_archive_refresh_plan_captures_target_and_honest_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.database_preparation import DatabasePreparationCoordinator
+
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.pg.builder.shutil.which",
+        lambda _name: "/usr/bin/psql",
+    )
+    archive_path = _local_archive(tmp_path / "caller-owned.zip")
+    source = tmp_path / "odoo.conf"
+    source.write_text(
+        "[options]\n"
+        "http_interface = 127.0.0.1\n"
+        "http_port = 8069\n"
+        "db_host = 127.0.0.1\n"
+        "db_port = 5432\n"
+        "db_user = odoo\n"
+        "db_password = private\n"
+    )
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        source_config=source,
+        postgres=PostgresProjectConfig(
+            mode="compose", image="postgres:16", port=55432, user="odoo"
+        ),
+        default_source_database="old",
+    )
+
+    command = DatabasePreparationCoordinator(MagicMock()).refresh_database_command(
+        project,
+        options=DatabaseRefreshOptions(restore=True),
+        restore_source=LocalArchiveRestoreSource(str(archive_path)),
+    )
+
+    step_ids = tuple(step.step_id for step in command.plan.steps)
+    assert (
+        step_ids.index("database.prepare.local-archive.validate")
+        < step_ids.index("database.prepare.local-archive.snapshot")
+        < step_ids.index("database.prepare.local-archive.cleanup")
+    )
+    assert "database.prepare.catalogue-backup" not in step_ids
+    assert str(archive_path) not in repr(command.plan)
+    reservation = next(
+        step for step in command.plan.steps if step.step_id == "database.restore.exists-reservation"
+    )
+    assert "local_db" in repr(reservation)
+    assert not (tmp_path / ".odcli" / "restore").exists()
 
 
 def test_verified_file_fails_closed_on_same_size_mutation_during_hash(
@@ -2175,6 +2226,99 @@ def test_catalogue_restore_uses_common_restore_stages_without_remote_call(
         copy=True,
         neutralize_database=True,
     )
+
+
+def test_local_archive_restore_pipeline_consumes_zip_and_switches_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.database_preparation import (
+        ProjectRuntimeBinding,
+        RestorePreflight,
+        _LocalArchiveRestoreSource,
+        capture_local_archive_restore,
+    )
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+
+    source_config = tmp_path / "odoo.conf"
+    source_config.write_text(
+        "[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8069\n"
+        "db_name = source\nadmin_passwd = local-secret\n"
+    )
+    archive_path = _local_archive(tmp_path / "caller-owned.zip")
+    payload = capture_local_archive_restore(
+        LocalArchiveRestoreSource(str(archive_path)),
+        snapshot_directory=tmp_path / ".odcli" / "restore",
+    )
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        source_config=source_config,
+        default_source_database="old",
+    )
+    local = MagicMock()
+    cluster = MagicMock()
+    consumed: dict[str, bytes] = {}
+
+    def consume_archive(
+        received: object,
+        target: str,
+        *,
+        copy: bool,
+        neutralize_database: bool,
+    ) -> None:
+        assert received is payload
+        assert target == "restored_target"
+        assert copy is True
+        assert neutralize_database is True
+        with zipfile.ZipFile(payload.verified_snapshot_path) as archive:
+            consumed["dump.sql"] = archive.read("dump.sql")
+            consumed["filestore"] = archive.read("filestore/local_db/marker")
+
+    local.databases._restore_local_archive.side_effect = consume_archive
+    preflight = RestorePreflight(
+        project=project,
+        project_id="project",
+        source=None,
+        source_config=source_config,
+        local_instance=local,
+        runtime=ProjectRuntimeBinding(
+            python_executable="/usr/bin/python3",
+            odoo_bin="/usr/bin/odoo-bin",
+            runtime_cwd=tmp_path,
+        ),
+        postgres_cluster=cluster,
+        target_database="restored_target",
+        restore_source=_LocalArchiveRestoreSource(Path(str(archive_path))),
+        selected_restore=payload,
+    )
+
+    @contextlib.contextmanager
+    def fake_preflight(*_args: object, **_kwargs: object) -> Iterator[RestorePreflight]:
+        yield preflight
+
+    client = MagicMock()
+    write = MagicMock()
+    monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
+    monkeypatch.setattr(preparation, "_manifest_after_preparation", lambda *_args: project)
+    monkeypatch.setattr(preparation, "write_manifest", write, raising=False)
+
+    result = preparation.prepare_restore(
+        client,
+        project,
+        restore_source=LocalArchiveRestoreSource(str(archive_path)),
+        selected_restore=payload,
+    )
+
+    assert result.backup is None
+    assert result.restored_database == "restored_target"
+    assert result.default_switched is True
+    assert consumed == {"dump.sql": b"select 'local';\n", "filestore": b"local"}
+    assert archive_path.exists()
+    assert not payload.verified_snapshot_path.exists()
+    assert not payload.dump_path.exists()
+    local.databases._restore_local_archive.assert_called_once()
+    client.get_catalog.assert_not_called()
+    write.assert_called_once()
 
 
 def test_pinned_http_download_reaches_remote_database_operation(

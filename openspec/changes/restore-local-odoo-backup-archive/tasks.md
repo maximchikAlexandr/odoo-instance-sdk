@@ -14,10 +14,10 @@
 
 ## 3. Common preparation and restore flow
 
-- [ ] 3.1 Capture local archive evidence and source-derived default target during `refresh_database_command()` construction, adding honest validate/snapshot/cleanup `ActionStep` values to the immutable plan.
-- [ ] 3.2 Extend preparation preflight and execution to route the verified local snapshot through the existing auxiliary runtime, restore, neutralization, postcondition, optional admin reset, progress, failure-retention, and default-switch stages.
-- [ ] 3.3 Share the private Database Manager restore transport between catalogue `Backup` and local snapshot evidence, retaining catalogue locks/identity checks only for catalogue sources and recording the correct atomic provenance after success.
-- [ ] 3.4 Keep local archive results and interruption/failure contexts JSON-safe and path-redacted, with `DatabasePreparationResult.backup=None` and no backup catalogue insert.
+- [x] 3.1 Capture local archive evidence and source-derived default target during `refresh_database_command()` construction, adding honest validate/snapshot/cleanup `ActionStep` values to the immutable plan.
+- [x] 3.2 Extend preparation preflight and execution to route the verified local snapshot through the existing auxiliary runtime, restore, neutralization, postcondition, optional admin reset, progress, failure-retention, and default-switch stages.
+- [x] 3.3 Share the private Database Manager restore transport between catalogue `Backup` and local snapshot evidence, retaining catalogue locks/identity checks only for catalogue sources and recording the correct atomic provenance after success.
+- [x] 3.4 Keep local archive results and interruption/failure contexts JSON-safe and path-redacted, with `DatabasePreparationResult.backup=None` and no backup catalogue insert.
 
 ## 4. CLI and documentation
 
@@ -29,6 +29,6 @@
 
 - [ ] 5.1 Add one parametrized public CLI source-selection regression covering UUID-only, file-only, both, neither, and `--file --replace`, including early failure and SDK delegation assertions.
 - [x] 5.2 Add focused archive tests for missing, unreadable, non-regular, symlink, invalid/incompatible/unsafe ZIP, insufficient space, changed-after-selection, snapshot-only reads, path redaction, source preservation, and staging cleanup.
-- [ ] 5.3 Add a restore-pipeline integration test proving a valid local Odoo ZIP restores `dump.sql` and filestore through the guarded stages with no backup row and with confirmed target/default behavior.
+- [x] 5.3 Add a restore-pipeline integration test proving a valid local Odoo ZIP restores `dump.sql` and filestore through the guarded stages with no backup row and with confirmed target/default behavior.
 - [ ] 5.4 Add migration/catalogue/ownership tests for existing-row upgrade, constraints, atomic paired provenance writes, nullable readers, local owned cleanup authorization, and fail-closed external/mismatched evidence.
 - [ ] 5.5 Run focused tests plus repository formatting, lint, strict typing, architecture/public-method inventories, OpenSpec strict validation, and the full non-real-Odoo test suite; record any environment-only exclusions.
