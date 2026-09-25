@@ -237,6 +237,7 @@ def test_module_update_dry_run_preserves_selection_and_defers_update_plan(
                     argv=("git", "status"),
                     display="git status",
                     executable="git",
+                    read_only=True,
                 ),
                 ProcessStep(
                     step_id="module.update",
@@ -248,6 +249,18 @@ def test_module_update_dry_run_preserves_selection_and_defers_update_plan(
             )
         ),
         run,
+        steps=(
+            PreparedStep(
+                step_id="module.probe",
+                argv=("git", "status"),
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="module.update",
+                argv=("odoo-bin", "--upgrade"),
+                mutating=True,
+            ),
+        ),
     )
     patches = [
         patch(

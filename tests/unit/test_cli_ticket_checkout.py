@@ -409,7 +409,11 @@ def test_cli_ticket_checkout_emits_one_shared_envelope_for_both_spellings(
         catalogue_heads=("PROJ-123_1",),
         remote_heads=("PROJ-123_2",),
     )
-    action = PreparedAction("checkout.synthetic")
+    action = PreparedAction(
+        "checkout.synthetic",
+        description="Synthetic checkout",
+        mutating=True,
+    )
 
     def run(context: RunContext[DevelopmentEnvironment]) -> DevelopmentEnvironment:
         context.action("checkout.synthetic")

@@ -48,6 +48,7 @@ from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment.checkout_artifacts import (
     _capture_checkout_stage,
     _checkout_applied_settings,
+    _checkout_execution_plan_with_private_steps,
     _checkout_steps,
     _normalize_checkout_stage,
     _planning_error_outcome,
@@ -181,8 +182,7 @@ class _CheckoutMixin:
             project_path = Path(project)
             project_cfg = ProjectConfig.load(project_path)
 
-        # A plan must be inspectable without creating the durable catalog or
-        # running migrations in user data.
+        # A plan must be inspectable without creating durable user state.
         # Do not open the durable catalog until all COPY preconditions have
         # passed.  Opening it can create/migrate user state, which must not be
         # the observable result of a rejected checkout.
@@ -777,10 +777,10 @@ class _CheckoutMixin:
         options: EnvironmentCheckoutOptions = EnvironmentCheckoutOptions(),
         branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None],
     ) -> Command[DevelopmentEnvironment]:
-        """Build the normal checkout command with one private late branch guard."""
         snapshot = self._build_checkout_snapshot(project, branch, options=options)
         private = replace(snapshot.private, branch_revalidator=branch_revalidator)
-        return self._command_from_snapshot(replace(snapshot, private=private))
+        execution_plan = _checkout_execution_plan_with_private_steps(snapshot.execution_plan, private)  # fmt: skip
+        return self._command_from_snapshot(replace(snapshot, private=private, execution_plan=execution_plan))  # fmt: skip
 
     def checkout_with_plan(
         self,

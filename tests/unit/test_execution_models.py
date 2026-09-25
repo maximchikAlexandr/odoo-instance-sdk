@@ -20,6 +20,7 @@ from odoo_instance_sdk import (
 from odoo_instance_sdk.exceptions import (
     DuplicateStepError,
     OmittedStepError,
+    PlanValidationError,
     StalePlanError,
     UnplannedStepError,
 )
@@ -245,6 +246,60 @@ def test_command_snapshot_does_not_follow_mutated_inputs_after_construction() ->
     assert command.plan.steps == (public,)
     assert command.run() == "before"
     assert [step.argv for step in executor.executed] == [("tool", "before")]
+
+
+def test_command_rejects_public_private_step_projection_mismatches() -> None:
+    first = PreparedStep(step_id="first", argv=("tool", "first"))
+    second = PreparedStep(step_id="second", argv=("tool", "second"))
+    matching_first = first.public_projection()
+
+    cases = (
+        (ExecutionPlan(), (first,), "private-only"),
+        (ExecutionPlan(steps=(matching_first,)), (), "public-only"),
+        (
+            ExecutionPlan(steps=(second.public_projection(), matching_first)),
+            (first, second),
+            "reordered",
+        ),
+        (
+            ExecutionPlan(
+                steps=(ActionStep(step_id="first", action="first", description="first"),)
+            ),
+            (first,),
+            "different-kind",
+        ),
+        (
+            ExecutionPlan(
+                steps=(
+                    ProcessStep(
+                        step_id="first",
+                        argv=matching_first.argv,
+                        display=matching_first.display,
+                        executable=matching_first.executable,
+                        mutating=True,
+                    ),
+                )
+            ),
+            (first,),
+            "different-field",
+        ),
+    )
+
+    for plan, steps, _case in cases:
+        with pytest.raises(PlanValidationError, match="public execution plan steps"):
+            Command.create(plan, lambda _context: "unused", steps)
+
+
+def test_command_accepts_matching_public_private_step_projections() -> None:
+    private = PreparedStep(step_id="child", argv=("tool", "value"))
+    command: Command[str] = Command.create(
+        ExecutionPlan(steps=(private.public_projection(),)),
+        lambda context: context.process("child"),
+        (private,),
+        executor=RecordingExecutor(result_factory=lambda step: step.argv[-1]),
+    )
+
+    assert command.run() == "value"
 
 
 def test_unplanned_or_duplicate_requests_do_not_launch_requested_child() -> None:

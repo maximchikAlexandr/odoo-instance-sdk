@@ -377,6 +377,7 @@ class _PlanningMixin:
             )
             for step_id in action_ids
         )
+        command_steps = (*prepared_steps, *actions)
         process_executor = SubprocessExecutor()
         logfile_path = str(effective_logfile)
 
@@ -447,7 +448,7 @@ class _PlanningMixin:
 
         return Command.create(
             _command_plan(
-                prepared_steps,
+                command_steps,
                 secrets=secrets,
                 observations=(
                     _http_port_observation(
@@ -458,7 +459,7 @@ class _PlanningMixin:
                 ),
             ),
             execute,
-            (*prepared_steps, *actions),
+            command_steps,
             executor=process_executor,
         )
 

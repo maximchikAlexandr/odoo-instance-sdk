@@ -45,9 +45,16 @@ from odoo_instance_sdk.commands.output import (
     run_rich_bounded,
     success_document,
 )
-from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan, SemanticPlanObservation
+from odoo_instance_sdk.execution import (
+    ActionStep,
+    Command,
+    ExecutionPlan,
+    ProcessStep,
+    SemanticPlanObservation,
+)
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
 from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
+from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, PrivateJsonValue
 from odoo_instance_sdk.internal.resource_inventory import ResourceInventory
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
@@ -1059,7 +1066,7 @@ def _matrix_command(
     execution_calls: list[str] | None = None,
 ) -> Command[T]:
     if wrapper_nonce is not None:
-        from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
+        from odoo_instance_sdk.internal.proc import RecordingExecutor
 
         step = PreparedStep(
             step_id="instance.shell_script",
@@ -1090,6 +1097,35 @@ def _matrix_command(
             private_projection=private_projection,
         )
 
+    private_steps: tuple[PreparedStep | PreparedAction, ...] = ()
+    if public_plan is not None:
+        private_steps = tuple(
+            PreparedStep(
+                step_id=step.step_id,
+                argv=step.argv,
+                cwd=step.cwd,
+                environment_policy=step.environment_policy,
+                environment_overrides=step.environment_overrides,
+                public_input_preview=step.input_preview,
+                timeout=step.timeout,
+                mode=step.mode,
+                read_only=step.read_only,
+                mutating=step.mutating,
+                interactive=step.interactive,
+                long_running=step.long_running,
+            )
+            if isinstance(step, ProcessStep)
+            else PreparedAction(
+                step_id=step.step_id,
+                action=step.action,
+                description=step.description,
+                details=cast("PrivateJsonValue", step.details),
+                read_only=step.read_only,
+                mutating=step.mutating,
+            )
+            for step in public_plan.steps
+        )
+
     def simple_run(_context: object) -> T:
         if error is not None:
             raise error
@@ -1100,6 +1136,7 @@ def _matrix_command(
     return Command.create(
         public_plan or ExecutionPlan(),
         simple_run,
+        steps=private_steps,
         private_projection=private_projection,
     )
 
@@ -2661,7 +2698,7 @@ def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
     def build() -> Command[str]:
         nonlocal builds
         builds += 1
-        action = PreparedAction("typed.action")
+        action = PreparedAction("typed.action", action="inspect", description="inspect")
 
         def callback(context: RunContext[str]) -> str:
             context.action("typed.action")
@@ -4168,7 +4205,12 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         secret_values=("secret-target",),
         mutating=True,
     )
-    dry_private_action = PreparedAction("checkout.cleanup")
+    dry_private_action = PreparedAction(
+        step_id="checkout.cleanup",
+        action="cleanup_on_failure",
+        description="Remove owned checkout artifacts if execution fails",
+        mutating=True,
+    )
     dry_public_process = dry_private_process.public_projection()
     dry_public_plan = ExecutionPlan(
         steps=(

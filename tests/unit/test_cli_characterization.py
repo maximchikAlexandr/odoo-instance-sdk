@@ -857,23 +857,14 @@ def test_run_dry_run_formats_use_single_shared_rich_projection(
     prepared = PreparedStep(
         step_id="instance.foreground",
         argv=("odoo", *native_args),
+        mode="foreground",
+        long_running=True,
         mutating=False,
         inherit_stdio=True,
         start_new_session=True,
     )
     command = Command.create(
-        ExecutionPlan(
-            steps=(
-                ProcessStep(
-                    step_id="instance.foreground",
-                    argv=prepared.argv,
-                    display="odoo native args",
-                    executable="odoo",
-                    mode="foreground",
-                    long_running=True,
-                ),
-            )
-        ),
+        ExecutionPlan(steps=(prepared.public_projection(),)),
         lambda _context: 0,
         (prepared,),
         executor=executor,
