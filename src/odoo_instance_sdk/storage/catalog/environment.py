@@ -293,6 +293,16 @@ class _EnvironmentMixin:
         return row
 
     @_translate_sqlite_error
+    def get_runtime(self, owner_kind: str, owner_id: str) -> sqlite3.Row | None:
+        if owner_kind not in {"environment", "project"}:
+            raise BackupCatalogError("runtime owner must be exactly environment or project")
+        row = self._conn.execute(
+            "SELECT * FROM runtime WHERE owner_kind = ? AND owner_id = ?",
+            (owner_kind, owner_id),
+        ).fetchone()
+        return cast("sqlite3.Row | None", row)
+
+    @_translate_sqlite_error
     def list_environment_runtimes(self) -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT * FROM environment_runtime ORDER BY environment_id"
@@ -473,12 +483,30 @@ class _EnvironmentMixin:
     def _clear_environment_runtime_if_matches(
         self, environment_id: str, *, root_pid: int, create_time: float
     ) -> bool:
-        cursor = self._conn.execute(
-            "DELETE FROM runtime WHERE owner_kind = 'environment' AND owner_id = ? "
-            "AND root_pid = ? AND create_time = ?",
-            (environment_id, root_pid, create_time),
+        return self._clear_runtime_if_matches(
+            "environment",
+            environment_id,
+            root_pid=root_pid,
+            create_time=create_time,
         )
-        self._conn.commit()
+
+    @_translate_sqlite_error
+    def _clear_runtime_if_matches(
+        self,
+        owner_kind: str,
+        owner_id: str,
+        *,
+        root_pid: int,
+        create_time: float,
+    ) -> bool:
+        if owner_kind not in {"environment", "project"}:
+            raise BackupCatalogError("runtime owner must be exactly environment or project")
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM runtime WHERE owner_kind = ? AND owner_id = ? "
+                "AND root_pid = ? AND create_time = ?",
+                (owner_kind, owner_id, root_pid, create_time),
+            )
         return cursor.rowcount == 1
 
     def _add_event(

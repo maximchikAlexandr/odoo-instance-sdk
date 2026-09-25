@@ -193,8 +193,9 @@ class BaseHttpClient(AbstractContextManager["BaseHttpClient"]):
     cookie/auth reuse.  Subclasses own service-specific payload/error parsing.
     """
 
-    def __init__(self, *, timeout: float | None = None) -> None:
+    def __init__(self, *, timeout: float | None = None, trust_env: bool = True) -> None:
         self._timeout = timeout
+        self._trust_env = trust_env
         self._client: _RawHttpClient | None = None
 
     def _ensure_client(self) -> _RawHttpClient:
@@ -202,7 +203,10 @@ class BaseHttpClient(AbstractContextManager["BaseHttpClient"]):
             import httpx
 
             timeout = self._timeout if self._timeout is not None else 30.0
-            self._client = cast("_RawHttpClient", httpx.Client(timeout=httpx.Timeout(timeout)))
+            self._client = cast(
+                "_RawHttpClient",
+                httpx.Client(timeout=httpx.Timeout(timeout), trust_env=self._trust_env),
+            )
         return self._client
 
     def __enter__(self) -> BaseHttpClient:

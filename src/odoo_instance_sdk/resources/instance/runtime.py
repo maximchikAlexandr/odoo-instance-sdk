@@ -71,7 +71,10 @@ class _RuntimeBinding:
 class _RuntimeIdentity:
     """One execution-time projection of persisted and live runtime identity."""
 
-    environment_id: str
+    owner_kind: Literal["environment", "project"]
+    owner_id: str
+    project_id: str
+    environment_id: str | None
     root_pid: int
     create_time: float
     expected_executable: str
@@ -88,6 +91,10 @@ class _RuntimeIdentity:
     @property
     def vanished(self) -> bool:
         return self.live_create_time is None
+
+    @property
+    def owner(self) -> tuple[str, str]:
+        return self.owner_kind, self.owner_id
 
 
 class _RuntimeCatalog(Protocol):
@@ -112,12 +119,17 @@ class _RuntimeCatalog(Protocol):
 
     def _clear_runtime(self, owner_kind: str, owner_id: str) -> None: ...
 
+    def get_runtime(self, owner_kind: str, owner_id: str) -> Mapping[str, JsonValue] | None: ...
+
     def get_environment(self, environment_id: str) -> Mapping[str, JsonValue] | None: ...
 
-    def get_environment_runtime(self, environment_id: str) -> Mapping[str, JsonValue] | None: ...
-
-    def _clear_environment_runtime_if_matches(
-        self, environment_id: str, *, root_pid: int, create_time: float
+    def _clear_runtime_if_matches(
+        self,
+        owner_kind: str,
+        owner_id: str,
+        *,
+        root_pid: int,
+        create_time: float,
     ) -> bool: ...
 
 
@@ -468,8 +480,8 @@ def _runtime_argv_matches(identity: _RuntimeIdentity) -> bool:
     )
 
 
-def _verify_process_exit(pid: int) -> None:
-    if is_process_alive(pid):
+def _verify_process_exit(pid: int, *, expected_create_time: float | None = None) -> None:
+    if is_process_alive(pid, expected_create_time=expected_create_time):
         raise RuntimeError("runtime process did not exit")
 
 

@@ -112,6 +112,9 @@ class _PlanningMixin:
             raise RuntimeError("runtime identity changed after planning")
 
         persisted_fields = (
+            "owner_kind",
+            "owner_id",
+            "project_id",
             "environment_id",
             "root_pid",
             "create_time",
@@ -139,6 +142,9 @@ class _PlanningMixin:
         if any(getattr(planned, field) != getattr(current, field) for field in live_fields):
             raise RuntimeError("runtime identity changed after planning")
 
+    def stop_runtime(self, *, timeout: float = 10.0) -> dict[str, str | None]:
+        return self.stop_runtime_command(timeout=timeout).run()
+
     def stop_environment(self, *, timeout: float = 10.0) -> StopEnvironmentResult:
         payload = self.stop_environment_command(timeout=timeout).run()
         return StopEnvironmentResult(
@@ -147,13 +153,63 @@ class _PlanningMixin:
         )
 
     def stop_environment_command(self, *, timeout: float = 10.0) -> Command[dict[str, str]]:
+        if self._runtime_binding is not None and self._runtime_binding.owner_kind != "environment":
+            raise InstanceConfigurationError(
+                "stop_environment requires an environment-owned runtime"
+            )
+        return cast(
+            "Command[dict[str, str]]",
+            self._stop_runtime_command(timeout=timeout, legacy_environment=True),
+        )
+
+    def stop_runtime_command(self, *, timeout: float = 10.0) -> Command[dict[str, str | None]]:
+        return self._stop_runtime_command(timeout=timeout, legacy_environment=False)
+
+    def _stop_runtime_command(  # noqa: C901
+        self, *, timeout: float, legacy_environment: bool
+    ) -> Command[dict[str, str | None]]:
         from odoo_instance_sdk.execution import Command, ExecutionPlan
+
+        def owner_fields(identity: _RuntimeIdentity | None) -> dict[str, str | None]:
+            if identity is not None:
+                return {
+                    "owner_kind": identity.owner_kind,
+                    "owner_id": identity.owner_id,
+                    "project_id": identity.project_id,
+                    "environment_id": identity.environment_id,
+                }
+            binding = self._runtime_binding
+            if binding is not None:
+                return {
+                    "owner_kind": binding.owner_kind,
+                    "owner_id": binding.owner_id,
+                    "project_id": binding.project_id,
+                    "environment_id": (
+                        binding.owner_id if binding.owner_kind == "environment" else None
+                    ),
+                }
+            environment_id = self._environment_id
+            return {
+                "owner_kind": "environment",
+                "owner_id": environment_id,
+                "project_id": "",
+                "environment_id": environment_id,
+            }
+
+        def result(status: str, identity: _RuntimeIdentity | None) -> dict[str, str | None]:
+            fields = owner_fields(identity)
+            if legacy_environment:
+                return {
+                    "status": status,
+                    "environment_id": fields["environment_id"],
+                }
+            return {"status": status, **fields}
 
         with self._artifact_operation(exclusive=False):
             planned_identity = self._read_runtime_identity()
 
         action_ids = (
-            "instance.stop.environment",
+            "instance.stop.runtime",
             "instance.stop.revalidate",
             "instance.stop.terminate",
             "instance.stop.verify_exit",
@@ -170,7 +226,7 @@ class _PlanningMixin:
             for step_id in action_ids
         )
 
-        def execute(context: RunContext[dict[str, str]]) -> dict[str, str]:
+        def execute(context: RunContext[dict[str, str | None]]) -> dict[str, str | None]:
             context.action(action_ids[0])
             try:
                 with self._artifact_operation(exclusive=True):
@@ -181,10 +237,7 @@ class _PlanningMixin:
                     if identity is None:
                         for step_id in action_ids[2:]:
                             context.skip(step_id)
-                        return {
-                            "status": "already_stopped",
-                            "environment_id": str(self._environment_id),
-                        }
+                        return result("already_stopped", None)
                     if identity.vanished:
                         context.skip(action_ids[2])
                         context.action(action_ids[3])
@@ -192,25 +245,25 @@ class _PlanningMixin:
                         context.action(action_ids[4])
                         self._clear_runtime_identity_if_matches(identity)
                         context.complete_action(action_ids[4])
-                        return {
-                            "status": "already_stopped",
-                            "environment_id": identity.environment_id,
-                        }
+                        return result("already_stopped", identity)
                     self._validate_runtime_identity(identity)
                     context.action(action_ids[2])
                     terminate_pid(
                         identity.root_pid,
                         process_group_id=identity.process_group_id,
+                        expected_create_time=identity.create_time,
                         timeout=timeout,
                     )
                     context.complete_action(action_ids[2])
                     context.action(action_ids[3])
-                    _verify_process_exit(identity.root_pid)
+                    _verify_process_exit(
+                        identity.root_pid, expected_create_time=identity.create_time
+                    )
                     context.complete_action(action_ids[3])
                     context.action(action_ids[4])
                     self._clear_runtime_identity_if_matches(identity)
                     context.complete_action(action_ids[4])
-                    return {"status": "stopped", "environment_id": identity.environment_id}
+                    return result("stopped", identity)
             except BaseException as error:
                 context.fail_action(action_ids[0], error)
                 raise
@@ -411,11 +464,12 @@ class _PlanningMixin:
 
     def _clear_runtime_identity_if_matches(self, identity: _RuntimeIdentity) -> None:
         catalog = cast("_RuntimeCatalog", self._client.get_catalog())
-        if not catalog._clear_environment_runtime_if_matches(
-            identity.environment_id,
+        cleared = catalog._clear_runtime_if_matches(
+            *identity.owner,
             root_pid=identity.root_pid,
             create_time=identity.create_time,
-        ):
+        )
+        if not cleared:
             raise RuntimeError("runtime identity changed before clearing its row")
 
     def stop(self, proc: OdooProcess, *, timeout: float = 10.0) -> None:

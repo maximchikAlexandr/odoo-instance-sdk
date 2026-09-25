@@ -189,7 +189,7 @@ _PUBLIC_LEAF_DATA: tuple[PublicLeafCase, ...] = (
         ("stop", "--dry-run"),
         "mutating-or-spawning",
         True,
-        sdk_primitive="OdooInstance.stop_environment_command",
+        sdk_primitive="OdooInstance.stop_runtime_command",
         e2e_disposition="critical",
         e2e_evidence=("E2E-CP-13",),
         e2e_rationale="owned target process stop and repeat",
@@ -803,7 +803,7 @@ _FORBIDDEN_PARALLEL_DOMAIN_CALLS = frozenset(
     {
         "build_database_inventory_command",
         "build_copy_replacement_command",
-        "_stop_environment_command",
+        "_stop_runtime_command",
     }
 )
 
@@ -1170,11 +1170,18 @@ def _patch_leaf_external(  # noqa: C901
         instance = MagicMock()
         env = _matrix_environment()
         if failing:
-            instance.stop_environment_command.side_effect = fail_operation
+            instance.stop_runtime_command.side_effect = fail_operation
         else:
-            instance.stop_environment_command.return_value = _matrix_command(
-                {"status": "stopped", "environment_id": str(env.id)}
+            command = _matrix_command(
+                {
+                    "status": "stopped",
+                    "owner_kind": "environment",
+                    "owner_id": str(env.id),
+                    "project_id": "project-1",
+                    "environment_id": str(env.id),
+                }
             )
+            instance.stop_runtime_command.return_value = command
         monkeypatch.setattr(
             "odoo_instance_sdk.cli.cli_context.ready_instance",
             lambda _ctx: _resolved_context(MagicMock(), env, instance),
@@ -1707,14 +1714,14 @@ def _patch_leaf_external(  # noqa: C901
     if path[:2] in {("db", "locks"), ("db", "stats"), ("db", "bloat"), ("db", "init-monitoring")}:
         resource = MagicMock()
         result = CommandResult(args=[], returncode=0, stdout="", stderr="", duration=0.0)
-        command = _matrix_command(
+        db_command: Command[CommandResult] = _matrix_command(
             result,
             error=RuntimeError("isolated external operation failed") if failing else None,
         )
-        resource.locks_command.return_value = command
-        resource.stats_command.return_value = command
-        resource.bloat_command.return_value = command
-        resource.init_monitoring_command.return_value = command
+        resource.locks_command.return_value = db_command
+        resource.stats_command.return_value = db_command
+        resource.bloat_command.return_value = db_command
+        resource.init_monitoring_command.return_value = db_command
         if failing and path == ("db", "init-monitoring"):
             resource.init_monitoring_command.side_effect = fail_operation
         environment = _matrix_public_environment()

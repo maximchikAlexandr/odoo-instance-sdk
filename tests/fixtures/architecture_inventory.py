@@ -18,8 +18,8 @@ DIRECT_SUBPROCESS_LAUNCHES: Final[frozenset[SourceLocation]] = frozenset({})
 
 DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 485),
-        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 486),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 503),
+        ("src/odoo_instance_sdk/commands/cli_parts/callbacks.py", 504),
         ("src/odoo_instance_sdk/commands/cli_parts/registration.py", 473),
         ("src/odoo_instance_sdk/commands/backup.py", 347),
         ("src/odoo_instance_sdk/commands/output.py", 116),
@@ -31,7 +31,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/self_update.py", 813),
         ("src/odoo_instance_sdk/internal/self_update.py", 814),
         ("src/odoo_instance_sdk/internal/self_update.py", 815),
-        ("src/odoo_instance_sdk/resources/instance/identity.py", 494),
+        ("src/odoo_instance_sdk/resources/instance/identity.py", 496),
     }
 )
 
@@ -45,11 +45,11 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ("src/odoo_instance_sdk/commands/output.py", 468): "shared diagnostic boundary",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
-        485,
+        503,
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/callbacks.py",
-        486,
+        504,
     ): "documented logs JSONL transport",
     (
         "src/odoo_instance_sdk/commands/cli_parts/registration.py",
@@ -70,7 +70,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
-        494,
+        496,
     ): "lifecycle cleanup diagnostic transport",
 }
 
@@ -101,17 +101,17 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {}
 
 DIRECT_HTTPX_USAGE: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/internal/transport/base.py", 202),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 205),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 229),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 231),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 76),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 78),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 154),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 203),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 208),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 233),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 235),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 77),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 79),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 156),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 157),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 208),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 211),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 158),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 159),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 210),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 213),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 215),
     }
 )

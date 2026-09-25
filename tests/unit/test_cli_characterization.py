@@ -603,6 +603,8 @@ def test_discovered_public_methods() -> None:
             "stop_command",
             "stop_environment",
             "stop_environment_command",
+            "stop_runtime",
+            "stop_runtime_command",
             "wait_ready",
         ),
         BackupCatalog: (
@@ -618,6 +620,7 @@ def test_discovered_public_methods() -> None:
             "get_copy_journal",
             "get_environment",
             "get_environment_runtime",
+            "get_runtime",
             "has_tracked_database",
             "latest_backup",
             "latest_restore",

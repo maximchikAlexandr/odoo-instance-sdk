@@ -569,7 +569,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli env path` — Print one active environment's absolute worktree path.
 - `odcli env rm` — Remove a registered environment and its owned artifacts safely.
 - `odcli env sync` — Rebuild or synchronize an environment's Python dependencies.
-- `odcli stop` — Stop the selected environment's proven-owned runtime.
+- `odcli stop` — Stop the selected project- or environment-owned proven runtime.
 - `odcli backup ls` — List retained backup records with state and file presence.
 - `odcli backup inspect` — Show one exact backup UUID with history and relationships.
 - `odcli backup validate` — Validate one exact backup and report invalid versus unavailable.
