@@ -17,9 +17,11 @@ from odoo_instance_sdk.internal.dbprep.source import (
     DatabasePreparationFailureContext,
     ProjectRuntimeBinding,
     _CatalogueRestoreSource,
+    _LocalArchiveRestoreSource,
     _RemoteRestoreSource,
     _resolve_source_config,
     _RestoreSource,
+    _RestoreSourceInput,
     _target_config_path,
     _write_target_config,
     relevant_manifest_conflicts,
@@ -37,6 +39,7 @@ from odoo_instance_sdk.internal.urls import assert_local, normalize_base_url
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
+    LocalArchiveRestoreSource,
     NoBackup,
 )
 from odoo_instance_sdk.project import ProjectConfig
@@ -170,13 +173,17 @@ def _latest_default_backup(
     return client.get_catalog().latest_restore(host, port, default) or None
 
 
-def _coerce_restore_source(source: _RestoreSource | uuid.UUID | str | None) -> _RestoreSource:
+def _coerce_restore_source(source: _RestoreSourceInput) -> _RestoreSource:
     if source is None:
         return _RemoteRestoreSource()
     if isinstance(source, _RemoteRestoreSource):
         return source
+    if isinstance(source, _LocalArchiveRestoreSource):
+        return source
     if isinstance(source, _CatalogueRestoreSource):
         source = source.backup_id
+    if isinstance(source, LocalArchiveRestoreSource):
+        return _LocalArchiveRestoreSource(Path(source.path))
     try:
         return _CatalogueRestoreSource(uuid.UUID(str(source)))
     except (ValueError, TypeError, AttributeError) as exc:
