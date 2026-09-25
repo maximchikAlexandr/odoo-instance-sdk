@@ -69,22 +69,30 @@ The `Mutation Testing` GitHub Actions workflow SHALL invoke the same `make mutat
 
 ### Requirement: Mutation contract regression proof
 
-Repository verification SHALL cover orchestration separately from the expensive full audit and SHALL include a bounded fixture or fake process boundary for success and failure paths. Verification SHALL prove report creation, exit-code preservation, configuration scope, workflow fail-closed semantics, and a representative import of `odoo_instance_sdk.cli`; the real `make mutation` run remains the end-to-end proof that generated mutants execute.
+Repository verification SHALL run a committed bounded integration fixture with the real installed mutmut process before every full `make mutation` audit. The fixture SHALL use a temporary workspace containing the real copied `src/odoo_instance_sdk` package, SHALL restrict `only_mutate` to `src/odoo_instance_sdk/internal/db_name.py`, and SHALL invoke the stable mutant filter `odoo_instance_sdk.internal.db_name.validate_db_name*`. Deterministic runner tests SHALL separately prove exact exit-code propagation, while repository contract tests SHALL prove configuration and workflow invariants.
 
-#### Scenario: Orchestration success is verified
+#### Scenario: Real bounded mutant execution is verified
 
-- **WHEN** the regression harness supplies successful mutation-run and result commands
-- **THEN** verification SHALL assert zero exit status and a non-empty result-classification report
+- **WHEN** the committed passing fixture is executed from a clean temporary workspace during `make mutation`
+- **THEN** its only selected test SHALL import `odoo_instance_sdk.cli`, import and exercise `validate_db_name`, and run without repository `PYTHONPATH`
+- **THEN** the harness SHALL launch the installed mutmut process for `odoo_instance_sdk.internal.db_name.validate_db_name*`
+- **THEN** verification SHALL assert zero status, a non-empty report, and at least one mutant classified as `killed`, `survived`, `timeout`, or `suspicious`
 
-#### Scenario: Controlled collection failure is verified
+#### Scenario: Real controlled collection failure is verified
 
-- **WHEN** the regression harness supplies a mutation-run process that fails during collection
-- **THEN** verification SHALL assert the same non-zero status, a non-empty stage-labelled report, and no false success
+- **WHEN** the same bounded harness selects the committed fixture that raises during pytest collection after importing `odoo_instance_sdk.cli`
+- **THEN** it SHALL launch the installed mutmut process and observe a non-zero collection status
+- **THEN** verification SHALL assert a non-empty collection-failure report and SHALL treat the expected child failure as proof only after both assertions pass
+
+#### Scenario: Exact child status is preserved
+
+- **WHEN** the deterministic runner test supplies a distinctive non-zero status for the mutation stage
+- **THEN** the runner SHALL return that exact status and retain a non-empty stage-labelled report without invoking later stages
 
 #### Scenario: Repository contracts are verified
 
 - **WHEN** CI contract tests inspect the committed mutation configuration and workflow
-- **THEN** they SHALL assert full-package source availability, the exact five-file target set, absence of failure masking, always-run artifact upload, and fail-on-missing artifact behavior
+- **THEN** they SHALL assert full-package source availability, the exact five-file target set, permanent bounded integration invocation, absence of failure masking, always-run artifact upload, and fail-on-missing artifact behavior
 
 ### Requirement: Mutation developer documentation
 

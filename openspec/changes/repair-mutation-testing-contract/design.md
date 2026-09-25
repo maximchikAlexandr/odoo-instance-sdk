@@ -11,7 +11,7 @@ The frozen lock resolves `mutmut 3.7.0`. The supported 3.6+ configuration separa
 - make the copied mutation workspace import-complete while preserving the exact five-file target set;
 - make one `make mutation` entrypoint produce a useful report on success and failure and preserve non-zero failures;
 - make scheduled/manual GitHub Actions status reflect the actual command result;
-- add fast deterministic contract tests plus retain the real mutation run as end-to-end evidence;
+- add a bounded committed mutmut integration regression plus deterministic orchestration contract tests and retain the full mutation run as end-to-end evidence;
 - document diagnostic/non-required policy separately from execution success.
 
 **Non-Goals:**
@@ -47,11 +47,17 @@ Remove job-level `continue-on-error`. Keep artifact upload under `if: always()` 
 
 The workflow remains non-required by branch-protection policy; repository YAML shall not weaken job conclusions to model that policy. A separate PR mutation job is rejected because it duplicates the costly audit and contradicts the original diagnostic scope.
 
-### 5. Split fast contract proof from the full mutation audit
+### 5. Run a real bounded mutmut regression before every full audit
 
-Add unit tests for the runner using controlled child outcomes and existing repository CI-contract style. These tests cover report contents, success/failure status, exact configuration paths, and workflow YAML invariants without running thousands of mutants in the ordinary test suite. Include a representative test/fixture import of `odoo_instance_sdk.cli` in the mutation-selected unit tree. The scheduled/manual `make mutation` execution provides the end-to-end evidence that every configured source file produces executed mutants and final classifications.
+Commit `tests/fixtures/mutation_smoke/pyproject.toml`, a passing fixture test, and a collection-failure fixture. Add `scripts/check_mutation_integration.py`, called by the report-first runner before the full audit. The script SHALL create a temporary workspace, copy the real `src/odoo_instance_sdk` package into it, and use the committed fixture configuration with full-package `source_paths` and `internal/db_name.py` as its sole `only_mutate` file.
 
-Mock-only verification was rejected as insufficient because it cannot establish that mutmut uses the copied package. Running a nested full mutation audit inside ordinary pytest was rejected because it duplicates the scheduled workload and requires the mutation dependency in the normal test group.
+The success case SHALL copy the passing fixture as the only selected test. That test SHALL import `odoo_instance_sdk.cli`, import and exercise `validate_db_name`, and expose no repository `PYTHONPATH`. The script SHALL invoke the installed mutmut process with the stable filter `odoo_instance_sdk.internal.db_name.validate_db_name*`, run `mutmut results`, and fail unless the captured non-empty report proves that at least one mutant received a terminal `killed`, `survived`, `timeout`, or `suspicious` classification.
+
+The failure case SHALL repeat the isolated run with the committed collection-failure fixture installed as the only selected test. That fixture SHALL raise during pytest collection after importing `odoo_instance_sdk.cli`. The script SHALL require a real non-zero mutmut status and a non-empty collection-failure report. Separately, runner unit tests SHALL feed a distinctive non-zero child status and assert that the runner returns that exact status and retains the stage-labelled report. Together these checks prove actual mutmut integration failure and exact orchestration propagation without relying on a mock for the integration boundary.
+
+The bounded integration script runs on every `make mutation`, so scheduled and manual CI cannot regress the import-copy contract unnoticed. The subsequent full audit remains the evidence that every configured target file produces executed mutants and final classifications. Existing CI-contract tests continue to cover configuration and workflow YAML invariants.
+
+A mock-only test was rejected because it cannot establish that mutmut loads the copied package. Running the entire five-file audit inside ordinary pytest was rejected because it duplicates the scheduled workload and installs mutation dependencies into the normal test group. The one-function temporary-workspace smoke is the smallest permanent check that exercises the real boundary.
 
 ### 6. Keep documentation bounded to contributor behavior
 
@@ -61,18 +67,20 @@ Update `CONTRIBUTING.md` with the dependency sync command, exact five-file targe
 
 - **[mutmut minor-version semantics change inside `<4`]** → contract tests pin the exact configuration shape and the frozen lock; implementation verifies against the locked 3.7.0 behavior before publication.
 - **[Full package copy increases setup time]** → mutation generation stays filtered to five small modules, and the 30-minute workflow budget remains the measured guardrail.
+- **[Permanent smoke adds duplicate mutation work]** → it selects only `validate_db_name*` in one target file and one test, while the later full audit remains authoritative for all five targets.
 - **[A child is terminated before buffered diagnostics flush]** → the runner writes stage headers before spawn, captures both streams, and guarantees a non-empty report even when child output is empty.
 - **[Survivors make `mutmut results` informational rather than green-quality proof]** → workflow success means the audit executed and reported; survivor policy remains explicitly out of scope.
 - **[YAML text tests become brittle]** → extend the existing `tests/unit/test_ci_contract.py` style with semantic YAML/repository assertions limited to behaviorally important keys.
 
 ## Migration Plan
 
-1. Add the runner and its deterministic success/failure unit tests.
-2. Change mutmut configuration to full-package `source_paths` plus exact `only_mutate` targets; add configuration contract coverage.
-3. Delegate `make mutation` to the runner and verify controlled collection failure preserves status and report.
-4. Remove workflow masking, require the artifact path, and update CI contract tests.
-5. Update contributor documentation and run focused repository checks.
-6. Run the real frozen-group `make mutation` once as implementation evidence, recording successful baseline collection, mutants from all five files, and a non-empty final report.
+1. Add the report-first runner and deterministic unit tests that prove exact child-status propagation.
+2. Add the committed passing and collection-failure fixtures plus the temporary-workspace integration script; make the script launch real mutmut for `validate_db_name*` and validate both reports.
+3. Change production mutmut configuration to full-package `source_paths` plus exact five-file `only_mutate` targets; add configuration contract coverage.
+4. Delegate `make mutation` to the runner, with the bounded integration regression before the full audit.
+5. Remove workflow masking, require the artifact path, and update CI contract tests.
+6. Update contributor documentation and run focused repository checks.
+7. Run the frozen-group `make mutation` as implementation evidence, recording the bounded real-mutmut regression, successful full baseline collection, mutants from all five files, and a non-empty final report.
 
 Rollback is one commit revert: no data, API, schema, or migration state is created. Existing ignored `mutants/` and `.artifacts/` outputs remain disposable.
 
