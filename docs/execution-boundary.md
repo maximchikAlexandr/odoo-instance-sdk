@@ -241,7 +241,7 @@ documented by `OUTPUT_WRITE_REASONS`:
 - `src/odoo_instance_sdk/internal/self_update.py:813-815` — maintenance child
   JSON stdout transport; remove when maintenance output gains a replacement
   centralized emitter.
-- `src/odoo_instance_sdk/resources/instance/identity.py:496` — lifecycle cleanup
+- `src/odoo_instance_sdk/resources/instance/identity.py:503` — lifecycle cleanup
   diagnostic transport; remove when cleanup diagnostics have an explicit
   logger/diagnostic adapter without changing native cleanup behavior.
 

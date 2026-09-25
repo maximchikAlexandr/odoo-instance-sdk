@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 
 _ContextT = TypeVar("_ContextT")
 
+type BootstrapTmpSteps = tuple[PreparedStep, PreparedStep, PreparedStep, PreparedAction]
+
 BOOTSTRAP_DATABASE = "tmp"
 _BOOTSTRAP_DATABASE = BOOTSTRAP_DATABASE
 _BOOTSTRAP_INIT_MODULE = "base"
@@ -204,19 +206,19 @@ def tmp_bootstrap_command(
     )
 
 
-def ensure_project_bootstrap_tmp(instance: OdooInstance, context: RunContext[_ContextT]) -> None:
-    """Ensure owned Compose projects have a valid bootstrap ``tmp`` database."""
+def project_bootstrap_tmp_steps(instance: OdooInstance) -> BootstrapTmpSteps | tuple[()]:
+    """Capture bootstrap steps for an owned Compose project."""
     from odoo_instance_sdk.resources.instance import OdooInstance
 
     if not isinstance(instance, OdooInstance):
-        return
+        return ()
     cluster = instance._postgres_cluster
     if cluster is None or not cluster.owned:
-        return
+        return ()
     start_config = instance.config.start_config
     if start_config is None:
-        return
-    spawn_step, probe_step, ready_step, ready_action = bootstrap_tmp_steps(
+        return ()
+    return bootstrap_tmp_steps(
         command_prefix=instance._executable_prefix(),
         start_config=start_config,
         db_host=cluster.endpoint_host,
@@ -225,6 +227,19 @@ def ensure_project_bootstrap_tmp(instance: OdooInstance, context: RunContext[_Co
         db_password=start_config.db_password or "",
         default_cwd=instance.config.default_cwd,
     )
+
+
+def ensure_project_bootstrap_tmp(
+    instance: OdooInstance,
+    context: RunContext[_ContextT],
+    *,
+    steps: BootstrapTmpSteps | tuple[()] | None = None,
+) -> None:
+    """Ensure owned Compose projects have a valid bootstrap ``tmp`` database."""
+    captured = project_bootstrap_tmp_steps(instance) if steps is None else steps
+    if not captured:
+        return
+    spawn_step, probe_step, ready_step, ready_action = captured
     context.action(ready_action.step_id)
     run_bootstrap_tmp(context, spawn_step, probe_step, ready_step)
     context.complete_action(ready_action.step_id)

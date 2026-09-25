@@ -31,7 +31,7 @@ DIRECT_OUTPUT_WRITES: Final[frozenset[SourceLocation]] = frozenset(
         ("src/odoo_instance_sdk/internal/self_update.py", 813),
         ("src/odoo_instance_sdk/internal/self_update.py", 814),
         ("src/odoo_instance_sdk/internal/self_update.py", 815),
-        ("src/odoo_instance_sdk/resources/instance/identity.py", 496),
+        ("src/odoo_instance_sdk/resources/instance/identity.py", 503),
     }
 )
 
@@ -70,7 +70,7 @@ OUTPUT_WRITE_REASONS: Final[dict[SourceLocation, str]] = {
     ): "maintenance child JSON stdout transport",
     (
         "src/odoo_instance_sdk/resources/instance/identity.py",
-        496,
+        503,
     ): "lifecycle cleanup diagnostic transport",
 }
 

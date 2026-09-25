@@ -354,7 +354,14 @@ class _IdentityMixin:
         from odoo_instance_sdk.internal.proc import PreparedStep as _PreparedStep
 
         dependency_steps, dependency_temporary_path = self._dependency_manifest()
-        prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (*dependency_steps, step)
+        from odoo_instance_sdk.internal.dbprep.bootstrap import project_bootstrap_tmp_steps
+
+        bootstrap_steps = project_bootstrap_tmp_steps(cast("OdooInstance", self))
+        prepared_steps: tuple[PreparedStep | PreparedAction, ...] = (
+            *dependency_steps,
+            *bootstrap_steps,
+            step,
+        )
         if (
             self._runtime_binding is not None or self._environment_id is not None
         ) and resolved_cwd is not None:
@@ -390,7 +397,7 @@ class _IdentityMixin:
             )
             from odoo_instance_sdk.internal.dbprep.bootstrap import ensure_project_bootstrap_tmp
 
-            ensure_project_bootstrap_tmp(cast("OdooInstance", self), context)
+            ensure_project_bootstrap_tmp(cast("OdooInstance", self), context, steps=bootstrap_steps)
             for dependency_step in dependency_steps:
                 if context.planned(dependency_step.step_id) and not context.consumed(
                     dependency_step.step_id
