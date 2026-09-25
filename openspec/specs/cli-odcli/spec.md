@@ -2146,7 +2146,7 @@ Logs SHALL use `resolve_effective_logfile()` from the `odcli run` requirement. A
 #### Scenario: Stop targets the detached runtime
 
 - **WHEN** `odcli stop` runs after a detached launch
-- **THEN** it stops exactly that persisted runtime
+- **THEN** it matches the launch argv including the injected effective `--logfile` and stops exactly that persisted runtime
 
 #### Scenario: Logs work after detached launch
 

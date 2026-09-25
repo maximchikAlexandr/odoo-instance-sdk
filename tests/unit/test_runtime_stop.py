@@ -25,7 +25,11 @@ from odoo_instance_sdk.models import DevelopmentEnvironment, StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import EnvironmentDatabaseMode, EnvironmentState
 from odoo_instance_sdk.resources.instance import OdooInstance
-from odoo_instance_sdk.resources.instance.runtime import _runtime_expectations, _RuntimeBinding
+from odoo_instance_sdk.resources.instance.runtime import (
+    _canonical_runtime_argv,
+    _runtime_expectations,
+    _RuntimeBinding,
+)
 
 
 class _Catalog:
@@ -254,6 +258,16 @@ def test_stop_project_runtime_reuses_identity_boundary_and_preserves_owner_neutr
     }
     assert calls == [(4242, 4242, 3.0)]
     assert catalog.project_runtime_row is None
+
+
+@pytest.mark.unit
+def test_project_stop_identity_matches_detached_launch_argv(tmp_path: Path) -> None:
+    instance, _catalog, _project_id = _instance(tmp_path, owner_kind="project")
+
+    expected_argv = instance._project_runtime_expectations()[1]
+    detached_argv = instance.run_detached_command().plan.process_steps[0].argv
+
+    assert expected_argv == _canonical_runtime_argv(detached_argv)
 
 
 @pytest.mark.unit
