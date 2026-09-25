@@ -774,6 +774,7 @@ def bug_report_submit_command(
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
+        SubprocessExecutor,
     )
 
     _validate_report_id(report_id)
@@ -930,7 +931,7 @@ def bug_report_submit_command(
         plan,
         callback,
         tuple(prepared_steps),
-        executor=executor,
+        executor=executor or SubprocessExecutor(),
     )
     return command
 

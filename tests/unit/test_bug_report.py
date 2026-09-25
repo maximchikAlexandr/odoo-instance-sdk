@@ -340,6 +340,32 @@ def test_successful_submit_records_issue_and_uses_proc_recorder() -> None:
     ]
 
 
+def test_submit_uses_real_process_executor_by_default() -> None:
+    draft = _init_draft()
+    report_dir = Path(draft.directory)
+    _write_filled_report(report_dir)
+    _approve(draft.report_id, report_dir)
+    issue_url = "https://github.com/example/repo/issues/74"
+    result = ProcessResult(
+        argv=("gh",),
+        returncode=0,
+        stdout=json.dumps([{"number": 74, "url": issue_url}]),
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+
+    with patch(
+        "odoo_instance_sdk.internal.proc.run.SubprocessExecutor.execute",
+        return_value=result,
+    ) as execute:
+        submitted = bug_report_submit_command(draft.report_id).run()
+
+    assert submitted.issue_url == issue_url
+    execute.assert_called_once()
+
+
 def test_repeat_submit_returns_stored_url_without_second_gh_call() -> None:
     draft = _init_draft()
     report_dir = Path(draft.directory)
