@@ -1,6 +1,6 @@
 ## Контекст
 
-`bug_report_init_command()` сейчас планирует только один мутирующий `ActionStep`, а `_report_template()` вызывает две константные функции, возвращающие `unknown`. При этом репозиторий уже умеет находить ближайший/зарегистрированный проект через `internal.context.resolve_project`, строить неизменяемые `PreparedStep` и безопасно получать PostgreSQL `server_version` через `internal.pg.server`. Odoo-проект хранит `odoo_bin`, Python runtime и рабочий каталог в `ProjectConfig`.
+`bug_report_init_command()` сейчас планирует только один мутирующий `ActionStep`, а `_report_template()` вызывает две константные функции, возвращающие `unknown`. При этом репозиторий уже умеет читать ближайший manifest через `internal.context._find_nearest_manifest()`, сопоставлять зарегистрированный worktree по read-only catalog, вычислять shared Git directory из локального `.git` marker через process-free `internal.repo_key.git_common_dir()`, строить неизменяемые `PreparedStep` и безопасно получать PostgreSQL `server_version` через `internal.pg.server`. Odoo-проект хранит `odoo_bin`, Python runtime и рабочий каталог в `ProjectConfig`.
 
 Изменение затрагивает публичный SDK command, CLI dry-run, запуск дочерних процессов и потенциально чувствительные PostgreSQL credentials. Поэтому discovery должен быть частью инспектируемого command plan, а не скрытым subprocess внутри draft action.
 
@@ -25,11 +25,11 @@
 
 ### 1. Один project snapshot и явные optional probes
 
-На этапе построения `bug_report_init_command()` код SHALL вызвать существующий `resolve_project(None, cwd=Path.cwd())` ровно один раз. Успешный `ProjectConfig` становится единственным snapshot для обоих providers. Отсутствие/ошибка project context SHALL дать пустой набор probe steps и значения `unknown`, не ошибку команды.
+На этапе построения `bug_report_init_command()` код SHALL вызвать новый узкий `internal.context.resolve_project_snapshot(cwd=Path.cwd())` ровно один раз. Helper SHALL только читать filesystem и catalog SQLite: сначала искать содержащую cwd активную catalog row и подтверждать её `git_common_dir` существующим process-free `internal.repo_key.git_common_dir(worktree_root)`, затем при отсутствии совпадения использовать существующий `_find_nearest_manifest(cwd, None)`, и в обоих случаях загружать manifest через `ProjectConfig.load()`. Он SHALL NOT вызывать `resolve_project()`, `git_worktree.rev_parse_*`, `run_captured`, `SubprocessExecutor` или иной child-process boundary. Успешный `ProjectConfig` становится единственным snapshot для обоих providers. Отсутствие/ошибка project context SHALL дать пустой набор probe steps и значения `unknown`, не ошибку команды.
 
 Команда SHALL содержать, в порядке исполнения, optional read-only Odoo `PreparedStep`, ноль или более уже типизированных PostgreSQL server-summary `PreparedStep`, затем существующий mutating draft `PreparedAction`. Callback SHALL выполнить доступные probes независимо, учесть каждый неисполненный optional step через `RunContext.skip()`, затем создать draft с двумя итоговыми строками.
 
-Так план остаётся полным и fingerprinted, а `--dry-run` показывает probes, но не выполняет их и не создаёт файлы. Альтернатива — вызывать `subprocess` внутри `_create_draft()` — отвергнута, потому что скрывает процесс от immutable plan. Альтернатива — читать версии только из строк manifest/image — отвергнута, потому что это заявленное намерение, а не обязательно фактический runtime.
+Snapshot завершается до materialization plan, но остаётся process-free, поэтому план содержит полный применимый набор probes и остаётся fingerprinted. `--dry-run` показывает эти probes, но не выполняет их и не создаёт файлы. Альтернатива — существующий `resolve_project()` — отвергнута для construction path, потому что он вызывает `git rev-parse` через `run_captured` до ветвления `run_or_preview()` по `dry_run`. Альтернатива — вызывать `subprocess` внутри `_create_draft()` — отвергнута, потому что скрывает процесс от immutable plan. Альтернатива — читать версии только из строк manifest/image — отвергнута, потому что это заявленное намерение, а не обязательно фактический runtime.
 
 ### 2. Odoo version через конфигурированный runtime
 
@@ -55,7 +55,7 @@ Callback SHALL хранить две локальные строки `odoo_versi
 
 Тесты SHALL использовать временный managed-project manifest и deterministic injected/recorded process executor. Параметризованная матрица SHALL покрыть: обе версии доступны; Odoo failure при успешном PostgreSQL; PostgreSQL failure при успешном Odoo; обе недоступны; unsafe/multiline/oversized output; отсутствие managed project.
 
-Отдельный публичный `CliRunner` regression SHALL вызвать `bug-report init` из configured project и проверить обе строки в созданном `report.md`. Dry-run regression SHALL проверить, что probes присутствуют в plan, но executor не вызван и draft не создан. Тесты SHALL дополнительно доказать отсутствие password/secret marker в plan, result и report.
+Отдельный публичный `CliRunner` regression SHALL вызвать `bug-report init` из configured project и проверить обе строки в созданном `report.md`. Два spawn-trap tests SHALL подменить production process boundary так, чтобы любой `execute()` или `spawn()` немедленно падал: первый SHALL построить `bug_report_init_command()` в configured project и доказать process-free construction при полном применимом plan; второй SHALL выполнить публичный CLI `--dry-run`, доказать отсутствие любого spawn и draft mutation и одновременно проверить наличие applicable probe steps в preview. Тесты SHALL дополнительно доказать отсутствие password/secret marker в plan, result и report.
 
 ## Риски / Компромиссы
 
@@ -63,6 +63,7 @@ Callback SHALL хранить две локальные строки `odoo_versi
 - **Формат `odoo-bin --version` меняется** → строгий parser принимает только известный префикс и безопасный token, иначе `unknown`.
 - **PostgreSQL credentials доступны только частично** → переиспользуется существующий server-summary eligibility/failure classification, без нового credential lookup.
 - **Несколько PostgreSQL maintenance candidates создают несколько steps** → они используют один deadline, а callback обязан skip-нуть остаток после успеха/окончательного fallback.
+- **Process-free snapshot может разойтись с command-backed project resolution** → catalog candidate подтверждается существующим `.git`-marker reader, а fallback использует существующий nearest-manifest reader; любое сомнение или ошибка даёт безопасный `unknown`, не скрытый probe.
 - **Best-effort ошибки могут быть незаметны пользователю** → это сознательная совместимость: публичный результат не расширяется, а `unknown` остаётся явным сигналом недоступности.
 
 ## План миграции

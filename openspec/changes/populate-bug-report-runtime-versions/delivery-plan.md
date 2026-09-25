@@ -21,9 +21,9 @@ WP однократно покрывает все tasks: `1.1`, `1.2`, `1.3`, `2
 
 ### Owned responsibility scope
 
-- Root-cause flow в `src/odoo_instance_sdk/bug_report.py`: project snapshot, probe construction, execution/fallback, template inputs и immutable plan composition.
+- Root-cause flow в `src/odoo_instance_sdk/bug_report.py`: process-free project snapshot, probe construction, execution/fallback, template inputs и immutable plan composition.
 - Переиспользование существующих контрактов `internal.context`, `internal.project_runtime`, `internal.pg.server`, `resources.postgres` и `internal.proc` без второго parser/runner/provider hierarchy.
-- Критические shared files: `src/odoo_instance_sdk/bug_report.py`, `tests/unit/test_bug_report.py`, а при доказанной необходимости — непосредственно связанные process/output contract tests.
+- Критические shared files: `src/odoo_instance_sdk/bug_report.py`, `src/odoo_instance_sdk/internal/context.py`, `tests/unit/test_bug_report.py`, `tests/unit/internal/test_context.py`, а при доказанной необходимости — непосредственно связанные process/output contract tests.
 - В scope также входят необходимые рядом расположенные fixtures, parametrized cases, docs/contract adjustments и служебные test files, если они не расширяют продуктовый scope.
 - Production behavior submit/review, публичные модели результата, CLI arguments и draft schema вне version values не входят в изменение.
 
@@ -31,6 +31,7 @@ WP однократно покрывает все tasks: `1.1`, `1.2`, `1.3`, `2
 
 - `bug_report_init_command(title=..., kind=...)` сохраняет публичную сигнатуру, result model и dry-run contract.
 - Все child processes заранее представлены в immutable public plan и имеют соответствующие private prepared snapshots; `shell=False`, read-only flags, time bounds и ledger accounting обязательны.
+- Construction snapshot использует только filesystem/read-only catalog, существующие `internal.repo_key.git_common_dir()` и manifest reader; command-backed `resolve_project()` и `git_worktree.rev_parse_*` на этом пути запрещены.
 - Odoo source: текущий managed-project runtime выполняет `odoo_bin --version`; принимается только строгий нормализованный token.
 - PostgreSQL source: существующий server-summary plan/collector возвращает фактический `server_version`; сервис не запускается.
 - Каждый provider деградирует в `unknown` независимо. Secrets, raw stdout/stderr и exception text не пересекают private execution boundary.
@@ -39,8 +40,8 @@ WP однократно покрывает все tasks: `1.1`, `1.2`, `1.3`, `2
 
 - Все OpenSpec tasks отмечены выполненными только после соответствующего production/test результата.
 - Parametrized tests доказывают success, independent fallback, non-zero, timeout, oversized/multiline/unsafe output и отсутствие managed project.
-- Command-plan tests доказывают immutable capture, redaction, read-only/non-shell execution, time bounds и полное consume/skip accounting.
-- Публичный `CliRunner` regression создаёт draft с обеими версиями из deterministic managed-project providers; dry-run не запускает probes и ничего не создаёт.
+- Command-plan tests доказывают immutable capture, redaction, read-only/non-shell execution, time bounds и полное consume/skip accounting; отдельный spawn trap падает при любом `execute()`/`spawn()` во время command construction.
+- Публичный `CliRunner` regression создаёт draft с обеими версиями из deterministic managed-project providers; dry-run под тем же spawn trap не запускает ни process resolution, ни probes, ничего не создаёт и возвращает полный applicable preview.
 - Проходят focused bug-report tests, CLI output-boundary tests, Ruff, mypy и reproducible core gate из `CONTRIBUTING.md`; команды и exit codes фиксируются в implementation handoff.
 - Diff остаётся минимальным: без новой зависимости, второго project parser, нового process runner и speculative abstraction.
 
