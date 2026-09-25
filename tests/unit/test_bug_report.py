@@ -32,7 +32,7 @@ from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.bug_report import (
     _DEFAULT_REPOSITORY,
     _gh_recheck_search_argv,
-    alpha_testing_labels,
+    bug_report_labels,
     bug_report_lock_path,
     bug_reports_root,
     read_bug_report_repository,
@@ -182,7 +182,7 @@ def test_submit_dry_run_returns_validation_without_side_effects(tmp_path: Path) 
     assert preview.report_valid is True
     assert preview.submit_ready is False
     assert preview.repository == _DEFAULT_REPOSITORY
-    assert preview.labels == alpha_testing_labels()
+    assert preview.labels == bug_report_labels()
     assert preview.payload_sha256
     assert preview.submit_blockers
 
@@ -195,7 +195,7 @@ def test_submit_dry_run_returns_validation_without_side_effects(tmp_path: Path) 
     assert payload["dry_run"] is True
     assert payload["result"]["report_valid"] is True
     assert payload["result"]["submit_ready"] is False
-    assert payload["result"]["labels"] == ["alpha-testing"]
+    assert payload["result"]["labels"] == ["bug"]
     assert (report_dir / "metadata.json").read_text(encoding="utf-8") == metadata_before
 
 
@@ -309,7 +309,7 @@ def test_successful_submit_records_issue_and_uses_proc_recorder() -> None:
             "--title",
             "Stop does not stop foreground run",
             "--label",
-            "alpha-testing",
+            "bug",
             "--body-file",
             "-",
         )
@@ -338,6 +338,32 @@ def test_successful_submit_records_issue_and_uses_proc_recorder() -> None:
         "bug-report.submit.recheck-before",
         "bug-report.submit.gh",
     ]
+
+
+def test_submit_uses_real_process_executor_by_default() -> None:
+    draft = _init_draft()
+    report_dir = Path(draft.directory)
+    _write_filled_report(report_dir)
+    _approve(draft.report_id, report_dir)
+    issue_url = "https://github.com/example/repo/issues/74"
+    result = ProcessResult(
+        argv=("gh",),
+        returncode=0,
+        stdout=json.dumps([{"number": 74, "url": issue_url}]),
+        stderr="",
+        duration=0.0,
+        cwd=None,
+        environment=(),
+    )
+
+    with patch(
+        "odoo_instance_sdk.internal.proc.run.SubprocessExecutor.execute",
+        return_value=result,
+    ) as execute:
+        submitted = bug_report_submit_command(draft.report_id).run()
+
+    assert submitted.issue_url == issue_url
+    execute.assert_called_once()
 
 
 def test_repeat_submit_returns_stored_url_without_second_gh_call() -> None:
@@ -721,4 +747,4 @@ def test_config_repository_override_is_used() -> None:
     assert metadata["repository"] == "example/custom-repo"
     preview = bug_report_submit_preview(draft.report_id)
     assert preview.repository == "example/custom-repo"
-    assert preview.labels == ("alpha-testing",)
+    assert preview.labels == ("bug",)

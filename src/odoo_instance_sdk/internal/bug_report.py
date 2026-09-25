@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
 
 _DEFAULT_REPOSITORY = "maximchikAlexandr/odoo-instance-sdk"
-_ALPHA_TESTING_LABELS: tuple[str, ...] = ("alpha-testing",)
+_BUG_REPORT_LABELS: tuple[str, ...] = ("bug",)
 _REPORT_MAX_BYTES = 262144
 _MAX_REVIEW_ROUNDS = 3
 _REVIEW_ROUNDS: tuple[int, ...] = (1, 2, 3)
@@ -156,10 +156,10 @@ def read_bug_report_repository() -> str:
     return value.strip()
 
 
-def alpha_testing_labels() -> tuple[str, ...]:
+def bug_report_labels() -> tuple[str, ...]:
     """Return the frozen GitHub labels used for every bug-report submit."""
 
-    return _ALPHA_TESTING_LABELS
+    return _BUG_REPORT_LABELS
 
 
 def report_max_bytes() -> int:
@@ -311,7 +311,7 @@ def _gh_argv(repo: str, title: str) -> tuple[str, ...]:
         "--title",
         title,
         "--label",
-        "alpha-testing",
+        "bug",
         "--body-file",
         "-",
     )
@@ -392,7 +392,7 @@ def _path_confined(root: Path, candidate: Path) -> bool:
 
 __all__ = [
     "BugReportPayload",
-    "alpha_testing_labels",
+    "bug_report_labels",
     "bug_report_lock_path",
     "bug_reports_root",
     "max_review_rounds",
