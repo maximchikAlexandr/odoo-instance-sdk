@@ -745,6 +745,49 @@ def test_local_archive_capture_is_read_only_and_cleanup_preserves_source(
     assert str(archive_path) not in repr(payload)
 
 
+def test_verified_file_fails_closed_on_same_size_mutation_during_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk.internal.dbprep import source as database_preparation
+
+    archive_path = _local_archive(tmp_path / "mutated.zip")
+    original = archive_path.read_bytes()
+    original_stat = archive_path.stat()
+    state = {"mutated": False}
+    real_sha256 = database_preparation.hashlib.sha256
+
+    def mutate_source_once() -> None:
+        if state["mutated"]:
+            return
+        changed = bytearray(original)
+        changed[0] ^= 1
+        archive_path.write_bytes(changed)
+        os.utime(
+            archive_path,
+            ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000_000),
+        )
+        state["mutated"] = True
+
+    class MutatingHash:
+        def __init__(self) -> None:
+            self._hash = real_sha256()
+
+        def update(self, chunk: bytes) -> None:
+            mutate_source_once()
+            self._hash.update(chunk)
+
+        def hexdigest(self) -> str:
+            return self._hash.hexdigest()
+
+    monkeypatch.setattr(database_preparation.hashlib, "sha256", MutatingHash)
+
+    with pytest.raises(ConfigError, match="changed during capture"):
+        database_preparation._verified_file(archive_path)
+
+    assert state["mutated"]
+    assert archive_path.stat().st_size == len(original)
+
+
 def test_local_archive_capture_rejects_symlink_without_writing_snapshot(
     tmp_path: Path,
 ) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import math
 import os
@@ -192,19 +193,43 @@ def _verified_file(
     expected_sha256: str | None = None,
     source_label: str = "selected backup",
 ) -> tuple[tuple[int, int, int, int], str]:
+    descriptor = -1
     try:
-        info = os.stat(path, follow_symlinks=False)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
             raise ConfigError(f"{source_label} is not a regular file")
         if expected_size is not None and info.st_size != expected_size:
             raise ConfigError(f"{source_label} size does not match captured evidence")
-        digest = _sha256_no_follow(path)
-    except (OSError, ValueError) as exc:
+        identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            final_info = os.fstat(stream.fileno())
+        final_identity = (
+            final_info.st_dev,
+            final_info.st_ino,
+            final_info.st_size,
+            final_info.st_mtime_ns,
+        )
+        if final_identity != identity:
+            raise ConfigError(f"{source_label} changed during capture")
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ConfigError(f"{source_label} is not a regular file") from exc
         raise ConfigError(f"{source_label} file is unavailable") from exc
-    actual_digest = digest
+    except ValueError as exc:
+        raise ConfigError(f"{source_label} file is unavailable") from exc
+    finally:
+        if descriptor != -1:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+    actual_digest = digest.hexdigest()
     if expected_sha256 and actual_digest != expected_sha256:
         raise ConfigError(f"{source_label} content does not match captured evidence")
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns), actual_digest
+    return identity, actual_digest
 
 
 def _sha256_no_follow(path: Path) -> str:
