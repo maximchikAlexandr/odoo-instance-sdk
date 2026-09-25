@@ -266,8 +266,17 @@ def db_list(
     raise click.exceptions.Exit(status)
 
 
-@db_group.command("restore", help="Restore one retained backup into a new database.")
-@click.argument("backup_uuid")
+@db_group.command(
+    "restore", help="Restore one retained backup or local archive into a new database."
+)
+@click.argument("backup_uuid", required=False)
+@click.option(
+    "--file",
+    "archive_file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Restore a caller-owned local Odoo ZIP archive.",
+)
 @click.option("--target", "target_database", default=None, help="Exact new database name.")
 @click.option(
     "--reset-admin-password",
@@ -290,7 +299,8 @@ def db_list(
 @pass_cli_context
 def db_restore(  # noqa: C901
     ctx: CliContext,
-    backup_uuid: str,
+    backup_uuid: str | None,
+    archive_file: Path | None,
     target_database: str | None,
     reset_admin_password: bool,
     yes: bool,
@@ -300,8 +310,14 @@ def db_restore(  # noqa: C901
     output_format: str | None,
     json_output: bool,
 ) -> None:
-    """Restore one exact catalogue backup without downloading it again."""
+    """Restore one exact catalogue backup or caller-owned local archive."""
     output_mode = resolve_output_mode(output_format, json_output)
+    if backup_uuid is None and archive_file is None:
+        raise click.UsageError("db restore requires exactly one of BACKUP_UUID or --file")
+    if backup_uuid is not None and archive_file is not None:
+        raise click.UsageError("db restore accepts exactly one of BACKUP_UUID or --file")
+    if replace_environment and archive_file is not None:
+        raise click.UsageError("--replace is only available for a retained backup UUID")
     if replace_environment and target_database is not None:
         raise click.UsageError("--replace cannot be combined with --target")
     if not dry_run and not yes and output_mode is not OutputMode.RICH:
@@ -314,16 +330,18 @@ def db_restore(  # noqa: C901
         )
         raise click.exceptions.Exit(1)
 
-    try:
-        backup_id = uuid.UUID(backup_uuid)
-    except (ValueError, TypeError, AttributeError) as exc:
-        fail(
-            output_mode,
-            "db.restore",
-            "backup identifier must be a complete UUID",
-            dry_run=dry_run,
-        )
-        raise AssertionError from exc
+    backup_id: uuid.UUID | None = None
+    if backup_uuid is not None:
+        try:
+            backup_id = uuid.UUID(backup_uuid)
+        except (ValueError, TypeError, AttributeError) as exc:
+            fail(
+                output_mode,
+                "db.restore",
+                "backup identifier must be a complete UUID",
+                dry_run=dry_run,
+            )
+            raise AssertionError from exc
 
     admin_password: str | None = None
     admin_password_provenance = "environment"
@@ -339,6 +357,7 @@ def db_restore(  # noqa: C901
         client = _client_class()(config=_client_config_class()(executable="odoo"))
         command: _InspectableCommand[msgspec.Struct]
         if replace_environment:
+            assert backup_id is not None
             environment = resolve_environment(client, ctx.env, cwd=Path.cwd())
             _validate_replace_context(client, environment)
             command = cast(
@@ -353,8 +372,15 @@ def db_restore(  # noqa: C901
             )
         else:
             from odoo_instance_sdk.internal.dbprep.source import _CatalogueRestoreSource
+            from odoo_instance_sdk.models import LocalArchiveRestoreSource
 
             project_path = resolve_project_path(ctx)
+            restore_source: LocalArchiveRestoreSource | _CatalogueRestoreSource
+            if archive_file is not None:
+                restore_source = LocalArchiveRestoreSource(path=str(archive_file))
+            else:
+                assert backup_id is not None
+                restore_source = _CatalogueRestoreSource(backup_id)
             command = cast(
                 "_InspectableCommand[msgspec.Struct]",
                 client.environments.refresh_database_command(
@@ -363,7 +389,7 @@ def db_restore(  # noqa: C901
                         restore=True,
                         reset_admin_password=reset_admin_password,
                     ),
-                    restore_source=_CatalogueRestoreSource(backup_id),
+                    restore_source=restore_source,
                     target_database=target_database,
                     admin_password=admin_password,
                     admin_password_provenance=admin_password_provenance,
@@ -384,9 +410,11 @@ def db_restore(  # noqa: C901
     except Exception as exc:
         fail(output_mode, "db.restore", exc, dry_run=dry_run)
 
+    source_label = "local archive" if archive_file is not None else f"backup {backup_id}"
+
     def confirm() -> None:
         click.confirm(
-            f"Restore backup {backup_id}"
+            f"Restore {source_label}"
             + (f" into {target_database!r}" if target_database else "")
             + "?",
             default=False,
@@ -408,7 +436,8 @@ def db_restore(  # noqa: C901
             else cast(
                 "dict[str, JsonValue]",
                 {
-                    "backup_id": str(backup_id),
+                    "backup_id": str(backup_id) if backup_id is not None else None,
+                    "source_kind": "local_archive" if archive_file is not None else "catalogue",
                     "retained_database": target_database,
                     "database_confirmed": False,
                     "default_switch_confirmed": False,
@@ -434,7 +463,8 @@ def db_restore(  # noqa: C901
             dry_run=dry_run,
             result=cast("Callable[[msgspec.Struct | None], dict[str, JsonValue]]", model_to_dict),
             context={
-                "backup_id": str(backup_id),
+                "backup_id": str(backup_id) if backup_id is not None else None,
+                "source_kind": "local_archive" if archive_file is not None else "catalogue",
                 "target_database": target_database,
                 "replace": replace_environment,
             },

@@ -67,11 +67,79 @@ def test_restore_is_registered_with_exact_uuid_and_target_options() -> None:
     result = CliRunner().invoke(cli, ["db", "restore", "--help"])
 
     assert result.exit_code == 0
+    assert "[BACKUP_UUID]" in result.output
+    assert "--file" in result.output
     assert "--target" in result.output
     assert "--reset-admin-password" in result.output
     assert "--dry-run" in result.output
     assert "--yes" in result.output
     assert "--replace" in result.output
+
+
+@pytest.mark.parametrize(
+    ("source_args", "expected_exit", "expected_source", "error_text"),
+    [
+        (
+            ["00000000-0000-0000-0000-000000000007"],
+            0,
+            "catalogue",
+            None,
+        ),
+        (["--file", "backup.zip"], 0, "local_archive", None),
+        (
+            ["00000000-0000-0000-0000-000000000007", "--file", "backup.zip"],
+            2,
+            None,
+            "exactly one",
+        ),
+        ([], 2, None, "exactly one"),
+        (["--file", "backup.zip", "--replace"], 2, None, "only available"),
+    ],
+    ids=["uuid-only", "file-only", "both", "neither", "file-replace"],
+)
+def test_restore_selects_exactly_one_source_before_context_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source_args: list[str],
+    expected_exit: int,
+    expected_source: str | None,
+    error_text: str | None,
+) -> None:
+    client = MagicMock()
+    client.environments.refresh_database_command.return_value = _command(
+        DatabasePreparationResult(
+            mode=DatabasePreparationAction.RESTORE,
+            restored_database="demo_copy",
+        )
+    )
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+    if expected_source is None:
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.resolve_project_path",
+            lambda _ctx: pytest.fail("invalid source selection must fail before context access"),
+        )
+    else:
+        monkeypatch.setattr(
+            "odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path
+        )
+
+    result = CliRunner().invoke(
+        cli,
+        ["db", "restore", *source_args, "--dry-run", "--format", "json"],
+    )
+
+    assert result.exit_code == expected_exit, result.output
+    if error_text is not None:
+        assert error_text in result.stderr
+        client.environments.refresh_database_command.assert_not_called()
+        return
+
+    call = client.environments.refresh_database_command.call_args
+    restore_source = call.kwargs["restore_source"]
+    if expected_source == "catalogue":
+        assert str(restore_source.backup_id) == "00000000-0000-0000-0000-000000000007"
+    else:
+        assert restore_source.path == "backup.zip"
 
 
 def test_restore_replace_rejects_target_before_environment_resolution(
