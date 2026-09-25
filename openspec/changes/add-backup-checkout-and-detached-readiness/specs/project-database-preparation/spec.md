@@ -14,7 +14,7 @@ The workflow SHALL resolve the remote URL/database from the explicitly selected 
 
 Project-configured remote URLs SHALL be trusted for named and legacy sources. Separate origin approval SHALL NOT be required. `ODCLI_TEST_INSTANCE_ORIGIN_PINS` and `ODCLI_REMOTE_<NAME>_ORIGIN` SHALL be treated as legacy no-op variables: their absence, emptiness, mismatched or malformed values SHALL NOT affect source selection or block execution. Init and diagnostics SHALL NOT generate or request them. Existing dotenv files SHALL NOT be rewritten to remove them; normal dotenv syntax validation remains applicable.
 
-URL normalization and validation, TLS verification and the existing once-per-process cleartext-secret warning for non-loopback HTTP SHALL remain. Generic direct backup calls SHALL retain their current contract.
+URL normalization and validation, TLS verification and the existing once-per-process cleartext-secret warning for non-loopback HTTP SHALL remain. Automatic redirects SHALL remain disabled; any redirect response SHALL fail without replaying a password-bearing request. Generic direct backup calls SHALL retain their current contract.
 
 #### Scenario: Configured source needs no origin approval
 
@@ -43,9 +43,9 @@ URL normalization and validation, TLS verification and the existing once-per-pro
 - **WHEN** legacy refresh is requested without a non-empty `ODCLI_TEST_MASTER_PASSWORD`
 - **THEN** it fails before HTTP, catalog, PostgreSQL, or manifest mutation and no secret value appears in the error
 
-For a named source, the SDK SHALL derive only `ODCLI_REMOTE_<UPPER_NAME>_MASTER_PASSWORD`. Process environment SHALL override the existing owner-only project dotenv per key; worktrees SHALL resolve the registered project root. An empty process override SHALL fail. The selected project URL SHALL be trusted without a separate origin approval variable. URL validation, TLS verification, existing transport warnings and canonicalization SHALL apply. Redirects SHALL NOT forward credentials across origins. Source credentials SHALL be stripped from all child-process environments, including local Odoo, and all diagnostic projections.
+For a named source, the SDK SHALL derive only `ODCLI_REMOTE_<UPPER_NAME>_MASTER_PASSWORD`. Process environment SHALL override the existing owner-only project dotenv per key; worktrees SHALL resolve the registered project root. An empty process override SHALL fail. The selected project URL SHALL be trusted without a separate origin approval variable. URL validation, TLS verification, existing transport warnings and canonicalization SHALL apply. Redirect responses SHALL fail without follow-up requests. Every key matching a valid named-source password form SHALL be stripped from all child-process environments, including local Odoo, and all diagnostic projections.
 
-Named-source branch provenance SHALL come from its configured branch or explicit override using the same declared/unknown semantics as legacy preparation. Results and backup catalog provenance SHALL retain selected name, normalized origin, database and declared branch; configuration edits SHALL NOT rewrite historical provenance.
+Named-source branch provenance SHALL come from its configured branch or explicit override using the same declared/unknown semantics as legacy preparation. Results and backup catalog provenance SHALL retain nullable historical source name, normalized origin, database and declared branch; configuration edits or removal SHALL NOT rewrite historical provenance.
 
 #### Scenario: Two passwords remain separate
 

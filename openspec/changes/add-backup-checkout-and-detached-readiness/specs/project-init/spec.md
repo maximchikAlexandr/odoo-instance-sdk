@@ -2,7 +2,7 @@
 
 ### Requirement: Named remote sources in project configuration
 
-Project configuration SHALL support multiple named remote entries with normalized URL, explicit database and declared Git branch. Names SHALL match `[a-z][a-z0-9_]*`; invalid or duplicate names and credential-bearing URLs SHALL fail validation. Public SDK and CLI SHALL expose read/add/update/remove operations using the existing manifest. Configuration changes SHALL preserve unrelated values and SHALL NOT contact remote servers or delete operational resources.
+Project configuration SHALL support multiple named remote entries with normalized URL, explicit database and declared Git branch. Names SHALL match `[a-z][a-z0-9_]*`; invalid or duplicate names, unknown fields, and credential-bearing URLs SHALL fail validation. The public project-init surface SHALL expose listing, one immutable configure operation with explicit replace semantics, and immutable removal using the existing manifest; no additional client facade SHALL be introduced. Configuration commands SHALL capture canonical repository identity and manifest fingerprint, take the existing project lock, reject drift, preserve unrelated project values, and SHALL NOT contact remote servers or delete secrets or operational resources.
 
 #### Scenario: Configure lab and staging
 
@@ -22,7 +22,7 @@ Project configuration SHALL support multiple named remote entries with normalize
 
 ### Requirement: Initialization accepts named sources
 
-Init SHALL accept multiple typed remote entries in SDK and repeatable `--remote NAME URL DATABASE GIT_REF` in CLI, applying existing validation, no-input, overwrite and dry-run rules. Named entries SHALL satisfy the remote-configuration completeness check without requiring a legacy test entry. Re-init without remote inputs SHALL preserve existing entries. Credential availability SHALL be reported separately; secrets SHALL NOT enter the manifest.
+Init SHALL accept multiple typed remote entries in SDK and repeatable `--remote NAME URL DATABASE GIT_REF` in CLI, applying existing validation, no-input, overwrite and dry-run rules. Named entries SHALL satisfy the remote-configuration completeness check without requiring a legacy test entry. Re-init without remote inputs SHALL preserve existing entries. Credential availability SHALL be reported only as derived `ODCLI_REMOTE_<UPPER_NAME>_MASTER_PASSWORD` key names; secrets SHALL NOT be accepted by init, enter the manifest, or be written to `.odcli/.env`.
 
 #### Scenario: Headless initialization with two sources
 
