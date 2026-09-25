@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, cast
 
 import pytest
+from click.testing import CliRunner
 from rich import box
 from rich.table import Table
 
+from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.output import render_rich_text
-from odoo_instance_sdk.commands.ps import _backend_row, _process_table, _render_ps_rich
+from odoo_instance_sdk.commands.ps import (
+    _backend_row,
+    _process_column_widths,
+    _process_table,
+    _render_ps_rich,
+)
 from odoo_instance_sdk.models import (
     BackendGroupReason,
     BackendProcessGroup,
@@ -26,6 +35,11 @@ from odoo_instance_sdk.models import (
     RuntimeState,
     SharedResourcesBlock,
 )
+
+if TYPE_CHECKING:
+    from rich.console import Group
+
+    from odoo_instance_sdk.resources.monitor import EnvironmentMonitor
 
 
 def _backend(
@@ -196,12 +210,132 @@ def test_each_inventory_section_has_one_common_bordered_table() -> None:
 def test_process_tables_wrap_without_dropping_typed_rows(width: int) -> None:
     output = render_rich_text(_render_ps_rich(_inventory(), width=width), width=width)
 
+    _assert_process_table_boundaries(output)
     assert "backend" in output
     assert "docker_vm" in output
     assert "stopped" in output
     assert "source=odcli-" in output
     assert "codex" in output
     assert all(len(line) <= width for line in output.splitlines())
+
+
+@pytest.mark.unit
+def test_single_process_section_does_not_add_layout_placeholder() -> None:
+    inventory = _inventory()
+    single_section = ProcessInventory(
+        schema_version=inventory.schema_version,
+        generated_at=inventory.generated_at,
+        sample_time=inventory.sample_time,
+        project_id=inventory.project_id,
+        shared=inventory.shared,
+        main_checkout=None,
+        environments=(),
+    )
+
+    rendered = _render_ps_rich(single_section, width=80)
+    tables = [item for item in rendered.renderables if isinstance(item, Table)]
+
+    assert len(tables) == 1
+    _assert_process_table_boundaries(render_rich_text(rendered, width=80))
+
+
+@pytest.mark.unit
+def test_process_layout_measures_unicode_and_multiline_cells() -> None:
+    rows = (("表", "ready", "host:1", "1", "1.0%", "2 KiB", "宽\n表格"),)
+    widths = _process_column_widths(rows, width=80)
+    output = render_rich_text(_process_table(rows, widths=widths), width=80)
+
+    assert "表" in output
+    assert "表格" in output
+    assert all(len(line) <= 80 for line in output.splitlines())
+
+
+@pytest.mark.unit
+def test_public_ps_one_shot_uses_aligned_frame_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMonitor:
+        def processes_command(self, *, project_id: str | None = None) -> object:
+            return type("Command", (), {"run": lambda _self: _inventory()})()
+
+    monkeypatch.setattr("odoo_instance_sdk.commands.ps.EnvironmentMonitor", FakeMonitor)
+    result = CliRunner().invoke(cli, ["ps", "--all-projects"], env={"COLUMNS": "80"})
+
+    assert result.exit_code == 0, result.output
+    _assert_process_table_boundaries(result.output)
+    assert all(len(line) <= 80 for line in result.output.splitlines())
+
+
+@pytest.mark.unit
+def test_ps_watch_recalculates_layout_for_each_successful_refresh(  # noqa: C901
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from odoo_instance_sdk.commands import ps as ps_command_module
+
+    class FakeConsole:
+        def __init__(self) -> None:
+            self.widths = iter((80, 120))
+            self.reads = 0
+
+        @property
+        def width(self) -> int:
+            self.reads += 1
+            return next(self.widths)
+
+    class FakeLive:
+        def __init__(self) -> None:
+            self.frames: list[Group] = []
+
+        def __enter__(self) -> FakeLive:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def update(self, renderable: Group, *, refresh: bool) -> None:
+            self.frames.append(renderable)
+
+    class FakeMonitor:
+        def __init__(self) -> None:
+            self.samples = iter((_inventory(), _inventory()))
+
+        def processes(self, *, project_id: str | None = None) -> ProcessInventory:
+            try:
+                return next(self.samples)
+            except StopIteration as exc:
+                raise KeyboardInterrupt from exc
+
+    console = FakeConsole()
+    live = FakeLive()
+    monkeypatch.setattr(ps_command_module, "Console", lambda: console)
+    monkeypatch.setattr(ps_command_module, "Live", lambda *_args, **_kwargs: live)
+    monkeypatch.setattr(time, "sleep", lambda _interval: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        ps_command_module._run_ps_live(
+            cast("EnvironmentMonitor", FakeMonitor()), project_id=None, interval=0.1
+        )
+
+    assert console.reads == 2
+    assert len(live.frames) == 2
+    first, second = live.frames
+    first_tables = [item for item in first.renderables if isinstance(item, Table)]
+    second_tables = [item for item in second.renderables if isinstance(item, Table)]
+    assert [column.width for column in first_tables[0].columns] != [
+        column.width for column in second_tables[0].columns
+    ]
+    for frame, width in zip(live.frames, (80, 120)):
+        _assert_process_table_boundaries(render_rich_text(frame, width=width))
+
+
+def _assert_process_table_boundaries(output: str) -> None:
+    borders = tuple(
+        (len(line), tuple(index for index, char in enumerate(line) if char in "┬┐"))
+        for line in output.splitlines()
+        if line.startswith("┌")
+    )
+    assert len(borders) >= 1
+    assert len(set(borders)) == 1
 
 
 @pytest.mark.unit
