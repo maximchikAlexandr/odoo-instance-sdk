@@ -246,7 +246,7 @@ def _preparation_action_steps(
                     step_id="database.prepare.local-archive.cleanup",
                     action="cleanup-local-archive-staging",
                     description="Remove command-owned local archive staging artifacts",
-                    read_only=True,
+                    mutating=True,
                 ),
             )
         )

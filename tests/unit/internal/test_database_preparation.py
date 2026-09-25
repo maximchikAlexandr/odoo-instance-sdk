@@ -789,6 +789,10 @@ def test_local_archive_refresh_plan_captures_target_and_honest_actions(
     )
     assert "database.prepare.catalogue-backup" not in step_ids
     assert str(archive_path) not in repr(command.plan)
+    plan_steps = {step.step_id: step for step in command.plan.steps}
+    assert plan_steps["database.prepare.local-archive.validate"].read_only is True
+    assert plan_steps["database.prepare.local-archive.snapshot"].mutating is True
+    assert plan_steps["database.prepare.local-archive.cleanup"].mutating is True
     reservation = next(
         step for step in command.plan.steps if step.step_id == "database.restore.exists-reservation"
     )
