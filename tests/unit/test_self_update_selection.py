@@ -457,7 +457,7 @@ def test_mutable_ref_already_current_has_no_mutation_plan(
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     executable.chmod(0o755)
     provenance = _provenance(executable=executable)
-    executor = _executor_factory({"uv_stdout": f"resolved {_SHA_A}\n"})
+    executor = _executor_factory({"resolve_stdout": f"{_SHA_A}\trefs/heads/main\n"})
     calls: list[str] = []
 
     def fake_update_command(*, ref: str, **_kwargs: object) -> Command[UpdateResult]:

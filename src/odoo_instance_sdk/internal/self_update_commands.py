@@ -34,7 +34,6 @@ from odoo_instance_sdk.internal.self_update import (
     InstalledProvenance,
     _clear_journal,
     _clear_snapshot,
-    _dry_run_flag_unsupported,
     _extract_target_sha,
     _failure_result,
     _install_argv,
@@ -45,12 +44,12 @@ from odoo_instance_sdk.internal.self_update import (
     _phase_durations,
     _process_output_text,
     _read_journal,
+    _resolve_argv,
     _restore_snapshot,
     _snapshot_metadata,
     _update_journal_path,
     _update_lock_path,
     _update_snapshot_dir,
-    _uv_version_string,
     _verify_installed_revision,
     _write_journal,
     _write_snapshot,
@@ -115,44 +114,41 @@ def _build_check_command(
     provenance: InstalledProvenance,
     executor: ProcessExecutor | None,
 ) -> Command[UpdateResult]:
-    check_step = PreparedStep(
-        step_id="update.resolve.check",
-        argv=_install_argv(ref, dry_run=True),
-        read_only=True,
+    check_step = (
+        None
+        if _is_full_sha(ref)
+        else PreparedStep(
+            step_id="update.resolve.check",
+            argv=_resolve_argv(ref),
+            read_only=True,
+        )
     )
 
     def callback(context: RunContext[UpdateResult]) -> UpdateResult:
         context.action("update.inspect")
         context.complete_action("update.inspect")
         context.action("update.resolve")
-        result = cast("ProcessResult", context.process_prepared(check_step))
-        if result.returncode != 0:
-            stderr = result.stderr if isinstance(result.stderr, str) else ""
-            if _dry_run_flag_unsupported(str(stderr)):
-                detail = str(stderr).strip() or "uv rejected --dry-run"
+        target_sha = ref.lower()
+        if check_step is not None:
+            result = cast("ProcessResult", context.process_prepared(check_step))
+            if result.returncode != 0:
+                stderr = result.stderr if isinstance(result.stderr, str) else ""
                 return _failure_result(
                     "unsupported_install",
                     provenance=provenance,
                     manual_argv=_MANUAL_INSTALL_ARGV,
-                    next_step=(
-                        f"uv {_uv_version_string()} does not support tool install --dry-run; {detail}"
-                    ),
+                    next_step=str(stderr).strip() or "git ls-remote could not resolve the ref",
                 )
-            return _failure_result(
-                "unsupported_install",
-                provenance=provenance,
-                manual_argv=_MANUAL_INSTALL_ARGV,
-                next_step="upgrade uv or install manually with manual_argv",
-            )
-        output = _process_output_text(result)
-        target_sha = _extract_target_sha(ref, str(output))
-        if target_sha is None:
-            return _failure_result(
-                "unsupported_install",
-                provenance=provenance,
-                manual_argv=_MANUAL_INSTALL_ARGV,
-                next_step="could not parse target SHA from uv output (sha_unparsed)",
-            )
+            output = _process_output_text(result)
+            resolved_sha = _extract_target_sha(ref, str(output))
+            if resolved_sha is None:
+                return _failure_result(
+                    "unsupported_install",
+                    provenance=provenance,
+                    manual_argv=_MANUAL_INSTALL_ARGV,
+                    next_step="could not parse target SHA from git ls-remote output (sha_unparsed)",
+                )
+            target_sha = resolved_sha
         context.complete_action("update.resolve")
         outcome: UpdateOutcome = (
             "already_current"
@@ -193,10 +189,10 @@ def _build_check_command(
         PreparedAction(
             step_id="update.resolve",
             action="resolve",
-            description="Resolve target revision via uv --dry-run",
+            description="Resolve target revision via git ls-remote",
             read_only=True,
         ),
-        check_step,
+        *((check_step,) if check_step is not None else ()),
     )
     plan = ExecutionPlan(steps=tuple(step.public_projection() for step in steps))
     prepared = prepared_command(callback, steps, executor=executor or SubprocessExecutor())
@@ -680,7 +676,7 @@ def _build_staged_command(
     """Build the first, read-only stage of the mutable-ref update flow."""
     resolve_step = PreparedStep(
         step_id="update.resolve",
-        argv=_install_argv(ref, dry_run=True),
+        argv=_resolve_argv(ref),
         read_only=True,
     )
     active_executor = executor or SubprocessExecutor()

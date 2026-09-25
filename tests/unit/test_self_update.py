@@ -159,15 +159,15 @@ def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
             return _process_result(
                 step,
                 returncode=cast("int", effects.get("resolve_rc", 0)),
-                stdout=str(effects.get("uv_stdout", f"install {_SHA_B}")),
-                stderr=str(effects.get("uv_stderr", "")),
+                stdout=str(effects.get("resolve_stdout", f"{_SHA_B}\trefs/heads/main")),
+                stderr=str(effects.get("resolve_stderr", "")),
             )
         if step.step_id == "update.resolve.check":
             return _process_result(
                 step,
-                returncode=cast("int", effects.get("install_rc", 0)),
-                stdout=str(effects.get("uv_stdout", f"install {_SHA_B}")),
-                stderr=str(effects.get("uv_stderr", "")),
+                returncode=cast("int", effects.get("resolve_rc", 0)),
+                stdout=str(effects.get("resolve_stdout", f"{_SHA_B}\trefs/heads/main")),
+                stderr=str(effects.get("resolve_stderr", "")),
             )
         if step.step_id == "update.inspect.ancestry-installed":
             relation = effects.get("ancestry_relation", "descendant")
@@ -205,24 +205,38 @@ _UPDATE_COMMAND_MATRIX = (
     ),
     pytest.param(
         {"ref": "main", "check": True},
-        {"uv_stdout": f"would install {_SHA_B}\n"},
+        {"resolve_stdout": f"{_SHA_B}\trefs/heads/main\n"},
         "updated",
         (),
         id="check-resolve",
     ),
     pytest.param(
         {"ref": "main", "check": True},
-        {"uv_stdout": f"resolved {_SHA_A}\n"},
+        {"resolve_stdout": f"{_SHA_A}\trefs/heads/main\n"},
         "already_current",
         (),
         id="check-already-current",
     ),
     pytest.param(
+        {"ref": "v0.2.0", "check": True},
+        {"resolve_stdout": (f"{_SHA_A}\trefs/tags/v0.2.0\n{_SHA_B}\trefs/tags/v0.2.0^{{}}\n")},
+        "updated",
+        (),
+        id="check-annotated-tag",
+    ),
+    pytest.param(
+        {"ref": _SHA_B, "check": True},
+        {},
+        "updated",
+        (),
+        id="check-exact-sha",
+    ),
+    pytest.param(
         {"ref": "main", "check": True},
-        {"install_rc": 2, "uv_stderr": "error: unexpected argument '--dry-run' found"},
+        {"resolve_rc": 2, "resolve_stderr": "fatal: remote ref not found"},
         "unsupported_install",
         (),
-        id="check-dry-run-unsupported",
+        id="check-ref-unavailable",
     ),
     pytest.param(
         {"ref": _SHA_OLD, "allow_downgrade": False},
@@ -354,9 +368,8 @@ def test_update_command_matrix(
     assert result.outcome == expected_outcome
     if expected_outcome == "unsupported_install":
         assert result.manual_argv is not None
-        if command_kwargs.get("check") and effects.get("uv_stderr"):
-            assert "uv " in (result.next_step or "")
-            assert "dry-run" in (result.next_step or "").lower()
+        if command_kwargs.get("check") and effects.get("resolve_stderr"):
+            assert "remote ref not found" in (result.next_step or "")
     if expected_outcome == "update_incomplete":
         assert result.recovery_argv is not None
         assert result.journal_state == "present"
@@ -518,13 +531,20 @@ def test_dry_run_command_has_frozen_process_steps(
     executable.chmod(0o755)
     _patch_distribution(monkeypatch, _FakeDist())
     _patch_provenance(monkeypatch, _provenance(executable=executable))
-    executor = _executor_factory({"uv_stdout": f"would install {_SHA_B}\n"})
+    executor = _executor_factory({"resolve_stdout": f"{_SHA_B}\trefs/heads/main\n"})
     command = update_command(ref="main", dry_run=True, executor=executor)
     process_steps = [step for step in command.plan.steps if isinstance(step, ProcessStep)]
     assert [step.step_id for step in process_steps] == ["update.resolve"]
     assert executor.executed == []
-    assert process_steps[0].argv[0] == "uv"
-    assert "--dry-run" in process_steps[0].argv
+    assert process_steps[0].argv == (
+        "git",
+        "ls-remote",
+        "--exit-code",
+        "https://github.com/maximchikAlexandr/odoo-instance-sdk.git",
+        "refs/heads/main",
+        "refs/tags/main",
+        "refs/tags/main^{}",
+    )
     resolution = command.run()
     assert resolution.target_sha == _SHA_B
     mutation = update_command(ref=_SHA_B, executor=executor)
@@ -797,7 +817,7 @@ def test_install_failure_rechecks_revision_before_failing(
         {
             "install_rc": 1,
             "maintenance_rc": 0,
-            "uv_stdout": f"installed {_SHA_B}\n",
+            "resolve_stdout": f"{_SHA_B}\trefs/heads/main\n",
         }
     )
     result = update(ref="main", executor=executor)
