@@ -4,7 +4,7 @@ Bug-report drafts currently write `unknown` for Odoo and PostgreSQL even when th
 
 ## What Changes
 
-- Capture the current managed project, when one is available, through a process-free snapshot that reuses the existing catalog, Git-marker, and manifest readers during `bug-report init` command construction.
+- Capture the current managed project, when one is available, through a process-free snapshot that validates the local Git marker and preserves the nearest-repository boundary while reading the existing catalog and manifest during `bug-report init` command construction.
 - Discover Odoo and PostgreSQL versions through bounded, read-only providers backed by the resolved project/runtime configuration.
 - Populate each version independently and retain `unknown` only for the provider that is unavailable, malformed, times out, or fails.
 - Keep draft creation available outside managed projects, avoid starting services, and prevent credentials or other secrets from entering the report or command plan.
