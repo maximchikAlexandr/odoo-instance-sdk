@@ -1943,7 +1943,7 @@ def _patch_leaf_external(  # noqa: C901
             repository="maximchikAlexandr/odoo-instance-sdk",
             title="matrix draft",
             body="REPORT_ID: 00000000-0000-0000-0000-000000000014\n",
-            labels=("alpha-testing",),
+            labels=("bug",),
             payload_sha256="0" * 64,
             submit_blockers=("missing independent review (round 1..3 required)",),
             outcome="dry_run",

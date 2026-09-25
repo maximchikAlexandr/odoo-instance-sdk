@@ -32,7 +32,7 @@ from odoo_instance_sdk.execution import JsonValue
 from odoo_instance_sdk.internal.bug_report import (
     _DEFAULT_REPOSITORY,
     _gh_recheck_search_argv,
-    alpha_testing_labels,
+    bug_report_labels,
     bug_report_lock_path,
     bug_reports_root,
     read_bug_report_repository,
@@ -182,7 +182,7 @@ def test_submit_dry_run_returns_validation_without_side_effects(tmp_path: Path) 
     assert preview.report_valid is True
     assert preview.submit_ready is False
     assert preview.repository == _DEFAULT_REPOSITORY
-    assert preview.labels == alpha_testing_labels()
+    assert preview.labels == bug_report_labels()
     assert preview.payload_sha256
     assert preview.submit_blockers
 
@@ -195,7 +195,7 @@ def test_submit_dry_run_returns_validation_without_side_effects(tmp_path: Path) 
     assert payload["dry_run"] is True
     assert payload["result"]["report_valid"] is True
     assert payload["result"]["submit_ready"] is False
-    assert payload["result"]["labels"] == ["alpha-testing"]
+    assert payload["result"]["labels"] == ["bug"]
     assert (report_dir / "metadata.json").read_text(encoding="utf-8") == metadata_before
 
 
@@ -309,7 +309,7 @@ def test_successful_submit_records_issue_and_uses_proc_recorder() -> None:
             "--title",
             "Stop does not stop foreground run",
             "--label",
-            "alpha-testing",
+            "bug",
             "--body-file",
             "-",
         )
@@ -747,4 +747,4 @@ def test_config_repository_override_is_used() -> None:
     assert metadata["repository"] == "example/custom-repo"
     preview = bug_report_submit_preview(draft.report_id)
     assert preview.repository == "example/custom-repo"
-    assert preview.labels == ("alpha-testing",)
+    assert preview.labels == ("bug",)

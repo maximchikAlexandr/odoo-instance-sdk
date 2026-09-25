@@ -48,7 +48,7 @@ from odoo_instance_sdk.internal.bug_report import (
     _validate_report_id,
     _write_file_mode_0600,
     _write_metadata,
-    alpha_testing_labels,
+    bug_report_labels,
     bug_report_lock_path,
     bug_reports_root,
     max_review_rounds,
@@ -219,7 +219,7 @@ def bug_report_init_command(
     if not clean_title:
         raise BugReportInvalidError("title must be a non-empty string")
     repository = read_bug_report_repository() or _DEFAULT_REPOSITORY
-    labels = alpha_testing_labels()
+    labels = bug_report_labels()
     report_id = str(uuid.uuid4())
 
     return cast(
@@ -258,7 +258,7 @@ def _load_payload(report_id: str) -> tuple[BugReportPayload, dict[str, JsonValue
         repository = read_bug_report_repository()
     labels_value = metadata.get("labels")
     if not isinstance(labels_value, list) or not labels_value:
-        labels = alpha_testing_labels()
+        labels = bug_report_labels()
     else:
         labels = tuple(str(item) for item in labels_value)
     report_text = _read_report(report_dir)
@@ -318,7 +318,7 @@ def _record_submit_intent(
         "repository": repository,
         "title": title,
         "payload_sha256": payload_sha256,
-        "labels": list(alpha_testing_labels()),
+        "labels": list(bug_report_labels()),
     }
     updated = {**metadata, "submit_intent": intent}
     _write_metadata(report_dir, updated)
@@ -456,7 +456,7 @@ def _submit_preview_result(
     report_errors: Sequence[str],
     submit_blockers: Sequence[str],
 ) -> BugReportSubmitResult:
-    labels = alpha_testing_labels()
+    labels = bug_report_labels()
     return BugReportSubmitResult(
         report_id=report_id,
         report_valid=report_valid,
@@ -787,7 +787,7 @@ def bug_report_submit_command(
         reviews=reviews,
     )
 
-    labels = alpha_testing_labels()
+    labels = bug_report_labels()
     payload_sha = payload.sha256()
     gh_argv = _gh_argv(payload.repository, payload.title)
     recheck_search_argv = _gh_recheck_search_argv(payload.repository, report_id)

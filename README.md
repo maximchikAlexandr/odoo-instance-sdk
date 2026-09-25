@@ -515,7 +515,7 @@ stdout, and stderr and returns Odoo's exit code.
 structure, size (262144-byte `report.md` cap), and secret redaction; publish
 requires the last `reviews/N.json` (`N` in 1..3) to be `approved` for the
 payload hash. There is no `--skip-review` or `--force`. `gh` is invoked through
-`internal/proc` with `--body-file -`; default labels are `alpha-testing` only.
+`internal/proc` with `--body-file -`; the default label is `bug` only.
 Use the portable `odcli-bug-report` agent skill for reviewer rounds and
 emergency unblock paths.
 
