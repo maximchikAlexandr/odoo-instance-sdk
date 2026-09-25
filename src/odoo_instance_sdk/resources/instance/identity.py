@@ -955,9 +955,12 @@ class _IdentityMixin:
         executable_prefix = self._executable_prefix()
         if not executable_prefix:
             raise RuntimeError("project runtime identity configuration is unreadable")
+        effective_logfile = resolve_effective_logfile(config, self.config.default_cwd)
         expected_argv = (
             *executable_prefix,
             *_build_cli_args(config),
+            "--logfile",
+            str(effective_logfile),
             *resolve_runtime_argv_extra(self.config.default_run_args),
         )
         return (

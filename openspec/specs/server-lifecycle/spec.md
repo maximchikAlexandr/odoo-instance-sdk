@@ -351,7 +351,7 @@ Logs SHALL be written to the path from `resolve_effective_logfile()` in `resourc
 #### Scenario: Stop targets the detached runtime
 
 - **WHEN** `stop()` runs after a detached launch
-- **THEN** it stops exactly that persisted runtime
+- **THEN** it matches the launch argv including the injected effective `--logfile` and stops exactly that persisted runtime
 
 #### Scenario: Logs work after detached launch
 
