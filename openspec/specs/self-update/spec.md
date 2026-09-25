@@ -1,7 +1,7 @@
 # self-update Specification
 
 ## Purpose
-TBD - created by archiving change address-alpha-testing-defects-74. Update Purpose after archive.
+Define a provenance-aware, recoverable self-upgrade flow for OdCLI uv-tool installations, including immutable revision resolution, migration, verification, and rollback contracts.
 
 ## Requirements
 
@@ -26,7 +26,7 @@ Inspect SHALL be in-process ActionSteps. `PUBLIC_LEAF_CASES` SHALL contain two r
 `odcli update` SHALL run nine phases: Inspect, Resolve, Preflight, Quiesce, Snapshot, Install, Migrate-in-a-new-process, Verify, Commit/Cleanup. It SHALL be a coordinating process and SHALL NOT continue running old Python code after replacing its own environment.
 
 1. **Inspect** — in-process `read_uv_tool_direct_url()` plus `sys.executable` and uv-tool layout; check `uv` presence, write-access, and supported provenance.
-2. **Resolve** — mutating `--dry-run` SHALL NOT spawn. `--check` SHALL run one ProcessStep `("uv", "tool", "install", "--force", "--dry-run", "odoo-instance-sdk @ git+https://github.com/maximchikAlexandr/odoo-instance-sdk.git@<ref>")`. If uv exits non-zero because `--dry-run` is unknown, fail with `unsupported_install` naming that uv version; do not invent a pip fallback. Target SHA follows design D16 (`--ref` SHA, else last `\b[0-9a-f]{40}\b` in uv stdout+stderr, else `sha_unparsed`). Mutating `already_current` without uv happens only when `--ref` is a 40-character lowercase hex SHA equal to installed `vcs_info.commit_id`.
+2. **Resolve** — mutating `--dry-run` SHALL NOT spawn. For a mutable branch or tag, `--check` SHALL run one read-only ProcessStep `("git", "ls-remote", "--exit-code", "https://github.com/maximchikAlexandr/odoo-instance-sdk.git", "refs/heads/<ref>", "refs/tags/<ref>", "refs/tags/<ref>^{}")`; an annotated tag SHALL resolve to its peeled commit. A non-zero exit or output without a full commit SHA SHALL return `unsupported_install` with a concrete diagnostic and manual install argv. A 40-character lowercase hex `--ref` is already immutable and SHALL require no resolver process. Mutating `already_current` without uv happens only when that SHA equals installed `vcs_info.commit_id`.
 3. **Preflight** — check Python/platform compatibility, `shutil.disk_usage(get_user_root()).free` minus `max(1 GiB, 10%)`, user-data schema, and the full migration path to target before any mutation. Shortfall is `preflight_failed`. Preflight SHALL NOT spawn uv.
 4. **Quiesce** — acquire `exclusive_lock` on `get_locks_dir()/odcli-update.lock`. On conflict, return the existing lock error with that path. The Odoo runtime SHALL NOT be stopped unless a migration explicitly requires it.
 5. **Snapshot** — save a verifiable rollback snapshot of affected metadata: current exact install requirement/ref, package revision, SQLite catalog, and other files actually touched by the migration plan. Large backup/filestore data SHALL NOT be copied without need.
@@ -35,7 +35,7 @@ Inspect SHALL be in-process ActionSteps. `PUBLIC_LEAF_CASES` SHALL contain two r
 8. **Verify** — performed by ProcessStep 2, not a third parent spawn.
 9. **Commit/Cleanup** — mark success only after verify; delete the snapshot directory.
 
-`--dry-run` SHALL NOT launch a process. `--check` SHALL be the only Resolve spawn. Passing `--check` and `--dry-run` together SHALL be a Click usage error with exit code 2 before SDK resolution.
+`--dry-run` SHALL NOT launch a process. For a mutable branch or tag, `--check` SHALL be the only Resolve spawn; an exact SHA requires none. Passing `--check` and `--dry-run` together SHALL be a Click usage error with exit code 2 before SDK resolution.
 
 #### Scenario: already current is a no-op for an exact SHA
 
@@ -105,7 +105,7 @@ A timeout or network loss during `uv` SHALL NOT automatically mean the install f
 
 `odcli update` SHALL support Rich, JSON, and TOON with one typed contract. The result SHALL contain at least: `outcome` (`updated`, `already_current`, `unsupported_install`, `preflight_failed`, `rolled_back`, `update_incomplete`); source repository; previous/target/final version and full commit SHA; executable/tool-environment path in a safe normalized form; executed/skipped migration IDs and final schema versions; snapshot/journal state; rollback outcome; one concrete next step; and per-phase duration without secrets and without GitHub credentials/tokens.
 
-Interactive confirmation SHALL be required before changing the install and data. `--yes` SHALL permit non-interactive execution after a successful preflight. `--no-input` without `--yes` SHALL exit before mutations. `odcli update --check` SHALL be the process-previewable-read-only variant with the uv `--dry-run` ProcessStep from design D16. `--dry-run` SHALL be a full plan without spawning. No phase SHALL log GitHub credentials, environment secrets, project passwords, or private config contents.
+Interactive confirmation SHALL be required before changing the install and data. `--yes` SHALL permit non-interactive execution after a successful preflight. `--no-input` without `--yes` SHALL exit before mutations. `odcli update --check` SHALL be the read-only variant with the `git ls-remote` ProcessStep defined by Resolve for mutable refs and no resolver process for an exact SHA. `--dry-run` SHALL be a full plan without spawning. No phase SHALL log GitHub credentials, environment secrets, project passwords, or private config contents.
 
 #### Scenario: check is read-only
 

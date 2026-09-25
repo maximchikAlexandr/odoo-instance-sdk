@@ -33,10 +33,8 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.execution import Command, JsonValue
 from odoo_instance_sdk.internal.paths import get_locks_dir, get_user_root
 from odoo_instance_sdk.internal.proc import (
-    PreparedStep,
     ProcessExecutor,
     ProcessResult,
-    SubprocessExecutor,
 )
 from odoo_instance_sdk.internal.proc.run import run_captured
 from odoo_instance_sdk.models.update import UpdateOutcome, UpdatePhaseDuration, UpdateResult
@@ -378,11 +376,21 @@ def _is_full_sha(value: str) -> bool:
     return bool(_HEX40_RE.match(value))
 
 
-def _install_argv(ref: str, *, dry_run: bool = False) -> tuple[str, ...]:
-    argv: tuple[str, ...] = ("uv", "tool", "install", "--force")
-    if dry_run:
-        argv = (*argv, "--dry-run")
-    return (*argv, _install_requirement(ref))
+def _install_argv(ref: str) -> tuple[str, ...]:
+    return ("uv", "tool", "install", "--force", _install_requirement(ref))
+
+
+def _resolve_argv(ref: str) -> tuple[str, ...]:
+    """Resolve a mutable branch or tag without modifying the uv tool."""
+    return (
+        "git",
+        "ls-remote",
+        "--exit-code",
+        _SOURCE_REPO,
+        f"refs/heads/{ref}",
+        f"refs/tags/{ref}",
+        f"refs/tags/{ref}^{{}}",
+    )
 
 
 def _maintenance_argv(executable: str | Path) -> tuple[str, ...]:
@@ -655,24 +663,6 @@ def _install_reached_target(*, ref: str, output: str, previous_sha: str | None) 
     return previous_sha is not None and commit_id != previous_sha
 
 
-def _uv_version_string() -> str:
-    uv_path = shutil.which("uv")
-    if uv_path is None:
-        return "unknown"
-    version = SubprocessExecutor().execute(
-        PreparedStep(
-            step_id="update.inspect.uv-version",
-            argv=(uv_path, "--version"),
-            read_only=True,
-        ),
-    )
-    if version.returncode != 0:
-        return "unknown"
-    stdout = version.stdout if isinstance(version.stdout, str) else ""
-    first_line = stdout.strip().splitlines()
-    return first_line[0] if first_line else "unknown"
-
-
 def _ensure_maintenance_path() -> None:
     """Recover a usable command path for legacy hermetic maintenance children."""
     if shutil.which("uv") is not None:
@@ -701,11 +691,6 @@ def prepare_maintenance_environment() -> None:
                 os.environ["HOME"] = str(parent.parent)
                 break
     _ensure_maintenance_path()
-
-
-def _dry_run_flag_unsupported(stderr: str) -> bool:
-    lowered = stderr.lower()
-    return "dry-run" in lowered or "--dry-run" in lowered or "dry_run" in lowered
 
 
 def _verify_installed_revision(
