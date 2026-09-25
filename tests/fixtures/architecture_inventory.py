@@ -99,17 +99,17 @@ PUBLIC_PROCESS_METHODS: Final[dict[str, int]] = {}
 
 DIRECT_HTTPX_USAGE: Final[frozenset[SourceLocation]] = frozenset(
     {
-        ("src/odoo_instance_sdk/internal/transport/base.py", 202),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 205),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 229),
-        ("src/odoo_instance_sdk/internal/transport/base.py", 231),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 76),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 78),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 154),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 203),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 208),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 233),
+        ("src/odoo_instance_sdk/internal/transport/base.py", 235),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 77),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 79),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 156),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 157),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 208),
-        ("src/odoo_instance_sdk/internal/transport/odoo.py", 211),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 158),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 159),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 210),
         ("src/odoo_instance_sdk/internal/transport/odoo.py", 213),
+        ("src/odoo_instance_sdk/internal/transport/odoo.py", 215),
     }
 )

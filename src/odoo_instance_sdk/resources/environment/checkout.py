@@ -29,11 +29,10 @@ from odoo_instance_sdk.internal.locks import (
     provisioning_lock_path,
     python_env_lock_path,
 )
-from odoo_instance_sdk.internal.odoo_config import (
-    parse_odoo_config,
-)
+from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.port_allocation import find_free_port
-from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.project_env import load_project_environment
+from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.models import (
     BackupFreshness,
@@ -85,6 +84,7 @@ if TYPE_CHECKING:
         RunContext,
     )
     from odoo_instance_sdk.models.backup import DevelopmentEnvironment
+    from odoo_instance_sdk.resources.instance import AuxiliaryRestoreSession
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
 
 
@@ -583,7 +583,44 @@ class _CheckoutMixin:
             executor=executor or SubprocessExecutor(),
             private_projection=snapshot.public,
         )
-        return Command.from_prepared(snapshot.execution_plan, prepared)
+        command = Command.from_prepared(snapshot.execution_plan, prepared)
+        if snapshot.private.db_mode is not EnvironmentDatabaseMode.COPY:
+            return command
+        if (source_session := self._copy_auxiliary_session(snapshot.private)) is None:
+            return command
+        from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+            _attach_auxiliary_restore_runtime,
+        )
+
+        return cast(
+            "Command[DevelopmentEnvironment]",
+            _attach_auxiliary_restore_runtime(
+                command,
+                source_session,
+                before_step_id="checkout.catalog",
+            ),
+        )
+
+    def _copy_auxiliary_session(self, plan: _CheckoutPlan) -> AuxiliaryRestoreSession | None:
+        if plan.source_config is None:
+            return None
+        from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore_session
+        from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
+
+        instance = self._client.instance.from_config(plan.source_config)
+        if not isinstance(instance, OdooInstance) or instance.config.start_config is None:
+            return None
+        python_bin = str(plan.venv / "bin" / "python") if plan.python_owned else plan.python_path
+        instance.config = replace(
+            instance.config,
+            command_prefix=(python_bin, plan.odoo_bin),
+            default_cwd=Path(plan.runtime_cwd),
+            default_run_args=plan.project.default_run_args,
+            project_environment=load_project_environment(plan.repo_root),
+        )
+        project_id = f"project_{repo_key(plan.repo_root, Path(plan.git_common_dir))}"
+        instance._runtime_binding = _RuntimeBinding("project", project_id, project_id, plan.repo_root, git_common_dir(plan.repo_root))  # fmt: skip
+        return auxiliary_restore_session(instance)
 
     def _run_checkout_snapshot(
         self, context: RunContext[DevelopmentEnvironment], snapshot: _CheckoutSnapshot
@@ -593,6 +630,11 @@ class _CheckoutMixin:
             self._validate_checkout_snapshot(snapshot, context=context)
             if plan.branch_revalidator is not None:
                 plan.branch_revalidator(context)
+            from odoo_instance_sdk.resources.instance import active_auxiliary_restore_session
+
+            auxiliary_session = active_auxiliary_restore_session()
+            if auxiliary_session is not None:
+                auxiliary_session.ensure_started(context)
             if plan.db_mode is EnvironmentDatabaseMode.COPY:
                 self._preflight_copy_checkout(plan)
             context.action("checkout.catalog")
