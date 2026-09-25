@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 from rich import box
 from rich.table import Table
+from rich.text import Text
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.output import render_rich_text
@@ -241,12 +242,17 @@ def test_single_process_section_does_not_add_layout_placeholder() -> None:
 
 @pytest.mark.unit
 def test_process_layout_measures_unicode_and_multiline_cells() -> None:
-    rows = (("表", "ready", "host:1", "1", "1.0%", "2 KiB", "宽\n表格"),)
+    rows = (("界界界", "ready", "host:1", "1", "1.0%", "2 KiB", "短\n細細細細"),)
     widths = _process_column_widths(rows, width=80)
     output = render_rich_text(_process_table(rows, widths=widths), width=80)
 
-    assert "表" in output
-    assert "表格" in output
+    assert widths == (6, 5, 11, 9, 4, 6, 8)
+    assert widths[0] == Text("界界界").cell_len > Text("Type").cell_len
+    assert widths[-1] == max(Text(line).cell_len for line in "短\n細細細細".splitlines())
+    assert widths[-1] > Text("Details").cell_len
+    assert "界界界" in output
+    assert "細細細細" in output
+    _assert_process_table_boundaries(output)
     assert all(len(line) <= 80 for line in output.splitlines())
 
 
