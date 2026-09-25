@@ -701,6 +701,230 @@ def test_selected_restore_consumes_verified_snapshot_after_source_path_swap(
     assert (filestore / "marker").read_bytes() == b"original"
 
 
+def test_local_archive_capture_is_read_only_and_cleanup_preserves_source(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.database_preparation import (
+        capture_local_archive_restore,
+        cleanup_selected_backup_restore,
+        materialize_selected_backup_dump,
+    )
+
+    archive_path = tmp_path / "backup with spaces.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"local_db"}')
+        archive.writestr("dump.sql", "select 'local';\n")
+        archive.writestr("filestore/local_db/marker", b"local")
+    snapshot_dir = tmp_path / ".odcli"
+
+    payload = capture_local_archive_restore(
+        LocalArchiveRestoreSource(str(archive_path)),
+        snapshot_directory=snapshot_dir,
+    )
+
+    assert payload.database_name == "local_db"
+    assert payload.source_kind == "local_archive"
+    assert payload.verified_sha256 == hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    assert not snapshot_dir.exists()
+
+    materialize_selected_backup_dump(payload)
+    assert payload.verified_snapshot_path.stat().st_mode & 0o777 == 0o600
+    assert payload.dump_path.read_text() == "select 'local';\n"
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "partial").write_bytes(b"partial")
+    cleanup_selected_backup_restore(payload, staging_paths=(staging,))
+
+    assert archive_path.exists()
+    assert archive_path.read_bytes()
+    assert not payload.verified_snapshot_path.exists()
+    assert not payload.dump_path.exists()
+    assert not staging.exists()
+    assert str(archive_path) not in repr(payload)
+
+
+def test_local_archive_capture_rejects_symlink_without_writing_snapshot(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.database_preparation import capture_local_archive_restore
+
+    real_archive = tmp_path / "real.zip"
+    real_archive.write_bytes(b"not a zip")
+    symlink = tmp_path / "selected.zip"
+    symlink.symlink_to(real_archive)
+
+    with pytest.raises(ConfigError, match="regular file"):
+        capture_local_archive_restore(
+            LocalArchiveRestoreSource(str(symlink)),
+            snapshot_directory=tmp_path / ".odcli",
+        )
+
+
+def test_local_archive_capture_rejects_non_regular_file(tmp_path: Path) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.database_preparation import capture_local_archive_restore
+
+    archive_path = tmp_path / "directory.zip"
+    archive_path.mkdir()
+
+    with pytest.raises(ConfigError, match="regular file"):
+        capture_local_archive_restore(
+            LocalArchiveRestoreSource(str(archive_path)),
+            snapshot_directory=tmp_path / ".odcli",
+        )
+
+
+def test_local_archive_capture_rejects_unreadable_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.database_preparation import capture_local_archive_restore
+
+    archive_path = tmp_path / "unreadable.zip"
+    archive_path.write_bytes(b"not readable")
+    real_open = os.open
+
+    def deny_archive(path: str | os.PathLike[str], flags: int, *args: int) -> int:
+        if Path(path) == archive_path:
+            raise PermissionError("permission denied")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(os, "open", deny_archive)
+
+    with pytest.raises(ConfigError, match="unavailable"):
+        capture_local_archive_restore(
+            LocalArchiveRestoreSource(str(archive_path)),
+            snapshot_directory=tmp_path / ".odcli",
+        )
+
+
+def test_local_archive_source_coercion_keeps_uuid_compatibility(tmp_path: Path) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.database_preparation import (
+        _CatalogueRestoreSource,
+        _LocalArchiveRestoreSource,
+    )
+    from odoo_instance_sdk.internal.dbprep.source_binding import _coerce_restore_source
+
+    backup_id = uuid.uuid4()
+    assert _coerce_restore_source(backup_id) == _CatalogueRestoreSource(backup_id)
+    local = _coerce_restore_source(LocalArchiveRestoreSource(str(tmp_path / "backup.zip")))
+    assert local == _LocalArchiveRestoreSource(tmp_path / "backup.zip")
+
+
+def _local_archive(
+    path: Path,
+    *,
+    manifest: str = '{"db_name":"local_db"}',
+    member: str = "filestore/local_db/marker",
+) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.json", manifest)
+        archive.writestr("dump.sql", "select 'local';\n")
+        archive.writestr(member, b"local")
+    return path
+
+
+@pytest.mark.parametrize("kind", ["missing", "invalid", "incompatible", "unsafe"])
+def test_local_archive_capture_rejects_invalid_sources(tmp_path: Path, kind: str) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.exceptions import BackupCorruptError, BackupUnsafeError
+    from odoo_instance_sdk.internal.database_preparation import capture_local_archive_restore
+
+    archive_path = tmp_path / f"{kind}.zip"
+    if kind == "missing":
+        expected = ConfigError
+    elif kind == "invalid":
+        archive_path.write_bytes(b"not a zip")
+        expected = BackupCorruptError
+    elif kind == "incompatible":
+        _local_archive(archive_path, manifest='{"db_name":"bad/name"}')
+        expected = ConfigError
+    else:
+        _local_archive(archive_path, member="filestore/../escape")
+        expected = BackupUnsafeError
+
+    with pytest.raises(expected) as failure:
+        capture_local_archive_restore(
+            LocalArchiveRestoreSource(str(archive_path)),
+            snapshot_directory=tmp_path / ".odcli",
+        )
+
+    assert str(archive_path) not in str(failure.value)
+
+
+def test_local_archive_capture_rejects_insufficient_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.exceptions import BackupInsufficientDiskError
+    from odoo_instance_sdk.internal.database_preparation import capture_local_archive_restore
+
+    archive_path = _local_archive(tmp_path / "space.zip")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+
+    with pytest.raises(BackupInsufficientDiskError):
+        capture_local_archive_restore(
+            LocalArchiveRestoreSource(str(archive_path)),
+            snapshot_directory=tmp_path / ".odcli",
+        )
+
+
+def test_local_archive_changed_after_capture_fails_before_snapshot_use(tmp_path: Path) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.database_preparation import (
+        capture_local_archive_restore,
+        materialize_selected_backup_dump,
+    )
+
+    archive_path = _local_archive(tmp_path / "changed.zip")
+    payload = capture_local_archive_restore(
+        LocalArchiveRestoreSource(str(archive_path)),
+        snapshot_directory=tmp_path / ".odcli",
+    )
+    archive_path.write_bytes(b"replacement")
+
+    with pytest.raises(ConfigError, match="changed"):
+        materialize_selected_backup_dump(payload)
+
+    assert not payload.verified_snapshot_path.exists()
+
+
+def test_local_archive_cleanup_runs_after_cancellation_without_hiding_primary_error(
+    tmp_path: Path,
+) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.internal.database_preparation import (
+        capture_local_archive_restore,
+        cleanup_selected_backup_restore,
+        materialize_selected_backup_dump,
+    )
+
+    archive_path = _local_archive(tmp_path / "cancelled.zip")
+    payload = capture_local_archive_restore(
+        LocalArchiveRestoreSource(str(archive_path)),
+        snapshot_directory=tmp_path / ".odcli",
+    )
+    materialize_selected_backup_dump(payload)
+
+    with pytest.raises(KeyboardInterrupt, match="primary"):
+        try:
+            raise KeyboardInterrupt("primary")
+        finally:
+            cleanup_selected_backup_restore(payload)
+
+    assert archive_path.exists()
+    assert not payload.verified_snapshot_path.exists()
+    assert not payload.dump_path.exists()
+
+
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required")
 def test_restore_uv_selector_is_not_resolved_while_planning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

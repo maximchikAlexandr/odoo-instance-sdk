@@ -123,6 +123,12 @@ class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     source_git_branch: str | None = None
 
 
+class LocalArchiveRestoreSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """A caller-owned local Odoo ZIP selected for a restore."""
+
+    path: str
+
+
 class BackupDownloadFailureContext(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """Secret-free identity and catalogue state retained after a download failure."""
 
