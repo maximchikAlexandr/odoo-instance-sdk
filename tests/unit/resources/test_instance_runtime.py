@@ -243,7 +243,7 @@ class TestInstancePrefix:
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
-            staticmethod(lambda _path: MagicMock()),
+            staticmethod(lambda _path: MagicMock(owned=False)),
         )
 
         inst = _make_client().instance.from_project(project)
@@ -285,7 +285,7 @@ class TestInstancePrefix:
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
-            staticmethod(lambda _path: MagicMock()),
+            staticmethod(lambda _path: MagicMock(owned=False)),
         )
 
         instance = _make_client().instance.from_project(project)
@@ -353,7 +353,7 @@ class TestInstancePrefix:
         )
         monkeypatch.setattr(
             "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project",
-            staticmethod(lambda _path: MagicMock()),
+            staticmethod(lambda _path: MagicMock(owned=False)),
         )
         uv_resolution = MagicMock(side_effect=AssertionError("uv must run at execution time"))
         monkeypatch.setattr("odoo_instance_sdk.internal.server.run_command", uv_resolution)

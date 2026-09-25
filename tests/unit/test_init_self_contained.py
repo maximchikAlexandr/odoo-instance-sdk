@@ -722,6 +722,39 @@ def test_first_run_triggers_bootstrap_when_no_valid_tmp(
     context.action.assert_called_once_with("init.bootstrap.tmp.verify")
 
 
+def test_first_foreground_run_captures_bootstrap_steps(tmp_path: Path) -> None:
+    from odoo_instance_sdk.config import InstanceConfig
+
+    config_path = tmp_path / ".odcli" / "odoo.conf"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("[options]\nhttp_port = 8069\n", encoding="utf-8")
+    instance = OdooInstance(
+        config=InstanceConfig(
+            base_url="http://127.0.0.1:8069",
+            start_config=StartConfig(config_path=str(config_path), http_port=8069, db_user="odoo"),
+            command_prefix=("/usr/bin/python3", "/opt/odoo/odoo-bin"),
+            default_cwd=tmp_path,
+        ),
+        _client=MagicMock(),
+    )
+    cluster = MagicMock()
+    cluster.owned = True
+    cluster.endpoint_host = "127.0.0.1"
+    cluster.endpoint_port = 5468
+    instance._postgres_cluster = cluster
+
+    command = instance.run_foreground_command(args=("-u", "comerta_base", "--stop-after-init"))
+
+    assert tuple(
+        step.step_id for step in command.plan.steps if step.step_id.startswith("init.bootstrap.tmp")
+    ) == (
+        "init.bootstrap.tmp",
+        "init.bootstrap.tmp.probe",
+        "init.bootstrap.tmp.ready",
+        "init.bootstrap.tmp.verify",
+    )
+
+
 @pytest.mark.parametrize("odoo_version", ["13.0", "19.0"])
 @pytest.mark.usefixtures("stub_psql_resolution")
 def test_self_contained_restore_regression_compose_tmp_restore_default_switch(

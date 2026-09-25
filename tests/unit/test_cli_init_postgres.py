@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_instance_sdk.cli import cli
+from odoo_instance_sdk.internal.dbprep.bootstrap import BootstrapTmpSteps
 from odoo_instance_sdk.internal.odoo_config import parse_odoo_config
 from odoo_instance_sdk.internal.proc import PreparedStep, RunContext
 from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
@@ -41,6 +42,15 @@ def _stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
         context.skip(ready_step.step_id)
         return True
 
+    def _skip_project_bootstrap_tmp(
+        _instance: object,
+        context: RunContext[object],
+        *,
+        steps: BootstrapTmpSteps | tuple[()] | None = None,
+    ) -> None:
+        for step in steps or ():
+            context.skip(step.step_id)
+
     def _bootstrap_sql_step_stub(
         *,
         db_host: str,
@@ -67,7 +77,7 @@ def _stub_compose_init_followup(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.dbprep.bootstrap.ensure_project_bootstrap_tmp",
-        lambda _instance, _context: None,
+        _skip_project_bootstrap_tmp,
     )
 
 

@@ -462,6 +462,8 @@ New project manifests SHALL explicitly write tracker-neutral `ticket_link_enable
 
 Self-contained Compose `init` SHALL create Odoo database `tmp` with `base` installed through the same project runtime. Spawn argv SHALL come from `resolve_runtime_argv` / `_build_cli_args` plus `--database tmp --init=base --stop-after-init` as a ProcessStep via `internal/proc` with `shell=False`. A separate Odoo version or second launcher SHALL NOT be introduced. After `--stop-after-init` the process has exited: readiness SHALL be SQL `SELECT state FROM ir_module_module WHERE name = 'base'` on database `tmp` returning `installed` (owned cluster ActionStep). `POST /web/webclient/version_info` SHALL NOT run at `init`. The operation SHALL be idempotent: that SQL success SHALL NOT recreate; missing relation or state not `installed` SHALL fail with `init_bootstrap_failed`. `--dry-run` SHALL show the step and SHALL NOT spawn. A failure SHALL NOT return a successful project-setup result. If an owned Compose project has no valid `tmp`, the first `odcli run` SHALL run the same ProcessStep+SQL.
 
+The foreground `run` command SHALL capture the bootstrap spawn, probe, readiness probe, and verification action in its immutable execution plan and SHALL execute those same captured steps before spawning the requested Odoo process.
+
 #### Scenario: init creates a valid tmp with base
 
 - **WHEN** a full self-contained `init` with Compose PostgreSQL completes
@@ -481,3 +483,8 @@ Self-contained Compose `init` SHALL create Odoo database `tmp` with `base` insta
 
 - **WHEN** `init --dry-run` runs with Compose PostgreSQL
 - **THEN** the `tmp` initialization step is shown and no database is created
+
+#### Scenario: first foreground run captures bootstrap
+
+- **WHEN** a foreground `odcli run` command is constructed for an owned Compose project
+- **THEN** its plan contains the bootstrap spawn, probe, readiness probe, and verification action that execution consumes
