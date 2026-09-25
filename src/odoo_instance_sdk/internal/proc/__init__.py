@@ -767,6 +767,7 @@ __all__ = [
     "active_context",
     "bounded_process_inputs",
     "is_process_alive",
+    "is_process_group_alive",
     "owned_handle",
     "prepared_command",
     "prepared_step",
@@ -798,6 +799,7 @@ from .run import (  # noqa: E402
 from .spawn import spawn  # noqa: E402
 from .terminate import (  # noqa: E402
     is_process_alive,
+    is_process_group_alive,
     terminate,
     terminate_pid,
     wait_foreground,

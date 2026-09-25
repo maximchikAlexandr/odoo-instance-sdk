@@ -581,7 +581,7 @@ _rich_command = cast("Callable[..., click.Command]", click.RichCommand)
 _rich_group = cast("Callable[..., click.Group]", click.RichGroup)
 
 for _name, _help in {
-    "stop": "Stop the selected environment's proven-owned runtime.",
+    "stop": "Stop the selected runtime.",
     "run": "Start resolved Odoo in the foreground or detached.",
     "logs": "Read or follow retained Odoo logs.",
     "shell": "Open an interactive Odoo shell.",
