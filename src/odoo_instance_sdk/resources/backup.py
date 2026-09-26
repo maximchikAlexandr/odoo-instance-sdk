@@ -629,6 +629,10 @@ class BackupResource:
     def delete(self, backup: Backup) -> BackupDeletionResult:
         return self.delete_command(backup).run()
 
+    def delete_owned(self, backup: Backup) -> BackupDeletionResult:
+        """Delete an environment-owned input during its verified cleanup."""
+        return self._delete_impl(backup, allow_owned_cleanup=True)
+
     def delete_command(
         self, backup: Backup, *, executor: ProcessExecutor | None = None
     ) -> Command[BackupDeletionResult]:
@@ -640,7 +644,9 @@ class BackupResource:
             mutating=True,
         )
 
-    def _delete_impl(self, backup: Backup) -> BackupDeletionResult:
+    def _delete_impl(
+        self, backup: Backup, *, allow_owned_cleanup: bool = False
+    ) -> BackupDeletionResult:
         catalog = self._client.get_catalog()
         captured_path = Path(backup.path)
         captured_identity = _file_identity(captured_path)
@@ -650,6 +656,7 @@ class BackupResource:
                 catalog=catalog,
                 captured_path=captured_path,
                 captured_identity=captured_identity,
+                allow_owned_cleanup=allow_owned_cleanup,
             )
 
     def _delete_impl_locked(  # noqa: C901 -- all deletion guards share one lifecycle lock
@@ -659,6 +666,7 @@ class BackupResource:
         catalog: object,
         captured_path: Path,
         captured_identity: tuple[int, int] | None,
+        allow_owned_cleanup: bool = False,
     ) -> BackupDeletionResult:
         catalog = cast("BackupCatalog", catalog)
         existing = catalog.get_by_id(str(backup.id))
@@ -685,6 +693,12 @@ class BackupResource:
                 f"Backup {backup.id} is in state {existing['state']!r}, not available"
             )
         reason = catalog.deletion_protection_reason(str(backup.id))
+        if (
+            reason is not None
+            and allow_owned_cleanup
+            and catalog.is_owned_copy_backup(str(backup.id))
+        ):
+            reason = None
         if reason is not None:
             raise BackupNotAvailableError(f"Backup {backup.id} is protected: {reason}")
         catalog.verify_identity(backup)

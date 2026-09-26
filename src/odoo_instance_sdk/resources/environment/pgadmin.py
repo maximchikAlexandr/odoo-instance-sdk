@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -206,7 +207,7 @@ class _PgadminMixin:
             )
         return _PythonMode("reuse", pybin)
 
-    def _resolve_dbs(
+    def _resolve_dbs(  # noqa: C901
         self,
         options: EnvironmentCheckoutOptions,
         project: ProjectConfig,
@@ -215,6 +216,41 @@ class _PgadminMixin:
         branch: str,
         repo_root: Path,
     ) -> tuple[str | None, str | None]:
+        if options.remote_name is not None or options.backup_id is not None:
+            if db_mode != EnvironmentDatabaseMode.COPY:
+                raise ConfigError("remote_name and backup_id are valid only for COPY checkout")
+            if options.remote_name is not None and options.backup_id is not None:
+                raise ConfigError("COPY accepts exactly one of remote_name or backup_id")
+            if options.source_database is not None:
+                raise ConfigError("explicit COPY source cannot be combined with --source-db")
+            if options.remote_name is not None:
+                from odoo_instance_sdk.internal.dbprep.source import resolve_test_source
+                from odoo_instance_sdk.models import DatabaseRefreshOptions
+
+                source_resolution = resolve_test_source(
+                    project, DatabaseRefreshOptions(remote_name=options.remote_name)
+                )
+                source = source_resolution.config.database
+            else:
+                try:
+                    backup_id = str(options.backup_id)
+                    uuid.UUID(backup_id)
+                except (ValueError, TypeError, AttributeError) as exc:
+                    raise ConfigError(
+                        "catalogue backup identifier must be a complete UUID"
+                    ) from exc
+                projection = self._client.get_catalog()._resolve_backup_projection(backup_id)
+                if projection.state.value != "available":
+                    raise ConfigError("catalogue backup is not available")
+                source = projection.backup.database_name
+            if not source:
+                raise ConfigError("explicit COPY source has no database provenance")
+            target = options.target_database or self._default_target_db(source, branch)
+            validate_db_name(target)
+            data_dir = cfg.get("data_dir")
+            if data_dir:
+                validate_filestore_containment(Path(data_dir), target)
+            return source, target
         if db_mode == EnvironmentDatabaseMode.SHARED:
             source = (
                 options.source_database or project.default_source_database or _infer_single_db(cfg)
@@ -227,14 +263,14 @@ class _PgadminMixin:
         source = options.source_database or project.default_source_database or _infer_single_db(cfg)
         if source is None:
             raise ConfigError("copy mode requires --source-db or exactly one db_name in odoo.conf")
-        target = options.target_database
-        if target is None:
-            target = self._default_target_db(source, branch)
-        validate_db_name(target)
+        resolved_target: str | None = options.target_database
+        if resolved_target is None:
+            resolved_target = self._default_target_db(source, branch)
+        validate_db_name(resolved_target)
         data_dir = cfg.get("data_dir")
         if data_dir:
-            validate_filestore_containment(Path(data_dir), target)
-        return source, target
+            validate_filestore_containment(Path(data_dir), resolved_target)
+        return source, resolved_target
 
     def _default_target_db(self, source: str, branch: str) -> str:
         slug = _SLUG_RE.sub("_", branch).strip("._-") or "branch"

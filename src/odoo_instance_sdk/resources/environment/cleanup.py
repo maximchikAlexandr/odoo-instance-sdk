@@ -95,6 +95,14 @@ class _CleanupMixin:
             failures: list[str],
         ) -> bool: ...
 
+    @staticmethod
+    def _copy_backup_ownership(journal: sqlite3.Row) -> Literal["owned", "borrowed", "unknown"]:
+        value = journal["backup_ownership"]
+        return cast(
+            "Literal['owned', 'borrowed', 'unknown']",
+            value if value in {"owned", "borrowed", "unknown"} else "unknown",
+        )
+
     def list_command(
         self,
         *,
@@ -480,6 +488,7 @@ class _CleanupMixin:
                 db_user=instance.config.db_user,
                 backup_id=str(copy_plan.backup_id) if copy_plan.backup_id is not None else None,
                 stage=CopyJournalStage.DROPPED,
+                backup_ownership=copy_plan.backup_ownership,
             )
         else:
             cat.add_environment_event(
@@ -521,6 +530,7 @@ class _CleanupMixin:
                     ),
                     backup_id=str(copy_plan.backup_id) if copy_plan.backup_id is not None else None,
                     stage=CopyJournalStage.BACKUP_DELETED,
+                    backup_ownership=copy_plan.backup_ownership,
                 )
         elif copy_plan is None and env.backup_id is not None:
             cleanup_failed = self._remove_backup(cat, env, failures) or cleanup_failed
@@ -659,6 +669,7 @@ class _CleanupMixin:
                 instance=None,
                 backup=recovery_backup,
                 stage=stage,
+                backup_ownership=self._copy_backup_ownership(journal),
             )
         if not config_path.is_file():
             if journal is not None:
@@ -677,6 +688,7 @@ class _CleanupMixin:
                         instance=None,
                         backup=backup,
                         stage=stage,
+                        backup_ownership=self._copy_backup_ownership(journal),
                     )
                 # Failed before restore: the durable stage proves no target
                 # database exists.  A prepared journal may legitimately have
@@ -689,6 +701,7 @@ class _CleanupMixin:
                         instance=None,
                         backup=None,
                         stage=stage,
+                        backup_ownership=self._copy_backup_ownership(journal),
                     )
                 if stage is CopyJournalStage.BACKED_UP and backup_id is not None:
                     if backup_id is None:
@@ -707,6 +720,7 @@ class _CleanupMixin:
                         instance=None,
                         backup=backup,
                         stage=stage,
+                        backup_ownership=self._copy_backup_ownership(journal),
                     )
             raise EnvironmentConflictError(
                 "copy_config_missing", "copy environment config is missing"
@@ -765,6 +779,9 @@ class _CleanupMixin:
                     instance=instance,
                     backup=_row_to_backup(backup_row) if backup_row is not None else None,
                     stage=CopyJournalStage.RESTORED,
+                    backup_ownership=(
+                        self._copy_backup_ownership(journal) if journal is not None else "unknown"
+                    ),
                     rollback_database=rollback_database,
                     rollback_filestore=rollback_filestore,
                 )
@@ -786,6 +803,7 @@ class _CleanupMixin:
                     instance=None,
                     backup=_row_to_backup(backup_row) if backup_row is not None else None,
                     stage=stage,
+                    backup_ownership=self._copy_backup_ownership(journal),
                 )
             if stage in (CopyJournalStage.RESTORE_PENDING, CopyJournalStage.RESTORED):
                 journal_backup_id = journal["backup_id"]
@@ -810,6 +828,7 @@ class _CleanupMixin:
                     instance=instance,
                     backup=backup,
                     stage=stage,
+                    backup_ownership=self._copy_backup_ownership(journal),
                 )
         restored = catalog.latest_restore(instance.config.db_host, db_port, env.target_db_name)
         if env.backup_id is None or restored is None or restored.id != env.backup_id:
@@ -832,6 +851,7 @@ class _CleanupMixin:
             instance=instance,
             backup=backup,
             stage=CopyJournalStage.RESTORED,
+            backup_ownership="unknown",
         )
 
     def _validate_copy_journal_ownership(
@@ -883,7 +903,10 @@ class _CleanupMixin:
             # rather than blocking filesystem cleanup forever.
             return False
         try:
-            self._client.backups.delete(plan.backup)
+            if plan.backup_ownership == "owned":
+                self._client.backups.delete_owned(plan.backup)
+            else:
+                self._client.backups.delete(plan.backup)
         except Exception as exc:
             failures.append(f"backup delete: {exc}")
             return True

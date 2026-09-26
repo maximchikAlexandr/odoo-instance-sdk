@@ -257,7 +257,7 @@ def _row_to_backup(row: sqlite3.Row) -> Backup | None:
         return None
     if path is None or not Path(str(path)).is_file():
         return None
-        size_raw: JsonValue = None
+    size_raw: JsonValue = None
     with contextlib.suppress(KeyError, IndexError):
         size_raw = cast("JsonValue", r["size_bytes"])
     return Backup(
@@ -270,7 +270,12 @@ def _row_to_backup(row: sqlite3.Row) -> Backup | None:
         filename=str(r["filename"]) if r["filename"] else "",
         size_bytes=int(str(size_raw)) if size_raw is not None else 0,
         sha256=str(r["sha256"]) if r["sha256"] else "",
-        downloaded_at=datetime.fromisoformat(str(r["downloaded_at"])),
+        downloaded_at=datetime.fromisoformat(str(r["downloaded_at"] or r["started_at"])),
+        source_git_branch=(
+            str(r["source_git_branch"]) if r["source_git_branch"] is not None else None
+        ),
+        source_name=str(r["source_name"]) if r["source_name"] is not None else None,
+        pinned=bool(r["pinned"]) if "pinned" in r else False,
     )
 
 
@@ -421,7 +426,7 @@ def _restore_audit_backup_from_sqlite(
     )
 
 
-def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
+def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:  # noqa: C901
     """Return the private steps that are projected and consumed by checkout."""
     from odoo_instance_sdk.internal.pg.builder import build_psql_specification
     from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
@@ -588,6 +593,23 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
             )
         )
     if plan.db_mode is EnvironmentDatabaseMode.COPY and plan.target_database is not None:
+        if plan.options.remote_name is not None:
+            steps.extend(
+                (
+                    PreparedAction(
+                        step_id="database.backup.wait",
+                        action="database.backup.wait",
+                        description="Wait for named remote backup response",
+                        mutating=True,
+                    ),
+                    PreparedAction(
+                        step_id="database.backup.transfer",
+                        action="database.backup.transfer",
+                        description="Transfer named remote backup bytes",
+                        mutating=True,
+                    ),
+                )
+            )
         raw_port = plan.config_values.get("db_port")
         try:
             db_port = int(raw_port) if raw_port else 5432
@@ -968,11 +990,27 @@ def _normalize_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome
         _public_checkout_plan,
     )
 
-    public = _public_checkout_plan(state.private, state.provenance, state.freshness, state.warnings)
-    execution_plan = _execution_plan(
-        state.private, state.provenance, state.freshness, state.warnings
+    provenance = msgspec.structs.replace(
+        state.provenance,
+        source_name=state.private.source_name,
+        source_base_url=state.private.source_base_url,
+        resolved_base_revision=state.private.base_revision,
+        backup_id=(
+            state.private.selected_backup.id
+            if state.private.selected_backup is not None
+            else state.provenance.backup_id
+        ),
     )
-    return _PlanningOutcome(state=replace(state, public=public, execution_plan=execution_plan))
+    public = _public_checkout_plan(state.private, provenance, state.freshness, state.warnings)
+    execution_plan = _execution_plan(state.private, provenance, state.freshness, state.warnings)
+    return _PlanningOutcome(
+        state=replace(
+            state,
+            provenance=provenance,
+            public=public,
+            execution_plan=execution_plan,
+        )
+    )
 
 
 def _capture_checkout_stage(state: _CheckoutPlanningState) -> _PlanningOutcome:

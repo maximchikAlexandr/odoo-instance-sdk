@@ -39,10 +39,17 @@ from odoo_instance_sdk.internal.odoo_config import (
     parse_odoo_config,
 )
 from odoo_instance_sdk.internal.pgadmin import PgAdminPhaseHandle
+from odoo_instance_sdk.internal.project_env import (
+    effective_project_environment,
+    load_project_environment,
+)
+from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
 from odoo_instance_sdk.internal.sanitize import sanitize_last_error
 from odoo_instance_sdk.internal.urls import assert_local
 from odoo_instance_sdk.models import (
+    Backup,
     BackupFormat,
+    DatabaseRefreshOptions,
     PgAdminOpenResult,
     PostgresClusterState,
 )
@@ -131,47 +138,93 @@ class _SettingsMixin:
         source_db: str,
         target_db: str,
         repo_root: Path,
+        project: ProjectConfig,
+        remote_name: str | None,
+        selected_backup: Backup | None,
     ) -> uuid.UUID:
-
         catalog = cat
         if source_config is None:
             raise ConfigError("copy mode requires a source config")
         base_url = infer_base_url(cfg_dict)
         assert_local(base_url)
-        master_pwd = get_admin_passwd(cfg_dict)
-        if master_pwd is None:
+        local_master_pwd = get_admin_passwd(cfg_dict)
+        if local_master_pwd is None:
             raise MasterPasswordRequiredError("copy mode requires admin_passwd in source config")
 
-        instance = self._client.instance.from_config(source_config, master_password=master_pwd)
+        instance = self._client.instance.from_config(
+            source_config, master_password=local_master_pwd
+        )
         from odoo_instance_sdk.resources.postgres import PostgresCluster
 
         instance._postgres_cluster = PostgresCluster.from_project(repo_root)
         db_port = instance.config.db_port or 5432
-        catalog.upsert_copy_journal(
+
+        ownership = "owned"
+        backup = selected_backup
+        if remote_name is not None:
+            from odoo_instance_sdk.internal.dbprep.source import (
+                _remote_password,
+                resolve_test_source,
+            )
+
+            source = resolve_test_source(project, DatabaseRefreshOptions(remote_name=remote_name))
+            remote_password = _remote_password(
+                effective_project_environment(load_project_environment(repo_root)),
+                remote_name=remote_name,
+            )
+            remote = self._client.instance(source.config.base_url, master_password=remote_password)
+            project_id = f"project_{repo_key(repo_root, git_common_dir(repo_root))}"
+            backup = remote.databases.backup(
+                source_db,
+                format=BackupFormat.ZIP,
+                filestore=True,
+                source_git_branch=source.branch,
+                source_name=source.source_name,
+                project_id=project_id,
+            )
+            ownership = "borrowed"
+        elif backup is not None:
+            ownership = "borrowed"
+            cat.verify_identity(backup, verify_content=True)
+            self._validate_copy_archive(backup, cfg_dict)
+
+        cat.upsert_copy_journal(
             str(env_id),
             target_database=target_db,
             db_host=instance.config.db_host,
             db_port=db_port,
             db_user=instance.config.db_user,
-            backup_id=None,
+            backup_id=str(backup.id) if backup is not None else None,
             stage=CopyJournalStage.PREPARED,
+            backup_ownership=ownership,
         )
 
-        try:
-            existing_dbs = instance.databases.list()
-        except Exception as e:
-            raise InstanceConfigurationError(
-                f"Source Odoo HTTP endpoint unavailable for copy mode: {e}"
-            ) from e
+        if backup is None:
+            try:
+                existing_dbs = instance.databases.list()
+            except Exception as e:
+                raise InstanceConfigurationError(
+                    f"Source Odoo HTTP endpoint unavailable for copy mode: {e}"
+                ) from e
 
-        if target_db in {db.name for db in existing_dbs}:
-            raise DatabaseAlreadyExistsError(
-                f"Target database {target_db!r} already exists on {base_url}"
+            if target_db in {db.name for db in existing_dbs}:
+                raise DatabaseAlreadyExistsError(
+                    f"Target database {target_db!r} already exists on {base_url}"
+                )
+            backup = instance.databases.backup(
+                source_db,
+                format=BackupFormat.ZIP,
+                filestore=True,
             )
+            cat.update_environment(str(env_id), {"backup_id": str(backup.id)})
+        else:
+            if instance.databases.exists(target_db):
+                raise DatabaseAlreadyExistsError(
+                    f"Target database {target_db!r} already exists on {base_url}"
+                )
+            cat.update_environment(str(env_id), {"backup_id": str(backup.id)})
 
-        backup = instance.databases.backup(source_db, format=BackupFormat.ZIP, filestore=True)
-        catalog.update_environment(str(env_id), {"backup_id": str(backup.id)})
-        catalog.upsert_copy_journal(
+        cat.upsert_copy_journal(
             str(env_id),
             target_database=target_db,
             db_host=instance.config.db_host,
@@ -179,6 +232,7 @@ class _SettingsMixin:
             db_user=instance.config.db_user,
             backup_id=str(backup.id),
             stage=CopyJournalStage.BACKED_UP,
+            backup_ownership=ownership,
         )
 
         self._consume_copy_database_probe(
@@ -198,6 +252,7 @@ class _SettingsMixin:
             db_user=instance.config.db_user,
             backup_id=str(backup.id),
             stage=CopyJournalStage.RESTORE_PENDING,
+            backup_ownership=ownership,
         )
         instance.databases._restore_after_verified_absence(
             backup,
@@ -219,9 +274,30 @@ class _SettingsMixin:
             db_user=instance.config.db_user,
             backup_id=str(backup.id),
             stage=CopyJournalStage.RESTORED,
+            backup_ownership=ownership,
         )
 
         return backup.id
+
+    @staticmethod
+    def _validate_copy_archive(backup: Backup, cfg_dict: Mapping[str, str]) -> None:
+        if backup.format is not BackupFormat.ZIP:
+            return
+        from odoo_instance_sdk.internal.backup_validation import (
+            raise_restore_preflight_errors,
+            raise_zip_validation_error,
+            validate_zip,
+        )
+
+        result = validate_zip(Path(backup.path))
+        if not result.valid:
+            raise_zip_validation_error(result)
+        if result.db_name != backup.database_name:
+            raise ConfigError("selected backup database name does not match catalog metadata")
+        data_dir = cfg_dict.get("data_dir")
+        raise_restore_preflight_errors(
+            result.uncompressed_bytes, Path(data_dir) if data_dir else None
+        )
 
     @staticmethod
     def _consume_copy_database_probe(
@@ -255,6 +331,10 @@ class _SettingsMixin:
             raise ConfigError("copy mode requires a source config")
         if plan.source_database is None or plan.target_database is None:
             raise ConfigError("copy mode requires source and target databases")
+        if plan.selected_backup is not None:
+            catalog = self._client.get_catalog()
+            catalog.verify_identity(plan.selected_backup, verify_content=True)
+            self._validate_copy_archive(plan.selected_backup, plan.config_values)
         base_url = infer_base_url(plan.config_values)
         assert_local(base_url)
         master_pwd = get_admin_passwd(plan.config_values)
@@ -349,6 +429,7 @@ class _SettingsMixin:
                 db_user=str(journal["db_user"]) if journal["db_user"] is not None else None,
                 backup_id=str(journal["backup_id"]) if journal["backup_id"] is not None else None,
                 stage=CopyJournalStage.DROPPED,
+                backup_ownership=str(journal["backup_ownership"] or "unknown"),
             )
             stage = CopyJournalStage.DROPPED
 
@@ -357,6 +438,8 @@ class _SettingsMixin:
             CopyJournalStage.BACKED_UP,
             CopyJournalStage.DROPPED,
         ):
+            if journal["backup_ownership"] != "owned":
+                return False
             journal_backup_id = journal["backup_id"]
             resolved_backup_id = (
                 uuid.UUID(str(journal_backup_id)) if journal_backup_id is not None else backup_id
@@ -372,6 +455,7 @@ class _SettingsMixin:
                     db_user=str(journal["db_user"]) if journal["db_user"] is not None else None,
                     backup_id=str(journal_backup_id) if journal_backup_id is not None else None,
                     stage=CopyJournalStage.BACKUP_DELETED,
+                    backup_ownership=str(journal["backup_ownership"] or "unknown"),
                 )
         return False
 

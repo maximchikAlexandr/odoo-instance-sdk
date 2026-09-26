@@ -15,10 +15,10 @@
 ## 3. Catalog provenance and explicit-source COPY
 
 - [ ] 3.1 Add one linear Alembic successor to the current source-neutral restore-provenance head for nullable backup `source_name`, audited pin state and COPY journal ownership; update Core metadata/projections and verify upgrade from both prior revisions, fresh schema, conservative legacy defaults, single-head and schema-equivalence gates.
-- [ ] 3.2 Add mutually exclusive `remote_name`/`backup_id` COPY options and immutable plan/result provenance; test incompatible modes/inputs, named default base, explicit compatible base, missing ref, stale profile and legacy unknown-branch handling.
-- [ ] 3.3 Route named download and exact retained UUID through the existing COPY validation/restore/neutralization/journal pipeline, reusing the shared source-neutral archive evidence and verified-snapshot transport; verify no intermediate database/default switch, no source HTTP for retained UUID, no fallback, no duplicate extractor/verifier, separate writable filestore and postconditions.
-- [ ] 3.4 Persist `owned` only for local-source archives and `borrowed` for named/retained input; verify rollback/removal preserves borrowed and migrated-unknown archives while existing owned cleanup remains idempotent.
-- [ ] 3.5 Reuse checksum, archive, disk, cluster, target-collision, lifecycle-lock and Odoo-major checks; cover corruption, insufficient space, busy/replaced input, known mismatch, unknown version and actionable retained recovery evidence.
+- [x] 3.2 Add mutually exclusive `remote_name`/`backup_id` COPY options and immutable plan/result provenance; test incompatible modes/inputs, named default base, explicit compatible base, missing ref, stale profile and legacy unknown-branch handling.
+- [x] 3.3 Route named download and exact retained UUID through the existing COPY validation/restore/neutralization/journal pipeline, reusing the shared source-neutral archive evidence and verified-snapshot transport; verify no intermediate database/default switch, no source HTTP for retained UUID, no fallback, no duplicate extractor/verifier, separate writable filestore and postconditions.
+- [x] 3.4 Persist `owned` only for local-source archives and `borrowed` for named/retained input; verify rollback/removal preserves borrowed and migrated-unknown archives while existing owned cleanup remains idempotent.
+- [x] 3.5 Reuse checksum, archive, disk, cluster, target-collision, lifecycle-lock and Odoo-major checks; cover corruption, insufficient space, busy/replaced input, known mismatch, unknown version and actionable retained recovery evidence.
 
 ## 4. Environment-bound detached readiness
 

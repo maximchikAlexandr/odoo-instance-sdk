@@ -88,6 +88,8 @@ class EnvironmentCheckoutOptions(msgspec.Struct, frozen=True, kw_only=True):
     http_port: int | None = None
     hash_lock: str | Path | None = None
     hash_lock_sha256: str | None = None
+    remote_name: str | None = None
+    backup_id: uuid.UUID | str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +107,7 @@ class CopyCleanupPlan:
     instance: OdooInstance | None
     backup: Backup | None
     stage: CopyJournalStage
+    backup_ownership: Literal["owned", "borrowed", "unknown"] = "unknown"
     rollback_database: str | None = None
     rollback_filestore: Path | None = None
 
@@ -180,6 +183,10 @@ class _CheckoutPlan:
     worktree_argv: tuple[str, ...]
     created_at: str
     options: EnvironmentCheckoutOptions
+    source_name: str | None = None
+    source_base_url: str | None = None
+    source_git_branch: str | None = None
+    selected_backup: Backup | None = None
     branch_revalidator: Callable[[RunContext[DevelopmentEnvironment]], None] | None = None
 
 

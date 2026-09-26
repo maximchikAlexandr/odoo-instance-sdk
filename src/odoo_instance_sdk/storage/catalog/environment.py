@@ -227,17 +227,22 @@ class _EnvironmentMixin:
         db_user: str | None,
         backup_id: str | None,
         stage: CopyJournalStage,
+        backup_ownership: str = "unknown",
     ) -> None:
         if not isinstance(stage, CopyJournalStage):
             raise TypeError("copy journal stage must be a CopyJournalStage")
+        if backup_ownership not in {"owned", "borrowed", "unknown"}:
+            raise ValueError("backup_ownership must be owned, borrowed, or unknown")
         self._conn.execute(
             """INSERT INTO environment_copy_journal
-               (environment_id,target_database,db_host,db_port,db_user,backup_id,stage,updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               (environment_id,target_database,db_host,db_port,db_user,backup_id,
+                backup_ownership,stage,updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(environment_id) DO UPDATE SET
                  target_database=excluded.target_database, db_host=excluded.db_host,
                  db_port=excluded.db_port, db_user=excluded.db_user,
-                 backup_id=excluded.backup_id, stage=excluded.stage, updated_at=excluded.updated_at""",
+                 backup_id=excluded.backup_id, backup_ownership=excluded.backup_ownership,
+                 stage=excluded.stage, updated_at=excluded.updated_at""",
             (
                 environment_id,
                 target_database,
@@ -245,6 +250,7 @@ class _EnvironmentMixin:
                 db_port,
                 db_user,
                 backup_id,
+                backup_ownership,
                 stage.value,
             ),
         )
@@ -257,6 +263,18 @@ class _EnvironmentMixin:
             self._conn.execute(
                 "SELECT * FROM environment_copy_journal WHERE environment_id=?", (environment_id,)
             ).fetchone(),
+        )
+
+    @_translate_sqlite_error
+    def is_owned_copy_backup(self, backup_id: str) -> bool:
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM environment_copy_journal "
+                "WHERE backup_id=? AND backup_ownership='owned' AND stage <> 'backup_deleted' "
+                "LIMIT 1",
+                (backup_id,),
+            ).fetchone()
+            is not None
         )
 
     @_translate_sqlite_error

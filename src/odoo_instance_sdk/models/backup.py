@@ -187,6 +187,11 @@ class BackupProvenanceComparison(
     status: BackupProvenanceStatus
     expected_base_ref: str
     recorded_branch: str | None
+    source_name: str | None = None
+    source_base_url: str | None = None
+    database_name: str | None = None
+    resolved_base_revision: str | None = None
+    backup_id: uuid.UUID | None = None
 
 
 class DatabaseRefreshOptions(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
