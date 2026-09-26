@@ -11,6 +11,7 @@ import pytest
 from odoo_instance_sdk.exceptions import (
     BackupNotAvailableError,
     BackupNotFoundError,
+    ConfigError,
     LockConflictError,
 )
 from odoo_instance_sdk.internal.locks import backup_lock_path, exclusive_lock
@@ -58,6 +59,62 @@ def test_list_empty(client: OdooClient, tmp_path: Path, monkeypatch: pytest.Monk
     res = BackupResource(_client=client)
     backups = res.list()
     assert backups == ()
+
+
+def test_public_retention_read_update_preview_and_permissions(
+    client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_root = tmp_path / "config"
+    config_root.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_config_root",
+        lambda **_kwargs: config_root,
+    )
+    settings = config_root / "user.toml"
+    settings.write_text('[other]\nkeep = "yes"\n\n[backup]\nmax_uncompressed_bytes = 42\n')
+
+    current = client.backups.retention()
+    assert current.retention_days == 14
+    assert current.auto_prune is False
+
+    before_preview = settings.read_text(encoding="utf-8")
+    preview_command = client.backups.set_retention_command(
+        retention_days=7, auto_prune=True, dry_run=True
+    )
+    assert preview_command.plan.steps[0].read_only is True
+    preview = preview_command.run()
+    assert preview.changed is False
+    assert settings.read_text(encoding="utf-8") == before_preview
+
+    updated = client.backups.set_retention(retention_days=7, auto_prune=True)
+    assert updated.changed is True
+    assert client.backups.retention().retention_days == 7
+    content = settings.read_text(encoding="utf-8")
+    assert 'keep = "yes"' in content
+    assert "max_uncompressed_bytes = 42" in content
+    assert settings.stat().st_mode & 0o777 == 0o600
+
+
+def test_public_retention_rejects_invalid_and_unreadable_settings(
+    client: OdooClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_root = tmp_path / "config"
+    config_root.mkdir()
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_config_root",
+        lambda **_kwargs: config_root,
+    )
+    with pytest.raises(ConfigError, match="positive integer"):
+        client.backups.set_retention(retention_days=0)
+    with pytest.raises(ConfigError, match="positive integer"):
+        client.backups.set_retention(retention_days=True)  # type: ignore[arg-type]
+    with pytest.raises(ConfigError, match="boolean"):
+        client.backups.set_retention(auto_prune=1)  # type: ignore[arg-type]
+
+    settings = config_root / "user.toml"
+    settings.mkdir()
+    with pytest.raises(ConfigError, match="unable to read"):
+        client.backups.retention()
 
 
 def test_list_with_entries(client: OdooClient, sample_backup_entry: dict[str, object]) -> None:

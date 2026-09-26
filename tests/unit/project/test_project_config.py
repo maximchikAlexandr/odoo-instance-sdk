@@ -6,11 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError
+from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError, StalePlanError
 from odoo_instance_sdk.internal import project_manifest as project_manifest_module
 from odoo_instance_sdk.internal.project_manifest import assert_no_secrets, write_manifest
 from odoo_instance_sdk.project import ProjectConfig, RemoteSourceConfig
 from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
+from odoo_instance_sdk.project_init import (
+    configure_remote_source,
+    configure_remote_source_command,
+    list_remote_sources,
+    remove_remote_source,
+)
 
 
 def test_load_existing_manifest(tmp_path: Path) -> None:
@@ -429,3 +435,56 @@ def test_named_remote_sources_reject_unknown_and_duplicate_fields(tmp_path: Path
                 ),
             ),
         )
+
+
+def test_public_remote_source_operations_are_atomic_and_idempotent(tmp_path: Path) -> None:
+    write_manifest(
+        tmp_path,
+        ProjectConfig(
+            repository_root=tmp_path,
+            odoo_bin=Path("/opt/odoo/odoo-bin"),
+            source_config=Path("odoo.conf"),
+        ),
+    )
+    source = RemoteSourceConfig(
+        name="staging",
+        base_url="https://staging.example",
+        database="staging",
+        git_branch="main",
+    )
+    assert configure_remote_source(tmp_path, source) == (source,)
+    assert configure_remote_source(tmp_path, source) == (source,)
+    assert list_remote_sources(tmp_path) == (source,)
+
+    replacement = RemoteSourceConfig(
+        name="staging",
+        base_url="https://staging.example",
+        database="staging_next",
+        git_branch="develop",
+    )
+    with pytest.raises(ValueError, match="replace=True"):
+        configure_remote_source(tmp_path, replacement)
+    assert configure_remote_source(tmp_path, replacement, replace=True) == (replacement,)
+    assert list_remote_sources(tmp_path) == (replacement,)
+
+    manifest = tmp_path / ".odcli" / "project.toml"
+    planned = configure_remote_source_command(
+        tmp_path,
+        RemoteSourceConfig(
+            name="production",
+            base_url="https://production.example",
+            database="production",
+            git_branch="main",
+        ),
+    )
+    before_preview = manifest.read_text(encoding="utf-8")
+    assert planned.plan.steps[0].mutating is True
+    assert manifest.read_text(encoding="utf-8") == before_preview
+
+    drifted = configure_remote_source_command(tmp_path, source, replace=True)
+    manifest.write_text(before_preview + "\n", encoding="utf-8")
+    with pytest.raises(StalePlanError, match="manifest changed"):
+        drifted.run()
+
+    assert remove_remote_source(tmp_path, "STAGING") == ()
+    assert remove_remote_source(tmp_path, "staging") == ()

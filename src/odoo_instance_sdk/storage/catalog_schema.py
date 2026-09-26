@@ -271,6 +271,7 @@ environment_copy_journal = Table(
         CheckConstraint(
             "backup_ownership IS NULL OR backup_ownership IN ('owned', 'borrowed', 'unknown')"
         ),
+        server_default="unknown",
     ),
     Column(
         "stage",
