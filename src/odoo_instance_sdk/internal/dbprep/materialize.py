@@ -919,7 +919,7 @@ class DatabasePreparationCoordinator:
                 admin_password=admin_password,
             ),
         )
-        return self._action_command(
+        command = self._action_command(
             "database.refresh",
             "Refresh a project database",
             lambda: self._prepare_impl(
@@ -948,6 +948,13 @@ class DatabasePreparationCoordinator:
                     "database.prepare.local-archive.cleanup",
                 }
             ),
+        )
+        from odoo_instance_sdk.internal.backup_maintenance import attach_auto_prune
+
+        return attach_auto_prune(
+            command,
+            backups=self.client.backups,
+            project=project,
         )
 
     def _action_command(

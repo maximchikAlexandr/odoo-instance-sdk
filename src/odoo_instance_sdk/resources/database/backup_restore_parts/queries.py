@@ -771,7 +771,7 @@ class _QueriesMixin:
     ) -> Command[Backup]:
         from odoo_instance_sdk.internal.proc import PreparedAction
 
-        return self._action_command(
+        command = self._action_command(
             "database.backup",
             "Create a database backup",
             lambda: self._backup_impl(
@@ -800,6 +800,14 @@ class _QueriesMixin:
                     mutating=True,
                 ),
             ),
+        )
+        from odoo_instance_sdk.internal.backup_maintenance import attach_auto_prune
+
+        binding = self._instance._runtime_binding
+        return attach_auto_prune(
+            command,
+            backups=self._instance._client.backups,
+            project=binding.repository_root if binding is not None else None,
         )
 
     def _backup_impl(  # noqa: C901

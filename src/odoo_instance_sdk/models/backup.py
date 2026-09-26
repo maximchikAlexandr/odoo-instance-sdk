@@ -126,6 +126,7 @@ class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     source_git_branch: str | None = None
     source_name: str | None = None
     pinned: bool = False
+    warnings: tuple[str, ...] = ()
 
 
 class LocalArchiveRestoreSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -248,6 +249,7 @@ class EnvironmentCheckoutResult(
 ):
     environment: DevelopmentEnvironment
     plan: EnvironmentCheckoutPlan
+    warnings: tuple[str, ...] = ()
 
 
 class Database(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

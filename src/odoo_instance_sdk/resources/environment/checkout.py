@@ -694,21 +694,27 @@ class _CheckoutMixin:
             private_projection=snapshot.public,
         )
         command = Command.from_prepared(snapshot.execution_plan, prepared)
-        if snapshot.private.db_mode is not EnvironmentDatabaseMode.COPY:
-            return command
-        if (source_session := self._copy_auxiliary_session(snapshot.private)) is None:
-            return command
-        from odoo_instance_sdk.resources.instance.auxiliary_restore import (
-            _attach_auxiliary_restore_runtime,
-        )
+        if snapshot.private.db_mode is EnvironmentDatabaseMode.COPY:
+            source_session = self._copy_auxiliary_session(snapshot.private)
+            if source_session is not None:
+                from odoo_instance_sdk.resources.instance.auxiliary_restore import (
+                    _attach_auxiliary_restore_runtime,
+                )
 
-        return cast(
-            "Command[DevelopmentEnvironment]",
-            _attach_auxiliary_restore_runtime(
-                command,
-                source_session,
-                before_step_id="checkout.catalog",
-            ),
+                command = cast(
+                    "Command[DevelopmentEnvironment]",
+                    _attach_auxiliary_restore_runtime(
+                        command,
+                        source_session,
+                        before_step_id="checkout.catalog",
+                    ),
+                )
+        from odoo_instance_sdk.internal.backup_maintenance import attach_auto_prune
+
+        return attach_auto_prune(
+            command,
+            backups=self._client.backups,
+            project=snapshot.private.project.repository_root,
         )
 
     def _copy_auxiliary_session(self, plan: _CheckoutPlan) -> AuxiliaryRestoreSession | None:

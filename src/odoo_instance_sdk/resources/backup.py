@@ -403,24 +403,41 @@ class BackupResource:
         return self.prune_command(project, dry_run=dry_run).run()
 
     def _execute_prune_plan(  # noqa: C901 -- each candidate is revalidated before deletion
-        self, plan: BackupPrunePlan, *, dry_run: bool
+        self,
+        plan: BackupPrunePlan,
+        *,
+        dry_run: bool,
+        excluded_ids: tuple[uuid.UUID, ...] = (),
     ) -> BackupPruneResult:
         from odoo_instance_sdk.internal.backup_retention import read_retention_policy
 
+        excluded = set(excluded_ids)
+        candidates = tuple(
+            candidate for candidate in plan.candidates if candidate.backup_id not in excluded
+        )
+        excluded_skips = tuple(
+            BackupPruneSkip(
+                backup_id=candidate.backup_id,
+                reason="primary operation backup input/output",
+                size_bytes=candidate.size_bytes,
+            )
+            for candidate in plan.candidates
+            if candidate.backup_id in excluded
+        )
         if dry_run:
             return BackupPruneResult(
                 plan=plan,
-                skipped=plan.protected + plan.skipped,
+                skipped=plan.protected + plan.skipped + excluded_skips,
                 dry_run=True,
             )
         deleted: list[uuid.UUID] = []
-        skipped: list[BackupPruneSkip] = list(plan.protected + plan.skipped)
+        skipped: list[BackupPruneSkip] = list(plan.protected + plan.skipped + excluded_skips)
         failed: list[uuid.UUID] = []
         failures: list[BackupPruneSkip] = []
         removed_bytes = 0
         policy_changed = False
         catalog = self._client.get_catalog()
-        for candidate in plan.candidates:
+        for candidate in candidates:
             current_policy = read_retention_policy()
             current_fingerprint = _policy_fingerprint(current_policy)
             if current_fingerprint != plan.policy_fingerprint:
