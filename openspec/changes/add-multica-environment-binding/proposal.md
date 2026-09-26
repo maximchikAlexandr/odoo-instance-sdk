@@ -1,35 +1,31 @@
-# Prepare Odoo on a native Multica checkout
-
 ## Why
 
-The analysis workflow needs Multica's task checkout and Odoo's isolated database/runtime to use the same code. Reuse native Multica checkout and let core adopt its path; do not recreate Multica registration or build a second task/environment registry.
+The analysis workflow needs Multica's native task checkout and Odoo's isolated runtime to operate on the same code without creating a second checkout or registry. The integration must consume the final public typed Multica SDK and core source/COPY contracts rather than freeze temporary raw-CLI workarounds while those contracts are still being implemented.
 
 ## What Changes
 
-- Deliver independently installed `odcli-multica` using public Odoo Instance SDK and existing `multica-py` APIs. Core stays independent of Multica.
-- Use existing `multica_client.cli.command_command()` for native checkout and daemon-status JSON. Two narrow output decoders replace the previously proposed mandatory upstream SDK changes.
-- Add generic core `adopt_command()` / `adopt()` for caller-owned Git checkouts, reusing COPY provisioning and preserving separate code/artifact ownership and configured project identity.
-- Expose read-only `context` and `env prepare` with explicit project, repository, issue/run and source/base inputs. Native checkout and Odoo preparation are two separate finite phases.
-- Return context and the existing core environment result separately. The caller retains their association. No project-link file, binding registry/history, bind/unbind commands or extension runtime manager.
-- Reuse core identity-based retries, runtime/status and owned-only cleanup. Telemetry/inventory enrichment stays in [#105](https://github.com/maximchikAlexandr/odoo-instance-sdk/issues/105).
+- Deliver independently installed `odcli-multica` using public typed operations from compatible `multica-py` and Odoo Instance SDK releases; core remains independent of Multica.
+- Reuse the native typed Multica checkout and daemon-status operations delivered by `multica-py` #93. Do not retain `cli.command_command()` calls or local checkout/status decoders as the product design.
+- Add generic core caller-owned-checkout adoption, reusing COPY provisioning while separating code ownership, SDK artifact ownership, configured project identity, and actual checkout identity.
+- Expose finite read-only context and Odoo preparation operations. Native checkout and preparation remain two explicit phases; the caller retains their results.
+- Reuse existing core lifecycle, diagnostics, retry, and owned-only cleanup surfaces. Do not add a binding registry, checkout registry, task dispatcher, or workflow engine.
+- Separate planning readiness from implementation readiness. Planning proceeds now; implementation remains gated until both prerequisite implementations are complete and this package is re-researched, updated, strictly validated, reviewed, and published at a new exact SHA.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `multica-environment-binding`: Verified, stateless task-to-environment handoff through context and preparation. The existing capability/change identifier is retained; it does not imply persistent binding storage.
+- `multica-environment-binding`: Verified stateless task-to-environment handoff through native typed Multica operations and core adoption.
 
 ### Modified Capabilities
 
-- `development-environment`: Caller-owned checkout adoption and ownership-aware lifecycle without Git creation/deletion.
-- `packaging`: Independent extension member and narrowly supported reuse of existing bounded output functions.
+- `development-environment`: Caller-owned checkout adoption and ownership-aware lifecycle without Git creation or deletion.
+- `packaging`: Independently installed extension with compatible public core and Multica SDK dependencies.
 
 ## Impact
 
-Core changes cover adoption, necessary catalog ownership/project evidence, runtime/path resolution and cleanup. The extension lives in `packages/odcli-multica`; no implementation change in `multica-py` is required by this plan. Research and the full #70 split are recorded in `research.md` and `issue-70-scope.md`.
+Core changes affect environment planning/catalog evidence, COPY provisioning, lookup, runtime/config resolution, diagnostics, and cleanup. The extension lives in `packages/odcli-multica` and consumes public typed `multica-py` checkout, issue/run, and daemon-status contracts.
 
-Consume the source/COPY contracts planned by MYL-271/272 without duplicating them. The inspected baseline had their planning branch but not their implementation in main; recheck actual APIs at implementation start. Only used source contracts and #69's workspace scaffold are dependencies. Detached readiness, retention, and #69's progress feature are not release gates for this change; use their existing APIs when available.
+Implementation has two mandatory gates: (1) MYL-271 planning plus the verified, integrated MYL-272 implementation of the consumed core source/COPY contracts; and (2) complete implementation of `multica-py` #93 with an available supported revision/version. Closing documentation alone, cancelling either dependency, or implementing only checkout/status does not open the gate. Once both are complete, the actual APIs and versions SHALL be inspected, all affected artifacts SHALL be revised, and a new exact verified SHA SHALL be published before any implementation work starts.
 
-## Non-goals
-
-No project configuration CRUD, persistent binding service, task dispatcher, Temporal worker, skills, reports, anonymizer, access-role system, dashboard, billing, plugin framework or automatic package/daemon installation. No project-resource rewrites, cross-machine provisioning or permanent checkout lease.
+Telemetry/inventory enrichment remains in GitHub #105. Project CRUD, persistent binding, business workflow, skills, Temporal workers, reports, dashboard, billing, access-policy implementation, and automatic package/daemon installation remain out of scope.

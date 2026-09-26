@@ -5,7 +5,7 @@ The table preserves the substantive points of original [#70](https://github.com/
 | Original point | Decision | Reviewed scope |
 |---|---|---|
 | Separate distribution in this repository | Now | Independent `odcli-multica` import/executable/version, no new repository. |
-| Core and external multica-py dependencies | Now | Existing public SDKs; no mandatory upstream wrapper release. |
+| Core and external multica-py dependencies | Gate | Consume the verified integrated MYL-272 core contracts and the supported `multica-py` revision/version that implements all of #93. |
 | Root uv workspace, no core relocation | Now | Reuse only #69's one-time scaffold, not its progress feature. |
 | Standalone/combined uv tool installation | Now | Both clean-wheel contracts; no extension package manager. |
 | Visible optional core integrated flags/lazy import | Remove flag | Native checkout and standalone prepare; core CLI remains unchanged and isolated. |
@@ -28,7 +28,7 @@ The table preserves the substantive points of original [#70](https://github.com/
 | issue_total/shared_issue/dedup | Later | No proportional allocation or duplicate totals. |
 | Per-run upstream gap issue | Later, conditional | File only after evidence; existing run usage field is not automatically a gap. |
 | Compact Rich/exact machine counters | Later | Common bounded output contract stays now. |
-| Public checkout/telemetry/process client example | Split | Existing SDK native command + context/prepare now; telemetry/process resource later. |
+| Public checkout/telemetry/process client example | Split | Typed native checkout plus context/prepare now; telemetry/process enrichment later. |
 | Frozen types/no Any/private imports/generic tracker | Now + later | Shared safety/maintainability contracts. |
 | Multica unavailable must not break core | Now + later | Preparation may fail; core lifecycle and cleanup remain usable. |
 | Canonical paths/stale state/timeouts/order | Now + later | Core missing-code diagnostics now; no extra binding state machine. |
@@ -42,12 +42,12 @@ The table preserves the substantive points of original [#70](https://github.com/
 ## Review of the eight user-facing proposals
 
 1. **Keep** the separate optional package.
-2. **Keep, simplify** native checkout: use existing public raw-command SDK instead of awaiting a new repository method.
+2. **Keep, simplify** native checkout: use the final public typed checkout operation from the complete #93 implementation; do not preserve a raw-command adapter.
 3. **Keep** generic core adoption and necessary ownership/lifecycle changes.
 4. **Simplify** project/context: explicit inputs plus read-only facts; remove project-link TOML/CRUD.
 5. **Simplify** CLI/SDK: context and prepare only; remove bind/unbind/status and persistent binding/history/locks.
 6. **Keep, simplify** retries: core UUID idempotency and safe cleanup remain; binding failure/reconciliation machinery disappears.
-7. **Remove** mandatory multica-py changes: existing public bounded command API covers both operations; two narrow output decoders suffice.
+7. **Require** complete multica-py #93 before implementation: consume its typed checkout and daemon-status contracts; local output decoders are forbidden.
 8. **Keep, simplify** contracts: support the used existing output module directly, no new facade or execution framework.
 
 No additional business workflow, Temporal implementation or automatic task routing is introduced. This split is reflected in the revised #70 body and #105's caller-owned attribution prerequisite.

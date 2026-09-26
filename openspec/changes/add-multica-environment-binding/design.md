@@ -1,83 +1,93 @@
-# Design
-
 ## Context
 
-See `proposal.md` for scope and `research.md` for pinned source evidence. Multica's project/daemon-wide `local_directory` cannot select a separate checkout per issue. Native checkout already establishes the task/code relationship. Core currently assumes it owns Git checkout placement and deletion, so adopting a path requires an explicit ownership distinction.
+Multica's project/daemon-wide `local_directory` cannot select one checkout per issue. Native checkout already owns the task-to-code association, while Odoo Instance SDK currently assumes that it created and may remove each environment worktree. The integration therefore needs one generic core adoption primitive and a thin optional package, not another checkout or binding registry.
+
+The input package used public raw `cli.command_command()` calls and local decoders because typed checkout and complete daemon status were absent. `multica-py` #93 now explicitly requires full public CLI-to-typed-SDK parity, including native checkout and complete daemon-status contracts. Those temporary adapters are no longer an acceptable target design. Their final signatures are intentionally not guessed before #93 is implemented.
+
+Two external implementations remain in flight: MYL-272 supplies the core source/COPY contracts planned by MYL-271, and `multica-py` #93 supplies the typed Multica contracts. They block implementation, not planning.
 
 ## Goals / Non-Goals
 
-Provide finite SDK/CLI primitives, not the DOCX workflow. Keep two effectful phases, one Git checkout, one core environment catalog and no extension persistence. Skills/scripts/Temporal activities retain results and decide when to start, inspect, stop and remove Odoo.
+**Goals:**
+
+- Prepare one isolated Odoo COPY environment against one native Multica checkout.
+- Use only public typed dependency contracts and the repository's existing command/execution/output boundaries.
+- Preserve explicit ownership, deterministic retry, diagnostics, and owned-only cleanup.
+- Make planning readiness and implementation readiness independently auditable.
+
+**Non-Goals:**
+
+- Persistent binding or checkout registries, project-resource mutation, task routing, workflow scheduling, telemetry allocation, remote policy enforcement, or a second runtime manager.
+- Reimplementation of Multica checkout/status behavior or preservation of raw CLI escape hatches for these operations.
+- Inventing final dependency method names, result fields, or compatibility versions before the prerequisite code exists.
 
 ## Decisions
 
-### D1. Native checkout through the existing public SDK
+### D1. Native checkout and daemon identity use final typed `multica-py` operations
 
-Use the existing scoped `MulticaClient` and `OperationOptions` for server/workspace, cwd, environment and timeout. Invoke `client.cli.command_command("repo", "checkout", url, "--ref", ref, options=...)`. This public bounded API returns an inspectable captured `Command[CliResult]`; it already supplies transport, redaction, compatibility, cancellation and execution. Do not access private fields or add a runner.
+At implementation start, select the confirmed public typed native-checkout and daemon-status operations from the available revision/version that completes all of `multica-py` #93. Use their inspectable command siblings, typed results, scoped server/workspace configuration, timeout/cancellation, and redaction contracts directly.
 
-Decode successful stdout as exactly one absolute path, allowing only the CLI's terminal line ending. Reject malformed, multiline, empty or redacted output. Stderr is diagnostic, never a path fallback. Confirm canonical Git root and repository identity before adoption. Timeout/cancellation means unknown checkout outcome, not permission to delete or immediately recreate it. Never use `--fresh` here.
+The extension SHALL NOT call `cli.command_command()` for checkout or daemon status, parse checkout stdout, decode daemon JSON, access private HTTP/storage, or copy a subprocess runner. Checkout remains a separate phase from Odoo preparation. Timeout/cancellation retains the dependency's typed unknown-outcome semantics; the integration never assumes that no checkout was created. Forced fresh checkout is excluded.
 
-The caller executes native checkout first, then captures Odoo preparation with its actual returned path. No composite command constructs later argv after mutation. The native CLI remains `multica repo checkout`; do not add an extension checkout clone or `--multica-issue` to core checkout.
+Alternative rejected: keep the two local decoders as compatibility fallbacks. That creates two contracts for the same public operations and would preserve precisely the parity gap #93 is required to close.
 
-### D2. Explicit inputs and read-only context, no configuration CRUD
+### D2. Explicit read-only context, no configuration CRUD
 
-Use a small `MulticaOdooClient(core_client, multica_client)` exposing `context_command`/`context` and `prepare_command`/`prepare`. Both accept the selected core project, exact checkout path, expected Multica project ID, issue ID and run ID. Server/workspace and credentials come from the already scoped public Multica client. Repository identity comes from trusted selected core project configuration; an ambiguous repository requires an explicit selection.
+Provide a small integration client with read-only `context` and preparation operations. Inputs identify the selected core project/repository, exact checkout path, expected Multica project, issue, and run. Server/workspace/credentials come from the scoped Multica client. Repository identity comes from the explicitly selected core project; ambiguity fails.
 
-CLI equivalents:
+Context composes typed issue/run and daemon-status operations to verify workspace/project/issue/run membership, the owning runtime/daemon, repository identity, and containment of the actual Git root beneath an absolute current/durable task directory. Missing fields, incomplete pagination, conflicting identities, relative-only paths, or forwarded/container endpoints without proven shared-filesystem evidence fail before mutation. The frozen result records verified identifiers, checkout facts, and observation time, but is not a lease.
 
-```text
-odcli-multica context PATH --project CORE_PROJECT --multica-project PROJECT --issue ISSUE --run RUN
-odcli-multica env prepare PATH --project CORE_PROJECT --multica-project PROJECT --issue ISSUE --run RUN --base REF (--remote NAME | --backup-id UUID | --source-db NAME)
-```
-
-Reuse existing Multica profile/workspace configuration and explicit overrides rather than storing another mapping. No `.odcli/multica.toml`, project link/show, hostname registry or inference from task prose/branch names.
-
-Context uses typed `issues.get_command` and `issues.runs_command` for membership and absolute work-directory evidence. Use the existing public `cli.command_command("daemon", "status", "--output", "json")` and a narrow strict decoder for daemon ID, server origin, lifecycle status, OS and workspace/runtime IDs. Match the selected run's runtime ID in the daemon's selected workspace. The current typed `DaemonStatus` drops those fields; public raw JSON already provides them, so no upstream release is required.
-
-Return a concrete frozen `TaskContext` with verified IDs, checkout identity and observation time. Missing fields, unavailable/incomplete runs, mismatched IDs or a relative-only task path fail before preparation. Complete relevant pagination or report incomplete. Path equality alone is not host evidence. Limit this release to execution on the owning daemon's local filesystem; a forwarded/container endpoint without a proven shared filesystem is unsupported. Environment hints cannot override conflicting explicit values.
-
-The actual Git root must lie beneath the verified current/durable task directory and match the selected repository. Context never creates resources, reroutes tasks or proves role/access/anonymization policy. Existing typed issue/run APIs remain the preferred path; raw commands are restricted to the two concrete uncovered output contracts.
+Alternative rejected: infer identity from task prose, branch names, path equality, or project `local_directory`. None proves issue-scoped ownership on the local host.
 
 ### D3. Preparation delegates to generic core adoption
 
-Add core `EnvironmentResource.adopt_command(project, checkout_path, *, options: EnvironmentCheckoutOptions)` and delegating `adopt() -> DevelopmentEnvironment`. Accept COPY only, an explicit compatible base and exactly one supported explicit COPY source. Support linked worktrees and independent clones because native Multica produces both. Do not add a provider interface.
+Add core caller-owned-checkout adoption as an inspectable command plus delegating convenience operation. It accepts COPY only, one explicit supported COPY source, an explicit compatible base, and an existing canonical Git checkout. It supports linked worktrees and independent clones without creating, moving, renaming, resetting, or deleting code.
 
-The extension's `prepare_command` performs explicit read-only context preflight and returns the exact captured core adoption command. `prepare` executes that command; it returns the existing `DevelopmentEnvironment`. A caller needing the task association stores the separate `context` result plus environment UUID. Do not introduce an execution wrapper just to combine results. Preflight observations are timestamped facts, not a remote lifetime lock; core revalidates captured local inputs before effects.
+First adoption verifies repository identity, path identity, branch/HEAD, clean status, manifest, source provenance, and locally resolved base before mutation. A ready matching record is resolved before first-adoption-only clean/base checks so ordinary later development returns the same UUID without another restore. Conflicting inputs and incomplete state return typed conflict/recovery evidence.
 
-First adoption verifies repository, canonical path, branch/HEAD, manifest, source provenance and locally resolved explicit base; HEAD must equal that base and Git must report no tracked/untracked changes. Respect Git ignore rules without Multica filename exceptions. Wrong/dirty retained native checkout fails unchanged, never resets. Preserve the selected configured core project and secret root; rebase repository-local config/addon/dependency paths while leaving external Odoo paths external. Never copy source `.env` into the borrowed checkout.
+The integration performs bounded context preflight, captures the exact core adoption command, and returns the existing environment result. Context and environment UUID remain separate caller-owned workflow results. No composite continuation framework is introduced.
 
-Reuse core COPY restore, neutralization, isolated database/filestore, disk/Python/port checks and recovery. Do not mutate the default source, build another backup GC or implicitly create a venv. `create_venv` stays false unless explicitly selected.
+### D4. Code ownership is independent from SDK artifact ownership
 
-### D4. Ownership, retry and lifecycle
+Persist only the additive evidence required to distinguish configured core project identity, actual checkout identity, code ownership (`sdk_owned`, `caller_owned`, `unknown`), and explicit SDK artifact root. Generated config/log/lock/optional venv, COPY database, and isolated filestore remain under existing SDK ownership rules. Repository-local paths are rebased into the adopted checkout; external configured paths stay external; source `.env` is never copied.
 
-Persist only necessary additive evidence: code ownership (`sdk_owned | caller_owned | unknown`), explicit SDK artifact root, configured project identity and actual checkout identity. Keep existing core catalog/locks and provisioning journal. Legacy cleanup retains SDK ownership only where canonical recorded layout proves it; unknown evidence never grants new deletion rights.
+List/cwd/config/sync/runtime/diagnostic/remove paths use recorded project and checkout evidence rather than guessing from Git common dir or `worktree_path.parent`. Rollback/removal never resets, prunes, renames, or recursively deletes caller-owned code, even when dirty, absent, or replaced. Legacy unknown ownership never grants deletion rights.
 
-Generated config/log/lock/optional venv live in the existing global SDK environment root, not beside borrowed code. Unique COPY database/filestore remain SDK-owned. Audit all affected list/cwd/config/sync/runtime/diagnostics/cleanup paths: independent clones must resolve to the configured project, and no code-path parent may become an artifact root by inference.
+### D5. Packaging and output stay narrow
 
-Reserve by core project plus canonical checkout identity before effects. Same captured source/base/options against a ready record returns the same UUID without download/restore/dependency changes; conflicting inputs fail, incomplete state reports existing recovery. Resolve a matching ready record before first-adoption clean/base checks: later edits/commits on its recorded branch are allowed and do not request a refresh. Do not reinterpret a moving source/ref as new retry inputs.
+Add `packages/odcli-multica` as an independently versioned distribution/import/executable using the shared workspace scaffold and compatible published dependencies. Core does not import Multica. The extension uses existing public bounded output contracts for equivalent Rich/JSON/TOON documents; it adds no serializer, renderer hierarchy, live monitor, or execution abstraction.
 
-Rollback/removal never resets, prunes, renames or recursively deletes caller-owned code, even if dirty, absent or replaced. Remove only independently proven SDK artifacts by environment UUID, subject to existing active-runtime and database ownership checks. Normal SDK-owned checkout behavior remains unchanged.
+### D6. Planning and implementation have separate readiness gates
 
-Use existing core get/list/status/diagnostics/start/stop/remove surfaces. No extension binding files, history, locks, stale-state machine, bind/unbind/status commands or remote issue metadata writes. Native Multica owns task-to-code association; the caller owns workflow-result persistence. #105 can later define only the attribution it actually needs.
+This revision may complete OpenSpec validation, estimation, review, and publication while dependencies are unfinished. It is planning-ready only.
 
-### D5. Packaging, output and minimum dependencies
+Implementation readiness requires all of the following evidence:
 
-Deliver `packages/odcli-multica`, independently versioned distribution/import/executable, compatible public SDK dependencies and isolated-wheel tests. Reuse #69's one-time workspace scaffold; do not wait for its progress functionality or other future members. Likewise require only predecessor source/COPY operations actually consumed, not the complete readiness/retention feature set.
+1. MYL-271 is closed and MYL-272 is complete, independently verified, integrated into the implementation base, and exposes the source/COPY contracts actually consumed here.
+2. `multica-py` #93 is fully implemented—not cancelled or partially closed—and an exact supported revision/version containing the complete approved parity scope is available.
+3. A Planner re-reads both implementations, their public API/types/tests/version metadata, and the current repository base; replaces every provisional contract reference with observed facts; revises proposal, research, design, specs, tasks, and delivery plan as needed; reruns estimation if scope/evidence changed; and publishes a new exact SHA.
+4. Plan Verifier independently approves that new SHA through the normal human-review gate.
 
-Document and support the narrowly reused existing `odoo_instance_sdk.commands.output` functions/types as the extension-facing bounded output contract. Its current CLI-private designation must be deliberately revised with compatibility tests. Do not add `cli_output.py`, duplicate serializers or a renderer hierarchy. Domain callbacks remain SDK delegates; JSON/TOON emit one sanitized bounded document, Rich expresses equivalent facts. Keep the single core leaf inventory; extension leaves have their package-local contract tests.
+The implementation parent may exist in backlog with these gates recorded, but no WP child or implementation run may start before all four conditions are satisfied.
 
 ## Risks / Trade-offs
 
-- **Native checkout can retain dirty code or cached refs** → reject incompatible first-adoption input; no implicit reset.
-- **Task code may be garbage-collected during/after restore** → no lifetime guarantee; preserve partial environment IDs, use core diagnostics and owned-only cleanup. Caller stops/removes Odoo before releasing code when feasible.
-- **No persisted association in this slice** → caller stores context and UUID; do not promise later cross-task discovery or telemetry attribution.
-- **Raw SDK output contracts can change** → pin/test the selected supported CLI/SDK combination and fail on invalid output; replace decoders with typed wrappers if upstream later supplies them.
-- **Prerequisite APIs or permissions unavailable** → explicit diagnostic before mutation; do not substitute private HTTP or live-data tests.
+- **Dependency signatures are not yet available** → describe required semantics only now; make observed API/version capture and a new exact SHA mandatory before implementation.
+- **Native checkout may retain dirty code or cached refs** → core first adoption rejects mismatched/dirty inputs without reset; an existing ready adoption is resolved before those first-use checks.
+- **Task checkout can disappear during or after restore** → retain environment/recovery identity, diagnose missing code, and clean only independently proven SDK artifacts.
+- **No extension-side persistent association** → the workflow caller stores context plus environment UUID; later telemetry attribution remains #105.
+- **Cross-package compatibility can drift** → declare compatible versions, run installed-wheel tests, and fail before mutation on unsupported contracts.
+- **Live daemon/Odoo evidence is environment-sensitive** → require an explicitly approved disposable acceptance fixture; static research never substitutes for it.
 
 ## Migration Plan
 
-1. Verify consumed source/COPY APIs and workspace scaffold; keep independent readiness/retention work outside the gate.
-2. Add minimal core ownership/project evidence migration, adoption and affected lifecycle handling together. No second catalog and no extension-state migration.
-3. Add the two raw-SDK adapters, read-only context and thin prepare CLI/SDK; document two-phase composition and caller-owned persistence.
-4. Validate fake boundaries and an explicitly approved disposable native-daemon/Odoo flow before release. Static research is not live acceptance.
+1. After both external dependencies complete, perform the mandatory API/version re-research and publish the new reviewed planning SHA.
+2. Add the smallest ownership/project evidence migration and generic adoption path while preserving existing SDK-owned behavior.
+3. Add the optional package using the observed typed Multica contracts and existing output boundary.
+4. Validate fake boundaries, installed wheels, and an approved disposable native-daemon/Odoo flow before release.
 
-Rollback: uninstall the extension without deleting environments; use a compatible core to clean SDK-owned assets by UUID. Catalog migration is forward-only; old core must not manage upgraded ownership rows.
+Rollback uninstalls the extension without deleting environments. A compatible core cleans only proven SDK-owned artifacts by UUID. Catalog migration is forward-only; an older core must not manage rows carrying the new ownership evidence.
+
+## Open Questions
+
+No product decision is delegated to implementation. The only unresolved facts are the exact final public names, result types, and compatible versions produced by the two dependencies; D6 requires observing and recording them before implementation authorization.

@@ -2,9 +2,9 @@
 
 ### Requirement: Independently installed Multica integration distribution
 
-The repository SHALL provide `odcli-multica` as a separately versioned distribution, `odcli_multica` import package and `odcli-multica` executable under `packages/odcli-multica`. It SHALL depend on compatible public releases of `odoo-instance-sdk` and external `multica-py`; the core wheel SHALL NOT depend on or import the extension or Multica. Root core source placement SHALL remain unchanged, and the member SHALL reuse the single workspace/lock foundation owned by issue #69.
+The repository SHALL provide `odcli-multica` as a separately versioned distribution, `odcli_multica` import package and `odcli-multica` executable under `packages/odcli-multica`. It SHALL depend on compatible public releases of `odoo-instance-sdk` and the `multica-py` revision/version that completes all of issue #93; the core wheel SHALL NOT depend on or import the extension or Multica. Root core source placement SHALL remain unchanged, and the member SHALL reuse the single workspace/lock foundation owned by issue #69.
 
-The extension SHALL import only public SDK APIs and SHALL NOT copy subprocess/HTTP execution, serializers, catalog schema or live-monitor loops. Package-specific publication SHALL use `odcli-multica-v<VERSION>` tags and independent versioning. Installing the extension SHALL NOT install/start a Multica daemon or disable SDK compatibility validation.
+The extension SHALL import only public typed SDK APIs and SHALL NOT invoke checkout or daemon status through a raw CLI escape hatch, add local wire/output decoders for those operations, or copy subprocess/HTTP execution, serializers, catalog schema, or live-monitor loops. Package-specific publication SHALL use `odcli-multica-v<VERSION>` tags and independent versioning. Installing the extension SHALL NOT install/start a Multica daemon or disable SDK compatibility validation.
 
 #### Scenario: Core-only installation
 
@@ -21,10 +21,10 @@ The extension SHALL import only public SDK APIs and SHALL NOT copy subprocess/HT
 - **WHEN** the member is built with `uv build --package odcli-multica --no-sources` and installed with the compatible core wheel outside the repository
 - **THEN** CLI/API smoke tests pass without undeclared cross-member imports or source checkout paths
 
-#### Scenario: Required upstream capability is absent
+#### Scenario: Required typed upstream capability is absent
 
-- **WHEN** the installed Multica SDK/CLI combination lacks the tested native checkout/context contract
-- **THEN** explicit integration use fails before mutation with the required compatibility information and core-only operations remain usable
+- **WHEN** the installed Multica SDK/CLI combination lacks the tested typed native checkout or complete daemon-status contract
+- **THEN** explicit integration use fails before mutation with the required compatibility information, does not fall back to raw CLI decoding, and core-only operations remain usable
 
 ### Requirement: Reuse the existing bounded output contract
 

@@ -2,64 +2,82 @@
 
 ## Evidence baseline — 2026-09-26
 
-Source inspection, not a live Multica/Odoo execution test. No application workspace, task, runtime or project resource was changed during research. The original DOCX was read locally; no attachment or customer identifiers are redistributed here.
+This is source and contract inspection, not a live Multica/Odoo acceptance run. No application task, runtime, project resource, checkout, database, or daemon lifecycle was mutated.
 
-| Source | Inspected revision | Finding |
+| Source | Inspected revision/state | Finding |
 |---|---|---|
-| Odoo Instance SDK main | `f7c3f7c9093529d6744c30745e220efb9aea8f80` | Native COPY checkout, external-file restore, command parity and direct guarded database cleanup exist. Caller-owned Git checkout adoption does not. |
-| MYL-271 planning branch | `f94fea797fe1fe6fc6575bf6afb7f76d5960f45c` | Named sources, exact backup COPY, readiness and retention are planned predecessor contracts. Diff against main contains planning/skill files, not their production implementation. |
-| Multica installed CLI | `0.5.2`, build `d45aba1cd` | `repo checkout` has `--ref`, `--fresh`, no destination flag or JSON option. Resource creation has an `execution-mode` option. |
-| Multica source tag | `v0.5.2` / `02d3e7cb81ff75c351b47cb1738317a07711b68f` | Task-bound native checkout and project/daemon-wide local-directory constraint. |
-| Multica selected source baseline | `v0.5.3` / `ff8b285497809e084915016c40c2bc5e5991ffbc` | Checkout and local-directory source contracts checked against the installed-version tag. |
-| Multica main, supplemental check | `12f8f3f31111564e5e1b9aac3f7f916e8bba4039` | Same relevant ownership constraints; not the release compatibility promise. |
-| multica-py current main | `d1b5f0e154c5587eca4cebd8bd2a6d39ae3d4d06` | Rechecked remote main during Ponytail review. Typed repositories lack checkout, but existing public bounded `cli.command_command` covers native checkout and daemon JSON. No upstream implementation prerequisite. |
+| Odoo Instance SDK planning base | `f7c3f7c9093529d6744c30745e220efb9aea8f80` | COPY checkout, external-file restore, command parity, and guarded cleanup exist; caller-owned checkout adoption does not. |
+| Current planning input | `cb638fa4d575b0dbb8ca5d4452897568102484ca` | Existing OpenSpec used two raw `multica-py` command calls and local decoders; this revision replaces that target design. |
+| MYL-271 / MYL-272 | planning `in_review`; implementation `in_progress`; no linked PR reported by Multica | Source/COPY predecessor is not yet a verified integrated implementation. WP-01 and WP-04 evidence exists on MYL-272, but partial WP evidence does not open the gate. |
+| `multica-py` issue #93 | OPEN; baseline `d1b5f0e154c5587eca4cebd8bd2a6d39ae3d4d06`; upstream target v0.5.3 / `ff8b285497809e084915016c40c2bc5e5991ffbc` | Requires full public CLI parity. Finding B1 requires typed native checkout; finding A1/D1 requires correct complete daemon status. Generic raw command invocation explicitly does not satisfy typed parity. |
+| Multica native checkout | upstream v0.5.3 source | Task-bound checkout owns repository cache/branch/path association; project/daemon-wide `local_directory` is not an issue-level selector. |
 
-Live issue state was MYL-271 `in_progress` and MYL-272 `backlog`. Do not infer shipping from their issue descriptions or the user's expectation that they are complete. Do not copy their implementation tasks into this change. Verify merged API signatures at implementation start.
+The dependency states above are observations, not completion claims. Before implementation, refresh every row against the integrated code and record the exact compatible revisions/versions.
 
 ## Native checkout traced end to end
 
-1. [`runRepoCheckout`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/cmd/multica/cmd_repo.go) reads the daemon endpoint and task context, requires the active task credential, and sends the current working directory plus URL/ref to the daemon. Successful stdout is **one path**, while the human summary is stderr. A missing JSON option is not a reason to scrape tables: a narrow SDK wrapper can decode this explicit path result and reject malformed output.
-2. [`repoCheckoutHandler`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/internal/daemon/health.go) authenticates the active task, checks workspace/task identity and ownership of the requested working directory, and delegates checkout to the daemon cache. It is not a public arbitrary-path registration API. The extension must not call it directly.
-3. [`CreateWorktreeContext`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/internal/daemon/repocache/cache.go) chooses a repo-name subdirectory, fetches refs, creates or reuses checkout and controls `agent/...` branch naming, collisions and isolated Git metadata. Fetch failure can preserve cached refs. Existing dirty/unpushed work can be retained instead of switching to the requested ref. Thus neither a requested branch nor a zero exit code proves the desired HEAD.
-4. Native daemon execution owns task context, run directory, sidecars and cleanup. Source inspection of `execenv/execenv.go` shows different cleanup rules for managed and local directories. We do not fabricate run rows, context files, GC markers, hooks or task credentials. Git checkout success is not Odoo readiness and does not promise permanent checkout retention.
+1. Native `repo checkout` uses the active task credential, daemon endpoint, current task directory, URL, and requested ref. It creates or reuses a daemon-managed checkout and returns its path.
+2. The daemon authenticates workspace/task ownership and controls repository cache, ref fetching, branch naming, collisions, and checkout retention. The extension must not reproduce or bypass those rules.
+3. A zero exit/result does not by itself prove requested HEAD or a clean checkout: cached refs and retained dirty/unpushed work are valid native outcomes. Core adoption therefore verifies repository, HEAD/base, and clean state on first use without resetting code.
+4. Native task/runtime lifecycle owns checkout availability. Odoo preparation is a separate phase and cannot promise permanent checkout retention.
 
-## Why the previous local-directory model is not selected
+## Why project `local_directory` is not selected
 
-[`findLocalDirectoryAssignment`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/internal/daemon/local_directory.go) selects a resource from the **project**, scoped to the daemon, and rejects two matches. [`CreateProjectResource`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/internal/handler/project_resource.go) also rejects a second resource for that project/daemon.
-
-This is valid for a deliberately shared project working directory, not one independent environment per issue. `in_place` serializes relevant coding tasks on the same path; `worktree` creates additional Multica-owned checkouts instead of using each independently provisioned Odoo environment. Issue metadata does not change that routing. Creating a Multica project per environment or repeatedly replacing the project's directory would add lifecycle and concurrency problems outside the requested scope.
+The local-directory resource is scoped to a project and daemon and rejects ambiguous multiple matches. It deliberately routes relevant tasks to one shared directory; it does not select a distinct checkout per issue. Replacing it per task or creating a project per environment would introduce routing and lifecycle machinery outside this change.
 
 | Model | Decision | Reason |
 |---|---|---|
-| OdCLI worktree + project `local_directory` per issue | Do not use here | Project-wide route, one directory per daemon; not an issue selector. |
-| Native Multica checkout + core adoption | Selected | Native registration/branch/task handling; one checkout; one necessary generic SDK primitive. |
-| Emulate Multica registries/private storage | Reject | No public atomic checkout-registration contract found; fragile and bypasses native ownership checks. |
-| Replace Git invocation inside current core checkout | Reject | Path, branch and Git-common-dir semantics differ; current cleanup assumes SDK ownership. |
+| OdCLI worktree plus rewritten project resource | Reject | Mutates a project-wide route and can create a second checkout. |
+| Native Multica checkout plus core adoption | Select | Preserves native task registration and introduces one reusable core primitive. |
+| Private Multica storage/HTTP emulation | Reject | Bypasses public ownership and compatibility contracts. |
+| Extension-side checkout registry | Reject | Duplicates native checkout identity and requires reconciliation/GC. |
 
-## Core seams and required changes
+## Current core seams
 
-- `resources/environment/checkout.py`, `checkout_planning.py`, `checkout_artifacts.py`: capture provisioning and reuse COPY/neutralization without the worktree-create step.
-- `resources/environment/cleanup.py`: currently derives artifact root from `worktree_path.parent` and captures `git worktree remove`. Those assumptions must be ownership-aware **before** admitting a borrowed checkout.
-- Environment listing currently filters by Git common dir. Native Multica caches/isolated clones can have a different common dir from the configured Odoo project. Retain explicit core project identity separately; runtime/cwd resolution must use exact registered checkout identity, not a guessed common-dir match.
-- `execution.py` and `command-execution` spec require all later process argv before mutation and explicitly permit a real domain phase boundary for result-dependent commands. Do not hide checkout → adoption behind a dynamic callback or continuation framework.
-- Existing public environment runtime, diagnostics, stop/remove and backup APIs are the post-provisioning surface. Do not create an extension runtime manager.
+- `resources/environment/checkout.py`, `checkout_planning.py`, and `checkout_artifacts.py` capture worktree creation and COPY provisioning in one path; adoption must reuse the latter without Git acquisition.
+- `resources/environment/cleanup.py` derives removal steps from `worktree_path` and assumes an SDK-created worktree. Caller-owned code requires an explicit ownership branch before adoption is safe.
+- Project filtering uses Git common-directory identity. Independent native clones need explicit configured-project identity plus separate actual-checkout identity.
+- `models/backup.py` and the catalog currently lack the complete ownership/artifact evidence required for safe adopted cleanup.
+- Existing environment runtime, status, diagnostics, stop, remove, and backup resources are sufficient post-provisioning surfaces; no extension runtime manager is needed.
 
-## Existing multica-py API is sufficient
+## `multica-py` parity dependency
 
-The earlier plan mistook missing convenience wrappers for missing capability. [`CliResource`](https://github.com/maximchikAlexandr/multica-py/blob/d1b5f0e154c5587eca4cebd8bd2a6d39ae3d4d06/src/multica_py/resources/cli.py#L146) already exposes public `command_command(*argv, options) -> Command[CliResult]`. It uses the standard captured transport and returns frozen redacted stdout/stderr/duration. Its execution-mode guard rejects managed/interactive operations, but neither `repo checkout` nor `daemon status`. A local construction-only check against this revision successfully built both command objects; no native checkout or daemon operation was executed.
+The input design treated `CliResource.command_command()` as sufficient. Issue #93 supersedes that assumption:
 
-Use `client.cli.command_command("repo", "checkout", url, "--ref", ref, options=...)`. A small integration decoder validates exactly one absolute path in successful stdout, never stderr/human-table parsing; reject redacted/malformed output. Do not invent created/reused/branch facts. Timeout is an unknown outcome. No `fresh`, new SDK repository method, copied runner or direct HTTP is necessary.
+- B1 requires a public typed native-checkout operation rather than raw argv.
+- A1 and D1 require daemon status to decode real lifecycle values and retain identity, OS, server, workspace/runtime, and related fields.
+- The completion boundary requires all approved public CLI families, inputs, response variants, and transports; closing only checkout/status is insufficient.
+- A raw command escape hatch alone does not count as typed resource/model coverage.
 
-`TaskRun` already exposes issue/project/workspace/runtime identity and optional work-directory/branch facts. Missing absolute paths or runtime identity are **unverified**, not a license to reconstruct a host path from a display label. Match repository subdirectories to a verified task root, not by branch name alone. If necessary run/host evidence is absent in the supported API, return an explicit unsupported result before provisioning.
+Therefore this change specifies the semantics it consumes but does not invent method names or wire shapes. After #93 is fully implemented, research SHALL identify the exact public command siblings, result types, cancellation/unknown-outcome behavior, redaction guarantees, and supported revision/version. The OpenSpec SHALL then be updated and republished at a new exact SHA before implementation.
 
-Current typed `DaemonStatus` exposes only running/PID/uptime, but that is not a blocker either. Multica v0.5.3 [`runDaemonStatus`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/cmd/multica/cmd_daemon.go) emits [`HealthResponse`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/internal/daemon/health.go) JSON containing daemon ID, server URL, OS, lifecycle state and workspace/runtime IDs. Invoke it through public `client.cli.command_command("daemon", "status", "--output", "json")` and narrowly decode the identity subset; match `TaskRun.runtime_id` in the selected workspace. Reuse typed `issues.get_command`/`issues.runs_command` for membership/path evidence. CPU/RSS and usage remain deferred. If upstream later supplies suitable typed wrappers, replace these two small adapters; do not make another repository's release a requirement now.
+## Core predecessor dependency
 
-This is source and command-construction evidence, not a live native checkout/Odoo acceptance test. Runtime permissions, same-host/filesystem checks, malformed/redacted bytes and compatibility remain explicit test gates.
+MYL-271 is the planning issue; MYL-272 is the implementation issue. They are one functional gate, not two separate dependencies. Required evidence is:
 
-## Requirements from the DOCX allocated elsewhere
+- the planning issue is closed;
+- the MYL-272 implementation is complete, independently verified, and integrated into the selected implementation base;
+- the actual named-source and/or exact-retained-backup COPY operations consumed here exist as public contracts with tests;
+- adoption does not duplicate source selection, restore, retention, readiness, or cleanup behavior already provided by the predecessor.
 
-- Approved code/dump selection and access roles: deployment/operator policy and the calling skill, with exact selections passed into primitives.
-- Full project passport: existing core configuration and explicit Multica context inputs; no second project-link file, module inventory, responsible-people registry or scenario catalog.
-- Docker topology, domains/proxy, anonymization and restrictive credentials: infrastructure/workflow, not inferred from context validation.
-- Analysis, transfer cards, testing strategy, MR assignment and reports: skills/scripts/Temporal activities consuming these APIs.
-- One user-facing scenario: caller composes finite commands and retains their results; the libraries do not become that scenario's scheduler.
+MYL-272 being `in_progress`, having accepted individual WP SHAs, or lacking a linked PR is not evidence of integrated completion. At revalidation, inspect the final merge/integration SHA rather than relying on the issue description.
+
+## Scope allocation
+
+- Deployment/operator policy chooses approved code/base/source and passes exact selections into these primitives.
+- Existing core project configuration remains the source of Odoo repository/config/secret-root identity.
+- Skills/scripts/workers compose checkout, context, preparation, and lifecycle commands and persist their results.
+- Infrastructure owns topology, domains/proxy, anonymization, and restrictive credentials.
+- GitHub #105 owns later telemetry and inventory enrichment.
+
+## Mandatory re-research checklist
+
+Implementation remains prohibited until a new planning revision records all of the following:
+
+1. Exact integrated MYL-272 base SHA and the public source/COPY types and operation signatures actually used.
+2. Exact `multica-py` revision/version completing all of #93 and the typed checkout/daemon-status APIs actually used.
+3. Updated compatibility constraints, packaging metadata, test fixtures, and any changed failure/cancellation semantics.
+4. Reconciled proposal, design, every delta spec, tasks, issue-70 disposition, and delivery plan.
+5. Recomputed estimate properties when evidence or scope changes, strict OpenSpec validation, repository checks, independent Plan Verifier approval, normal push, and remote-SHA equality for the new exact SHA.
+
+No raw-command fallback, local output decoder, private HTTP call, or speculative signature may be introduced to bypass this checklist.
