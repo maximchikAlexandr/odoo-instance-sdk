@@ -68,6 +68,21 @@ make live
 
 `make mutation` needs the `mutation` group and writes `.artifacts/mutation/results.txt`. It is a scheduled diagnostic, not a PR gate.
 
+The mutation audit is intentionally targeted to exactly these five security and
+normalization modules: `internal/redact.py`, `internal/sanitize.py`,
+`internal/db_name.py`, `internal/urls.py`, and `internal/address.py`. The
+configuration copies the complete package so baseline tests can import the CLI,
+but no other package module is mutated. The locked `mutmut>=3,<4` dependency is
+installed with the command above; do not use a second mutation framework.
+
+`make mutation` first runs a bounded real-mutmut import/collection regression,
+then the full audit. It always creates `.artifacts/mutation/results.txt` and
+keeps stage-labelled diagnostics on both success and failure. A bootstrap,
+collection, mutation, result, or artifact-upload failure remains a non-zero
+failure; the report is diagnostic output, not a failure mask. The scheduled and
+manual workflow is non-required by repository policy, but its job conclusion is
+still honest and must be red when the command fails.
+
 ## Pull requests
 
 1. Create a feature branch (`git checkout -b feat/your-feature`).

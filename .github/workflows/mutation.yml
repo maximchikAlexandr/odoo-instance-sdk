@@ -12,7 +12,6 @@ jobs:
   mutation:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -25,4 +24,5 @@ jobs:
         with:
           name: mutation-results
           path: .artifacts/mutation/results.txt
+          if-no-files-found: error
           retention-days: 14

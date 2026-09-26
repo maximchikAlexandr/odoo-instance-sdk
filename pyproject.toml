@@ -140,14 +140,32 @@ monitor = 70
 developer_workflow = 40
 
 [tool.mutmut]
-source_paths = [
+source_paths = ["src/odoo_instance_sdk"]
+also_copy = [
+    "scripts",
+    "README.md",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md",
+    "docs",
+    "openapi.json",
+    ".github",
+    ".agents",
+    "AGENTS.md",
+    "Makefile",
+    "LICENSE",
+    "CODE_OF_CONDUCT.md",
+    "SECURITY.md",
+    "examples",
+    "ruff.toml",
+]
+only_mutate = [
     "src/odoo_instance_sdk/internal/redact.py",
     "src/odoo_instance_sdk/internal/sanitize.py",
     "src/odoo_instance_sdk/internal/db_name.py",
     "src/odoo_instance_sdk/internal/urls.py",
     "src/odoo_instance_sdk/internal/address.py",
 ]
-pytest_add_cli_args = ["-x", "-q"]
+pytest_add_cli_args = ["-x", "-q", "-n", "2", "--dist", "loadscope"]
 pytest_add_cli_args_test_selection = [
     "tests/unit",
     "-m",
