@@ -1,5 +1,6 @@
 from __future__ import annotations  # noqa: I001 -- keep context test lookup aliases grouped; remove when Ruff supports grouped aliases.
 
+import sqlite3
 import re
 import shutil
 import sys
@@ -27,7 +28,13 @@ from odoo_instance_sdk.exceptions import (
     EnvironmentResolutionError,
     ProjectContextError,
 )
-from odoo_instance_sdk.internal.context import resolve_project
+from odoo_instance_sdk.internal.context import (
+    _catalog_project_root,
+    _nearest_git_marker,
+    resolve_project,
+    resolve_project_snapshot,
+)
+from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.project import ProjectConfig
 from odoo_instance_sdk.resources.environment import (
@@ -36,6 +43,7 @@ from odoo_instance_sdk.resources.environment import (
     EnvironmentState,
 )
 from odoo_instance_sdk.resources.instance import OdooInstance
+from odoo_instance_sdk.storage.catalog import BackupCatalog
 
 
 def _patch_canonical_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,6 +199,96 @@ def test_resolve_project_no_manifest_errors(tmp_path: Path) -> None:
 
     with pytest.raises(ProjectContextError):
         resolve_project(None, cwd=tmp_path)
+
+
+def test_project_snapshot_stops_at_nested_repository_boundary(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    (parent / ".odcli").mkdir(parents=True)
+    (parent / ".odcli" / "project.toml").write_text("[project]\n")
+    nested = parent / "nested"
+    (nested / ".git").mkdir(parents=True)
+    workdir = nested / "src"
+    workdir.mkdir()
+
+    assert resolve_project_snapshot(workdir) is None
+
+
+def test_project_snapshot_accepts_only_a_valid_git_marker(tmp_path: Path) -> None:
+    (tmp_path / ".odcli").mkdir()
+    (tmp_path / ".odcli" / "project.toml").write_text("[project]\n")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / ".git").write_text("not a gitdir marker\n")
+
+    assert resolve_project_snapshot(nested / "work") is None
+
+
+def _registered_snapshot_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, Path]:
+    root = tmp_path / "managed"
+    (root / ".odcli").mkdir(parents=True)
+    (root / ".odcli" / "project.toml").write_text("[project]\n")
+    (root / ".git").mkdir()
+    workdir = root / "src"
+    workdir.mkdir()
+    catalog_path = tmp_path / "catalog.sqlite3"
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.context.get_catalog_path", lambda **_kwargs: catalog_path
+    )
+    catalog = BackupCatalog(db_path=catalog_path)
+    try:
+        catalog._register_project(f"project_{repo_key(root, root / '.git')}", root, root / ".git")
+    finally:
+        catalog.close()
+
+    return root, workdir, catalog_path
+
+
+def test_catalog_snapshot_rejects_missing_git_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, workdir, _catalog_path = _registered_snapshot_fixture(tmp_path, monkeypatch)
+    shutil.rmtree(root / ".git")
+
+    boundary, common_dir = _nearest_git_marker(workdir)
+    assert _catalog_project_root(workdir, boundary, common_dir) is None
+    snapshot = resolve_project_snapshot(workdir)
+    assert snapshot is not None
+    assert snapshot.git_common_dir is None
+    assert snapshot.runtime_trusted is False
+
+
+def test_catalog_snapshot_rejects_stale_git_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, workdir, _catalog_path = _registered_snapshot_fixture(tmp_path, monkeypatch)
+    shutil.rmtree(root / ".git")
+    (root / ".git").write_text("gitdir: .missing-worktree\n")
+
+    boundary, common_dir = _nearest_git_marker(workdir)
+    assert _catalog_project_root(workdir, boundary, common_dir) is None
+    snapshot = resolve_project_snapshot(workdir)
+    assert snapshot is not None
+    assert snapshot.git_common_dir is None
+    assert snapshot.runtime_trusted is False
+
+
+def test_catalog_snapshot_rejects_mismatched_git_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _root, workdir, catalog_path = _registered_snapshot_fixture(tmp_path, monkeypatch)
+    with sqlite3.connect(catalog_path) as connection:
+        connection.execute(
+            "UPDATE projects SET git_common_dir = ?",
+            (str(tmp_path / "foreign.git"),),
+        )
+
+    boundary, common_dir = _nearest_git_marker(workdir)
+    assert _catalog_project_root(workdir, boundary, common_dir) is None
+    snapshot = resolve_project_snapshot(workdir)
+    assert snapshot is not None
+    assert snapshot.runtime_trusted is False
 
 
 def test_cli_context_records_explicit_project_resolution(tmp_path: Path) -> None:

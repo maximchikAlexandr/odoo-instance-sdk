@@ -402,7 +402,12 @@ def source_config(git_repo: Path) -> Path:
 
 
 @pytest.fixture
-def project_manifest(git_repo: Path, fake_python: Path, source_config: Path) -> Path:
+def project_manifest(
+    git_repo: Path,
+    fake_python: Path,
+    source_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
     manifest_dir = git_repo / ".odcli"
     manifest_dir.mkdir(exist_ok=True)
     manifest = manifest_dir / "project.toml"
@@ -421,6 +426,20 @@ def project_manifest(git_repo: Path, fake_python: Path, source_config: Path) -> 
         """
         )
     )
+    from odoo_instance_sdk.internal.paths import get_catalog_path
+    from odoo_instance_sdk.internal.repo_key import repo_key
+    from odoo_instance_sdk.storage.catalog import BackupCatalog
+
+    monkeypatch.setattr("odoo_instance_sdk.internal.context.get_catalog_path", get_catalog_path)
+    catalog = BackupCatalog(db_path=get_catalog_path())
+    try:
+        catalog._register_project(
+            f"project_{repo_key(git_repo, git_repo / '.git')}",
+            git_repo,
+            git_repo / ".git",
+        )
+    finally:
+        catalog.close()
     return git_repo
 
 

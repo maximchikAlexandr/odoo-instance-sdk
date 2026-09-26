@@ -418,7 +418,14 @@ def _run_pump(  # noqa: C901
                     close_stream(stream)
                     continue
                 buffer = full_output[stream]
-                if max_output_bytes is not None and len(buffer) + len(chunk) > max_output_bytes:
+                output_exceeded = (
+                    max_output_bytes is not None and len(buffer) + len(chunk) > max_output_bytes
+                )
+                combined_exceeded = prepared.max_combined_output_bytes is not None and (
+                    sum(len(value) for value in full_output.values()) + len(chunk)
+                    > prepared.max_combined_output_bytes
+                )
+                if output_exceeded or combined_exceeded:
                     terminate_and_reap()
                     drain_after_termination()
                     raise ProcessExecutionError(  # noqa: TRY301
@@ -515,6 +522,7 @@ class SubprocessExecutor:
                     environment_snapshot=environment_snapshot,
                     observer=observer,
                     observe_output=observe_output,
+                    max_output_bytes=prepared.max_output_bytes,
                 )
             except ProcessTimeoutError as error:
                 _notify(
@@ -796,6 +804,8 @@ def prepared_step(
     environment_policy: str = "sanitized-inherit",
     stdin: bytes | None = None,
     timeout: float | None = None,
+    max_output_bytes: int | None = None,
+    max_combined_output_bytes: int | None = None,
     mode: str = "captured",
     text: bool = True,
     read_only: bool = False,
@@ -821,6 +831,8 @@ def prepared_step(
         environment_policy=environment_policy,
         stdin=stdin,
         timeout=timeout,
+        max_output_bytes=max_output_bytes,
+        max_combined_output_bytes=max_combined_output_bytes,
         mode=mode,
         text=text,
         read_only=read_only,
