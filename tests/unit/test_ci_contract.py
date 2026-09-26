@@ -193,6 +193,13 @@ def test_mutation_command_wires_permanent_bounded_regression() -> None:
     assert "PYTHONPATH" in harness
 
 
+def test_mutation_command_runs_full_configured_scope_after_smoke() -> None:
+    runner = (_REPOSITORY_ROOT / "scripts" / "run_mutation.py").read_text(encoding="utf-8")
+
+    assert "AUDIT_MUTANTS" not in runner
+    assert '(sys.executable, "-m", "mutmut", "run", "--max-children", "32"),' in runner
+
+
 def test_mutation_workflow_fails_closed_and_uploads_diagnostics() -> None:
     workflow = _MUTATION_WORKFLOW.read_text(encoding="utf-8")
 
