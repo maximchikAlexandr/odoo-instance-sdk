@@ -266,10 +266,16 @@ def _check_remote_source(report: DoctorReport, project_root: Path, remote_name: 
             "local_restore_prerequisites": restore_ready,
             "authentication": "unverified",
         }
-        status = STATUS_OK if password_present and restore_ready else STATUS_WARN
+        status = STATUS_OK if password_present and ref_available and restore_ready else STATUS_WARN
         missing = []
         if not password_present:
             missing.append(f"set {password_key}")
+        if not ref_available:
+            missing.append(
+                f"make declared local ref {source.branch!r} available"
+                if source.branch
+                else "declare a local source ref"
+            )
         if not restore_ready:
             missing.append("configure local restore prerequisites")
         detail = "named source configured; authentication unverified"

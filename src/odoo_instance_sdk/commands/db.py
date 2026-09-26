@@ -129,7 +129,6 @@ def db_group() -> None:
     help="Reset base.user_admin after restoring.",
 )
 @click.option("--source-branch", default=None, help="Source Git branch provenance.")
-@click.option("--remote", "remote_name", default=None, help="Named remote source.")
 @click.option("--dry-run", is_flag=True, default=False, help="Plan only.")
 @click.option("--no-input", "no_input", is_flag=True, default=False, help="Forbid prompts.")
 @output_options
@@ -140,7 +139,6 @@ def db_refresh(
     show_command_output: bool,
     reset_admin_password: bool,
     source_branch: str | None,
-    remote_name: str | None,
     dry_run: bool,
     no_input: bool,
     output_format: str | None,
@@ -172,7 +170,6 @@ def db_refresh(
                 options=DatabaseRefreshOptions(
                     restore=restore,
                     source_branch=source_branch,
-                    remote_name=remote_name,
                     reset_admin_password=reset_admin_password,
                 ),
                 admin_password=admin_password,

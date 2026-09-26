@@ -43,6 +43,7 @@ from odoo_instance_sdk.models import (
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
     ProjectConfig,
+    RemoteSourceConfig,
     TestInstanceProjectConfig as ConfigTestInstance,
 )
 
@@ -1208,6 +1209,8 @@ def _production_restore_command(
     *,
     odoo_returncode: int = 0,
     python_value: str | Path | None = None,
+    remote_name: str | None = None,
+    observed: dict[str, object] | None = None,
 ) -> tuple[
     Command[DatabasePreparationResult],
     RecordingExecutor,
@@ -1264,13 +1267,44 @@ def _production_restore_command(
             mode="compose", image="postgres:16", port=55432, user="odoo"
         ),
         default_source_database="old",
-        test_instance=ConfigTestInstance(base_url="https://example.test", database="remote"),
+        test_instance=(
+            ConfigTestInstance(base_url="https://example.test", database="remote")
+            if remote_name is None
+            else None
+        ),
+        remote_instances=(
+            RemoteSourceConfig(
+                name=remote_name,
+                base_url="https://staging.example",
+                database="staging_db",
+                git_branch="staging",
+            ),
+        )
+        if remote_name is not None
+        else (),
     )
     backup = _backup(tmp_path, downloaded_at=datetime.now(UTC))
+    if remote_name is not None:
+        backup = Backup(
+            id=backup.id,
+            source_base_url="https://staging.example",
+            database_name="staging_db",
+            format=backup.format,
+            filestore_requested=backup.filestore_requested,
+            path=backup.path,
+            filename=backup.filename,
+            size_bytes=backup.size_bytes,
+            sha256=backup.sha256,
+            downloaded_at=backup.downloaded_at,
+            source_git_branch="staging",
+            source_name=remote_name,
+        )
     remote = MagicMock()
     remote.databases.backup.return_value = backup
     client = MagicMock()
     client.instance.return_value = remote
+    if observed is not None:
+        observed.update(client=client, remote=remote)
     local = MagicMock()
     local.databases.restore.side_effect = _consume_restore_probes
     cluster = PostgresCluster._from_config(
@@ -1279,7 +1313,9 @@ def _production_restore_command(
         compose_runner=None,
         project_id="<runtime>",
     )
-    options = DatabaseRefreshOptions(restore=True, reset_admin_password=True)
+    options = DatabaseRefreshOptions(
+        restore=True, reset_admin_password=True, remote_name=remote_name
+    )
     source_resolution = resolve_test_source(project, options)
     runtime = preparation.resolve_runtime_binding(project, tmp_path)
 
@@ -1332,7 +1368,12 @@ def _production_restore_command(
     monkeypatch.setattr(preparation, "_restore_preflight", fake_preflight)
     monkeypatch.setattr(ProjectConfig, "load", MagicMock(return_value=project))
     monkeypatch.setattr(preparation, "write_manifest", write, raising=False)
-    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
+    monkeypatch.setenv(
+        "ODCLI_TEST_MASTER_PASSWORD"
+        if remote_name is None
+        else "ODCLI_REMOTE_STAGING_MASTER_PASSWORD",
+        "remote-secret",
+    )
     command = preparation.DatabasePreparationCoordinator(client).prepare_command(
         project, options=options, executor=executor, admin_password="test-secret"
     )
@@ -1377,6 +1418,38 @@ def test_production_restore_command_consumes_compose_psql_and_odoo_steps(
     assert executor.executed[-1].wrapper_nonce is not None
     assert executor.executed[-1].wrapper_nonce.encode() in (executor.executed[-1].stdin or b"")
     assert len(executor.executed) == len({step.step_id for step in executor.executed})
+    assert write.called
+
+
+def test_named_production_restore_uses_named_secret_and_switches_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+    command, _executor, project, backup, write = _production_restore_command(
+        tmp_path,
+        monkeypatch,
+        remote_name="staging",
+        observed=observed,
+    )
+
+    result = command.run()
+
+    client = cast("MagicMock", observed["client"])
+    remote = cast("MagicMock", observed["remote"])
+    client.instance.assert_called_once_with(
+        "https://staging.example", master_password="remote-secret"
+    )
+    remote.databases.backup.assert_called_once_with(
+        "staging_db",
+        source_git_branch="staging",
+        project_id="project_<runtime>",
+        source_name="staging",
+    )
+    assert result.backup == backup
+    assert result.default_switched is True
+    assert result.effective_default == result.restored_database
+    assert result.branch_origin is BackupBranchOrigin.CONFIGURED
+    assert project.default_source_database == "old"
     assert write.called
 
 
