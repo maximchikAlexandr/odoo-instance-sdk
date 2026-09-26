@@ -30,6 +30,7 @@ def backup_projection_to_inspect_result(projection: BackupProjection) -> BackupI
         downloaded_at=backup.downloaded_at,
         source_git_branch=backup.source_git_branch,
         source_name=backup.source_name,
+        pinned=backup.pinned,
         state=projection.state,
         catalogue_time=projection.catalogue_time,
         file_present=projection.file_present,
