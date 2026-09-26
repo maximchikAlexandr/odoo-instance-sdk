@@ -24,7 +24,7 @@ Project database preparation SHALL select exactly one typed source variant: the 
 - **WHEN** any restore source targets a currently inspected Compose cluster matching an `active` claim
 - **THEN** completed provenance records that same non-null `cluster_id` on the exact restore and restored-event rows
 
-#### Scenario: Pending claim blocks every restore source
+#### Scenario: Pending claim blocks both restore sources
 
 - **WHEN** the current cluster claim is `pending` for remote, catalogue, or local-archive restore
 - **THEN** preparation refuses before database mutation or completed restore audit
@@ -40,7 +40,7 @@ Before the first local-restore mutation, preparation SHALL validate the selected
 
 For a local archive, command construction SHALL capture file device, inode, size, modification time, SHA-256, validated archive metadata, and a private project-owned snapshot destination without writing it. Execution SHALL re-open the source without following symlinks, require the captured identity, stream it to an exclusive mode-0600 snapshot while recomputing size and SHA-256, and fail before database mutation if any evidence differs. Every restore consumer SHALL read only that snapshot. The snapshot and derived temporary dump/filestore staging artifacts SHALL be removed after success or failure; cleanup SHALL NOT remove the caller's source archive or a confirmed restored database.
 
-#### Scenario: Catalogue checksum differs
+#### Scenario: Preflight checksum differs
 
 - **WHEN** the registered file content no longer matches its catalogue checksum
 - **THEN** preparation fails before invoking restore and retains the prior project default

@@ -1602,7 +1602,7 @@ After a successful bounded command finishes in Rich mode, the CLI SHALL emit exa
 
 ### Requirement: Database inventory and registered restore CLI
 
-`odcli db list [--tracked]` SHALL project the read-only project-cluster inventory in all bounded formats. `odcli db restore <BACKUP_UUID> [--target DATABASE] [--reset-admin-password] [--dry-run] [--yes]` SHALL invoke the registered-local-backup preparation path; normal Rich execution SHALL confirm unless `--yes`, machine execution SHALL require `--yes`, and dry-run SHALL not prompt. A successful restore SHALL switch the project default only after all restore postconditions and optional administrator reset succeed.
+`odcli db list [--tracked]` SHALL project the read-only project-cluster inventory in all bounded formats. `odcli db restore [BACKUP_UUID] [--file PATH] [--target DATABASE] [--reset-admin-password] [--dry-run] [--yes]` SHALL require exactly one restore source: a complete retained-backup UUID or a local archive path. UUID selection SHALL invoke the existing registered-backup path; file selection SHALL invoke the same public `EnvironmentResource.refresh_database_command()` boundary with a typed local-archive source. `--replace` SHALL remain restricted to a retained backup UUID and SHALL reject `--file`. Normal Rich execution SHALL confirm unless `--yes`, machine execution SHALL require `--yes`, and dry-run SHALL not prompt. A successful restore SHALL switch the project default only after all restore postconditions and optional administrator reset succeed. The existing `db restore` row in `PUBLIC_LEAF_CASES` SHALL remain the only inventory row for this leaf.
 
 #### Scenario: Database list is read-only
 
@@ -1619,9 +1619,24 @@ After a successful bounded command finishes in Rich mode, the CLI SHALL emit exa
 - **WHEN** `db restore UUID --yes` omits `--target`
 - **THEN** it restores to a generated collision-free name, preserves the backup and prior database, and switches default after full success
 
+#### Scenario: File restore dry-run
+
+- **WHEN** `db restore --file BACKUP.zip --target restored_db --dry-run` receives a valid supported Odoo ZIP
+- **THEN** it emits the same bounded redacted restore-plan shape as UUID restore, performs no mutation, and does not prompt
+
+#### Scenario: Exactly one source is required
+
+- **WHEN** `db restore` receives both `BACKUP_UUID` and `--file`, or receives neither
+- **THEN** Click exits with status 2 and a clear usage error before project, catalogue, database, filestore, or configuration mutation
+
+#### Scenario: Replacement remains catalogue-only
+
+- **WHEN** `db restore --file BACKUP.zip --replace` is invoked
+- **THEN** Click exits with status 2 before environment resolution or mutation
+
 #### Scenario: Restore preflight fails
 
-- **WHEN** UUID, file, checksum, format, cluster binding, or target-name preflight fails
+- **WHEN** the selected UUID or local archive fails identity, readability, checksum, format, cluster binding, or target-name preflight
 - **THEN** the command exits 1 with no database or project-config mutation
 
 ### Requirement: Resource inspection CLI
@@ -2237,6 +2252,7 @@ The CLI SHALL register `odcli update` with `--check`, `--dry-run`, `--ref`, `--y
 
 - **WHEN** a running cluster has an empty or unparseable Docker metrics snapshot
 - **THEN** lifecycle state comes from `PostgresCluster.status_command()` and `stats_failed` degrades only metrics
+
 ### Requirement: Unified bordered structured Rich tables
 
 Every bounded human-readable result that presents multiple named fields or repeated records SHALL use a Rich table with a visible outer border, visible vertical separators between columns, visible horizontal separators between rows, and a visually distinct header. The contract SHALL apply to the existing structured table surface in `ps`; `env list`; backup list/inspect/validate/delete plans and results; database list/diagnostics/lifecycle summaries; PostgreSQL status/locks/stats/bloat/monitoring/image approval; module list/info/where/deps/update; resource list/doctor; Git workflow results; translation export/validation; Odoo test results; VS Code generation; and repeated multi-target plans/results.

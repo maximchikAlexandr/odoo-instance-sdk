@@ -14,7 +14,7 @@
 - **WHEN** `db list --tracked` runs
 - **THEN** it returns only exact cluster/database identities having proven restore or lifecycle relationships
 
-#### Scenario: UUID restore default target
+#### Scenario: Restore default target
 
 - **WHEN** `db restore UUID --yes` omits `--target`
 - **THEN** it restores to a generated collision-free name, preserves the backup and prior database, and switches default after full success
