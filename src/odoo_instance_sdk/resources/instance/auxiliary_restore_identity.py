@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import ipaddress
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import psutil
@@ -92,9 +93,16 @@ def _runtime_process_matches(
     config: StartConfig,
     process: psutil.Process,
     environment: Mapping[str, JsonValue] | None,
+    *,
+    expected_argv: Sequence[str] | None = None,
+    expected_cwd: str | Path | None = None,
 ) -> bool:
-    expected_executable, expected_argv, expected_cwd, expected_config_path = (
+    expected_executable, identity_argv, identity_cwd, expected_config_path = (
         _expected_runtime_identity(instance, config, environment)
+    )
+    expected_argv = _canonical_runtime_argv(expected_argv or identity_argv)
+    expected_cwd = (
+        _canonical_runtime_path(str(expected_cwd)) if expected_cwd is not None else identity_cwd
     )
     live_argv = _canonical_runtime_argv(tuple(process.cmdline()))
     live_config_path = _runtime_config_arg(live_argv)
@@ -116,6 +124,8 @@ def _runtime_row_matches(
     environment: Mapping[str, JsonValue] | None,
     *,
     require_socket_owner: bool = True,
+    expected_argv: Sequence[str] | None = None,
+    expected_cwd: str | Path | None = None,
 ) -> int | None:
     owner_kind = str(runtime["owner_kind"])
     if owner_kind == "project" and str(runtime["owner_id"]) != binding.owner_id:
@@ -139,7 +149,14 @@ def _runtime_row_matches(
         return None
     if float(process.create_time()) != float(str(runtime["create_time"])):
         return None
-    if not _runtime_process_matches(instance, config, process, environment):
+    if not _runtime_process_matches(
+        instance,
+        config,
+        process,
+        environment,
+        expected_argv=expected_argv,
+        expected_cwd=expected_cwd,
+    ):
         return None
     if require_socket_owner and not _socket_owned_by(config, root_pid):
         return None
@@ -151,10 +168,12 @@ def _recorded_runtime_pid(
     config: StartConfig,
     *,
     require_socket_owner: bool = True,
+    expected_argv: Sequence[str] | None = None,
+    expected_cwd: str | Path | None = None,
 ) -> int | None:
     """Return a matching persisted runtime PID, failing closed on drift."""
     binding = instance._runtime_binding
-    if binding is None or binding.owner_kind != "project":
+    if binding is None:
         return None
     catalog = cast("_RuntimeCatalog", instance._client.get_catalog())
     snapshot_reader = getattr(catalog, "_monitor_snapshot_rows", None)
@@ -180,6 +199,8 @@ def _recorded_runtime_pid(
                 cast("Mapping[str, JsonValue]", runtime),
                 cast("Mapping[str, JsonValue] | None", environment),
                 require_socket_owner=require_socket_owner,
+                expected_argv=expected_argv,
+                expected_cwd=expected_cwd,
             )
         except (KeyError, OSError, RuntimeError, TypeError, ValueError, psutil.Error):
             continue

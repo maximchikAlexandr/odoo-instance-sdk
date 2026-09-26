@@ -42,7 +42,7 @@ from odoo_instance_sdk.models import (
     OdooProcess,
     StartConfig,
 )
-from odoo_instance_sdk.resources.instance import auxiliary_restore_identity as _restore_identity
+from odoo_instance_sdk.resources.instance import runtime_identity as _restore_identity
 from odoo_instance_sdk.resources.instance.runtime import (
     _PROTECTED_RUNTIME_OPTIONS,
     T,

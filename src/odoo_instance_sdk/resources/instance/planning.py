@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import sys
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from odoo_instance_sdk.exceptions import InstanceConfigurationError
+from odoo_instance_sdk.exceptions import (
+    DetachedLaunchCleanupError,
+    InstanceConfigurationError,
+)
 from odoo_instance_sdk.internal.proc import (
     PreparedAction,
     PreparedStep,
@@ -48,6 +52,7 @@ from odoo_instance_sdk.resources.instance.runtime import (
     _verify_process_exit,
     resolve_effective_logfile,
 )
+from odoo_instance_sdk.resources.instance.runtime_identity import _recorded_runtime_pid
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
@@ -56,6 +61,7 @@ if TYPE_CHECKING:
         Command,
     )
     from odoo_instance_sdk.internal.proc import RunContext
+    from odoo_instance_sdk.resources.instance import OdooInstance
 
 
 def _raise_if_exited(exited: bool, handle: ProcessHandle | None = None) -> None:
@@ -285,7 +291,18 @@ class _PlanningMixin:
         args: Sequence[str] = (),
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
+        wait_ready: bool = False,
+        readiness_timeout: float = 60.0,
     ) -> DetachedLaunchResult:
+        if wait_ready or readiness_timeout != 60.0:
+            return self.run_detached_command(
+                config,
+                args=args,
+                cwd=cwd,
+                env=env,
+                wait_ready=wait_ready,
+                readiness_timeout=readiness_timeout,
+            ).run()
         return self.run_detached_command(config, args=args, cwd=cwd, env=env).run()
 
     def run_detached_command(  # noqa: C901
@@ -295,7 +312,18 @@ class _PlanningMixin:
         args: Sequence[str] = (),
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
+        wait_ready: bool = False,
+        readiness_timeout: float = 60.0,
     ) -> Command[DetachedLaunchResult]:
+        if not wait_ready and readiness_timeout != 60.0:
+            raise InstanceConfigurationError("readiness_timeout requires wait_ready=True")
+        if wait_ready and (
+            not isinstance(readiness_timeout, (int, float))
+            or isinstance(readiness_timeout, bool)
+            or readiness_timeout <= 0
+            or not math.isfinite(readiness_timeout)
+        ):
+            raise InstanceConfigurationError("readiness_timeout must be a finite positive number")
         if config is None:
             config = self.config.start_config
             if config is None:
@@ -366,14 +394,24 @@ class _PlanningMixin:
             "instance.detached.spawn",
             "instance.detached.confirm_alive",
             "instance.detached.persist",
-        )
+        ) + (("instance.detached.readiness", "instance.detached.cleanup") if wait_ready else ())
         actions = tuple(
             PreparedAction(
                 step_id=step_id,
                 action=step_id,
                 description=step_id.replace(".", " "),
+                details=(
+                    {"timeout": readiness_timeout}
+                    if step_id == "instance.detached.readiness"
+                    else None
+                ),
                 read_only=step_id == "instance.detached.assert_port",
-                mutating=step_id in {"instance.detached.spawn", "instance.detached.persist"},
+                mutating=step_id
+                in {
+                    "instance.detached.spawn",
+                    "instance.detached.persist",
+                    "instance.detached.cleanup",
+                },
             )
             for step_id in action_ids
         )
@@ -381,7 +419,7 @@ class _PlanningMixin:
         process_executor = SubprocessExecutor()
         logfile_path = str(effective_logfile)
 
-        def execute(context: RunContext[DetachedLaunchResult]) -> DetachedLaunchResult:
+        def execute(context: RunContext[DetachedLaunchResult]) -> DetachedLaunchResult:  # noqa: C901
             if type(process_executor) is SubprocessExecutor:
                 _assert_http_port_free(config)
             _ensure_logfile_writable(effective_logfile)
@@ -403,6 +441,7 @@ class _PlanningMixin:
                     _write_secret_config(snapshot, secret_path)
                     secret_created = True
                 handle: ProcessHandle | None = None
+                runtime_persisted = False
                 try:
                     context.action(action_ids[1])
                     handle = context.spawn(step.step_id)
@@ -419,7 +458,22 @@ class _PlanningMixin:
                             resolved_cwd,
                             context=context,
                         )
+                        runtime_persisted = True
                     context.complete_action(action_ids[3])
+                    if wait_ready:
+                        context.action(action_ids[4])
+                        try:
+                            self._wait_for_detached_ready(
+                                config,
+                                step,
+                                timeout=readiness_timeout,
+                                pid=handle.pid,
+                            )
+                        except BaseException as error:
+                            context.fail_action(action_ids[4], error)
+                            raise
+                        context.complete_action(action_ids[4])
+                        context.skip(action_ids[5])
                     owner_kind, owner_id = _runtime_owner(
                         self._runtime_binding, self._environment_id
                     )
@@ -430,15 +484,71 @@ class _PlanningMixin:
                         http_endpoint=f"http://{config.http_interface}:{config.http_port}",
                         log_path=logfile_path,
                     )
-                except BaseException:
+                except BaseException as error:
                     if handle is not None:
-                        with contextlib.suppress(BaseException):
-                            terminate(
-                                handle,
-                                process_group_id=handle.process_group_id,
-                                timeout=5.0,
+                        if wait_ready and runtime_persisted:
+                            owner_kind, owner_id = _runtime_owner(
+                                self._runtime_binding, self._environment_id
                             )
-                    self._clear_runtime_identity()
+                            with contextlib.suppress(BaseException):
+                                tails = handle.drain_tails()
+                                error.add_note(
+                                    f"environment={owner_id if owner_kind == 'environment' else None!r} "
+                                    f"database={config.db_name!r} logfile={logfile_path!r} "
+                                    f"stdout_tail={tails['stdout']!r} stderr_tail={tails['stderr']!r}"
+                                )
+                            context.action(action_ids[5])
+                            try:
+                                terminate(
+                                    handle,
+                                    process_group_id=handle.process_group_id,
+                                    timeout=5.0,
+                                )
+                                _verify_process_exit(handle.pid)
+                            except BaseException as cleanup_error:
+                                context.fail_action(action_ids[5], cleanup_error)
+                                raise DetachedLaunchCleanupError(
+                                    handle.pid,
+                                    owner_kind,
+                                    owner_id,
+                                    str(cleanup_error),
+                                ) from error
+
+                            def clear_persisted_runtime() -> None:
+                                identity = self._read_runtime_identity()
+                                if identity is None:
+                                    raise RuntimeError(
+                                        "runtime identity disappeared before cleanup"
+                                    )
+                                self._clear_runtime_identity_if_matches(identity)
+
+                            try:
+                                clear_persisted_runtime()
+                            except BaseException as cleanup_error:
+                                context.fail_action(action_ids[5], cleanup_error)
+                                raise DetachedLaunchCleanupError(
+                                    handle.pid,
+                                    owner_kind,
+                                    owner_id,
+                                    str(cleanup_error),
+                                ) from error
+                            context.complete_action(action_ids[5])
+                        else:
+                            with contextlib.suppress(BaseException):
+                                terminate(
+                                    handle,
+                                    process_group_id=handle.process_group_id,
+                                    timeout=5.0,
+                                )
+                            self._clear_runtime_identity()
+                    elif not runtime_persisted:
+                        self._clear_runtime_identity()
+                    if (
+                        wait_ready
+                        and context.planned(action_ids[5])
+                        and not context.consumed(action_ids[5])
+                    ):
+                        context.skip(action_ids[5])
                     raise
                 finally:
                     if secret_created:
@@ -461,6 +571,41 @@ class _PlanningMixin:
             execute,
             command_steps,
             executor=process_executor,
+        )
+
+    def _wait_for_detached_ready(
+        self,
+        config: StartConfig,
+        step: PreparedStep,
+        *,
+        timeout: float,
+        pid: int,
+    ) -> ReadinessResult:
+        """Poll health only while the exact persisted runtime still owns its listener."""
+        from odoo_instance_sdk.exceptions import ProcessExitedBeforeReady
+        from odoo_instance_sdk.internal.health import poll_health
+
+        expected_cwd = step.cwd
+
+        def owned() -> bool:
+            return (
+                _recorded_runtime_pid(
+                    cast("OdooInstance", self),
+                    config,
+                    expected_argv=step.argv,
+                    expected_cwd=expected_cwd,
+                )
+                == pid
+            )
+
+        if not owned():
+            raise ProcessExitedBeforeReady(
+                "detached runtime identity or listener ownership could not be proven"
+            )
+        return poll_health(
+            self.config.base_url,
+            timeout=timeout,
+            alive_check=owned,
         )
 
     def _clear_runtime_identity_if_matches(self, identity: _RuntimeIdentity) -> None:

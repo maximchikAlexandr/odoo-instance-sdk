@@ -205,6 +205,22 @@ class InstanceConfigurationError(OdooInstanceSdkError):
     """Invalid or incomplete instance configuration."""
 
 
+class DetachedLaunchCleanupError(InstanceConfigurationError):
+    """Readiness failed and the process created by detached launch survived cleanup."""
+
+    code = "detached_cleanup_failed"
+
+    def __init__(self, pid: int, owner_kind: str, owner_id: str, reason: str) -> None:
+        self.pid = pid
+        self.owner_kind = owner_kind
+        self.owner_id = owner_id
+        self.reason = reason
+        super().__init__(
+            f"detached readiness cleanup failed; surviving owned process "
+            f"pid={pid} owner={owner_kind}:{owner_id}: {reason}"
+        )
+
+
 class LogfileAccessError(InstanceConfigurationError):
     """The configured logfile cannot be opened for reading."""
 

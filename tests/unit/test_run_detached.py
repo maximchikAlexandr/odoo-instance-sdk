@@ -362,6 +362,47 @@ def test_detached_dry_run_does_not_spawn(env_id: str, http_port: int, tmp_path: 
 
 
 @pytest.mark.unit
+def test_detached_readiness_timeout_requires_waiting(env_id: str, http_port: int) -> None:
+    instance = OdooInstance(
+        config=InstanceConfig(
+            base_url=f"http://127.0.0.1:{http_port}",
+            start_config=StartConfig(http_port=http_port),
+        ),
+        _client=_client_with_catalog(_FakeCatalog()),
+        _environment_id=env_id,
+    )
+
+    with pytest.raises(InstanceConfigurationError, match="requires wait_ready"):
+        instance.run_detached_command(readiness_timeout=1.0)
+
+
+@pytest.mark.unit
+def test_detached_readiness_plan_captures_wait_and_cleanup(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    fake = _FakeCatalog()
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(fake),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(30)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+
+    with patch.object(OdooInstance, "_ensure_dependencies_ready"):
+        command = instance.run_detached_command(wait_ready=True, readiness_timeout=3.5)
+
+    action_ids = {step.step_id for step in command.plan.steps}
+    assert {
+        "instance.detached.readiness",
+        "instance.detached.cleanup",
+    }.issubset(action_ids)
+
+
+@pytest.mark.unit
 def test_detached_delegates_to_command_sibling(env_id: str, http_port: int, tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     _init_git_worktree(wt)
