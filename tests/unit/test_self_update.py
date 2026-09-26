@@ -118,6 +118,40 @@ def _patch_provenance(
     monkeypatch.setattr("odoo_instance_sdk.internal.self_update.shutil.which", lambda _name: "uv")
 
 
+def _write_recovery_evidence(
+    user_root: Path,
+    *,
+    journal: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    include_metadata: bool = True,
+) -> None:
+    update_root = user_root / "update"
+    snapshot = update_root / "snapshot"
+    snapshot.mkdir(parents=True, exist_ok=True)
+    journal_payload: dict[str, Any] = {
+        "version": 1,
+        "phase": "migrate",
+        "target_ref": _SHA_B,
+        "snapshot_sha": _SHA_A,
+        "maintenance_pid": None,
+    }
+    journal_payload.update(journal or {})
+    (update_root / "journal.json").write_text(json.dumps(journal_payload), encoding="utf-8")
+    if include_metadata:
+        metadata_payload: dict[str, Any] = {
+            "version": 1,
+            "previous_version": "0.1.0",
+            "package_revision": "0.1.0",
+            "previous_sha": _SHA_A,
+            "install_requirement": f"odoo-instance-sdk @ git+https://example.test/repo.git@{_SHA_B}",
+            "source_repo": "https://example.test/repo.git",
+            "target_ref": _SHA_B,
+            "snapshot_sha": _SHA_A,
+        }
+        metadata_payload.update(metadata or {})
+        (snapshot / "metadata.json").write_text(json.dumps(metadata_payload), encoding="utf-8")
+
+
 def _patch_distribution(monkeypatch: pytest.MonkeyPatch, dist: _FakeDist) -> None:
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update.distribution",
@@ -503,19 +537,14 @@ def test_read_uv_tool_direct_url_accepts_uv_bare_vcs_url(
 
 
 def test_unfinished_journal_blocks_other_commands(user_root: Path) -> None:
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "migrate",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
+    _write_recovery_evidence(
+        user_root,
+        journal={
+            "phase": "migrate",
+            "target_ref": _SHA_B,
+            "snapshot_sha": _SHA_A,
+            "maintenance_pid": None,
+        },
     )
     assert unfinished_update_journal() is not None
     with pytest.raises(UpdateIncompleteError, match="doctor"):
@@ -542,21 +571,19 @@ def test_check_reports_matching_sha_as_incomplete_with_dead_pid(
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     executable.chmod(0o755)
     _patch_provenance(monkeypatch, _provenance(commit_id=_SHA_A, executable=executable))
+    _write_recovery_evidence(
+        user_root,
+        journal={
+            "target_ref": _SHA_A,
+            "snapshot_sha": _SHA_B,
+            "maintenance_pid": 2_000_000,
+        },
+        metadata={"target_ref": _SHA_A, "snapshot_sha": _SHA_B},
+    )
     update_root = user_root / "update"
     snapshot = update_root / "snapshot"
-    snapshot.mkdir(parents=True)
-    (update_root / "journal.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "migrate",
-                "target_ref": _SHA_A,
-                "snapshot_sha": _SHA_B,
-                "maintenance_pid": 2_000_000,
-            }
-        ),
-        encoding="utf-8",
-    )
+    state = inspect_update_recovery_state()
+    assert state.maintenance_pid_alive is False
     executor = _executor_factory({})
 
     result = update_command(ref=_SHA_A, check=True, executor=executor).run()
@@ -608,6 +635,75 @@ def test_check_preserves_malformed_recovery_evidence_without_resume_argv(
     assert result.journal_state == "present"
     assert result.snapshot_state == "present"
     assert "immutable target_ref" in (result.next_step or "")
+
+
+@pytest.mark.parametrize("version", [None, 2])
+def test_check_rejects_missing_or_unsupported_journal_version(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+    version: int | None,
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    _patch_provenance(monkeypatch, _provenance(executable=executable))
+    _write_recovery_evidence(user_root)
+    journal_path = user_root / "update" / "journal.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    if version is None:
+        del journal["version"]
+    else:
+        journal["version"] = version
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    state = inspect_update_recovery_state()
+    result = update_command(ref=_SHA_B, check=True, executor=_executor_factory({})).run()
+
+    assert state.valid is False
+    assert state.recoverable is False
+    assert result.outcome == "update_incomplete"
+    assert result.recovery_argv is None
+    assert result.journal_state == "present"
+    assert result.snapshot_state == "present"
+    assert "version" in (result.next_step or "")
+
+
+@pytest.mark.parametrize(
+    ("metadata", "include_metadata"),
+    [
+        (None, False),
+        ({"version": "invalid"}, True),
+        ({"target_ref": _SHA_A}, True),
+    ],
+)
+def test_check_rejects_missing_malformed_or_inconsistent_snapshot_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+    metadata: dict[str, Any] | None,
+    include_metadata: bool,
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    _patch_provenance(monkeypatch, _provenance(executable=executable))
+    _write_recovery_evidence(
+        user_root,
+        metadata=metadata,
+        include_metadata=include_metadata,
+    )
+
+    state = inspect_update_recovery_state()
+    result = update_command(ref=_SHA_B, check=True, executor=_executor_factory({})).run()
+
+    assert state.valid is False
+    assert state.recoverable is False
+    assert result.outcome == "update_incomplete"
+    assert result.recovery_argv is None
+    assert result.journal_state == "present"
+    assert result.snapshot_state == "present"
+    assert "snapshot metadata" in (result.next_step or "")
 
 
 def test_verify_failure_consumes_version_once_and_preserves_recovery_state(
@@ -823,19 +919,14 @@ def _snapshot_resume_command(
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.self_update_commands._write_snapshot", fail_snapshot
     )
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "snapshot",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
+    _write_recovery_evidence(
+        user_root,
+        journal={
+            "phase": "snapshot",
+            "target_ref": _SHA_B,
+            "snapshot_sha": _SHA_A,
+            "maintenance_pid": None,
+        },
     )
     return update_command(ref="main", executor=executor)
 
@@ -984,19 +1075,14 @@ def test_update_resumes_from_migrate_journal(
         "odoo_instance_sdk.internal.self_update._verify_installed_revision",
         lambda *_args, **_kwargs: None,
     )
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "migrate",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
+    _write_recovery_evidence(
+        user_root,
+        journal={
+            "phase": "migrate",
+            "target_ref": _SHA_B,
+            "snapshot_sha": _SHA_A,
+            "maintenance_pid": None,
+        },
     )
     executor = _executor_factory({"maintenance_rc": 0})
     result = update_command(ref=_SHA_B, executor=executor).run()
@@ -1037,19 +1123,14 @@ def test_migrate_resume_rollback_uses_journal_snapshot_sha(
         "odoo_instance_sdk.internal.self_update._verify_installed_revision",
         lambda *_args, **_kwargs: None,
     )
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "migrate",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
+    _write_recovery_evidence(
+        user_root,
+        journal={
+            "phase": "migrate",
+            "target_ref": _SHA_B,
+            "snapshot_sha": _SHA_A,
+            "maintenance_pid": None,
+        },
     )
     executor = _executor_factory({"maintenance_rc": 1, "rollback_rc": 0})
     result = update_command(ref=_SHA_B, executor=executor).run()
@@ -1090,19 +1171,14 @@ def test_update_resumes_from_install_journal(
         "odoo_instance_sdk.internal.self_update._verify_installed_revision",
         lambda *_args, **_kwargs: None,
     )
-    journal = user_root / "update" / "journal.json"
-    journal.parent.mkdir(parents=True, exist_ok=True)
-    journal.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "phase": "install",
-                "target_ref": _SHA_B,
-                "snapshot_sha": _SHA_A,
-                "maintenance_pid": None,
-            }
-        ),
-        encoding="utf-8",
+    _write_recovery_evidence(
+        user_root,
+        journal={
+            "phase": "install",
+            "target_ref": _SHA_B,
+            "snapshot_sha": _SHA_A,
+            "maintenance_pid": None,
+        },
     )
     executor = _executor_factory({"install_rc": 0, "maintenance_rc": 0})
     result = update_command(ref="main", executor=executor).run()

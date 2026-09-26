@@ -264,6 +264,21 @@ def test_uv_tool_update_check_reports_interrupted_state_without_resume(tmp_path:
     update_root = Path(env["HOME"]) / ".odcli" / "update"
     snapshot = update_root / "snapshot"
     snapshot.mkdir(parents=True)
+    (snapshot / "metadata.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "previous_version": "0.1.0",
+                "package_revision": "0.1.0",
+                "previous_sha": head,
+                "install_requirement": _vcs_install_requirement(_REPO, head),
+                "source_repo": _REPO.resolve().as_uri(),
+                "target_ref": head,
+                "snapshot_sha": head,
+            }
+        ),
+        encoding="utf-8",
+    )
     journal = update_root / "journal.json"
     journal.write_text(
         json.dumps(

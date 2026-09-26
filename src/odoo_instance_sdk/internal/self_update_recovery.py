@@ -46,9 +46,89 @@ def _read_journal(path: Path) -> dict[str, JsonValue] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _read_snapshot_metadata(path: Path) -> dict[str, JsonValue] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _snapshot_metadata_shape_error(
+    metadata: dict[str, JsonValue], journal_version: int
+) -> str | None:
+    required = (
+        "version",
+        "previous_version",
+        "package_revision",
+        "previous_sha",
+        "install_requirement",
+        "source_repo",
+        "target_ref",
+        "snapshot_sha",
+    )
+    if any(field not in metadata for field in required):
+        return "update recovery snapshot metadata is missing canonical fields"
+    if not isinstance(metadata["version"], int) or isinstance(metadata["version"], bool):
+        return "update recovery snapshot metadata has malformed version"
+    if metadata["version"] != journal_version:
+        return "update recovery snapshot metadata has an inconsistent version"
+    if not isinstance(metadata["previous_version"], str):
+        return "update recovery snapshot metadata has malformed previous_version"
+    if not isinstance(metadata["package_revision"], str):
+        return "update recovery snapshot metadata has malformed package_revision"
+    if not isinstance(metadata["install_requirement"], str):
+        return "update recovery snapshot metadata has malformed install_requirement"
+    if metadata["source_repo"] is not None and not isinstance(metadata["source_repo"], str):
+        return "update recovery snapshot metadata has malformed source_repo"
+    previous_sha = metadata["previous_sha"]
+    if previous_sha is not None and (
+        not isinstance(previous_sha, str) or not _full_sha(previous_sha)
+    ):
+        return "update recovery snapshot metadata has malformed previous_sha"
+    return None
+
+
+def _snapshot_metadata_ref_error(
+    metadata: dict[str, JsonValue], target_ref: str | None, snapshot_sha: str | None
+) -> str | None:
+    metadata_target = metadata["target_ref"]
+    if not isinstance(metadata_target, str) or not _full_sha(metadata_target):
+        return "update recovery snapshot metadata has malformed target_ref"
+    if target_ref is None or metadata_target.lower() != target_ref:
+        return "update recovery snapshot metadata has an inconsistent target_ref"
+    metadata_snapshot = metadata["snapshot_sha"]
+    if not isinstance(metadata_snapshot, str) or not _full_sha(metadata_snapshot):
+        return "update recovery snapshot metadata has malformed snapshot_sha"
+    if snapshot_sha is None or metadata_snapshot.lower() != snapshot_sha:
+        return "update recovery snapshot metadata has an inconsistent snapshot_sha"
+    return None
+
+
+def _snapshot_metadata_error(
+    metadata: dict[str, JsonValue] | None,
+    *,
+    journal_version: int,
+    target_ref: str | None,
+    snapshot_sha: str | None,
+) -> str | None:
+    if metadata is None:
+        return "update recovery snapshot metadata is unreadable or missing"
+    shape_error = _snapshot_metadata_shape_error(metadata, journal_version)
+    if shape_error is not None:
+        return shape_error
+    return _snapshot_metadata_ref_error(metadata, target_ref, snapshot_sha)
+
+
 def inspect_update_recovery_state(user_root: Path) -> UpdateRecoveryState:
     """Inspect recovery paths without creating, locking, or mutating them."""
-    from odoo_instance_sdk.internal.self_update import _JOURNAL_PHASES, _is_full_sha
+    from odoo_instance_sdk.internal.self_update import (
+        _JOURNAL_PHASES,
+        _JOURNAL_VERSION,
+        _is_full_sha,
+    )
 
     root = user_root / "update"
     journal_path = root / "journal.json"
@@ -78,6 +158,7 @@ def inspect_update_recovery_state(user_root: Path) -> UpdateRecoveryState:
             diagnostic="update recovery journal is unreadable or not a JSON object",
         )
     phase = journal.get("phase")
+    raw_version = journal.get("version")
     raw_target_ref = journal.get("target_ref")
     raw_snapshot_sha = journal.get("snapshot_sha")
     raw_pid = journal.get("maintenance_pid")
@@ -92,9 +173,16 @@ def inspect_update_recovery_state(user_root: Path) -> UpdateRecoveryState:
         else None
     )
     maintenance_pid = (
-        raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else None
+        raw_pid
+        if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) and raw_pid > 0
+        else None
     )
-    if raw_pid is not None and maintenance_pid is None:
+    diagnostic: str | None
+    if not isinstance(raw_version, int) or isinstance(raw_version, bool):
+        diagnostic = "update recovery journal has missing or malformed version"
+    elif raw_version != _JOURNAL_VERSION:
+        diagnostic = "update recovery journal has an unsupported version"
+    elif raw_pid is not None and maintenance_pid is None:
         diagnostic = "update recovery journal has malformed maintenance_pid"
     elif phase not in _JOURNAL_PHASES:
         diagnostic = "update recovery journal has an invalid phase"
@@ -102,8 +190,15 @@ def inspect_update_recovery_state(user_root: Path) -> UpdateRecoveryState:
         diagnostic = "update recovery journal has no immutable target_ref"
     elif snapshot_sha is None:
         diagnostic = "update recovery journal has no immutable snapshot_sha"
+    elif not snapshot_present:
+        diagnostic = "update recovery snapshot directory is missing"
     else:
-        diagnostic = None
+        diagnostic = _snapshot_metadata_error(
+            _read_snapshot_metadata(snapshot_dir / "metadata.json"),
+            journal_version=raw_version,
+            target_ref=target_ref,
+            snapshot_sha=snapshot_sha,
+        )
     return UpdateRecoveryState(
         journal_state="present" if journal_present else "absent",
         snapshot_state="present" if snapshot_present else "absent",
