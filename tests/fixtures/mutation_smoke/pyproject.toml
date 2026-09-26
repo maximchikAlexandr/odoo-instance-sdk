@@ -1,0 +1,10 @@
+[project]
+name = "mutation-smoke"
+version = "0.0.0"
+requires-python = ">=3.12"
+
+[tool.mutmut]
+source_paths = ["src/odoo_instance_sdk"]
+only_mutate = ["src/odoo_instance_sdk/internal/db_name.py"]
+pytest_add_cli_args = ["-x", "-q"]
+pytest_add_cli_args_test_selection = ["tests/test_passing.py"]
