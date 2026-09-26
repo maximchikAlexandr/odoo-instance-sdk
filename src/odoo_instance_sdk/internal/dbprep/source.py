@@ -61,12 +61,18 @@ from odoo_instance_sdk.models import (
     LocalArchiveRestoreSource,
     NoBackup,
 )
-from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
+from odoo_instance_sdk.project import (
+    ProjectConfig,
+    RemoteSourceConfig,
+    TestInstanceProjectConfig,
+    normalize_remote_name,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 T = TypeVar("T")
+_REMOTE_MASTER_PASSWORD = "ODCLI_TEST_MASTER_PASSWORD"
 
 _BRANCH_PREFIX = "refs/heads/"
 _MAX_TARGET_BYTES = 63
@@ -74,6 +80,7 @@ _TARGET_ATTEMPTS = 100
 _TARGET_SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _PREPARATION_FIELDS = (
     "test_instance",
+    "remote_instances",
     "default_base_ref",
     "refresh_after_hours",
     "source_config",
@@ -91,9 +98,10 @@ class DatabaseNameProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class TestSourceResolution:
-    config: TestInstanceProjectConfig
+    config: TestInstanceProjectConfig | RemoteSourceConfig
     branch: str | None
     origin: BackupBranchOrigin
+    source_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,33 +635,75 @@ def _normalize_branch(value: str | None) -> str | None:
 def resolve_test_source(
     project: ProjectConfig, options: DatabaseRefreshOptions = DatabaseRefreshOptions()
 ) -> TestSourceResolution:
-    config = project.test_instance
-    if config is None:
-        raise ConfigError("project has no [test_instance] configuration")
+    config: TestInstanceProjectConfig | RemoteSourceConfig
+    configured_branch: str | None
+    source_name: str | None
+    if options.remote_name is not None:
+        name = normalize_remote_name(options.remote_name)
+        selected = next(
+            (
+                source
+                for source in project.remote_instances
+                if normalize_remote_name(source.name) == name
+            ),
+            None,
+        )
+        if selected is None:
+            available = ", ".join(source.name for source in project.remote_instances) or "none"
+            raise ConfigError(f"unknown remote source {name!r}; available names: {available}")
+        config = selected
+        base_url = config.base_url
+        configured_branch = config.git_branch
+        source_name = name
+    else:
+        legacy = project.test_instance
+        if legacy is None:
+            raise ConfigError("project has no [test_instance] configuration")
+        config = legacy
+        base_url = config.base_url
+        configured_branch = config.git_branch
+        source_name = None
     try:
-        base_url = normalize_base_url(config.base_url)
+        normalized_url = normalize_base_url(base_url)
     except Exception as exc:
-        raise ConfigError("invalid test_instance.base_url") from exc
+        label = f"remote source {source_name!r}" if source_name else "test_instance"
+        raise ConfigError(f"invalid {label}.base_url") from exc
     if config.database is not None and not config.database.strip():
-        raise ConfigError("test_instance.database must not be empty")
+        label = f"remote source {source_name!r}" if source_name else "test_instance"
+        raise ConfigError(f"{label}.database must not be empty")
     explicit = options.source_branch
     if explicit is not None:
         branch = _normalize_branch(explicit)
         origin = BackupBranchOrigin.EXPLICIT
-    elif config.git_branch is not None:
-        branch = _normalize_branch(config.git_branch)
+    elif configured_branch is not None:
+        branch = _normalize_branch(configured_branch)
         origin = BackupBranchOrigin.CONFIGURED
     else:
         branch = None
         origin = BackupBranchOrigin.UNKNOWN
-    return TestSourceResolution(
-        config=TestInstanceProjectConfig(
-            base_url=base_url,
+    if source_name is not None:
+        assert isinstance(config, RemoteSourceConfig)
+        assert branch is not None
+        assert config.database is not None
+    if source_name is not None:
+        named_config = cast("RemoteSourceConfig", config)
+        resolved_config: RemoteSourceConfig | TestInstanceProjectConfig = RemoteSourceConfig(
+            name=source_name,
+            base_url=normalized_url,
+            database=named_config.database,
+            git_branch=cast("str", branch),
+        )
+    else:
+        resolved_config = TestInstanceProjectConfig(
+            base_url=normalized_url,
             database=config.database,
             git_branch=branch,
-        ),
+        )
+    return TestSourceResolution(
+        config=resolved_config,
         branch=branch,
         origin=origin,
+        source_name=source_name,
     )
 
 
@@ -851,11 +901,20 @@ def _reload_project(project: ProjectConfig | str | Path, root: Path) -> ProjectC
     return ProjectConfig.load(root)
 
 
-def _remote_password(environ: Mapping[str, str] | None = None) -> str:
+def remote_password_key(remote_name: str | None = None) -> str:
+    if remote_name is None:
+        return _REMOTE_MASTER_PASSWORD
+    return f"ODCLI_REMOTE_{normalize_remote_name(remote_name).upper()}_MASTER_PASSWORD"
+
+
+def _remote_password(
+    environ: Mapping[str, str] | None = None, *, remote_name: str | None = None
+) -> str:
     source = os.environ if environ is None else environ
-    value = source.get("ODCLI_TEST_MASTER_PASSWORD")
+    key = remote_password_key(remote_name)
+    value = source.get(key)
     if value is None or not value.strip():
-        raise MasterPasswordRequiredError("ODCLI_TEST_MASTER_PASSWORD is required")
+        raise MasterPasswordRequiredError(f"{key} is required")
     return value
 
 

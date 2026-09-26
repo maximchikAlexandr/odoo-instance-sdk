@@ -181,20 +181,27 @@ def _handle_existing_manifest(  # noqa: C901
 
 
 @cli.command(help="Diagnose project, runtime, and PostgreSQL.")
+@click.option("--remote", "remote_name", default=None, help="Named remote source.")
 @output_options
 @pass_cli_context
-def doctor(ctx: CliContext, output_format: str | None, json_output: bool) -> None:
+def doctor(
+    ctx: CliContext, remote_name: str | None, output_format: str | None, json_output: bool
+) -> None:
     output_mode = resolve_output_mode(output_format, json_output)
     json_output = output_mode is not OutputMode.RICH
     try:
         resolved = cli_context._ready_instance_for_doctor(ctx)
         from odoo_instance_sdk.internal.doctor import run_doctor
 
-        report = run_doctor(
-            resolved.client,
-            resolved.project_root,
-            resolved_context=resolved,
-        )
+        if remote_name is None:
+            report = run_doctor(resolved.client, resolved.project_root, resolved_context=resolved)
+        else:
+            report = run_doctor(
+                resolved.client,
+                resolved.project_root,
+                resolved_context=resolved,
+                remote_name=remote_name,
+            )
     except Exception as e:
         fail(output_mode, "doctor", str(e), dry_run=False)
     if json_output:

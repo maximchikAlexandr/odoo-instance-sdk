@@ -14,6 +14,7 @@ from odoo_instance_sdk.exceptions import (
     AdminPasswordRequiredError,
     ConfigError,
     DatabaseAlreadyExistsError,
+    EnvironmentConflictError,
     InstanceConfigurationError,
     MasterPasswordRequiredError,
 )
@@ -26,6 +27,7 @@ from odoo_instance_sdk.internal.dbprep.source import (
     DatabasePreparationFailureContext as DatabasePreparationFailureContext,
     RestorePreflight as RestorePreflight,
     SelectedBackupRestorePayload as SelectedBackupRestorePayload,
+    TestSourceResolution as TestSourceResolution,
     T as T,
     _CatalogueRestoreSource as _CatalogueRestoreSource,
     _LocalArchiveRestoreSource as _LocalArchiveRestoreSource,
@@ -81,7 +83,6 @@ from odoo_instance_sdk.internal.project_manifest import write_manifest
 from odoo_instance_sdk.internal.project_runtime import (
     resolve_project_http_port,
 )
-from odoo_instance_sdk.internal.test_instance_trust import require_test_instance_origin_approval
 from odoo_instance_sdk.internal.urls import assert_local, normalize_base_url
 from odoo_instance_sdk.models import (
     Backup,
@@ -132,14 +133,7 @@ def _restore_preflight(  # noqa: C901
         raise ConfigError("restore preparation requires restore=True")
 
     selected_source = _coerce_restore_source(restore_source)
-    initial, root = _load_project(project)
-    initial_source = (
-        resolve_test_source(initial, options)
-        if isinstance(selected_source, _RemoteRestoreSource)
-        else None
-    )
-    if initial_source is not None:
-        require_test_instance_origin_approval(initial_source.config.base_url)
+    _initial, root = _load_project(project)
     _, _, project_id = canonical_project_identity(root)
     lock_path = database_preparation_lock_path(project_id)
     lock_context = (
@@ -155,8 +149,6 @@ def _restore_preflight(  # noqa: C901
         )
         if isinstance(selected_source, _LocalArchiveRestoreSource):
             _consume_action_if_planned("database.prepare.local-archive.validate")
-        if source is not None:
-            require_test_instance_origin_approval(source.config.base_url)
         catalogue_backup = None
         if isinstance(selected_source, _CatalogueRestoreSource):
             _consume_action_if_planned("database.prepare.catalogue-backup")
@@ -170,6 +162,9 @@ def _restore_preflight(  # noqa: C901
                 isinstance(mapped, Backup)
                 and classify_freshness(mapped, current.refresh_after_hours) is BackupFreshness.FRESH
                 and source is not None
+                and mapped.source_name == source.source_name
+                and mapped.source_base_url == source.config.base_url
+                and mapped.database_name == source.config.database
                 and mapped.source_git_branch == source.branch
             ):
                 raise _CoalescedRestore(
@@ -320,7 +315,10 @@ def prepare_restore(  # noqa: C901
         elif restore_inputs[0] != target_database:
             raise ConfigError("target database was captured with a different value")
     remote_password = (
-        _remote_password(effective_project_environment(project_environment))
+        _remote_password(
+            effective_project_environment(project_environment),
+            remote_name=options.remote_name,
+        )
         if isinstance(selected_source, _RemoteRestoreSource)
         else None
     )
@@ -396,11 +394,19 @@ def prepare_restore(  # noqa: C901
                     from odoo_instance_sdk.internal.restore_stages import restore_stage
 
                     with restore_stage("backup_prepare"):
-                        backup = remote.databases.backup(
-                            database_name,
-                            source_git_branch=source.branch,
-                            project_id=catalog_project_id,
-                        )
+                        if source.source_name is None:
+                            backup = remote.databases.backup(
+                                database_name,
+                                source_git_branch=source.branch,
+                                project_id=catalog_project_id,
+                            )
+                        else:
+                            backup = remote.databases.backup(
+                                database_name,
+                                source_git_branch=source.branch,
+                                project_id=catalog_project_id,
+                                source_name=source.source_name,
+                            )
                 else:
                     from odoo_instance_sdk.internal.restore_stages import publish_stage
 
@@ -590,9 +596,11 @@ def prepare_download(
     if options.restore:
         raise ConfigError("restore preparation is not available in download-only mode")
     initial, root = _load_project(project)
-    password = _remote_password()
     source = resolve_test_source(initial, options)
-    require_test_instance_origin_approval(source.config.base_url)
+    password = _remote_password(
+        effective_project_environment(load_project_environment(root)),
+        remote_name=source.source_name,
+    )
     repo_root, git_common, project_key = canonical_project_identity(root)
     lock_path = database_preparation_lock_path(project_key)
     lock_context = (
@@ -602,17 +610,24 @@ def prepare_download(
     with lock_context:
         current = _reload_project(project, root)
         source = resolve_test_source(current, options)
-        require_test_instance_origin_approval(source.config.base_url)
         remote = client.instance(source.config.base_url, master_password=password)
         database_name = resolve_remote_database_name(source.config.database, remote.databases)
         _consume_action_if_planned("database.prepare.remote-backup")
         catalog_project_id = f"project_{project_key}"
         client.get_catalog()._register_project(catalog_project_id, repo_root, git_common)
-        backup = remote.databases.backup(
-            database_name,
-            source_git_branch=source.branch,
-            project_id=catalog_project_id,
-        )
+        if source.source_name is None:
+            backup = remote.databases.backup(
+                database_name,
+                source_git_branch=source.branch,
+                project_id=catalog_project_id,
+            )
+        else:
+            backup = remote.databases.backup(
+                database_name,
+                source_git_branch=source.branch,
+                project_id=catalog_project_id,
+                source_name=source.source_name,
+            )
         return DatabasePreparationResult(
             mode=DatabasePreparationAction.DOWNLOAD,
             backup=backup,
@@ -703,6 +718,27 @@ def _capture_selected_restore(
     )
 
 
+def _source_identity(
+    source: TestSourceResolution,
+) -> tuple[str | None, str, str | None, str | None]:
+    return (source.source_name, source.config.base_url, source.config.database, source.branch)
+
+
+def _assert_source_plan_current(
+    project: ProjectConfig | str | Path,
+    options: DatabaseRefreshOptions,
+    expected: tuple[str | None, str, str | None, str | None] | None,
+) -> None:
+    if expected is None:
+        return
+    current, _root = _load_project(project)
+    if _source_identity(resolve_test_source(current, options)) != expected:
+        raise EnvironmentConflictError(
+            "preparation_source_conflict",
+            "selected remote source changed after planning",
+        )
+
+
 @dataclass(slots=True)
 class DatabasePreparationCoordinator:
     client: OdooClient
@@ -740,6 +776,10 @@ class DatabasePreparationCoordinator:
         admin_password_provenance: str = "environment",
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
+        planned_source = None
+        if isinstance(_coerce_restore_source(restore_source), _RemoteRestoreSource):
+            planned_project, _planned_root = _load_project(project)
+            planned_source = _source_identity(resolve_test_source(planned_project, options))
         selected_restore = (
             _capture_selected_restore(project, restore_source) if options.restore else None
         )
@@ -775,6 +815,7 @@ class DatabasePreparationCoordinator:
                 target_database=target_database,
                 admin_password=admin_password,
                 admin_password_provenance=admin_password_provenance,
+                planned_source=planned_source,
             ),
             executor=executor,
             steps=steps,
@@ -804,7 +845,9 @@ class DatabasePreparationCoordinator:
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
+        planned_source: tuple[str | None, str, str | None, str | None] | None = None,
     ) -> DatabasePreparationResult:
+        _assert_source_plan_current(project, options, planned_source)
         if options.restore:
             return prepare_restore(
                 self.client,
@@ -850,6 +893,10 @@ class DatabasePreparationCoordinator:
         admin_password_provenance: str = "environment",
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
+        planned_source = None
+        if isinstance(_coerce_restore_source(restore_source), _RemoteRestoreSource):
+            planned_project, _planned_root = _load_project(project)
+            planned_source = _source_identity(resolve_test_source(planned_project, options))
         selected_restore = (
             _capture_selected_restore(project, restore_source) if options.restore else None
         )
@@ -885,6 +932,7 @@ class DatabasePreparationCoordinator:
                 target_database=target_database,
                 admin_password=admin_password,
                 admin_password_provenance=admin_password_provenance,
+                planned_source=planned_source,
             ),
             executor=executor,
             steps=steps,

@@ -191,6 +191,7 @@ class BackupProvenanceComparison(
 class DatabaseRefreshOptions(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     restore: bool = False
     source_branch: str | None = None
+    remote_name: str | None = None
     reset_admin_password: bool = False
 
 

@@ -1732,46 +1732,28 @@ def test_restore_missing_remote_secret_fails_before_preparation_work(
     cluster.assert_not_called()
 
 
-def test_unpinned_download_preparation_fails_before_lock_or_catalog(
+def test_legacy_origin_variable_is_ignored_for_download_source_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
-    monkeypatch.delenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", raising=False)
-    monkeypatch.setenv("ODCLI_TEST_MASTER_PASSWORD", "remote-secret")
-    client = MagicMock()
-    lock = MagicMock()
-    monkeypatch.setattr(preparation, "exclusive_lock", lock)
+    monkeypatch.setenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", "not an origin,%%%")
 
-    with pytest.raises(ConfigError, match="not approved outside the repository"):
-        preparation.prepare_download(client, _project(tmp_path))
+    source = preparation.resolve_test_source(_project(tmp_path))
 
-    client.instance.assert_not_called()
-    client.get_catalog.assert_not_called()
-    lock.assert_not_called()
+    assert source.config.base_url == "https://example.test"
 
 
-def test_unpinned_restore_preflight_fails_before_lock_or_local_manager(
+def test_legacy_origin_variable_is_ignored_for_restore_source_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from odoo_instance_sdk.internal.dbprep import materialize as preparation
 
-    monkeypatch.delenv("ODCLI_TEST_INSTANCE_ORIGIN_PINS", raising=False)
-    client = MagicMock()
-    lock = MagicMock()
-    cluster = MagicMock()
-    monkeypatch.setattr(preparation, "exclusive_lock", lock)
-    monkeypatch.setattr(
-        "odoo_instance_sdk.resources.postgres.PostgresCluster.from_project", cluster
-    )
+    monkeypatch.setenv("ODCLI_REMOTE_STAGING_ORIGIN", "not a URL")
 
-    with pytest.raises(ConfigError, match="not approved outside the repository"):
-        preparation.preflight_restore(client, _project(tmp_path))
+    source = preparation.resolve_test_source(_project(tmp_path))
 
-    client.instance.assert_not_called()
-    client.get_catalog.assert_not_called()
-    lock.assert_not_called()
-    cluster.assert_not_called()
+    assert source.config.base_url == "https://example.test"
 
 
 def test_project_runtime_executable_cannot_read_remote_master_password(
@@ -2568,7 +2550,7 @@ def test_checkout_coalesces_fresh_result_under_preparation_lock(
     backup = Backup(
         id=backup.id,
         source_base_url=backup.source_base_url,
-        database_name=backup.database_name,
+        database_name="remote",
         format=backup.format,
         filestore_requested=backup.filestore_requested,
         path=backup.path,

@@ -241,8 +241,9 @@ def test_init_full_self_contained_writes_data_dir_and_dotenv(tmp_path: Path) -> 
     dotenv = tmp_path / ".odcli" / ".env"
     assert dotenv.is_file()
     assert dotenv.stat().st_mode & 0o777 == 0o600
-    assert "ODCLI_TEST_INSTANCE_ORIGIN_PINS=" in dotenv.read_text()
-    assert "ODCLI_TEST_MASTER_PASSWORD=" in dotenv.read_text()
+    dotenv_text = dotenv.read_text()
+    assert "ODCLI_TEST_INSTANCE_ORIGIN_PINS" not in dotenv_text
+    assert "ODCLI_TEST_MASTER_PASSWORD=" in dotenv_text
 
 
 @pytest.mark.usefixtures("stub_compose_init_followup")

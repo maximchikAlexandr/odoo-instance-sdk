@@ -288,15 +288,10 @@ def write_project_env(
     origin_pins: str | None = None,
     master_password: str | None = None,
 ) -> Path:
-    """Write the project-owned dotenv under 0600, preserving unmanaged lines.
-
-    Only the ``ODCLI_TEST_INSTANCE_ORIGIN_PINS`` and ``ODCLI_TEST_MASTER_PASSWORD``
-    keys are managed; existing operator lines are preserved. The file is
-    created with 0600 permissions and never receives a secret from argv.
-    """
+    """Write the legacy password key without generating origin approvals."""
     dest = project_env_path(project_root)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    existing: dict[str, str] = {}
+    existing_master: str | None = None
     preserved: list[str] = []
     if dest.is_file():
         for line in dest.read_text(encoding="utf-8").splitlines():
@@ -304,22 +299,14 @@ def write_project_env(
             if stripped and "=" in stripped and not stripped.startswith("#"):
                 key, _, value = stripped.partition("=")
                 key = key.strip()
-                if key in (_ORIGIN_PINS_KEY, _MASTER_PASSWORD_KEY):
-                    existing[key] = value
+                if key == _MASTER_PASSWORD_KEY:
+                    existing_master = value
                     continue
             preserved.append(line)
     lines = list(preserved)
     if lines and lines[-1] != "":
         lines.append("")
-    pin_value = origin_pins if origin_pins is not None else existing.get(_ORIGIN_PINS_KEY, "")
-    lines.append(f"{_ORIGIN_PINS_KEY}={pin_value}")
-    master_value: str
-    if master_password is not None:
-        master_value = master_password
-    elif _MASTER_PASSWORD_KEY in existing:
-        master_value = existing[_MASTER_PASSWORD_KEY]
-    else:
-        master_value = ""
+    master_value = master_password if master_password is not None else (existing_master or "")
     lines.append(f"{_MASTER_PASSWORD_KEY}={master_value}")
     content = "\n".join(lines) + "\n"
     fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), suffix=".env.tmp", prefix=".env")

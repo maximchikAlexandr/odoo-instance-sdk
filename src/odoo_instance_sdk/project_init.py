@@ -344,7 +344,7 @@ def _planned_command_prefix(root: Path, config: ProjectConfig) -> tuple[str, ...
     return (python, str(odoo_bin))
 
 
-def init_project(  # noqa: C901
+def init_project(
     project_path: Path,
     config: ProjectConfig,
     *,
@@ -401,19 +401,10 @@ def init_project(  # noqa: C901
     write_manifest(project_path, effective_config)
     if effective_config.postgres is not None and effective_config.postgres.mode == "compose":
         write_project_generated_config(project_path, effective_config)
-        origin_pins = ""
-        if effective_config.test_instance is not None:
-            from odoo_instance_sdk.internal.urls import canonical_origin
-
-            try:
-                origin_pins = canonical_origin(effective_config.test_instance.base_url)
-            except Exception:
-                origin_pins = ""
         if effective_config.test_instance is not None:
             existing_env = read_project_env(project_path)
             write_project_env(
                 project_path,
-                origin_pins=origin_pins or None,
                 master_password=existing_env.get("ODCLI_TEST_MASTER_PASSWORD"),
             )
     register_initialized_project(project_path)

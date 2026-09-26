@@ -27,10 +27,10 @@ from odoo_instance_sdk.internal.proc import (
 )
 from odoo_instance_sdk.internal.process_env import (
     captured_child_environment,
+    is_secret_environment_key,
     sanitized_child_environment,
 )
 from odoo_instance_sdk.internal.project_env import (
-    MASTER_PASSWORD_KEY,
     project_environment_secret_values,
 )
 from odoo_instance_sdk.internal.server import (
@@ -346,7 +346,7 @@ def _child_secret_values(
 ) -> tuple[str, ...]:
     values = list(project_environment_secret_values(project_environment))
     for key, value in (overrides or {}).items():
-        if key == MASTER_PASSWORD_KEY and value:
+        if is_secret_environment_key(key) and value:
             values.append(value)
     return tuple(dict.fromkeys(values))
 
