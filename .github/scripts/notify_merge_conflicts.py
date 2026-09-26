@@ -53,7 +53,7 @@ def conflicting_pull_requests(
     get: JsonGetter,
     base_branch: str,
     *,
-    attempts: int = 6,
+    attempts: int = 8,
     retry_delay: float = 3,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[JsonObject]:
@@ -72,7 +72,7 @@ def conflicting_pull_requests(
             if pull_request.get("mergeable") is not None:
                 break
             if attempt + 1 < attempts:
-                sleep(retry_delay)
+                sleep(min(retry_delay * 2**attempt, 30))
         if pull_request is None or pull_request.get("mergeable") is None:
             raise RuntimeError(f"GitHub did not compute mergeability for PR #{number}")
         if pull_request.get("mergeable") is not False:
