@@ -44,11 +44,14 @@ def _commands(target: Target | None = None) -> tuple[tuple[str, Command], ...]:
         mutation_command += (target.filter,)
     results_command: tuple[str, ...] = (
         sys.executable,
-        "-m",
-        "mutmut",
-        "results",
-        "--all=true",
-        *((target.filter,) if target is not None else ()),
+        *(
+            (
+                str(ROOT / "scripts" / "mutmut_results.py"),
+                target.filter,
+            )
+            if target is not None
+            else ("-m", "mutmut", "results", "--all=true")
+        ),
     )
     return (
         (
