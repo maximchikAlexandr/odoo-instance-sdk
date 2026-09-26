@@ -92,8 +92,8 @@ MODULE_LOCAL_SUBPROCESS_PATCHES: Final[frozenset[SourceLocation]] = frozenset(
         ("tests/unit/test_real_odoo_foundation.py", 325),
         ("tests/unit/test_real_odoo_foundation.py", 348),
         ("tests/unit/test_real_odoo_foundation.py", 367),
-        ("tests/unit/test_mutmut_results.py", 30),
-        ("tests/unit/test_mutmut_results.py", 45),
+        ("tests/unit/test_mutmut_results.py", 32),
+        ("tests/unit/test_mutmut_results.py", 47),
     }
 )
 
