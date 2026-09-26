@@ -454,11 +454,19 @@ def _invoke_ticket_checkout(
 
 
 @pytest.mark.parametrize("spelling", ["checkout", "create"], ids=["checkout", "create"])
-@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "execute"])
+@pytest.mark.parametrize(
+    ("dry_run", "expected_lifecycle_step_count", "expected_lifecycle_step"),
+    [
+        pytest.param(True, 1, "checkout.synthetic", id="dry-run"),
+        pytest.param(False, 2, "checkout.synthetic", id="execute"),
+    ],
+)
 def test_cli_ticket_checkout_rich_rendering(
     tmp_path: Path,
     spelling: str,
     dry_run: bool,
+    expected_lifecycle_step_count: int,
+    expected_lifecycle_step: str,
 ) -> None:
     result, _expected_ticket_allocation = _invoke_ticket_checkout(
         tmp_path, spelling=spelling, mode="rich", dry_run=dry_run
@@ -468,8 +476,7 @@ def test_cli_ticket_checkout_rich_rendering(
     assert result.stdout.count("Ticket PROJ-123") == 1
     assert "PROJ-123_2" in result.stdout
     assert "base release" in result.stdout
-    if dry_run:
-        assert "checkout.synthetic" in result.stdout
+    assert result.stdout.count(expected_lifecycle_step) == expected_lifecycle_step_count
 
 
 @pytest.mark.parametrize("spelling", ["checkout", "create"], ids=["checkout", "create"])

@@ -4212,7 +4212,7 @@ def _build_env_checkout_command(
     callback: Callable[[RunContext[DevelopmentEnvironment]], DevelopmentEnvironment],
     *,
     executor: RecordingExecutor,
-) -> tuple[Command[DevelopmentEnvironment], PreparedStep, EnvironmentCheckoutPlan]:
+) -> tuple[Command[DevelopmentEnvironment], PreparedStep]:
     domain_plan = _matrix_checkout_plan()
     private_process = PreparedStep(
         step_id="checkout.worktree",
@@ -4229,12 +4229,7 @@ def _build_env_checkout_command(
     public_plan = ExecutionPlan(
         steps=(
             private_process.public_projection(),
-            ActionStep(
-                step_id="checkout.cleanup",
-                action="cleanup_on_failure",
-                description="Remove owned checkout artifacts if execution fails",
-                mutating=True,
-            ),
+            private_action.public_projection(),
         ),
         observations=(
             {
@@ -4255,7 +4250,6 @@ def _build_env_checkout_command(
             private_projection=domain_plan,
         ),
         private_process,
-        domain_plan,
     )
 
 
@@ -4289,9 +4283,7 @@ def test_env_checkout_cli_dry_run_inspects_one_command_without_execution(tmp_pat
         dry_effects.append("run")
         return _matrix_public_environment()
 
-    dry_command, _private_process, _domain_plan = _build_env_checkout_command(
-        dry_callback, executor=dry_executor
-    )
+    dry_command, _private_process = _build_env_checkout_command(dry_callback, executor=dry_executor)
     dry_result, client = _invoke_env_checkout(tmp_path, dry_command, dry_run=True)
 
     assert dry_result.exit_code == 0, dry_result.output
@@ -4318,7 +4310,7 @@ def test_env_checkout_cli_execution_uses_one_inspected_command(tmp_path: Path) -
         run_effects.append("run")
         return _matrix_public_environment()
 
-    run_command, private_process, _domain_plan = _build_env_checkout_command(
+    run_command, private_process = _build_env_checkout_command(
         run_callback_with_steps, executor=run_executor
     )
     run_result, client = _invoke_env_checkout(tmp_path, run_command, dry_run=False)
