@@ -15,6 +15,9 @@ from odoo_instance_sdk.models import (
     BackupPrunePlan,
     BackupPruneResult,
     BackupRetentionPolicy,
+    DevelopmentEnvironment,
+    EnvironmentDatabaseMode,
+    EnvironmentState,
 )
 
 
@@ -30,6 +33,28 @@ def _backup() -> Backup:
         size_bytes=1,
         sha256="sha",
         downloaded_at=datetime.now(UTC),
+    )
+
+
+def _environment(backup_id: uuid.UUID | None) -> DevelopmentEnvironment:
+    return DevelopmentEnvironment(
+        id=uuid.uuid4(),
+        name="demo",
+        repository_root="/repo",
+        git_common_dir="/repo/.git",
+        branch="main",
+        base_ref="main",
+        worktree_path="/worktree",
+        generated_config_path="/config/odoo.conf",
+        python_environment_path="/venv",
+        python_environment_owned=True,
+        dependency_lock_path="/repo/uv.lock",
+        http_interface="127.0.0.1",
+        http_port=8069,
+        db_mode=EnvironmentDatabaseMode.COPY,
+        backup_id=backup_id,
+        state=EnvironmentState.READY,
+        created_at=datetime.now(UTC),
     )
 
 
@@ -111,6 +136,57 @@ def test_auto_prune_failure_is_a_warning_after_primary_success(
 
     assert result.id == result.id
     assert result.warnings == ("automatic backup pruning failed; primary operation succeeded",)
+
+
+def test_auto_prune_checkout_excludes_backup_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.backup_retention.read_retention_policy",
+        lambda: BackupRetentionPolicy(auto_prune=True),
+    )
+    backups = _Backups()
+    output = _environment(uuid.uuid4())
+    command = attach_auto_prune(
+        _command(lambda _context: output, RecordingExecutor()),
+        backups=backups,
+        project=Path("/project"),
+    )
+
+    result = command.run()
+
+    assert result is output
+    assert backups.calls == [(output.backup_id,)]
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_auto_prune_checkout_propagates_maintenance_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    partial: bool,
+) -> None:
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.backup_retention.read_retention_policy",
+        lambda: BackupRetentionPolicy(auto_prune=True),
+    )
+    backups = _Backups(
+        error=RuntimeError("maintenance unavailable") if not partial else None,
+    )
+    if partial:
+        backups.result = BackupPruneResult(plan=backups.plan, warnings=("partial",))
+    output = _environment(uuid.uuid4())
+    command = attach_auto_prune(
+        _command(lambda _context: output, RecordingExecutor()),
+        backups=backups,
+        project=Path("/project"),
+    )
+
+    result = command.run()
+
+    expected = (
+        "automatic backup pruning completed with warnings"
+        if partial
+        else "automatic backup pruning failed; primary operation succeeded"
+    )
+    assert result.warnings == (expected,)
+    assert result.backup_id == output.backup_id
 
 
 def test_auto_prune_does_not_run_when_primary_fails(monkeypatch: pytest.MonkeyPatch) -> None:

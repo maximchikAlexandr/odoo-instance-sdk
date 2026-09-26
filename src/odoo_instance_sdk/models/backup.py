@@ -180,6 +180,7 @@ class DevelopmentEnvironment(msgspec.Struct, frozen=True, forbid_unknown_fields=
     last_used_at: datetime | None = None
     removed_at: datetime | None = None
     last_error: str | None = None
+    warnings: tuple[str, ...] = ()
 
 
 class BackupProvenanceComparison(

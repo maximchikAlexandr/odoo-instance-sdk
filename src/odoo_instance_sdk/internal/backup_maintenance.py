@@ -13,6 +13,7 @@ from odoo_instance_sdk.models import (
     Backup,
     BackupPrunePlan,
     DatabasePreparationResult,
+    DevelopmentEnvironment,
     EnvironmentCheckoutResult,
     RestoreResult,
 )
@@ -119,6 +120,8 @@ def _result_backup_ids(result: object) -> tuple[uuid.UUID, ...]:
         return (result.source.id,)
     if isinstance(result, DatabasePreparationResult):
         return (result.backup.id,) if result.backup is not None else ()
+    if isinstance(result, DevelopmentEnvironment):
+        return (result.backup_id,) if result.backup_id is not None else ()
     if isinstance(result, EnvironmentCheckoutResult):
         backup_id = result.environment.backup_id
         return (backup_id,) if backup_id is not None else ()
@@ -128,7 +131,10 @@ def _result_backup_ids(result: object) -> tuple[uuid.UUID, ...]:
 def _append_warning(result: T, warning: str | None) -> T:
     if warning is None:
         return result
-    if isinstance(result, (Backup, RestoreResult, DatabasePreparationResult)):
+    if isinstance(
+        result,
+        (Backup, RestoreResult, DatabasePreparationResult, DevelopmentEnvironment),
+    ):
         return cast("T", msgspec.structs.replace(result, warnings=(*result.warnings, warning)))
     if isinstance(result, EnvironmentCheckoutResult):
         return cast(
