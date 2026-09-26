@@ -24,6 +24,8 @@ from odoo_instance_sdk.models import (
     BackupEvent,
     BackupFormat,
     BackupInspectResult,
+    BackupRetentionPolicy,
+    BackupRetentionUpdateResult,
     BackupState,
     BackupValidationResult,
     BackupValidationStatus,
@@ -63,6 +65,71 @@ def _is_contained_path(path: Path) -> bool:
 @dataclass(slots=True, kw_only=True)
 class BackupResource:
     _client: OdooClient
+
+    def retention(self) -> BackupRetentionPolicy:
+        from odoo_instance_sdk.internal.backup_retention import read_retention_policy
+
+        return read_retention_policy()
+
+    def set_retention_command(
+        self,
+        *,
+        retention_days: int | None = None,
+        auto_prune: bool | None = None,
+        dry_run: bool = False,
+        executor: ProcessExecutor | None = None,
+    ) -> Command[BackupRetentionUpdateResult]:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.backup_retention import (
+            read_retention_policy,
+            retention_path,
+            write_retention_policy,
+        )
+        from odoo_instance_sdk.internal.proc import (
+            PreparedAction,
+            SubprocessExecutor,
+            prepared_command,
+        )
+
+        current = read_retention_policy()
+        days = current.retention_days if retention_days is None else retention_days
+        enabled = current.auto_prune if auto_prune is None else auto_prune
+        desired = BackupRetentionPolicy(
+            retention_days=days,
+            auto_prune=enabled,
+            path=str(retention_path()),
+        )
+        action_id = "backup.retention.preview" if dry_run else "backup.retention.update"
+        action = PreparedAction(
+            step_id=action_id,
+            action=action_id,
+            description="Preview or update user backup retention settings",
+            read_only=dry_run,
+            mutating=not dry_run,
+        )
+
+        def run(context: RunContext[BackupRetentionUpdateResult]) -> BackupRetentionUpdateResult:
+            context.action(action_id)
+            changed = False if dry_run else write_retention_policy(desired)
+            result = BackupRetentionUpdateResult(policy=desired, changed=changed)
+            context.complete_action(action_id)
+            return result
+
+        return Command.from_prepared(
+            ExecutionPlan(steps=(action.public_projection(),)),
+            prepared_command(run, (action,), executor=executor or SubprocessExecutor()),
+        )
+
+    def set_retention(
+        self,
+        *,
+        retention_days: int | None = None,
+        auto_prune: bool | None = None,
+        dry_run: bool = False,
+    ) -> BackupRetentionUpdateResult:
+        return self.set_retention_command(
+            retention_days=retention_days, auto_prune=auto_prune, dry_run=dry_run
+        ).run()
 
     def list(
         self,

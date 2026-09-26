@@ -32,6 +32,7 @@ from odoo_instance_sdk.models import DatabaseRefreshOptions, StartConfig
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
     ProjectConfig,
+    RemoteSourceConfig,
 )
 from odoo_instance_sdk.project import (
     TestInstanceProjectConfig as RemoteTestInstanceConfig,
@@ -280,6 +281,98 @@ def test_init_rerun_preserves_existing_test_instance(tmp_path: Path) -> None:
     manifest = (tmp_path / ".odcli" / "project.toml").read_text()
     assert "http://127.0.0.1:18069" in manifest
     assert 'database = "remote_db"' in manifest
+
+
+def test_named_remote_init_is_complete_repeatable_and_secret_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_catalog_path",
+        lambda **_kwargs: tmp_path / "catalog.sqlite3",
+    )
+    runner = CliRunner()
+    common = [
+        "init",
+        "--no-input",
+        "--yes",
+        "--odoo-bin",
+        "/opt/odoo/odoo-bin",
+        "--python",
+        "python3",
+        "--config",
+        "odoo.conf",
+        "--project",
+        str(tmp_path),
+        "--format",
+        "json",
+    ]
+    first = runner.invoke(
+        cli,
+        [
+            *common,
+            "--remote",
+            "staging",
+            "https://staging.example/",
+            "staging",
+            "main",
+            "--remote",
+            "PROD",
+            "https://prod.example",
+            "production",
+            "release/19",
+        ],
+    )
+    assert first.exit_code == 0, first.output
+    payload = json.loads(first.output)["result"]
+    assert payload["remote_password_keys"] == [
+        "ODCLI_REMOTE_PROD_MASTER_PASSWORD",
+        "ODCLI_REMOTE_STAGING_MASTER_PASSWORD",
+    ]
+    assert "remote-secret" not in first.output
+
+    second = runner.invoke(cli, common)
+    assert second.exit_code == 0, second.output
+    config = ProjectConfig.load(tmp_path)
+    assert [source.name for source in config.remote_instances] == ["prod", "staging"]
+    manifest = (tmp_path / ".odcli" / "project.toml").read_text(encoding="utf-8")
+    assert "ODCLI_REMOTE_" not in manifest
+    assert "remote-secret" not in manifest
+
+
+def test_named_remote_init_dry_run_is_inert_without_input(tmp_path: Path) -> None:
+    config = ProjectConfig(
+        repository_root=tmp_path,
+        odoo_bin=Path("/opt/odoo/odoo-bin"),
+        source_config=Path("odoo.conf"),
+        remote_instances=(
+            RemoteSourceConfig(
+                name="staging",
+                base_url="https://staging.example",
+                database="staging",
+                git_branch="main",
+            ),
+        ),
+    )
+    missing, _details = evaluate_init_completeness(
+        project_root=tmp_path,
+        config=config,
+        local_config=False,
+        postgres_image=None,
+        existing_test_instance=None,
+        dry_run=True,
+        remote_database_names=None,
+    )
+    assert missing == []
+    result = init_project(
+        tmp_path,
+        config,
+        postgres_allocated=False,
+        no_input=True,
+        dry_run=True,
+    )
+    assert result["remote_password_keys"] == ["ODCLI_REMOTE_STAGING_MASTER_PASSWORD"]
+    assert not (tmp_path / ".odcli" / "project.toml").exists()
 
 
 @pytest.mark.usefixtures("stub_compose_init_followup")

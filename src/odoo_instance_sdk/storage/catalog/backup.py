@@ -127,10 +127,11 @@ class _BackupMixin:
         path: Path,
         *,
         source_git_branch: str | None = None,
+        source_name: str | None = None,
         project_id: str | None = None,
     ) -> None:
         self._conn.execute(
-            "INSERT INTO backups (id, source_base_url, database_name, format, filestore_requested, path, state, started_at, source_git_branch, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)",
+            "INSERT INTO backups (id, source_base_url, database_name, format, filestore_requested, path, state, started_at, source_git_branch, source_name, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)",
             (
                 backup_id,
                 source_base_url,
@@ -140,6 +141,7 @@ class _BackupMixin:
                 str(path),
                 BackupState.DOWNLOADING.value,
                 source_git_branch,
+                source_name,
                 project_id,
             ),
         )

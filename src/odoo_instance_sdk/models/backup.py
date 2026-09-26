@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 
 import msgspec
 
+from odoo_instance_sdk.exceptions import ConfigError
+
 
 class BackupFormat(enum.StrEnum):
     ZIP = "zip"
@@ -45,6 +47,7 @@ class BackupEventType(enum.StrEnum):
     VALIDATION_SUCCEEDED = "validation_succeeded"
     VALIDATION_FAILED = "validation_failed"
     VALIDATION_UNAVAILABLE = "validation_unavailable"
+    PIN_SET = "pin_set"
     DELETED = "deleted"
 
 
@@ -121,6 +124,7 @@ class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     sha256: str
     downloaded_at: datetime
     source_git_branch: str | None = None
+    source_name: str | None = None
 
 
 class LocalArchiveRestoreSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -301,6 +305,7 @@ class BackupInspectResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     sha256: str
     downloaded_at: datetime
     source_git_branch: str | None
+    source_name: str | None = None
     state: BackupState
     catalogue_time: datetime
     file_present: bool
@@ -309,6 +314,31 @@ class BackupInspectResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     history: tuple[BackupEvent, ...]
     restore_links: tuple[BackupRestoreLink, ...]
     environment_links: tuple[BackupEnvironmentLink, ...]
+
+
+class BackupRetentionPolicy(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Effective user-level backup retention policy."""
+
+    retention_days: int = 14
+    auto_prune: bool = False
+    path: str = ""
+
+    def __post_init__(self) -> None:
+        if isinstance(self.retention_days, bool) or not isinstance(self.retention_days, int):
+            raise ConfigError("retention_days must be a positive integer")
+        if self.retention_days <= 0:
+            raise ConfigError("retention_days must be a positive integer")
+        if type(self.auto_prune) is not bool:
+            raise ConfigError("auto_prune must be a boolean")
+
+
+class BackupRetentionUpdateResult(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True
+):
+    """Result of reading or updating the user retention policy."""
+
+    policy: BackupRetentionPolicy
+    changed: bool = False
 
 
 class CopyReplacementResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

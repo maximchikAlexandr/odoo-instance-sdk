@@ -33,19 +33,22 @@ from odoo_instance_sdk.internal.project_init import (
     validate_generated_config_target as _validate_generated_config_target,
 )
 from odoo_instance_sdk.internal.project_manifest import manifest_path
+from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.internal.vscode_import import import_vscode_launch
 from odoo_instance_sdk.models import StartConfig
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
     ProjectConfig,
+    RemoteSourceConfig,
     TestInstanceProjectConfig,
+    normalize_remote_name,
 )
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
 
 
-InitOption = str | int | bool | tuple[str, ...] | None
+InitOption = str | int | bool | tuple[str, ...] | tuple[tuple[str, str, str, str], ...] | None
 
 
 class _InitRunOrPreview(Protocol):
@@ -87,6 +90,7 @@ class _InitRequest:
     test_url: str | None
     test_database: str | None
     test_branch: str | None
+    remote_entries: tuple[tuple[str, str, str, str], ...]
     local_config: bool
     allow_partial: bool
     output_format: str | None
@@ -116,6 +120,7 @@ def _bind_init_request(options: dict[str, InitOption]) -> _InitRequest:
         test_url=cast("str | None", options["test_url"]),
         test_database=cast("str | None", options["test_database"]),
         test_branch=cast("str | None", options["test_branch"]),
+        remote_entries=cast("tuple[tuple[str, str, str, str], ...]", options["remote_entries"]),
         local_config=cast("bool", options["local_config"]),
         allow_partial=cast("bool", options["allow_partial"]),
         output_format=cast("str | None", options["output_format"]),
@@ -222,6 +227,12 @@ def _execute_init(
     existing_test_instance = _existing_test_instance(resolved_project)
     if test_instance_cfg is None and existing_test_instance is not None:
         test_instance_cfg = existing_test_instance
+    existing_remote_instances = _existing_remote_instances(resolved_project)
+    remote_instances = (
+        _resolve_remote_entries(request.remote_entries)
+        if request.remote_entries
+        else existing_remote_instances
+    )
 
     effective_source_config = option_state.source_config
     if request.local_config and postgres_cfg is not None and postgres_cfg.mode == "compose":
@@ -240,6 +251,7 @@ def _execute_init(
         runtime_cwd=option_state.runtime_cwd,
         postgres=postgres_cfg,
         test_instance=test_instance_cfg,
+        remote_instances=remote_instances,
         ticket_link_enabled=False,
     )
     if config.postgres is not None and config.postgres.mode == "compose":
@@ -383,6 +395,14 @@ def register_init_command(cli: click.Group) -> None:
         help="Remote test instance git branch for [test_instance].git_branch.",
     )
     @click.option(
+        "--remote",
+        "remote_entries",
+        nargs=4,
+        multiple=True,
+        metavar="NAME URL DATABASE GIT_REF",
+        help="Named remote source; repeat for multiple sources.",
+    )
+    @click.option(
         "--local-config",
         "local_config",
         is_flag=True,
@@ -463,6 +483,34 @@ def _existing_test_instance(project_root: Path) -> TestInstanceProjectConfig | N
     except Exception:
         return None
     return existing_cfg.test_instance
+
+
+def _existing_remote_instances(project_root: Path) -> tuple[RemoteSourceConfig, ...]:
+    """Return existing named sources so re-init without ``--remote`` preserves them."""
+    manifest = manifest_path(project_root)
+    if not manifest.is_file():
+        return ()
+    try:
+        return ProjectConfig.load(project_root).remote_instances
+    except Exception:
+        return ()
+
+
+def _resolve_remote_entries(
+    entries: tuple[tuple[str, str, str, str], ...],
+) -> tuple[RemoteSourceConfig, ...]:
+    sources = tuple(
+        RemoteSourceConfig(
+            name=normalize_remote_name(name),
+            base_url=normalize_base_url(url),
+            database=database,
+            git_branch=git_ref,
+        )
+        for name, url, database, git_ref in entries
+    )
+    if len({source.name for source in sources}) != len(sources):
+        raise click.UsageError("duplicate --remote names are not allowed")
+    return tuple(sorted(sources, key=lambda source: source.name))
 
 
 def _resolve_postgres_state(

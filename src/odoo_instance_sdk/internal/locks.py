@@ -105,6 +105,18 @@ def database_preparation_artifact_lock_path(project_id: str, database_name: str)
     return get_locks_dir() / f"database-preparation-{project_id}-{database_name}.lock"
 
 
+def project_manifest_lock_path(project_id: str) -> Path:
+    """Return the lock serializing project manifest edits."""
+    from odoo_instance_sdk.internal.paths import get_locks_dir
+
+    if not project_id or any(
+        char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        for char in project_id
+    ):
+        raise ValueError("project_id must be a safe identifier")
+    return get_locks_dir() / f"project-manifest-{project_id}.lock"
+
+
 def python_env_lock_path(python_env_path: str) -> Path:
     from odoo_instance_sdk.internal.paths import get_locks_dir
 
