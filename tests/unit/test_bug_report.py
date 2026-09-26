@@ -40,7 +40,10 @@ from odoo_instance_sdk.internal.bug_report import (
 )
 from odoo_instance_sdk.internal.locks import exclusive_lock
 from odoo_instance_sdk.internal.paths import get_config_root
-from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.proc import (
+    ProcessResult,
+    RecordingExecutor,
+)
 from odoo_instance_sdk.models import BugReportInitResult
 
 
