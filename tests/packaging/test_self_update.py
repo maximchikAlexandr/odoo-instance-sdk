@@ -212,11 +212,19 @@ def test_uv_tool_full_update_from_old_revision(tmp_path: Path) -> None:
         message = str(error.get("message", ""))
         if "uv tool install failed" in message:
             pytest.skip("target revision is not installable from GitHub in this environment")
+        if "target history is unavailable" in message:
+            pytest.skip("Git ancestry source is unavailable for the local packaging fixture")
         if "Unplanned execution step" in message:
-            pytest.skip("installed revision lacks update plan compatibility required for E2E")
+            pytest.fail(message)
         assert False, update.stderr or update.stdout
     payload = json.loads(update.stdout)
-    assert payload["result"]["outcome"] in {"updated", "already_current"}
+    assert payload["result"]["outcome"] == "updated"
+    assert payload["result"]["target_sha"] == head
+    assert payload["result"]["final_sha"] == head
+    assert payload["result"]["snapshot_state"] == "cleared"
+    assert payload["result"]["journal_state"] == "cleared"
+    assert not (user_root / "update" / "journal.json").exists()
+    assert not (user_root / "update" / "snapshot").exists()
     with sqlite3.connect(str(catalog_path)) as conn:
         assert catalog_revision(conn) == CATALOG_REVISION
     version = subprocess.run(
@@ -237,3 +245,69 @@ def test_uv_tool_full_update_from_old_revision(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
     assert doctor.returncode in {0, 1}, doctor.stderr or doctor.stdout
+
+
+def test_uv_tool_update_check_reports_interrupted_state_without_resume(tmp_path: Path) -> None:
+    """Public check reports frozen recovery evidence without mutating it."""
+    _require_uv()
+    env = _isolated_home(tmp_path)
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=_REPO,
+        text=True,
+    ).strip()
+    install = _install_uv_tool_vcs(env, _REPO, head)
+    if install.returncode != 0:
+        pytest.skip(f"uv tool install unavailable: {install.stderr}")
+    odcli = Path(env["HOME"]) / ".local" / "bin" / "odcli"
+    env["ODCLI_UV_TOOL_EXECUTABLE"] = str(odcli)
+    update_root = Path(env["HOME"]) / ".odcli" / "update"
+    snapshot = update_root / "snapshot"
+    snapshot.mkdir(parents=True)
+    (snapshot / "metadata.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "previous_version": "0.1.0",
+                "package_revision": "0.1.0",
+                "previous_sha": head,
+                "install_requirement": _vcs_install_requirement(_REPO, head),
+                "source_repo": _REPO.resolve().as_uri(),
+                "target_ref": head,
+                "snapshot_sha": head,
+            }
+        ),
+        encoding="utf-8",
+    )
+    journal = update_root / "journal.json"
+    journal.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "phase": "migrate",
+                "target_ref": head,
+                "snapshot_sha": head,
+                "maintenance_pid": 2_000_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(odcli), "update", "--check", "--format", "json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    details = payload["error"]["details"]
+    assert payload["error"]["code"] == "update_incomplete"
+    assert details["outcome"] == "update_incomplete"
+    assert details["journal_state"] == "present"
+    assert details["snapshot_state"] == "present"
+    assert details["recovery_argv"] == [str(odcli), "update", "--ref", head, "--yes"]
+    assert journal.is_file()
+    assert snapshot.is_dir()

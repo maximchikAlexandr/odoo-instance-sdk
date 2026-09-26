@@ -36,7 +36,12 @@ from odoo_instance_sdk.internal.proc import (
     ProcessExecutor,
     ProcessResult,
 )
-from odoo_instance_sdk.internal.proc.run import run_captured
+from odoo_instance_sdk.internal.self_update_recovery import (
+    UpdateRecoveryState,
+)
+from odoo_instance_sdk.internal.self_update_recovery import (
+    inspect_update_recovery_state as _inspect_update_recovery_state,
+)
 from odoo_instance_sdk.models.update import UpdateOutcome, UpdatePhaseDuration, UpdateResult
 
 _PACKAGE_NAME = "odoo-instance-sdk"
@@ -132,6 +137,7 @@ def _failure_result(
     outcome: UpdateOutcome,
     *,
     provenance: InstalledProvenance | None = None,
+    target_sha: str | None = None,
     manual_argv: tuple[str, ...] | None = None,
     recovery_argv: tuple[str, ...] | None = None,
     rollback_outcome: str | None = None,
@@ -145,6 +151,7 @@ def _failure_result(
         source_repo=provenance.source_repo if provenance else None,
         previous_version=provenance.version if provenance else None,
         previous_sha=provenance.commit_id if provenance else None,
+        target_sha=target_sha,
         executable_path=(
             str(provenance.uv_tool_bin_path) if provenance and provenance.uv_tool_bin_path else None
         ),
@@ -419,6 +426,10 @@ def _read_journal(path: Path) -> dict[str, JsonValue] | None:
     if not isinstance(payload, dict):
         return None
     return payload
+
+
+def inspect_update_recovery_state() -> UpdateRecoveryState:
+    return _inspect_update_recovery_state(get_user_root(ensure_exists=False))
 
 
 def unfinished_update_journal() -> dict[str, JsonValue] | None:
@@ -697,6 +708,7 @@ def _verify_installed_revision(
     expected_sha: str | None,
     *,
     target_ref: str | None = None,
+    version_result: ProcessResult | None = None,
 ) -> None:
     provenance = read_uv_tool_direct_url()
     expected = expected_sha or _expected_sha_for_target_ref(target_ref)
@@ -706,13 +718,7 @@ def _verify_installed_revision(
         )
     if provenance.uv_tool_bin_path is None:
         raise UpdateError("uv-tool odcli executable is missing after update")
-    version = run_captured(
-        str(provenance.uv_tool_bin_path),
-        ("--version",),
-        step_id="update.verify.version",
-        read_only=True,
-    )
-    if version.returncode != 0:
+    if version_result is not None and version_result.returncode != 0:
         raise UpdateError("odcli --version failed after update")
 
 
@@ -760,7 +766,6 @@ def _maintenance_run() -> UpdateResult:
     target_ref = journal.get("target_ref") if journal is not None else None
     target_ref_str = target_ref if isinstance(target_ref, str) else None
     executed, skipped, final_versions = _run_coordinator_migrations()
-    _verify_installed_revision(None, target_ref=target_ref_str)
     _verify_doctor_startup()
     _verify_reached_schema_versions(final_versions)
     _normalize_legacy_direct_url(provenance)
@@ -839,7 +844,6 @@ def update_command(
         _build_failure_command,
         _build_mutating_command,
         _build_staged_command,
-        _journal_target_ref,
     )
 
     try:
@@ -854,7 +858,19 @@ def update_command(
         )
     if check:
         return _build_check_command(ref=ref, provenance=provenance, executor=executor)
-    journal_target = _journal_target_ref(unfinished_update_journal())
+    recovery = inspect_update_recovery_state()
+    if recovery.has_evidence and not recovery.valid:
+        return _build_failure_command(
+            _failure_result(
+                "update_incomplete",
+                provenance=provenance,
+                target_sha=ref.lower() if _is_full_sha(ref) else None,
+                snapshot_state=recovery.snapshot_state,
+                journal_state=recovery.journal_state,
+                next_step=recovery.diagnostic or "update recovery evidence is incomplete",
+            )
+        )
+    journal_target = recovery.target_ref
     target_sha = (
         ref.lower()
         if journal_target is not None and _is_full_sha(ref) and ref.lower() != journal_target
@@ -865,7 +881,7 @@ def update_command(
         and not force_mutation
         and provenance.commit_id is not None
         and target_sha == provenance.commit_id
-        and unfinished_update_journal() is None
+        and not recovery.has_evidence
     ):
         return _build_already_current_command(provenance)
     if not _is_full_sha(target_sha):
@@ -928,7 +944,9 @@ def preflight_update_command(
 
 __all__ = [
     "InstalledProvenance",
+    "UpdateRecoveryState",
     "assert_update_not_blocking",
+    "inspect_update_recovery_state",
     "is_maintenance_mode",
     "preflight_update_command",
     "prepare_maintenance_environment",
