@@ -309,7 +309,7 @@ class _BackupMixin:
         ):
             return "referenced by unresolved recovery"
         if row["project_id"] is None:
-            return None
+            return "unknown or unowned ownership"
         timestamp = self._retention_timestamp(row)
         group = self._retention_group(row)
         if timestamp is None:

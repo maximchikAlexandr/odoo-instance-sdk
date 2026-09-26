@@ -9,22 +9,30 @@ import pytest
 
 from odoo_instance_sdk.exceptions import BackupNotAvailableError, StalePlanError
 from odoo_instance_sdk.internal.backup_retention import write_retention_policy
+from odoo_instance_sdk.internal.locks import backup_lock_path, exclusive_lock
 from odoo_instance_sdk.internal.repo_key import repo_key
 from odoo_instance_sdk.models import BackupRetentionPolicy, BackupState
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from odoo_instance_sdk.storage.catalog.helpers import CopyJournalStage
+from tests.unit.monitor_support import make_env
 
 
 def _catalogue(client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BackupCatalog:
     db_path = tmp_path / "catalog.sqlite3"
     locks = tmp_path / "locks"
     config = tmp_path / "config"
+    backups = tmp_path / "backups"
     config.mkdir()
+    backups.mkdir()
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_catalog_path", lambda **_kwargs: db_path
     )
     monkeypatch.setattr("odoo_instance_sdk.internal.paths.get_locks_dir", lambda **_kwargs: locks)
     monkeypatch.setattr(
         "odoo_instance_sdk.internal.paths.get_config_root", lambda **_kwargs: config
+    )
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.paths.get_backups_dir", lambda **_kwargs: backups
     )
     client._catalog = None
     return client.get_catalog()
@@ -47,7 +55,7 @@ def _backup(
     source_name: str | None = None,
 ) -> tuple[str, Path]:
     backup_id = str(uuid.uuid4())
-    path = tmp_path / f"{backup_id}.zip"
+    path = tmp_path / "backups" / f"{backup_id}.zip"
     payload = backup_id.encode()
     path.write_bytes(payload)
     catalog.start_download(
@@ -112,7 +120,7 @@ def test_prune_keeps_newest_each_group_and_removes_only_old_files(
 
     result = client.backups.prune(root)
 
-    assert set(result.deleted_ids) == {uuid.UUID(old_id), uuid.UUID(named_old_id)}
+    assert set(result.deleted_ids) == {uuid.UUID(old_id), uuid.UUID(named_old_id)}, result
     assert result.removed_bytes == len(old_id.encode()) + len(named_old_id.encode())
     assert not old_path.exists() and not named_old_path.exists()
     assert newest_path.exists() and named_newest_path.exists()
@@ -163,3 +171,160 @@ def test_prune_preview_does_not_delete_or_write_audit(
     assert result.deleted_ids == ()
     assert path.exists()
     assert len(client.backups.history(backup_id=backup_id)) == before
+
+
+def test_prune_cutoff_equality_and_deterministic_tie_protection(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalogue(client, tmp_path, monkeypatch)
+    root, project_id = _project(catalog, tmp_path)
+    now = datetime(2026, 1, 31, tzinfo=UTC)
+    policy = BackupRetentionPolicy(retention_days=14, auto_prune=False)
+    _at_cutoff_id, _at_cutoff_path = _backup(
+        catalog, tmp_path, project_id, now - timedelta(days=14), source_name="cutoff"
+    )
+    tie_a, _tie_a_path = _backup(catalog, tmp_path, project_id, now - timedelta(days=20))
+    tie_b, _tie_b_path = _backup(catalog, tmp_path, project_id, now - timedelta(days=20))
+
+    plan = client.backups._build_prune_plan(root, policy=policy, now=now)
+
+    assert any(item.reason == "younger than retention cutoff" for item in plan.skipped)
+    assert {str(item.backup_id) for item in plan.protected} == {min(tie_a, tie_b)}
+    assert {str(item.backup_id) for item in plan.candidates} == {max(tie_a, tie_b)}
+
+
+def test_prune_rejects_unknown_unowned_external_and_unlisted_files(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalogue(client, tmp_path, monkeypatch)
+    root, project_id = _project(catalog, tmp_path)
+    old = datetime.now(UTC) - timedelta(days=30)
+    unowned_id = str(uuid.uuid4())
+    unowned_path = tmp_path / "backups" / "unowned.zip"
+    unowned_path.write_bytes(b"unowned")
+    catalog.start_download(
+        unowned_id, "https://odoo.example", "database", "zip", True, unowned_path
+    )
+    catalog.success_download(unowned_id, unowned_path.name, 7, "unowned", downloaded_at=old)
+    external_id, _external_managed_path = _backup(catalog, tmp_path, project_id, old)
+    external_path = tmp_path / "external.zip"
+    external_path.write_bytes(b"external")
+    catalog._conn.execute(
+        "UPDATE backups SET path = ? WHERE id = ?", (str(external_path), external_id)
+    )
+    local_archive = tmp_path / "local-archive.zip"
+    local_archive.write_bytes(b"not in catalog")
+    settings = tmp_path / "config" / "user.toml"
+    policy = BackupRetentionPolicy(retention_days=14, auto_prune=False, path=str(settings))
+
+    unowned = next(item for item in client.backups.list() if str(item.id) == unowned_id)
+    with pytest.raises(BackupNotAvailableError, match="unknown or unowned"):
+        client.backups.delete(unowned)
+    plan = client.backups._build_prune_plan(root, policy=policy, now=datetime.now(UTC))
+
+    assert unowned_id not in {str(item.backup_id) for item in plan.candidates}
+    assert any(item.backup_id == uuid.UUID(external_id) for item in plan.skipped)
+    assert local_archive.exists()
+
+
+def test_prune_protects_busy_lock_and_live_environment_recovery_references(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalogue(client, tmp_path, monkeypatch)
+    root, project_id = _project(catalog, tmp_path)
+    backup_id, _path = _backup(
+        catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=30)
+    )
+    _other_id, _other_path = _backup(
+        catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=29)
+    )
+    policy = BackupRetentionPolicy(retention_days=14, auto_prune=False)
+    busy_id = backup_id
+    with exclusive_lock(backup_lock_path(busy_id)):
+        busy_plan = client.backups._build_prune_plan(root, policy=policy)
+    assert any(item.backup_id == uuid.UUID(busy_id) for item in busy_plan.protected)
+    assert any(item.reason == "busy lifecycle lock" for item in busy_plan.protected)
+
+    environment_id = str(uuid.uuid4())
+    catalog.create_environment(
+        make_env(
+            environment_id,
+            repository_root=str(root),
+            git_common_dir=str(root / ".git"),
+            backup_id=backup_id,
+        )
+    )
+    assert catalog.deletion_protection_reason(backup_id) == (
+        "referenced by a non-removed environment"
+    )
+    catalog.update_environment_state(environment_id, "removed")
+    catalog.upsert_copy_journal(
+        environment_id,
+        target_database="database",
+        db_host=None,
+        db_port=5432,
+        db_user=None,
+        backup_id=backup_id,
+        stage=CopyJournalStage.PREPARED,
+    )
+    assert catalog.deletion_protection_reason(backup_id) == "referenced by unresolved recovery"
+
+
+def test_prune_returns_truthful_partial_result_after_policy_drift(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalogue(client, tmp_path, monkeypatch)
+    root, project_id = _project(catalog, tmp_path)
+    now = datetime.now(UTC)
+    first_id, first_path = _backup(catalog, tmp_path, project_id, now - timedelta(days=30))
+    second_id, second_path = _backup(catalog, tmp_path, project_id, now - timedelta(days=20))
+    _newest_id, _newest_path = _backup(catalog, tmp_path, project_id, now - timedelta(days=5))
+    settings = tmp_path / "config" / "user.toml"
+    original = BackupRetentionPolicy(retention_days=14, auto_prune=False, path=str(settings))
+    changed = BackupRetentionPolicy(retention_days=7, auto_prune=False, path=str(settings))
+    write_retention_policy(original)
+    command = client.backups.prune_command(root)
+    policies = iter((original, original, changed))
+    monkeypatch.setattr(
+        "odoo_instance_sdk.internal.backup_retention.read_retention_policy",
+        lambda: next(policies),
+    )
+
+    result = command.run()
+
+    assert result.policy_changed is True
+    assert result.warnings == ("backup retention policy changed; replan before pruning",)
+    assert len(result.deleted_ids) == 1
+    assert result.deleted_ids[0] in {uuid.UUID(first_id), uuid.UUID(second_id)}
+    deleted_candidate = next(
+        item for item in result.plan.candidates if item.backup_id == result.deleted_ids[0]
+    )
+    assert result.removed_bytes == deleted_candidate.size_bytes
+    assert first_path.exists() != second_path.exists()
+    assert any(event.event_type.value == "deleted" for event in client.backups.history())
+
+
+def test_prune_revalidates_pin_latest_file_identity_and_is_repeatable(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalogue(client, tmp_path, monkeypatch)
+    root, project_id = _project(catalog, tmp_path)
+    old = datetime.now(UTC) - timedelta(days=30)
+    pinned_id, pinned_path = _backup(catalog, tmp_path, project_id, old)
+    raced_id, raced_path = _backup(catalog, tmp_path, project_id, old)
+    _backup(catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=5))
+    settings = tmp_path / "config" / "user.toml"
+    policy = BackupRetentionPolicy(retention_days=14, auto_prune=False, path=str(settings))
+    plan = client.backups._build_prune_plan(root, policy=policy)
+    client.backups.set_pinned(pinned_id, True)
+    raced_path.unlink()
+    raced_path.write_bytes(b"replacement")
+
+    first = client.backups._execute_prune_plan(plan, dry_run=False)
+
+    assert uuid.UUID(pinned_id) not in first.deleted_ids
+    assert uuid.UUID(raced_id) not in first.deleted_ids
+    assert pinned_path.exists() and raced_path.exists()
+    second = client.backups.prune(root)
+    assert uuid.UUID(pinned_id) not in second.deleted_ids
+    assert uuid.UUID(raced_id) not in second.deleted_ids

@@ -403,6 +403,8 @@ class BackupPruneResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True,
     skipped: tuple[BackupPruneSkip, ...] = ()
     failures: tuple[BackupPruneSkip, ...] = ()
     dry_run: bool = False
+    policy_changed: bool = False
+    warnings: tuple[str, ...] = ()
 
     @property
     def actual_removed_bytes(self) -> int:

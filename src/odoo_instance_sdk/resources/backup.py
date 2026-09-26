@@ -69,10 +69,37 @@ def _file_identity(path: Path) -> tuple[int, int] | None:
     return stat_result.st_dev, stat_result.st_ino
 
 
-def _is_contained_path(path: Path) -> bool:
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file_handle:
+        for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _managed_backup_roots(client: OdooClient) -> tuple[Path, ...]:
+    from odoo_instance_sdk.internal.paths import get_backups_dir
+
+    roots: list[Path] = []
+    configured = client.config.backups_directory
+    if configured is not None:
+        roots.append(Path(configured).expanduser().resolve(strict=False))
+    roots.append(get_backups_dir(ensure_exists=False).resolve(strict=False))
+    return tuple(dict.fromkeys(roots))
+
+
+def _is_sdk_managed_backup_path(client: OdooClient, path: Path) -> bool:
+    """Prove a path is an SDK-managed regular-file location, fail closed."""
     try:
-        return path.resolve(strict=False).parent == path.parent.resolve(strict=False)
-    except OSError:
+        if path.is_symlink():
+            return False
+        if path.exists() and not path.is_file():
+            return False
+        resolved = path.resolve(strict=False)
+        return any(
+            root == resolved or root in resolved.parents for root in _managed_backup_roots(client)
+        )
+    except (OSError, RuntimeError):
         return False
 
 
@@ -286,7 +313,7 @@ class BackupResource:
                     )
                 )
                 continue
-            if path.is_symlink() or not path.is_file() or not _is_contained_path(path):
+            if not _is_sdk_managed_backup_path(self._client, path):
                 skipped.append(
                     BackupPruneSkip(
                         backup_id=backup_id,
@@ -391,11 +418,15 @@ class BackupResource:
         failed: list[uuid.UUID] = []
         failures: list[BackupPruneSkip] = []
         removed_bytes = 0
+        policy_changed = False
         catalog = self._client.get_catalog()
         for candidate in plan.candidates:
             current_policy = read_retention_policy()
             current_fingerprint = _policy_fingerprint(current_policy)
             if current_fingerprint != plan.policy_fingerprint:
+                if deleted:
+                    policy_changed = True
+                    break
                 raise StalePlanError(
                     "backup retention policy changed; replan before pruning",
                     expected=plan.policy_fingerprint,
@@ -406,7 +437,10 @@ class BackupResource:
                     current_policy = read_retention_policy()
                     current_fingerprint = _policy_fingerprint(current_policy)
                     if current_fingerprint != plan.policy_fingerprint:
-                        raise StalePlanError(  # noqa: TRY301 -- abort the captured destructive set
+                        if deleted:
+                            policy_changed = True
+                            break
+                        raise StalePlanError(  # noqa: TRY301 -- abort before any deletion
                             "backup retention policy changed; replan before pruning",
                             expected=plan.policy_fingerprint,
                             actual=current_fingerprint,
@@ -442,8 +476,7 @@ class BackupResource:
                     if (
                         path != Path(candidate.path)
                         or current_identity != candidate.file_identity
-                        or path.is_symlink()
-                        or not path.is_file()
+                        or not _is_sdk_managed_backup_path(self._client, path)
                     ):
                         skipped.append(
                             BackupPruneSkip(
@@ -460,6 +493,21 @@ class BackupResource:
                             BackupPruneSkip(
                                 backup_id=candidate.backup_id,
                                 reason="backup metadata is incomplete",
+                            )
+                        )
+                        continue
+                    try:
+                        content_matches = actual_size == backup.size_bytes and (
+                            not backup.sha256 or _file_sha256(path) == backup.sha256
+                        )
+                    except OSError:
+                        content_matches = False
+                    if not content_matches:
+                        skipped.append(
+                            BackupPruneSkip(
+                                backup_id=candidate.backup_id,
+                                reason="file content changed",
+                                size_bytes=candidate.size_bytes,
                             )
                         )
                         continue
@@ -506,6 +554,12 @@ class BackupResource:
             removed_bytes=removed_bytes,
             skipped=tuple(skipped),
             failures=tuple(failures),
+            policy_changed=policy_changed,
+            warnings=(
+                ("backup retention policy changed; replan before pruning",)
+                if policy_changed
+                else ()
+            ),
         )
 
     def list(
@@ -634,12 +688,16 @@ class BackupResource:
         if reason is not None:
             raise BackupNotAvailableError(f"Backup {backup.id} is protected: {reason}")
         catalog.verify_identity(backup)
-        if existing_path != captured_path or not _is_contained_path(existing_path):
+        if existing_path != captured_path:
             raise BackupNotAvailableError(
                 f"Backup {backup.id} path changed or is outside its recorded directory"
             )
         if existing_path.is_symlink():
             raise BackupNotAvailableError(f"Backup {backup.id} path must not be a symlink")
+        if not _is_sdk_managed_backup_path(self._client, existing_path):
+            raise BackupNotAvailableError(
+                f"Backup {backup.id} path changed or is outside its recorded directory"
+            )
         current_identity = _file_identity(existing_path)
         if current_identity != captured_identity:
             raise BackupNotAvailableError(f"Backup {backup.id} file identity changed")
