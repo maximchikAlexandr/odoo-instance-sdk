@@ -103,6 +103,7 @@ class _BackupPayloadResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tr
     sha256: str
     downloaded_at: datetime
     source_git_branch: str | None
+    source_name: str | None
     state: BackupState
     catalogue_time: datetime
     file_present: bool
@@ -153,6 +154,7 @@ def _backup_payload(projection: BackupProjection) -> _BackupPayloadResult:
         sha256=backup.sha256,
         downloaded_at=backup.downloaded_at,
         source_git_branch=backup.source_git_branch,
+        source_name=backup.source_name,
         state=projection.state,
         catalogue_time=projection.catalogue_time,
         file_present=projection.file_present,

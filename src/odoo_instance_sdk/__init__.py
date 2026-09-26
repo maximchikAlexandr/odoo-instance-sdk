@@ -92,6 +92,8 @@ if TYPE_CHECKING:
         BackupFreshness,
         BackupProvenanceComparison,
         BackupProvenanceStatus,
+        BackupRetentionPolicy,
+        BackupRetentionUpdateResult,
         BackupState,
         BackupValidationResult,
         BackupValidationStatus,
@@ -171,6 +173,7 @@ if TYPE_CHECKING:
     from odoo_instance_sdk.project import (
         PostgresProjectConfig,
         ProjectConfig,
+        RemoteSourceConfig,
         TestInstanceProjectConfig,
     )
     from odoo_instance_sdk.resources.backup import BackupResource
@@ -243,6 +246,11 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "BackupState": ("odoo_instance_sdk.models", "BackupState"),
     "BackupValidationResult": ("odoo_instance_sdk.models", "BackupValidationResult"),
     "BackupValidationStatus": ("odoo_instance_sdk.models", "BackupValidationStatus"),
+    "BackupRetentionPolicy": ("odoo_instance_sdk.models", "BackupRetentionPolicy"),
+    "BackupRetentionUpdateResult": (
+        "odoo_instance_sdk.models",
+        "BackupRetentionUpdateResult",
+    ),
     "LocalArchiveRestoreSource": ("odoo_instance_sdk.models", "LocalArchiveRestoreSource"),
     "BackupValidationUnavailableError": (
         "odoo_instance_sdk.exceptions",
@@ -460,6 +468,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "ProcessNotFoundError": ("odoo_instance_sdk.exceptions", "ProcessNotFoundError"),
     "ProcessStatus": ("odoo_instance_sdk.models", "ProcessStatus"),
     "ProjectConfig": ("odoo_instance_sdk.project", "ProjectConfig"),
+    "RemoteSourceConfig": ("odoo_instance_sdk.project", "RemoteSourceConfig"),
     "ProjectContextError": ("odoo_instance_sdk.exceptions", "ProjectContextError"),
     "ProjectManifestNotFoundError": (
         "odoo_instance_sdk.exceptions",
@@ -543,6 +552,8 @@ if TYPE_CHECKING:
         "BackupProvenanceStatus",
         "BackupResource",
         "BackupRestoreLink",
+        "BackupRetentionPolicy",
+        "BackupRetentionUpdateResult",
         "BackupState",
         "BackupValidationResult",
         "BackupValidationStatus",
@@ -699,6 +710,7 @@ if TYPE_CHECKING:
         "PythonEnvFootprint",
         "ReadinessResult",
         "ReadinessTimeoutError",
+        "RemoteSourceConfig",
         "RestoreFailedError",
         "RestoreResult",
         "RuntimeMetrics",

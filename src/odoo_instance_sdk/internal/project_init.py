@@ -8,7 +8,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.internal.dbprep.source import _planned_project_identity
@@ -18,8 +18,13 @@ from odoo_instance_sdk.internal.generated_config import (
     render_config,
 )
 from odoo_instance_sdk.internal.project_runtime import resolve_project_http_port
+from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import StartConfig
-from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
+from odoo_instance_sdk.project import (
+    ProjectConfig,
+    TestInstanceProjectConfig,
+    normalize_remote_name,
+)
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
@@ -85,6 +90,16 @@ def manifest_dict(
             "database": config.test_instance.database,
             "git_branch": config.test_instance.git_branch,
         }
+    remote_instances: list[dict[str, JsonValue]] = [
+        {
+            "name": source.name,
+            "base_url": normalize_base_url(source.base_url),
+            "database": source.database,
+            "git_branch": source.git_branch,
+            "password_key": f"ODCLI_REMOTE_{normalize_remote_name(source.name).upper()}_MASTER_PASSWORD",
+        }
+        for source in sorted(config.remote_instances, key=lambda item: item.name)
+    ]
     return {
         "odoo_bin": str(config.odoo_bin) if config.odoo_bin else None,
         "python": str(config.python) if config.python else None,
@@ -95,6 +110,10 @@ def manifest_dict(
         "ticket_base_url": config.ticket_base_url,
         "refresh_after_hours": config.refresh_after_hours,
         "test_instance": test_instance,
+        "remote_instances": cast("JsonValue", remote_instances),
+        "remote_password_keys": cast(
+            "JsonValue", [item["password_key"] for item in remote_instances]
+        ),
         "preferred_http_port": config.preferred_http_port,
         "requirements": list(config.requirements),
         "default_run_args": list(config.default_run_args),
@@ -412,13 +431,13 @@ def evaluate_init_completeness(  # noqa: C901
     test_database = test_instance.database if test_instance is not None else None
     test_branch = test_instance.git_branch if test_instance is not None else None
 
-    if test_url is None:
+    if test_url is None and not config.remote_instances:
         missing.append("test_url")
         details["test_url"] = "no --test-url and no [test_instance].url"
-    if test_branch is None:
+    if test_branch is None and not config.remote_instances:
         missing.append("test_branch")
         details["test_branch"] = "no --test-branch and no [test_instance].git_branch"
-    if test_database is None:
+    if test_database is None and not config.remote_instances:
         if remote_database_names is not None and len(remote_database_names) == 1:
             details["test_database"] = f"resolved to {remote_database_names[0]!r}"
         else:

@@ -9,7 +9,7 @@ import pytest
 from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError
 from odoo_instance_sdk.internal import project_manifest as project_manifest_module
 from odoo_instance_sdk.internal.project_manifest import assert_no_secrets, write_manifest
-from odoo_instance_sdk.project import ProjectConfig
+from odoo_instance_sdk.project import ProjectConfig, RemoteSourceConfig
 from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
 
 
@@ -361,3 +361,71 @@ def test_legacy_manifest_omits_new_sections_and_is_byte_stable(tmp_path: Path) -
     write_manifest(tmp_path, cfg)
     assert (tmp_path / ".odcli" / "project.toml").read_text() == expected
     assert ProjectConfig.load(tmp_path).to_manifest() == expected
+
+
+def test_named_remote_sources_roundtrip_deterministically(tmp_path: Path) -> None:
+    manifest_dir = tmp_path / ".odcli"
+    manifest_dir.mkdir()
+    (manifest_dir / "project.toml").write_text(
+        "[project]\n\n"
+        "[remote_instances.zeta]\n"
+        'base_url = "HTTPS://Zeta.example:443/"\n'
+        'database = "zeta"\n'
+        'git_branch = "main"\n\n'
+        "[remote_instances.alpha]\n"
+        'base_url = "https://alpha.example/"\n'
+        'database = "alpha"\n'
+        'git_branch = "release/19"\n'
+    )
+
+    config = ProjectConfig.load(tmp_path)
+
+    assert [source.name for source in config.remote_instances] == ["alpha", "zeta"]
+    assert config.remote_instances[0].base_url == "https://alpha.example"
+    assert config.to_manifest().index("[remote_instances.alpha]") < config.to_manifest().index(
+        "[remote_instances.zeta]"
+    )
+    assert (
+        ProjectConfig._from_mapping(
+            {},
+            repository_root=tmp_path,
+            remote_instances_data={
+                "ALPHA": {
+                    "base_url": "https://alpha.example/",
+                    "database": "alpha",
+                    "git_branch": "release/19",
+                }
+            },
+        )
+        .remote_instances[0]
+        .name
+        == "alpha"
+    )
+
+
+def test_named_remote_sources_reject_unknown_and_duplicate_fields(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="invalid"):
+        ProjectConfig._from_mapping(
+            {},
+            repository_root=tmp_path,
+            remote_instances_data={
+                "alpha": {
+                    "base_url": "https://alpha.example",
+                    "database": "alpha",
+                    "git_branch": "main",
+                    "password": "secret",
+                }
+            },
+        )
+    with pytest.raises(ConfigError, match="duplicate remote source"):
+        ProjectConfig(
+            repository_root=tmp_path,
+            remote_instances=(
+                RemoteSourceConfig(
+                    name="alpha", base_url="https://a.example", database="a", git_branch="main"
+                ),
+                RemoteSourceConfig(
+                    name="ALPHA", base_url="https://b.example", database="b", git_branch="main"
+                ),
+            ),
+        )

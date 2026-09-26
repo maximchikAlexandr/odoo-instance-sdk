@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -63,6 +64,39 @@ class TestInstanceProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             raise ConfigError("invalid test_instance.base_url") from exc
 
 
+_REMOTE_NAME_RE = re.compile(r"[a-z][a-z0-9_]*\Z")
+
+
+def normalize_remote_name(value: str) -> str:
+    """Return the manifest-safe spelling of a named remote source."""
+    if not isinstance(value, str):
+        raise ConfigError("remote source name must be a string")
+    name = value.strip().lower()
+    if not _REMOTE_NAME_RE.fullmatch(name):
+        raise ConfigError("remote source name must match [a-z][a-z0-9_]*")
+    return name
+
+
+class RemoteSourceConfig(msgspec.Struct, frozen=True, kw_only=True):
+    """Non-secret, named remote source stored in ``[remote_instances.NAME]``."""
+
+    name: str
+    base_url: str
+    database: str
+    git_branch: str
+
+    def __post_init__(self) -> None:
+        normalize_remote_name(self.name)
+        if not self.database.strip():
+            raise ConfigError("remote source database must not be empty")
+        if not self.git_branch.strip():
+            raise ConfigError("remote source git_branch must not be empty")
+        try:
+            normalize_base_url(self.base_url)
+        except Exception as exc:
+            raise ConfigError("invalid remote source base_url") from exc
+
+
 class TicketLinkSettings(msgspec.Struct, frozen=True, kw_only=True):
     """Effective tracker-neutral commit-link policy."""
 
@@ -101,6 +135,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
     runtime_cwd: Path | None = None
     postgres: PostgresProjectConfig | None = None
     test_instance: TestInstanceProjectConfig | None = None
+    remote_instances: tuple[RemoteSourceConfig, ...] = ()
     default_base_ref: str | None = None
     refresh_after_hours: float | None = None
     ticket_link_enabled: bool | None = None
@@ -124,6 +159,9 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
                 raise ConfigError("invalid project.ticket_base_url") from exc
         if self.ticket_link_enabled is True and self.ticket_base_url is None:
             raise ConfigError("project.ticket_link_enabled requires project.ticket_base_url")
+        names = [normalize_remote_name(source.name) for source in self.remote_instances]
+        if len(names) != len(set(names)):
+            raise ConfigError("duplicate remote source name")
 
     @classmethod
     def load(cls, project_path: str | Path) -> ProjectConfig:
@@ -145,6 +183,9 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             repository_root=root.resolve(),
             postgres_data=postgres_data,
             test_instance_data=data.get("test_instance") if isinstance(data, dict) else None,
+            remote_instances_data=(
+                data.get("remote_instances") if isinstance(data, dict) else None
+            ),
         )
 
     @classmethod
@@ -155,6 +196,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         repository_root: Path,
         postgres_data: JsonValue | Mapping[str, JsonValue] = None,
         test_instance_data: JsonValue | Mapping[str, JsonValue] = None,
+        remote_instances_data: JsonValue | Mapping[str, JsonValue] = None,
     ) -> ProjectConfig:
         legacy_enabled = data.get("jira_enabled")
         legacy_url = data.get("jira_base_url")
@@ -185,6 +227,14 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
                 test_instance_data if test_instance_data is not None else data.get("test_instance"),
             )
         )
+        remote_instances = _remote_instances_from_mapping(
+            cast(
+                "JsonValue",
+                remote_instances_data
+                if remote_instances_data is not None
+                else data.get("remote_instances"),
+            )
+        )
         return cls(
             repository_root=repository_root,
             odoo_bin=_path_or_none(data.get("odoo_bin")),
@@ -197,6 +247,7 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
             runtime_cwd=_path_or_none(data.get("runtime_cwd")),
             postgres=postgres,
             test_instance=test_instance,
+            remote_instances=remote_instances,
             default_base_ref=_str_or_none(data.get("default_base_ref")),
             refresh_after_hours=_float_or_none(data.get("refresh_after_hours")),
             ticket_link_enabled=ticket_enabled,
@@ -214,6 +265,9 @@ class ProjectConfig(msgspec.Struct, frozen=True, kw_only=True):
         if test_instance_block is not None:
             lines.append("")
             lines.append(test_instance_block)
+        for source in sorted(self.remote_instances, key=lambda item: item.name):
+            lines.append("")
+            lines.append(_remote_source_to_manifest(source))
         return "\n".join(lines) + "\n"
 
 
@@ -285,6 +339,50 @@ def _test_instance_from_mapping(value: JsonValue) -> TestInstanceProjectConfig |
         base_url=normalized_url,
         database=database,
         git_branch=git_branch,
+    )
+
+
+def _remote_instances_from_mapping(value: JsonValue) -> tuple[RemoteSourceConfig, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ConfigError("invalid [remote_instances] manifest section")
+    result: list[RemoteSourceConfig] = []
+    for raw_name, raw_value in sorted(value.items(), key=lambda item: str(item[0]).lower()):
+        if not isinstance(raw_name, str) or not isinstance(raw_value, dict):
+            raise ConfigError("invalid named remote source manifest section")
+        if set(raw_value) - {"base_url", "database", "git_branch"}:
+            raise ConfigError(f"invalid [remote_instances.{raw_name}] manifest section")
+        base_url = raw_value.get("base_url")
+        database = raw_value.get("database")
+        git_branch = raw_value.get("git_branch")
+        if not isinstance(base_url, str):
+            raise ConfigError("remote source base_url must be a string")
+        if not isinstance(database, str):
+            raise ConfigError("remote source database must be a string")
+        if not isinstance(git_branch, str):
+            raise ConfigError("remote source git_branch must be a string")
+        result.append(
+            RemoteSourceConfig(
+                name=normalize_remote_name(raw_name),
+                base_url=normalize_base_url(base_url),
+                database=database,
+                git_branch=git_branch,
+            )
+        )
+    return tuple(result)
+
+
+def _remote_source_to_manifest(config: RemoteSourceConfig) -> str:
+    name = normalize_remote_name(config.name)
+    base_url = normalize_base_url(config.base_url)
+    return "\n".join(
+        (
+            f"[remote_instances.{name}]",
+            f'base_url = "{_toml_str(base_url)}"',
+            f'database = "{_toml_str(config.database)}"',
+            f'git_branch = "{_toml_str(config.git_branch)}"',
+        )
     )
 
 
