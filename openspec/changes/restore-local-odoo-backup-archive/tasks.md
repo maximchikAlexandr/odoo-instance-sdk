@@ -7,10 +7,10 @@
 
 ## 2. Source-neutral restore provenance
 
-- [ ] 2.1 Add the Alembic catalogue migration for constrained `catalogue` and `local_archive` provenance on `restores` and `database_events`, including deterministic existing-row backfill and lossless-only downgrade.
-- [ ] 2.2 Update catalogue schema models and atomic restore/event writers to accept catalogue UUID evidence or local archive digest evidence and reject incomplete or mixed forms.
-- [ ] 2.3 Update restore-binding, inventory, and catalogue-only backup readers for nullable backup IDs and source-neutral provenance without changing existing UUID projections.
-- [ ] 2.4 Update guarded database/filestore removal ownership checks so exact active cluster and contained data-directory evidence remains authoritative for local archive rows and all unknown/mismatched cases fail closed.
+- [x] 2.1 Add the Alembic catalogue migration for constrained `catalogue` and `local_archive` provenance on `restores` and `database_events`, including deterministic existing-row backfill and lossless-only downgrade.
+- [x] 2.2 Update catalogue schema models and atomic restore/event writers to accept catalogue UUID evidence or local archive digest evidence and reject incomplete or mixed forms.
+- [x] 2.3 Update restore-binding, inventory, and catalogue-only backup readers for nullable backup IDs and source-neutral provenance without changing existing UUID projections.
+- [x] 2.4 Update guarded database/filestore removal ownership checks so exact active cluster and contained data-directory evidence remains authoritative for local archive rows and all unknown/mismatched cases fail closed.
 
 ## 3. Common preparation and restore flow
 
@@ -21,14 +21,14 @@
 
 ## 4. CLI and documentation
 
-- [ ] 4.1 Add optional positional `BACKUP_UUID` plus `--file PATH` to `db restore`, validate UUID-only/file-only/both/neither and catalogue-only `--replace` before context mutation, and delegate file selection through `LocalArchiveRestoreSource`.
-- [ ] 4.2 Preserve confirmation, `--yes`, `--no-input`, `--dry-run`, output formats, target, reset, progress, exit-code, and single `PUBLIC_LEAF_CASES` contracts for both sources.
-- [ ] 4.3 Update CLI help, Python SDK documentation, and execution-boundary/real-Odoo checked projections only where generated contract output actually changes.
+- [x] 4.1 Add optional positional `BACKUP_UUID` plus `--file PATH` to `db restore`, validate UUID-only/file-only/both/neither and catalogue-only `--replace` before context mutation, and delegate file selection through `LocalArchiveRestoreSource`.
+- [x] 4.2 Preserve confirmation, `--yes`, `--no-input`, `--dry-run`, output formats, target, reset, progress, exit-code, and single `PUBLIC_LEAF_CASES` contracts for both sources.
+- [x] 4.3 Update CLI help, Python SDK documentation, and execution-boundary/real-Odoo checked projections only where generated contract output actually changes.
 
 ## 5. Verification
 
-- [ ] 5.1 Add one parametrized public CLI source-selection regression covering UUID-only, file-only, both, neither, and `--file --replace`, including early failure and SDK delegation assertions.
+- [x] 5.1 Add one parametrized public CLI source-selection regression covering UUID-only, file-only, both, neither, and `--file --replace`, including early failure and SDK delegation assertions.
 - [x] 5.2 Add focused archive tests for missing, unreadable, non-regular, symlink, invalid/incompatible/unsafe ZIP, insufficient space, changed-after-selection, snapshot-only reads, path redaction, source preservation, and staging cleanup.
 - [x] 5.3 Add a restore-pipeline integration test proving a valid local Odoo ZIP restores `dump.sql` and filestore through the guarded stages with no backup row and with confirmed target/default behavior.
-- [ ] 5.4 Add migration/catalogue/ownership tests for existing-row upgrade, constraints, atomic paired provenance writes, nullable readers, local owned cleanup authorization, and fail-closed external/mismatched evidence.
-- [ ] 5.5 Run focused tests plus repository formatting, lint, strict typing, architecture/public-method inventories, OpenSpec strict validation, and the full non-real-Odoo test suite; record any environment-only exclusions.
+- [x] 5.4 Add migration/catalogue/ownership tests for existing-row upgrade, constraints, atomic paired provenance writes, nullable readers, local owned cleanup authorization, and fail-closed external/mismatched evidence.
+- [x] 5.5 Run focused tests plus repository formatting, lint, strict typing, architecture/public-method inventories, OpenSpec strict validation, and the full non-real-Odoo test suite; record any environment-only exclusions.

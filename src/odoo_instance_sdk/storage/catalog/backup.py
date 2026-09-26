@@ -40,32 +40,8 @@ from odoo_instance_sdk.storage.catalog.helpers import (
     _translate_sqlite_error as _translate_sqlite_error,
     normalize_db_host as normalize_db_host,
 )
-from odoo_instance_sdk.storage.catalog_migrate import (
-    ensure_catalog_migrated,
-)
-
-
-def _restore_provenance(
-    backup_id: str | None,
-    source_kind: str | None,
-    source_sha256: str | None,
-) -> tuple[str, str | None, str | None]:
-    """Validate and normalize one complete restore evidence tuple."""
-    kind = source_kind or ("catalogue" if backup_id is not None else None)
-    if kind == "catalogue":
-        if not isinstance(backup_id, str) or not backup_id.strip() or source_sha256 is not None:
-            raise BackupCatalogError("catalogue restore provenance requires only backup_id")
-        return kind, backup_id, None
-    if kind == "local_archive":
-        if backup_id is not None or not isinstance(source_sha256, str):
-            raise BackupCatalogError(
-                "local_archive restore provenance requires source_sha256 and no backup_id"
-            )
-        digest = source_sha256
-        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-            raise BackupCatalogError("local_archive source_sha256 must be lowercase 64-hex")
-        return kind, None, digest
-    raise BackupCatalogError("restore provenance requires a supported source_kind")
+from odoo_instance_sdk.storage.catalog.provenance import restore_provenance
+from odoo_instance_sdk.storage.catalog_migrate import ensure_catalog_migrated
 
 
 class _BackupMixin:
@@ -739,9 +715,7 @@ class _BackupMixin:
         data_directory: str | Path | None = None,
     ) -> None:
         host = normalize_db_host(db_host)
-        kind, evidence_backup_id, digest = _restore_provenance(
-            backup_id, source_kind, source_sha256
-        )
+        kind, evidence_backup_id, digest = restore_provenance(backup_id, source_kind, source_sha256)
         identity = None if cluster_id is None else self._cluster_uuid(cluster_id)
         data_dir = None if data_directory is None else str(data_directory)
         if data_dir is not None and not data_dir.strip():

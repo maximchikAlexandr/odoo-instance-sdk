@@ -809,7 +809,7 @@ def test_verified_file_fails_closed_on_same_size_mutation_during_hash(
     original = archive_path.read_bytes()
     original_stat = archive_path.stat()
     state = {"mutated": False}
-    real_sha256 = database_preparation.hashlib.sha256
+    real_sha256 = hashlib.sha256
 
     def mutate_source_once() -> None:
         if state["mutated"]:
@@ -834,7 +834,8 @@ def test_verified_file_fails_closed_on_same_size_mutation_during_hash(
         def hexdigest(self) -> str:
             return self._hash.hexdigest()
 
-    monkeypatch.setattr(database_preparation.hashlib, "sha256", MutatingHash)
+    monkeypatch.setattr(database_preparation, "hashlib", hashlib, raising=False)
+    monkeypatch.setattr(hashlib, "sha256", MutatingHash)
 
     with pytest.raises(ConfigError, match="changed during capture"):
         database_preparation._verified_file(archive_path)
@@ -935,6 +936,7 @@ def test_local_archive_capture_rejects_invalid_sources(tmp_path: Path, kind: str
     from odoo_instance_sdk.internal.database_preparation import capture_local_archive_restore
 
     archive_path = tmp_path / f"{kind}.zip"
+    expected: type[Exception]
     if kind == "missing":
         expected = ConfigError
     elif kind == "invalid":
