@@ -40,9 +40,16 @@ def _commands(target: Target | None = None) -> tuple[tuple[str, Command], ...]:
         "--max-children",
         "32",
     )
-    results_command: tuple[str, ...] = (sys.executable, "-m", "mutmut", "results", "--all=true")
     if target is not None:
         mutation_command += (target.filter,)
+    results_command: tuple[str, ...] = (
+        sys.executable,
+        "-m",
+        "mutmut",
+        "results",
+        "--all=true",
+        *((target.filter,) if target is not None else ()),
+    )
     return (
         (
             "bounded mutmut integration",

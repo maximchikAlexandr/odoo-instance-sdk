@@ -197,7 +197,7 @@ def _raw_results(text: str, target: Target | None) -> tuple[dict[str, int], list
             continue
         name = status_match.group("name")
         status = status_match.group("status")
-        if expected_prefix is None or name.startswith(expected_prefix) or name == target.module:
+        if target is None or name.startswith(expected_prefix or "") or name == target.module:
             statuses.append(status)
     return values, statuses
 

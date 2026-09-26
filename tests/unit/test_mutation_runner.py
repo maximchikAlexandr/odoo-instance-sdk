@@ -39,7 +39,7 @@ def test_target_runner_uses_matching_filter_and_writes_complete_report(tmp_path:
         commands=(
             ("integration", ("smoke",)),
             ("mutmut run", ("mutmut", "run", target.filter)),
-            ("mutmut results", ("mutmut", "results")),
+            ("mutmut results", ("mutmut", "results", target.filter)),
         ),
         execute=_executor([(0, "smoke ok"), (0, "run ok"), (0, _result(target))], calls),
     )
@@ -47,6 +47,7 @@ def test_target_runner_uses_matching_filter_and_writes_complete_report(tmp_path:
     content = report.read_text(encoding="utf-8")
     assert status == 0
     assert calls[1][-1] == target.filter
+    assert calls[2][-1] == target.filter
     assert "=== mutation report ===" in content
     assert "not checked=0" in content
 
@@ -84,6 +85,14 @@ def test_unfiltered_runner_keeps_exact_child_failure(tmp_path: Path) -> None:
     assert "collection failed" in content
     assert "failed with exit code 73" in content
     assert "=== mutation report ===" not in content
+
+
+def test_target_filter_is_symmetric_for_runner_commands() -> None:
+    target = mutation_report.load_targets()[0]
+    commands = run_mutation._commands(target)
+
+    assert commands[1][1][-1] == target.filter
+    assert commands[2][1][-1] == target.filter
 
 
 def test_target_runner_fails_on_incomplete_results_and_keeps_label(tmp_path: Path) -> None:
