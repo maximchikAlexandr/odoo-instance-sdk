@@ -26,6 +26,14 @@ def test_sanitize_terminal_text_replaces_c0_c1_and_del() -> None:
     assert all(not 0x7F <= ord(char) <= 0x9F for char in sanitized)
 
 
+def test_sanitize_terminal_text_escapes_newlines_by_default() -> None:
+    assert sanitize_terminal_text("before\nafter") == r"before\x0aafter"
+
+
+def test_sanitize_last_error_uses_exact_environment_placeholder() -> None:
+    assert sanitize_last_error("command ${TOKEN}") == "command <env>"
+
+
 def test_sanitize_terminal_text_can_preserve_document_line_feeds() -> None:
     value = "before\n\x00\x1b[2J\x9b31m\x7fafter"
 

@@ -102,6 +102,23 @@ def test_probe_wildcard_checks_loopback_after_free_wildcard(
 
     assert probe_address("0.0.0.0", 8069) is AddressState.OCCUPIED
     assert probe.call_count == 2
+    assert probe.call_args_list[1].args == (
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        0,
+        ("127.0.0.1", 8069),
+    )
+
+
+def test_probe_bind_uses_bounded_socket_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    sock = Mock()
+    monkeypatch.setattr(address.socket, "socket", Mock(return_value=sock))
+
+    assert (
+        address._probe_bind(socket.AF_INET, socket.SOCK_STREAM, 0, ("127.0.0.1", 8069))
+        is AddressState.FREE
+    )
+    sock.settimeout.assert_called_once_with(0.2)
 
 
 @pytest.mark.parametrize(
