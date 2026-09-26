@@ -1,9 +1,9 @@
 ## 1. Source contract and archive capture
 
-- [ ] 1.1 Add the frozen public `LocalArchiveRestoreSource(path: str)` model, lazy export, and strict public-import/type characterization without adding a public resource method.
-- [ ] 1.2 Extend the environment/coordinator restore-source annotations and coercion with one unambiguous local-archive variant while preserving remote and UUID compatibility.
-- [ ] 1.3 Refactor the existing Odoo ZIP validation into shared catalogue/local evidence capture that records manifest database name, safe bounded members, file identity, size, and SHA-256 without writing files.
-- [ ] 1.4 Implement project-owned exclusive mode-0600 snapshot materialization, identity/digest revalidation, snapshot-only consumption, and primary-error-preserving cleanup for success, failure, and cancellation.
+- [x] 1.1 Add the frozen public `LocalArchiveRestoreSource(path: str)` model, lazy export, and strict public-import/type characterization without adding a public resource method.
+- [x] 1.2 Extend the environment/coordinator restore-source annotations and coercion with one unambiguous local-archive variant while preserving remote and UUID compatibility.
+- [x] 1.3 Refactor the existing Odoo ZIP validation into shared catalogue/local evidence capture that records manifest database name, safe bounded members, file identity, size, and SHA-256 without writing files.
+- [x] 1.4 Implement project-owned exclusive mode-0600 snapshot materialization, identity/digest revalidation, snapshot-only consumption, and primary-error-preserving cleanup for success, failure, and cancellation.
 
 ## 2. Source-neutral restore provenance
 
@@ -28,7 +28,7 @@
 ## 5. Verification
 
 - [ ] 5.1 Add one parametrized public CLI source-selection regression covering UUID-only, file-only, both, neither, and `--file --replace`, including early failure and SDK delegation assertions.
-- [ ] 5.2 Add focused archive tests for missing, unreadable, non-regular, symlink, invalid/incompatible/unsafe ZIP, insufficient space, changed-after-selection, snapshot-only reads, path redaction, source preservation, and staging cleanup.
+- [x] 5.2 Add focused archive tests for missing, unreadable, non-regular, symlink, invalid/incompatible/unsafe ZIP, insufficient space, changed-after-selection, snapshot-only reads, path redaction, source preservation, and staging cleanup.
 - [ ] 5.3 Add a restore-pipeline integration test proving a valid local Odoo ZIP restores `dump.sql` and filestore through the guarded stages with no backup row and with confirmed target/default behavior.
 - [ ] 5.4 Add migration/catalogue/ownership tests for existing-row upgrade, constraints, atomic paired provenance writes, nullable readers, local owned cleanup authorization, and fail-closed external/mismatched evidence.
 - [ ] 5.5 Run focused tests plus repository formatting, lint, strict typing, architecture/public-method inventories, OpenSpec strict validation, and the full non-real-Odoo test suite; record any environment-only exclusions.

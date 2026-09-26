@@ -77,7 +77,7 @@ from odoo_instance_sdk.resources.environment.checkout_planning import (
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
     from odoo_instance_sdk.execution import Command
-    from odoo_instance_sdk.internal.dbprep.source import _RestoreSource
+    from odoo_instance_sdk.internal.dbprep.source import _RestoreSourceInput
     from odoo_instance_sdk.internal.proc import (
         ProcessExecutor,
         ProcessResult,
@@ -339,7 +339,7 @@ class _CheckoutMixin:
         project: ProjectConfig | Path,
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
     ) -> DatabasePreparationResult:
         return self.refresh_database_command(
@@ -354,7 +354,7 @@ class _CheckoutMixin:
         project: ProjectConfig | Path,
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",

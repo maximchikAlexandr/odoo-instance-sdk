@@ -37,6 +37,7 @@ from odoo_instance_sdk.internal.dbprep.source import (
     _RemoteRestoreSource as _RemoteRestoreSource,
     _resolve_source_config as _resolve_source_config,
     _RestoreSource as _RestoreSource,
+    _RestoreSourceInput as _RestoreSourceInput,
     _skip_preparation_branch as _skip_preparation_branch,
     _target_config_path as _target_config_path,
     build_selected_backup_restore_steps as build_selected_backup_restore_steps,
@@ -112,7 +113,7 @@ def _restore_preflight(  # noqa: C901
     wait_for_lock: bool = True,
     coalesce: bool = False,
     target_database: str | None = None,
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
     remote_password: str | None = None,
 ) -> Iterator[RestorePreflight]:
     """Own the complete restore preflight and preparation-lock lifetime."""
@@ -271,7 +272,7 @@ def prepare_restore(  # noqa: C901
     options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
     coalesce: bool = False,
     restore_inputs: tuple[str, Path] | None = None,
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
     target_database: str | None = None,
     admin_password: str | None = None,
     admin_password_provenance: str = "environment",
@@ -529,7 +530,7 @@ def preflight_restore(
     project: ProjectConfig | str | Path,
     *,
     options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
     remote_password: str | None = None,
 ) -> RestorePreflight:
     with _restore_preflight(
@@ -547,7 +548,7 @@ def _capture_restore_inputs(
     project: ProjectConfig | str | Path,
     options: DatabaseRefreshOptions,
     *,
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
     client: OdooClient | None = None,
     target_database: str | None = None,
     selected_environment: DevelopmentEnvironment | None = None,
@@ -565,11 +566,13 @@ def _capture_restore_inputs(
     selected_source = _coerce_restore_source(restore_source)
     if isinstance(selected_source, _RemoteRestoreSource):
         source_database = resolve_test_source(initial, options).config.database
-    else:
+    elif isinstance(selected_source, _CatalogueRestoreSource):
         if client is None:
             return None
         projection = client.get_catalog()._resolve_backup_projection(str(selected_source.backup_id))
         source_database = projection.backup.database_name
+    else:
+        source_database = None
     if source_database is None:
         source_database = "remote"
     target = target_database or generate_target_database(source_database)
@@ -588,7 +591,7 @@ class DatabasePreparationCoordinator:
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         coalesce: bool = False,
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
@@ -609,7 +612,7 @@ class DatabasePreparationCoordinator:
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         coalesce: bool = False,
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
@@ -668,7 +671,7 @@ class DatabasePreparationCoordinator:
         options: DatabaseRefreshOptions,
         coalesce: bool,
         restore_inputs: tuple[str, Path] | None = None,
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
@@ -692,7 +695,7 @@ class DatabasePreparationCoordinator:
         project: ProjectConfig | str | Path,
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
@@ -711,7 +714,7 @@ class DatabasePreparationCoordinator:
         project: ProjectConfig | str | Path,
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",

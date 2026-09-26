@@ -20,6 +20,7 @@ from odoo_instance_sdk import (
     EnvironmentCheckoutPlan,
     EnvironmentDatabaseMode,
     EnvironmentPythonMode,
+    LocalArchiveRestoreSource,
     NoBackup,
 )
 
@@ -114,3 +115,12 @@ def test_refresh_options_are_frozen_and_secret_free() -> None:
     )
     assert options.restore is True
     assert "password" not in {field.name for field in msgspec.structs.fields(options)}
+
+
+def test_local_archive_restore_source_is_public_frozen_and_exact() -> None:
+    source = LocalArchiveRestoreSource("/tmp/backup with spaces.zip")
+
+    assert source.path == "/tmp/backup with spaces.zip"
+    assert msgspec.structs.fields(source)[0].name == "path"
+    with pytest.raises(AttributeError):
+        source.path = "/tmp/other.zip"  # type: ignore[misc]

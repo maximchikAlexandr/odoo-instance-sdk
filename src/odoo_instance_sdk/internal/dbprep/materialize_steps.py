@@ -14,7 +14,7 @@ from odoo_instance_sdk.internal.dbprep.source import (
     _planned_project_identity,
     _RemoteRestoreSource,
     _resolve_source_config,
-    _RestoreSource,
+    _RestoreSourceInput,
     build_selected_backup_restore_steps,
     resolve_runtime_binding,
 )
@@ -203,7 +203,7 @@ def _preparation_action_steps(
     *,
     operation: str,
     options: DatabaseRefreshOptions,
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
 ) -> tuple[PreparedAction, ...]:
     """Return honest in-process boundaries for the preparation coordinator."""
     from odoo_instance_sdk.internal.proc import PreparedAction
