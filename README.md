@@ -151,6 +151,7 @@ UTC/ISO-8601 values. For example:
 ```bash
 odcli env create PROJ-123 --dry-run
 odcli db restore 01234567-89ab-cdef-0123-456789abcdef --dry-run
+odcli db restore --file ./backup.zip --target restored_db --dry-run
 ```
 
 ### Lifecycle and recovery contracts
@@ -176,10 +177,12 @@ confirmation boundaries:
   `update` may run its read-only resolver and preflight before showing the
   inert install/migration plan.
 - `odcli db restore BACKUP_UUID --replace` replaces only a selected stopped
-  COPY environment. It preserves the exact target and environment identity,
-  uses matching database/filestore provenance, supports the existing
-  `--reset-admin-password`, and retains sanitized retry evidence on incomplete
-  compensation.
+  COPY environment. Ordinary `db restore` also accepts `--file PATH` for a
+  caller-owned Odoo ZIP; exactly one of `BACKUP_UUID` and `--file` is required,
+  and `--replace` remains catalogue-only. Both sources preserve the exact
+  target and environment identity, use matching database/filestore
+  provenance, support the existing `--reset-admin-password`, and retain
+  sanitized retry evidence on incomplete compensation.
 - Top-level `odcli stop` signals only a runtime whose persisted owner and live
   executable, argv, create time, cwd, config, and (on POSIX) process-group
   identity still match; stale or inaccessible evidence fails closed.
@@ -605,7 +608,7 @@ sentence; use the entry's `--help` for exact options.
 - `odcli db init-monitoring` — Idempotently initialize supported monitoring extensions on an owned cluster.
 - `odcli db refresh` — Refresh an environment database from its configured source policy.
 - `odcli db ls` — List databases from the bound PostgreSQL cluster and known provenance.
-- `odcli db restore` — Restore one exact retained backup into a selected database target.
+- `odcli db restore` — Restore one exact retained backup or local Odoo ZIP into a selected database target.
 - `odcli db reset-admin-password` — Reset the Odoo administrator password in the selected database.
 - `odcli db rm` — Safely remove one exact local cluster database after guarded checks.
 - `odcli ps` — Show process and resource inventory from one monitor snapshot.
