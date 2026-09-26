@@ -506,7 +506,7 @@ class _CleanupMixin:
                 )
                 cat.add_environment_event(str(env.id), "remove", "failed", message=msg)
                 raise EnvironmentConflictError("cleanup_failed", msg)
-            if not cleanup_failed:
+            if not cleanup_failed and copy_plan.backup_ownership == "owned":
                 journal = cat.get_copy_journal(str(env.id))
                 assert journal is not None
                 cleanup_instance = copy_plan.instance
@@ -897,16 +897,17 @@ class _CleanupMixin:
         return False
 
     def _delete_copy_backup(self, plan: CopyCleanupPlan, failures: list[str]) -> bool:
+        if plan.backup_ownership != "owned":
+            # Named and retained inputs belong to their source/catalog owner;
+            # removal must leave both the payload and its durable stage intact.
+            return False
         if plan.backup is None:
             # The catalog still proves ownership, but the payload has already
             # disappeared.  Deletion is idempotent: advance the durable stage
             # rather than blocking filesystem cleanup forever.
             return False
         try:
-            if plan.backup_ownership == "owned":
-                self._client.backups.delete_owned(plan.backup)
-            else:
-                self._client.backups.delete(plan.backup)
+            self._client.backups.delete_owned(plan.backup)
         except Exception as exc:
             failures.append(f"backup delete: {exc}")
             return True

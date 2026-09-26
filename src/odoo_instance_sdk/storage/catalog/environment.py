@@ -270,7 +270,10 @@ class _EnvironmentMixin:
         return (
             self._conn.execute(
                 "SELECT 1 FROM environment_copy_journal "
-                "WHERE backup_id=? AND backup_ownership='owned' AND stage <> 'backup_deleted' "
+                "AS journal JOIN environments AS environment "
+                "ON environment.id=journal.environment_id "
+                "WHERE journal.backup_id=? AND journal.backup_ownership='owned' "
+                "AND journal.stage <> 'backup_deleted' AND environment.state='removing' "
                 "LIMIT 1",
                 (backup_id,),
             ).fetchone()

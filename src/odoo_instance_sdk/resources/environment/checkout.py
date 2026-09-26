@@ -523,7 +523,7 @@ class _CheckoutMixin:
                 else ()
             )
             return (
-                replace(
+                msgspec.structs.replace(
                     comparison,
                     source_name=source_name,
                     source_base_url=source_base_url,

@@ -174,6 +174,9 @@ class _SettingsMixin:
             )
             remote = self._client.instance(source.config.base_url, master_password=remote_password)
             project_id = f"project_{repo_key(repo_root, git_common_dir(repo_root))}"
+            context.action("database.backup.wait")
+            context.complete_action("database.backup.wait")
+            context.action("database.backup.transfer")
             backup = remote.databases.backup(
                 source_db,
                 format=BackupFormat.ZIP,
@@ -182,6 +185,7 @@ class _SettingsMixin:
                 source_name=source.source_name,
                 project_id=project_id,
             )
+            context.complete_action("database.backup.transfer")
             ownership = "borrowed"
         elif backup is not None:
             ownership = "borrowed"
