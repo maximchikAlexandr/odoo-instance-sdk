@@ -16,7 +16,11 @@ import msgspec
 from odoo_instance_sdk.exceptions import ConfigError, EnvironmentConflictError
 from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
 from odoo_instance_sdk.internal.dbprep.materialize import _capture_restore_inputs
-from odoo_instance_sdk.internal.odoo_config import parse_db_names, parse_odoo_config
+from odoo_instance_sdk.internal.odoo_config import (
+    _resolve_data_dir,
+    parse_db_names,
+    parse_odoo_config,
+)
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 from odoo_instance_sdk.internal.proc import (
     PreparedStep,
@@ -455,11 +459,7 @@ def _validate_plan(  # noqa: C901
     )
     if not data_dir_value:
         raise ConfigError("generated config has no contained filestore root")
-    data_dir = Path(data_dir_value)
-    if not data_dir.is_absolute():
-        data_dir = (config_path.parent / data_dir).resolve()
-    else:
-        data_dir = data_dir.resolve()
+    data_dir = _resolve_data_dir(data_dir_value, config_path)
     filestore = validate_filestore_containment(data_dir, target)
     binding = _restore_binding(
         catalog,
@@ -577,11 +577,7 @@ def _revalidate(  # noqa: C901
     )
     if not data_dir_value:
         raise ConfigError("generated config lost its contained filestore root")
-    current_data_dir = Path(data_dir_value)
-    if not current_data_dir.is_absolute():
-        current_data_dir = (config_path.parent / current_data_dir).resolve()
-    else:
-        current_data_dir = current_data_dir.resolve()
+    current_data_dir = _resolve_data_dir(data_dir_value, config_path)
     if current_data_dir != plan.data_directory:
         raise EnvironmentConflictError(
             "replacement_conflict", "generated filestore binding changed before replacement"

@@ -9,7 +9,7 @@ import subprocess
 import uuid
 import warnings
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
@@ -19,12 +19,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from odoo_instance_sdk.exceptions import (
+    BackupCorruptError,
     ConfigError,
     InstanceConfigurationError,
     LockConflictError,
     MasterPasswordRequiredError,
     OmittedStepError,
     UnplannedStepError,
+    BackupUnsafeError,
 )
 from odoo_instance_sdk.execution import Command
 from odoo_instance_sdk.internal.proc import PreparedStep, RecordingExecutor
@@ -854,12 +856,15 @@ def test_local_archive_capture_rejects_symlink_without_writing_snapshot(
     real_archive.write_bytes(b"not a zip")
     symlink = tmp_path / "selected.zip"
     symlink.symlink_to(real_archive)
+    snapshot_directory = tmp_path / ".odcli"
 
     with pytest.raises(ConfigError, match="regular file"):
         capture_local_archive_restore(
             LocalArchiveRestoreSource(str(symlink)),
-            snapshot_directory=tmp_path / ".odcli",
+            snapshot_directory=snapshot_directory,
         )
+
+    assert not snapshot_directory.exists()
 
 
 def test_local_archive_capture_rejects_non_regular_file(tmp_path: Path) -> None:
@@ -929,25 +934,41 @@ def _local_archive(
     return path
 
 
-@pytest.mark.parametrize("kind", ["missing", "invalid", "incompatible", "unsafe"])
-def test_local_archive_capture_rejects_invalid_sources(tmp_path: Path, kind: str) -> None:
+def _missing_archive(_path: Path) -> None:
+    return None
+
+
+def _invalid_archive(path: Path) -> None:
+    path.write_bytes(b"not a zip")
+
+
+def _incompatible_archive(path: Path) -> None:
+    _local_archive(path, manifest='{"db_name":"bad/name"}')
+
+
+def _unsafe_archive(path: Path) -> None:
+    _local_archive(path, member="filestore/../escape")
+
+
+@pytest.mark.parametrize(
+    ("prepare_archive", "expected"),
+    [
+        pytest.param(_missing_archive, ConfigError, id="missing"),
+        pytest.param(_invalid_archive, BackupCorruptError, id="invalid"),
+        pytest.param(_incompatible_archive, ConfigError, id="incompatible"),
+        pytest.param(_unsafe_archive, BackupUnsafeError, id="unsafe"),
+    ],
+)
+def test_local_archive_capture_rejects_invalid_sources(
+    tmp_path: Path,
+    prepare_archive: Callable[[Path], None],
+    expected: type[Exception],
+) -> None:
     from odoo_instance_sdk import LocalArchiveRestoreSource
-    from odoo_instance_sdk.exceptions import BackupCorruptError, BackupUnsafeError
     from odoo_instance_sdk.internal.database_preparation import capture_local_archive_restore
 
-    archive_path = tmp_path / f"{kind}.zip"
-    expected: type[Exception]
-    if kind == "missing":
-        expected = ConfigError
-    elif kind == "invalid":
-        archive_path.write_bytes(b"not a zip")
-        expected = BackupCorruptError
-    elif kind == "incompatible":
-        _local_archive(archive_path, manifest='{"db_name":"bad/name"}')
-        expected = ConfigError
-    else:
-        _local_archive(archive_path, member="filestore/../escape")
-        expected = BackupUnsafeError
+    archive_path = tmp_path / "selected.zip"
+    prepare_archive(archive_path)
 
     with pytest.raises(expected) as failure:
         capture_local_archive_restore(
@@ -975,6 +996,49 @@ def test_local_archive_capture_rejects_insufficient_space(
             LocalArchiveRestoreSource(str(archive_path)),
             snapshot_directory=tmp_path / ".odcli",
         )
+
+
+def test_local_archive_capture_uses_configured_restore_data_dir_for_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from odoo_instance_sdk import LocalArchiveRestoreSource
+    from odoo_instance_sdk.exceptions import BackupInsufficientDiskError
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    data_dir = source_root / "restore-data"
+    data_dir.mkdir()
+    (tmp_path / "restore-data").mkdir()
+    source_config = source_root / "odoo.conf"
+    source_config.write_text(
+        "[options]\nhttp_interface = 127.0.0.1\nhttp_port = 8069\ndata_dir = restore-data\n"
+    )
+    archive_path = _local_archive(source_root / "caller-owned.zip")
+    project = ProjectConfig(
+        repository_root=tmp_path,
+        source_config=source_config,
+        default_source_database="old",
+    )
+    observed: list[Path] = []
+
+    def disk_usage(path: Path) -> SimpleNamespace:
+        resolved = path.resolve()
+        observed.append(resolved)
+        return SimpleNamespace(free=0 if resolved == data_dir.resolve() else 10**12)
+
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(BackupInsufficientDiskError):
+        preparation._capture_selected_restore(
+            project,
+            LocalArchiveRestoreSource(str(archive_path)),
+        )
+
+    assert observed == [data_dir.resolve()]
 
 
 def test_local_archive_changed_after_capture_fails_before_snapshot_use(tmp_path: Path) -> None:
@@ -2325,6 +2389,127 @@ def test_local_archive_restore_pipeline_consumes_zip_and_switches_default(
     local.databases._restore_local_archive.assert_called_once()
     client.get_catalog.assert_not_called()
     write.assert_called_once()
+
+
+def test_local_archive_restore_vertical_flow_uses_real_preflight_transport_and_catalogue(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from odoo_instance_sdk import LocalArchiveRestoreSource, OdooClient, OdooClientConfig
+    from odoo_instance_sdk.internal.dbprep import materialize as preparation
+    from odoo_instance_sdk.internal.proc import PreparedProcess, ProcessResult, RecordingExecutor
+    from odoo_instance_sdk.resources.postgres import PostgresCluster
+    from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+    from tests.fixtures.transport import make_response, patch_open_odoo_http_client
+
+    source_config = git_repo / "odoo.conf"
+    data_dir = git_repo / "restore-data"
+    data_dir.mkdir()
+    source_config.write_text(
+        "[options]\n"
+        "http_interface = 127.0.0.1\n"
+        "http_port = 8069\n"
+        "db_name = source\n"
+        "admin_passwd = local-secret\n"
+        "db_host = 127.0.0.1\n"
+        "db_port = 5432\n"
+        f"data_dir = {data_dir}\n"
+    )
+    python = git_repo / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    odoo_bin = git_repo / "odoo-bin"
+    odoo_bin.write_text("#!/bin/sh\n")
+    odoo_bin.chmod(0o755)
+    archive_path = _local_archive(git_repo / "caller-owned.zip")
+    expected_sha256 = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    project = ProjectConfig(
+        repository_root=git_repo,
+        python=python,
+        odoo_bin=odoo_bin,
+        source_config=source_config,
+        default_source_database="old",
+    )
+    client = OdooClient(config=OdooClientConfig(executable="python3"))
+    catalog = BackupCatalog(db_path=git_repo / "catalog.sqlite3")
+    client._catalog = catalog
+    cluster = SimpleNamespace(
+        mode="external",
+        ensure_running=MagicMock(),
+        _restore_provenance=MagicMock(return_value=(None, None)),
+        _ensure_running_steps=MagicMock(return_value=()),
+    )
+    monkeypatch.setattr(
+        PostgresCluster,
+        "_from_config",
+        classmethod(lambda cls, *_args, **_kwargs: cluster),
+    )
+    monkeypatch.setattr(
+        preparation,
+        "_manifest_after_preparation",
+        lambda _root, current: current,
+    )
+    monkeypatch.setattr(preparation, "write_manifest", MagicMock())
+
+    def result_for(step: PreparedProcess) -> ProcessResult:
+        prepared = cast("PreparedStep", step)
+        stdout = str(git_repo) if prepared.step_id.endswith("toplevel") else ".git"
+        return ProcessResult(
+            argv=prepared.argv,
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+            duration=0.0,
+            cwd=prepared.cwd,
+            environment=prepared.environment,
+        )
+
+    executor = RecordingExecutor(result_factory=result_for)
+    http = MagicMock()
+    list_calls = 0
+    consumed: dict[str, bytes] = {}
+
+    def post(url: str, *args: object, **kwargs: object) -> MagicMock:
+        nonlocal list_calls
+        del args
+        if url.endswith("/list"):
+            list_calls += 1
+            names = ["source"] if list_calls <= 2 else ["source", "restored_target"]
+            return make_response(json_data={"result": names})
+        files = cast("dict[str, object]", kwargs["files"])
+        upload = cast("tuple[str, object, str]", files["backup_file"])
+        stream = cast("io.BufferedIOBase", upload[1])
+        with zipfile.ZipFile(stream) as restored:
+            consumed["dump.sql"] = restored.read("dump.sql")
+            consumed["filestore"] = restored.read("filestore/local_db/marker")
+        return make_response(json_data={"result": True})
+
+    http.post.side_effect = post
+    command = preparation.DatabasePreparationCoordinator(client).refresh_database_command(
+        project,
+        options=DatabaseRefreshOptions(restore=True),
+        restore_source=LocalArchiveRestoreSource(str(archive_path)),
+        target_database="restored_target",
+        executor=executor,
+    )
+    with patch_open_odoo_http_client(http):
+        result = command.run()
+
+    assert result.backup is None
+    assert result.restored_database == "restored_target"
+    assert result.previous_default == "old"
+    assert result.effective_default == "restored_target"
+    assert consumed == {"dump.sql": b"select 'local';\n", "filestore": b"local"}
+    assert catalog.list_backups() == []
+    row = catalog._conn.execute(
+        "SELECT backup_id, source_kind, source_sha256, data_directory "
+        "FROM restores WHERE database_name = ?",
+        ("restored_target",),
+    ).fetchone()
+    assert row is not None
+    assert tuple(row) == (None, "local_archive", expected_sha256, str(data_dir))
+    assert archive_path.exists()
+    assert not list(git_repo.joinpath(".odcli", "restore").glob(".*"))
+    catalog.close()
 
 
 def test_pinned_http_download_reaches_remote_database_operation(

@@ -68,7 +68,11 @@ from odoo_instance_sdk.internal.locks import (
     exclusive_lock,
     exclusive_lock_until,
 )
-from odoo_instance_sdk.internal.odoo_config import infer_base_url, parse_odoo_config
+from odoo_instance_sdk.internal.odoo_config import (
+    _resolve_data_dir,
+    infer_base_url,
+    parse_odoo_config,
+)
 from odoo_instance_sdk.internal.project_env import (
     effective_project_environment,
     load_project_environment,
@@ -86,6 +90,7 @@ from odoo_instance_sdk.models import (
     DatabasePreparationAction,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
+    StartConfig,
 )
 from odoo_instance_sdk.project import ProjectConfig
 
@@ -406,9 +411,10 @@ def prepare_restore(  # noqa: C901
                         raise ConfigError(  # noqa: TRY301
                             "local archive restore evidence was not captured"
                         )
+                    restore_payload = local_restore
                     _consume_action_if_planned("database.prepare.local-archive.snapshot")
-                    _materialize_verified_snapshot(local_restore)
-                    _assert_verified_snapshot_unchanged(local_restore)
+                    _materialize_verified_snapshot(restore_payload)
+                    _assert_verified_snapshot_unchanged(restore_payload)
                 else:
                     assert backup is not None
                 from odoo_instance_sdk.internal.restore_stages import (
@@ -423,7 +429,7 @@ def prepare_restore(  # noqa: C901
                 ):
                     if isinstance(preflight.restore_source, _LocalArchiveRestoreSource):
                         preflight.local_instance.databases._restore_local_archive(
-                            local_restore,
+                            restore_payload,
                             preflight.target_database,
                             copy=True,
                             neutralize_database=True,
@@ -685,9 +691,15 @@ def _capture_selected_restore(
     if not isinstance(selected_source, _LocalArchiveRestoreSource):
         return None
     _project, root = _load_project(project)
+    source_config = _resolve_source_config(_project, root)
+    start_config = StartConfig.from_odoo_config(source_config)
+    data_dir = (
+        _resolve_data_dir(start_config.data_dir, source_config) if start_config.data_dir else None
+    )
     return capture_local_archive_restore(
         selected_source,
         snapshot_directory=root / ".odcli" / "restore",
+        data_dir=data_dir,
     )
 
 

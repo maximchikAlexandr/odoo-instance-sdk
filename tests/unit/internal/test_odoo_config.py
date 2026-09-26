@@ -7,6 +7,7 @@ import pytest
 
 from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.internal.odoo_config import (
+    _resolve_data_dir,
     get_admin_passwd,
     infer_base_url,
     parse_db_names,
@@ -20,6 +21,21 @@ def _write_config(content: str, tmp_path: Path) -> Path:
     path = tmp_path / "odoo.conf"
     path.write_text(content)
     return path
+
+
+def test_resolve_data_dir_uses_config_parent_for_relative_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "source" / "odoo.conf"
+    config_path.parent.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    assert (
+        _resolve_data_dir("restore-data", config_path)
+        == (config_path.parent / "restore-data").resolve()
+    )
+    absolute = tmp_path / "absolute-data"
+    assert _resolve_data_dir(absolute, config_path) == absolute.resolve()
 
 
 class TestParseOdooConfig:
