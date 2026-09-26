@@ -13,6 +13,14 @@ if TYPE_CHECKING:
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW = _REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+_MUTATION_WORKFLOW = _REPOSITORY_ROOT / ".github" / "workflows" / "mutation.yml"
+_MUTATION_TARGETS = [
+    "src/odoo_instance_sdk/internal/redact.py",
+    "src/odoo_instance_sdk/internal/sanitize.py",
+    "src/odoo_instance_sdk/internal/db_name.py",
+    "src/odoo_instance_sdk/internal/urls.py",
+    "src/odoo_instance_sdk/internal/address.py",
+]
 
 
 def _test_conftest() -> ModuleType:
@@ -137,3 +145,69 @@ def test_make_test_recipe_fails_fast_between_verification_stages() -> None:
     test_recipe = recipe.split("\ntest:\n", 1)[1].split("\ntargeted:\n", 1)[0]
 
     assert "set -e" in test_recipe
+
+
+def test_mutation_configuration_copies_package_but_targets_exact_five_files() -> None:
+    project = tomllib.loads((_REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    mutation = project["tool"]["mutmut"]
+
+    assert mutation["source_paths"] == ["src/odoo_instance_sdk"]
+    assert mutation["also_copy"] == [
+        "scripts",
+        "README.md",
+        "CONTRIBUTING.md",
+        "CHANGELOG.md",
+        "docs",
+        "openapi.json",
+        ".github",
+        ".agents",
+        "AGENTS.md",
+        "Makefile",
+        "LICENSE",
+        "CODE_OF_CONDUCT.md",
+        "SECURITY.md",
+        "examples",
+        "ruff.toml",
+    ]
+    assert mutation["only_mutate"] == _MUTATION_TARGETS
+    assert project["dependency-groups"]["mutation"] == ["mutmut>=3,<4"]
+    assert mutation["pytest_add_cli_args_test_selection"] == [
+        "tests/unit",
+        "-m",
+        "not real_odoo and not packaging and not serial",
+    ]
+
+
+def test_mutation_command_wires_permanent_bounded_regression() -> None:
+    makefile = (_REPOSITORY_ROOT / "Makefile").read_text(encoding="utf-8")
+    runner = (_REPOSITORY_ROOT / "scripts" / "run_mutation.py").read_text(encoding="utf-8")
+    harness = (_REPOSITORY_ROOT / "scripts" / "check_mutation_integration.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "uv run python scripts/run_mutation.py" in makefile
+    assert "check_mutation_integration.py" in runner
+    assert 'ROOT / "src" / "odoo_instance_sdk"' in harness
+    assert "validate_db_name*" in harness
+    assert "TemporaryDirectory" in harness
+    assert "PYTHONPATH" in harness
+
+
+def test_mutation_command_runs_full_configured_scope_after_smoke() -> None:
+    runner = (_REPOSITORY_ROOT / "scripts" / "run_mutation.py").read_text(encoding="utf-8")
+
+    assert "AUDIT_MUTANTS" not in runner
+    assert '(sys.executable, "-m", "mutmut", "run", "--max-children", "32"),' in runner
+
+
+def test_mutation_workflow_fails_closed_and_uploads_diagnostics() -> None:
+    workflow = _MUTATION_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "schedule:" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "make mutation" in workflow
+    assert "continue-on-error" not in workflow
+    assert "if: always()" in workflow
+    assert "name: mutation-results" in workflow
+    assert "path: .artifacts/mutation/results.txt" in workflow
+    assert "if-no-files-found: error" in workflow

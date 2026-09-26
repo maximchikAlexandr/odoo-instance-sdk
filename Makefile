@@ -39,9 +39,7 @@ targeted:
 coverage: test
 
 mutation:
-	mkdir -p .artifacts/mutation
-	NO_COLOR=1 uv run mutmut run
-	NO_COLOR=1 uv run mutmut results | tee .artifacts/mutation/results.txt
+	NO_COLOR=1 uv run python scripts/run_mutation.py
 
 package:
 	rm -rf dist
