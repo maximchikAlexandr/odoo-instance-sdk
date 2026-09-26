@@ -328,3 +328,130 @@ def test_prune_revalidates_pin_latest_file_identity_and_is_repeatable(
     second = client.backups.prune(root)
     assert uuid.UUID(pinned_id) not in second.deleted_ids
     assert uuid.UUID(raced_id) not in second.deleted_ids
+
+
+def test_prune_rechecks_reference_race_after_plan_and_preserves_audit(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalogue(client, tmp_path, monkeypatch)
+    root, project_id = _project(catalog, tmp_path)
+    backup_id, path = _backup(catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=30))
+    _backup(catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=20))
+    policy = BackupRetentionPolicy(retention_days=14, auto_prune=False)
+    plan = client.backups._build_prune_plan(root, policy=policy)
+    environment_id = str(uuid.uuid4())
+    catalog.create_environment(
+        make_env(
+            environment_id,
+            repository_root=str(root),
+            git_common_dir=str(root / ".git"),
+            backup_id=backup_id,
+        )
+    )
+
+    result = client.backups._execute_prune_plan(plan, dry_run=False)
+
+    assert uuid.UUID(backup_id) not in result.deleted_ids
+    assert any(
+        item.backup_id == uuid.UUID(backup_id)
+        and item.reason == "referenced by a non-removed environment"
+        for item in result.skipped
+    )
+    assert path.exists()
+    row = catalog.get_by_id(backup_id)
+    assert row is not None and row["state"] == BackupState.AVAILABLE.value
+    assert not any(
+        event.event_type.value == "deleted" for event in client.backups.history(backup_id=backup_id)
+    )
+
+
+def test_prune_rechecks_newest_race_after_plan(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalogue(client, tmp_path, monkeypatch)
+    root, project_id = _project(catalog, tmp_path)
+    backup_id, path = _backup(catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=30))
+    newest_id, _newest_path = _backup(
+        catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=20)
+    )
+    policy = BackupRetentionPolicy(retention_days=14, auto_prune=False)
+    plan = client.backups._build_prune_plan(root, policy=policy)
+    catalog.record_deletion(newest_id)
+
+    result = client.backups._execute_prune_plan(plan, dry_run=False)
+
+    assert uuid.UUID(backup_id) not in result.deleted_ids
+    assert any(
+        item.backup_id == uuid.UUID(backup_id)
+        and item.reason == "newest available backup in historical source group"
+        for item in result.skipped
+    )
+    assert path.exists()
+
+
+def test_prune_execution_lock_race_skips_captured_candidate(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalogue(client, tmp_path, monkeypatch)
+    root, project_id = _project(catalog, tmp_path)
+    backup_id, path = _backup(catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=30))
+    _backup(catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=20))
+    plan = client.backups._build_prune_plan(
+        root, policy=BackupRetentionPolicy(retention_days=14, auto_prune=False)
+    )
+
+    with exclusive_lock(backup_lock_path(backup_id)):
+        result = client.backups._execute_prune_plan(plan, dry_run=False)
+
+    assert uuid.UUID(backup_id) not in result.deleted_ids
+    assert any(
+        item.backup_id == uuid.UUID(backup_id) and item.reason == "busy lifecycle lock"
+        for item in result.skipped
+    )
+    assert path.exists()
+
+
+def test_prune_partial_filesystem_failure_reports_exact_outcome_and_audit(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = _catalogue(client, tmp_path, monkeypatch)
+    root, project_id = _project(catalog, tmp_path)
+    _first_id, _first_path = _backup(
+        catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=30)
+    )
+    _second_id, _second_path = _backup(
+        catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=20)
+    )
+    _backup(catalog, tmp_path, project_id, datetime.now(UTC) - timedelta(days=5))
+    plan = client.backups._build_prune_plan(
+        root, policy=BackupRetentionPolicy(retention_days=14, auto_prune=False)
+    )
+    first, second = plan.candidates
+
+    original_unlink = Path.unlink
+
+    def fail_second(path: Path, *, missing_ok: bool = False) -> None:
+        if path == Path(second.path):
+            raise PermissionError("simulated removal failure")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_second)
+    result = client.backups._execute_prune_plan(plan, dry_run=False)
+
+    assert result.deleted_ids == (first.backup_id,)
+    assert result.failed_ids == (second.backup_id,)
+    assert result.removed_bytes == first.size_bytes
+    assert not Path(first.path).exists()
+    assert Path(second.path).exists()
+    first_row = catalog.get_by_id(str(first.backup_id))
+    second_row = catalog.get_by_id(str(second.backup_id))
+    assert first_row is not None and first_row["state"] == BackupState.DELETED.value
+    assert second_row is not None and second_row["state"] == BackupState.AVAILABLE.value
+    assert any(
+        event.event_type.value == "deleted"
+        for event in client.backups.history(backup_id=str(first.backup_id))
+    )
+    assert not any(
+        event.event_type.value == "deleted"
+        for event in client.backups.history(backup_id=str(second.backup_id))
+    )
