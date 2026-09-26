@@ -22,6 +22,7 @@ def _module() -> ModuleType:
 def test_conflicts_are_retried_and_reported_with_exact_refs() -> None:
     notifier = _module()
     calls: dict[str, int] = {}
+    delays: list[float] = []
 
     def get(path: str) -> object:
         calls[path] = calls.get(path, 0) + 1
@@ -42,7 +43,7 @@ def test_conflicts_are_retried_and_reported_with_exact_refs() -> None:
         return {"number": 8, "mergeable": True}
 
     conflicts = notifier.conflicting_pull_requests(
-        get, "main", attempts=2, retry_delay=0, sleep=lambda _seconds: None
+        get, "main", attempts=2, retry_delay=3, sleep=delays.append
     )
 
     assert conflicts == [
@@ -58,6 +59,28 @@ def test_conflicts_are_retried_and_reported_with_exact_refs() -> None:
         }
     ]
     assert calls["/pulls/7"] == 2
+    assert delays == [3]
+
+
+def test_mergeability_retries_use_capped_exponential_backoff() -> None:
+    notifier = _module()
+    detail_calls = 0
+    delays: list[float] = []
+
+    def get(path: str) -> object:
+        nonlocal detail_calls
+        if path.startswith("/pulls?"):
+            return [{"number": 7}]
+        detail_calls += 1
+        return {"number": 7, "mergeable": None if detail_calls < 5 else True}
+
+    assert (
+        notifier.conflicting_pull_requests(
+            get, "main", attempts=5, retry_delay=10, sleep=delays.append
+        )
+        == []
+    )
+    assert delays == [10, 20, 30, 30]
 
 
 def test_delivery_errors_never_expose_the_secret_url(monkeypatch: pytest.MonkeyPatch) -> None:
