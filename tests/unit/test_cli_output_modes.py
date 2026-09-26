@@ -59,6 +59,7 @@ from odoo_instance_sdk.internal.proc import (
     PreparedStep,
     PrivateJsonValue,
     RecordingExecutor,
+    RunContext,
 )
 from odoo_instance_sdk.internal.resource_inventory import ResourceInventory
 from odoo_instance_sdk.models import (
@@ -2699,19 +2700,18 @@ def test_shared_failure_boundary_requires_and_preserves_resolved_dry_run(
     assert payload["error"]["code"] == "representative_failure_failed"
 
 
-def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def _preview_command_builder() -> tuple[
+    Callable[[], Command[str]], RecordingExecutor, list[int], list[str]
+]:
     from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
-    from odoo_instance_sdk.internal.proc import PreparedAction, RecordingExecutor, RunContext
+    from odoo_instance_sdk.internal.proc import PreparedAction, RecordingExecutor
 
     executor = RecordingExecutor()
-    builds = 0
+    builds = [0]
     confirmations: list[str] = []
 
     def build() -> Command[str]:
-        nonlocal builds
-        builds += 1
+        builds[0] += 1
         action = PreparedAction("typed.action", action="inspect", description="inspect")
 
         def callback(context: RunContext[str]) -> str:
@@ -2727,19 +2727,28 @@ def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
             executor=executor,
         )
 
-    def result_payload(item: str | None) -> dict[str, JsonValue]:
-        return {"value": item}
+    return build, executor, builds, confirmations
+
+
+def test_run_or_preview_builds_once_for_the_dry_run_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    build, executor, builds, confirmations = _preview_command_builder()
 
     status, value = run_or_preview(
         build,
         command_name="typed",
         mode=OutputMode.JSON,
         dry_run=True,
-        result=result_payload,
+        result=lambda item: {"value": item},
         confirm=lambda: confirmations.append("confirmed"),
     )
-    assert (status, value, builds, confirmations, executor.executed) == (0, None, 1, [], [])
+    assert (status, value, builds[0], confirmations, executor.executed) == (0, None, 1, [], [])
     assert json.loads(capsys.readouterr().out)["dry_run"] is True
+
+
+def test_run_or_preview_builds_once_and_runs_the_normal_path() -> None:
+    build, _executor, builds, confirmations = _preview_command_builder()
 
     status, value = run_or_preview(
         build,
@@ -2751,7 +2760,7 @@ def test_run_or_preview_builds_once_and_runs_only_the_normal_path(
     )
     assert status == 0
     assert value == "done"
-    assert builds == 2
+    assert builds[0] == 1
     assert confirmations == ["confirmed"]
 
 
@@ -3026,7 +3035,7 @@ def test_rich_plan_projection_preserves_ordered_steps_and_multiline_input(
 ) -> None:
     """Rich is a pure, readable projection of the same redacted plan."""
     from odoo_instance_sdk.execution import Command, ExecutionPlan
-    from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, RunContext
+    from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
 
     private_process = PreparedStep(
         step_id="instance.shell_script",
@@ -4199,36 +4208,27 @@ def test_rich_env_checkout_execution_projects_final_public_plan(tmp_path: Path) 
         assert f"{private_field}:" not in result.output
 
 
-def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
-    tmp_path: Path,
-) -> None:
-    from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan
-    from odoo_instance_sdk.internal.proc import (
-        PreparedAction,
-        PreparedStep,
-        RecordingExecutor,
-        RunContext,
-    )
-
+def _build_env_checkout_command(
+    callback: Callable[[RunContext[DevelopmentEnvironment]], DevelopmentEnvironment],
+    *,
+    executor: RecordingExecutor,
+) -> tuple[Command[DevelopmentEnvironment], PreparedStep, EnvironmentCheckoutPlan]:
     domain_plan = _matrix_checkout_plan()
-    dry_effects: list[str] = []
-    dry_executor = RecordingExecutor()
-    dry_private_process = PreparedStep(
+    private_process = PreparedStep(
         step_id="checkout.worktree",
         argv=("git", "-C", "/project", "worktree", "add", "secret-target"),
         secret_values=("secret-target",),
         mutating=True,
     )
-    dry_private_action = PreparedAction(
+    private_action = PreparedAction(
         step_id="checkout.cleanup",
         action="cleanup_on_failure",
         description="Remove owned checkout artifacts if execution fails",
         mutating=True,
     )
-    dry_public_process = dry_private_process.public_projection()
-    dry_public_plan = ExecutionPlan(
+    public_plan = ExecutionPlan(
         steps=(
-            dry_public_process,
+            private_process.public_projection(),
             ActionStep(
                 step_id="checkout.cleanup",
                 action="cleanup_on_failure",
@@ -4245,22 +4245,31 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
             },
         ),
         warnings=("secret-target will remain redacted",),
+    ).with_fingerprint(secrets=("secret-target",))
+    return (
+        Command.create(
+            public_plan,
+            callback,
+            steps=(private_process, private_action),
+            executor=executor,
+            private_projection=domain_plan,
+        ),
+        private_process,
+        domain_plan,
     )
-    dry_public_plan = dry_public_plan.with_fingerprint(secrets=("secret-target",))
 
-    def dry_callback(_context: object) -> DevelopmentEnvironment:
-        dry_effects.append("run")
-        return _matrix_public_environment()
 
-    dry_command = Command.create(
-        dry_public_plan,
-        dry_callback,
-        steps=(dry_private_process, dry_private_action),
-        executor=dry_executor,
-        private_projection=domain_plan,
-    )
+def _invoke_env_checkout(
+    tmp_path: Path,
+    command: Command[DevelopmentEnvironment],
+    *,
+    dry_run: bool,
+) -> tuple[Result, MagicMock]:
     client = MagicMock()
-    client.environments.checkout_command.return_value = dry_command
+    client.environments.checkout_command.return_value = command
+    args = ["env", "create", "PROJ-123"]
+    if dry_run:
+        args.extend(["--dry-run", "--format", "json"])
 
     with (
         patch("odoo_instance_sdk.commands.env.checkout.OdooClient", return_value=client),
@@ -4268,9 +4277,22 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
             "odoo_instance_sdk.commands.env.checkout.resolve_project_path", return_value=tmp_path
         ),
     ):
-        dry_result = CliRunner().invoke(
-            cli, ["env", "create", "PROJ-123", "--dry-run", "--format", "json"]
-        )
+        result = CliRunner().invoke(cli, args)
+    return result, client
+
+
+def test_env_checkout_cli_dry_run_inspects_one_command_without_execution(tmp_path: Path) -> None:
+    dry_effects: list[str] = []
+    dry_executor = RecordingExecutor()
+
+    def dry_callback(_context: RunContext[DevelopmentEnvironment]) -> DevelopmentEnvironment:
+        dry_effects.append("run")
+        return _matrix_public_environment()
+
+    dry_command, _private_process, _domain_plan = _build_env_checkout_command(
+        dry_callback, executor=dry_executor
+    )
+    dry_result, client = _invoke_env_checkout(tmp_path, dry_command, dry_run=True)
 
     assert dry_result.exit_code == 0, dry_result.output
     dry_payload = json.loads(dry_result.stdout)["result"]
@@ -4283,6 +4305,8 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
     client.environments.checkout_command.assert_called_once()
     client.environments.checkout_with_plan.assert_not_called()
 
+
+def test_env_checkout_cli_execution_uses_one_inspected_command(tmp_path: Path) -> None:
     run_executor = RecordingExecutor()
     run_effects: list[str] = []
 
@@ -4294,28 +4318,16 @@ def test_env_checkout_cli_inspects_one_command_for_dry_run_and_execution(
         run_effects.append("run")
         return _matrix_public_environment()
 
-    run_command = Command.create(
-        dry_public_plan,
-        run_callback_with_steps,
-        steps=(dry_private_process, dry_private_action),
-        executor=run_executor,
-        private_projection=domain_plan,
+    run_command, private_process, _domain_plan = _build_env_checkout_command(
+        run_callback_with_steps, executor=run_executor
     )
-    client.environments.checkout_command.reset_mock()
-    client.environments.checkout_command.return_value = run_command
-    with (
-        patch("odoo_instance_sdk.commands.env.checkout.OdooClient", return_value=client),
-        patch(
-            "odoo_instance_sdk.commands.env.checkout.resolve_project_path", return_value=tmp_path
-        ),
-    ):
-        run_result = CliRunner().invoke(cli, ["env", "create", "PROJ-123"])
+    run_result, client = _invoke_env_checkout(tmp_path, run_command, dry_run=False)
 
     assert run_result.exit_code == 0, run_result.output
     assert run_effects == ["run"]
-    assert run_executor.executed == [dry_private_process]
+    assert run_executor.executed == [private_process]
     assert msgspec.to_builtins(run_command.plan.steps[0]) == msgspec.to_builtins(
-        dry_private_process.public_projection()
+        private_process.public_projection()
     )
     client.environments.checkout_command.assert_called_once()
     client.environments.checkout_with_plan.assert_not_called()

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.env import checkout as env
@@ -385,16 +385,13 @@ def test_env_shell_completion_keeps_both_checkout_spellings_visible() -> None:
     assert "plain,create" in result.stdout
 
 
-@pytest.mark.parametrize("spelling", ["checkout", "create"])
-@pytest.mark.parametrize("mode", ["rich", "json", "toon"])
-@pytest.mark.parametrize("dry_run", [True, False])
-def test_cli_ticket_checkout_emits_one_shared_envelope_for_both_spellings(
-    monkeypatch: pytest.MonkeyPatch,
+def _invoke_ticket_checkout(
     tmp_path: Path,
+    *,
     spelling: str,
     mode: str,
     dry_run: bool,
-) -> None:
+) -> tuple[Result, object]:
     from odoo_instance_sdk.internal.proc import PreparedAction, RunContext
     from tests.unit.test_cli_output_modes import _matrix_checkout_plan, _matrix_public_environment
 
@@ -453,16 +450,42 @@ def test_cli_ticket_checkout_emits_one_shared_envelope_for_both_spellings(
         ),
     ):
         result = CliRunner().invoke(cli, argv)
+    return result, env._ticket_provenance(allocation)["ticket_allocation"]
+
+
+@pytest.mark.parametrize("spelling", ["checkout", "create"], ids=["checkout", "create"])
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "execute"])
+def test_cli_ticket_checkout_rich_rendering(
+    tmp_path: Path,
+    spelling: str,
+    dry_run: bool,
+) -> None:
+    result, _expected_ticket_allocation = _invoke_ticket_checkout(
+        tmp_path, spelling=spelling, mode="rich", dry_run=dry_run
+    )
 
     assert result.exit_code == 0, result.output
-    expected_provenance = env._ticket_provenance(allocation)
-    if mode == "rich":
-        assert result.stdout.count("Ticket PROJ-123") == 1
-        assert "PROJ-123_2" in result.stdout
-        assert "base release" in result.stdout
-        if dry_run:
-            assert "checkout.synthetic" in result.stdout
-        return
+    assert result.stdout.count("Ticket PROJ-123") == 1
+    assert "PROJ-123_2" in result.stdout
+    assert "base release" in result.stdout
+    if dry_run:
+        assert "checkout.synthetic" in result.stdout
+
+
+@pytest.mark.parametrize("spelling", ["checkout", "create"], ids=["checkout", "create"])
+@pytest.mark.parametrize("mode", ["json", "toon"], ids=["json", "toon"])
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "execute"])
+def test_cli_ticket_checkout_structured_envelope(
+    tmp_path: Path,
+    spelling: str,
+    mode: str,
+    dry_run: bool,
+) -> None:
+    result, expected_ticket_allocation = _invoke_ticket_checkout(
+        tmp_path, spelling=spelling, mode=mode, dry_run=dry_run
+    )
+
+    assert result.exit_code == 0, result.output
     if mode == "json":
         payload = json.loads(result.stdout)
     else:
@@ -471,4 +494,4 @@ def test_cli_ticket_checkout_emits_one_shared_envelope_for_both_spellings(
         payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
     assert result.stdout.count("schema_version") == 1
     assert payload["dry_run"] is dry_run
-    assert payload["provenance"]["ticket_allocation"] == expected_provenance["ticket_allocation"]
+    assert payload["provenance"]["ticket_allocation"] == expected_ticket_allocation

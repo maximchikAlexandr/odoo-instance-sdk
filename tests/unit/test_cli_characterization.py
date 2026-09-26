@@ -846,12 +846,9 @@ def test_run_native_exit_code_and_streams_remain_unwrapped() -> None:
     instance.run_foreground_command.assert_called_once_with(args=("--workers=2",), env=ANY)
 
 
-@pytest.mark.parametrize(
-    "output", [("--format", "rich"), ("--format", "json"), ("--format", "toon")]
-)
-def test_run_dry_run_formats_use_single_shared_rich_projection(
-    output: tuple[str, ...],
-) -> None:
+def _invoke_run_dry_run_format(
+    format_name: str,
+) -> tuple[Result, RecordingExecutor, MagicMock, MagicMock, tuple[str, ...]]:
     native_args = ("--dev=reload", "space value", "meta;$(touch should-not-run)")
     executor = RecordingExecutor()
     prepared = PreparedStep(
@@ -882,23 +879,37 @@ def test_run_dry_run_formats_use_single_shared_rich_projection(
             "odoo_instance_sdk.commands.context.ResolvedContext.check_port_free", return_value=True
         ),
     ):
-        result = CliRunner().invoke(cli, ["run", "--dry-run", *output, "--", *native_args])
+        result = CliRunner().invoke(
+            cli, ["run", "--dry-run", "--format", format_name, "--", *native_args]
+        )
+
+    return result, executor, client, instance, native_args
+
+
+def test_run_dry_run_rich_format_uses_single_shared_projection() -> None:
+    result, executor, client, instance, native_args = _invoke_run_dry_run_format("rich")
 
     assert result.exit_code == 0, result.output
-    if output == ("--format", "rich"):
-        expected_argv = json.dumps(
-            ["odoo", *native_args], ensure_ascii=False, separators=(", ", ": ")
-        )
-        assert result.stdout.count(expected_argv) == 1
-        assert "Native argv:" not in result.stdout
-    elif output == ("--format", "toon"):
+    expected_argv = json.dumps(["odoo", *native_args], ensure_ascii=False, separators=(", ", ": "))
+    assert result.stdout.count(expected_argv) == 1
+    assert "Native argv:" not in result.stdout
+    assert executor.executed == []
+    client.environments.record_use.assert_not_called()
+    instance.run_foreground_command.assert_called_once_with(args=native_args, env=ANY)
+
+
+@pytest.mark.parametrize("format_name", ["json", "toon"], ids=["json", "toon"])
+def test_run_dry_run_structured_formats_use_single_shared_projection(format_name: str) -> None:
+    result, executor, client, instance, native_args = _invoke_run_dry_run_format(format_name)
+
+    assert result.exit_code == 0, result.output
+    if format_name == "toon":
         from toon import DecodeOptions, decode
 
         payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
-        assert tuple(payload["result"]["steps"][0]["argv"])[-3:] == native_args
     else:
         payload = json.loads(result.stdout)
-        assert tuple(payload["result"]["steps"][0]["argv"])[-3:] == native_args
+    assert tuple(payload["result"]["steps"][0]["argv"])[-3:] == native_args
     assert executor.executed == []
     client.environments.record_use.assert_not_called()
     instance.run_foreground_command.assert_called_once_with(args=native_args, env=ANY)

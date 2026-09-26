@@ -248,27 +248,35 @@ def test_command_snapshot_does_not_follow_mutated_inputs_after_construction() ->
     assert [step.argv for step in executor.executed] == [("tool", "before")]
 
 
-def test_command_rejects_public_private_step_projection_mismatches() -> None:
+@pytest.mark.parametrize(
+    "case_id",
+    [
+        pytest.param("private-only", id="private-only"),
+        pytest.param("public-only", id="public-only"),
+        pytest.param("reordered", id="reordered"),
+        pytest.param("different-kind", id="different-kind"),
+        pytest.param("different-field", id="different-field"),
+    ],
+)
+def test_command_rejects_public_private_step_projection_mismatches(case_id: str) -> None:
     first = PreparedStep(step_id="first", argv=("tool", "first"))
     second = PreparedStep(step_id="second", argv=("tool", "second"))
     matching_first = first.public_projection()
 
-    cases = (
-        (ExecutionPlan(), (first,), "private-only"),
-        (ExecutionPlan(steps=(matching_first,)), (), "public-only"),
-        (
+    cases = {
+        "private-only": (ExecutionPlan(), (first,)),
+        "public-only": (ExecutionPlan(steps=(matching_first,)), ()),
+        "reordered": (
             ExecutionPlan(steps=(second.public_projection(), matching_first)),
             (first, second),
-            "reordered",
         ),
-        (
+        "different-kind": (
             ExecutionPlan(
                 steps=(ActionStep(step_id="first", action="first", description="first"),)
             ),
             (first,),
-            "different-kind",
         ),
-        (
+        "different-field": (
             ExecutionPlan(
                 steps=(
                     ProcessStep(
@@ -281,13 +289,12 @@ def test_command_rejects_public_private_step_projection_mismatches() -> None:
                 )
             ),
             (first,),
-            "different-field",
         ),
-    )
+    }
+    plan, steps = cases[case_id]
 
-    for plan, steps, _case in cases:
-        with pytest.raises(PlanValidationError, match="public execution plan steps"):
-            Command.create(plan, lambda _context: "unused", steps)
+    with pytest.raises(PlanValidationError, match="public execution plan steps"):
+        Command.create(plan, lambda _context: "unused", steps)
 
 
 def test_command_accepts_matching_public_private_step_projections() -> None:
