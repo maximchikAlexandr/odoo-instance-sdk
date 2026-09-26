@@ -18,15 +18,21 @@ from odoo_instance_sdk.client import OdooClient
 from odoo_instance_sdk.commands.cli_parts import callbacks
 from odoo_instance_sdk.commands.context import ResolvedContext, RuntimeSource
 from odoo_instance_sdk.config import InstanceConfig, OdooClientConfig
-from odoo_instance_sdk.exceptions import InstanceConfigurationError, LogfileUnwritableError
+from odoo_instance_sdk.exceptions import (
+    DetachedLaunchCleanupError,
+    InstanceConfigurationError,
+    LogfileUnwritableError,
+    ReadinessTimeoutError,
+)
 from odoo_instance_sdk.execution import Command, ExecutionPlan
 from odoo_instance_sdk.internal.proc import (
+    PreparedStep,
     ProcessHandle,
     RecordingExecutor,
 )
-from odoo_instance_sdk.models import DetachedLaunchResult, StartConfig
-from odoo_instance_sdk.resources.instance import OdooInstance
-from odoo_instance_sdk.resources.instance.runtime import resolve_effective_logfile
+from odoo_instance_sdk.models import DetachedLaunchResult, ReadinessResult, StartConfig
+from odoo_instance_sdk.resources.instance import OdooInstance, auxiliary_restore, runtime_identity
+from odoo_instance_sdk.resources.instance.runtime import _RuntimeIdentity, resolve_effective_logfile
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog, CatalogValue
 
 
@@ -149,6 +155,27 @@ def _dead_handle(pid: int = 4242) -> ProcessHandle:
     process.pid = pid
     process.poll.return_value = 1
     return ProcessHandle(process, (), pid, pid, False)
+
+
+def _runtime_identity(pid: int = 4242) -> _RuntimeIdentity:
+    return _RuntimeIdentity(
+        owner_kind="environment",
+        owner_id="env",
+        project_id="",
+        environment_id="env",
+        root_pid=pid,
+        create_time=1.0,
+        expected_executable=sys.executable,
+        expected_argv=(sys.executable,),
+        expected_cwd="/repo",
+        expected_config_path="/repo/odoo.conf",
+        live_create_time=1.0,
+        live_executable=sys.executable,
+        live_argv=(sys.executable,),
+        live_cwd="/repo",
+        live_config_path="/repo/odoo.conf",
+        process_group_id=pid,
+    )
 
 
 @pytest.fixture()
@@ -400,6 +427,323 @@ def test_detached_readiness_plan_captures_wait_and_cleanup(
         "instance.detached.readiness",
         "instance.detached.cleanup",
     }.issubset(action_ids)
+
+
+@pytest.mark.unit
+def test_detached_readiness_defaults_to_disabled_compatibility(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    (wt / "odoo.log").write_text("")
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(_FakeCatalog()),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(30)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+    executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch.object(OdooInstance, "_ensure_dependencies_ready"),
+        patch.object(OdooInstance, "_wait_for_detached_ready") as wait_ready,
+    ):
+        instance.run_detached()
+    wait_ready.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), float("-inf"), True])
+def test_detached_readiness_requires_finite_positive_timeout(
+    env_id: str, http_port: int, timeout: float
+) -> None:
+    instance = OdooInstance(
+        config=InstanceConfig(
+            base_url=f"http://127.0.0.1:{http_port}",
+            start_config=StartConfig(http_port=http_port),
+        ),
+        _client=_client_with_catalog(_FakeCatalog()),
+        _environment_id=env_id,
+    )
+    with pytest.raises(InstanceConfigurationError, match="finite positive"):
+        instance.run_detached_command(wait_ready=True, readiness_timeout=timeout)
+
+
+@pytest.mark.unit
+def test_detached_readiness_plan_records_default_sixty_second_timeout(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(_FakeCatalog()),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(30)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+    with patch.object(OdooInstance, "_ensure_dependencies_ready"):
+        command = instance.run_detached_command(wait_ready=True)
+    readiness = next(
+        step for step in command.plan.steps if step.step_id == "instance.detached.readiness"
+    )
+    assert getattr(readiness, "details", None) == {"timeout": 60.0}
+
+
+@pytest.mark.unit
+def test_detached_readiness_success_waits_and_keeps_runtime(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    (wt / "odoo.log").write_text("")
+    fake = _FakeCatalog()
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(fake),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(30)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+    executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
+    identity = _runtime_identity()
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch.object(OdooInstance, "_ensure_dependencies_ready"),
+        patch.object(OdooInstance, "_read_runtime_identity", return_value=identity),
+        patch.object(
+            OdooInstance,
+            "_wait_for_detached_ready",
+            return_value=ReadinessResult(ok=True, elapsed=0.1, attempts=1, final_status="200"),
+        ) as wait_ready,
+        patch.object(OdooInstance, "_clear_runtime_identity_if_matches") as clear_runtime,
+    ):
+        result = instance.run_detached(wait_ready=True)
+    assert result.pid == 4242
+    wait_ready.assert_called_once()
+    clear_runtime.assert_not_called()
+    assert fake.clear_calls == []
+
+
+@pytest.mark.unit
+def test_detached_readiness_early_exit_does_not_clear_unpersisted_identity(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    (wt / "odoo.log").write_text("")
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(_FakeCatalog()),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import sys; sys.exit(1)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+    executor = RecordingExecutor(handles={"instance.detached": _dead_handle()})
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch.object(OdooInstance, "_ensure_dependencies_ready"),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate") as terminate_process,
+        patch.object(OdooInstance, "_clear_runtime_identity") as clear_runtime,
+        pytest.raises(InstanceConfigurationError, match="exited immediately"),
+    ):
+        instance.run_detached(wait_ready=True)
+    terminate_process.assert_called_once_with(
+        executor.handles["instance.detached"], process_group_id=4242, timeout=5.0
+    )
+    clear_runtime.assert_not_called()
+
+
+@pytest.mark.unit
+def test_detached_readiness_timeout_clears_only_captured_identity_after_group_exit(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    (wt / "odoo.log").write_text("")
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(_FakeCatalog()),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(30)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+    executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
+    identity = _runtime_identity()
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch.object(OdooInstance, "_ensure_dependencies_ready"),
+        patch.object(OdooInstance, "_read_runtime_identity", return_value=identity),
+        patch.object(
+            OdooInstance,
+            "_wait_for_detached_ready",
+            side_effect=ReadinessTimeoutError(1.0),
+        ),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate") as terminate_process,
+        patch("odoo_instance_sdk.resources.instance.planning._verify_process_exit") as verify_exit,
+        patch.object(OdooInstance, "_clear_runtime_identity_if_matches") as clear_runtime,
+        pytest.raises(ReadinessTimeoutError, match="Readiness not reached"),
+    ):
+        instance.run_detached(wait_ready=True)
+    terminate_process.assert_called_once()
+    verify_exit.assert_called_once_with(4242)
+    clear_runtime.assert_called_once_with(identity)
+
+
+@pytest.mark.unit
+def test_detached_readiness_cleanup_failure_retains_identity_and_diagnostics(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    (wt / "odoo.log").write_text("")
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(_FakeCatalog()),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(30)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+    executor = RecordingExecutor(handles={"instance.detached": _alive_handle()})
+    identity = _runtime_identity()
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch.object(OdooInstance, "_ensure_dependencies_ready"),
+        patch.object(OdooInstance, "_read_runtime_identity", return_value=identity),
+        patch.object(
+            OdooInstance,
+            "_wait_for_detached_ready",
+            side_effect=ReadinessTimeoutError(1.0),
+        ),
+        patch.object(ProcessHandle, "drain_tails", return_value={"stdout": "out", "stderr": "err"}),
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.terminate",
+            side_effect=RuntimeError("group still alive"),
+        ),
+        patch.object(OdooInstance, "_clear_runtime_identity_if_matches") as clear_runtime,
+        pytest.raises(DetachedLaunchCleanupError) as raised,
+    ):
+        instance.run_detached(wait_ready=True)
+    assert raised.value.pid == 4242
+    assert "surviving owned process pid=4242" in str(raised.value)
+    cause = raised.value.__cause__
+    assert cause is not None
+    notes = " ".join(cause.__notes__ or [])
+    assert "environment=" in notes
+    assert "database='mydb'" in notes
+    assert "logfile=" in notes
+    assert "stdout_tail='out'" in notes
+    assert "stderr_tail='err'" in notes
+    clear_runtime.assert_not_called()
+
+
+@pytest.mark.unit
+def test_detached_readiness_does_not_terminate_unrelated_process(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    (wt / "odoo.log").write_text("")
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(_FakeCatalog()),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(30)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+    executor = RecordingExecutor(handles={"instance.detached": _alive_handle(4242)})
+    identity = _runtime_identity()
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.planning.SubprocessExecutor",
+            return_value=executor,
+        ),
+        patch.object(OdooInstance, "_ensure_dependencies_ready"),
+        patch.object(OdooInstance, "_read_runtime_identity", return_value=identity),
+        patch.object(
+            OdooInstance,
+            "_wait_for_detached_ready",
+            side_effect=InstanceConfigurationError("wrong listener"),
+        ),
+        patch("odoo_instance_sdk.resources.instance.planning.terminate") as terminate_process,
+        patch("odoo_instance_sdk.resources.instance.planning._verify_process_exit"),
+        patch.object(OdooInstance, "_clear_runtime_identity_if_matches"),
+        pytest.raises(InstanceConfigurationError, match="wrong listener"),
+    ):
+        instance.run_detached(wait_ready=True)
+    assert terminate_process.call_args.args[0] is executor.handles["instance.detached"]
+    assert terminate_process.call_args.args[0].pid == 4242
+
+
+@pytest.mark.unit
+def test_detached_readiness_passes_effective_logfile_argv_to_identity_proof(
+    env_id: str, http_port: int, tmp_path: Path
+) -> None:
+    wt = tmp_path / "wt"
+    _init_git_worktree(wt)
+    (wt / "odoo.log").write_text("")
+    instance = _make_tracked_instance(
+        client=_client_with_catalog(_FakeCatalog()),
+        env_id=env_id,
+        cwd=wt,
+        command_prefix=(sys.executable, "-c", "import time; time.sleep(30)"),
+        http_port=http_port,
+        logfile="odoo.log",
+    )
+    with (
+        patch(
+            "odoo_instance_sdk.resources.instance.planning._recorded_runtime_pid", return_value=4242
+        ) as proof,
+        patch(
+            "odoo_instance_sdk.internal.health.poll_health",
+            return_value=ReadinessResult(ok=True, elapsed=0.1, attempts=1),
+        ),
+    ):
+        command = instance.run_detached_command(wait_ready=True)
+        step = cast(
+            "PreparedStep",
+            next(step for step in command.plan.steps if step.step_id == "instance.detached"),
+        )
+        config = instance.config.start_config
+        assert config is not None
+        result = instance._wait_for_detached_ready(
+            config,
+            step,
+            timeout=60.0,
+            pid=4242,
+        )
+    assert result.ok
+    expected_argv = proof.call_args.kwargs["expected_argv"]
+    logfile_index = expected_argv.index("--logfile")
+    assert expected_argv[logfile_index + 1] == str((wt / "odoo.log").resolve())
+
+
+@pytest.mark.unit
+def test_auxiliary_restore_consumes_shared_runtime_identity_proof() -> None:
+    assert auxiliary_restore._recorded_runtime_pid is runtime_identity._recorded_runtime_pid
 
 
 @pytest.mark.unit

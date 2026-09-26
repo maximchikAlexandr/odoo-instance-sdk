@@ -442,6 +442,7 @@ class _PlanningMixin:
                     secret_created = True
                 handle: ProcessHandle | None = None
                 runtime_persisted = False
+                persisted_identity: _RuntimeIdentity | None = None
                 try:
                     context.action(action_ids[1])
                     handle = context.spawn(step.step_id)
@@ -459,6 +460,8 @@ class _PlanningMixin:
                             context=context,
                         )
                         runtime_persisted = True
+                        if wait_ready:
+                            persisted_identity = self._read_runtime_identity()
                     context.complete_action(action_ids[3])
                     if wait_ready:
                         context.action(action_ids[4])
@@ -486,7 +489,7 @@ class _PlanningMixin:
                     )
                 except BaseException as error:
                     if handle is not None:
-                        if wait_ready and runtime_persisted:
+                        if wait_ready:
                             owner_kind, owner_id = _runtime_owner(
                                 self._runtime_binding, self._environment_id
                             )
@@ -505,25 +508,8 @@ class _PlanningMixin:
                                     timeout=5.0,
                                 )
                                 _verify_process_exit(handle.pid)
-                            except BaseException as cleanup_error:
-                                context.fail_action(action_ids[5], cleanup_error)
-                                raise DetachedLaunchCleanupError(
-                                    handle.pid,
-                                    owner_kind,
-                                    owner_id,
-                                    str(cleanup_error),
-                                ) from error
-
-                            def clear_persisted_runtime() -> None:
-                                identity = self._read_runtime_identity()
-                                if identity is None:
-                                    raise RuntimeError(
-                                        "runtime identity disappeared before cleanup"
-                                    )
-                                self._clear_runtime_identity_if_matches(identity)
-
-                            try:
-                                clear_persisted_runtime()
+                                if persisted_identity is not None:
+                                    self._clear_runtime_identity_if_matches(persisted_identity)
                             except BaseException as cleanup_error:
                                 context.fail_action(action_ids[5], cleanup_error)
                                 raise DetachedLaunchCleanupError(
@@ -533,7 +519,7 @@ class _PlanningMixin:
                                     str(cleanup_error),
                                 ) from error
                             context.complete_action(action_ids[5])
-                        else:
+                        elif not wait_ready:
                             with contextlib.suppress(BaseException):
                                 terminate(
                                     handle,
@@ -541,7 +527,7 @@ class _PlanningMixin:
                                     timeout=5.0,
                                 )
                             self._clear_runtime_identity()
-                    elif not runtime_persisted:
+                    elif not wait_ready and not runtime_persisted:
                         self._clear_runtime_identity()
                     if (
                         wait_ready
