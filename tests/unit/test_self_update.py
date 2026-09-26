@@ -21,6 +21,7 @@ from odoo_instance_sdk.internal.proc import PreparedStep, ProcessResult, Recordi
 from odoo_instance_sdk.internal.self_update import (
     InstalledProvenance,
     assert_update_not_blocking,
+    inspect_update_recovery_state,
     read_uv_tool_direct_url,
     unfinished_update_journal,
     update,
@@ -187,6 +188,11 @@ def _executor_factory(effects: dict[str, object]) -> RecordingExecutor:
                 stdout=_MAINTENANCE_JSON
                 if cast("int", effects.get("maintenance_rc", 0)) == 0
                 else "",
+            )
+        if step.step_id == "update.verify.version":
+            return _process_result(
+                step,
+                returncode=cast("int", effects.get("verify_rc", 0)),
             )
         if step.step_id == "update.recovery":
             return _process_result(step, returncode=cast("int", effects.get("rollback_rc", 0)))
@@ -378,7 +384,12 @@ def test_update_command_matrix(
     if expected_outcome == "already_current":
         assert not any(step.step_id.startswith("update.install") for step in executor.executed)
     if expected_outcome == "updated" and not command_kwargs.get("check"):
-        expected_steps = [*_ANCESTRY_STEPS, "update.install", "update.migrate"]
+        expected_steps = [
+            *_ANCESTRY_STEPS,
+            "update.install",
+            "update.migrate",
+            "update.verify.version",
+        ]
         if str(command_kwargs.get("ref", "")).lower() != _SHA_OLD:
             expected_steps.insert(0, "update.resolve")
         assert [step.step_id for step in executor.executed] == expected_steps
@@ -424,9 +435,12 @@ def test_update_coordinator_matrix(
             *_ANCESTRY_STEPS,
             "update.install",
             "update.migrate",
+            "update.verify.version",
         ]
         install = next(step for step in executor.executed if step.step_id == "update.install")
         assert any(_SHA_B in arg for arg in install.argv)
+        assert not (user_root / "update" / "journal.json").exists()
+        assert not (user_root / "update" / "snapshot").exists()
 
 
 def test_read_uv_tool_direct_url_uses_pep610_metadata(
@@ -508,6 +522,112 @@ def test_unfinished_journal_blocks_other_commands(user_root: Path) -> None:
         assert_update_not_blocking("doctor")
 
 
+def test_recovery_inspection_reports_absent_without_creating_paths(user_root: Path) -> None:
+    update_root = user_root / "update"
+
+    state = inspect_update_recovery_state()
+
+    assert state.journal_state == "absent"
+    assert state.snapshot_state == "absent"
+    assert state.valid is True
+    assert not update_root.exists()
+
+
+def test_check_reports_matching_sha_as_incomplete_with_dead_pid(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    _patch_provenance(monkeypatch, _provenance(commit_id=_SHA_A, executable=executable))
+    update_root = user_root / "update"
+    snapshot = update_root / "snapshot"
+    snapshot.mkdir(parents=True)
+    (update_root / "journal.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "phase": "migrate",
+                "target_ref": _SHA_A,
+                "snapshot_sha": _SHA_B,
+                "maintenance_pid": 2_000_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    executor = _executor_factory({})
+
+    result = update_command(ref=_SHA_A, check=True, executor=executor).run()
+
+    assert result.outcome == "update_incomplete"
+    assert result.target_sha == _SHA_A
+    assert result.journal_state == "present"
+    assert result.snapshot_state == "present"
+    assert result.recovery_argv == (
+        str(executable.absolute()),
+        "update",
+        "--ref",
+        _SHA_A,
+        "--yes",
+    )
+    assert executor.executed == []
+    assert (update_root / "journal.json").is_file()
+    assert snapshot.is_dir()
+
+
+def test_check_preserves_malformed_recovery_evidence_without_resume_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "odcli"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    _patch_provenance(monkeypatch, _provenance(executable=executable))
+    update_root = user_root / "update"
+    (update_root / "snapshot").mkdir(parents=True)
+    (update_root / "journal.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "phase": "migrate",
+                "target_ref": "not-an-immutable-sha",
+                "snapshot_sha": _SHA_A,
+                "maintenance_pid": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = update_command(ref=_SHA_B, check=True, executor=_executor_factory({})).run()
+
+    assert result.outcome == "update_incomplete"
+    assert result.recovery_argv is None
+    assert result.journal_state == "present"
+    assert result.snapshot_state == "present"
+    assert "immutable target_ref" in (result.next_step or "")
+
+
+def test_verify_failure_consumes_version_once_and_preserves_recovery_state(
+    monkeypatch: pytest.MonkeyPatch,
+    user_root: Path,
+    tmp_path: Path,
+) -> None:
+    executor = _prepare_update_case(monkeypatch, tmp_path, {"verify_rc": 1})
+
+    result = update(ref="main", executor=executor)
+
+    assert result.outcome == "update_incomplete"
+    assert [step.step_id for step in executor.executed].count("update.verify.version") == 1
+    assert not any(step.step_id == "update.commit" for step in executor.executed)
+    assert result.journal_state == "present"
+    assert result.snapshot_state == "present"
+    assert (user_root / "update" / "journal.json").is_file()
+    assert (user_root / "update" / "snapshot").is_dir()
+
+
 def test_mutually_exclusive_check_and_dry_run_cli() -> None:
     from click.testing import CliRunner
 
@@ -553,10 +673,17 @@ def test_dry_run_command_has_frozen_process_steps(
         *_ANCESTRY_STEPS,
         "update.install",
         "update.migrate",
+        "update.verify.version",
     ]
     install = next(step for step in mutation_steps if step.step_id == "update.install")
     assert install.argv[0] == "uv"
     assert any(_SHA_B in arg for arg in install.argv)
+    verify = next(step for step in mutation_steps if step.step_id == "update.verify.version")
+    assert verify.argv == (str(executable.absolute()), "--version")
+    assert verify.read_only is True
+    assert command.plan.steps == tuple(
+        step.public_projection() for step in command._prepared().steps
+    )
     assert executor.executed[0].step_id == "update.resolve"
 
 
@@ -747,7 +874,10 @@ def test_snapshot_resume_skips_install_after_crash_before_journal_write(
     )
     result = command.run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == ["update.migrate"]
+    assert [step.step_id for step in executor.executed] == [
+        "update.migrate",
+        "update.verify.version",
+    ]
 
 
 def test_snapshot_resume_rejects_unexpected_installed_revision(
@@ -871,7 +1001,11 @@ def test_update_resumes_from_migrate_journal(
     executor = _executor_factory({"maintenance_rc": 0})
     result = update_command(ref=_SHA_B, executor=executor).run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
+    assert [step.step_id for step in executor.executed] == [
+        *_ANCESTRY_STEPS,
+        "update.migrate",
+        "update.verify.version",
+    ]
 
 
 def test_migrate_resume_rollback_uses_journal_snapshot_sha(
@@ -973,4 +1107,8 @@ def test_update_resumes_from_install_journal(
     executor = _executor_factory({"install_rc": 0, "maintenance_rc": 0})
     result = update_command(ref="main", executor=executor).run()
     assert result.outcome == "updated"
-    assert [step.step_id for step in executor.executed] == [*_ANCESTRY_STEPS, "update.migrate"]
+    assert [step.step_id for step in executor.executed] == [
+        *_ANCESTRY_STEPS,
+        "update.migrate",
+        "update.verify.version",
+    ]
