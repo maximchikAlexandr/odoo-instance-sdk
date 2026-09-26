@@ -1082,6 +1082,42 @@ def test_drop_preserves_unknown_or_symlink_filestore(
 
 
 @pytest.mark.unit
+def test_drop_allows_proven_local_archive_with_contained_filestore(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    data_directory = tmp_path / "local-data"
+    target = data_directory / "filestore" / "feature_db"
+    target.mkdir(parents=True)
+    (target / "blob").write_bytes(b"local")
+    catalog = BackupCatalog(db_path=tmp_path / "local.sqlite3")
+    instance, _backup = _managed_instance(
+        project_manifest, catalog, tmp_path, data_directory=data_directory
+    )
+    digest = "c" * 64
+    catalog._conn.execute(
+        "UPDATE restores SET backup_id=NULL, source_kind='local_archive', "
+        "source_sha256=? WHERE database_name='feature_db'",
+        (digest,),
+    )
+    catalog._conn.execute(
+        "UPDATE database_events SET backup_id=NULL, source_kind='local_archive', "
+        "source_sha256=? WHERE database_name='feature_db' AND event_type='restored'",
+        (digest,),
+    )
+    catalog._conn.commit()
+
+    result = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=_executor()
+    ).run()
+
+    assert result.filestore_state == "deleted"
+    assert not target.exists()
+    catalog.close()
+
+
+@pytest.mark.unit
 def test_filestore_failure_is_typed_partial_after_database_audit(
     monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
 ) -> None:

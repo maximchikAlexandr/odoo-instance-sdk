@@ -21,7 +21,7 @@ from odoo_instance_sdk.execution import (
     SemanticPlanObservation,
     _PlanObservation,
 )
-from odoo_instance_sdk.internal.db_name import validate_db_name
+from odoo_instance_sdk.internal.db_name import validate_db_name, validate_filestore_containment
 from odoo_instance_sdk.internal.locks import exclusive_lock_until, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.builder import build_psql_specification
 from odoo_instance_sdk.internal.pg.context import DatabaseContext, resolve_database_context
@@ -129,7 +129,9 @@ class _DropOwnershipEvidence:
     cluster_id: str
     compose_project: str
     volume_name: str
-    backup_id: str
+    backup_id: str | None
+    source_kind: str
+    source_sha256: str | None
     data_directory: str | None
 
 
@@ -466,17 +468,55 @@ def _drop_ownership_evidence(  # noqa: C901
     )
     if binding is None or binding["cluster_id"] != str(claim.cluster_id):
         raise ConfigError("database drop requires an exact active restore binding")
-    if binding["database_name"] != binding_database or not isinstance(binding["backup_id"], str):
+    source_kind = binding["source_kind"]
+    source_sha256 = binding["source_sha256"]
+    backup_id = binding["backup_id"]
+    if source_kind not in {"catalogue", "local_archive"}:
+        raise ConfigError("database drop restore binding provenance is invalid")
+    if binding["database_name"] != binding_database:
         raise ConfigError("database drop restore binding identity does not match")
+    if source_kind == "catalogue":
+        if not isinstance(backup_id, str) or not backup_id or source_sha256 is not None:
+            raise ConfigError("database drop restore binding provenance is invalid")
+    elif (
+        backup_id is not None
+        or not isinstance(source_sha256, str)
+        or len(source_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in source_sha256)
+    ):
+        raise ConfigError("database drop restore binding provenance is invalid")
+    data_directory_value = (
+        binding["data_directory"] if isinstance(binding["data_directory"], str) else None
+    )
+    if source_kind == "local_archive" and not _safe_proven_filestore(
+        data_directory_value, binding_database
+    ):
+        raise ConfigError("local archive restore binding lacks contained data-directory evidence")
     return _DropOwnershipEvidence(
         cluster_id=str(claim.cluster_id),
         compose_project=claim.compose_project,
         volume_name=claim.volume_name,
-        backup_id=binding["backup_id"],
-        data_directory=binding["data_directory"]
-        if isinstance(binding["data_directory"], str)
-        else None,
+        backup_id=backup_id,
+        source_kind=source_kind,
+        source_sha256=source_sha256,
+        data_directory=data_directory_value,
     )
+
+
+def _safe_proven_filestore(data_directory: str | None, database: str) -> bool:
+    """Require an existing, non-symlink filestore root for local evidence."""
+    if data_directory is None:
+        return False
+    base = Path(data_directory)
+    root = base / "filestore"
+    if base.is_symlink() or not base.is_dir() or root.is_symlink() or not root.is_dir():
+        return False
+    try:
+        validate_filestore_containment(base, database)
+    except ConfigError:
+        return False
+    candidate = root / database
+    return not candidate.is_symlink()
 
 
 def _cleanup_proven_filestore(data_directory: str | None, database: str) -> tuple[str, str | None]:

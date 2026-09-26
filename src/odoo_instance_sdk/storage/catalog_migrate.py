@@ -19,7 +19,7 @@ from odoo_instance_sdk.storage.catalog_schema import (
     metadata,
 )
 
-CATALOG_REVISION = "0001"
+CATALOG_REVISION = "0002"
 
 
 def _migrations_dir() -> Path:
@@ -177,8 +177,21 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
     expected_tables, expected_indexes, expected_foreign_keys, expected_view = (
         _reference_fingerprint()
     )
+    expected_by_name = {table: (columns, keys) for table, columns, keys in expected_tables}
+    compatible_tables = True
+    for table, columns, keys in actual_tables:
+        expected_columns, expected_keys = expected_by_name.get(table, ((), frozenset()))
+        if table in {"restores", "database_events"}:
+            expected_columns = tuple(
+                item for item in expected_columns if item[0] not in {"source_kind", "source_sha256"}
+            )
+            expected_columns = tuple(
+                (name, type_name, 1 if name == "backup_id" and table == "restores" else required)
+                for name, type_name, required in expected_columns
+            )
+        compatible_tables &= tuple(columns) == expected_columns and keys == expected_keys
     if (
-        actual_tables != expected_tables
+        not compatible_tables
         or actual_foreign_keys != expected_foreign_keys
         or actual_view != expected_view
         or actual_indexes - expected_indexes
@@ -195,6 +208,33 @@ def _repair_known_v16_catalog(conn: sqlite3.Connection) -> None:
         raise BackupCatalogError(
             "catalog has multiple active environments for the same branch"
         ) from exc
+
+
+def _is_legacy_provenance_schema(conn: sqlite3.Connection) -> bool:
+    """Recognize the pre-source-neutral schema before stamping it as 0001."""
+    actual_tables, actual_indexes, actual_foreign_keys, actual_view = _schema_fingerprint(conn)
+    expected_tables, expected_indexes, expected_foreign_keys, expected_view = (
+        _reference_fingerprint()
+    )
+    if actual_indexes != expected_indexes or actual_foreign_keys != expected_foreign_keys:
+        return False
+    if actual_view != expected_view:
+        return False
+    expected_by_name = {table: (columns, keys) for table, columns, keys in expected_tables}
+    for table, columns, keys in actual_tables:
+        expected_columns, expected_keys = expected_by_name.get(table, ((), frozenset()))
+        if table in {"restores", "database_events"}:
+            expected_columns = tuple(
+                item for item in expected_columns if item[0] not in {"source_kind", "source_sha256"}
+            )
+        if table in {"restores", "database_events"}:
+            expected_columns = tuple(
+                (name, type_name, 1 if name == "backup_id" and table == "restores" else required)
+                for name, type_name, required in expected_columns
+            )
+        if tuple(columns) != expected_columns or keys != expected_keys:
+            return False
+    return len(actual_tables) == len(expected_tables)
 
 
 def _assert_single_head() -> str:
@@ -224,7 +264,14 @@ def ensure_catalog_migrated(db_path: Path) -> None:
             return
         _backup_catalog(db_path)
         _repair_known_v16_catalog(conn)
-        verify_schema_equivalence(conn)
+        try:
+            verify_schema_equivalence(conn)
+        except BackupCatalogError:
+            if not _is_legacy_provenance_schema(conn):
+                raise
+            command.stamp(config, "0001")
+            command.upgrade(config, "head")
+            return
     finally:
         conn.close()
     command.stamp(config, head)
@@ -245,6 +292,8 @@ def assert_schema_metadata_matches_revision() -> None:
         try:
             verify_schema_equivalence(conn)
             if catalog_revision(conn) != CATALOG_REVISION:
-                raise BackupCatalogError("fresh Alembic upgrade did not stamp revision 0001")
+                raise BackupCatalogError(
+                    f"fresh Alembic upgrade did not stamp revision {CATALOG_REVISION}"
+                )
         finally:
             conn.close()

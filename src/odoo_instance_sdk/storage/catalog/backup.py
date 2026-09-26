@@ -45,6 +45,29 @@ from odoo_instance_sdk.storage.catalog_migrate import (
 )
 
 
+def _restore_provenance(
+    backup_id: str | None,
+    source_kind: str | None,
+    source_sha256: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Validate and normalize one complete restore evidence tuple."""
+    kind = source_kind or ("catalogue" if backup_id is not None else None)
+    if kind == "catalogue":
+        if not isinstance(backup_id, str) or not backup_id.strip() or source_sha256 is not None:
+            raise BackupCatalogError("catalogue restore provenance requires only backup_id")
+        return kind, backup_id, None
+    if kind == "local_archive":
+        if backup_id is not None or not isinstance(source_sha256, str):
+            raise BackupCatalogError(
+                "local_archive restore provenance requires source_sha256 and no backup_id"
+            )
+        digest = source_sha256
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise BackupCatalogError("local_archive source_sha256 must be lowercase 64-hex")
+        return kind, None, digest
+    raise BackupCatalogError("restore provenance requires a supported source_kind")
+
+
 class _BackupMixin:
     if TYPE_CHECKING:
         _conn: sqlite3.Connection
@@ -708,12 +731,17 @@ class _BackupMixin:
         db_host: str | None,
         db_port: int,
         database_name: str,
-        backup_id: str,
+        backup_id: str | None = None,
         *,
+        source_kind: str | None = None,
+        source_sha256: str | None = None,
         cluster_id: uuid.UUID | str | None = None,
         data_directory: str | Path | None = None,
     ) -> None:
         host = normalize_db_host(db_host)
+        kind, evidence_backup_id, digest = _restore_provenance(
+            backup_id, source_kind, source_sha256
+        )
         identity = None if cluster_id is None else self._cluster_uuid(cluster_id)
         data_dir = None if data_directory is None else str(data_directory)
         if data_dir is not None and not data_dir.strip():
@@ -725,15 +753,35 @@ class _BackupMixin:
         with self._conn:
             self._conn.execute(
                 """INSERT INTO restores
-                   (db_host, db_port, database_name, backup_id, restored_at, cluster_id, data_directory)
-                   VALUES (?, ?, ?, ?, datetime('now'), ?, ?)""",
-                (host, db_port, database_name, backup_id, identity, data_dir),
+                   (db_host, db_port, database_name, backup_id, source_kind, source_sha256,
+                    restored_at, cluster_id, data_directory)
+                   VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)""",
+                (
+                    host,
+                    db_port,
+                    database_name,
+                    evidence_backup_id,
+                    kind,
+                    digest,
+                    identity,
+                    data_dir,
+                ),
             )
             self._conn.execute(
                 """INSERT INTO database_events
-                   (db_host, db_port, database_name, event_type, occurred_at, backup_id, cluster_id, data_directory)
-                   VALUES (?, ?, ?, 'restored', datetime('now'), ?, ?, ?)""",
-                (host, db_port, database_name, backup_id, identity, data_dir),
+                   (db_host, db_port, database_name, event_type, occurred_at, backup_id,
+                    source_kind, source_sha256, cluster_id, data_directory)
+                   VALUES (?, ?, ?, 'restored', datetime('now'), ?, ?, ?, ?, ?)""",
+                (
+                    host,
+                    db_port,
+                    database_name,
+                    evidence_backup_id,
+                    kind,
+                    digest,
+                    identity,
+                    data_dir,
+                ),
             )
 
     @_translate_sqlite_error
@@ -782,14 +830,16 @@ class _BackupMixin:
             )
             self._conn.execute(
                 "INSERT INTO restores "
-                "(db_host, db_port, database_name, backup_id, restored_at, cluster_id, data_directory) "
-                "VALUES (?, ?, ?, ?, datetime('now'), ?, ?)",
+                "(db_host, db_port, database_name, backup_id, source_kind, source_sha256, "
+                "restored_at, cluster_id, data_directory) "
+                "VALUES (?, ?, ?, ?, 'catalogue', NULL, datetime('now'), ?, ?)",
                 (host, db_port, target_database, backup_id, identity, data_dir),
             )
             self._conn.execute(
                 "INSERT INTO database_events "
-                "(db_host, db_port, database_name, event_type, occurred_at, backup_id, cluster_id, data_directory) "
-                "VALUES (?, ?, ?, 'restored', datetime('now'), ?, ?, ?)",
+                "(db_host, db_port, database_name, event_type, occurred_at, backup_id, "
+                "source_kind, source_sha256, cluster_id, data_directory) "
+                "VALUES (?, ?, ?, 'restored', datetime('now'), ?, 'catalogue', NULL, ?, ?)",
                 (host, db_port, target_database, backup_id, identity, data_dir),
             )
             self._conn.execute(
@@ -828,14 +878,16 @@ class _BackupMixin:
             )
             self._conn.execute(
                 "INSERT INTO restores "
-                "(db_host, db_port, database_name, backup_id, restored_at, cluster_id, data_directory) "
-                "VALUES (?, ?, ?, ?, datetime('now'), ?, ?)",
+                "(db_host, db_port, database_name, backup_id, source_kind, source_sha256, "
+                "restored_at, cluster_id, data_directory) "
+                "VALUES (?, ?, ?, ?, 'catalogue', NULL, datetime('now'), ?, ?)",
                 (host, db_port, target_database, backup_id, identity, data_dir),
             )
             self._conn.execute(
                 "INSERT INTO database_events "
-                "(db_host, db_port, database_name, event_type, occurred_at, backup_id, cluster_id, data_directory) "
-                "VALUES (?, ?, ?, 'restored', datetime('now'), ?, ?, ?)",
+                "(db_host, db_port, database_name, event_type, occurred_at, backup_id, "
+                "source_kind, source_sha256, cluster_id, data_directory) "
+                "VALUES (?, ?, ?, 'restored', datetime('now'), ?, 'catalogue', NULL, ?, ?)",
                 (host, db_port, target_database, backup_id, identity, data_dir),
             )
             self._conn.execute(
@@ -874,10 +926,13 @@ class _BackupMixin:
     ) -> Backup | None:
         host = normalize_db_host(db_host)
         row = self._conn.execute(
-            "SELECT b.*, r.restored_at FROM restores r INNER JOIN backups b ON b.id = r.backup_id WHERE r.db_host=? AND r.db_port=? AND r.database_name=? ORDER BY r.restored_at DESC LIMIT 1",
+            "SELECT b.*, r.backup_id AS restore_backup_id, r.restored_at "
+            "FROM restores r LEFT JOIN backups b ON b.id = r.backup_id "
+            "WHERE r.db_host=? AND r.db_port=? AND r.database_name=? "
+            "ORDER BY r.restored_at DESC, r.sequence DESC LIMIT 1",
             (host, db_port, database_name),
         ).fetchone()
-        if row is None:
+        if row is None or row["restore_backup_id"] is None:
             return None
         if row["state"] == BackupState.DELETED.value:
             return None
@@ -901,13 +956,13 @@ class _BackupMixin:
         """
         host = normalize_db_host(db_host)
         row = self._conn.execute(
-            "SELECT b.*, r.restored_at FROM restores r "
-            "INNER JOIN backups b ON b.id = r.backup_id "
+            "SELECT b.*, r.backup_id AS restore_backup_id, r.restored_at "
+            "FROM restores r LEFT JOIN backups b ON b.id = r.backup_id "
             "WHERE r.db_host=? AND r.db_port=? AND r.database_name=? "
             "ORDER BY r.restored_at DESC, r.sequence DESC LIMIT 1",
             (host, db_port, database_name),
         ).fetchone()
-        if row is None:
+        if row is None or row["restore_backup_id"] is None:
             return None
         return _row_to_backup(row, require_file=False)
 
@@ -916,7 +971,8 @@ class _BackupMixin:
         """Read exact restore identities for internal database projections."""
         host = normalize_db_host(db_host)
         return self._conn.execute(
-            "SELECT database_name, backup_id, cluster_id, data_directory, restored_at "
+            "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
+            "data_directory, restored_at "
             "FROM restores WHERE db_host=? AND db_port=? "
             "ORDER BY database_name ASC, restored_at DESC, sequence DESC",
             (host, db_port),
@@ -931,7 +987,8 @@ class _BackupMixin:
         return cast(
             "sqlite3.Row | None",
             self._conn.execute(
-                "SELECT database_name, backup_id, cluster_id, data_directory, restored_at "
+                "SELECT database_name, backup_id, source_kind, source_sha256, cluster_id, "
+                "data_directory, restored_at "
                 "FROM restores WHERE db_host=? AND db_port=? AND database_name=? "
                 "ORDER BY restored_at DESC, sequence DESC LIMIT 1",
                 (host, db_port, database_name),
