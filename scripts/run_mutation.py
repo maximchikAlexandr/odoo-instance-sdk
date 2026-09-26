@@ -38,7 +38,7 @@ def _commands(target: Target | None = None) -> tuple[tuple[str, Command], ...]:
         "mutmut",
         "run",
         "--max-children",
-        "32",
+        "4",
     )
     if target is not None:
         mutation_command += (target.filter,)

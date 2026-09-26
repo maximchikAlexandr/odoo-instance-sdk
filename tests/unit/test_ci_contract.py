@@ -197,7 +197,7 @@ def test_mutation_command_runs_full_configured_scope_after_smoke() -> None:
     runner = (_REPOSITORY_ROOT / "scripts" / "run_mutation.py").read_text(encoding="utf-8")
 
     assert "AUDIT_MUTANTS" not in runner
-    assert '"--max-children",\n        "32",' in runner
+    assert '"--max-children",\n        "4",' in runner
 
 
 def test_mutation_workflow_fails_closed_and_uploads_diagnostics() -> None:
