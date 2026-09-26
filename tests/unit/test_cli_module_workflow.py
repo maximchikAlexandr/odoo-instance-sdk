@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 
 from odoo_instance_sdk.cli import cli
 from odoo_instance_sdk.commands.context import ResolvedContext
@@ -204,12 +205,9 @@ def _update_context(tmp_path: Path, owner: str) -> tuple[ResolvedContext, OdooIn
     )
 
 
-@pytest.mark.parametrize("owner", ["project", "environment"])
-@pytest.mark.parametrize("mode", ["rich", "json", "toon"])
-@pytest.mark.parametrize("changed", [True, False], ids=["changed", "explicit"])
-def test_module_update_dry_run_preserves_selection_and_defers_update_plan(
-    owner: str, mode: str, changed: bool, tmp_path: Path
-) -> None:
+def _invoke_module_update_dry_run(
+    tmp_path: Path, *, owner: str, changed: bool, mode: str
+) -> tuple[Result, int]:
     context, _instance = _update_context(tmp_path, owner)
     selected = SimpleNamespace(
         base_source="explicit",
@@ -237,6 +235,7 @@ def test_module_update_dry_run_preserves_selection_and_defers_update_plan(
                     argv=("git", "status"),
                     display="git status",
                     executable="git",
+                    read_only=True,
                 ),
                 ProcessStep(
                     step_id="module.update",
@@ -248,6 +247,18 @@ def test_module_update_dry_run_preserves_selection_and_defers_update_plan(
             )
         ),
         run,
+        steps=(
+            PreparedStep(
+                step_id="module.probe",
+                argv=("git", "status"),
+                read_only=True,
+            ),
+            PreparedStep(
+                step_id="module.update",
+                argv=("odoo-bin", "--upgrade"),
+                mutating=True,
+            ),
+        ),
     )
     patches = [
         patch(
@@ -282,29 +293,102 @@ def test_module_update_dry_run_preserves_selection_and_defers_update_plan(
             args.append("sale")
         args.extend(["--dry-run", "--format", mode])
         result = CliRunner().invoke(cli, args)
+    return result, executed
+
+
+@pytest.mark.parametrize(
+    ("owner", "changed", "expected_head", "expected_changed_files"),
+    [
+        pytest.param(
+            "project",
+            True,
+            "captured-head",
+            ["addons/sale/models.py"],
+            id="project-changed",
+        ),
+        pytest.param("project", False, None, [], id="project-explicit"),
+        pytest.param(
+            "environment",
+            True,
+            "captured-head",
+            ["addons/sale/models.py"],
+            id="environment-changed",
+        ),
+        pytest.param("environment", False, None, [], id="environment-explicit"),
+    ],
+)
+def test_module_update_dry_run_preserves_selection(
+    owner: str,
+    changed: bool,
+    expected_head: str | None,
+    expected_changed_files: list[str] | None,
+    tmp_path: Path,
+) -> None:
+    result, executed = _invoke_module_update_dry_run(
+        tmp_path, owner=owner, changed=changed, mode="json"
+    )
 
     assert result.exit_code == 0, result.output
     assert executed == 0
-    if mode == "rich":
-        assert "git status" in result.output
-        assert "odoo-bin --upgrade" in result.output
-    else:
-        if mode == "json":
-            payload = json.loads(result.stdout)
-        else:
-            from toon import DecodeOptions, decode
+    payload = json.loads(result.stdout)
+    assert payload["result"]["modules"] == ["sale"]
+    assert payload["result"]["not_installed"] == ["stock"]
+    assert payload["result"].get("head") == expected_head
+    assert payload["result"].get("changed_files") == expected_changed_files
 
-            payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
-        assert payload["result"] == payload["data"]
-        assert payload["result"]["modules"] == ["sale"]
-        assert payload["result"]["not_installed"] == ["stock"]
-        if changed:
-            assert payload["result"]["head"] == "captured-head"
-            assert payload["result"]["changed_files"] == ["addons/sale/models.py"]
-        assert [step["step_id"] for step in payload["result"]["plan"]["steps"]] == [
-            "module.probe",
-            "module.update",
-        ]
+
+def _assert_module_update_json_output(result: Result) -> None:
+    payload = json.loads(result.stdout)
+    assert payload["result"] == payload["data"]
+    assert payload["result"]["modules"] == ["sale"]
+    assert payload["result"]["not_installed"] == ["stock"]
+    assert [step["step_id"] for step in payload["result"]["plan"]["steps"]] == [
+        "module.probe",
+        "module.update",
+    ]
+
+
+def _assert_module_update_toon_output(result: Result) -> None:
+    from toon import DecodeOptions, decode
+
+    payload = decode(result.stdout, DecodeOptions(indent=2, strict=True))
+    assert payload["result"] == payload["data"]
+    assert payload["result"]["modules"] == ["sale"]
+    assert payload["result"]["not_installed"] == ["stock"]
+    assert [step["step_id"] for step in payload["result"]["plan"]["steps"]] == [
+        "module.probe",
+        "module.update",
+    ]
+
+
+def test_module_update_dry_run_renders_rich_output(tmp_path: Path) -> None:
+    result, executed = _invoke_module_update_dry_run(
+        tmp_path, owner="project", changed=False, mode="rich"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert executed == 0
+    assert "git status" in result.output
+    assert "odoo-bin --upgrade" in result.output
+
+
+@pytest.mark.parametrize(
+    ("mode", "verify"),
+    [
+        pytest.param("json", _assert_module_update_json_output, id="json"),
+        pytest.param("toon", _assert_module_update_toon_output, id="toon"),
+    ],
+)
+def test_module_update_dry_run_serializes_structured_output(
+    mode: str, verify: Callable[[Result], None], tmp_path: Path
+) -> None:
+    result, executed = _invoke_module_update_dry_run(
+        tmp_path, owner="project", changed=False, mode=mode
+    )
+
+    assert result.exit_code == 0, result.output
+    assert executed == 0
+    verify(result)
 
 
 _NONCE = "deadbeefdeadbeef"

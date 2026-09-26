@@ -350,6 +350,12 @@ def test_detached_dry_run_does_not_spawn(env_id: str, http_port: int, tmp_path: 
 
     plan_argv = command.plan.process_steps[0].argv
     assert plan_argv[0] == sys.executable
+    assert {
+        "instance.detached.assert_port",
+        "instance.detached.spawn",
+        "instance.detached.confirm_alive",
+        "instance.detached.persist",
+    }.issubset({step.step_id for step in command.plan.steps})
     assert executor.spawned == []
     assert executor.executed == []
     assert fake.upsert_calls == []

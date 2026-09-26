@@ -203,6 +203,11 @@ class Command(msgspec.Struct, Generic[T], frozen=True, forbid_unknown_fields=Tru
 
     @classmethod
     def from_prepared(cls, plan: ExecutionPlan, prepared: PreparedCommand[T]) -> Command[T]:
+        prepared_steps = tuple(step.public_projection() for step in prepared.steps)
+        if plan.steps != prepared_steps:
+            raise PlanValidationError(
+                "public execution plan steps do not match prepared command steps"
+            )
         if not plan.fingerprint:
             plan = plan.with_fingerprint()
         command = cls(plan=plan)

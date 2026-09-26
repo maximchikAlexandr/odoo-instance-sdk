@@ -13,6 +13,7 @@ from click.testing import CliRunner
 
 from odoo_instance_sdk.execution import ActionStep, Command, ExecutionPlan, ProcessStep
 from odoo_instance_sdk.internal.proc import (
+    PreparedAction,
     PreparedProcess,
     PreparedStep,
     ProcessResultLike,
@@ -398,21 +399,33 @@ def test_exact_sha_dry_run_runs_preflight_and_shows_immutable_plan(
         executable="odcli",
         mutating=True,
     )
+    inspect = PreparedAction(
+        "update.inspect",
+        action="inspect",
+        description="Inspect installed OdCLI provenance",
+        read_only=True,
+    )
+    install_private = PreparedStep(
+        step_id=install.step_id,
+        argv=install.argv,
+        mutating=True,
+    )
+    migrate_private = PreparedStep(
+        step_id=migrate.step_id,
+        argv=migrate.argv,
+        mutating=True,
+    )
     plan = ExecutionPlan(
         steps=(
-            ActionStep(
-                step_id="update.inspect",
-                action="inspect",
-                description="Inspect installed OdCLI provenance",
-                read_only=True,
-            ),
-            install,
-            migrate,
+            inspect.public_projection(),
+            install_private.public_projection(),
+            migrate_private.public_projection(),
         )
     )
     candidate = Command.create(
         plan,
         lambda _context: UpdateResult(outcome="updated", target_sha=_SHA_B),
+        steps=(inspect, install_private, migrate_private),
     )
     preflight_calls: list[str] = []
 

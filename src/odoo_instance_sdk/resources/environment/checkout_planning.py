@@ -336,8 +336,7 @@ def _execution_plan(
     warnings: tuple[str, ...],
 ) -> ExecutionPlan:
     """Build the public process/action projection from one private snapshot."""
-    from odoo_instance_sdk.execution import ActionStep, ExecutionPlan, ExecutionStep
-    from odoo_instance_sdk.internal.proc import PreparedStep
+    from odoo_instance_sdk.execution import ExecutionPlan
     from odoo_instance_sdk.resources.environment.checkout_artifacts import _checkout_steps
 
     probe_argvs = (
@@ -363,42 +362,7 @@ def _execution_plan(
             )
         )
 
-    steps: list[ExecutionStep] = []
-    for step in _checkout_steps(plan):
-        if isinstance(step, PreparedStep):
-            steps.append(step.public_projection())
-        else:
-            action_details: JsonValue = None
-            action = step.step_id.removeprefix("checkout.")
-            description = "Execute checkout action"
-            if action == "catalog":
-                action = "record_environment"
-                description = "Record the environment in the catalog"
-                action_details = {"environment_id": str(plan.env_id)}
-            elif action == "generated_config":
-                action = "write_generated_config"
-                description = "Generate the checkout Odoo configuration"
-                action_details = {"path": str(plan.generated_config)}
-            elif action == "database":
-                action = "prepare_database"
-                description = "Prepare the selected checkout database"
-                action_details = {
-                    "mode": plan.db_mode.value,
-                    "database": plan.target_database or plan.source_database,
-                }
-            elif action == "cleanup":
-                action = "cleanup_on_failure"
-                description = "Remove owned checkout artifacts if execution fails"
-                action_details = {"root": str(plan.env_root)}
-            steps.append(
-                ActionStep(
-                    step_id=step.step_id,
-                    action=action,
-                    description=description,
-                    details=action_details,
-                    mutating=True,
-                )
-            )
+    steps = [step.public_projection() for step in _checkout_steps(plan)]
     execution = ExecutionPlan(
         steps=tuple(steps),
         observations=tuple(observations),

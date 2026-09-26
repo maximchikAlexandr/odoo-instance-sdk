@@ -3,6 +3,7 @@ from __future__ import annotations  # noqa: I001 -- keep checkout planning artif
 import configparser
 import contextlib
 import json
+import msgspec
 import os
 import shutil
 import sqlite3
@@ -63,7 +64,7 @@ from odoo_instance_sdk.storage.backup_catalog import normalize_db_host
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.client import OdooClient
-    from odoo_instance_sdk.execution import JsonValue
+    from odoo_instance_sdk.execution import ExecutionPlan, JsonValue
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
@@ -448,7 +449,13 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
             ),
             read_only=True,
         ),
-        PreparedAction("checkout.catalog"),
+        PreparedAction(
+            step_id="checkout.catalog",
+            action="record_environment",
+            description="Record the environment in the catalog",
+            details={"environment_id": str(plan.env_id)},
+            mutating=True,
+        ),
         PreparedStep(
             step_id="checkout.worktree",
             argv=plan.worktree_argv,
@@ -495,7 +502,15 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
             )
         )
     if plan.source_config is not None:
-        steps.append(PreparedAction("checkout.generated_config"))
+        steps.append(
+            PreparedAction(
+                step_id="checkout.generated_config",
+                action="write_generated_config",
+                description="Generate the checkout Odoo configuration",
+                details={"path": str(plan.generated_config)},
+                mutating=True,
+            )
+        )
     if plan.options.create_venv and plan.python_selector is not None:
         steps.append(
             PreparedStep(
@@ -602,7 +617,16 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
         )
     steps.extend(
         (
-            PreparedAction("checkout.database"),
+            PreparedAction(
+                step_id="checkout.database",
+                action="prepare_database",
+                description="Prepare the selected checkout database",
+                details={
+                    "mode": plan.db_mode.value,
+                    "database": plan.target_database or plan.source_database,
+                },
+                mutating=True,
+            ),
             PreparedStep(
                 step_id="checkout.cleanup.worktree",
                 argv=(
@@ -616,10 +640,27 @@ def _checkout_steps(plan: _CheckoutPlan) -> tuple[Step, ...]:
                 timeout=30.0,
                 mutating=True,
             ),
-            PreparedAction("checkout.cleanup"),
+            PreparedAction(
+                step_id="checkout.cleanup",
+                action="cleanup_on_failure",
+                description="Remove owned checkout artifacts if execution fails",
+                details={"root": str(plan.env_root)},
+                mutating=True,
+            ),
         )
     )
     return tuple(steps)
+
+
+def _checkout_execution_plan_with_private_steps(
+    execution_plan: ExecutionPlan, plan: _CheckoutPlan
+) -> ExecutionPlan:
+    """Refresh the public projection after adding the late branch guard."""
+    return msgspec.structs.replace(
+        execution_plan,
+        steps=tuple(step.public_projection() for step in _checkout_steps(plan)),
+        fingerprint="",
+    ).with_fingerprint(secrets=tuple(plan.config_values.values()))
 
 
 def _pgadmin_cluster_snapshot(selector: EnvironmentSelector) -> PostgresCluster | None:

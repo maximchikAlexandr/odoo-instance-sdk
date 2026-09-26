@@ -766,10 +766,8 @@ def bug_report_submit_command(
     """
 
     from odoo_instance_sdk.execution import (
-        ActionStep,
         Command,
         ExecutionPlan,
-        ProcessStep,
     )
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
@@ -793,7 +791,6 @@ def bug_report_submit_command(
     recheck_search_argv = _gh_recheck_search_argv(payload.repository, report_id)
     stored_issue_number = initial_metadata.get("issue_number")
     recheck_view_step: PreparedStep | None = None
-    recheck_view_process: ProcessStep | None = None
     if isinstance(stored_issue_number, int) and not initial_metadata.get("issue_url"):
         recheck_view_argv = _gh_recheck_view_argv(payload.repository, stored_issue_number)
         recheck_view_step = PreparedStep(
@@ -803,16 +800,6 @@ def bug_report_submit_command(
             read_only=True,
             mutating=False,
             text=True,
-        )
-        recheck_view_process = ProcessStep(
-            step_id=recheck_view_step.step_id,
-            argv=recheck_view_argv,
-            display=" ".join(recheck_view_argv),
-            executable=recheck_view_argv[0],
-            timeout=recheck_view_step.timeout,
-            mode="captured",
-            read_only=True,
-            mutating=False,
         )
 
     submit_intent_action = PreparedAction(
@@ -847,53 +834,6 @@ def bug_report_submit_command(
         text=True,
     )
 
-    plan_steps: list[ActionStep | ProcessStep] = [
-        ActionStep(
-            step_id=submit_intent_action.step_id,
-            action=submit_intent_action.action,
-            description=submit_intent_action.description,
-            mutating=True,
-        ),
-        ProcessStep(
-            step_id=recheck_before_step.step_id,
-            argv=recheck_search_argv,
-            display=" ".join(recheck_search_argv),
-            executable=recheck_search_argv[0],
-            timeout=recheck_before_step.timeout,
-            mode="captured",
-            read_only=True,
-            mutating=False,
-        ),
-    ]
-    if recheck_view_process is not None:
-        plan_steps.append(recheck_view_process)
-    plan_steps.extend(
-        (
-            ProcessStep(
-                step_id=gh_step.step_id,
-                argv=gh_argv,
-                display=" ".join(gh_argv),
-                executable=gh_argv[0],
-                input_preview="<redacted>",
-                timeout=gh_step.timeout,
-                mode="captured",
-                read_only=False,
-                mutating=True,
-            ),
-            ProcessStep(
-                step_id=recheck_after_step.step_id,
-                argv=recheck_search_argv,
-                display=" ".join(recheck_search_argv),
-                executable=recheck_search_argv[0],
-                timeout=recheck_after_step.timeout,
-                mode="captured",
-                read_only=True,
-                mutating=False,
-            ),
-        )
-    )
-    plan = ExecutionPlan(steps=tuple(plan_steps)).with_fingerprint()
-
     prepared_steps: list[PreparedAction | PreparedStep] = [
         submit_intent_action,
         recheck_before_step,
@@ -901,6 +841,9 @@ def bug_report_submit_command(
     if recheck_view_step is not None:
         prepared_steps.append(recheck_view_step)
     prepared_steps.extend((gh_step, recheck_after_step))
+    plan = ExecutionPlan(
+        steps=tuple(step.public_projection() for step in prepared_steps)
+    ).with_fingerprint()
 
     submission = _SubmissionExecutor(
         report_id=report_id,
