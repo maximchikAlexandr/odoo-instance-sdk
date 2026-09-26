@@ -12,13 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / ".artifacts" / "mutation" / "results.txt"
 Command = Sequence[str]
 Execute = Callable[..., subprocess.CompletedProcess[str]]
-AUDIT_MUTANTS = (
-    "odoo_instance_sdk.internal.redact.x__redact_replace__mutmut_1",
-    "odoo_instance_sdk.internal.sanitize.x_sanitize_event_message__mutmut_1",
-    "odoo_instance_sdk.internal.db_name.x_validate_filestore_containment__mutmut_1",
-    "odoo_instance_sdk.internal.urls.x_canonical_origin__mutmut_1",
-    "odoo_instance_sdk.internal.address.x__loopback_sockaddr__mutmut_1",
-)
 
 
 def _commands() -> tuple[tuple[str, Command], ...]:
@@ -29,7 +22,7 @@ def _commands() -> tuple[tuple[str, Command], ...]:
         ),
         (
             "mutmut run",
-            (sys.executable, "-m", "mutmut", "run", "--max-children", "8", *AUDIT_MUTANTS),
+            (sys.executable, "-m", "mutmut", "run", "--max-children", "32"),
         ),
         ("mutmut results", (sys.executable, "-m", "mutmut", "results", "--all=true")),
     )
