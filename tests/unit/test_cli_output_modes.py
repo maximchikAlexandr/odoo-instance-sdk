@@ -54,7 +54,12 @@ from odoo_instance_sdk.execution import (
 )
 from odoo_instance_sdk.internal.doctor import CheckResult, DoctorReport
 from odoo_instance_sdk.internal.pg.drop import DatabaseDropResult
-from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep, PrivateJsonValue
+from odoo_instance_sdk.internal.proc import (
+    PreparedAction,
+    PreparedStep,
+    PrivateJsonValue,
+    RecordingExecutor,
+)
 from odoo_instance_sdk.internal.resource_inventory import ResourceInventory
 from odoo_instance_sdk.models import (
     AdminPasswordResetResult,
@@ -1056,7 +1061,7 @@ def _command_result(returncode: int, payload: dict[str, Any]) -> CommandResult:
     )
 
 
-def _matrix_command(
+def _matrix_command(  # noqa: C901
     value: T,
     *,
     error: BaseException | None = None,
@@ -1066,8 +1071,6 @@ def _matrix_command(
     execution_calls: list[str] | None = None,
 ) -> Command[T]:
     if wrapper_nonce is not None:
-        from odoo_instance_sdk.internal.proc import RecordingExecutor
-
         step = PreparedStep(
             step_id="instance.shell_script",
             argv=("odoo",),
@@ -1126,17 +1129,28 @@ def _matrix_command(
             for step in public_plan.steps
         )
 
-    def simple_run(_context: object) -> T:
+    def consume_steps(context: object) -> None:
+        run_context = cast("Any", context)
+        for step in private_steps:
+            if isinstance(step, PreparedStep):
+                run_context.process(step.step_id)
+            else:
+                run_context.action(step.step_id)
+                run_context.complete_action(step.step_id)
+
+    def run_with_ledger(context: object) -> T:
         if error is not None:
             raise error
+        consume_steps(context)
         if execution_calls is not None:
             execution_calls.append("run")
         return value
 
     return Command.create(
         public_plan or ExecutionPlan(),
-        simple_run,
+        run_with_ledger,
         steps=private_steps,
+        executor=RecordingExecutor(),
         private_projection=private_projection,
     )
 
