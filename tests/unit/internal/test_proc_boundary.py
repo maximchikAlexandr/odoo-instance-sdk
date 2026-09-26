@@ -40,6 +40,8 @@ from odoo_instance_sdk.internal.proc.redaction import (
     redacted_projection,
 )
 
+pytestmark = pytest.mark.serial
+
 
 def _python(source: str) -> tuple[str, ...]:
     return (sys.executable, "-c", source)
@@ -180,6 +182,7 @@ def test_completed_actions_are_not_reclassified_when_a_later_action_fails() -> N
     ]
 
 
+@pytest.mark.serial
 def test_observed_output_arrives_before_captured_process_completion() -> None:
     ready = threading.Event()
     events: list[StepEvent] = []
@@ -1170,6 +1173,7 @@ def test_incremental_redaction_terminal_flush_never_releases_incomplete_secret(
     assert "<redacted>" in projected
 
 
+@pytest.mark.serial
 def test_captured_stdin_closes_cleanly_when_child_exits_before_consuming_it() -> None:
     result = run_captured(
         _python("import sys; sys.exit(0)"),
@@ -1181,6 +1185,7 @@ def test_captured_stdin_closes_cleanly_when_child_exits_before_consuming_it() ->
     assert result.stderr == ""
 
 
+@pytest.mark.serial
 @pytest.mark.parametrize("returncode", [0, 7])
 def test_child_can_close_stdin_before_exiting(returncode: int) -> None:
     result = run_captured(

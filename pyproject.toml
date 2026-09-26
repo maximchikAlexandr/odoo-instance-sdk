@@ -165,7 +165,7 @@ only_mutate = [
     "src/odoo_instance_sdk/internal/urls.py",
     "src/odoo_instance_sdk/internal/address.py",
 ]
-pytest_add_cli_args = ["-x", "-q", "-n", "2", "--dist", "loadscope"]
+pytest_add_cli_args = ["-x", "-q", "-m", "not real_odoo and not packaging and not serial"]
 pytest_add_cli_args_test_selection = [
     "tests/unit",
     "-m",
