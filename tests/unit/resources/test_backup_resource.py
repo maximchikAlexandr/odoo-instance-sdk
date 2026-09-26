@@ -107,7 +107,7 @@ def test_public_retention_rejects_invalid_and_unreadable_settings(
     with pytest.raises(ConfigError, match="positive integer"):
         client.backups.set_retention(retention_days=0)
     with pytest.raises(ConfigError, match="positive integer"):
-        client.backups.set_retention(retention_days=True)  # type: ignore[arg-type]
+        client.backups.set_retention(retention_days=True)
     with pytest.raises(ConfigError, match="boolean"):
         client.backups.set_retention(auto_prune=1)  # type: ignore[arg-type]
 
