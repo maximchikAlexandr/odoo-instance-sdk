@@ -25,3 +25,12 @@ The extension SHALL import only public SDK APIs and SHALL NOT copy subprocess/HT
 
 - **WHEN** the installed Multica SDK/CLI combination lacks the tested native checkout/context contract
 - **THEN** explicit integration use fails before mutation with the required compatibility information and core-only operations remain usable
+
+### Requirement: Reuse the existing bounded output contract
+
+The core SHALL document and support the narrow subset of its existing bounded output API consumed by the extension. The extension SHALL reuse it for equivalent Rich/JSON/TOON results without adding another facade module, serializer or rendering framework. Existing core-only behavior SHALL remain unchanged.
+
+#### Scenario: Output reuse from an installed wheel
+
+- **WHEN** the standalone extension emits its context or preparation result through the documented core output API outside the repository
+- **THEN** Rich/JSON/TOON express equivalent sanitized facts and machine stdout contains one document without private imports or copied serializers

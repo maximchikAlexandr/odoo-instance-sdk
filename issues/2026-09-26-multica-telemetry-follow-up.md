@@ -5,7 +5,7 @@ Defer the observability half of #70 into a separate `later` slice: Multica daemo
 ## Context and dependencies
 
 - Parent scope split: #70.
-- First deliver the focused checkout/adoption/binding primitive; consume its explicit environment/run identity instead of inventing another registry.
+- First deliver focused native checkout/adoption primitives. #70 returns context and the core environment UUID separately; the caller retains their association. This follow-up must define only the attribution it actually needs, not require a binding registry/history/CRUD from #70.
 - Reuse #67's existing process/inventory boundaries and coordinate PID attribution with #68.
 - Keep `odcli-multica` independently installed, using public core SDK and `multica-py` only.
 
@@ -13,7 +13,7 @@ Defer the observability half of #70 into a separate `later` slice: Multica daemo
 
 1. Contribute one `multica-daemon` shared process group to `odcli ps`: verified root PID, process identity/create time, observation time, lifecycle state and CPU/RSS or a typed unavailable reason. Root process only initially; never double-count Codex children.
 2. Add compact Multica issue/status/run-count context to `odcli env list`, separate from process metrics. Do not put token/task columns in `ps` or PID/CPU/RSS columns in `env list`.
-3. Resolve attribution from explicit environment/run binding first, then canonical exact path **and runtime host**; branch name alone is insufficient. Missing and ambiguous facts remain explicit.
+3. Resolve attribution from an explicitly supplied environment/run association first, then canonical exact path **and runtime host**; branch name alone is insufficient. Missing and ambiguous facts remain explicit. Prefer caller-provided results or current API facts; justify any persistent association separately rather than assuming #70 delivers a store.
 4. Show typed token/input/output/cache-read/cache-write counters with an explicit scope. Reverify the selected upstream release: current `multica-py` TaskRun already contains `usage`, so do not assume only issue totals exist or assert precise per-run attribution without supported populated data.
 5. When only issue totals are available, distinguish `issue_total` from `shared_issue`; deduplicate across environments and never divide totals proportionally or fabricate per-checkout costs.
 6. Use compact human units in Rich, exact integers and scope in JSON/TOON. Expose equivalent finite Python SDK telemetry/process results.
@@ -23,7 +23,7 @@ Defer the observability half of #70 into a separate `later` slice: Multica daemo
 ## Acceptance criteria
 
 - [ ] A running, stopped, missing or stale-PID daemon is represented honestly once; PID identity is checked before sampling.
-- [ ] Explicit binding and same-host exact-path attribution work; ambiguous and cross-host paths never silently match.
+- [ ] Explicit caller-provided associations and same-host exact-path attribution work; ambiguous and cross-host paths never silently match. No dependency on a #70 binding registry exists.
 - [ ] One/multiple environments sharing an issue do not duplicate aggregate usage; missing/per-run/issue-total scope fixtures are covered.
 - [ ] Rich/JSON/TOON agree semantically and machine counters retain precision.
 - [ ] `env list --watch` and `ps --watch` reuse core loops; unavailable Multica affects only its annotation/group.
@@ -37,4 +37,4 @@ Checkout/adoption implementation itself; task dispatch and status automation; bi
 
 ## Impact
 
-Operational convenience after the deterministic environment workflow is available. This issue must not gate the first checkout/binding delivery.
+Operational convenience after the deterministic environment workflow is available. This issue must not gate the first checkout/adoption delivery.

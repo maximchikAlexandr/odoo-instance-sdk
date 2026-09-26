@@ -64,7 +64,7 @@ Adoption SHALL capture a non-mutating immutable plan, revalidate volatile inputs
 #### Scenario: Existing environment has normal development edits
 
 - **WHEN** an already adopted environment contains subsequent code edits or commits on its recorded branch and the caller inspects it
-- **THEN** those changes are reported as Git context without re-adopting, resetting, or declaring its binding stale solely because the code changed
+- **THEN** those changes are reported as Git context without re-adopting, resetting, or treating normal edits as replaced checkout identity
 
 #### Scenario: Retry after ordinary development edits
 

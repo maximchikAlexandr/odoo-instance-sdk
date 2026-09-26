@@ -1,141 +1,103 @@
 ## Purpose
 
-Connect a Multica task's native checkout to a separately provisioned Odoo environment through small typed, inspectable and recoverable SDK and CLI operations.
+Provide verified task context and prepare an isolated Odoo environment on a native Multica checkout without duplicating task routing, configuration or persistent associations.
 
 ## ADDED Requirements
 
-### Requirement: Use native checkout through multica-py
+### Requirement: Reuse native checkout through the existing Multica SDK
 
-The integration SHALL depend on a compatible public typed `multica-py` native repository checkout operation. That operation SHALL preserve Multica's active-task authentication, cwd, branch, reuse and ownership semantics. It SHALL NOT be replaced by direct HTTP, private storage edits, human-table parsing or a copied Git implementation. A supported one-path stdout result SHALL be decoded strictly and validated before adoption. `--fresh` SHALL NOT be used by this workflow.
+The integration SHALL use the existing public bounded Multica SDK command API for native repository checkout. It SHALL preserve active-task credentials, cwd, explicit ref, timeout, cancellation and native code ownership. It SHALL decode the single-path stdout contract strictly and SHALL NOT parse human tables, use private HTTP/storage or copy a subprocess runner. Forced fresh checkout SHALL NOT be part of this flow.
 
-Checkout and Odoo preparation SHALL be separate explicit phases because the actual returned checkout path is an input to the Odoo command. Native checkout failure/timeout SHALL NOT imply that no checkout was created. No general-purpose third checkout command or weakening of core ticket allocation SHALL be introduced.
+Checkout and Odoo preparation SHALL remain separately captured phases. No general-purpose extension checkout command or core integrated checkout flag SHALL be added.
 
-#### Scenario: Native task checkout succeeds
+#### Scenario: Native checkout succeeds
 
-- **WHEN** the public Multica SDK checkout operation succeeds inside a valid active task
-- **THEN** its typed result identifies the actual checkout path, and the caller can pass that path into a separately captured Odoo preparation command without creating another worktree
+- **WHEN** a native checkout command succeeds in a valid active task
+- **THEN** its validated absolute Git checkout path is available for a separately captured Odoo preparation, without creating a second checkout
 
-#### Scenario: External worker lacks an active task context
+#### Scenario: Malformed output or unknown outcome
 
-- **WHEN** a worker attempts native checkout without the required task credential/context
-- **THEN** the operation fails clearly without fabricating task identity or switching to an unregistered local clone
+- **WHEN** output is empty, multiline, redacted or invalid, or the command times out or is interrupted
+- **THEN** Odoo preparation does not start automatically, diagnostics remain sanitized and the caller is not told that no checkout was created
 
-#### Scenario: Checkout output or outcome cannot be verified
+#### Scenario: Worker lacks active task credentials
 
-- **WHEN** checkout returns malformed path output, times out or is interrupted
-- **THEN** the caller receives a bounded sanitized failure/unknown outcome and Odoo preparation does not start automatically
+- **WHEN** a worker attempts native checkout without the required task context
+- **THEN** it fails explicitly instead of inventing a task or creating an unregistered clone
 
-### Requirement: Explicit project and task resolution
+### Requirement: Stateless verified task context
 
-The extension SHALL expose typed project-link and context operations with CLI equivalents `project link`, `project show` and `context`. A project link SHALL contain non-secret core-project and Multica origin/workspace/project identity, not a duplicate business passport. Context SHALL validate the exact issue/run membership and execution host through public Multica SDK operations. Repository selection SHALL be explicit when ambiguous and SHALL NOT depend on task text, name similarity, branch names or list order.
+The extension SHALL expose a finite read-only context SDK operation and CLI equivalent. Inputs SHALL identify the selected core project/repository, checkout path, expected Multica project, issue and run; existing scoped Multica configuration SHALL supply server/workspace credentials. It SHALL NOT persist a project-link file or infer identities from names, branches, task prose or list order.
 
-Preparation/binding SHALL require the exact existing checkout to belong to the verified current or durable task directory on the same host and to the linked repository. Missing evidence SHALL yield an actionable unsupported/unverified result. Context inspection SHALL NOT create a project/resource/issue, enqueue a run or claim access-control/anonymization enforcement.
+Context SHALL verify issue/project/workspace/run membership, owning local daemon runtime identity, repository identity and containment beneath the run's absolute current/durable directory. It SHALL return frozen facts and observation time. Existing typed issue/run operations and a narrow decoder of public daemon-status JSON SHALL provide the evidence, without requiring new upstream typed wrappers.
 
-Host evidence SHALL come through a public typed Multica daemon-status result including server origin and per-workspace runtime IDs matched to the selected run. The required additive `multica-py` model/decoder work SHALL precede integration; missing fields SHALL NOT be replaced with inferred identity from a PID, hostname or path string. A loopback endpoint alone SHALL NOT prove shared filesystem access for forwarded/container daemons.
+#### Scenario: Matching local run
 
-#### Scenario: Incorrect workspace or project
+- **WHEN** exact membership, server/workspace/runtime and local filesystem/path evidence match
+- **THEN** context returns the verified identifiers and checkout facts without mutation
 
-- **WHEN** issue membership does not match the explicit project link
-- **THEN** preparation/binding is rejected before environment or binding mutation
+#### Scenario: Wrong host or incomplete evidence
 
-#### Scenario: Same path text on another machine
+- **WHEN** host/project identity conflicts, daemon JSON lacks required fields, run pagination is incomplete or only a relative display path is available
+- **THEN** context fails with an actionable unavailable/unverified reason and preparation does not mutate anything
 
-- **WHEN** a run belongs to another runtime host even though its path string matches a local directory
-- **THEN** preparation/binding fails rather than treating the path string as ownership evidence
+#### Scenario: Forwarded endpoint
 
-#### Scenario: Selected run belongs to the local daemon
+- **WHEN** a daemon is reachable over loopback but shared local filesystem evidence is absent
+- **THEN** reachability and equal path strings alone do not authorize preparation
 
-- **WHEN** public daemon status proves the matching server/workspace/runtime and filesystem context, and the issue's selected run supplies its absolute task directory
-- **THEN** context can validate the exact repository checkout beneath that directory without a new host registry or direct daemon HTTP request
+### Requirement: Thin Odoo preparation
 
-#### Scenario: Relative-only path or incomplete run inventory
+The extension SHALL expose a preparation SDK operation, its inspectable command sibling and `env prepare`. It SHALL perform read-only context preflight then delegate to the exact captured public core adoption command using an explicit compatible base and one explicit COPY source. It SHALL return the existing core environment result, without starting Odoo or writing task associations.
 
-- **WHEN** the supported API provides insufficient path/host evidence or required pagination cannot be completed
-- **THEN** context reports unverified/incomplete and no local path is guessed from a display label
+The caller SHALL be able to retain the separate context result and environment UUID. No project-link CRUD, binding registry/history, binding locks, bind/unbind or extension status service SHALL be required. Core lifecycle operations SHALL remain usable without Multica.
 
-#### Scenario: Link changes after planning
+#### Scenario: Exact retained backup
 
-- **WHEN** project-link bytes change between a planned update and execution
-- **THEN** the captured update fails stale and preserves unrelated settings
+- **WHEN** a verified checkout is prepared from an exact compatible retained backup UUID
+- **THEN** core COPY/provenance checks are reused and an environment UUID is returned without another remote backup request, implicit binding or startup
 
-### Requirement: Preparation is a thin COPY adoption boundary
+#### Scenario: Named source
 
-`env prepare` and its public SDK command SHALL validate explicit Multica context and delegate to the captured public core adoption command. They SHALL accept the actual checkout path, explicit core project/base and exactly one supported COPY source. They SHALL NOT create another code checkout, bind implicitly, launch Odoo, reset code, alter project resources or start an agent. Missing predecessor capabilities SHALL fail before mutation with a compatibility diagnostic.
+- **WHEN** the caller selects the named staging source
+- **THEN** only that configured source/credential and explicit compatible base are used, without default-source substitution
 
-#### Scenario: Prepare from an exact retained backup
+#### Scenario: Lost successful preparation response
 
-- **WHEN** a verified checkout is prepared from a compatible exact retained backup UUID
-- **THEN** the core catalog/source checks, restore isolation and recovery contracts are reused and the environment UUID is returned without a remote backup request or automatic bind/start
+- **WHEN** identical captured preparation inputs are retried against a ready matching environment
+- **THEN** the existing UUID is returned without repeating checkout, download, restore or dependency mutation
 
-#### Scenario: Prepare from a named source
+#### Scenario: Preparation fails after native checkout
 
-- **WHEN** the caller explicitly selects the named staging source
-- **THEN** only that configured source/credential and compatible base are passed to core COPY; no other source or default database is substituted
+- **WHEN** Odoo preparation fails
+- **THEN** native code is preserved and core recovery identities are retained; no distributed rollback or task rerun is claimed
 
-#### Scenario: Core preparation succeeds but next phase fails
+### Requirement: Preserve existing execution and output contracts
 
-- **WHEN** preparation returned an environment UUID but a later binding request fails
-- **THEN** the environment is retained and the recommended recovery retries binding by that UUID, not checkout or restore
+Public operations SHALL expose inspectable captured commands with delegating convenience methods. Preparation preflight MAY perform bounded observational reads, but preview SHALL NOT create a checkout, restore a database or write files. Core revalidation SHALL protect local mutable inputs before execution. Remote task lifetime SHALL NOT be misrepresented as locked by a preview.
 
-### Requirement: Local binding is explicit and non-destructive
+Machine stdout SHALL contain one bounded sanitized JSON/TOON document; Rich SHALL express equivalent facts. Secrets SHALL NOT enter public plans, fingerprints, results or diagnostics. The extension SHALL use existing supported SDK transport and output boundaries rather than a parallel execution/renderer framework.
 
-The extension SHALL expose `env bind`, `env status`, and `env unbind` plus matching SDK operations and command siblings. Binding SHALL associate exact core project/environment IDs with Multica origin/workspace/project/issue/run/runtime IDs and checkout identity. It SHALL be owner-only ignored local metadata associated with the configured project, not a remote task-routing instruction or second environment catalog. It SHALL NOT be written into or uploaded from the daemon's checkout.
+#### Scenario: Inspect preparation
 
-Rebinding the same association SHALL be a no-op; a verified subsequent run for the same issue and checkout SHALL be addable without duplicating the environment. Different project/issue associations SHALL conflict rather than be replaced silently. Concurrent binds SHALL use atomic persistence and a per-environment lock. One issue SHALL be allowed to reference multiple independently identified environments; branch name SHALL never be the key.
-
-Unbind SHALL remove only extension binding metadata after identity revalidation. It SHALL NOT delete or stop the environment, code, database, backup, Multica task or project resource. None of these operations SHALL mutate Multica task status, assignment, project directory, execution mode or daemon lifecycle.
-
-#### Scenario: Repeated binding
-
-- **WHEN** two identical binding calls target the same environment and run
-- **THEN** one association exists and the second result reports no change
-
-#### Scenario: Another issue claims an existing binding
-
-- **WHEN** bind is asked to replace a different issue association
-- **THEN** it fails with a conflict and preserves the existing binding
-
-#### Scenario: Unbind while Multica is unavailable
-
-- **WHEN** the user requests removal of a known local binding while the Multica service cannot be reached
-- **THEN** unbind can remove only that proven local metadata without contacting or deleting any remote resource
-
-#### Scenario: Core removal races with binding
-
-- **WHEN** the environment is removed while a binding is being persisted
-- **THEN** the extension reports stale association on revalidation, never recreates the environment/artifact root and permits removal of only its own metadata
-
-### Requirement: Status and failure results preserve useful evidence
-
-Status SHALL return frozen bounded facts with observation time, binding state (`bound`, `unbound`, `stale`, `conflict`, `unavailable`), reason, environment identity and issue/run identity when known. Provisioning readiness and runtime/HTTP readiness SHALL remain separate. Missing/replaced checkout, wrong host and unavailable service SHALL NOT erase retained environment evidence or trigger repair.
-
-Every finite mutation SHALL expose a non-mutating immutable preview and execute the same captured effects. JSON/TOON SHALL contain one final document with no progress/credential noise; Rich SHALL express the same facts. Failures SHALL retain completed-phase identities, sanitized reason and an existing next action; interruption SHALL preserve cancellation semantics and not restart the task or whole workflow.
-
-#### Scenario: Stale external checkout
-
-- **WHEN** Multica has garbage-collected the code directory
-- **THEN** status identifies stale code and the retained environment UUID, and points to explicit core cleanup rather than recreating or deleting other resources
+- **WHEN** preparation is previewed
+- **THEN** observational context checks and the sanitized captured core plan are available without any mutating effect
 
 #### Scenario: Provisioned but stopped
 
-- **WHEN** adoption is ready but Odoo has not been started
-- **THEN** status does not claim service/HTTP readiness
+- **WHEN** preparation succeeds without an explicit runtime start
+- **THEN** the result does not claim HTTP readiness
 
-#### Scenario: Inspect any mutating command
+### Requirement: Caller owns orchestration and lifetime
 
-- **WHEN** project link, preparation, bind or unbind is previewed
-- **THEN** the sanitized captured plan is available and no mutating child, filesystem write, database restore or remote mutation occurs
+The package SHALL provide finite operations only. Native checkout lifetime SHALL remain owned by Multica; scripts/skills/workers SHALL own phase-result persistence and scheduling. No remote task/project-resource mutation, telemetry store, lease, cleanup daemon, role policy or workflow engine SHALL be supplied by this change.
 
-#### Scenario: Sensitive input or diagnostic
+#### Scenario: Multica removes its code checkout
 
-- **WHEN** any prerequisite command encounters task tokens or source passwords
-- **THEN** no token/password reaches public plans, fingerprints, binding files, exception text or machine output
+- **WHEN** the code owner removes a checkout after preparation
+- **THEN** existing core diagnostics identify missing code and owned-only cleanup remains possible by environment UUID without contacting Multica
 
-### Requirement: Caller retains orchestration and lifetime responsibility
+#### Scenario: Caller persists workflow results
 
-The package SHALL provide finite operations without a scheduler, background watcher, task launcher, report workflow or cleanup daemon. It SHALL document that native code lifetime remains controlled by Multica, that local locking cannot prevent external GC, and that no persistent checkout lease is supplied. Existing core start/readiness/stop/remove operations SHALL remain separate caller-controlled steps.
-
-#### Scenario: Caller implements a Temporal activity
-
-- **WHEN** a worker composes the public primitives
-- **THEN** it can save exact phase results and retry only an incomplete phase without depending on an extension-owned workflow engine
+- **WHEN** a script or activity saves the context result and environment UUID
+- **THEN** it can inspect/start/stop/remove the environment through core without an extension registry or a repeated native checkout

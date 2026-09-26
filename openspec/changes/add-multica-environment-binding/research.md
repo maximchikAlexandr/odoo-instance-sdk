@@ -12,7 +12,7 @@ Source inspection, not a live Multica/Odoo execution test. No application worksp
 | Multica source tag | `v0.5.2` / `02d3e7cb81ff75c351b47cb1738317a07711b68f` | Task-bound native checkout and project/daemon-wide local-directory constraint. |
 | Multica selected source baseline | `v0.5.3` / `ff8b285497809e084915016c40c2bc5e5991ffbc` | Checkout and local-directory source contracts checked against the installed-version tag. |
 | Multica main, supplemental check | `12f8f3f31111564e5e1b9aac3f7f916e8bba4039` | Same relevant ownership constraints; not the release compatibility promise. |
-| multica-py current main | `d1b5f0e154c5587eca4cebd8bd2a6d39ae3d4d06` | Contract fixture targets Multica `v0.5.3`. Repositories expose list/add/remove, not checkout. Issue/run/metadata and scoped command APIs exist. |
+| multica-py current main | `d1b5f0e154c5587eca4cebd8bd2a6d39ae3d4d06` | Rechecked remote main during Ponytail review. Typed repositories lack checkout, but existing public bounded `cli.command_command` covers native checkout and daemon JSON. No upstream implementation prerequisite. |
 
 Live issue state was MYL-271 `in_progress` and MYL-272 `backlog`. Do not infer shipping from their issue descriptions or the user's expectation that they are complete. Do not copy their implementation tasks into this change. Verify merged API signatures at implementation start.
 
@@ -44,18 +44,22 @@ This is valid for a deliberately shared project working directory, not one indep
 - `execution.py` and `command-execution` spec require all later process argv before mutation and explicitly permit a real domain phase boundary for result-dependent commands. Do not hide checkout → adoption behind a dynamic callback or continuation framework.
 - Existing public environment runtime, diagnostics, stop/remove and backup APIs are the post-provisioning surface. Do not create an extension runtime manager.
 
-## multica-py prerequisite
+## Existing multica-py API is sufficient
 
-[`RepositoryResource`](https://github.com/maximchikAlexandr/multica-py/blob/d1b5f0e154c5587eca4cebd8bd2a6d39ae3d4d06/src/multica_py/resources/repositories.py) needs an additive typed `checkout_command(url, ref, options)` and convenience operation in that repository. It must use its existing command/transport, cwd/environment snapshot, timeout, redaction and compatibility contracts. Return an absolute checkout path; do not invent unavailable created/reused/branch facts. Prohibit `fresh` in this workflow. Tests should pin single-path stdout separately from stderr and distinguish timeout/unknown outcome from proved absence.
+The earlier plan mistook missing convenience wrappers for missing capability. [`CliResource`](https://github.com/maximchikAlexandr/multica-py/blob/d1b5f0e154c5587eca4cebd8bd2a6d39ae3d4d06/src/multica_py/resources/cli.py#L146) already exposes public `command_command(*argv, options) -> Command[CliResult]`. It uses the standard captured transport and returns frozen redacted stdout/stderr/duration. Its execution-mode guard rejects managed/interactive operations, but neither `repo checkout` nor `daemon status`. A local construction-only check against this revision successfully built both command objects; no native checkout or daemon operation was executed.
+
+Use `client.cli.command_command("repo", "checkout", url, "--ref", ref, options=...)`. A small integration decoder validates exactly one absolute path in successful stdout, never stderr/human-table parsing; reject redacted/malformed output. Do not invent created/reused/branch facts. Timeout is an unknown outcome. No `fresh`, new SDK repository method, copied runner or direct HTTP is necessary.
 
 `TaskRun` already exposes issue/project/workspace/runtime identity and optional work-directory/branch facts. Missing absolute paths or runtime identity are **unverified**, not a license to reconstruct a host path from a display label. Match repository subdirectories to a verified task root, not by branch name alone. If necessary run/host evidence is absent in the supported API, return an explicit unsupported result before provisioning.
 
-There is one additional concrete public-model gap: current `multica-py` `DaemonStatus` exposes only running/PID/uptime. Multica v0.5.3 [`runDaemonStatus`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/cmd/multica/cmd_daemon.go) emits the [`HealthResponse`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/internal/daemon/health.go) JSON with daemon ID, server URL, OS, lifecycle status and workspace runtime-ID lists. Extend the existing SDK result/decoder to preserve these few identity facts. Then match `TaskRun.runtime_id` to the selected workspace's runtime IDs from `daemon.status_command`; use `issues.get_command` and `issues.runs_command` for membership/path evidence. This identity check is needed now; CPU/RSS sampling and usage telemetry still belong to the deferred issue. This is source evidence, not proof of a live same-host run or a forwarded filesystem.
+Current typed `DaemonStatus` exposes only running/PID/uptime, but that is not a blocker either. Multica v0.5.3 [`runDaemonStatus`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/cmd/multica/cmd_daemon.go) emits [`HealthResponse`](https://github.com/multica-ai/multica/blob/ff8b285497809e084915016c40c2bc5e5991ffbc/server/internal/daemon/health.go) JSON containing daemon ID, server URL, OS, lifecycle state and workspace/runtime IDs. Invoke it through public `client.cli.command_command("daemon", "status", "--output", "json")` and narrowly decode the identity subset; match `TaskRun.runtime_id` in the selected workspace. Reuse typed `issues.get_command`/`issues.runs_command` for membership/path evidence. CPU/RSS and usage remain deferred. If upstream later supplies suitable typed wrappers, replace these two small adapters; do not make another repository's release a requirement now.
+
+This is source and command-construction evidence, not a live native checkout/Odoo acceptance test. Runtime permissions, same-host/filesystem checks, malformed/redacted bytes and compatibility remain explicit test gates.
 
 ## Requirements from the DOCX allocated elsewhere
 
 - Approved code/dump selection and access roles: deployment/operator policy and the calling skill, with exact selections passed into primitives.
-- Full project passport: existing core configuration plus a minimal Multica-project link; no second version of module inventory, responsible people or scenario catalog.
-- Docker topology, domains/proxy, anonymization and restrictive credentials: infrastructure/workflow, not inferred from binding.
+- Full project passport: existing core configuration and explicit Multica context inputs; no second project-link file, module inventory, responsible-people registry or scenario catalog.
+- Docker topology, domains/proxy, anonymization and restrictive credentials: infrastructure/workflow, not inferred from context validation.
 - Analysis, transfer cards, testing strategy, MR assignment and reports: skills/scripts/Temporal activities consuming these APIs.
 - One user-facing scenario: caller composes finite commands and retains their results; the libraries do not become that scenario's scheduler.
