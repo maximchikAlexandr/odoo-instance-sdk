@@ -9,9 +9,22 @@ permissions:
   contents: read
 
 jobs:
-  mutation:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: targets
+        run: echo "matrix=$(python scripts/mutation_report.py matrix)" >> "$GITHUB_OUTPUT"
+
+  mutation:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -19,10 +32,38 @@ jobs:
           python-version: "3.12"
       - run: uv sync --frozen --group mutation --group test
       - run: make mutation
+        env:
+          MUTATION_TARGET: ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mutation-results
+          name: mutation-results-${{ matrix.shard }}
           path: .artifacts/mutation/results.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  aggregate:
+    if: always()
+    needs:
+      - prepare
+      - mutation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-results-*
+          path: .artifacts/mutation/reports
+      - name: Validate aggregate mutation report
+        run: >-
+          python scripts/mutation_report.py aggregate
+          --reports-dir .artifacts/mutation/reports
+          --summary .artifacts/mutation/summary.txt
+          --baseline .github/mutation-baseline.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-summary
+          path: .artifacts/mutation/summary.txt
           if-no-files-found: error
           retention-days: 14

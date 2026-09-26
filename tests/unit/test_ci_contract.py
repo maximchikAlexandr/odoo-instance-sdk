@@ -197,7 +197,7 @@ def test_mutation_command_runs_full_configured_scope_after_smoke() -> None:
     runner = (_REPOSITORY_ROOT / "scripts" / "run_mutation.py").read_text(encoding="utf-8")
 
     assert "AUDIT_MUTANTS" not in runner
-    assert '(sys.executable, "-m", "mutmut", "run", "--max-children", "32"),' in runner
+    assert '"--max-children",\n        "32",' in runner
 
 
 def test_mutation_workflow_fails_closed_and_uploads_diagnostics() -> None:
@@ -205,9 +205,19 @@ def test_mutation_workflow_fails_closed_and_uploads_diagnostics() -> None:
 
     assert "schedule:" in workflow
     assert "workflow_dispatch:" in workflow
+    assert "prepare:" in workflow
+    assert "fromJSON(needs.prepare.outputs.matrix)" in workflow
+    assert "fail-fast: false" in workflow
+    assert "timeout-minutes: 45" in workflow
     assert "make mutation" in workflow
+    assert "MUTATION_TARGET" in workflow
+    assert "matrix.target" in workflow
+    assert "matrix.shard" in workflow
     assert "continue-on-error" not in workflow
-    assert "if: always()" in workflow
-    assert "name: mutation-results" in workflow
+    assert workflow.count("if: always()") >= 3
+    assert "name: mutation-results-${{ matrix.shard }}" in workflow
     assert "path: .artifacts/mutation/results.txt" in workflow
     assert "if-no-files-found: error" in workflow
+    assert "download-artifact@v4" in workflow
+    assert "mutation_report.py aggregate" in workflow
+    assert "name: mutation-summary" in workflow

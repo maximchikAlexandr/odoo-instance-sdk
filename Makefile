@@ -39,7 +39,7 @@ targeted:
 coverage: test
 
 mutation:
-	NO_COLOR=1 uv run python scripts/run_mutation.py
+	NO_COLOR=1 MUTATION_TARGET="$(MUTATION_TARGET)" uv run python scripts/run_mutation.py
 
 package:
 	rm -rf dist
