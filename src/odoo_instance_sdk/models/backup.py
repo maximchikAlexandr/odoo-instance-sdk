@@ -125,6 +125,7 @@ class Backup(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     downloaded_at: datetime
     source_git_branch: str | None = None
     source_name: str | None = None
+    pinned: bool = False
 
 
 class LocalArchiveRestoreSource(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -274,6 +275,31 @@ class BackupDeletionResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tr
     deleted_at: datetime
 
 
+class BackupPinResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """The resulting pin state for one exact catalogue UUID."""
+
+    backup_id: uuid.UUID
+    pinned: bool
+    changed: bool
+
+
+class BackupPruneSkip(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """One backup excluded from a captured prune plan or execution."""
+
+    backup_id: uuid.UUID
+    reason: str
+    size_bytes: int = 0
+
+
+class BackupPruneCandidate(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """The immutable file identity captured before prune execution."""
+
+    backup_id: uuid.UUID
+    path: str
+    file_identity: tuple[int, int]
+    size_bytes: int
+
+
 class BackupRestoreLink(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
     """One recorded restore binding for a retained backup."""
 
@@ -307,6 +333,7 @@ class BackupInspectResult(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
     downloaded_at: datetime
     source_git_branch: str | None
     source_name: str | None = None
+    pinned: bool = False
     state: BackupState
     catalogue_time: datetime
     file_present: bool
@@ -340,6 +367,49 @@ class BackupRetentionUpdateResult(
 
     policy: BackupRetentionPolicy
     changed: bool = False
+
+
+class BackupPrunePlan(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """A project-scoped retention decision captured before any deletion."""
+
+    project_id: str
+    policy: BackupRetentionPolicy
+    policy_fingerprint: str
+    cutoff: datetime
+    candidates: tuple[BackupPruneCandidate, ...] = ()
+    protected: tuple[BackupPruneSkip, ...] = ()
+    skipped: tuple[BackupPruneSkip, ...] = ()
+
+    @property
+    def candidate_bytes(self) -> int:
+        return sum(item.size_bytes for item in self.candidates)
+
+    @property
+    def protected_ids(self) -> tuple[uuid.UUID, ...]:
+        return tuple(item.backup_id for item in self.protected)
+
+    @property
+    def skipped_ids(self) -> tuple[uuid.UUID, ...]:
+        return tuple(item.backup_id for item in self.skipped)
+
+
+class BackupPruneResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):
+    """Truthful outcome of one captured prune execution."""
+
+    plan: BackupPrunePlan
+    deleted_ids: tuple[uuid.UUID, ...] = ()
+    skipped_ids: tuple[uuid.UUID, ...] = ()
+    failed_ids: tuple[uuid.UUID, ...] = ()
+    removed_bytes: int = 0
+    skipped: tuple[BackupPruneSkip, ...] = ()
+    failures: tuple[BackupPruneSkip, ...] = ()
+    dry_run: bool = False
+    policy_changed: bool = False
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def actual_removed_bytes(self) -> int:
+        return self.removed_bytes
 
 
 class CopyReplacementResult(msgspec.Struct, frozen=True, forbid_unknown_fields=True, kw_only=True):

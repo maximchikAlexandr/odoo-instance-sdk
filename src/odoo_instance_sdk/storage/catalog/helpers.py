@@ -143,6 +143,7 @@ def _row_to_backup(row: sqlite3.Row, *, require_file: bool = True) -> Backup | N
         downloaded_at=datetime.fromisoformat(downloaded_at),
         source_git_branch=row["source_git_branch"],
         source_name=row["source_name"],
+        pinned=bool(row["pinned"]),
     )
 
 

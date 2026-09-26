@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -16,6 +16,7 @@ from odoo_instance_sdk.exceptions import (
     BackupNotFoundError,
 )
 from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.internal.urls import normalize_base_url
 from odoo_instance_sdk.models import (
     Backup,
     BackupEvent,
@@ -215,6 +216,123 @@ class _BackupMixin:
         )
         self._add_event(backup_id, "deleted")
         self._conn.commit()
+
+    @_translate_sqlite_error
+    def set_pinned(self, backup_id: str, pinned: bool) -> bool:
+        """Set one UUID's pin state and audit only actual state transitions."""
+        if type(pinned) is not bool:
+            raise TypeError("pinned must be a boolean")
+        canonical_id = self._canonical_backup_id(backup_id)
+        row = self._conn.execute(
+            "SELECT pinned FROM backups WHERE id = ?", (canonical_id,)
+        ).fetchone()
+        if row is None:
+            raise BackupNotFoundError(f"Backup {canonical_id} not found in catalog")
+        changed = bool(row["pinned"]) != pinned
+        if not changed:
+            return False
+        with self._conn:
+            self._conn.execute(
+                "UPDATE backups SET pinned = ? WHERE id = ?",
+                (int(pinned), canonical_id),
+            )
+            self._add_event(
+                canonical_id,
+                BackupEventType.PIN_SET.value,
+                message=f"pinned={str(pinned).lower()}",
+            )
+        return True
+
+    @_translate_sqlite_error
+    def retention_rows(self, project_id: str) -> list[sqlite3.Row]:
+        """Return all project rows for one immutable retention snapshot."""
+        self._backfill_deterministic_backup_ownership()
+        return self._conn.execute(
+            "SELECT * FROM backups WHERE project_id = ? "
+            "ORDER BY COALESCE(downloaded_at, started_at) DESC, id ASC",
+            (project_id,),
+        ).fetchall()
+
+    @staticmethod
+    def _retention_group(row: sqlite3.Row) -> tuple[str, ...] | None:
+        source_name = row["source_name"]
+        if source_name is not None:
+            if not isinstance(source_name, str) or not source_name.strip():
+                return None
+            return ("named", source_name)
+        try:
+            source = normalize_base_url(str(row["source_base_url"]))
+        except Exception:
+            return None
+        database = row["database_name"]
+        if not isinstance(database, str) or not database.strip():
+            return None
+        return ("legacy", source, database)
+
+    @staticmethod
+    def _retention_timestamp(row: sqlite3.Row) -> datetime | None:
+        raw = row["downloaded_at"] or row["started_at"]
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    @_translate_sqlite_error
+    def deletion_protection_reason(  # noqa: C901 -- protections are checked in contract order
+        self, backup_id: str
+    ) -> str | None:
+        """Return the first durable protection preventing exact deletion."""
+        canonical_id = self._canonical_backup_id(backup_id)
+        row = self._conn.execute("SELECT * FROM backups WHERE id = ?", (canonical_id,)).fetchone()
+        if row is None:
+            raise BackupNotFoundError(f"Backup {canonical_id} not found in catalog")
+        if bool(row["pinned"]):
+            return "pinned"
+        if (
+            self._conn.execute(
+                "SELECT 1 FROM environments WHERE backup_id = ? AND state <> 'removed' LIMIT 1",
+                (canonical_id,),
+            ).fetchone()
+            is not None
+        ):
+            return "referenced by a non-removed environment"
+        if (
+            self._conn.execute(
+                "SELECT 1 FROM environment_copy_journal "
+                "WHERE backup_id = ? AND stage <> 'backup_deleted' LIMIT 1",
+                (canonical_id,),
+            ).fetchone()
+            is not None
+        ):
+            return "referenced by unresolved recovery"
+        if row["project_id"] is None:
+            return "unknown or unowned ownership"
+        timestamp = self._retention_timestamp(row)
+        group = self._retention_group(row)
+        if timestamp is None:
+            return "unknown catalogue timestamp"
+        if group is None:
+            return "unknown historical source group"
+        rows = self._conn.execute(
+            "SELECT * FROM backups WHERE project_id = ? AND state = 'available'",
+            (row["project_id"],),
+        ).fetchall()
+        same_group: list[tuple[sqlite3.Row, datetime]] = []
+        for candidate in rows:
+            if self._retention_group(candidate) != group:
+                continue
+            candidate_time = self._retention_timestamp(candidate)
+            if candidate_time is not None:
+                same_group.append((candidate, candidate_time))
+        if not same_group:
+            return "unknown historical source group"
+        newest, _ = min(same_group, key=lambda item: (-item[1].timestamp(), str(item[0]["id"])))
+        if str(newest["id"]) == canonical_id:
+            return "newest available backup in historical source group"
+        return None
 
     @_translate_sqlite_error
     def get_by_id(self, backup_id: str) -> sqlite3.Row | None:
