@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     import click
@@ -159,15 +159,23 @@ def _print_ps_human(inventory: ProcessInventory) -> None:
 
 
 def _render_ps_rich(inventory: ProcessInventory, *, width: int = 300) -> Group:
-    sections: list[Text | Table] = []
-    sections.append(Text("Process inventory", style="bold cyan"))
+    sections: list[_ProcessSection] = []
     for shared in inventory.shared:
-        sections.extend(_shared_section(shared))
+        sections.append(_shared_section(shared))
     if inventory.main_checkout is not None:
-        sections.extend(_checkout_section(inventory.main_checkout, title="Main checkout"))
+        sections.append(_checkout_section(inventory.main_checkout, title="Main checkout"))
     for environment in inventory.environments:
-        sections.extend(_checkout_section(environment, title=f"Environment {environment.name}"))
-    return Group(*sections)
+        sections.append(_checkout_section(environment, title=f"Environment {environment.name}"))
+
+    rows = tuple(row for section in sections for row in section.rows)
+    column_widths = _process_column_widths(rows, width=width)
+    renderables: list[Text | Table] = [Text("Process inventory", style="bold cyan")]
+    for section in sections:
+        renderables.append(Text(section.title, style=section.title_style))
+        renderables.append(_process_table(section.rows, widths=column_widths))
+        if section.storage is not None:
+            renderables.append(Text(section.storage, style="dim"))
+    return Group(*renderables)
 
 
 _PROCESS_COLUMNS = (
@@ -179,10 +187,68 @@ _PROCESS_COLUMNS = (
     "Memory",
     "Details",
 )
+_PROCESS_TABLE_CHROME_WIDTH = 14
+_PROCESS_TYPE_MIN_WIDTH = 7
+_PROCESS_DETAILS_MIN_WIDTH = 13
 
 
-def _process_table(rows: list[tuple[str, ...]]) -> Table:
+class _ProcessSection(NamedTuple):
+    title: str
+    title_style: str
+    rows: tuple[tuple[str, ...], ...]
+    storage: str | None
+
+
+def _process_column_widths(rows: tuple[tuple[str, ...], ...], *, width: int) -> tuple[int, ...]:
+    if width <= 0:
+        raise ValueError("process table width must be positive")
+
+    natural = tuple(
+        max(
+            [
+                _display_cell_width(_PROCESS_COLUMNS[index]),
+                *(_display_cell_width(row[index]) for row in rows),
+            ],
+        )
+        for index in range(len(_PROCESS_COLUMNS))
+    )
+    available = max(len(_PROCESS_COLUMNS), width - _PROCESS_TABLE_CHROME_WIDTH)
+    header_widths = tuple(_display_cell_width(header) for header in _PROCESS_COLUMNS)
+    if available >= sum(header_widths):
+        minimums = (
+            min(natural[0], max(header_widths[0], _PROCESS_TYPE_MIN_WIDTH)),
+            *header_widths[1:-1],
+            min(natural[-1], max(header_widths[-1], _PROCESS_DETAILS_MIN_WIDTH)),
+        )
+    else:
+        minimums = (1,) * len(_PROCESS_COLUMNS)
+    widths = list(natural)
+    excess = sum(widths) - available
+    while excess > 0:
+        candidates = [index for index, value in enumerate(widths) if value > minimums[index]]
+        if not candidates:
+            break
+        index = max(candidates, key=lambda candidate: (widths[candidate], -candidate))
+        reduction = min(excess, widths[index] - minimums[index])
+        widths[index] -= reduction
+        excess -= reduction
+    return tuple(widths)
+
+
+def _display_cell_width(value: str) -> int:
+    sanitized = sanitize_terminal_text(value, preserve_newlines=True)
+    return max((Text(line).cell_len for line in sanitized.splitlines()), default=0)
+
+
+def _process_table(
+    rows: tuple[tuple[str, ...], ...] | list[tuple[str, ...]],
+    *,
+    widths: tuple[int, ...] | None = None,
+) -> Table:
     table = bordered_table(*_PROCESS_COLUMNS)
+    if widths is not None:
+        for column, width in zip(table.columns, widths):
+            column.width = width
     for row in rows:
         table.add_row(
             *(Text(sanitize_terminal_text(value, preserve_newlines=True)) for value in row)
@@ -329,43 +395,41 @@ def _pid_scope_cell(scope: PidScope, pids: tuple[int, ...]) -> str:
     return f"{label}:{', '.join(str(pid) for pid in pids)}"
 
 
-def _shared_section(shared: SharedResourcesBlock) -> list[Text | Table]:
-    parts: list[Text | Table] = []
-    parts.append(Text(f"Shared resources ({shared.project_id})", style="bold magenta"))
+def _shared_section(shared: SharedResourcesBlock) -> _ProcessSection:
     rows: list[tuple[str, ...]] = []
     if shared.postgres_container is not None:
         rows.append(_cluster_row(shared.postgres_container))
     rows.extend(_backend_row(group) for group in shared.backend_groups)
     rows.extend(_contribution_row(item) for item in shared.external_contributions)
-    parts.append(_process_table(rows or [_empty_process_row()]))
+    storage = None
     if shared.postgres_container is not None:
         metrics = shared.postgres_container.metrics
         if metrics is not None and metrics.volume_usage_bytes is not None:
-            parts.append(
-                Text(
-                    f"  storage volume={_human_bytes(metrics.volume_usage_bytes)}",
-                    style="dim",
-                )
-            )
-    return parts
+            storage = f"  storage volume={_human_bytes(metrics.volume_usage_bytes)}"
+    return _ProcessSection(
+        title=f"Shared resources ({shared.project_id})",
+        title_style="bold magenta",
+        rows=tuple(rows or [_empty_process_row()]),
+        storage=storage,
+    )
 
 
-def _checkout_section(block: CheckoutProcessBlock, *, title: str) -> list[Text | Table]:
-    parts: list[Text | Table] = []
-    parts.append(Text(title, style="bold green"))
+def _checkout_section(block: CheckoutProcessBlock, *, title: str) -> _ProcessSection:
     rows = [_runtime_row(block.odoo)] if block.odoo is not None else []
     rows.extend(_backend_row(group) for group in block.backend_groups)
     rows.extend(_contribution_row(item) for item in block.external_contributions)
-    parts.append(_process_table(rows or [_empty_process_row()]))
+    storage = None
     if block.storage is not None:
-        parts.append(
-            Text(
-                f"  storage total={_human_bytes(block.storage.total_bytes)} "
-                f"complete={'yes' if block.storage.complete else 'partial'}",
-                style="dim",
-            )
+        storage = (
+            f"  storage total={_human_bytes(block.storage.total_bytes)} "
+            f"complete={'yes' if block.storage.complete else 'partial'}"
         )
-    return parts
+    return _ProcessSection(
+        title=title,
+        title_style="bold green",
+        rows=tuple(rows or [_empty_process_row()]),
+        storage=storage,
+    )
 
 
 def _cpu_cell(value: float | None) -> str:
