@@ -10,6 +10,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _project_results(output: str, module_filter: str) -> str:
+    lines: list[str] = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        name, separator, _status = stripped.partition(":")
+        if separator and fnmatch.fnmatchcase(name, module_filter):
+            lines.append(stripped)
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: mutmut_results.py MODULE_FILTER", file=sys.stderr)
@@ -28,11 +38,7 @@ def main() -> int:
         print(output, end="")
         return result.returncode
 
-    for line in output.splitlines():
-        stripped = line.strip()
-        name, separator, _status = stripped.partition(":")
-        if separator and fnmatch.fnmatchcase(name, sys.argv[1]):
-            print(stripped)
+    sys.stdout.write(_project_results(output, sys.argv[1]))
     return 0
 
 
