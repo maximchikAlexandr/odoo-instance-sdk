@@ -2,11 +2,11 @@
 
 - Planning issue: `MYL-271`.
 - OpenSpec change: `add-backup-checkout-and-detached-readiness`.
-- Rebase baseline: `origin/main` at `3d688b26b463d273e80fa46500226158d7d9fab1`; planning series replayed directly on that commit without a merge commit.
+- Rebase baseline: `origin/main` at `f7c3f7c9093529d6744c30745e220efb9aea8f80`; planning series replayed directly on that commit without a merge commit.
 - Authoritative optimistic, weighted и pessimistic totals хранятся только в properties корневой planning issue `Estimate min, hours`, `Estimate, hours` и `Estimate max, hours`; все три значения подтверждены read-back. `Estimate, hours` находится выше порога single-WP.
 - Оценка покрывает полный remaining scope до всех acceptance scenarios одним опытным разработчиком, знакомым с Python, Click, msgspec, SQLite/Alembic и этим репозиторием, без AI-ускорения. Unattended CI, очереди review и внешние ожидания исключены.
 - Уверенность: средняя. Все затронутые публичные входы, lifecycle/catalog/config boundaries и test matrices доступны, но COPY recovery, destructive revalidation, listener ownership на разных ОС и композиция post-success maintenance создают связанные риски.
-- Калибровка: uncalibrated — сопоставимые фактические трудозатраты не предоставлены. Основание: текущие `ProjectConfig`/project-init commands, database preparation, exact backup deletion, Alembic/Core catalog, COPY journal/recovery, detached runtime identity/listener proof, bounded output и canonical leaf inventory. Тесты для оценки не запускались.
+- Калибровка: uncalibrated — сопоставимые фактические трудозатраты не предоставлены. Основание: текущие `ProjectConfig`/project-init commands, database preparation, source-neutral local-archive evidence/verified snapshot and provenance, exact backup deletion, Alembic/Core catalog, COPY journal/recovery, detached runtime identity/listener proof, command-plan step parity, bounded output и canonical leaf inventory. Тесты для оценки не запускались.
 
 ## Топология исполнения
 
@@ -23,7 +23,7 @@ Topological level 1 содержит независимые `WP-01` и `WP-04`. 
 ## WP-01 — Persisted source, policy and catalog foundation
 
 - **Task coverage:** `1.1`, `1.2`, `1.3`, `3.1`, `5.1`.
-- **Deliverable:** typed named-source manifest/configuration and retention-policy SDK contracts plus one verified linear catalog migration for historical source, pin state and COPY ownership.
+- **Deliverable:** typed named-source manifest/configuration and retention-policy SDK contracts plus one verified linear catalog migration, succeeding the current source-neutral provenance head, for historical source, pin state and COPY ownership.
 - **depends_on:** none.
 - **Stage / topological level:** 1.
 - **Owned responsibility scope:** `project.py`, public project-init/configuration functions, manifest locking/writing and init inputs; narrow `user.toml` retention reader/updater; catalog Core metadata, Alembic revision, migration gates, backup/environment projection fields and their focused tests. Critical shared files include `src/odoo_instance_sdk/project.py`, `project_init.py`, `internal/project_manifest.py`, `resources/backup.py`, `storage/catalog_schema.py`, `storage/catalog_migrate.py`, `storage/catalog_migrations/`, catalog projection helpers and directly related init/config/migration tests. CLI init registration required by task `1.3` is owned here; all other CLI registration remains `WP-07`.
@@ -49,7 +49,7 @@ Topological level 1 содержит независимые `WP-01` и `WP-04`. 
 - **depends_on:** `WP-02`, `WP-05`.
 - **Stage / topological level:** 3.
 - **Owned responsibility scope:** environment checkout option/planning/execution/artifacts, COPY journal use, exact backup validation/restore handoff and directly related environment/database lifecycle tests. Critical shared files include `resources/environment/checkout_planning.py`, `resources/environment/checkout.py`, `resources/environment/checkout_artifacts.py`, environment cleanup/settings, database preparation handoff models and checkout/recovery tests. Persisted schema definitions are read-only after `WP-01`; retention query/delete primitives are read-only after `WP-05`.
-- **Contract surface:** mutually exclusive source inputs; named base resolution to local commit; no hidden Git/network/default fallback; download-only named acquisition; offline exact UUID; owned/borrowed/unknown cleanup; shared checksum/archive/disk/cluster/version/lock gates; retained actionable recovery evidence.
+- **Contract surface:** mutually exclusive source inputs; named base resolution to local commit; no hidden Git/network/default fallback; download-only named acquisition; offline exact UUID; owned/borrowed/unknown cleanup; shared source-neutral archive evidence/verified snapshot plus checksum/archive/disk/cluster/version/lock gates; retained actionable recovery evidence; caller-owned `--file` restore remains outside COPY.
 - **DoD / evidence:** validation matrix, exact provenance, no-intermediate/default mutation, HTTP call counts, filestore isolation, neutralization/postconditions, ownership-safe rollback/removal, corruption/disk/busy/collision/version and retry-from-retained-UUID scenarios pass.
 - **Parallel-safety rationale:** this WP starts only after both source preparation and retention/catalog query contracts are frozen, eliminating concurrent writes to shared backup/catalog seams.
 
@@ -72,7 +72,7 @@ Topological level 1 содержит независимые `WP-01` и `WP-04`. 
 - **Stage / topological level:** 2.
 - **Owned responsibility scope:** backup resource models/commands, catalog retention queries and pin events, lifecycle-lock/delete composition and focused backup/catalog tests. Critical shared files include `resources/backup.py`, `models/backup.py`, `storage/catalog/backup.py`, backup locks/deletion helpers and directly related unit/integration tests. Environment checkout production files and CLI registration are excluded.
 - **Contract surface:** deterministic named/legacy source grouping; pin/busy/live-environment/recovery/newest protection shared by delete and prune; captured policy/cutoff/file identity/bytes; no force; no plan widening; partial truthful outcomes and preserved audit.
-- **DoD / evidence:** age/tie/group/protection/unknown/external matrix, inert preview, changed policy/pin/reference/file/latest races, concurrent restore, partial failure, bytes, idempotency and audit assertions pass.
+- **DoD / evidence:** age/tie/group/protection/unknown/external matrix, caller-owned no-row local-archive exclusion, inert preview, changed policy/pin/reference/file/latest races, concurrent restore, partial failure, bytes, idempotency and audit assertions pass.
 - **Parallel-safety rationale:** this package owns backup/catalog retention modules while `WP-02` owns source preparation and `WP-04` owns runtime readiness. `WP-03` explicitly waits for it before using shared catalog seams.
 
 ## WP-06 — One post-success maintenance phase
@@ -94,7 +94,7 @@ Topological level 1 содержит независимые `WP-01` и `WP-04`. 
 - **Stage / topological level:** 5.
 - **Owned responsibility scope:** all remaining Click registration/callbacks/rendering, `PUBLIC_LEAF_CASES`, aliases/help/output/error fixtures, user/SDK documentation, real-Odoo/fake-boundary integration scenarios and final cross-domain repairs after predecessors finish. Critical shared files include CLI registration/callback modules, `commands/backup.py`, `commands/db.py`, `commands/env/`, canonical leaf/output tests, README/docs and integration fixtures.
 - **Contract surface:** thin one-delegation leaves; stable Rich/JSON/TOON/error/confirmation/dry-run behavior; source/provenance fields; readiness option validation; retention confirmations/warnings; no credential arguments, orchestration layer or new output registry.
-- **DoD / evidence:** two differently authenticated sources remain isolated; staging COPY and offline UUID reuse preserve lab/default; exact runtime readiness/stop/remove works; prune keeps protected/newest archives; plans/results/logs/child env contain no secrets. Focused suites, available current real-Odoo contract cases, Ruff check/format, strict mypy, architecture/leaf/schema gates, `git diff --check` and strict OpenSpec validation pass.
+- **DoD / evidence:** two differently authenticated sources remain isolated; staging COPY and offline UUID reuse preserve lab/default; exact runtime readiness/stop/remove works; prune keeps protected/newest archives; plans/results/logs/child env contain no secrets. All new public/private command step projections have construction-time parity. Focused suites, available current real-Odoo contract cases, Ruff check/format, strict mypy, architecture/leaf/schema gates, the repository mutation gate, `git diff --check` and strict OpenSpec validation pass.
 - **Parallel-safety rationale:** this join package starts only after all production contracts are frozen and exclusively owns shared CLI/integration files, so no sibling edits the same callbacks, inventory or final repair zones.
 
 ## Task coverage proof

@@ -1,10 +1,10 @@
 ## Context
 
-The current implementation and this planning package were reconciled after rebasing onto `origin/main` at `3d688b26b463d273e80fa46500226158d7d9fab1`:
+The current implementation and this planning package were reconciled after rebasing onto `origin/main` at `f7c3f7c9093529d6744c30745e220efb9aea8f80`:
 
 - `ProjectConfig.test_instance` and `--test-*` represent one legacy remote source. Project initialization and database preparation already use immutable commands, project locks, atomic manifest replacement, conservative `.odcli/.env` parsing, and `ODCLI_TEST_MASTER_PASSWORD`; a self-contained foreground run now captures its existing bootstrap steps in the immutable plan.
-- Database preparation already downloads, validates, restores, neutralizes, records project ownership/provenance, and preserves failures. COPY checkout already has one journal/recovery path and a local-source auxiliary Database Manager lifecycle.
-- The catalog now uses SQLAlchemy Core metadata and a linear Alembic ledger. Backups already carry project ownership, source URL/database/branch, events, restore links, environment links, checksum, size, and state. Exact UUID deletion already rechecks path identity under a per-backup lifecycle lock.
+- Database preparation already downloads, validates, restores, neutralizes, records project ownership/provenance, and preserves failures. COPY checkout already has one journal/recovery path and a local-source auxiliary Database Manager lifecycle. Current main also accepts a caller-owned local archive through `LocalArchiveRestoreSource`, captures source-neutral archive evidence, materializes a private verified snapshot, and restores through the same safety pipeline without creating a retained catalog backup.
+- The catalog now uses SQLAlchemy Core metadata and a linear Alembic ledger whose current head is the source-neutral restore-provenance revision. Backups already carry project ownership, source URL/database/branch, events, restore links, environment links, checksum, size, and state. Restore provenance supports either an exact catalog UUID or a local-archive SHA-256. Exact UUID deletion already rechecks path identity under a per-backup lifecycle lock.
 - Detached launch already has an immutable command, persisted project/environment runtime identity, bounded process cleanup, logfile evidence, and a health probe. Project runtime expectations include the injected effective `--logfile`; `auxiliary_restore_identity.py` proves PID/create-time/argv/cwd/config and exact listener ownership with `psutil`.
 - `get_config_root()/user.toml` already supplies `backup.max_uncompressed_bytes`, but it has no public retention writer. The project dotenv permits arbitrary validated keys and gives process environment precedence.
 - GitHub #20 and #24 delivered single-source refresh and branch provenance. #53 delivered the dotenv boundary. #11, #43, and #81 delivered reusable monitoring, detail, process inventory, and bounded Rich output. Open #17, #37, and #39 remain separate logging, inspection, and filestore research scopes.
@@ -61,9 +61,9 @@ Extend `EnvironmentCheckoutOptions` with mutually exclusive `remote_name` and `b
 
 A named source's branch is the default base. An explicit base may override only when existing provenance comparison can prove compatibility; a known mismatch fails. The base ref must already resolve locally to an exact commit before download. Missing refs fail with the existing fetch/sync guidance; there is no hidden Git mutation or fallback. A retained legacy backup with unknown branch requires an explicit base and returns an `unknown` warning.
 
-Add a nullable journal ownership field with three semantic states: `owned` for the local-source backup created solely for this environment, `borrowed` for named-remote or retained UUID input, and `unknown` for migrated journals. Rollback/removal deletes only `owned`; borrowed/unknown archives survive. The new linear Alembic revision also adds nullable historical source name and pin state/event support. Existing rows migrate conservatively.
+Add a nullable journal ownership field with three semantic states: `owned` for the local-source backup created solely for this environment, `borrowed` for named-remote or retained UUID input, and `unknown` for migrated journals. Rollback/removal deletes only `owned`; borrowed/unknown archives survive. The new linear Alembic revision succeeds the current source-neutral restore-provenance head and also adds nullable historical source name and pin state/event support. Existing rows migrate conservatively.
 
-Before target mutation, reuse current catalog/file identity, checksum, archive-safety, disk reserve, collision, cluster, and lifecycle-lock checks. Known Odoo major mismatch blocks; missing version evidence is `unknown`. All paths create a new local database and separate writable filestore, neutralize, and verify postconditions before ready. A failure identifies exact retained backup/target state and one existing recovery operation; it never retries or substitutes another source/archive.
+Before target mutation, reuse current catalog/file identity, checksum, archive-safety, disk reserve, collision, cluster, and lifecycle-lock checks. Reuse the source-neutral archive evidence, verified-snapshot, and restore transport now shared by catalog and caller-owned local sources; do not create a parallel extractor or verifier. COPY still accepts only its three declared source modes, so the existing arbitrary `--file` restore is not a fourth checkout input. Known Odoo major mismatch blocks; missing version evidence is `unknown`. All paths create a new local database and separate writable filestore, neutralize, and verify postconditions before ready. A failure identifies exact retained backup/target state and one existing recovery operation; it never retries or substitutes another source/archive.
 
 ### 5. Detached readiness reuses exact runtime/listener proof
 
@@ -93,6 +93,8 @@ Candidates are project-owned, available, successfully downloaded SDK-managed reg
 - the newest available backup in each historical source group;
 - unknown ownership/timestamp/path identity and external/unowned files.
 
+A caller-owned file restored through the existing local-archive source has no `Backup` row and is therefore outside both manual and automatic retention candidate sets. Moving or deleting it after a successful restore does not affect the already materialized database/filestore; it only removes that file as an input for a future restore. Catalog backups created or downloaded by the SDK remain eligible for deletion once every protection above is absent.
+
 For named rows, a historical group is `(project_id, source_name)`; legacy/local rows use `(project_id, normalized source origin, database)`. Ties use current deterministic catalog ordering. Direct UUID deletion applies the same pin, active-use, environment/recovery, and newest-group protections; there is no force bypass. Historical restore audit alone does not protect every archive.
 
 Execution takes the existing per-backup lifecycle lock and rechecks policy fingerprint, catalog state, file identity, pin/reference/busy/latest protections, and captured UUID membership immediately before each deletion. It never widens the plan. Changed/busy targets are skipped. Reuse the existing exact deletion/audit operation. Results report deleted/skipped/failed IDs and actual bytes; partial failure is truthful and repeat execution is idempotent. Catalog rows/events are never retention targets.
@@ -105,7 +107,7 @@ Run the captured pass only after primary success; revalidate every candidate and
 
 ### 9. CLI remains a thin bounded projection
 
-Add `remote ls/add/update/remove`, remote selectors on `db refresh`, `env checkout`, and `doctor`, detached readiness flags, and `backup retention/pin/unpin/prune`. Every mutating leaf delegates once to a public command, uses current confirmation/dry-run/redaction/error/output contracts, and is registered once in `PUBLIC_LEAF_CASES`. Interactive prune requires confirmation; non-interactive application requires `--yes`; dry-run requires neither. Existing monitor, environment detail/listing, process inventory, logs, stop, remove, and recovery operations are documented as the composition surface instead of adding a session manager.
+Add `remote ls/add/update/remove`, remote selectors on `db refresh`, `env checkout`, and `doctor`, detached readiness flags, and `backup retention/pin/unpin/prune`. Every mutating leaf delegates once to a public command, uses current confirmation/dry-run/redaction/error/output contracts, and is registered once in `PUBLIC_LEAF_CASES`. Every new command builder projects the complete ordered private step tuple into its public plan so the current construction-time parity invariant can reject omissions, additions, reordering, or field drift before registration. Interactive prune requires confirmation; non-interactive application requires `--yes`; dry-run requires neither. Existing monitor, environment detail/listing, process inventory, logs, stop, remove, and recovery operations are documented as the composition surface instead of adding a session manager.
 
 ## Risks / Trade-offs
 
@@ -115,12 +117,12 @@ Add `remote ls/add/update/remove`, remote selectors on `db refresh`, `env checko
 - **Protected archives can exceed retention age** -> report exact reasons and bytes; retention is intentionally not a quota.
 - **Pre-primary pruning snapshots are conservative** -> an archive that becomes eligible during the primary operation waits for the next manual/successful pass; execution never expands a destructive set.
 - **Idle projects do not auto-prune** -> explicit prune or the next successful project-aware operation is required; no daemon is introduced.
-- **Current main moved after the input planning SHA** -> implementation must rebase onto its approved current main and preserve the newer auxiliary-runtime, output, and catalog contracts; the OpenSpec-only planning commit does not merge production changes.
+- **Main can move after the verified planning baseline** -> implementation must start from its approved current main and preserve newer runtime, command-plan, archive, output, and catalog contracts; the OpenSpec-only planning commit does not merge production changes.
 
 ## Migration Plan
 
 1. Land named-source config/credential selection and remove origin approval while preserving legacy variables as no-ops.
-2. Land the single linear Alembic revision and public backup/source projections, then exact-backup/named-remote COPY on the existing journal and recovery path.
+2. Land one linear Alembic successor to the source-neutral restore-provenance head and public backup/source projections, then exact-backup/named-remote COPY on the existing journal, verified-snapshot, and recovery path.
 3. Land shared listener proof and detached readiness.
 4. Land retention policy, pin/delete protection, manual prune, then the explicit post-success composer.
 5. Land CLI/documentation and two-source integration evidence after all public contracts are stable.
