@@ -28,6 +28,7 @@ from odoo_instance_sdk.internal.dbprep.source import (
     SelectedBackupRestorePayload as SelectedBackupRestorePayload,
     T as T,
     _CatalogueRestoreSource as _CatalogueRestoreSource,
+    _LocalArchiveRestoreSource as _LocalArchiveRestoreSource,
     _CoalescedRestore as _CoalescedRestore,
     _consume_action_if_planned as _consume_action_if_planned,
     _load_project as _load_project,
@@ -37,8 +38,13 @@ from odoo_instance_sdk.internal.dbprep.source import (
     _RemoteRestoreSource as _RemoteRestoreSource,
     _resolve_source_config as _resolve_source_config,
     _RestoreSource as _RestoreSource,
+    _RestoreSourceInput as _RestoreSourceInput,
     _skip_preparation_branch as _skip_preparation_branch,
     _target_config_path as _target_config_path,
+    _assert_verified_snapshot_unchanged as _assert_verified_snapshot_unchanged,
+    _materialize_verified_snapshot as _materialize_verified_snapshot,
+    capture_local_archive_restore as capture_local_archive_restore,
+    cleanup_selected_backup_restore as cleanup_selected_backup_restore,
     build_selected_backup_restore_steps as build_selected_backup_restore_steps,
     canonical_project_identity as canonical_project_identity,
     classify_freshness as classify_freshness,
@@ -62,7 +68,11 @@ from odoo_instance_sdk.internal.locks import (
     exclusive_lock,
     exclusive_lock_until,
 )
-from odoo_instance_sdk.internal.odoo_config import infer_base_url, parse_odoo_config
+from odoo_instance_sdk.internal.odoo_config import (
+    _resolve_data_dir,
+    infer_base_url,
+    parse_odoo_config,
+)
 from odoo_instance_sdk.internal.project_env import (
     effective_project_environment,
     load_project_environment,
@@ -80,6 +90,7 @@ from odoo_instance_sdk.models import (
     DatabasePreparationAction,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
+    StartConfig,
 )
 from odoo_instance_sdk.project import ProjectConfig
 
@@ -112,7 +123,8 @@ def _restore_preflight(  # noqa: C901
     wait_for_lock: bool = True,
     coalesce: bool = False,
     target_database: str | None = None,
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
+    selected_restore: SelectedBackupRestorePayload | None = None,
     remote_password: str | None = None,
 ) -> Iterator[RestorePreflight]:
     """Own the complete restore preflight and preparation-lock lifetime."""
@@ -141,6 +153,8 @@ def _restore_preflight(  # noqa: C901
             if isinstance(selected_source, _RemoteRestoreSource)
             else None
         )
+        if isinstance(selected_source, _LocalArchiveRestoreSource):
+            _consume_action_if_planned("database.prepare.local-archive.validate")
         if source is not None:
             require_test_instance_origin_approval(source.config.base_url)
         catalogue_backup = None
@@ -236,7 +250,13 @@ def _restore_preflight(  # noqa: C901
                 else (
                     source.config.database
                     if source is not None
-                    else (catalogue_backup.database_name if catalogue_backup is not None else "")
+                    else (
+                        catalogue_backup.database_name
+                        if catalogue_backup is not None
+                        else (
+                            selected_restore.database_name if selected_restore is not None else ""
+                        )
+                    )
                 )
             )
             if not source_database:
@@ -261,6 +281,7 @@ def _restore_preflight(  # noqa: C901
             postgres_cluster=cluster,
             target_database=target,
             resolved_database=resolved_database,
+            selected_restore=selected_restore,
         )
 
 
@@ -271,7 +292,8 @@ def prepare_restore(  # noqa: C901
     options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
     coalesce: bool = False,
     restore_inputs: tuple[str, Path] | None = None,
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
+    selected_restore: SelectedBackupRestorePayload | None = None,
     target_database: str | None = None,
     admin_password: str | None = None,
     admin_password_provenance: str = "environment",
@@ -285,6 +307,8 @@ def prepare_restore(  # noqa: C901
     _initial, root = _load_project(project)
     project_environment = load_project_environment(root)
     selected_source = _coerce_restore_source(restore_source)
+    if isinstance(selected_source, _LocalArchiveRestoreSource) and selected_restore is None:
+        selected_restore = _capture_selected_restore(project, selected_source)
     if target_database is not None:
         validate_db_name(target_database)
         if restore_inputs is None:
@@ -301,28 +325,53 @@ def prepare_restore(  # noqa: C901
         else None
     )
     try:
-        preflight_context = _restore_preflight(
-            client,
-            project,
-            options=options,
-            coalesce=coalesce,
-            target_database=restore_inputs[0] if restore_inputs is not None else None,
-            remote_password=remote_password,
-        )
-        if not isinstance(selected_source, _RemoteRestoreSource):
+        if selected_restore is None:
             preflight_context = _restore_preflight(
                 client,
                 project,
                 options=options,
                 coalesce=coalesce,
                 target_database=restore_inputs[0] if restore_inputs is not None else None,
-                restore_source=selected_source,
+                remote_password=remote_password,
             )
+        else:
+            preflight_context = _restore_preflight(
+                client,
+                project,
+                options=options,
+                coalesce=coalesce,
+                target_database=restore_inputs[0] if restore_inputs is not None else None,
+                remote_password=remote_password,
+                selected_restore=selected_restore,
+            )
+        if not isinstance(selected_source, _RemoteRestoreSource):
+            if selected_restore is None:
+                preflight_context = _restore_preflight(
+                    client,
+                    project,
+                    options=options,
+                    coalesce=coalesce,
+                    target_database=restore_inputs[0] if restore_inputs is not None else None,
+                    restore_source=selected_source,
+                    remote_password=remote_password,
+                )
+            else:
+                preflight_context = _restore_preflight(
+                    client,
+                    project,
+                    options=options,
+                    coalesce=coalesce,
+                    target_database=restore_inputs[0] if restore_inputs is not None else None,
+                    restore_source=selected_source,
+                    remote_password=remote_password,
+                    selected_restore=selected_restore,
+                )
         with preflight_context as preflight:
             current = preflight.project
             root = current.repository_root
             source = preflight.source
             backup: Backup | None = preflight.catalogue_backup
+            local_restore = selected_restore or preflight.selected_restore
             database_confirmed = False
             default_switch_confirmed = False
             try:
@@ -357,7 +406,17 @@ def prepare_restore(  # noqa: C901
 
                     publish_stage("backup_prepare", kind="completed")
                 _consume_action_if_planned("database.prepare.local-restore")
-                assert backup is not None
+                if isinstance(preflight.restore_source, _LocalArchiveRestoreSource):
+                    if local_restore is None:
+                        raise ConfigError(  # noqa: TRY301
+                            "local archive restore evidence was not captured"
+                        )
+                    restore_payload = local_restore
+                    _consume_action_if_planned("database.prepare.local-archive.snapshot")
+                    _materialize_verified_snapshot(restore_payload)
+                    _assert_verified_snapshot_unchanged(restore_payload)
+                else:
+                    assert backup is not None
                 from odoo_instance_sdk.internal.restore_stages import (
                     restore_stage as _restore_stage,
                 )
@@ -368,12 +427,21 @@ def prepare_restore(  # noqa: C901
                     _restore_stage("db_verify"),
                     _restore_stage("filestore_restore"),
                 ):
-                    preflight.local_instance.databases.restore(
-                        backup,
-                        preflight.target_database,
-                        copy=True,
-                        neutralize_database=True,
-                    )
+                    if isinstance(preflight.restore_source, _LocalArchiveRestoreSource):
+                        preflight.local_instance.databases._restore_local_archive(
+                            restore_payload,
+                            preflight.target_database,
+                            copy=True,
+                            neutralize_database=True,
+                        )
+                    else:
+                        assert backup is not None
+                        preflight.local_instance.databases.restore(
+                            backup,
+                            preflight.target_database,
+                            copy=True,
+                            neutralize_database=True,
+                        )
                 database_confirmed = True
                 reset_completed = False
                 if options.reset_admin_password:
@@ -419,7 +487,7 @@ def prepare_restore(  # noqa: C901
                 return DatabasePreparationResult(
                     mode=DatabasePreparationAction.RESTORE,
                     backup=backup,
-                    source_git_branch=backup.source_git_branch,
+                    source_git_branch=backup.source_git_branch if backup is not None else None,
                     branch_origin=source.origin
                     if source is not None
                     else BackupBranchOrigin.UNKNOWN,
@@ -442,12 +510,30 @@ def prepare_restore(  # noqa: C901
                     ),
                     database_confirmed=database_confirmed,
                     default_switch_confirmed=default_switch_confirmed,
+                    source_kind=(
+                        "local_archive"
+                        if isinstance(preflight.restore_source, _LocalArchiveRestoreSource)
+                        else "catalogue"
+                        if isinstance(preflight.restore_source, _CatalogueRestoreSource)
+                        else None
+                    ),
+                    source_sha256=local_restore.verified_sha256
+                    if local_restore is not None
+                    and isinstance(preflight.restore_source, _LocalArchiveRestoreSource)
+                    else None,
                 )
                 raise
+            finally:
+                if local_restore is not None:
+                    cleanup_selected_backup_restore(local_restore)
+                    _consume_action_if_planned("database.prepare.local-archive.cleanup")
     except _CoalescedRestore as coalesced:
         _skip_preparation_branch(
             (
                 "database.prepare.remote-backup",
+                "database.prepare.local-archive.validate",
+                "database.prepare.local-archive.snapshot",
+                "database.prepare.local-archive.cleanup",
                 "database.prepare.local-restore",
                 "database.prepare.odoo-reset",
                 "database.prepare.default-switch",
@@ -467,6 +553,8 @@ def prepare_restore(  # noqa: C901
         )
         return coalesced.result
     except BaseException as exc:
+        if isinstance(selected_source, _LocalArchiveRestoreSource):
+            _consume_action_if_planned("database.prepare.local-archive.cleanup")
         if not isinstance(getattr(exc, "failure_context", None), DatabasePreparationFailureContext):
             _annotate_retained_failure(
                 error=exc,
@@ -475,6 +563,17 @@ def prepare_restore(  # noqa: C901
                 backup_id=(
                     selected_source.backup_id
                     if isinstance(selected_source, _CatalogueRestoreSource)
+                    else None
+                ),
+                source_kind=(
+                    "local_archive"
+                    if isinstance(selected_source, _LocalArchiveRestoreSource)
+                    else None
+                ),
+                source_sha256=(
+                    selected_restore.verified_sha256
+                    if selected_restore is not None
+                    and isinstance(selected_source, _LocalArchiveRestoreSource)
                     else None
                 ),
             )
@@ -529,7 +628,7 @@ def preflight_restore(
     project: ProjectConfig | str | Path,
     *,
     options: DatabaseRefreshOptions = DatabaseRefreshOptions(restore=True),
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
     remote_password: str | None = None,
 ) -> RestorePreflight:
     with _restore_preflight(
@@ -547,10 +646,11 @@ def _capture_restore_inputs(
     project: ProjectConfig | str | Path,
     options: DatabaseRefreshOptions,
     *,
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
     client: OdooClient | None = None,
     target_database: str | None = None,
     selected_environment: DevelopmentEnvironment | None = None,
+    selected_restore: SelectedBackupRestorePayload | None = None,
 ) -> tuple[str, Path] | None:
     """Capture target-bound paths without creating files or reserving a DB."""
     if not options.restore:
@@ -565,17 +665,42 @@ def _capture_restore_inputs(
     selected_source = _coerce_restore_source(restore_source)
     if isinstance(selected_source, _RemoteRestoreSource):
         source_database = resolve_test_source(initial, options).config.database
-    else:
+    elif isinstance(selected_source, _CatalogueRestoreSource):
         if client is None:
             return None
         projection = client.get_catalog()._resolve_backup_projection(str(selected_source.backup_id))
         source_database = projection.backup.database_name
+    elif selected_restore is not None:
+        source_database = selected_restore.database_name
+    else:
+        source_database = None
     if source_database is None:
         source_database = "remote"
     target = target_database or generate_target_database(source_database)
     validate_db_name(target)
     target_config = source_config.parent / f".odcli-refresh-{uuid.uuid4().hex}.conf"
     return target, target_config
+
+
+def _capture_selected_restore(
+    project: ProjectConfig | str | Path,
+    restore_source: _RestoreSourceInput,
+) -> SelectedBackupRestorePayload | None:
+    """Capture local archive evidence without creating project artifacts."""
+    selected_source = _coerce_restore_source(restore_source)
+    if not isinstance(selected_source, _LocalArchiveRestoreSource):
+        return None
+    _project, root = _load_project(project)
+    source_config = _resolve_source_config(_project, root)
+    start_config = StartConfig.from_odoo_config(source_config)
+    data_dir = (
+        _resolve_data_dir(start_config.data_dir, source_config) if start_config.data_dir else None
+    )
+    return capture_local_archive_restore(
+        selected_source,
+        snapshot_directory=root / ".odcli" / "restore",
+        data_dir=data_dir,
+    )
 
 
 @dataclass(slots=True)
@@ -588,7 +713,7 @@ class DatabasePreparationCoordinator:
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         coalesce: bool = False,
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
@@ -609,18 +734,22 @@ class DatabasePreparationCoordinator:
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
         coalesce: bool = False,
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
+        selected_restore = (
+            _capture_selected_restore(project, restore_source) if options.restore else None
+        )
         restore_inputs = _capture_restore_inputs(
             project,
             options,
             restore_source=restore_source,
             client=self.client,
             target_database=target_database,
+            selected_restore=selected_restore,
         )
         steps: tuple[PreparedStep | PreparedAction, ...] = (
             *_preparation_action_steps(
@@ -642,6 +771,7 @@ class DatabasePreparationCoordinator:
                 coalesce=coalesce,
                 restore_inputs=restore_inputs,
                 restore_source=restore_source,
+                selected_restore=selected_restore,
                 target_database=target_database,
                 admin_password=admin_password,
                 admin_password_provenance=admin_password_provenance,
@@ -657,6 +787,7 @@ class DatabasePreparationCoordinator:
                     "database.restore.exists-before",
                     "database.restore.exists-after",
                     "database.prepare.rollback",
+                    "database.prepare.local-archive.cleanup",
                 }
             ),
         )
@@ -668,7 +799,8 @@ class DatabasePreparationCoordinator:
         options: DatabaseRefreshOptions,
         coalesce: bool,
         restore_inputs: tuple[str, Path] | None = None,
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
+        selected_restore: SelectedBackupRestorePayload | None = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
@@ -681,6 +813,7 @@ class DatabasePreparationCoordinator:
                 coalesce=coalesce,
                 restore_inputs=restore_inputs,
                 restore_source=restore_source,
+                selected_restore=selected_restore,
                 target_database=target_database,
                 admin_password=admin_password,
                 admin_password_provenance=admin_password_provenance,
@@ -692,7 +825,7 @@ class DatabasePreparationCoordinator:
         project: ProjectConfig | str | Path,
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
@@ -711,18 +844,22 @@ class DatabasePreparationCoordinator:
         project: ProjectConfig | str | Path,
         *,
         options: DatabaseRefreshOptions = DatabaseRefreshOptions(),
-        restore_source: _RestoreSource | uuid.UUID | str | None = None,
+        restore_source: _RestoreSourceInput = None,
         target_database: str | None = None,
         admin_password: str | None = None,
         admin_password_provenance: str = "environment",
         executor: ProcessExecutor | None = None,
     ) -> Command[DatabasePreparationResult]:
+        selected_restore = (
+            _capture_selected_restore(project, restore_source) if options.restore else None
+        )
         restore_inputs = _capture_restore_inputs(
             project,
             options,
             restore_source=restore_source,
             client=self.client,
             target_database=target_database,
+            selected_restore=selected_restore,
         )
         steps: tuple[PreparedStep | PreparedAction, ...] = (
             *_preparation_action_steps(
@@ -744,6 +881,7 @@ class DatabasePreparationCoordinator:
                 coalesce=False,
                 restore_inputs=restore_inputs,
                 restore_source=restore_source,
+                selected_restore=selected_restore,
                 target_database=target_database,
                 admin_password=admin_password,
                 admin_password_provenance=admin_password_provenance,
@@ -759,6 +897,7 @@ class DatabasePreparationCoordinator:
                     "database.restore.exists-before",
                     "database.restore.exists-after",
                     "database.prepare.rollback",
+                    "database.prepare.local-archive.cleanup",
                 }
             ),
         )

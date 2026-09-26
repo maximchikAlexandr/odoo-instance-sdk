@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,11 +68,99 @@ def test_restore_is_registered_with_exact_uuid_and_target_options() -> None:
     result = CliRunner().invoke(cli, ["db", "restore", "--help"])
 
     assert result.exit_code == 0
+    assert "[BACKUP_UUID]" in result.output
+    assert "--file" in result.output
     assert "--target" in result.output
     assert "--reset-admin-password" in result.output
     assert "--dry-run" in result.output
     assert "--yes" in result.output
     assert "--replace" in result.output
+
+
+def _assert_catalogue_source(source: object) -> None:
+    assert str(getattr(source, "backup_id")) == "00000000-0000-0000-0000-000000000007"
+
+
+def _assert_local_archive_source(source: object) -> None:
+    assert getattr(source, "path") == "backup.zip"
+
+
+@pytest.mark.parametrize(
+    ("source_args", "assert_source"),
+    [
+        pytest.param(
+            ["00000000-0000-0000-0000-000000000007"],
+            _assert_catalogue_source,
+            id="uuid-only",
+        ),
+        pytest.param(
+            ["--file", "backup.zip"],
+            _assert_local_archive_source,
+            id="file-only",
+        ),
+    ],
+)
+def test_restore_delegates_valid_source_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    source_args: list[str],
+    assert_source: Callable[[object], None],
+) -> None:
+    client = MagicMock()
+    client.environments.refresh_database_command.return_value = _command(
+        DatabasePreparationResult(
+            mode=DatabasePreparationAction.RESTORE,
+            restored_database="demo_copy",
+        )
+    )
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.resolve_project_path", lambda _ctx: tmp_path)
+
+    result = CliRunner().invoke(
+        cli,
+        ["db", "restore", *source_args, "--dry-run", "--format", "json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert_source(client.environments.refresh_database_command.call_args.kwargs["restore_source"])
+
+
+@pytest.mark.parametrize(
+    ("source_args", "error_text"),
+    [
+        pytest.param(
+            ["00000000-0000-0000-0000-000000000007", "--file", "backup.zip"],
+            "exactly one",
+            id="both",
+        ),
+        pytest.param([], "exactly one", id="neither"),
+        pytest.param(
+            ["--file", "backup.zip", "--replace"],
+            "only available",
+            id="file-replace",
+        ),
+    ],
+)
+def test_restore_rejects_invalid_source_selection_before_context_access(
+    monkeypatch: pytest.MonkeyPatch,
+    source_args: list[str],
+    error_text: str,
+) -> None:
+    client = MagicMock()
+    monkeypatch.setattr("odoo_instance_sdk.commands.db.OdooClient", lambda **_: client)
+    monkeypatch.setattr(
+        "odoo_instance_sdk.commands.db.resolve_project_path",
+        lambda _ctx: pytest.fail("invalid source selection must fail before context access"),
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        ["db", "restore", *source_args, "--dry-run", "--format", "json"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert error_text in result.stderr
+    client.environments.refresh_database_command.assert_not_called()
 
 
 def test_restore_replace_rejects_target_before_environment_resolution(

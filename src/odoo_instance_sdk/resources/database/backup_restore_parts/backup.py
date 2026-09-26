@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from odoo_instance_sdk.execution import Command
+    from odoo_instance_sdk.internal.dbprep.source import SelectedBackupRestorePayload
     from odoo_instance_sdk.internal.proc import (
         PreparedAction,
         PreparedStep,
@@ -360,6 +361,35 @@ class _BackupMixin:
             record_provenance=record_provenance,
         )
 
+    def _restore_local_archive(
+        self,
+        payload: SelectedBackupRestorePayload,
+        target_database_name: str,
+        *,
+        copy: bool = False,
+        neutralize_database: bool = False,
+        timeout: float | None = None,
+    ) -> None:
+        """Restore one verified caller-owned archive without catalogue identity."""
+        from odoo_instance_sdk.internal.dbprep.source import (
+            SelectedBackupRestorePayload,
+            _assert_verified_snapshot_unchanged,
+        )
+        from odoo_instance_sdk.internal.proc import active_context
+
+        if active_context() is None:
+            raise RuntimeError("verified local restore requires an active command context")
+        if not isinstance(payload, SelectedBackupRestorePayload):
+            raise InstanceConfigurationError("local restore evidence is unavailable")
+        _assert_verified_snapshot_unchanged(payload)
+        self._restore_impl_locked(
+            payload,
+            target_database_name,
+            copy=copy,
+            neutralize_database=neutralize_database,
+            timeout=timeout,
+        )
+
     def _restore_impl(
         self,
         backup: Backup,
@@ -374,7 +404,7 @@ class _BackupMixin:
         record_provenance: bool = True,
     ) -> RestoreResult:
         with exclusive_lock(backup_lock_path(str(backup.id))):
-            return self._restore_impl_locked(
+            self._restore_impl_locked(
                 backup,
                 target_database_name,
                 copy=copy,
@@ -385,10 +415,11 @@ class _BackupMixin:
                 after_step_id=after_step_id,
                 record_provenance=record_provenance,
             )
+        return RestoreResult(new_db=target_database_name, source=backup)
 
     def _restore_impl_locked(  # noqa: C901
         self,
-        backup: Backup,
+        source: Backup | SelectedBackupRestorePayload,
         target_database_name: str,
         *,
         copy: bool,
@@ -398,12 +429,29 @@ class _BackupMixin:
         before_step_id: str | None = None,
         after_step_id: str | None = None,
         record_provenance: bool = True,
-    ) -> RestoreResult:
+    ) -> None:
+        from odoo_instance_sdk.internal.dbprep.source import SelectedBackupRestorePayload
+
         self._assert_local()
         pwd = self._require_password()
 
+        if not isinstance(source, (Backup, SelectedBackupRestorePayload)):
+            raise InstanceConfigurationError("restore evidence is unavailable")
         catalog = self._instance._client.get_catalog()
-        catalog.verify_identity(backup)
+        source_kind = "catalogue"
+        source_sha256: str | None = None
+        if isinstance(source, Backup):
+            catalog.verify_identity(source)
+            archive_path = Path(source.path)
+            archive_filename = source.filename
+        else:
+            from odoo_instance_sdk.internal.dbprep.source import _assert_verified_snapshot_unchanged
+
+            _assert_verified_snapshot_unchanged(source)
+            archive_path = source.verified_snapshot_path
+            archive_filename = "odoo-archive.zip"
+            source_kind = "local_archive"
+            source_sha256 = source.verified_sha256
 
         # Classify the target before the remote effect.  A pending or malformed
         # managed claim is never downgraded to nullable legacy provenance.
@@ -417,8 +465,13 @@ class _BackupMixin:
         if callable(provenance):
             cluster_identity, _ = provenance()
         start_config = self._instance.config.start_config
-        data_directory = None if start_config is None else start_config.data_dir
-        if data_directory:
+        data_directory: str | None = None
+        if start_config is not None and start_config.data_dir:
+            from odoo_instance_sdk.internal.odoo_config import _resolve_data_dir
+
+            data_directory = str(_resolve_data_dir(start_config.data_dir, start_config.config_path))
+
+        if data_directory is not None:
             from odoo_instance_sdk.internal.project_init import verify_project_owned_data_dir
             from odoo_instance_sdk.resources.instance.runtime import _RuntimeBinding
 
@@ -426,9 +479,10 @@ class _BackupMixin:
             if isinstance(binding, _RuntimeBinding) and binding.owner_kind == "project":
                 verify_project_owned_data_dir(binding.repository_root, data_directory)
 
-        backup_path = Path(backup.path)
-        if not backup_path.is_file() or not os.access(backup_path, os.R_OK):
-            raise BackupNotAvailableError(f"Backup file not found or unreadable: {backup.path}")
+        if not archive_path.is_file() or not os.access(archive_path, os.R_OK):
+            if isinstance(source, Backup):
+                raise BackupNotAvailableError("Backup file not found or unreadable")
+            raise DatabaseManagerUnavailableError("local restore snapshot is unavailable")
 
         def target_exists(step_id: str | None) -> bool:
             if step_id is not None:
@@ -470,7 +524,7 @@ class _BackupMixin:
             )
             with (
                 restore_stage_heartbeat("db_restore"),
-                open(backup_path, "rb") as fp,
+                open(archive_path, "rb") as fp,
                 self._http(timeout=restore_timeout) as http,
             ):
                 resp = http.post(
@@ -482,7 +536,7 @@ class _BackupMixin:
                         "neutralize_database": "true" if neutralize_database else "false",
                     },
                     files={
-                        "backup_file": (backup.filename, fp, "application/octet-stream"),
+                        "backup_file": (archive_filename, fp, "application/octet-stream"),
                     },
                 )
                 if resp.is_error:
@@ -516,24 +570,34 @@ class _BackupMixin:
         ck = self._cluster
         if ck is not None and record_provenance:
             db_host, db_port = ck
-            if cluster_identity is None and data_directory is None:
+            if source_kind == "local_archive":
                 catalog.record_restore(
                     db_host,
                     db_port,
                     target_database_name,
-                    str(backup.id),
-                )
-            else:
-                catalog.record_restore(
-                    db_host,
-                    db_port,
-                    target_database_name,
-                    str(backup.id),
+                    source_kind=source_kind,
+                    source_sha256=source_sha256,
                     cluster_id=cluster_identity,
                     data_directory=data_directory,
                 )
-
-        return RestoreResult(new_db=target_database_name, source=backup)
+            elif cluster_identity is None and data_directory is None:
+                assert isinstance(source, Backup)
+                catalog.record_restore(
+                    db_host,
+                    db_port,
+                    target_database_name,
+                    str(source.id),
+                )
+            else:
+                assert isinstance(source, Backup)
+                catalog.record_restore(
+                    db_host,
+                    db_port,
+                    target_database_name,
+                    str(source.id),
+                    cluster_id=cluster_identity,
+                    data_directory=data_directory,
+                )
 
     def drop(
         self,

@@ -106,10 +106,22 @@ restores = Table(
     Column("db_host", Text, nullable=False),
     Column("db_port", Integer, nullable=False),
     Column("database_name", Text, nullable=False),
-    Column("backup_id", Text, ForeignKey("backups.id"), nullable=False),
+    Column("backup_id", Text, ForeignKey("backups.id")),
+    Column(
+        "source_kind",
+        Text,
+        CheckConstraint("source_kind IN ('catalogue', 'local_archive')"),
+        nullable=False,
+    ),
+    Column("source_sha256", Text),
     Column("restored_at", Text, nullable=False),
     Column("cluster_id", Text),
     Column("data_directory", Text),
+    CheckConstraint(
+        "(source_kind = 'catalogue' AND backup_id IS NOT NULL AND source_sha256 IS NULL) "
+        "OR (source_kind = 'local_archive' AND backup_id IS NULL AND source_sha256 IS NOT NULL "
+        "AND length(source_sha256) = 64 AND source_sha256 NOT GLOB '*[^0-9a-f]*')"
+    ),
     Index(
         "restores_cluster_idx",
         "db_host",
@@ -142,9 +154,20 @@ database_events = Table(
     ),
     Column("occurred_at", Text, nullable=False),
     Column("backup_id", Text, ForeignKey("backups.id")),
+    Column(
+        "source_kind",
+        Text,
+        CheckConstraint("source_kind IN ('catalogue', 'local_archive')"),
+    ),
+    Column("source_sha256", Text),
     Column("cluster_id", Text),
     Column("data_directory", Text),
-    CheckConstraint("event_type = 'dropped' OR backup_id IS NOT NULL"),
+    CheckConstraint(
+        "event_type = 'dropped' OR "
+        "((source_kind = 'catalogue' AND backup_id IS NOT NULL AND source_sha256 IS NULL) "
+        "OR (source_kind = 'local_archive' AND backup_id IS NULL AND source_sha256 IS NOT NULL "
+        "AND length(source_sha256) = 64 AND source_sha256 NOT GLOB '*[^0-9a-f]*'))"
+    ),
     Index(
         "database_events_cluster_idx",
         "db_host",

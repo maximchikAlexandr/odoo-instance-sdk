@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import subprocess
 import uuid
+import zipfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +36,7 @@ from odoo_instance_sdk.models import (
     BackupFormat,
     CommandResult,
     Database,
+    LocalArchiveRestoreSource,
     NoBackup,
     RestoreResult,
 )
@@ -1418,6 +1420,62 @@ def test_remote_drop_rejected(instance_remote: OdooInstance) -> None:
 
 
 class TestRestore:
+    def test_local_archive_transport_uses_snapshot_and_records_neutral_provenance(
+        self, client: OdooClient, tmp_path: Path
+    ) -> None:
+        from odoo_instance_sdk.execution import Command, ExecutionPlan
+        from odoo_instance_sdk.internal.dbprep.source import (
+            _materialize_verified_snapshot,
+            capture_local_archive_restore,
+        )
+        from odoo_instance_sdk.internal.proc import PreparedAction
+
+        archive_path = tmp_path / "caller-owned.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("manifest.json", '{"db_name":"source"}')
+            archive.writestr("dump.sql", "SELECT 1;\n")
+            archive.writestr("filestore/source/marker", b"fixture")
+        payload = capture_local_archive_restore(
+            LocalArchiveRestoreSource(str(archive_path)),
+            snapshot_directory=tmp_path / ".odcli" / "restore",
+        )
+        _materialize_verified_snapshot(payload)
+        instance = _make_instance_with_cluster_key(client)
+        action = PreparedAction(
+            step_id="database.restore.local-archive", action="restore-local-archive", mutating=True
+        )
+        catalog = MagicMock()
+        http_cm = _mock_http({"result": True})
+
+        def callback(context: Any) -> None:
+            context.action(action.step_id)
+            instance.databases._restore_local_archive(payload, "newdb")
+
+        command = Command.create(
+            ExecutionPlan(steps=(action.public_projection(),)), callback, (action,)
+        )
+        with (
+            patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_cm),
+            patch.object(instance, "_client") as mock_client,
+            patch("odoo_instance_sdk.resources.database.DatabaseResource.exists") as mock_exists,
+        ):
+            mock_client.config = client.config
+            mock_client.get_catalog.return_value = catalog
+            mock_exists.side_effect = [False, True]
+            command.run()
+
+        catalog.record_restore.assert_called_once_with(
+            "localhost",
+            5432,
+            "newdb",
+            source_kind="local_archive",
+            source_sha256=payload.verified_sha256,
+            cluster_id=None,
+            data_directory=None,
+        )
+        catalog.verify_identity.assert_not_called()
+        assert str(archive_path) not in repr(http_cm.__enter__.return_value.post.call_args)
+
     def test_verified_restore_does_not_probe_when_database_manager_is_unavailable(
         self, client: OdooClient, tmp_path: Path
     ) -> None:

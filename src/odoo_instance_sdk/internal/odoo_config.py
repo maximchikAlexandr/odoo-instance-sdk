@@ -9,6 +9,14 @@ from odoo_instance_sdk.exceptions import InstanceConfigurationError
 from odoo_instance_sdk.internal.urls import is_loopback_host
 
 
+def _resolve_data_dir(data_dir: str | Path, config_path: str | Path | None) -> Path:
+    """Resolve an Odoo data directory relative to its config file."""
+    path = Path(data_dir)
+    if not path.is_absolute() and config_path is not None:
+        path = Path(config_path).resolve().parent / path
+    return path.resolve()
+
+
 def parse_odoo_config(path: str | Path) -> dict[str, str]:
     cfg = configparser.RawConfigParser(interpolation=None)
     cfg.read(str(path))

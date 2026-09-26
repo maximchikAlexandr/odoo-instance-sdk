@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import msgspec
 import pytest
@@ -13,6 +14,11 @@ from odoo_instance_sdk import OdooClient, OdooClientConfig
 from odoo_instance_sdk.commands.output import OutputMode, run_or_preview
 from odoo_instance_sdk.config import InstanceConfig
 from odoo_instance_sdk.exceptions import BackupCatalogError, ConfigError, LockConflictError
+from odoo_instance_sdk.execution import Command, ExecutionPlan
+from odoo_instance_sdk.internal.dbprep.source import (
+    _materialize_verified_snapshot,
+    capture_local_archive_restore,
+)
 from odoo_instance_sdk.internal.locks import exclusive_lock, postgres_cluster_lock_path
 from odoo_instance_sdk.internal.pg.drop import (
     DatabaseDropPartialError,
@@ -21,11 +27,13 @@ from odoo_instance_sdk.internal.pg.drop import (
     build_database_drop_command,
 )
 from odoo_instance_sdk.internal.postgres_compose import compose_volume_name
-from odoo_instance_sdk.internal.proc import ProcessResult, RecordingExecutor
+from odoo_instance_sdk.internal.proc import PreparedAction, ProcessResult, RecordingExecutor
 from odoo_instance_sdk.internal.repo_key import repo_key
+from odoo_instance_sdk.models import LocalArchiveRestoreSource, StartConfig
 from odoo_instance_sdk.resources.instance import OdooInstance
 from odoo_instance_sdk.resources.postgres import PostgresCluster
 from odoo_instance_sdk.storage.backup_catalog import BackupCatalog
+from tests.fixtures.transport import OPEN_ODOO_HTTP_CLIENT
 from tests.unit.monitor_support import make_env
 
 
@@ -1078,6 +1086,124 @@ def test_drop_preserves_unknown_or_symlink_filestore(
     if kind == "symlink":
         assert target.is_symlink()
         assert (tmp_path / "external" / "secret").read_text() == "keep"
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_drop_allows_proven_local_archive_with_contained_filestore(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    data_directory = tmp_path / "local-data"
+    target = data_directory / "filestore" / "feature_db"
+    target.mkdir(parents=True)
+    (target / "blob").write_bytes(b"local")
+    catalog = BackupCatalog(db_path=tmp_path / "local.sqlite3")
+    instance, _backup = _managed_instance(
+        project_manifest, catalog, tmp_path, data_directory=data_directory
+    )
+    digest = "c" * 64
+    catalog._conn.execute(
+        "UPDATE restores SET backup_id=NULL, source_kind='local_archive', "
+        "source_sha256=? WHERE database_name='feature_db'",
+        (digest,),
+    )
+    catalog._conn.execute(
+        "UPDATE database_events SET backup_id=NULL, source_kind='local_archive', "
+        "source_sha256=? WHERE database_name='feature_db' AND event_type='restored'",
+        (digest,),
+    )
+    catalog._conn.commit()
+
+    result = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=_executor()
+    ).run()
+
+    assert result.filestore_state == "deleted"
+    assert not target.exists()
+    catalog.close()
+
+
+@pytest.mark.unit
+def test_local_archive_restore_resolves_relative_provenance_for_drop(
+    monkeypatch: pytest.MonkeyPatch, project_manifest: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("odoo_instance_sdk.internal.pg.builder.shutil.which", lambda _: "/psql")
+    monkeypatch.setattr(PostgresCluster, "_inspect_cluster_volume", lambda *_a, **_k: True)
+    source_config = project_manifest / "odoo.conf"
+    configured_data = project_manifest / "restore-data"
+    cwd_data = tmp_path / "restore-data"
+    for data_directory in (configured_data, cwd_data):
+        target = data_directory / "filestore" / "feature_db"
+        target.mkdir(parents=True)
+        (target / "blob").write_bytes(b"filestore")
+
+    catalog = BackupCatalog(db_path=tmp_path / "relative-provenance.sqlite3")
+    instance, _backup = _managed_instance(project_manifest, catalog, tmp_path, data_directory=None)
+    cluster = instance._postgres_cluster
+    assert cluster is not None
+    claim = catalog._get_postgres_cluster(cluster._project_id)
+    assert claim is not None
+    monkeypatch.setattr(
+        PostgresCluster,
+        "_restore_provenance",
+        lambda _cluster: (str(claim.cluster_id), None),
+    )
+    object.__setattr__(
+        instance.config,
+        "start_config",
+        StartConfig(config_path=str(source_config), data_dir="restore-data"),
+    )
+    object.__setattr__(instance.config, "master_password", "admin")
+    instance.databases.master_password = "admin"
+    archive_path = tmp_path / "local-archive.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("manifest.json", '{"db_name":"source"}')
+        archive.writestr("dump.sql", "SELECT 1;\n")
+        archive.writestr("filestore/source/marker", b"fixture")
+    payload = capture_local_archive_restore(
+        LocalArchiveRestoreSource(str(archive_path)),
+        snapshot_directory=tmp_path / ".odcli" / "restore",
+    )
+    _materialize_verified_snapshot(payload)
+    action = PreparedAction(
+        step_id="database.restore.local-archive", action="restore-local-archive", mutating=True
+    )
+    http = MagicMock()
+    http.post.return_value.is_error = False
+    http_context = MagicMock()
+    http_context.__enter__.return_value = http
+
+    def callback(context: Any) -> None:
+        context.action(action.step_id)
+        instance.databases._restore_local_archive(payload, "feature_db")
+
+    command = Command.create(
+        ExecutionPlan(steps=(action.public_projection(),)), callback, (action,)
+    )
+    monkeypatch.chdir(tmp_path)
+    with (
+        patch(OPEN_ODOO_HTTP_CLIENT, return_value=http_context),
+        patch(
+            "odoo_instance_sdk.resources.database.DatabaseResource.exists",
+            side_effect=[False, True],
+        ),
+    ):
+        command.run()
+
+    binding = catalog._latest_restore_binding("127.0.0.1", 5432, "feature_db")
+    assert binding is not None
+    assert binding["source_kind"] == "local_archive"
+    assert binding["data_directory"] == str(configured_data.resolve())
+
+    result = build_database_drop_command(
+        instance, project_manifest, "feature_db", executor=_executor()
+    ).run()
+
+    assert result.filestore_state == "deleted"
+    assert not (configured_data / "filestore" / "feature_db").exists()
+    assert (cwd_data / "filestore" / "feature_db").is_dir()
     catalog.close()
 
 

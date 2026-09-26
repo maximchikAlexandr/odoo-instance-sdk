@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import math
 import os
@@ -16,7 +17,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import msgspec
 
@@ -57,15 +58,12 @@ from odoo_instance_sdk.models import (
     BackupProvenanceStatus,
     DatabasePreparationResult,
     DatabaseRefreshOptions,
+    LocalArchiveRestoreSource,
     NoBackup,
 )
 from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig
 
 if TYPE_CHECKING:
-    from odoo_instance_sdk.internal.proc import (
-        PreparedAction,
-        PreparedStep,
-    )
     from odoo_instance_sdk.resources.instance import OdooInstance
     from odoo_instance_sdk.resources.postgres import PostgresCluster
 T = TypeVar("T")
@@ -110,7 +108,15 @@ class _CatalogueRestoreSource:
     backup_id: uuid.UUID
 
 
-_RestoreSource = _RemoteRestoreSource | _CatalogueRestoreSource
+@dataclass(frozen=True, slots=True)
+class _LocalArchiveRestoreSource:
+    """Select one caller-owned local Odoo ZIP for restore."""
+
+    path: Path
+
+
+_RestoreSource = _RemoteRestoreSource | _CatalogueRestoreSource | _LocalArchiveRestoreSource
+_RestoreSourceInput = _RestoreSource | LocalArchiveRestoreSource | uuid.UUID | str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +156,8 @@ class DatabasePreparationFailureContext(
     default_switch_confirmed: bool | None = None
     restore_stage_id: str | None = None
     restore_stage_elapsed: float | None = None
+    source_kind: Literal["catalogue", "local_archive"] | None = None
+    source_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,9 +170,9 @@ class SelectedBackupRestorePayload:
     operation, never as part of the public command projection.
     """
 
-    archive_path: Path
-    dump_path: Path
-    verified_snapshot_path: Path
+    archive_path: Path = field(repr=False)
+    dump_path: Path = field(repr=False)
+    verified_snapshot_path: Path = field(repr=False)
     filestore_members: tuple[str, ...]
     database_name: str
     file_identity: tuple[int, int, int, int]
@@ -173,22 +181,53 @@ class SelectedBackupRestorePayload:
     zip_entry_sizes: tuple[tuple[str, int], ...] = ()
     zip_uncompressed_bytes: int = 0
     format: BackupFormat = BackupFormat.ZIP
+    source_kind: Literal["catalogue", "local_archive"] = "catalogue"
 
 
-def _verified_file(path: Path, backup: Backup) -> tuple[tuple[int, int, int, int], str]:
+def _verified_file(
+    path: Path,
+    *,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
+    source_label: str = "selected backup",
+) -> tuple[tuple[int, int, int, int], str]:
+    descriptor = -1
     try:
-        info = os.stat(path, follow_symlinks=False)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
-            raise ConfigError("selected backup is not a regular file")
-        if info.st_size != backup.size_bytes:
-            raise ConfigError("selected backup size does not match catalogue evidence")
-        digest = _sha256_no_follow(path)
-    except (OSError, ValueError) as exc:
-        raise ConfigError("selected backup file is unavailable") from exc
-    actual_digest = digest
-    if backup.sha256 and actual_digest != backup.sha256:
-        raise ConfigError("selected backup content does not match catalogue evidence")
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns), actual_digest
+            raise ConfigError(f"{source_label} is not a regular file")
+        if expected_size is not None and info.st_size != expected_size:
+            raise ConfigError(f"{source_label} size does not match captured evidence")
+        identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            final_info = os.fstat(stream.fileno())
+        final_identity = (
+            final_info.st_dev,
+            final_info.st_ino,
+            final_info.st_size,
+            final_info.st_mtime_ns,
+        )
+        if final_identity != identity:
+            raise ConfigError(f"{source_label} changed during capture")
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ConfigError(f"{source_label} is not a regular file") from exc
+        raise ConfigError(f"{source_label} file is unavailable") from exc
+    except ValueError as exc:
+        raise ConfigError(f"{source_label} file is unavailable") from exc
+    finally:
+        if descriptor != -1:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+    actual_digest = digest.hexdigest()
+    if expected_sha256 and actual_digest != expected_sha256:
+        raise ConfigError(f"{source_label} content does not match captured evidence")
+    return identity, actual_digest
 
 
 def _sha256_no_follow(path: Path) -> str:
@@ -219,6 +258,7 @@ def _materialize_verified_snapshot(  # noqa: C901
         _assert_verified_snapshot_unchanged(payload)
         return payload
     try:
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
         if shutil.disk_usage(snapshot.parent).free < payload.verified_size:
             raise ConfigError(  # noqa: TRY301
                 "selected backup snapshot exceeds available space"
@@ -260,6 +300,8 @@ def _materialize_verified_snapshot(  # noqa: C901
                 raise ConfigError("selected backup size changed before restore")
             if digest.hexdigest() != payload.verified_sha256:
                 raise ConfigError("selected backup content changed before restore")
+            if stat.S_IMODE(os.stat(snapshot, follow_symlinks=False).st_mode) != 0o600:
+                raise ConfigError("selected backup snapshot permissions are unsafe")
         finally:
             if source_fd != -1:
                 with contextlib.suppress(OSError):
@@ -284,7 +326,11 @@ def _assert_verified_snapshot_unchanged(payload: SelectedBackupRestorePayload) -
         info = os.stat(payload.verified_snapshot_path, follow_symlinks=False)
     except OSError as exc:
         raise ConfigError("selected backup snapshot disappeared before restore") from exc
-    if not stat.S_ISREG(info.st_mode) or info.st_size != payload.verified_size:
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_size != payload.verified_size
+    ):
         raise ConfigError("selected backup snapshot identity changed before restore")
     try:
         digest = _sha256_no_follow(payload.verified_snapshot_path)
@@ -309,11 +355,12 @@ def _open_verified_zip(path: Path) -> zipfile.ZipFile:
 
 
 def capture_selected_backup_restore(  # noqa: C901
-    backup: Backup,
+    selected: Backup | LocalArchiveRestoreSource | _LocalArchiveRestoreSource,
     *,
     data_dir: Path | None = None,
+    snapshot_directory: Path | None = None,
 ) -> SelectedBackupRestorePayload:
-    """Read and validate selected-backup inputs at the restore boundary."""
+    """Read and validate one selected archive without creating staging files."""
     from odoo_instance_sdk.exceptions import BackupValidationUnavailableError
     from odoo_instance_sdk.internal.backup_validation import (
         raise_restore_preflight_errors,
@@ -322,10 +369,41 @@ def capture_selected_backup_restore(  # noqa: C901
         validate_zip,
     )
 
-    path = Path(backup.path)
-    file_identity, verified_sha256 = _verified_file(path, backup)
-    snapshot_path = path.parent / f".odcli-verified-{backup.id.hex}-{uuid.uuid4().hex}.backup"
-    if backup.format == BackupFormat.DUMP:
+    if isinstance(selected, Backup):
+        path = Path(selected.path)
+        database_name = selected.database_name
+        archive_format = selected.format
+        expected_size = selected.size_bytes
+        expected_sha256 = selected.sha256
+        token = selected.id.hex
+        source_kind: Literal["catalogue", "local_archive"] = "catalogue"
+        source_label = "selected backup"
+    else:
+        local = (
+            selected
+            if isinstance(selected, _LocalArchiveRestoreSource)
+            else _LocalArchiveRestoreSource(Path(selected.path))
+        )
+        path = local.path
+        database_name = None
+        archive_format = BackupFormat.ZIP
+        expected_size = None
+        expected_sha256 = None
+        token = uuid.uuid4().hex
+        source_kind = "local_archive"
+        source_label = "selected local archive"
+        if snapshot_directory is None:
+            raise ConfigError("local archive snapshot directory is required")
+
+    file_identity, verified_sha256 = _verified_file(
+        path,
+        expected_size=expected_size,
+        expected_sha256=expected_sha256,
+        source_label=source_label,
+    )
+    staging_directory = Path(snapshot_directory) if snapshot_directory is not None else path.parent
+    snapshot_path = staging_directory / f".odcli-verified-{token}.backup"
+    if archive_format == BackupFormat.DUMP:
         try:
             dump_validation = validate_dump(path, timeout=30.0, raise_if_unavailable=True)
         except BackupValidationUnavailableError as exc:
@@ -338,11 +416,12 @@ def capture_selected_backup_restore(  # noqa: C901
                 dump_path=snapshot_path,
                 verified_snapshot_path=snapshot_path,
                 filestore_members=(),
-                database_name=backup.database_name,
+                database_name=database_name or "",
                 file_identity=file_identity,
-                verified_size=backup.size_bytes,
+                verified_size=file_identity[2],
                 verified_sha256=verified_sha256,
                 format=BackupFormat.DUMP,
+                source_kind=source_kind,
             )
         except OSError as exc:
             raise ConfigError("selected native dump is unavailable or invalid") from exc
@@ -350,7 +429,10 @@ def capture_selected_backup_restore(  # noqa: C901
     if not zip_validation.valid:
         raise_zip_validation_error(zip_validation)
         raise ConfigError("selected backup archive is unavailable or invalid")  # pragma: no cover
-    if zip_validation.db_name != backup.database_name:
+    if not isinstance(zip_validation.db_name, str):
+        raise ConfigError(f"{source_label} manifest has no database name")
+    validate_db_name(zip_validation.db_name)
+    if database_name is not None and zip_validation.db_name != database_name:
         raise ConfigError("selected backup database name does not match catalog metadata")
     raise_restore_preflight_errors(zip_validation.uncompressed_bytes, data_dir)
     try:
@@ -367,7 +449,7 @@ def capture_selected_backup_restore(  # noqa: C901
                 parts = tuple(part for part in name.removeprefix(prefix).split("/") if part)
                 if not parts or any(part in {".", ".."} for part in parts):
                     raise ConfigError("selected backup contains an unsafe filestore path")
-                relative = parts[1:] if parts[0] == backup.database_name else parts
+                relative = parts[1:] if parts[0] == zip_validation.db_name else parts
                 if relative:
                     files.append("/".join(relative))
     except (OSError, KeyError, zipfile.BadZipFile) as exc:
@@ -376,117 +458,51 @@ def capture_selected_backup_restore(  # noqa: C901
         raise ConfigError("selected backup does not contain a usable filestore")
     return SelectedBackupRestorePayload(
         archive_path=path,
-        dump_path=path.parent / f".odcli-restore-{backup.id.hex}.dump",
+        dump_path=staging_directory / f".odcli-restore-{token}.dump",
         verified_snapshot_path=snapshot_path,
         filestore_members=tuple(sorted(files)),
-        database_name=backup.database_name,
+        database_name=zip_validation.db_name,
         file_identity=file_identity,
-        verified_size=backup.size_bytes,
+        verified_size=file_identity[2],
         verified_sha256=verified_sha256,
         zip_entry_sizes=zip_validation.entry_sizes,
         zip_uncompressed_bytes=zip_validation.uncompressed_bytes,
         format=BackupFormat.ZIP,
+        source_kind=source_kind,
     )
 
 
-def build_selected_backup_restore_steps(
-    instance: OdooInstance,
+def capture_local_archive_restore(
+    source: LocalArchiveRestoreSource | _LocalArchiveRestoreSource,
     *,
-    target_database: str,
-    dump_path: Path,
-    backup_format: BackupFormat = BackupFormat.ZIP,
-) -> tuple[PreparedStep, PreparedStep | PreparedAction, PreparedStep]:
-    """Build the preparation PostgreSQL steps for a stopped COPY.
+    snapshot_directory: Path,
+    data_dir: Path | None = None,
+) -> SelectedBackupRestorePayload:
+    """Capture local archive evidence without creating a snapshot."""
+    return capture_selected_backup_restore(
+        source,
+        data_dir=data_dir,
+        snapshot_directory=snapshot_directory,
+    )
 
-    Native dumps use the existing ``pg_restore`` validation/restore boundary.
-    Odoo ZIPs contain plain SQL and therefore use the bounded ``psql``
-    transport; ZIP members are streamed to the captured temporary dump path
-    only during execution.
-    """
-    from odoo_instance_sdk.internal.pg.builder import build_psql_specification
-    from odoo_instance_sdk.internal.proc import PreparedAction, PreparedStep
 
-    cluster = instance._postgres_cluster
-    if cluster is None:
-        raise ConfigError("selected restore requires a bound PostgreSQL cluster")
-    user = instance.config.db_user or getattr(cluster, "_user", None)
-    if user is None:
-        raise ConfigError("selected restore requires a PostgreSQL user")
-    create = build_psql_specification(
-        step_id="database.replace.restore.create",
-        host=cluster.endpoint_host,
-        port=cluster.endpoint_port,
-        user=user,
-        password=instance.config.db_password,
-        database="postgres",
-        args=("-c", f'CREATE DATABASE "{target_database.replace(chr(34), chr(34) + chr(34))}";'),
-        _trusted_args=("-t", "-A"),
-        timeout=30.0,
-        _read_only=False,
-        _mutating=True,
-    ).prepared_step
-    if backup_format == BackupFormat.DUMP:
-        executable = shutil.which("pg_restore")
-        if executable is None:
-            raise ConfigError("selected native dump restore requires pg_restore")
-        validate: PreparedStep | PreparedAction = PreparedStep(
-            step_id="database.replace.restore.validate",
-            argv=(executable, "--list", str(dump_path)),
-            cwd=str(instance.config.default_cwd),
-            timeout=30.0,
-            read_only=True,
-            text=True,
-        )
-        restore = PreparedStep(
-            step_id="database.replace.restore.pg-restore",
-            argv=(
-                executable,
-                "--exit-on-error",
-                "--single-transaction",
-                "--host",
-                cluster.endpoint_host,
-                "--port",
-                str(cluster.endpoint_port),
-                "--username",
-                user,
-                "--dbname",
-                target_database,
-                str(dump_path),
-            ),
-            cwd=str(instance.config.default_cwd),
-            environment=(
-                ()
-                if instance.config.db_password is None
-                else (("PGPASSWORD", instance.config.db_password),)
-            ),
-            secret_values=(
-                () if instance.config.db_password is None else (instance.config.db_password,)
-            ),
-            timeout=30.0,
-            read_only=False,
-            mutating=True,
-            text=False,
-        )
-    else:
-        validate = PreparedAction(
-            step_id="database.replace.restore.validate",
-            action="validate-odoo-zip-dump",
-            description="Use the validated Odoo ZIP SQL transport",
-            read_only=True,
-        )
-        restore = build_psql_specification(
-            step_id="database.replace.restore.psql",
-            host=cluster.endpoint_host,
-            port=cluster.endpoint_port,
-            user=user,
-            password=instance.config.db_password,
-            database=target_database,
-            args=("--single-transaction", "--set", "ON_ERROR_STOP=1", "--file", str(dump_path)),
-            timeout=30.0,
-            _read_only=False,
-            _mutating=True,
-        ).prepared_step
-    return create, validate, restore
+def cleanup_selected_backup_restore(
+    payload: SelectedBackupRestorePayload,
+    *,
+    staging_paths: Sequence[Path] = (),
+) -> None:
+    """Remove only command-owned staging artifacts, preserving the source."""
+    for path in {payload.dump_path, payload.verified_snapshot_path}:
+        with contextlib.suppress(OSError):
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+    for staging in staging_paths:
+        candidate = Path(staging)
+        with contextlib.suppress(OSError):
+            if candidate.is_symlink() or candidate.is_file():
+                candidate.unlink()
+            elif candidate.is_dir():
+                shutil.rmtree(candidate)
 
 
 def materialize_selected_backup_dump(payload: SelectedBackupRestorePayload) -> None:
@@ -589,6 +605,7 @@ class RestorePreflight:
     restore_source: _RestoreSource = field(default_factory=_RemoteRestoreSource)
     catalogue_backup: Backup | None = None
     resolved_database: str | None = None
+    selected_restore: SelectedBackupRestorePayload | None = None
 
 
 class _CoalescedRestore(Exception):
@@ -849,7 +866,8 @@ def _consume_action_if_planned(step_id: str) -> None:
     context = active_context()
     if context is None:
         return
-    context.action(step_id)
+    if context.planned(step_id) and not context.consumed(step_id):
+        context.action(step_id)
 
 
 def _skip_preparation_branch(step_ids: Sequence[str]) -> None:
@@ -973,3 +991,10 @@ def _write_target_config(source_config: Path, target_config: Path, target_databa
     with target_config.open("w", encoding="utf-8") as stream:
         config.write(stream)
     os.chmod(target_config, 0o600)
+
+
+from odoo_instance_sdk.internal.dbprep.archive_transport import (  # noqa: E402
+    build_selected_backup_restore_steps as _build_selected_backup_restore_steps,
+)
+
+build_selected_backup_restore_steps = _build_selected_backup_restore_steps

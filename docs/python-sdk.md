@@ -241,7 +241,14 @@ streams into an exclusive temporary file and publishes only after checksum,
 size, fsync, and close succeed. A failed or interrupted transfer closes its
 handles and retains any already-published backup.
 
-Use `db restore UUID --dry-run` to inspect a local restore before confirmation.
+Use `db restore UUID --dry-run` to inspect a retained-backup restore, or
+`db restore --file ./backup.zip --dry-run` to inspect a caller-owned local Odoo
+ZIP before confirmation. The two forms are mutually exclusive; `--replace`
+remains available only with a retained backup UUID. At the SDK boundary, pass
+`LocalArchiveRestoreSource(path="./backup.zip")` to the existing
+`EnvironmentResource.refresh_database_command()` method. The archive is
+validated and consumed through a private snapshot without creating a catalogue
+backup row or exposing the source path in output.
 The default changes only after restore, neutralization, postcondition, audit,
 and optional admin reset complete. Ctrl-C returns exit `130`; JSON/TOON keep
 one progress-free document on stdout and put sanitized diagnostics on stderr.

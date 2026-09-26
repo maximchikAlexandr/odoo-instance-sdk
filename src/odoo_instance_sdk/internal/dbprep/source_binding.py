@@ -5,7 +5,7 @@ import os
 import uuid
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from odoo_instance_sdk.execution import JsonValue
@@ -17,9 +17,11 @@ from odoo_instance_sdk.internal.dbprep.source import (
     DatabasePreparationFailureContext,
     ProjectRuntimeBinding,
     _CatalogueRestoreSource,
+    _LocalArchiveRestoreSource,
     _RemoteRestoreSource,
     _resolve_source_config,
     _RestoreSource,
+    _RestoreSourceInput,
     _target_config_path,
     _write_target_config,
     relevant_manifest_conflicts,
@@ -37,6 +39,7 @@ from odoo_instance_sdk.internal.urls import assert_local, normalize_base_url
 from odoo_instance_sdk.models import (
     Backup,
     BackupFormat,
+    LocalArchiveRestoreSource,
     NoBackup,
 )
 from odoo_instance_sdk.project import ProjectConfig
@@ -116,6 +119,8 @@ def _annotate_retained_failure(
     backup_id: uuid.UUID | None = None,
     database_confirmed: bool = False,
     default_switch_confirmed: bool = False,
+    source_kind: str | None = None,
+    source_sha256: str | None = None,
 ) -> None:
     """Attach only non-secret retained-artifact identifiers to a failure."""
     restore_stage_id = getattr(error, "restore_stage_id", None)
@@ -130,6 +135,11 @@ def _annotate_retained_failure(
         restore_stage_elapsed=(
             restore_stage_elapsed if isinstance(restore_stage_elapsed, (int, float)) else None
         ),
+        source_kind=cast(
+            "Literal['catalogue', 'local_archive'] | None",
+            source_kind if source_kind in {"catalogue", "local_archive"} else None,
+        ),
+        source_sha256=source_sha256 if isinstance(source_sha256, str) else None,
     )
     setattr(error, "failure_context", context)
     note = retained_artifact_context(
@@ -170,13 +180,17 @@ def _latest_default_backup(
     return client.get_catalog().latest_restore(host, port, default) or None
 
 
-def _coerce_restore_source(source: _RestoreSource | uuid.UUID | str | None) -> _RestoreSource:
+def _coerce_restore_source(source: _RestoreSourceInput) -> _RestoreSource:
     if source is None:
         return _RemoteRestoreSource()
     if isinstance(source, _RemoteRestoreSource):
         return source
+    if isinstance(source, _LocalArchiveRestoreSource):
+        return source
     if isinstance(source, _CatalogueRestoreSource):
         source = source.backup_id
+    if isinstance(source, LocalArchiveRestoreSource):
+        return _LocalArchiveRestoreSource(Path(source.path))
     try:
         return _CatalogueRestoreSource(uuid.UUID(str(source)))
     except (ValueError, TypeError, AttributeError) as exc:

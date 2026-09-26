@@ -131,6 +131,7 @@ if TYPE_CHECKING:
         HttpErrorCode,
         IndexBloat,
         IndexStats,
+        LocalArchiveRestoreSource,
         LockRow,
         LocksResult,
         MonitoringExtensionSkip,
@@ -242,6 +243,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "BackupState": ("odoo_instance_sdk.models", "BackupState"),
     "BackupValidationResult": ("odoo_instance_sdk.models", "BackupValidationResult"),
     "BackupValidationStatus": ("odoo_instance_sdk.models", "BackupValidationStatus"),
+    "LocalArchiveRestoreSource": ("odoo_instance_sdk.models", "LocalArchiveRestoreSource"),
     "BackupValidationUnavailableError": (
         "odoo_instance_sdk.exceptions",
         "BackupValidationUnavailableError",
@@ -624,6 +626,7 @@ if TYPE_CHECKING:
         "InstanceFactory",
         "InvalidBaseUrlError",
         "JsonValue",
+        "LocalArchiveRestoreSource",
         "LockConflictError",
         "LockRow",
         "LocksResult",

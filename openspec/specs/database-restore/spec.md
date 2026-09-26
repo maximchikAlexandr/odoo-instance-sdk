@@ -75,9 +75,9 @@ Mapping write (шаги 1-2 ниже) MUST выполняться ТОЛЬКО �
 
 ### Requirement: Модель запуска из готового backup
 
-Поддерживаемый flow MUST начинаться с `Backup`, скачанного через `instance.databases.backup()` или найденного через `client.backups`.
+Поддерживаемый flow MUST начинаться либо с `Backup`, скачанного через `instance.databases.backup()` или найденного через `client.backups`, либо с типизированного `LocalArchiveRestoreSource`, переданного в существующий `EnvironmentResource.refresh_database_command()`.
 
-SDK MUST NOT предоставлять создание пустой базы, module-selection resource, отдельный test resource или автоматическую политику повторного скачивания.
+SDK MUST NOT предоставлять создание пустой базы, module-selection resource, отдельный test resource, remote-URL source, импорт локального архива в backup catalogue или автоматическую политику повторного скачивания.
 
 Решение использовать найденный backup или скачать новый MUST принимать вызывающий код по `Backup.downloaded_at`.
 
@@ -85,6 +85,11 @@ SDK MUST NOT предоставлять создание пустой базы, 
 
 - **WHEN** `client.backups.latest()` вернул существующий file
 - **THEN** вызывающий код может сравнить `downloaded_at` со своим threshold и передать тот же `Backup` в restore
+
+#### Scenario: Локальный архив не импортируется
+
+- **WHEN** вызывающий код передаёт `LocalArchiveRestoreSource` в `refresh_database_command()`
+- **THEN** SDK восстанавливает из проверенного snapshot и не создаёт `Backup` или retained catalogue file
 
 ### Requirement: Mutating DB methods require password at call time
 
@@ -320,6 +325,7 @@ When guarded drop-plan construction fails, the command SHALL report a sanitized 
 
 - **WHEN** doctor encounters an unknown existing filestore path without a proven binding
 - **THEN** it does not assign ownership and does not delete the path
+
 ### Requirement: COPY checkout owns a bounded source Database Manager lifecycle
 
 COPY environment checkout SHALL make its source Database Manager available through the existing project runtime and source configuration before the first COPY preflight, backup, or restore request. It SHALL reuse a runtime without claiming or stopping it only when a persisted runtime record, exact live PID/create-time/process identity, configured endpoint, and live listening socket owned by that exact PID all match. A responsive but unrecorded listener and every occupied listener whose exact process-to-socket ownership cannot be proven SHALL fail closed without an HTTP trust probe, secret transmission, signal, replacement, or restart. When the configured port is proven free, checkout SHALL start a bounded auxiliary Odoo process, track the exact process handle it created, wait for `/web/database/list` readiness, and stop and unregister only that owned process. Immediately before every auxiliary Database Manager request carrying `master_pwd`, the active session SHALL revalidate the exact process-to-socket proof for that request's source instance and SHALL not create or send the privileged HTTP request when proof fails. Recorded identity, port/ownership, privileged-request revalidation, auxiliary start, readiness, and cleanup SHALL be honest actions in the same immutable checkout command and sanitized dry-run plan. Cleanup SHALL run after success, failure, readiness timeout, early exit, backup or restore failure, and cancellation; it SHALL remove owned temporary secret configuration and SHALL preserve the primary operation error when cleanup also fails. Existing COPY journal, target-absence, backup provenance, restore postcondition, and compensating-cleanup guarantees SHALL remain unchanged, and shared database checkout SHALL not acquire this lifecycle.
@@ -373,3 +379,27 @@ COPY environment checkout SHALL make its source Database Manager available throu
 
 - **WHEN** environment checkout uses shared database mode
 - **THEN** its plan and execution contain no auxiliary source Database Manager lifecycle and retain their existing behavior
+
+### Requirement: Restore from a caller-owned local Odoo ZIP
+
+The environment restore command SHALL accept public frozen typed `LocalArchiveRestoreSource(path: str)` through its existing restore-source parameter. It SHALL support Odoo ZIP archives containing `dump.sql`, a compatible manifest database name, and safe filestore content. It SHALL preserve the caller-owned archive, restore into a new target, verify database and filestore postconditions, apply the existing neutralization and optional administrator reset, switch the project default only after full success, and return `DatabasePreparationResult` without fabricating a `Backup`. It SHALL NOT persist the source path, expose it in plan/output/error projections, add a public restore method, or support native dump/remote URL/format conversion through this source.
+
+#### Scenario: Valid local ZIP restores through the public boundary
+
+- **WHEN** `LocalArchiveRestoreSource` identifies a supported Odoo ZIP and the target is absent
+- **THEN** `EnvironmentResource.refresh_database_command()` restores `dump.sql` and filestore through the existing guarded stages and returns the confirmed target
+
+#### Scenario: Source archive is preserved
+
+- **WHEN** local-archive restore succeeds or fails
+- **THEN** the caller-owned archive remains unchanged and only private staging artifacts are cleaned
+
+#### Scenario: Result and plans are path-redacted
+
+- **WHEN** a local-archive command is previewed, succeeds, fails, or is interrupted
+- **THEN** bounded Rich, JSON, and TOON projections identify the source kind and sanitized digest evidence without exposing the source or private snapshot path
+
+#### Scenario: Unsupported local format is rejected
+
+- **WHEN** `LocalArchiveRestoreSource` identifies a native dump, remote URL, or archive requiring conversion
+- **THEN** restore fails before database mutation with a typed validation/configuration error

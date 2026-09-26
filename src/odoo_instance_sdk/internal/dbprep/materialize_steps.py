@@ -11,10 +11,11 @@ from odoo_instance_sdk.exceptions import (
 from odoo_instance_sdk.internal.dbprep.source import (
     SelectedBackupRestorePayload,
     _load_project,
+    _LocalArchiveRestoreSource,
     _planned_project_identity,
     _RemoteRestoreSource,
     _resolve_source_config,
-    _RestoreSource,
+    _RestoreSourceInput,
     build_selected_backup_restore_steps,
     resolve_runtime_binding,
 )
@@ -203,7 +204,7 @@ def _preparation_action_steps(
     *,
     operation: str,
     options: DatabaseRefreshOptions,
-    restore_source: _RestoreSource | uuid.UUID | str | None = None,
+    restore_source: _RestoreSourceInput = None,
 ) -> tuple[PreparedAction, ...]:
     """Return honest in-process boundaries for the preparation coordinator."""
     from odoo_instance_sdk.internal.proc import PreparedAction
@@ -224,6 +225,29 @@ def _preparation_action_steps(
                 action="download-remote-backup",
                 description="Request the selected remote database backup",
                 mutating=True,
+            )
+        )
+    elif isinstance(selected_source, _LocalArchiveRestoreSource):
+        action_steps.extend(
+            (
+                PreparedAction(
+                    step_id="database.prepare.local-archive.validate",
+                    action="validate-local-archive",
+                    description="Validate the selected caller-owned Odoo archive",
+                    read_only=True,
+                ),
+                PreparedAction(
+                    step_id="database.prepare.local-archive.snapshot",
+                    action="materialize-local-archive-snapshot",
+                    description="Materialize a private verified archive snapshot",
+                    mutating=True,
+                ),
+                PreparedAction(
+                    step_id="database.prepare.local-archive.cleanup",
+                    action="cleanup-local-archive-staging",
+                    description="Remove command-owned local archive staging artifacts",
+                    mutating=True,
+                ),
             )
         )
     else:
