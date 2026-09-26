@@ -160,6 +160,8 @@ class DatabasePreparationFailureContext(
     default_switch_confirmed: bool | None = None
     restore_stage_id: str | None = None
     restore_stage_elapsed: float | None = None
+    source_kind: Literal["catalogue", "local_archive"] | None = None
+    source_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -707,6 +709,7 @@ class RestorePreflight:
     restore_source: _RestoreSource = field(default_factory=_RemoteRestoreSource)
     catalogue_backup: Backup | None = None
     resolved_database: str | None = None
+    selected_restore: SelectedBackupRestorePayload | None = None
 
 
 class _CoalescedRestore(Exception):
@@ -967,7 +970,8 @@ def _consume_action_if_planned(step_id: str) -> None:
     context = active_context()
     if context is None:
         return
-    context.action(step_id)
+    if context.planned(step_id) and not context.consumed(step_id):
+        context.action(step_id)
 
 
 def _skip_preparation_branch(step_ids: Sequence[str]) -> None:
