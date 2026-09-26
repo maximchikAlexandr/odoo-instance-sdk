@@ -16,5 +16,5 @@
 
 ## 4. Verify repository contracts
 
-- [ ] 4.1 Run the focused execution-model and detached-run unit tests, then the complete automated test suite.
+- [x] 4.1 Run the focused execution-model and detached-run unit tests, then the complete automated test suite.
 - [x] 4.2 Run repository formatting, lint, strict type, production line-limit, and execution-architecture checks; resolve only failures attributable to this change.
