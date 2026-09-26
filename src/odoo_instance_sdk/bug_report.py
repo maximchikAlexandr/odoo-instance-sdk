@@ -28,8 +28,10 @@ from odoo_instance_sdk.exceptions import (
     BugReportStaleHashError,
 )
 from odoo_instance_sdk.internal.bug_report import (
+    _POSTGRES_TIMEOUT,
     BugReportPayload,
     _build_body,
+    _build_version_probe_plan,
     _count_refusals,
     _draft_directory,
     _gh_argv,
@@ -37,9 +39,11 @@ from odoo_instance_sdk.internal.bug_report import (
     _gh_recheck_view_argv,
     _latest_review,
     _list_reviews,
+    _normalize_version,
     _parse_issue_list_json,
     _parse_issue_url,
     _parse_issue_view_json,
+    _parse_odoo_version,
     _path_confined,
     _read_metadata,
     _read_report,
@@ -55,6 +59,7 @@ from odoo_instance_sdk.internal.bug_report import (
     read_bug_report_repository,
     report_max_bytes,
 )
+from odoo_instance_sdk.internal.context import resolve_project_snapshot
 from odoo_instance_sdk.internal.locks import exclusive_lock
 from odoo_instance_sdk.internal.paths import get_user_root
 from odoo_instance_sdk.models.bug_report import (
@@ -109,15 +114,13 @@ def _installed_vcs_sha() -> str:
         return "unknown"
 
 
-def _odoo_version() -> str:
-    return "unknown"
-
-
-def _postgres_version() -> str:
-    return "unknown"
-
-
-def _report_template(title: str, kind: BugReportKind) -> str:
+def _report_template(
+    title: str,
+    kind: BugReportKind,
+    *,
+    odoo_version: str = "unknown",
+    postgres_version: str = "unknown",
+) -> str:
     from odoo_instance_sdk.internal.bug_report import _REPORT_TEMPLATE
 
     return _REPORT_TEMPLATE.format(
@@ -127,8 +130,8 @@ def _report_template(title: str, kind: BugReportKind) -> str:
         vcs_sha=_installed_vcs_sha(),
         os=platform.platform(),
         python=sys.version.split()[0],
-        odoo_version=_odoo_version(),
-        postgres_version=_postgres_version(),
+        odoo_version=odoo_version,
+        postgres_version=postgres_version,
     )
 
 
@@ -162,6 +165,8 @@ def _create_draft(
     kind: BugReportKind,
     repository: str,
     labels: Sequence[str],
+    odoo_version: str = "unknown",
+    postgres_version: str = "unknown",
 ) -> BugReportInitResult:
     root = bug_reports_root(ensure_exists=True)
     user_root = get_user_root(ensure_exists=False)
@@ -179,7 +184,15 @@ def _create_draft(
     os.chmod(reviews_dir, 0o700)
     report_path = report_dir / "report.md"
     metadata_path = report_dir / "metadata.json"
-    _write_file_mode_0600(report_path, _report_template(title, kind).encode("utf-8"))
+    _write_file_mode_0600(
+        report_path,
+        _report_template(
+            title,
+            kind,
+            odoo_version=odoo_version,
+            postgres_version=postgres_version,
+        ).encode("utf-8"),
+    )
     _write_metadata(
         report_dir,
         _metadata_dict(
@@ -197,21 +210,17 @@ def _create_draft(
     )
 
 
-def bug_report_init_command(
+def bug_report_init_command(  # noqa: C901
     *,
     title: str,
     kind: BugReportKind = "bug",
 ) -> Command[BugReportInitResult]:
-    """Capture one immutable bug-report init command for preview and execution.
+    """Capture one immutable bug-report init command for preview and execution."""
 
-    Creates a UUID ``REPORT_ID`` and writes ``get_user_root()/bug-reports/<REPORT_ID>/``
-    with ``report.md``, ``metadata.json``, and an empty ``reviews/`` directory.
-    ``--dry-run`` is handled by the CLI; this primitive always writes when run.
-    The directory is ``0700`` and the files are ``0600`` on POSIX.
-    """
-
-    from odoo_instance_sdk.commands.output import action_command
+    from odoo_instance_sdk.execution import Command, ExecutionPlan
     from odoo_instance_sdk.internal.bug_report import _DEFAULT_REPOSITORY
+    from odoo_instance_sdk.internal.pg.server import collect_server_summary
+    from odoo_instance_sdk.internal.proc import PreparedAction, SubprocessExecutor
 
     if not isinstance(kind, str) or kind not in _VALID_KINDS:
         raise BugReportInvalidError(f"kind must be one of {_VALID_KINDS}: {kind!r}")
@@ -221,20 +230,73 @@ def bug_report_init_command(
     repository = read_bug_report_repository() or _DEFAULT_REPOSITORY
     labels = bug_report_labels()
     report_id = str(uuid.uuid4())
+    try:
+        snapshot = resolve_project_snapshot()
+        probe_plan = _build_version_probe_plan(snapshot) if snapshot is not None else None
+    except Exception:
+        probe_plan = None
+
+    action = PreparedAction(
+        step_id="bug-report.init",
+        action="bug-report.init",
+        description="Create bug-report draft directory and template files",
+        mutating=True,
+    )
+    planned_steps = (
+        (() if probe_plan is None or probe_plan.odoo_step is None else (probe_plan.odoo_step,))
+        + (() if probe_plan is None else probe_plan.postgres_steps)
+        + (action,)
+    )
+
+    def run(context: RunContext[BugReportInitResult]) -> BugReportInitResult:
+        odoo_version = "unknown"
+        postgres_version = "unknown"
+        if probe_plan is not None and probe_plan.odoo_step is not None:
+            try:
+                result = context.process_prepared(probe_plan.odoo_step)
+                if getattr(result, "returncode", None) == 0:
+                    odoo_version = _parse_odoo_version(
+                        getattr(result, "stdout", None),
+                        getattr(result, "stderr", None),
+                    )
+            except Exception:
+                pass
+        if probe_plan is not None and probe_plan.postgres_cluster is not None:
+            try:
+                summary = collect_server_summary(
+                    timeout=_POSTGRES_TIMEOUT,
+                    context=context,
+                    steps=probe_plan.postgres_steps,
+                    eligibility=probe_plan.postgres_eligibility,
+                )
+                server = summary.server
+                postgres_version = _normalize_version(
+                    getattr(server, "version", None) if server is not None else None
+                )
+            except Exception:
+                for step in probe_plan.postgres_steps:
+                    if context.planned(step.step_id) and not context.consumed(step.step_id):
+                        context.skip(step.step_id)
+        context.action(action.step_id)
+        result = _create_draft(
+            report_id=report_id,
+            title=clean_title,
+            kind=kind,
+            repository=repository,
+            labels=labels,
+            odoo_version=odoo_version,
+            postgres_version=postgres_version,
+        )
+        context.complete_action(action.step_id)
+        return result
 
     return cast(
         "Command[BugReportInitResult]",
-        action_command(
-            "bug-report.init",
-            lambda: _create_draft(
-                report_id=report_id,
-                title=clean_title,
-                kind=kind,
-                repository=repository,
-                labels=labels,
-            ),
-            description="Create bug-report draft directory and template files",
-            mutating=True,
+        Command.create(
+            ExecutionPlan(steps=tuple(step.public_projection() for step in planned_steps)),
+            run,
+            planned_steps,
+            executor=SubprocessExecutor(),
         ),
     )
 
