@@ -353,8 +353,7 @@ def test_source_backed_full_critical_path(  # noqa: C901
     _assert_catalog_patch_targets_importable()
     for target in _CATALOG_PATCH_TARGETS:
         monkeypatch.setattr(target, run_catalog_path)
-    from odoo_instance_sdk.commands import backup as backup_commands
-    from odoo_instance_sdk.commands import resource as resource_commands
+    from odoo_instance_sdk.commands import backup as backup_commands, resource as resource_commands
 
     monkeypatch.setattr(backup_commands._catalog_path_provider, "provider", run_catalog_path)
     monkeypatch.setattr(resource_commands._catalog_path_provider, "provider", run_catalog_path)

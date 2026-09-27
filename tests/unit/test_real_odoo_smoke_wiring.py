@@ -8,8 +8,7 @@ from typing import Literal, cast
 
 import pytest
 
-from scripts import real_odoo_bootstrap as bootstrap
-from scripts import real_odoo_evidence as evidence
+from scripts import real_odoo_bootstrap as bootstrap, real_odoo_evidence as evidence
 from tests.integration.real_odoo import test_smoke as smoke
 from tests.integration.real_odoo.conftest import E2ERuntime
 from tests.unit.real_odoo_ci_support import _evidence_contract

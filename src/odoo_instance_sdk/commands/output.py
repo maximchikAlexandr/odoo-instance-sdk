@@ -36,8 +36,7 @@ if TYPE_CHECKING:
     import click
 else:
     import rich_click as click
-from toon import encode
-from toon import encoders as toon_encoders
+from toon import encode, encoders as toon_encoders
 
 from odoo_instance_sdk.internal.dbprep.source import DatabasePreparationFailureContext
 from odoo_instance_sdk.internal.output_rich import rich_plan_projection as _rich_plan_projection

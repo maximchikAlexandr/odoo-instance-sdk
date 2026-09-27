@@ -745,8 +745,10 @@ class TestBackupProvenance:
     ) -> None:
         from odoo_instance_sdk.internal.dbprep import materialize as preparation
         from odoo_instance_sdk.internal.repo_key import git_common_dir, repo_key
-        from odoo_instance_sdk.project import ProjectConfig
-        from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
+        from odoo_instance_sdk.project import (
+            ProjectConfig,
+            TestInstanceProjectConfig as ConfigTestInstance,
+        )
 
         root = tmp_path
         common = git_common_dir(root)

@@ -8,9 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import real_odoo_bootstrap as bootstrap
-from scripts import real_odoo_ci as ci
-from scripts import real_odoo_timing as timing
+from scripts import real_odoo_bootstrap as bootstrap, real_odoo_ci as ci, real_odoo_timing as timing
 
 
 def test_real_pytest_plugins_load_through_collection(tmp_path: Path) -> None:

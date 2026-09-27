@@ -9,8 +9,7 @@ import pytest
 from odoo_instance_sdk.exceptions import ConfigError, ProjectManifestNotFoundError
 from odoo_instance_sdk.internal import project_manifest as project_manifest_module
 from odoo_instance_sdk.internal.project_manifest import assert_no_secrets, write_manifest
-from odoo_instance_sdk.project import ProjectConfig
-from odoo_instance_sdk.project import TestInstanceProjectConfig as ConfigTestInstance
+from odoo_instance_sdk.project import ProjectConfig, TestInstanceProjectConfig as ConfigTestInstance
 
 
 def test_load_existing_manifest(tmp_path: Path) -> None:

@@ -4,8 +4,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from scripts import real_odoo_acceptance as acceptance
-from scripts import real_odoo_bootstrap as bootstrap
+from scripts import real_odoo_acceptance as acceptance, real_odoo_bootstrap as bootstrap
 from scripts.real_odoo_pins import E2E_PINS
 
 

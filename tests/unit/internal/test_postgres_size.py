@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from odoo_instance_sdk.internal.pg import size as size_module
-from odoo_instance_sdk.internal.pg import transport as transport_module
+from odoo_instance_sdk.internal.pg import size as size_module, transport as transport_module
 from odoo_instance_sdk.internal.proc import ProcessResult
 
 

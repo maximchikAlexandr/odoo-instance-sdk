@@ -32,8 +32,6 @@ from odoo_instance_sdk.models import DatabaseRefreshOptions, StartConfig
 from odoo_instance_sdk.project import (
     PostgresProjectConfig,
     ProjectConfig,
-)
-from odoo_instance_sdk.project import (
     TestInstanceProjectConfig as RemoteTestInstanceConfig,
 )
 from odoo_instance_sdk.project_init import init_project, init_project_command

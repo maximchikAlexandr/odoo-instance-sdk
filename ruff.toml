@@ -54,6 +54,7 @@ ignore = [
 "src/odoo_instance_sdk/storage/catalog/environment.py" = ["PLC0414"]
 
 [lint.isort]
+combine-as-imports = true
 known-first-party = ["odoo_instance_sdk"]
 
 [format]

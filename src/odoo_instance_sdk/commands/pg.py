@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 else:
     import rich_click as click
 
-from odoo_instance_sdk.commands.context import (  # noqa: I001 -- keep PostgreSQL CLI context aliases grouped; remove when Ruff supports grouped aliases.
+from odoo_instance_sdk.commands.context import (
     CliContext,
     environment_provenance,
     pass_cli_context,
