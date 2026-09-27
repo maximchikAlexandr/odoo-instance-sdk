@@ -21,7 +21,7 @@ Planning MUST resolve the backup through the existing catalog and apply the curr
 
 ### Requirement: Checkout MUST preserve borrowed backups
 
-Existing COPY-journal state MUST distinguish an environment-owned backup from a selected pre-existing or named-remote backup. Rollback and environment removal MUST delete a backup only when ownership is proven; borrowed or unknown-ownership backups MUST be retained.
+Existing COPY-journal state MUST distinguish `owned`, `borrowed`, and migrated `unknown` backup ownership. A local-source archive created solely for that environment MUST be `owned`; a selected pre-existing or named-remote archive MUST be `borrowed`. Rollback and environment removal MUST delete a backup only when journal ownership is `owned`; borrowed or unknown-ownership backups MUST be retained.
 
 #### Scenario: Environment cleanup retains its input backup
 
@@ -50,7 +50,7 @@ Checkout SHALL accept an exact remote name, mutually exclusive with an existing 
 
 Named-source checkout SHALL default its base to that source's declared Git branch and resolve an exact available local commit before download. Known branch mismatch SHALL fail before mutation. A missing Git ref SHALL fail with corrective guidance, without hidden pull/merge or fallback. Retained-backup checkout SHALL reuse existing branch-match rules: unknown provenance requires an explicit base and returns an unknown warning.
 
-Plan/results SHALL expose project, source identity, declared branch, resolved base commit and exact backup UUID when known. Declared branch SHALL NOT be represented as proof of the deployed remote commit. Changed source configuration after planning SHALL cause a stale-plan error.
+Plan/results SHALL expose project, nullable historical source name, normalized origin/database, declared branch, resolved base commit and exact backup UUID when known. Declared branch SHALL NOT be represented as proof of the deployed remote commit. Changed source configuration after planning SHALL cause a stale-plan error.
 
 #### Scenario: Staging overrides project default base
 

@@ -28,7 +28,7 @@ The existing `run` leaf MUST accept `--wait-ready` only for root `--env` plus `-
 
 ### Requirement: CLI exposes named remote configuration
 
-CLI SHALL expose `remote ls`, `remote add NAME --url URL --database DB --branch REF`, `remote update NAME` with the same configurable fields, and `remote remove NAME`. Update SHALL preserve unspecified fields. Init SHALL accept repeatable `--remote NAME URL DATABASE GIT_REF`. Every operation SHALL delegate to a public SDK primitive; credentials SHALL NOT be accepted as literal CLI arguments.
+CLI SHALL expose `remote ls`, `remote add NAME --url URL --database DB --branch REF`, `remote update NAME` with the same configurable fields, and `remote remove NAME`. Add SHALL use the public configure primitive without replace; update SHALL use the same primitive with explicit replace and preserve unspecified fields before constructing the complete typed source. Init SHALL accept repeatable `--remote NAME URL DATABASE GIT_REF`. Every operation SHALL delegate once to a public SDK primitive; credentials SHALL NOT be accepted as literal CLI arguments.
 
 #### Scenario: Add staging after init
 
@@ -47,7 +47,7 @@ CLI SHALL expose `remote ls`, `remote add NAME --url URL --database DB --branch 
 #### Scenario: Checkout staging
 
 - **WHEN** `odcli env checkout TASK-123 --db-mode copy --remote staging --format json` is invoked
-- **THEN** the CLI delegates to the SDK and reports the selected source, base commit and resulting backup/environment identities
+- **THEN** the CLI delegates to the SDK and reports the historical source name, normalized origin/database, declared branch, resolved base commit and resulting backup/environment identities
 
 #### Scenario: Invalid source combination
 
@@ -56,7 +56,7 @@ CLI SHALL expose `remote ls`, `remote add NAME --url URL --database DB --branch 
 
 ### Requirement: CLI exposes retention and pinning
 
-CLI SHALL expose `backup retention` to inspect user settings, optional `--days N` and `--auto/--no-auto` to update them, `backup pin UUID`, `backup unpin UUID`, and project-scoped `backup prune`. Prune SHALL require normal destructive confirmation interactively or explicit `--yes` without input; dry-run SHALL require no confirmation and perform no deletion. Retention updates SHALL require an explicit enablement flag before enabling automatic deletion.
+CLI SHALL expose `backup retention` to inspect user settings, optional `--days N` and `--auto/--no-auto` to update them, `backup pin UUID`, `backup unpin UUID`, and project-scoped `backup prune`. Existing exact backup deletion SHALL surface the same protected reason as prune for pinned, busy, referenced or newest-per-source archives. Prune SHALL require normal destructive confirmation interactively or explicit `--yes` without input; dry-run SHALL require no confirmation and perform no deletion. Retention updates SHALL require an explicit enablement flag before enabling automatic deletion.
 
 #### Scenario: Enable two-week retention
 
