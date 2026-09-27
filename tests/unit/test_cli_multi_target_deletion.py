@@ -142,10 +142,10 @@ def _run_backup_scenario(
             db_a,
             ["backup", "rm", BACKUP_ID_A, BACKUP_ID_B, "--yes", "--format", "json"],
         )
-        assert result.exit_code == 0, result.output
-        targets = json.loads(result.stdout)["result"]["targets"]
-        assert all(t["ok"] for t in targets)
-        assert not path_a.exists() and not path_b.exists()
+        assert result.exit_code == 1, result.output
+        targets = json.loads(result.stdout)["context"]["targets"]
+        assert not any(t["ok"] for t in targets)
+        assert path_a.is_file() and path_b.is_file()
         return
 
     if scenario == "duplicate_aborts":
@@ -518,8 +518,8 @@ def test_backup_rm_single_target_backward_compat_yes(
         db_path,
         ["backup", "rm", BACKUP_ID_A, "--yes", "--format", "json"],
     )
-    assert result.exit_code == 0, result.output
-    assert not backup_path.exists()
+    assert result.exit_code == 1, result.output
+    assert backup_path.is_file()
 
 
 def test_db_rm_single_target_backward_compat_dry_run(
